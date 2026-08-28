@@ -707,6 +707,102 @@ test("四期样式守卫：style.css 第 18 节统计判读区在场", () => {
 // 11. 进程收敛守卫
 // ----------------------------------------------------------------------------
 
+// —— 五期：服务端统计真实形状（product_eval.rs::report_statistics）同步 ——
+
+const SERVER_STATS_REPORT = {
+  runs: [],
+  statistics: {
+    modes: [
+      {
+        mode: "single", runs_total: 30, passed: 24, success_rate: 0.8,
+        ci95_low: 0.627, ci95_high: 0.905, p50_wall_ms: 30300, p95_wall_ms: 107400,
+        mean_wall_ms: 40500, mean_model_calls: 2.9, total_tokens: 126611,
+        total_cost_usd: null, sample_sufficient: true,
+      },
+      {
+        mode: "multi", runs_total: 10, passed: 5, success_rate: 0.5,
+        ci95_low: 0.237, ci95_high: 0.763, p50_wall_ms: 95500, p95_wall_ms: 171500,
+        mean_wall_ms: 106400, mean_model_calls: 6.8, total_tokens: 84798,
+        total_cost_usd: null, sample_sufficient: false,
+      },
+    ],
+    comparison: {
+      multi_success_rate_diff: -0.3,
+      multi_wall_rel_change: 1.63,
+      multi_calls_rel_change: 1.34,
+      multi_tokens_rel_change: null,
+      multi_cost_rel_change: null,
+      rules: [
+        { name: "成功率 +5pp", satisfied: false, detail: "-30.0pp" },
+        { name: "成功率相对提升 +10%", satisfied: false, detail: "-37.5%" },
+        { name: "平均耗时 -30%", satisfied: false, detail: "+163%" },
+      ],
+      enabled: false,
+      sample_sufficient: false,
+    },
+  },
+};
+
+test("serverStats：识别 report_statistics 真实形状（modes[2] + comparison）", () => {
+  const s = T.serverStats(SERVER_STATS_REPORT);
+  assert.ok(s, "真实形状应被识别");
+  assert.equal(s.single.n, 30);
+  assert.equal(s.single.rate, 0.8);
+  assert.deepEqual(s.single.ci95, [0.627, 0.905].map((x) => x));
+  assert.equal(s.single.p50Ms, 30300);
+  assert.equal(s.single.p95Ms, 107400);
+  assert.equal(s.single.calls, 2.9);
+  assert.equal(s.single.sampleSufficient, true);
+  assert.equal(s.workswarm.n, 10);
+  assert.equal(s.workswarm.rate, 0.5);
+  assert.equal(s.workswarm.sampleSufficient, false);
+  assert.equal(s.comparisonSampleSufficient, false);
+  assert.ok(s.serverDeltas);
+  assert.equal(s.serverDeltas.rateDiff, -0.3);
+  assert.equal(s.serverDeltas.wallChangePct, 163);
+  // mode 标签互换顺序仍可识别
+  const swapped = T.serverStats({ statistics: { modes: [SERVER_STATS_REPORT.statistics.modes[1], SERVER_STATS_REPORT.statistics.modes[0]] } });
+  assert.equal(swapped.single.n, 30);
+  assert.equal(swapped.workswarm.n, 10);
+});
+
+test("statisticsFromReport：服务端 comparison 优先给出启用建议与样本充分性", () => {
+  const stats = T.statisticsFromReport(SERVER_STATS_REPORT);
+  assert.ok(stats.recommendation, "服务端 enabled 字段在场时给建议");
+  assert.equal(stats.recommendation.source, "server");
+  assert.match(stats.recommendation.verdict, /暂不建议启用多 Agent/);
+  assert.equal(stats.sampleSmall, true, "comparison.sample_sufficient=false → 样本不足");
+  assert.equal(stats.deltas.rateDiff, -0.3);
+  assert.equal(stats.deltas.wallChangePct, 163);
+  const html = T.renderStatistics(stats);
+  assert.match(html, /样本不足/);
+  assert.match(html, /判定来源：服务端统计/);
+});
+
+test("statisticsFromReport：服务端 enabled=true 时建议启用并列出满足规则", () => {
+  const rep = JSON.parse(JSON.stringify(SERVER_STATS_REPORT));
+  rep.statistics.comparison.enabled = true;
+  rep.statistics.comparison.sample_sufficient = true; // 两组 n≥30 才算充分（服务端口径）
+  rep.statistics.comparison.rules = [{ name: "成功率 +5pp", satisfied: true, detail: "+8pp" }];
+  const stats = T.statisticsFromReport(rep);
+  assert.match(stats.recommendation.verdict, /建议启用多 Agent/);
+  assert.match(stats.recommendation.verdict, /成功率 \+5pp/);
+  assert.equal(stats.sampleSmall, false);
+});
+
+test("statisticsFromReport：无服务端统计时回退客户端推导（回归守卫）", () => {
+  const stats = T.statisticsFromReport({
+    runs: [
+      { key: { case_id: "c1", agent_mode: "single" }, status: "passed", wall_ms: 100, model_calls: 2 },
+      { key: { case_id: "c2", agent_mode: "single" }, status: "passed", wall_ms: 200, model_calls: 2 },
+      { key: { case_id: "c1", agent_mode: "workswarm" }, status: "failed", wall_ms: 400, model_calls: 5 },
+    ],
+  });
+  assert.ok(stats.single, "客户端推导单 Agent 统计在场");
+  assert.equal(stats.single.n, 2);
+  if (stats.recommendation) assert.equal(stats.recommendation.source, "client");
+});
+
 // 本机（node v24.19 + Windows 管道/重定向 stdio）下，含真实 setInterval 的套件
 // 跑完后 node:test 可能不自然挂起（裸跑可退；`node --test` 门禁形态挂起）。
 // 全部用例结束后显式收敛进程；失败时 runner 已把 process.exitCode 置 1

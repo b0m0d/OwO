@@ -57,6 +57,15 @@ function resetState() {
   T.state.reviewBusy = {};
   T.state.artifacts = [];
   T.state.reviewResult = null;
+  // —— 五期字段 ——
+  T.state.strategyDecision = null;
+  T.state.metrics = null;
+  T.state.deliverables = null;
+  T.state.deliverablesOpen = false;
+  T.state.reworkBusy = {};
+  T.state.reworkResult = null;
+  T.state.historyReviews = {};
+  T.state.diagnostic = null;
 }
 
 // 可记录属性读写的假按钮（模拟 lockBtn/unlockBtn 所需的最小接口）。
@@ -418,3 +427,347 @@ test("四期样式守卫：style.css 第 18 节进度区/评审闭环/统计判�
   assert.ok(flat.includes(".owo-pe-panel.owo-pe-stat-note.bad"), "样本不足提示样式在场");
   assert.ok(flat.includes("@keyframesowo-ws-pulse"), "取消中脉冲动画在场");
 });
+
+// ============================================================================
+// 五期：自适应组队 / 角色指标 / 版本时间线 / 差异 / 返工 / 交付物 / 诊断
+// ============================================================================
+const STRAT = {
+  mode: "single",
+  roles: [{ role: "writer", duty: "独立完成交付物" }],
+  parallelism: 1,
+  budget_per_role: 4,
+  reasons: ["无并行子任务", "单 Agent 历史成功率 80%"],
+};
+
+test("strategyDecisionOf：完整判定/字符串 reasons/字符串角色/非法输入", () => {
+  resetState();
+  const d = T.strategyDecisionOf({ strategy_decision: STRAT });
+  assert.equal(d.mode, "single");
+  assert.equal(d.roles.length, 1);
+  assert.equal(d.roles[0].role, "writer");
+  assert.equal(d.parallelism, 1);
+  assert.equal(d.budgetPerRole, 4);
+  assert.equal(d.reasons.length, 2);
+  // reason 单数字符串 + roles 字符串形态
+  const d2 = T.strategyDecisionOf({ strategy: { mode: "team", reason: "需要独立评审", roles: ["producer", "critic"] } });
+  assert.equal(d2.mode, "team");
+  assert.deepEqual(d2.reasons, ["需要独立评审"]);
+  assert.equal(d2.roles[1].role, "critic");
+  // 非法/缺失 → null
+  assert.equal(T.strategyDecisionOf(null), null);
+  assert.equal(T.strategyDecisionOf({}), null);
+  assert.equal(T.strategyDecisionOf({ strategy_decision: { mode: "unknown" } }), null);
+  assert.equal(T.strategyDecisionOf({ strategy_decision: { mode: "single" }, team: 1 }).mode, "single");
+});
+
+test("strategyBoxHtml：单/多 Agent 徽标与理由列表", () => {
+  resetState();
+  const html = T.strategyBoxHtml(T.strategyDecisionOf({ strategy_decision: STRAT }));
+  assert.match(html, /单 Agent/);
+  assert.match(html, /writer/);
+  assert.match(html, /每角色调用预算 4/);
+  assert.match(html, /无并行子任务/);
+  const teamHtml = T.strategyBoxHtml(T.strategyDecisionOf({ strategy_decision: { mode: "team", roles: ["producer", "critic"], reasons: [] } }));
+  assert.match(teamHtml, /多 Agent 团队/);
+  assert.match(teamHtml, /producer → critic/);
+  // 无判定时给可理解空态
+  assert.match(T.strategyBoxHtml(null), /策略判定/);
+});
+
+test("metricsFromPayload：标准形状/别名形状/空形状", () => {
+  resetState();
+  const std = T.metricsFromPayload({
+    workers: [
+      { worker: "m-writer", role: "writer", duration_ms: 1200, model_calls: 3, tokens_in: 100, tokens_out: 50, est_cost: 0.002, attempts: 1, terminal: "Succeeded", failure_reason: "", artifact_ids: ["a1"] },
+    ],
+    summary: { wall_clock_ms: 5000, total_model_calls: 3, total_tokens_in: 100, total_tokens_out: 50, total_est_cost: 0.002, slowest_worker: "m-writer", failures: 0, reworks: 0, artifact_versions: 1 },
+  });
+  assert.equal(std.workers.length, 1);
+  assert.equal(std.workers[0].modelCalls, 3);
+  assert.equal(std.workers[0].durationMs, 1200);
+  assert.equal(std.summary.wallClockMs, 5000);
+  assert.equal(std.summary.slowestWorker, "m-writer");
+  // 别名：roles/items + calls/cost_usd
+  const alias = T.metricsFromPayload({ roles: [{ name: "critic", calls: 1, cost_usd: 0.01 }] });
+  assert.equal(alias.workers[0].worker, "critic");
+  assert.equal(alias.workers[0].modelCalls, 1);
+  assert.equal(alias.workers[0].estCost, 0.01);
+  // 预算耗尽原因透传
+  const budget = T.metricsFromPayload({ summary: { wall_clock_ms: 1, budget_exhausted: true, budget_reason: "调用预算用尽" } });
+  assert.equal(budget.summary.budgetExhausted, true);
+  assert.equal(budget.summary.budgetReason, "调用预算用尽");
+  // 完全无指标 → null（UI 保持空态）
+  assert.equal(T.metricsFromPayload(null), null);
+  assert.equal(T.metricsFromPayload({}), null);
+});
+
+test("metricsCardsHtml：汇总条/卡片/预算余量/空态", () => {
+  resetState();
+  const empty = T.metricsCardsHtml(null, null);
+  assert.match(empty, /暂无角色指标/);
+  const html = T.metricsCardsHtml(
+    T.metricsFromPayload({
+      workers: [{ worker: "m-w", role: "writer", duration_ms: 900, model_calls: 3, terminal: "Succeeded" }],
+      summary: { wall_clock_ms: 900, total_model_calls: 3, failures: 1, reworks: 0 },
+    }),
+    4
+  );
+  assert.match(html, /总墙钟/);
+  assert.match(html, /最慢|总调用/);
+  assert.match(html, /writer/);
+  assert.match(html, /余 1）/, "预算余量 = budget - calls");
+  assert.match(html, /失败 <b class="bad">1<\/b>/);
+  // 无 workers 只有 summary → 仅汇总条
+  const sumOnly = T.metricsCardsHtml(T.metricsFromPayload({ summary: { wall_clock_ms: 800 } }), null);
+  assert.ok(!sumOnly.includes("owo-ws-mgrid"));
+});
+
+test("fmtMs：毫秒/秒/分秒档位", () => {
+  assert.equal(T.fmtMs(null), "—");
+  assert.equal(T.fmtMs(500), "500ms");
+  assert.equal(T.fmtMs(1200), "1.2s");
+  assert.equal(T.fmtMs(65000), "1m5s");
+});
+
+test("diffLines/diffHtml：LCS 行差异与 +/- 渲染", () => {
+  const a = "行一\n行二\n行三";
+  const b = "行一\n行二改\n行三\n行四";
+  const rows = T.diffLines(a, b);
+  const dels = rows.filter((r) => r.t === "-").map((r) => r.s);
+  const adds = rows.filter((r) => r.t === "+").map((r) => r.s);
+  assert.deepEqual(dels, ["行二"]);
+  assert.deepEqual(adds, ["行二改", "行四"]);
+  const html = T.diffHtml(a, b, "v1", "v2");
+  assert.match(html, /dl-del/);
+  assert.match(html, /dl-add/);
+  assert.match(html, /差异 v1 → v2/);
+  // 空对空：两行都归一为单条空上下文行（LCS 语义），不抛错
+  assert.deepEqual(T.diffLines(null, ""), [{ t: " ", s: "" }]);
+});
+
+test("artifactTimelineHtml：版本节点/状态徽标/箭头数", () => {
+  resetState();
+  const chain = [
+    { artifact_id: "p:critic:v1", version: 1, review_state: "Superseded" },
+    { artifact_id: "p:critic:v2", version: 2, review_state: "Approved" },
+  ];
+  const html = T.artifactTimelineHtml(chain);
+  assert.match(html, /data-timeline-len="2"/);
+  assert.match(html, /v1/);
+  assert.match(html, /已被取代|draft|草稿/);
+  assert.match(html, /已批准/);
+  assert.equal((html.match(/owo-ws-tl-arrow/g) || []).length, 1);
+  assert.equal(T.artifactTimelineHtml([]), "");
+});
+
+test("buildReworkBody：冻结契约四字段 + 校验 + 幂等键自动生成", () => {
+  resetState();
+  T.state.current = "team-9";
+  const body = T.buildReworkBody({ artifactId: "p:critic:v1", reviewId: "rev-1", instruction: "修正 scope 字段", idempotencyKey: "k-1" });
+  assert.deepEqual(Object.keys(body).sort(), ["idempotency_key", "instruction", "review_id", "team_id"]);
+  assert.equal(body.team_id, "team-9");
+  assert.equal(body.review_id, "rev-1");
+  assert.equal(body.idempotency_key, "k-1");
+  // 缺省幂等键自动生成（含 rework 意图标记 + 序号）
+  const b2 = T.buildReworkBody({ artifactId: "p:critic:v1", reviewId: "rev-1", instruction: " 修正 " });
+  assert.match(b2.idempotency_key, /rework/);
+  assert.equal(b2.instruction, "修正");
+  // 校验：缺 artifact / review / instruction / team
+  assert.throws(() => T.buildReworkBody({ reviewId: "r", instruction: "x" }), /artifactId/);
+  assert.throws(() => T.buildReworkBody({ artifactId: "a", instruction: "x" }), /review_id/);
+  T.state.current = null;
+  assert.throws(() => T.buildReworkBody({ artifactId: "a", reviewId: "r", instruction: "x" }), /team_id/);
+  T.state.current = "team-9";
+  assert.throws(() => T.buildReworkBody({ artifactId: "a", reviewId: "r", instruction: "  " }), /不能为空/);
+});
+
+test("explainReworkError：409 幂等冲突/404/回退文案", () => {
+  assert.match(T.explainReworkError(new Error("409: dup")), /已创建过返工任务/);
+  assert.match(T.explainReworkError(new Error("404: no")), /不存在/);
+  assert.match(T.explainReworkError(new Error("boom")), /返工提交/);
+});
+
+test("submitRework：成功记录 flash + 忙锁 + 失败文案（注入传输层）", async () => {
+  resetState();
+  T.state.current = "team-9";
+  const calls = [];
+  const old = T.getTransport();
+  T.setTransport({
+    get: old.get,
+    post: (url, body) => {
+      calls.push({ url, body });
+      return calls.length === 1 ? Promise.resolve({ replayed: false }) : Promise.reject(new Error("409: dup"));
+    },
+  });
+  await T.submitRework({ artifactId: "a1", reviewId: "rev-1", instruction: "修", idempotencyKey: "k1" });
+  assert.equal(calls[0].url, "/artifacts/a1/rework");
+  assert.equal(calls[0].body.review_id, "rev-1");
+  assert.equal(calls[0].body.team_id, "team-9");
+  assert.equal(T.state.reworkResult.ok, true);
+  assert.match(T.state.reviewFlash.text, /返工任务已受理/);
+  // 失败路径：409 → 计划文案进 flash
+  await assert.rejects(() => T.submitRework({ artifactId: "a1", reviewId: "rev-1", instruction: "修", idempotencyKey: "k2" }));
+  assert.equal(T.state.reworkResult.ok, false);
+  assert.match(T.state.reviewFlash.text, /已创建过返工任务/);
+  assert.equal(T.state.reworkBusy.a1, undefined, "失败后解锁");
+  // 忙锁：同产物进行中拒绝并发
+  T.state.reworkBusy.a1 = true;
+  await assert.rejects(() => T.submitRework({ artifactId: "a1", reviewId: "rev-1", instruction: "修" }), /进行中/);
+  T.setTransport(old);
+});
+
+test("deliverablesFromPayload：分列形状/单列分桶/空形状", () => {
+  resetState();
+  const bucketed = T.deliverablesFromPayload({
+    project_id: "proj-1",
+    approved: [{ artifact_id: "a-ok", kind: "doc", version: 2, producer: "m-w", review_state: "Approved" }],
+    pending: [{ artifact_id: "a-p", review_state: "PendingReview" }],
+    rejected_or_superseded: [{ artifact_id: "a-x", review_state: "Rejected" }],
+  });
+  assert.equal(bucketed.approved.length, 1);
+  assert.equal(bucketed.approved[0].artifactId, "a-ok");
+  assert.equal(bucketed.pending.length, 1);
+  assert.equal(bucketed.other.length, 1);
+  // 单列表形状：按 review_state 自动分桶
+  const flat = T.deliverablesFromPayload({
+    items: [
+      { artifact_id: "a1", review_state: "Approved" },
+      { artifact_id: "a2", review_state: "pending_review" },
+      { artifact_id: "a3", review_state: "Superseded" },
+    ],
+  });
+  assert.equal(flat.approved.length, 1);
+  assert.equal(flat.pending.length, 1);
+  assert.equal(flat.other.length, 1);
+  // 空容器 → 空三桶（不崩）
+  const empty = T.deliverablesFromPayload({});
+  assert.equal(empty.approved.length + empty.pending.length + empty.other.length, 0);
+  assert.equal(T.deliverablesFromPayload(null), null);
+});
+
+test("metricsFromPayload：服务端实弹形状（五期 team-metrics live shape）", () => {
+  resetState();
+  // 形状取自 GET /teams/{id}/metrics 实测响应（workers 行 + summary 别名 + budget）。
+  const live = T.metricsFromPayload({
+    team_id: "team-x",
+    workers: [
+      {
+        member_id: "m-critic",
+        role: "critic",
+        outcome: "succeeded",
+        attempt: 1,
+        wall_ms: 24,
+        model_calls: 0,
+        cost_usd: 0.0,
+        artifact: { artifact_id: "team-x:critic:v1", kind: "review", version: 1 },
+      },
+    ],
+    summary: {
+      wall_window_ms: 59548,
+      model_calls: 0,
+      prompt_tokens: null,
+      completion_tokens: null,
+      cost_usd: 0.0,
+      failed_spans: 0,
+      succeeded_spans: 2,
+      span_count: 2,
+      rework_count: 1,
+      artifact_versions: 2,
+      slowest_worker: { role: "critic", span_id: "span-1", step_id: "s-critic" },
+    },
+    budget: { exceeded: false, max_cost_usd: null, spent_usd: 0.0, reason: null },
+  });
+  assert.ok(live, "实弹形状应产出指标");
+  assert.equal(live.workers.length, 1);
+  const w = live.workers[0];
+  assert.equal(w.worker, "m-critic");
+  assert.equal(w.terminal, "succeeded");
+  assert.equal(w.durationMs, 24);
+  assert.equal(w.attempts, 1);
+  assert.deepEqual(w.artifactIds, ["team-x:critic:v1"], "artifact 对象应提取 artifact_id");
+  assert.equal(live.summary.wallClockMs, 59548, "wall_window_ms 别名");
+  assert.equal(live.summary.reworks, 1);
+  assert.equal(live.summary.failures, 0, "failed_spans 别名");
+  assert.equal(live.summary.slowestWorker, "critic", "slowest_worker 对象提 role");
+  assert.equal(live.summary.budgetExhausted, false);
+  // budget.exceeded=true 透传（附最小 wall_clock 以通过空态守卫）
+  const boomed = T.metricsFromPayload({ summary: { wall_clock_ms: 1 }, budget: { exceeded: true, reason: "费用超限" } });
+  assert.equal(boomed.summary.budgetExhausted, true);
+  assert.equal(boomed.summary.budgetReason, "费用超限");
+});
+
+test("deliverablesFromPayload：服务端实弹形状（pending_review + null 桶 + manifest）", () => {
+  resetState();
+  const live = T.deliverablesFromPayload({
+    project_id: "proj-x",
+    approved: [],
+    pending_review: [
+      { artifact_id: "team-x:critic:v1", review_state: "draft", version: 1, kind: "review", producer: "m-critic" },
+      { artifact_id: "team-x:critic:v2", review_state: "PendingReview", version: 2, kind: "review", producer: "m-critic" },
+    ],
+    rejected_or_superseded: null,
+    complete: false,
+    delivery_manifest_ref: "cas://sha256:abc",
+    rework_tasks: [{ task_id: "t1" }],
+  });
+  assert.equal(live.approved.length, 0);
+  assert.equal(live.pending.length, 2, "pending_review 键应并入待评审桶");
+  assert.equal(live.other.length, 0, "null 桶应容错为空");
+  assert.equal(live.manifestRef, "cas://sha256:abc");
+  assert.equal(live.complete, false);
+  assert.equal(live.reworkCount, 1);
+  const html = T.deliverablesBoxHtml(live);
+  assert.match(html, /待评审 2/);
+  assert.match(html, /返工中 1/);
+  assert.match(html, /cas:\/\/sha256:abc/);
+  assert.doesNotMatch(html, /交付完成/);
+});
+
+test("deliverablesBoxHtml：计数徽标/交付列表/全空提示", () => {
+  resetState();
+  const dl = T.deliverablesFromPayload({
+    approved: [{ artifact_id: "a-ok", kind: "doc", version: 2, producer: "m-w", review_state: "Approved" }],
+    pending: [{ artifact_id: "a-p", review_state: "PendingReview" }],
+    rejected_or_superseded: [],
+  });
+  const html = T.deliverablesBoxHtml(dl);
+  assert.match(html, /已批准 1/);
+  assert.match(html, /待评审 1/);
+  assert.match(html, /data-dlv-art="a-ok"/);
+  assert.match(T.deliverablesBoxHtml(T.deliverablesFromPayload({})), /暂无交付物/);
+});
+
+test("latestChangesReviewId：取最近一次要求修改评审 id", () => {
+  resetState();
+  T.state.historyReviews["a1"] = [
+    { review_id: "rev-1", decision: "request_changes", comment: "修 scope" },
+    { review_id: "rev-2", decision: "approve" },
+  ];
+  assert.equal(T.latestChangesReviewId("a1"), "rev-1");
+  T.state.historyReviews["a2"] = [{ review_id: "rev-3", decision: "reject" }];
+  assert.equal(T.latestChangesReviewId("a2"), "");
+  assert.equal(T.latestChangesReviewId("missing"), "");
+});
+
+test("artifactRowHtml：链内最新 Draft/Rejected 行带返工表单，其余状态不带", () => {
+  resetState();
+  const v1 = { artifact_id: "p:critic:v1", kind: "doc", version: 1, producer: "m-critic", review_state: "Superseded", supersedes_artifact_id: null, preview: "x" };
+  const v2 = { artifact_id: "p:critic:v2", kind: "doc", version: 2, producer: "m-critic", review_state: "Draft", supersedes_artifact_id: "p:critic:v1", preview: "y" };
+  const chain = T.groupArtifactChain([v1, v2])[0];
+  const html = T.artifactRowHtml(chain.items[1], chain);
+  assert.match(html, /根据评审意见返工/);
+  assert.match(html, /data-rework-go="p:critic:v2"/);
+  const approved = T.artifactRowHtml({ artifact_id: "p:critic:v3", kind: "doc", version: 3, producer: "m-critic", review_state: "Approved", supersedes_artifact_id: "p:critic:v2", preview: "z" }, { items: [v1, v2, { artifact_id: "p:critic:v3", version: 3 }], approvedHead: null });
+  assert.ok(!approved.includes("根据评审意见返工"), "已批准版本无返工入口");
+});
+
+test("五期样式守卫：style.css 第 19 节策略/指标/时间线/差异/交付物样式在场", () => {
+  const flat = shellCss.replace(/\s+/g, "");
+  assert.ok(flat.includes(".owo-ws-strategy"), "策略判定区样式在场");
+  assert.ok(flat.includes(".owo-ws-mgrid"), "角色指标网格样式在场");
+  assert.ok(flat.includes(".owo-ws-timeline"), "版本时间线样式在场");
+  assert.ok(flat.includes(".owo-ws-diff.dl-add"), "差异增行样式在场");
+  assert.ok(flat.includes(".owo-ws-rework"), "返工表单样式在场");
+  assert.ok(flat.includes(".owo-ws-dlv-item"), "交付物条目样式在场");
+});
+

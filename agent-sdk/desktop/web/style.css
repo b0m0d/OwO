@@ -869,3 +869,58 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
   .owo-pe-panel .owo-pe-stat-row { gap: 6px; }
 }
 
+/* ===========================================================================
+   19. 五期：自适应组队 / 角色指标 / 版本时间线 / 差异 / 返工 / 交付物 / 诊断
+   =========================================================================== */
+/* 组队策略判定（auto/single/team + 理由） */
+.owo-ws-strategybox { margin-bottom: 8px; }
+.owo-ws-strategy { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0 2px; min-width: 0; }
+.owo-ws-strategy ul { margin: 2px 0 0; padding-left: 18px; flex-basis: 100%; color: var(--muted); font-size: 12px; }
+.owo-ws-strategy li { margin: 2px 0; }
+.owo-ws-strategy-empty { font-size: 12px; }
+
+/* 角色指标：汇总条 + 卡片网格 */
+.owo-ws-metrics-sum { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); padding: 4px 0 8px; min-width: 0; }
+.owo-ws-metrics-sum b { color: var(--text); font-variant-numeric: tabular-nums; }
+.owo-ws-metrics-sum .bad, .owo-ws-mcard .bad { color: var(--red); }
+.owo-ws-metrics-sum .owo-ws-budget-exhausted { border-radius: 8px; padding: 2px 8px; background: var(--red-soft); border: 1px solid var(--red-line); }
+.owo-ws-mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.owo-ws-mcard { border: 1px solid var(--soft-border); border-radius: 10px; padding: 7px 9px; min-width: 0; background: var(--surface-2, transparent); }
+.owo-ws-mcard > div { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.owo-ws-mcard .hint { font-variant-numeric: tabular-nums; }
+.owo-ws-mcard.bad { border-color: var(--red-line); }
+
+/* 版本时间线（v1 → v2 状态流转） */
+.owo-ws-timeline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 0 8px; min-width: 0; }
+.owo-ws-tl-node { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--soft-border); border-radius: 999px; padding: 2px 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.owo-ws-tl-node[data-tl-state="approved"] { border-color: var(--green-line); background: var(--green-soft); }
+.owo-ws-tl-node[data-tl-state="rejected"] { border-color: var(--red-line); background: var(--red-soft); }
+.owo-ws-tl-node[data-tl-state="pendingreview"] { border-color: var(--yellow-line); background: var(--yellow-soft); }
+.owo-ws-tl-node[data-tl-state="superseded"] { opacity: 0.72; }
+.owo-ws-tl-arrow { color: var(--muted); }
+
+/* 首末版本差异 */
+.owo-ws-diff { max-height: 320px; overflow: auto; font-size: 12px; border: 1px dashed var(--soft-border); border-radius: 8px; padding: 8px; white-space: pre-wrap; word-break: break-word; }
+.owo-ws-diff .dl-add { color: var(--green); }
+.owo-ws-diff .dl-del { color: var(--red); }
+.owo-ws-diff .dl-ctx { color: var(--muted); }
+
+/* 根据评审意见返工 */
+.owo-ws-rework { margin: 4px 0; }
+.owo-ws-rework > summary { cursor: pointer; font-size: 12px; color: var(--accent, #3663d8); }
+.owo-ws-rework > summary::marker { content: "▸ "; }
+.owo-ws-rework[data-busy] > summary { opacity: 0.6; pointer-events: none; }
+.owo-ws-rework-form textarea { width: 100%; }
+
+/* 最终交付物 */
+.owo-ws-dlv-counts { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 8px; }
+.owo-ws-dlv-list { display: flex; flex-direction: column; gap: 4px; }
+.owo-ws-dlv-item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; border: 1px solid var(--soft-border); border-radius: 8px; padding: 4px 8px; min-width: 0; }
+.owo-ws-dlv-item .hint { min-width: 0; }
+
+/* 窄视口：指标卡与时间线收窄 */
+@media (max-width: 1280px) {
+  .owo-ws-mgrid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+  .owo-ws-metrics-sum { gap: 8px; }
+}
+

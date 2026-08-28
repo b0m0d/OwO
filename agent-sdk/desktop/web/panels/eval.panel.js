@@ -297,11 +297,79 @@
       };
     }
 
-    // 服务端统计（第一路 statistics 字段）宽容归一：识别 {lo,hi}|[lo,hi] 区间、
-    // p50/p95 耗时、verdict/recommendation 文本；形状不符返回 null（走客户端推导）。
+    // 服务端统计（第一路 report_statistics 真实形状优先）：
+    //   statistics = { modes: [ModeStats(single), ModeStats(multi)],
+    //                  comparison: { multi_success_rate_diff, multi_wall_rel_change,
+    //                                rules:[{name,satisfied,detail}], enabled, sample_sufficient } }
+    // ModeStats 字段：mode/runs_total/passed/success_rate/ci95_low/ci95_high/p50_wall_ms/
+    //                p95_wall_ms/mean_wall_ms/mean_model_calls/total_tokens/total_cost_usd/sample_sufficient
+    // 同时保留旧 per_engine 宽容形状；两者皆不匹配返回 null（走客户端推导）。
     function serverStats(report) {
       var s = report && (report.statistics || report.stats);
       if (!s || typeof s !== "object" || Array.isArray(s)) return null;
+
+      // —— 真实形状：modes[2] + comparison ——
+      if (Array.isArray(s.modes)) {
+        function modeOf(x) {
+          if (!x || typeof x !== "object") return null;
+          var n = x.runs_total != null ? Number(x.runs_total) : NaN;
+          var rate = x.success_rate != null ? Number(x.success_rate) : NaN;
+          var lo = x.ci95_low != null ? Number(x.ci95_low) : NaN;
+          var hi = x.ci95_high != null ? Number(x.ci95_high) : NaN;
+          if (!isFinite(n) && !isFinite(rate)) return null;
+          var calls = x.mean_model_calls != null ? Number(x.mean_model_calls) : null;
+          var tokens = x.total_tokens != null && isFinite(Number(x.total_tokens)) ? Number(x.total_tokens) : null;
+          var cost = x.total_cost_usd != null && isFinite(Number(x.total_cost_usd)) ? Number(x.total_cost_usd) : null;
+          return {
+            n: isFinite(n) ? n : null,
+            passed: x.passed != null ? Number(x.passed) : null,
+            rate: isFinite(rate) ? rate : null,
+            ci95: isFinite(lo) && isFinite(hi) ? [lo, hi] : null,
+            p50Ms: x.p50_wall_ms != null ? Number(x.p50_wall_ms) : null,
+            p95Ms: x.p95_wall_ms != null ? Number(x.p95_wall_ms) : null,
+            calls: calls != null ? Math.round(calls * 100) / 100 : null,
+            tokens: tokens,
+            cost: cost,
+            sampleSufficient: !!x.sample_sufficient,
+          };
+        }
+        var mSingle = null, mMulti = null;
+        for (var mi = 0; mi < s.modes.length; mi++) {
+          var mm = modeOf(s.modes[mi]);
+          if (!mm) continue;
+          var tag = String(s.modes[mi].mode || "").toLowerCase();
+          if (tag === "multi" || tag === "workswarm") { if (!mMulti) mMulti = mm; }
+          else if (!mSingle) mSingle = mm;
+        }
+        var cmp = s.comparison;
+        var verdictText = null, cmpSample = null, deltasSrv = null;
+        if (cmp && typeof cmp === "object" && !Array.isArray(cmp)) {
+          if (cmp.enabled != null) {
+            var rules = Array.isArray(cmp.rules) ? cmp.rules : [];
+            var hits = [];
+            for (var ri = 0; ri < rules.length; ri++) {
+              if (rules[ri] && rules[ri].satisfied) hits.push(String(rules[ri].name || "") + "（" + String(rules[ri].detail || "") + "）");
+            }
+            verdictText = cmp.enabled
+              ? "建议启用多 Agent：" + (hits.length ? hits.join("；") : "满足启用条件")
+              : "暂不建议启用多 Agent（未满足任何启用条件）";
+          }
+          if (cmp.sample_sufficient != null) cmpSample = !!cmp.sample_sufficient;
+          var wr = cmp.multi_wall_rel_change != null ? Number(cmp.multi_wall_rel_change) : null;
+          deltasSrv = {
+            rateDiff: cmp.multi_success_rate_diff != null ? Number(cmp.multi_success_rate_diff) : null,
+            wallChangePct: wr != null && isFinite(wr) ? wr * 100 : null,
+            callsChangePct: cmp.multi_calls_rel_change != null ? Number(cmp.multi_calls_rel_change) * 100 : null,
+            tokensChangePct: cmp.multi_tokens_rel_change != null ? Number(cmp.multi_tokens_rel_change) * 100 : null,
+            costChangePct: cmp.multi_cost_rel_change != null ? Number(cmp.multi_cost_rel_change) * 100 : null,
+          };
+        }
+        if (mSingle || mMulti || verdictText) {
+          return { single: mSingle, workswarm: mMulti, verdictText: verdictText, comparisonSampleSufficient: cmpSample, serverDeltas: deltasSrv };
+        }
+      }
+
+      // —— 旧 per_engine 宽容形状 ——
       function pair(v) {
         if (Array.isArray(v) && v.length === 2 && isFinite(Number(v[0])) && isFinite(Number(v[1]))) return [Number(v[0]), Number(v[1])];
         if (v && typeof v === "object" && !Array.isArray(v)) {
@@ -329,9 +397,9 @@
       var single = eng(per.single || per.single_agent);
       var workswarm = eng(per.workswarm || per.multi || per.multi_agent);
       var verdict = s.verdict || s.recommendation || s.decision || null;
-      var verdictText = verdict && typeof verdict === "object" ? verdict.text || verdict.verdict || verdict.summary || null : verdict;
-      if (!single && !workswarm && !verdictText) return null;
-      return { single: single, workswarm: workswarm, verdictText: verdictText };
+      var verdictText2 = verdict && typeof verdict === "object" ? verdict.text || verdict.verdict || verdict.summary || null : verdict;
+      if (!single && !workswarm && !verdictText2) return null;
+      return { single: single, workswarm: workswarm, verdictText: verdictText2 };
     }
 
     // 统计视图模型：服务端统计在场时优先，否则从 report.runs 客户端推导。
@@ -345,7 +413,9 @@
         return a > 0 && b != null ? ((b - a) / a) * 100 : null;
       }
       var deltas = null;
-      if (single && workswarm) {
+      if (srv && srv.serverDeltas) {
+        deltas = srv.serverDeltas; // 服务端 comparison 字段优先（口径与 core 相同）
+      } else if (single && workswarm) {
         deltas = {
           rateDiff: workswarm.rate != null && single.rate != null ? workswarm.rate - single.rate : null,
           wallChangePct: pctChange(single.p50Ms, workswarm.p50Ms),
@@ -366,8 +436,13 @@
           source: "client",
         };
       }
-      var sampleSmall =
-        (single && single.n != null && single.n < 30) || (workswarm && workswarm.n != null && workswarm.n < 30);
+      // 样本充分性：comparison.sample_sufficient（服务端口径：两组都 ≥30）优先；
+      // 否则按任一引擎 n<30 判小样本。
+      var sampleSmall;
+      if (srv && srv.comparisonSampleSufficient != null) sampleSmall = !srv.comparisonSampleSufficient;
+      else
+        sampleSmall =
+          (single && single.n != null && single.n < 30) || (workswarm && workswarm.n != null && workswarm.n < 30);
       return { single: single, workswarm: workswarm, deltas: deltas, recommendation: rec, sampleSmall: sampleSmall };
     }
 

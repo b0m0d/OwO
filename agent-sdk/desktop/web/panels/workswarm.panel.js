@@ -157,6 +157,15 @@
       artifacts: [], // 最近一次 loadArtifacts 的产物数组（findArtifactById / 评审提交依赖）
       reviewResult: null, // 最近一次评审提交结果（测试与 DOM 提示共用）
       reviewFlash: null, // {artifactId, ok, text} 评审结果闪存：产物区重载后仍显示
+      // —— 五期：自适应组队 / 角色指标 / 版本链返工 / 交付物 / 诊断 ——
+      strategyDecision: null, // strategyDecisionOf(detail) 归一结果（auto/single/team + 理由）
+      metrics: null, // metricsFromPayload 归一结果（角色指标卡）
+      deliverables: null, // deliverablesFromPayload 归一结果（最终交付物三桶）
+      deliverablesOpen: false, // 交付物区是否展开（懒加载）
+      reworkBusy: {}, // artifact_id -> true（返工提交进行中）
+      reworkResult: null, // 最近一次返工提交结果
+      historyReviews: {}, // artifact_id -> 最近一次评审历史记录（rework 预填 review_id 用）
+      diagnostic: null, // 最近一次下载的诊断 JSON（已脱敏）
     };
 
     // ---------- 常量与工具 ----------
@@ -970,6 +979,394 @@
       return null;
     }
 
+    // ---------- 五期：组队策略判定展示 ----------
+    // 容错读取团队详情里的策略判定（第一路 TeamStrategyEngine 落地前后均可工作）。
+    // 接受 detail.strategy_decision 或 detail.strategy；reasons 兼容 reason/reasons/why。
+    function strategyDecisionOf(detail) {
+      if (!detail || typeof detail !== "object") return null;
+      var raw = detail.strategy_decision || detail.strategy;
+      if (!raw || typeof raw !== "object") return null;
+      var mode = String(raw.mode || raw.decision || "").toLowerCase();
+      if (mode !== "single" && mode !== "team") return null;
+      var reasons = raw.reasons || raw.reason || raw.why || [];
+      if (typeof reasons === "string") reasons = [reasons];
+      if (!Array.isArray(reasons)) reasons = [];
+      var roles = raw.roles || [];
+      if (!Array.isArray(roles)) roles = [];
+      var budget = Number(raw.budget_per_role);
+      return {
+        mode: mode,
+        roles: roles.map(function (r) {
+          if (typeof r === "string") return { role: r, duty: "" };
+          return { role: String((r && r.role) || ""), duty: String((r && r.duty) || (r && r.responsibility) || "") };
+        }).filter(function (r) { return r.role; }),
+        parallelism: raw.parallelism == null ? null : Number(raw.parallelism),
+        budgetPerRole: isFinite(budget) && budget > 0 ? budget : null,
+        reasons: reasons.map(String).filter(Boolean),
+      };
+    }
+
+    function strategyBoxHtml(dec) {
+      if (!dec) return '<div class="hint owo-ws-strategy-empty">策略判定将由「自动选择」模式在创建时给出（单 Agent / 组队 + 角色与预算 + 理由）。</div>';
+      var html =
+        '<div class="owo-ws-strategy" data-strategy-mode="' + esc(dec.mode) + '">' +
+        '<span class="owo-ws-badge ' + (dec.mode === "single" ? "rv-off" : "rv-warn") + '">' +
+        (dec.mode === "single" ? "单 Agent" : "多 Agent 团队") + "</span>";
+      if (dec.roles.length) {
+        html += '<span class="hint">角色：' + esc(dec.roles.map(function (r) { return r.role; }).join(" → ")) + "</span>";
+      }
+      if (dec.parallelism != null) html += '<span class="hint">并行度 ' + esc(dec.parallelism) + "</span>";
+      if (dec.budgetPerRole != null) html += '<span class="hint">每角色调用预算 ' + esc(dec.budgetPerRole) + "</span>";
+      if (dec.reasons.length) {
+        html += "<ul>" + dec.reasons.map(function (r) { return "<li>" + esc(r) + "</li>"; }).join("") + "</ul>";
+      }
+      return html + "</div>";
+    }
+
+    // ---------- 五期：角色指标（GET /teams/{id}/metrics 容错归一） ----------
+    function pickNum(o, keys) {
+      for (var i = 0; i < keys.length; i++) {
+        var v = o && o[keys[i]];
+        if (v != null && isFinite(Number(v))) return Number(v);
+      }
+      return null;
+    }
+    function pickStr(o, keys) {
+      for (var i = 0; i < keys.length; i++) {
+        var v = o && o[keys[i]];
+        if (v != null && v !== "") return String(v);
+      }
+      return "";
+    }
+    function metricsFromPayload(d) {
+      if (!d || typeof d !== "object") return null;
+      var rawWorkers = d.workers || d.roles || d.items || [];
+      if (!Array.isArray(rawWorkers)) rawWorkers = [];
+      var workers = rawWorkers.map(function (w) {
+        var arts = (w && (w.artifact_ids || w.artifacts || w.output_artifacts)) || [];
+        if (!Array.isArray(arts)) arts = [];
+        // 服务端 worker 行可为 {artifact:{artifact_id,...}} 单对象（五期实弹形状）。
+        var one = (w && w.artifact) || null;
+        if (one && typeof one === "object") {
+          var oid = one.artifact_id || one.id;
+          if (oid) arts.push(oid);
+        } else if (one) {
+          arts.push(one);
+        }
+        return {
+          worker: pickStr(w, ["worker", "worker_id", "member_id", "name", "role"]),
+          role: pickStr(w, ["role", "worker_role"]),
+          startedAt: pickStr(w, ["started_at", "startedAt", "start"]),
+          endedAt: pickStr(w, ["ended_at", "endedAt", "end", "finished_at"]),
+          durationMs: pickNum(w, ["duration_ms", "durationMs", "wall_ms", "wall_ms_sum", "elapsed_ms"]),
+          modelCalls: pickNum(w, ["model_calls", "calls", "model_call_count"]),
+          tokensIn: pickNum(w, ["tokens_in", "input_tokens", "prompt_tokens"]),
+          tokensOut: pickNum(w, ["tokens_out", "output_tokens", "completion_tokens"]),
+          estCost: pickNum(w, ["est_cost", "cost_usd", "cost"]),
+          attempts: pickNum(w, ["attempts", "try_count", "attempt", "spans"]),
+          terminal: pickStr(w, ["terminal", "outcome", "status", "final_status"]),
+          failureReason: pickStr(w, ["failure_reason", "error", "fail_reason"]),
+          artifactIds: arts.map(function (x) { return typeof x === "string" ? x : String(x && (x.artifact_id || x.id) || ""); }).filter(Boolean),
+        };
+      });
+      var s = d.summary || d.totals || {};
+      // 五期实弹：slowest_worker 可为 {role,span_id,step_id} 对象——提取 role。
+      var slowest = s.slowest_worker;
+      if (slowest && typeof slowest === "object") slowest = slowest.role || slowest.worker || slowest.span_id || "";
+      var budget = (d && d.budget) || {};
+      var summary = {
+        wallClockMs: pickNum(s, ["wall_clock_ms", "wallClockMs", "wall_window_ms", "wall_ms", "total_wall_ms"]),
+        totalModelCalls: pickNum(s, ["total_model_calls", "total_calls", "model_calls"]),
+        totalTokensIn: pickNum(s, ["total_tokens_in", "tokens_in", "prompt_tokens"]),
+        totalTokensOut: pickNum(s, ["total_tokens_out", "tokens_out", "completion_tokens"]),
+        totalEstCost: pickNum(s, ["total_est_cost", "total_cost_usd", "total_cost", "cost_usd", "est_cost"]),
+        slowestWorker: typeof slowest === "string" ? slowest : pickStr(s, ["slowest_worker", "slowest"]),
+        failures: pickNum(s, ["failures", "failed_spans", "failure_count"]),
+        reworks: pickNum(s, ["reworks", "rework_count"]),
+        artifactVersions: pickNum(s, ["artifact_versions", "artifact_count"]),
+        budgetExhausted: !!(s.budget_exhausted || s.budgetExhausted || budget.exceeded),
+        budgetReason: (function () {
+          var r = pickStr(s, ["budget_reason", "budget_exhausted_reason"]);
+          if (r) return r;
+          var br = budget.reason;
+          return typeof br === "string" ? br : "";
+        })(),
+      };
+      if (!workers.length && summary.wallClockMs == null && summary.totalModelCalls == null) return null;
+      return { workers: workers, summary: summary };
+    }
+
+    function fmtMs(ms) {
+      if (ms == null || !isFinite(ms)) return "—";
+      if (ms < 1000) return Math.round(ms) + "ms";
+      var s = ms / 1000;
+      if (s < 60) return s.toFixed(1) + "s";
+      var m = Math.floor(s / 60);
+      return m + "m" + Math.round(s - m * 60) + "s";
+    }
+
+    function metricsCardsHtml(vm, budgetPerRole) {
+      if (!vm) return '<div class="hint owo-ws-metrics-empty">暂无角色指标（指标由角色 Worker 执行时采集；服务端未提供时此区保持空态）。</div>';
+      var s = vm.summary;
+      var chips =
+        '<div class="owo-ws-metrics-sum">' +
+        '<span>总墙钟 <b>' + fmtMs(s.wallClockMs) + "</b></span>" +
+        '<span>总调用 <b>' + (s.totalModelCalls == null ? "—" : s.totalModelCalls) + "</b></span>" +
+        (s.totalTokensIn != null || s.totalTokensOut != null
+          ? "<span>token <b>" + (s.totalTokensIn == null ? "—" : s.totalTokensIn) + " / " + (s.totalTokensOut == null ? "—" : s.totalTokensOut) + "</b></span>"
+          : "") +
+        (s.totalEstCost != null ? '<span>估算费用 <b>$' + s.totalEstCost.toFixed(4) + "</b></span>" : "") +
+        (s.slowestWorker ? '<span>最慢 <b>' + esc(s.slowestWorker) + "</b></span>" : "") +
+        (s.failures != null ? '<span>失败 <b class="' + (s.failures > 0 ? "bad" : "") + '">' + s.failures + "</b></span>" : "") +
+        (s.reworks != null ? "<span>返工 <b>" + s.reworks + "</b></span>" : "") +
+        (s.artifactVersions != null ? "<span>产物版本 <b>" + s.artifactVersions + "</b></span>" : "") +
+        (s.budgetExhausted ? '<span class="owo-ws-budget-exhausted bad">预算耗尽' + (s.budgetReason ? "：" + esc(s.budgetReason) : "") + "</span>" : "") +
+        "</div>";
+      if (!vm.workers.length) return chips;
+      var cards = vm.workers
+        .map(function (w) {
+          var remain = budgetPerRole != null && w.modelCalls != null ? budgetPerRole - w.modelCalls : null;
+          return (
+            '<div class="owo-ws-mcard' + (w.failureReason ? " bad" : "") + '">' +
+            "<div><b>" + esc(w.role || w.worker) + "</b>" +
+            (w.worker && w.role && w.worker !== w.role ? '<span class="hint">（' + esc(w.worker) + "）</span>" : "") +
+            (w.terminal ? '<span class="owo-ws-badge ' + (w.failureReason || /fail|abort|cancel/i.test(String(w.terminal)) ? "rv-bad" : "rv-ok") + '">' + esc(w.terminal) + "</span>" : "") +
+            "</div>" +
+            '<div class="hint">' +
+            "耗时 " + fmtMs(w.durationMs) +
+            " · 调用 " + (w.modelCalls == null ? "—" : w.modelCalls) +
+            (remain != null ? "（余 " + remain + "" : "") + (remain != null ? "）" : "") +
+            (w.tokensIn != null || w.tokensOut != null ? " · token " + (w.tokensIn == null ? "—" : w.tokensIn) + "/" + (w.tokensOut == null ? "—" : w.tokensOut) : "") +
+            (w.estCost != null ? " · $" + w.estCost.toFixed(4) : "") +
+            (w.attempts != null ? " · 尝试 " + w.attempts : "") +
+            "</div>" +
+            (w.failureReason ? '<div class="bad hint">失败：' + esc(short(w.failureReason, 120)) + "</div>" : "") +
+            (w.artifactIds.length ? '<div class="hint">产物：' + esc(w.artifactIds.join("、")) + "</div>" : "") +
+            "</div>"
+          );
+        })
+        .join("");
+      return chips + '<div class="owo-ws-mgrid">' + cards + "</div>";
+    }
+
+    // ---------- 五期：版本时间线与 v1/v2 差异 ----------
+    // 简单 LCS 行差异（预览文本短，O(n·m) 可接受；超长截断保护）。
+    function diffLines(aText, bText) {
+      var a = String(aText == null ? "" : aText).split("\n").slice(0, 400);
+      var b = String(bText == null ? "" : bText).split("\n").slice(0, 400);
+      var n = a.length, m = b.length;
+      var dp = [];
+      for (var i = 0; i <= n; i++) { dp.push(new Array(m + 1).fill(0)); }
+      for (i = n - 1; i >= 0; i--) {
+        for (var j = m - 1; j >= 0; j--) {
+          dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+      var out = [];
+      i = 0; j = 0;
+      while (i < n && j < m) {
+        if (a[i] === b[j]) { out.push({ t: " ", s: a[i] }); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: "-", s: a[i] }); i++; }
+        else { out.push({ t: "+", s: b[j] }); j++; }
+      }
+      while (i < n) { out.push({ t: "-", s: a[i] }); i++; }
+      while (j < m) { out.push({ t: "+", s: b[j] }); j++; }
+      return out;
+    }
+
+    function diffHtml(aText, bText, labelA, labelB) {
+      var rows = diffLines(aText, bText)
+        .map(function (r) {
+          if (r.t === " ") return '<span class="dl-ctx">  ' + esc(r.s) + "\n</span>";
+          if (r.t === "-") return '<span class="dl-del">- ' + esc(r.s) + "\n</span>";
+          return '<span class="dl-add">+ ' + esc(r.s) + "\n</span>";
+        })
+        .join("");
+      return (
+        '<pre class="owo-ws-diff" data-diff-a="' + esc(labelA || "vA") + '" data-diff-b="' + esc(labelB || "vB") + '">' +
+        '<span class="hint">差异 ' + esc(labelA || "vA") + " → " + esc(labelB || "vB") + "（- 删行 / + 增行）</span>\n" + rows + "</pre>"
+      );
+    }
+
+    function artifactTimelineHtml(chain) {
+      if (!chain || !chain.length) return "";
+      var nodes = chain
+        .map(function (a) {
+          var st = normReviewState(a.review_state);
+          return (
+            '<span class="owo-ws-tl-node" data-tl-state="' + esc(st) + '" title="' + esc(a.artifact_id) + '">' +
+            "v" + (a.version == null ? "?" : a.version) +
+            '<i class="owo-ws-badge ' + (REVIEW_CLS[st] || "rv-off") + '">' + (REVIEW_CN[st] || st || "—") + "</i></span>"
+          );
+        })
+        .join('<span class="owo-ws-tl-arrow">→</span>');
+      return '<div class="owo-ws-timeline" data-timeline-len="' + chain.length + '">' + nodes + "</div>";
+    }
+
+    // ---------- 五期：根据评审意见返工（POST /artifacts/{id}/rework） ----------
+    function buildReworkBody(input) {
+      var aid = String((input && input.artifactId) || "");
+      if (!aid) throw new Error("缺少 artifactId：无法定位要返工的产物");
+      var teamId = String((input && input.teamId) || state.current || "");
+      if (!teamId) throw new Error("缺少 team_id：请先打开团队详情再发起返工");
+      var reviewId = String((input && input.reviewId) || "");
+      if (!reviewId) throw new Error("缺少 review_id：请先加载该产物的评审历史（要求修改的评审记录）");
+      var instruction = String((input && input.instruction) || "").trim();
+      if (!instruction) throw new Error("返工指令不能为空：请填写要修正的内容（可从评审意见预填）");
+      return {
+        team_id: teamId,
+        review_id: reviewId,
+        instruction: instruction,
+        idempotency_key: (input && input.idempotencyKey) || aidemKey({ artifact_id: aid }, "rework", "rework"),
+      };
+    }
+
+    function explainReworkError(err) {
+      var st = err && err.status;
+      if (!st && err && typeof err.message === "string") {
+        var m = /^(\d{3}):/.exec(err.message);
+        if (m) st = Number(m[1]);
+      }
+      if (st === 409) return "该评审已创建过返工任务（409 幂等冲突）；请刷新产物列表查看返工进度，不要重复创建";
+      if (st === 404) return "产物或评审记录不存在（404）：可能已被刷新移除，请刷新后重试";
+      return explainError(err, "返工提交");
+    }
+
+    function submitRework(opts) {
+      var aid = String((opts && opts.artifactId) || "");
+      var body;
+      try {
+        body = buildReworkBody({
+          artifactId: aid,
+          teamId: (opts && opts.teamId) || state.current,
+          reviewId: opts && opts.reviewId,
+          instruction: opts && opts.instruction,
+          idempotencyKey: opts && opts.idempotencyKey,
+        });
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      if (state.reworkBusy[aid]) return Promise.reject(new Error("该产物已有返工提交进行中，请等待完成"));
+      state.reworkBusy[aid] = true;
+      return H.post("/artifacts/" + encodeURIComponent(aid) + "/rework", body).then(
+        function (resp) {
+          delete state.reworkBusy[aid];
+          state.reworkResult = { ok: true, artifactId: aid, resp: resp || null };
+          state.reviewFlash = { artifactId: aid, ok: true, text: "返工任务已受理（" + ((resp && resp.replayed) ? "幂等重放既有任务" : "新任务") + "）；v2 生成后自动进入评审" };
+          return resp;
+        },
+        function (e) {
+          delete state.reworkBusy[aid];
+          state.reworkResult = { ok: false, artifactId: aid, error: explainReworkError(e) };
+          state.reviewFlash = { artifactId: aid, ok: false, text: explainReworkError(e) };
+          throw e;
+        }
+      );
+    }
+
+    // ---------- 五期：最终交付物（GET /projects/{id}/deliverables 容错三桶） ----------
+    function deliverablesFromPayload(d) {
+      if (!d || typeof d !== "object") return null;
+      var all = d.approved || d.deliverables || d.items || d.artifacts || [];
+      // 服务端实弹键为 pending_review；契约草案为 pending——两者皆容错。
+      var pending = d.pending || d.pending_review || [];
+      var other = d.rejected_or_superseded || d.rejected || d.superseded || [];
+      var isArr = Array.isArray(all);
+      if (!isArr && typeof all === "object" && all != null) all = [];
+      if (!Array.isArray(pending)) pending = [];
+      if (!Array.isArray(other)) other = []; // 实弹可为 null
+      var norm = function (x) {
+        return {
+          artifactId: String((x && x.artifact_id) || ""),
+          kind: String((x && x.kind) || ""),
+          version: x && x.version != null ? x.version : null,
+          producer: String((x && x.producer) || ""),
+          reviewState: normReviewState(x && x.review_state),
+        };
+      };
+      var approved, pendingOut, otherOut;
+      if (d.approved || d.deliverables) {
+        approved = (isArr ? all : []).map(norm);
+        pendingOut = pending.map(norm);
+        otherOut = other.map(norm);
+      } else {
+        // 单列表形状：按 review_state 分桶
+        var src = (d.items || d.artifacts || []);
+        approved = []; pendingOut = []; otherOut = [];
+        src.map(norm).forEach(function (x) {
+          if (x.reviewState === "approved") approved.push(x);
+          else if (x.reviewState === "pendingreview") pendingOut.push(x);
+          else otherOut.push(x);
+        });
+      }
+      // manifest/complete/rework 概览（实弹字段；缺省无害）
+      var manifestRef = typeof d.delivery_manifest_ref === "string" ? d.delivery_manifest_ref : "";
+      return {
+        approved: approved,
+        pending: pendingOut,
+        other: otherOut,
+        complete: !!d.complete,
+        manifestRef: manifestRef,
+        reworkCount: Array.isArray(d.rework_tasks) ? d.rework_tasks.length : null,
+      };
+    }
+
+    function deliverablesBoxHtml(dl) {
+      if (!dl) return '<div class="hint">交付物数据为空。</div>';
+      var html = "";
+      if (!dl.approved.length && !dl.pending.length && !dl.other.length) {
+        return '<div class="hint">项目暂无交付物（尚未有产物通过评审或进入评审）。</div>';
+      }
+      html += '<div class="owo-ws-dlv-counts"><span class="owo-ws-badge rv-ok">已批准 ' + dl.approved.length + "</span>" +
+        '<span class="owo-ws-badge rv-warn">待评审 ' + dl.pending.length + "</span>" +
+        '<span class="owo-ws-badge rv-off">驳回/取代 ' + dl.other.length + "</span>" +
+        (dl.complete ? '<span class="owo-ws-badge rv-ok">交付完成</span>' : "") +
+        (dl.reworkCount != null && dl.reworkCount > 0 ? '<span class="owo-ws-badge rv-warn">返工中 ' + dl.reworkCount + "</span>" : "") +
+        "</div>";
+      if (dl.manifestRef) {
+        html += '<div class="hint">交付清单：' + esc(dl.manifestRef) + "</div>";
+      }
+      if (dl.approved.length) {
+        html +=
+          '<div class="owo-ws-dlv-list">' +
+          dl.approved
+            .map(function (x) {
+              return (
+                '<div class="owo-ws-dlv-item" data-dlv-art="' + esc(x.artifactId) + '">' +
+                '<span class="owo-ws-badge rv-ok">交付</span> <b>' + esc(x.kind || "artifact") + "</b> v" + (x.version == null ? "?" : x.version) +
+                '<span class="hint">' + esc(x.artifactId) + " · " + esc(x.producer || "—") + "</span></div>"
+              );
+            })
+            .join("") +
+          "</div>";
+      } else {
+        html += '<div class="hint">尚无已批准版本：approved head 建立后将在此列出最终交付物。</div>';
+      }
+      return html;
+    }
+
+    // ---------- 五期：下载脱敏诊断（GET /teams/{id}/diagnostic） ----------
+    function downloadDiagnostic(teamId) {
+      var tid = String(teamId || state.current || "");
+      if (!tid) return Promise.reject(new Error("缺少 team_id：请先打开团队详情"));
+      return H.get("/teams/" + encodeURIComponent(tid) + "/diagnostic").then(function (d) {
+        state.diagnostic = d || null;
+        if (typeof Blob === "function" && typeof win.URL !== "undefined" && win.URL.createObjectURL) {
+          var blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
+          var a = win.document.createElement("a");
+          a.href = win.URL.createObjectURL(blob);
+          a.download = "diagnostic-" + tid + ".json";
+          win.document.body.appendChild(a);
+          a.click();
+          setTimeout(function () {
+            win.URL.revokeObjectURL(a.href);
+            a.remove();
+          }, 400);
+        }
+        return d;
+      });
+    }
+
     // 评审历史（懒加载）：GET /artifacts/{id}/history → 不可变记录列表。
     function artifactHistoryHtml(records) {
       if (!records || !records.length) return '<div class="hint">暂无评审记录</div>';
@@ -977,8 +1374,9 @@
         .map(function (r) {
           var dec = String((r && r.decision) || "");
           var cn = { approve: "批准", request_changes: "要求修改", reject: "驳回" }[dec] || dec;
+          var rid = r && (r.review_id || r.id) ? String(r.review_id || r.id) : "";
           return (
-            '<div class="owo-ws-review-rec">' +
+            '<div class="owo-ws-review-rec"' + (rid ? ' data-review-id="' + esc(rid) + '" data-review-decision="' + esc(dec) + '"' : "") + ">" +
             reviewBadgeHtml(dec === "approve" ? "approved" : dec === "request_changes" ? "changes_requested" : "rejected") +
             "<b>" + esc(r.reviewer || "—") + "</b>" +
             '<span class="owo-ws-ellip" title="' + esc(r.comment || "") + '">' + esc(r.comment || "（无评语）") + "</span>" +
@@ -1003,11 +1401,23 @@
         .then(function (d) {
           // 第三路响应：reviews[]（评审记录）+ supersedes/superseded_by/approved_head
           var recs = (d && (d.reviews || d.records || d.history)) || [];
+          state.historyReviews[String(aid)] = recs; // 返工预填 review_id 用
           target.innerHTML = artifactHistoryHtml(recs);
         })
         .catch(function (e) {
           target.innerHTML = stateBox("error", explainError(e, "评审历史"), "history-" + aid);
         });
+    }
+
+    // 取某产物最近一次 request_changes 评审（返工依据）：优先用已缓存历史。
+    function latestChangesReviewId(aid) {
+      var recs = state.historyReviews[String(aid)] || [];
+      for (var i = 0; i < recs.length; i++) {
+        if (String((recs[i] && recs[i].decision) || "") === "request_changes") {
+          return String((recs[i] && (recs[i].review_id || recs[i].id)) || "");
+        }
+      }
+      return "";
     }
 
     // 产物行（链内）：版本徽标 + 评审状态 + 产出者 + 取代关系 + 预览 + 评审表单 + 历史。
@@ -1037,6 +1447,21 @@
           "</div>" +
           "</div></details>";
       }
+      // 五期：返工表单——链内最新版本且状态为 Draft（被要求修改后）或 Rejected 时提供
+      // 「根据评审意见返工」；展开时懒加载评审历史预填 review_id 与指令。
+      var reworkHtml = "";
+      var rowState = normReviewState(a.review_state);
+      if (isHead && (rowState === "draft" || rowState === "rejected")) {
+        var rbusy = !!state.reworkBusy[aid];
+        reworkHtml =
+          '<details class="owo-ws-rework"' + (rbusy ? ' data-busy="1"' : "") + ">" +
+          '<summary>根据评审意见返工（生成 v2 取代本版本）</summary>' +
+          '<div class="owo-ws-rework-form" data-rework-form="' + esc(aid) + '">' +
+          '<textarea class="owo-ws-rework-instruction" rows="2" placeholder="返工指令（展开时自动从最近一次「要求修改」评审意见预填，可修改）"></textarea>' +
+          '<div class="owo-ws-inline"><button type="button" class="owo-ws-rework-go primary" data-rework-go="' + esc(aid) + '"' + (rbusy ? " disabled" : "") + ">发起返工</button>" +
+          '<span class="hint">POST /artifacts/{id}/rework —— 同一评审仅创建一个返工任务（重复提交幂等返回原任务）</span></div>' +
+          "</div></details>";
+      }
       // 评审结果行（行级，独立于表单）：状态迁移后表单可能消失，但 flash 提示仍在。
       var flash = state.reviewFlash && String(state.reviewFlash.artifactId) === aid ? state.reviewFlash : null;
       var resultHtml =
@@ -1056,6 +1481,7 @@
           ? '<details class="owo-ws-art-preview"><summary>预览</summary><pre>' + esc(a.preview || "（空）") + "</pre></details>"
           : "") +
         formHtml +
+        reworkHtml +
         resultHtml +
         '<div class="owo-ws-art-histline">' +
         '<button type="button" class="owo-ws-mini" data-art-history="' + esc(aid) + '">评审历史</button>' +
@@ -1077,9 +1503,17 @@
           var headHtml = c.approvedHead
             ? '当前 approved head：<span class="owo-ws-badge rv-ok">v' + esc(c.approvedHead.version) + "</span>"
             : '<span class="hint">无已批准版本（approved head 未建立）</span>';
+          // 版本时间线（v1→v2 状态流转）+ 多版本时提供 v1/v2 差异入口
+          var timeline = artifactTimelineHtml(c.items);
+          var diffBtn =
+            c.items.length >= 2
+              ? '<button type="button" class="owo-ws-mini" data-chain-diff="' + esc((c.items[0] && c.items[0].artifact_id) || "") + '">查看首末版本差异</button>'
+              : "";
           return (
             '<div class="owo-ws-art-chain">' +
-            '<div class="owo-ws-art-chainhead"><b>' + esc(kind) + "</b> 版本链（" + c.items.length + " 个版本）· " + headHtml + "</div>" +
+            '<div class="owo-ws-art-chainhead"><b>' + esc(kind) + "</b> 版本链（" + c.items.length + " 个版本）· " + headHtml + " " + diffBtn + "</div>" +
+            timeline +
+            '<div class="owo-ws-chain-diffbox" data-chain-diffbox="' + esc((c.items[0] && c.items[0].artifact_id) || "") + '" hidden></div>' +
             c.items
               .map(function (a) {
                 return artifactRowHtml(a, c);
@@ -1545,6 +1979,58 @@
     }
 
     // ---------- 产物 ----------
+    // ---------- 五期：角色指标与交付物加载 ----------
+    function projectIdOfTeam() {
+      var t = state.team;
+      return (t && t.project_space_id) || (state.current ? "proj-" + state.current : "");
+    }
+
+    function loadMetrics() {
+      if (!state.current) return Promise.resolve();
+      return H.get("/teams/" + encodeURIComponent(state.current) + "/metrics")
+        .then(function (d) {
+          state.metrics = metricsFromPayload(d);
+          paintMetrics();
+        })
+        .catch(function () {
+          // 指标接口未上线/404 时保持空态，不干扰详情其它区域
+          state.metrics = metricsFromPayload(null);
+          paintMetrics();
+        });
+    }
+
+    function paintMetrics() {
+      var box = el("#ws-d-metrics");
+      if (!box) return;
+      box.innerHTML = metricsCardsHtml(state.metrics, state.strategyDecision && state.strategyDecision.budgetPerRole);
+    }
+
+    function paintStrategy() {
+      var box = el("#ws-d-strategy");
+      if (!box) return;
+      box.innerHTML = strategyBoxHtml(state.strategyDecision);
+    }
+
+    function loadDeliverables() {
+      var pid = projectIdOfTeam();
+      var box = el("#ws-dlv-box");
+      if (!box) return Promise.resolve();
+      if (!pid) {
+        box.innerHTML = '<div class="hint">项目空间尚不可用（交付物按项目聚合）。</div>';
+        return Promise.resolve();
+      }
+      box.innerHTML = stateBox("loading", "正在加载最终交付物…");
+      return H.get("/projects/" + encodeURIComponent(pid) + "/deliverables")
+        .then(function (d) {
+          state.deliverables = deliverablesFromPayload(d);
+          if (state.deliverablesOpen && box.hidden === false) box.innerHTML = deliverablesBoxHtml(state.deliverables);
+        })
+        .catch(function (e) {
+          if (box.hidden === false) box.innerHTML = stateBox("error", explainError(e, "交付物加载"), "deliverables");
+        });
+    }
+
+    // ---------- 产物 ----------
     function loadArtifacts() {
       var box = el("#ws-d-artifacts");
       if (!box) return Promise.resolve();
@@ -1624,6 +2110,99 @@
         var histBtn = target.closest("[data-art-history]");
         if (histBtn) {
           loadArtifactHistory(histBtn.getAttribute("data-art-history"));
+          return;
+        }
+        // 五期：链内首末版本差异（懒计算预览行差异）
+        var diffBtn = target.closest("[data-chain-diff]");
+        if (diffBtn) {
+          var headId = diffBtn.getAttribute("data-chain-diff") || "";
+          var chainEl = diffBtn.closest(".owo-ws-art-chain");
+          var diffBox = chainEl ? chainEl.querySelector("[data-chain-diffbox]") : null;
+          if (diffBox) {
+            if (!diffBox.hidden) {
+              diffBox.hidden = true;
+              diffBox.innerHTML = "";
+              return;
+            }
+            // 找到与 headId 同链的产物序列（按 supersedes 关系重建链序）
+            var chainsNow = groupArtifactChain(state.artifacts || []);
+            var chain = null;
+            for (var ci = 0; ci < chainsNow.length; ci++) {
+              var first = chainsNow[ci].items[0];
+              if (first && String(first.artifact_id) === String(headId)) { chain = chainsNow[ci]; break; }
+            }
+            if (!chain || chain.items.length < 2) {
+              diffBox.hidden = false;
+              diffBox.innerHTML = '<div class="hint">该链不足两个版本，暂无可对比内容。</div>';
+              return;
+            }
+            var vA = chain.items[0];
+            var vB = chain.items[chain.items.length - 1];
+            diffBox.hidden = false;
+            diffBox.innerHTML =
+              vA.preview == null || vB.preview == null
+                ? '<div class="hint">缺少预览内容（产物未携带 preview），无法生成差异。</div>'
+                : diffHtml(vA.preview, vB.preview, "v" + vA.version, "v" + vB.version);
+          }
+          return;
+        }
+        // 五期：返工表单展开（懒加载评审历史并预填）与提交
+        var reworkDetails = target.closest(".owo-ws-rework");
+        if (reworkDetails && target.tagName === "SUMMARY") {
+          var form = reworkDetails.querySelector("[data-rework-form]");
+          if (form && !form.getAttribute("data-prefilled")) {
+            form.setAttribute("data-prefilled", "1");
+            var raid = form.getAttribute("data-rework-form") || "";
+            var ensure = latestChangesReviewId(raid)
+              ? Promise.resolve()
+              : loadArtifactHistory(raid);
+            ensure.then(function () {
+              var rid = latestChangesReviewId(raid);
+              if (rid) form.setAttribute("data-review-id", rid);
+              var ta = form.querySelector(".owo-ws-rework-instruction");
+              if (ta && !ta.value.trim()) {
+                var recs = state.historyReviews[String(raid)] || [];
+                for (var k = recs.length - 1; k >= 0; k--) {
+                  if (String((recs[k] && recs[k].decision) || "") === "request_changes") {
+                    ta.value = String((recs[k] && recs[k].comment) || "");
+                    break;
+                  }
+                }
+              }
+            });
+          }
+          return;
+        }
+        var reworkBtn = target.closest("[data-rework-go]");
+        if (reworkBtn) {
+          var rAid = reworkBtn.getAttribute("data-rework-go") || "";
+          var rForm = reworkBtn.closest("[data-rework-form]");
+          var rTa = rForm ? rForm.querySelector(".owo-ws-rework-instruction") : null;
+          var rid2 = rForm ? rForm.getAttribute("data-review-id") || latestChangesReviewId(rAid) : "";
+          reworkBtn.disabled = true;
+          submitRework({
+            artifactId: rAid,
+            reviewId: rid2,
+            instruction: rTa ? rTa.value : "",
+          }).then(
+            function () {
+              loadArtifacts();
+            },
+            function (e) {
+              reworkBtn.disabled = false;
+              if (resultEl || true) {
+                var box2 = el("#ws-d-artifacts");
+                if (box2) {
+                  var rowEl = box2.querySelector('[data-art-result="' + rAid.replace(/"/g, '\\"') + '"]');
+                  if (rowEl) {
+                    rowEl.textContent = explainReworkError(e);
+                    rowEl.className = "owo-ws-review-result sub bad";
+                  }
+                }
+              }
+            }
+          );
+          return;
         }
       });
     }
@@ -1653,6 +2232,14 @@
           state.reviewBusy = {};
           state.reviewResult = null;
           state.reviewFlash = null;
+          state.strategyDecision = strategyDecisionOf(d.team || d); // 五期：auto 判定理由
+          state.metrics = null;
+          state.deliverables = null;
+          state.deliverablesOpen = false;
+          state.reworkBusy = {};
+          state.reworkResult = null;
+          state.historyReviews = {};
+          state.diagnostic = null;
           stopProgressTimer();
           var tail = (d.audit_tail || []).slice();
           tail.sort(function (a, b) {
@@ -1661,6 +2248,8 @@
           tail.forEach(addAudit);
           populateSelects();
           paintDetailLive();
+          paintStrategy();
+          loadMetrics();
           loadArtifacts();
           connectEvents(teamId);
         })
@@ -1674,6 +2263,8 @@
     function syncDetail() {
       if (!state.current) return Promise.resolve();
       var seq = detailSeq;
+      // 五期：角色指标随轮询轻量刷新（接口未上线时静默保持空态）
+      if (state.active || !isTerminalTeam(state.teamStatus)) loadMetrics();
       return H.get("/teams/" + encodeURIComponent(state.current))
         .then(function (d) {
           if (seq !== detailSeq) return;
@@ -2062,6 +2653,10 @@
       var mode = modeEl ? modeEl.value : "team";
       var tpl = tplEl ? tplEl.value : "";
       var body = { objective: objective, mode: mode };
+      // 五期：组队策略（auto 为缺省值；现服务端忽略未知字段，第一路落地后生效）
+      var stratEl = el("#ws-strategy");
+      var strategy = stratEl ? String(stratEl.value || "auto") : "auto";
+      body.strategy = strategy === "auto" ? "auto" : strategy;
       if (tpl && mode !== "single") body.template_id = tpl;
       var roles = collectRoles();
       if (roles.length) body.roles = roles;
@@ -2106,6 +2701,12 @@
         '<option value="team">team — 默认接力（planner → builder → critic → leader）</option>' +
         '<option value="single">single — 单节点（忽略模板与角色规格）</option>' +
         '<option value="swarmflow">swarmflow — DAG 流程（需模板角色或自定义角色规格）</option>' +
+        "</select>" +
+        "<label>组队策略 strategy</label>" +
+        '<select id="ws-strategy">' +
+        '<option value="auto">auto — 自动选择（系统判定单 Agent / 组队，默认）</option>' +
+        '<option value="single">single — 强制单 Agent</option>' +
+        '<option value="team">team — 强制多 Agent</option>' +
         "</select>" +
         "<label>模板</label>" +
         '<select id="ws-template"><option value="">（动态组队：按下方角色规格）</option></select>' +
@@ -2601,6 +3202,7 @@
         '<span class="owo-ws-badge" id="ws-d-status">加载中</span>' +
         '<span class="owo-ws-active" id="ws-d-active"></span>' +
         '<span class="hint" id="ws-d-meta">正在加载团队详情…</span>' +
+        '<button class="owo-ws-mini" id="ws-d-diag" title="导出 TeamRun 诊断（凭据与敏感输入已由服务端脱敏）">下载诊断信息（已脱敏）</button>' +
         "</div>" +
         '<div id="ws-d-main" style="display:flex;flex-direction:column;gap:10px">' +
         '<pre class="owo-ws-result sub" id="ws-d-error"></pre>' +
@@ -2679,7 +3281,16 @@
         '<div id="ws-d-progress" class="owo-ws-prog" aria-live="polite"><div class="hint">等待进度数据…</div></div>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>产物 <span class="hint">GET /projects/{pid}/artifacts —— CAS 引用，版本链 + 评审闭环</span> <button class="owo-ws-mini" id="ws-art-refresh">刷新产物</button></h3>' +
+        '<h3>组队策略与角色指标 <span class="hint">auto 判定理由 / GET /teams/{id}/metrics —— 耗时·调用·token·费用·预算余量</span>' +
+        '<button class="owo-ws-mini" id="ws-metrics-refresh">刷新指标</button></h3>' +
+        '<div id="ws-d-strategy" class="owo-ws-strategybox">' + strategyBoxHtml(state.strategyDecision) + "</div>" +
+        '<div id="ws-d-metrics">' + metricsCardsHtml(state.metrics, state.strategyDecision && state.strategyDecision.budgetPerRole) + "</div>" +
+        "</div>" +
+        '<div class="owo-ws-sec">' +
+        '<h3>产物 <span class="hint">GET /projects/{pid}/artifacts —— CAS 引用，版本链 + 评审闭环</span>' +
+        '<button class="owo-ws-mini" id="ws-art-refresh">刷新产物</button>' +
+        '<button class="owo-ws-mini" id="ws-dlv-toggle">最终交付物</button></h3>' +
+        '<div id="ws-dlv-box" hidden></div>' +
         '<div id="ws-d-artifacts">' + stateBox("loading", "正在加载产物…") + "</div>" +
         "</div>" +
         '<div class="owo-ws-sec">' +
@@ -2739,6 +3350,31 @@
         };
       bindLockedButton(el("#ws-dag-refresh"), refreshTasksOnly, "刷新中…");
       bindLockedButton(el("#ws-art-refresh"), loadArtifacts, "刷新中…");
+      bindLockedButton(el("#ws-metrics-refresh"), loadMetrics, "刷新中…");
+      var diagBtn = el("#ws-d-diag");
+      if (diagBtn)
+        bindLockedButton(diagBtn, function () {
+          return downloadDiagnostic(state.current).then(
+            function (d) {
+              show("ws-act-result", "ok", "诊断信息已下载（服务端已脱敏：不含凭据/Authorization/完整敏感输入）。");
+              return d;
+            },
+            function (e) {
+              show("ws-act-result", "err", explainError(e, "诊断导出"));
+              throw e;
+            }
+          );
+        }, "导出中…");
+      var dlvBtn = el("#ws-dlv-toggle");
+      if (dlvBtn)
+        dlvBtn.onclick = function () {
+          state.deliverablesOpen = !state.deliverablesOpen;
+          var box = el("#ws-dlv-box");
+          if (!box) return;
+          box.hidden = !state.deliverablesOpen;
+          dlvBtn.setAttribute("data-open", state.deliverablesOpen ? "1" : "0");
+          if (state.deliverablesOpen) loadDeliverables();
+        };
       markLiveRegions();
       applyGating(); // 以当前已知状态初始化按钮可用性（数据到达后再刷新）
     }
@@ -2764,6 +3400,14 @@
       state.reviewBusy = {};
       state.reviewResult = null;
       state.reviewFlash = null;
+      state.strategyDecision = null;
+      state.metrics = null;
+      state.deliverables = null;
+      state.deliverablesOpen = false;
+      state.reworkBusy = {};
+      state.reworkResult = null;
+      state.historyReviews = {};
+      state.diagnostic = null;
       stopProgressTimer();
       renderView();
     }
@@ -2999,6 +3643,24 @@
       renderArtifactsChains: renderArtifactsChains,
       loadArtifactHistory: loadArtifactHistory,
       findArtifactById: findArtifactById,
+      // —— 五期挂钩：自适应组队 / 角色指标 / 版本链返工 / 交付物 / 诊断 ——
+      strategyDecisionOf: strategyDecisionOf,
+      strategyBoxHtml: strategyBoxHtml,
+      metricsFromPayload: metricsFromPayload,
+      metricsCardsHtml: metricsCardsHtml,
+      fmtMs: fmtMs,
+      diffLines: diffLines,
+      diffHtml: diffHtml,
+      artifactTimelineHtml: artifactTimelineHtml,
+      buildReworkBody: buildReworkBody,
+      explainReworkError: explainReworkError,
+      submitRework: submitRework,
+      deliverablesFromPayload: deliverablesFromPayload,
+      deliverablesBoxHtml: deliverablesBoxHtml,
+      latestChangesReviewId: latestChangesReviewId,
+      loadMetrics: loadMetrics,
+      loadDeliverables: loadDeliverables,
+      downloadDiagnostic: downloadDiagnostic,
       css: function () {
         return CSS;
       },
