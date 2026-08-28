@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "code-contract-change",
+  "category": "code",
+  "title": "API 契约重命名变更单",
+  "instruction": "产品契约变更：公开函数 get_user_name 更名为 fetch_user_display_name，且 user_id 参数类型显式标注为 str。请产出变更单 out/contract-change.md：列出受影响文件（src/api_old.py 与 docs/contract.md）、旧签名、新签名（必须逐字包含 def fetch_user_display_name(user_id: str) -> str），并写明迁移说明 get_user_name → fetch_user_display_name。",
+  "inputs": [
+    {
+      "path": "src/api_old.py",
+      "content": "def get_user_name(user_id):\n    \"\"\"按用户 ID 返回显示名（公开 API，外部插件在用）。\"\"\"\n    return _lookup(user_id).display_name\n"
+    },
+    {
+      "path": "docs/contract.md",
+      "content": "# 公开 API 契约\n\n- get_user_name(user_id) → str：返回显示名。\n- 兼容承诺：签名变更须提前一个版本公告。\n"
+    }
+  ],
+  "allow_read": ["src/**", "docs/**"],
+  "allow_write": ["out/**"],
+  "expected_artifacts": ["out/contract-change.md"],
+  "checkers": [
+    { "type": "contains", "path": "out/contract-change.md", "text": "def fetch_user_display_name(user_id: str) -> str" },
+    { "type": "contains", "path": "out/contract-change.md", "text": "src/api_old.py" },
+    { "type": "contains", "path": "out/contract-change.md", "text": "docs/contract.md" },
+    { "type": "contains", "path": "out/contract-change.md", "text": "get_user_name → fetch_user_display_name" },
+    { "type": "line_count_min", "path": "out/contract-change.md", "min_lines": 6 }
+  ],
+  "reference_outputs": {
+    "out/contract-change.md": "# 契约变更单：用户名 API 重命名\n\n## 变更内容\n\n- 旧签名：get_user_name(user_id)（docs/contract.md 已登记）\n- 新签名：def fetch_user_display_name(user_id: str) -> str\n\n## 受影响文件\n\n1. src/api_old.py：函数定义与实现。\n2. docs/contract.md：公开契约登记条目。\n\n## 迁移说明\n\n映射关系：get_user_name → fetch_user_display_name；旧名保留一个版本的 DeprecationWarning 后移除。\n"
+  }
+}

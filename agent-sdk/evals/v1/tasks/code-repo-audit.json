@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "code-repo-audit",
+  "category": "code",
+  "title": "小型代码仓库风险审计",
+  "instruction": "审计沙盒中的 Python 仓库（src/ 与 config/），找出所有工程风险，重点检查并发安全。产出审计报告 out/audit.md：必须包含「## 发现问题」「## 风险等级」「## 修复建议」三个二级标题；报告必须点名 src/order_service.py 并说明其中存在的竞态问题；每条问题给出修复建议。",
+  "inputs": [
+    {
+      "path": "src/order_service.py",
+      "content": "import threading\n\nclass OrderService:\n    def __init__(self):\n        self.orders = {}\n        self.next_id = 0\n\n    # 并发调用时 next_id 与 orders 均未加锁，存在竞态条件。\n    def create_order(self, sku, qty):\n        order_id = self.next_id\n        self.next_id = self.next_id + 1\n        self.orders[order_id] = {\"sku\": sku, \"qty\": qty}\n        return order_id\n\n    def total(self):\n        return len(self.orders)\n"
+    },
+    {
+      "path": "src/README.md",
+      "content": "# 订单服务\n\n提供 create_order / total 两个接口，供 Web 层调用。\n"
+    },
+    {
+      "path": "config/settings.ini",
+      "content": "[server]\nworkers = 8\nport = 8080\n"
+    }
+  ],
+  "allow_read": ["src/**", "config/**"],
+  "allow_write": ["out/**"],
+  "expected_artifacts": ["out/audit.md"],
+  "checkers": [
+    { "type": "contains", "path": "out/audit.md", "text": "src/order_service.py" },
+    { "type": "contains", "path": "out/audit.md", "text": "竞态" },
+    { "type": "regex", "path": "out/audit.md", "pattern": "^## 发现问题" },
+    { "type": "regex", "path": "out/audit.md", "pattern": "^## 风险等级" },
+    { "type": "regex", "path": "out/audit.md", "pattern": "^## 修复建议" },
+    { "type": "line_count_min", "path": "out/audit.md", "min_lines": 6 }
+  ],
+  "reference_outputs": {
+    "out/audit.md": "# 仓库审计报告\n\n## 发现问题\n\n1. src/order_service.py 的 OrderService 在 8 worker 并发下存在竞态：next_id 读改写非原子，orders 字典并发写可能丢更新。\n2. src/order_service.py 未对 self.orders 做任何锁保护。\n\n## 风险等级\n\n| 问题 | 等级 |\n| --- | --- |\n| 自增 ID 竞态 | 高 |\n| 共享字典并发写 | 中 |\n\n## 修复建议\n\n1. 用 threading.Lock 保护 create_order 的整段读改写。\n2. 或改用 itertools.count / 队列串行化写入。\n"
+  }
+}

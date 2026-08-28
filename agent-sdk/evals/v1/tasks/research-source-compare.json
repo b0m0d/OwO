@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "research-source-compare",
+  "category": "research",
+  "title": "双数据库选型对比表",
+  "instruction": "阅读 sources/ 下两份资料（SQLite 与 PostgreSQL），从「部署形态」「事务能力」「适用场景」三个维度对比，产出对比表 out/comparison-table.md：必须使用 Markdown 表格，同时提到 SQLite 与 PostgreSQL，并给出一句选型结论。",
+  "inputs": [
+    {
+      "path": "sources/source_a.md",
+      "content": "# SQLite 要点\n\n- 嵌入式：数据库即单个文件，无独立服务进程。\n- 事务：完整 ACID，写并发弱（库级写锁）。\n- 适用：单机应用、移动端、嵌入式设备、原型。\n"
+    },
+    {
+      "path": "sources/source_b.md",
+      "content": "# PostgreSQL 要点\n\n- 客户端/服务端：独立服务进程，网络访问，多实例共享。\n- 事务：完整 ACID，MVCC 高并发读写。\n- 适用：多服务共享、复杂查询、OLAP 混合负载、强扩展（ PostGIS 等）。\n"
+    }
+  ],
+  "allow_read": ["sources/**"],
+  "allow_write": ["out/**"],
+  "expected_artifacts": ["out/comparison-table.md"],
+  "checkers": [
+    { "type": "contains", "path": "out/comparison-table.md", "text": "SQLite" },
+    { "type": "contains", "path": "out/comparison-table.md", "text": "PostgreSQL" },
+    { "type": "contains", "path": "out/comparison-table.md", "text": "部署形态" },
+    { "type": "contains", "path": "out/comparison-table.md", "text": "事务" },
+    { "type": "contains", "path": "out/comparison-table.md", "text": "适用场景" },
+    { "type": "regex", "path": "out/comparison-table.md", "pattern": "\\|" },
+    { "type": "line_count_min", "path": "out/comparison-table.md", "min_lines": 7 }
+  ],
+  "reference_outputs": {
+    "out/comparison-table.md": "# SQLite vs PostgreSQL 对比\n\n| 维度 | SQLite | PostgreSQL |\n| --- | --- | --- |\n| 部署形态 | 嵌入式，单文件，零进程 | C/S 架构，独立服务进程 |\n| 事务能力 | 完整 ACID，库级写锁 | 完整 ACID，MVCC 高并发 |\n| 适用场景 | 单机应用 / 移动端 / 原型 | 多服务共享 / 复杂查询 / OLAP |\n\n## 选型结论\n\n单机嵌入式优先 SQLite；多服务共享与高并发分析场景选 PostgreSQL。\n"
+  }
+}

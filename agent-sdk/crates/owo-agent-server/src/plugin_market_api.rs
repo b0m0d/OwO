@@ -500,7 +500,7 @@ fn pre_scan(dir: &Path) -> Result<(), String> {
                 .get("error")
                 .and_then(Value::as_str)
                 .unwrap_or("目录无效")
-                .to_string())
+                .to_string());
         }
     };
     if risks.is_empty() {

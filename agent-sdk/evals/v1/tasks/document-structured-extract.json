@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "document-structured-extract",
+  "category": "document",
+  "title": "会议纪要结构化抽取（JSON）",
+  "instruction": "阅读 notes/meeting_2026_08_31.md，抽取四个字段写入 out/extract.json：顶层字段 owner（负责人）、deadline（截止日期）、budget（预算，数字）、scope（范围）。只输出一个 JSON 对象，不得包含额外字段或说明文字。",
+  "inputs": [
+    {
+      "path": "notes/meeting_2026_08_31.md",
+      "content": "# 结算模块重构启动会（2026-08-31）\n\n- 负责人：张三\n- 截止日期：2026-09-05\n- 预算：42000 元（含外部评审）\n- 范围：重构结算模块，仅限清算子域\n"
+    }
+  ],
+  "allow_read": ["notes/**"],
+  "allow_write": ["out/**"],
+  "expected_artifacts": ["out/extract.json"],
+  "checkers": [
+    { "type": "exists", "path": "out/extract.json" },
+    { "type": "json_field_equals", "path": "out/extract.json", "field": "owner", "expected": "张三" },
+    { "type": "json_field_equals", "path": "out/extract.json", "field": "deadline", "expected": "2026-09-05" },
+    { "type": "json_field_equals", "path": "out/extract.json", "field": "budget", "expected": 42000 },
+    { "type": "json_field_equals", "path": "out/extract.json", "field": "scope", "expected": "重构结算模块" }
+  ],
+  "reference_outputs": {
+    "out/extract.json": "{\"owner\":\"张三\",\"deadline\":\"2026-09-05\",\"budget\":42000,\"scope\":\"重构结算模块\"}"
+  }
+}

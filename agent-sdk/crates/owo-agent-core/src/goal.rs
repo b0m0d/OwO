@@ -6,11 +6,20 @@
 //!   真实接入 `Agent::run_subagent` 由主控后续做，本模块只读引用 agent 语义）。
 //! - [`GoalRunner`]：拓扑 wave 调度 + 并行度上限 + 步内重试 + 验证断言 +
 //!   replan（只重建未完成子图）+ 预算熔断 + abort + 持久化恢复（已完成步骤不重跑）+ 全程审计。
+//! - A2 统一调度适配层：步骤可经显式绑定定向到
+//!   `in_process` / `local_process` / `fleet_node`（接口见 [`crate::execution_target`]）；
+//!   显式目标不可用时等待/询问/拒绝，绝不静默切换到权限更高的目标；
+//!   三类目标共用同一执行/取消/预算语义。HTTP 与节点注册细节不进入本模块。
 
 use crate::audit::AuditLog;
 use crate::blackboard::Blackboard;
 use crate::capability::{CapabilityWorkerRegistry, RouteDecision, WorkerRequirement};
 use crate::critic::{review_loop, CriticConfig};
+use crate::execution_target::{
+    dispatch_disposition, select_binding, DispatchCancelRegistry, DispatchChannel,
+    DispatchDisposition, FleetDispatchWorker, FleetProbe, LocalProcessProbe, TargetAvailability,
+    WorkerBinding,
+};
 use crate::experience_store::{Attribution, ExperienceStore, Outcome};
 use crate::plan::{verify_output, Plan, StepSpec, StepStatus, VerificationSpec};
 use crate::worker_pool::{PoolWorker, WorkerPool};
@@ -245,6 +254,14 @@ pub struct RunnerConfig {
     pub transport: Option<std::sync::Arc<dyn crate::fleet_transport::FleetTransport>>,
     /// 租约管理器（可选）：步骤持有任务租约，结果写入前 fencing 校验（epoch/token）。
     pub leases: Option<crate::lease::LeaseManager>,
+    /// A2 统一调度适配层：显式执行绑定（非空时优先于旧解析链，严格定向派发）。
+    ///
+    /// - 匹配规则见 [`crate::execution_target::select_binding`]：
+    ///   step id 精确匹配优先于步骤声明的 worker 名；按 step id 命中时，
+    ///   执行者引用取 plan 步骤声明的 worker 名（target/预算/权限仍来自绑定）。
+    /// - 安全语义：显式目标不可用时返回等待/询问/拒绝，
+    ///   **绝不静默切换到权限更高的目标**。
+    pub bindings: Vec<WorkerBinding>,
 }
 
 impl Default for RunnerConfig {
@@ -259,6 +276,7 @@ impl Default for RunnerConfig {
             capability_requirement: None,
             transport: None,
             leases: None,
+            bindings: Vec::new(),
         }
     }
 }
@@ -282,6 +300,7 @@ impl std::fmt::Debug for RunnerConfig {
                     .unwrap_or_else(|| "<none>".to_string()),
             )
             .field("leases", &self.leases)
+            .field("bindings", &self.bindings.len())
             .finish()
     }
 }
@@ -448,6 +467,9 @@ impl GoalRunner {
             capability_requirement: self.config.capability_requirement.clone(),
             transport: self.config.transport.clone(),
             leases: self.config.leases.clone(),
+            bindings: self.config.bindings.clone(),
+            run_id: self.state.run_id.clone(),
+            cancels: DispatchCancelRegistry::default(),
         };
 
         loop {
@@ -514,36 +536,52 @@ impl GoalRunner {
             let mut set = tokio::task::JoinSet::new();
             let mut pending: std::collections::VecDeque<StepSpec> = ready.into_iter().collect();
             let mut failed: Vec<StepSpec> = Vec::new();
-            let mut budget_error: Option<String> = None;
+            let mut stop_error: Option<StepStop> = None;
             while let Some(step) = pending.pop_front() {
-                while set.len() >= max_parallel && budget_error.is_none() {
-                    if let Err(reason) = self.merge_step_outcome(set.join_next().await, &mut failed)
-                    {
-                        budget_error = Some(reason);
+                while set.len() >= max_parallel && stop_error.is_none() {
+                    if let Err(stop) = self.merge_step_outcome(set.join_next().await, &mut failed) {
+                        stop_error = Some(stop);
                     }
                 }
-                if budget_error.is_some() {
+                if stop_error.is_some() {
                     break;
                 }
+                let target_note = select_binding(&self.config.bindings, &step.id, &step.worker)
+                    .map(|b| {
+                        format!(
+                            "，target={} node={}",
+                            b.target.kind(),
+                            b.target.node_id().unwrap_or("-")
+                        )
+                    })
+                    .unwrap_or_default();
                 self.log(
                     "goal.step.start",
-                    format!("步骤 {}（worker {}）", step.id, step.worker),
+                    format!("步骤 {}（worker {}）{}", step.id, step.worker, target_note),
                 );
                 set.spawn(run_step_attempts(workers.clone(), step, rt.clone()));
             }
-            if budget_error.is_none() {
+            if stop_error.is_none() {
                 while let Some(joined) = set.join_next().await {
-                    if let Err(reason) = self.merge_step_outcome(Some(joined), &mut failed) {
-                        budget_error = Some(reason);
+                    if let Err(stop) = self.merge_step_outcome(Some(joined), &mut failed) {
+                        stop_error = Some(stop);
                         break;
                     }
                 }
             }
-            // 早退路径（abort/预算熔断）：先终止在飞步骤任务，避免孤儿任务继续运行。
+            // 早退路径（abort/预算熔断/目标拒绝）：先终止在飞步骤任务，避免孤儿任务继续运行，
+            // 并把在飞的远端派发任务统一 cancel（防 transport 残留 pending）。
             set.abort_all();
             while set.join_next().await.is_some() {}
-            if let Some(reason) = budget_error {
-                return self.fail_goal(format!("预算熔断：{reason}"));
+            rt.cancels.cancel_all().await;
+            match stop_error {
+                Some(StepStop::Budget(reason)) => {
+                    return self.fail_goal(format!("预算熔断：{reason}"));
+                }
+                Some(StepStop::Fatal(reason)) => {
+                    return self.fail_goal(reason);
+                }
+                None => {}
             }
 
             if self.state.aborted {
@@ -572,16 +610,18 @@ impl GoalRunner {
         }
     }
 
-    /// 合并一个步骤的并发执行结果到运行状态。失败步骤加入 failed；预算熔断返回 Err(reason)。
+    /// 合并一个步骤的并发执行结果到运行状态。失败步骤加入 failed；
+    /// 预算熔断返回 [`StepStop::Budget`]，确定性失败返回 [`StepStop::Fatal`]。
     fn merge_step_outcome(
         &mut self,
         joined: Option<Result<StepOutcome, tokio::task::JoinError>>,
         failed: &mut Vec<StepSpec>,
-    ) -> Result<(), String> {
+    ) -> Result<(), StepStop> {
         let outcome = match joined {
             Some(Ok(outcome)) => outcome,
-            Some(Err(e)) => return Err(format!("步骤任务 panic：{e}")),
-            None => return Err("步骤任务丢失".to_string()),
+            // 既有语义保持：panic/丢失按「预算熔断」表述收尾。
+            Some(Err(e)) => return Err(StepStop::Budget(format!("步骤任务 panic：{e}"))),
+            None => return Err(StepStop::Budget("步骤任务丢失".to_string())),
         };
         self.state.steps_taken = self.state.steps_taken.saturating_add(outcome.attempts);
         self.state.total_retries = self.state.total_retries.saturating_add(outcome.attempts);
@@ -619,7 +659,21 @@ impl GoalRunner {
                 }
             }
             StepResult::Budget { reason } => {
-                return Err(reason);
+                return Err(StepStop::Budget(reason));
+            }
+            StepResult::Fatal { ref reason } => {
+                // 确定性失败：只记录现场，不写 worker 健康/经验（执行体根本未运行），
+                // 不参与 replan；原因直达目标终态。
+                let record = self.record_mut(&outcome.step_id);
+                record.status = StepStatus::Failed;
+                record.attempts = outcome.attempts;
+                record.error = Some(reason.clone());
+                self.log(
+                    "goal.step.rejected",
+                    format!("步骤 {} 目标不可用终止：{reason}", outcome.step_id),
+                );
+                self.persist_if_needed();
+                return Err(StepStop::Fatal(reason.clone()));
             }
         }
         Ok(())
@@ -793,9 +847,28 @@ impl GoalRunner {
 
 /// 步骤执行结果。
 enum StepResult {
-    Ok { output: String },
-    Retried { error: String },
-    Budget { reason: String },
+    Ok {
+        output: String,
+    },
+    Retried {
+        error: String,
+    },
+    Budget {
+        reason: String,
+    },
+    /// 确定性失败：不重试、不参与 replan，原因直达目标终态。
+    /// A2 语义：显式目标被拒绝（Reject）或需用户确认（AskUser）——
+    /// 绝不允许静默改派，故直接以原因终止而非消耗重试预算。
+    Fatal {
+        reason: String,
+    },
+}
+
+/// wave 内提前终止原因：Budget 沿用既有「预算熔断」终态表述；
+/// Fatal 直接以原因作为目标终态错误。
+enum StepStop {
+    Budget(String),
+    Fatal(String),
 }
 
 /// 单个步骤的并发执行产出（含尝试次数，供预算合并）。
@@ -806,6 +879,7 @@ struct StepOutcome {
 }
 
 /// 单步运行环境（预算 / abort / 可选 critic / 黑板 / worker pool / 能力路由 / 传输 / 租约，随步骤任务克隆）。
+/// A2：另携带显式执行绑定（定向派发）与在飞远端任务取消登记表。
 #[derive(Clone)]
 struct StepRuntime {
     budget: GoalBudget,
@@ -819,11 +893,133 @@ struct StepRuntime {
     capability_requirement: Option<WorkerRequirement>,
     transport: Option<std::sync::Arc<dyn crate::fleet_transport::FleetTransport>>,
     leases: Option<crate::lease::LeaseManager>,
+    /// 显式执行绑定（空 = 未配置，走旧解析链）。
+    bindings: Vec<WorkerBinding>,
+    /// 运行 id（默认 correlation 兜底 `{run_id}:{step_id}`）。
+    run_id: String,
+    /// 在飞远端派发任务登记表（abort 收尾统一 cancel）。
+    cancels: DispatchCancelRegistry,
 }
 
-/// worker 解析：registry 优先（进程内语义）；feature flag 开启时回退到 worker pool 子进程；
-/// 未命中且配置传输时经 transport 提交（跨机铺路）；步骤显式声明 `_cap` 时按能力路由选 worker。
-async fn resolve_worker(
+/// 显式绑定解析结果（A2 定向派发与旧解析链的分界）。
+enum WorkerResolution {
+    /// 命中显式绑定并装配完成（含生效绑定视图，供 `_dispatch` 注入与预算封顶）。
+    Directed(Arc<dyn Worker>, WorkerBinding),
+    /// 未配置绑定时走旧解析链命中（行为完全兼容）。
+    Legacy(Arc<dyn Worker>),
+    /// 绑定命中但目标不可用：等待 / 询问 / 拒绝（绝不改派其他目标）。
+    Disposition(DispatchDisposition),
+    /// 旧解析链未命中（保持既有可重试错误语义与文案）。
+    Unresolved(String),
+}
+
+/// A2 统一派发解析：
+/// 1) 先解析显式绑定（step id 匹配 > worker 名匹配）；命中即严格定向，
+///    目标探测不足时产出 Wait/AskUser/Reject 裁定，不进入任何回退路径；
+/// 2) 未配置绑定时保持旧行为兼容（registry → 池 → 能力路由 → transport）。
+async fn resolve_execution(
+    workers: &WorkerRegistry,
+    step: &StepSpec,
+    rt: &StepRuntime,
+) -> WorkerResolution {
+    if let Some(mut binding_view) = select_binding(&rt.bindings, &step.id, &step.worker).cloned() {
+        // 按 step id 命中的绑定：执行者引用取 plan 步骤声明的 worker 名，
+        // target/能力/权限/预算/关联信息仍来自绑定本身。
+        if binding_view.worker == step.id {
+            binding_view.worker = step.worker.clone();
+        }
+        let availability = probe_target_availability(workers, step, rt).await;
+        return match dispatch_disposition(&binding_view, &availability) {
+            ready @ DispatchDisposition::Ready(_) => WorkerResolution::Directed(
+                build_channel_worker(workers, rt, step, ready, &binding_view),
+                binding_view,
+            ),
+            disposition => WorkerResolution::Disposition(disposition),
+        };
+    }
+    match legacy_resolve_worker(workers, step, rt).await {
+        Ok(Some(worker)) => WorkerResolution::Legacy(worker),
+        Ok(None) => WorkerResolution::Unresolved(format!("worker 未注册：{}", step.worker)),
+        Err(reason) => WorkerResolution::Unresolved(reason),
+    }
+}
+
+/// 三类目标的可用性探测（无远程接口细节；远端仅判断是否配置了传输）。
+async fn probe_target_availability(
+    workers: &WorkerRegistry,
+    step: &StepSpec,
+    rt: &StepRuntime,
+) -> TargetAvailability {
+    TargetAvailability {
+        in_process_ready: workers.get(&step.worker).is_some(),
+        local_process: match (&rt.use_worker_pool, &rt.worker_pool) {
+            (false, _) => LocalProcessProbe::NotConfigured,
+            (true, None) => LocalProcessProbe::NotConfigured,
+            (true, Some(pool)) => {
+                if pool.contains(&step.worker).await {
+                    LocalProcessProbe::Ready
+                } else {
+                    LocalProcessProbe::WorkerMissing
+                }
+            }
+        },
+        fleet: match &rt.transport {
+            None => FleetProbe::NotConfigured,
+            Some(_) => FleetProbe::Ready,
+        },
+    }
+}
+
+/// 把 Ready 裁定装配为可执行的通道 worker。
+fn build_channel_worker(
+    workers: &WorkerRegistry,
+    rt: &StepRuntime,
+    step: &StepSpec,
+    ready: DispatchDisposition,
+    binding: &WorkerBinding,
+) -> Arc<dyn Worker> {
+    let resolved = match ready {
+        DispatchDisposition::Ready(resolved) => resolved,
+        other => unreachable!("非 Ready 裁定不应装配通道：{other:?}"),
+    };
+    let correlation_fallback = format!("{}:{}", rt.run_id, step.id);
+    match resolved.channel {
+        DispatchChannel::Registry(name) => {
+            // 探测已确认命中；unwrap_or_else 仅防御编程错误。
+            workers
+                .get(&name)
+                .unwrap_or_else(|| panic!("定向派发内部错误：registry 探测通过但未找到 {name}"))
+        }
+        DispatchChannel::Pool(id) => {
+            let pool = rt
+                .worker_pool
+                .as_ref()
+                .unwrap_or_else(|| panic!("定向派发内部错误：池探测通过但 WorkerPool 缺失"));
+            Arc::new(PoolWorker::new(pool.clone(), id))
+        }
+        DispatchChannel::Fleet { node_id, .. } => {
+            let transport =
+                rt.transport.as_ref().map(Arc::clone).unwrap_or_else(|| {
+                    panic!("定向派发内部错误：传输探测通过但 FleetTransport 缺失")
+                });
+            Arc::new(FleetDispatchWorker::from_binding(
+                resolved.binding.worker.clone(),
+                node_id,
+                binding,
+                resolved
+                    .binding
+                    .effective_correlation_id(&correlation_fallback),
+                transport,
+                rt.cancels.clone(),
+            ))
+        }
+    }
+}
+
+/// 旧解析链（保留原文案与顺序）：registry 优先（进程内语义）；feature flag 开启时
+/// 回退到 worker pool 子进程；未命中且配置传输时经 transport 提交（跨机铺路）；
+/// 步骤显式声明 `_cap` 时按能力路由选 worker。仅在**未配置**显式绑定时启用。
+async fn legacy_resolve_worker(
     workers: &WorkerRegistry,
     step: &StepSpec,
     rt: &StepRuntime,
@@ -926,6 +1122,29 @@ impl Drop for StepLeaseGuard {
     }
 }
 
+/// 定向裁定 → 统一步骤结果映射：
+/// Wait 按可重试错误参与既有重试/失败语义；AskUser 与 Reject 为确定性失败
+/// （不消耗重试预算、不参与 replan，原因直达目标终态）。
+fn disposition_outcome(step: &StepSpec, disposition: DispatchDisposition) -> StepOutcome {
+    let result = match disposition {
+        DispatchDisposition::Ready(_) => unreachable!("Ready 裁定不会进入失败映射"),
+        DispatchDisposition::Wait { reason } => StepResult::Retried {
+            error: format!("目标暂不可用（wait）：{reason}"),
+        },
+        DispatchDisposition::AskUser { prompt } => StepResult::Fatal {
+            reason: format!("需用户确认：{prompt}"),
+        },
+        DispatchDisposition::Reject { reason } => StepResult::Fatal {
+            reason: format!("目标拒绝：{reason}"),
+        },
+    };
+    StepOutcome {
+        step_id: step.id.clone(),
+        attempts: 0,
+        result,
+    }
+}
+
 /// 独立执行一个步骤的尝试循环（worker 调用 + 验证断言 + 可选 critic/黑板；不触碰 runner 状态）。
 /// 预算在任务内按 `budget.max_steps` 粗略封顶，全局熔断由 run() 合并后校验。
 ///
@@ -937,26 +1156,26 @@ async fn run_step_attempts(
     step: StepSpec,
     rt: StepRuntime,
 ) -> StepOutcome {
-    let worker = match resolve_worker(&workers, &step, &rt).await {
-        Ok(Some(worker)) => worker,
-        Ok(None) => {
+    // A2：显式绑定优先（严格定向），未配置时走旧解析链。
+    let mut directed_binding: Option<WorkerBinding> = None;
+    let worker = match resolve_execution(&workers, &step, &rt).await {
+        WorkerResolution::Directed(worker, binding) => {
+            directed_binding = Some(binding);
+            worker
+        }
+        WorkerResolution::Legacy(worker) => worker,
+        WorkerResolution::Unresolved(error) => {
             return StepOutcome {
                 step_id: step.id.clone(),
                 attempts: 0,
-                result: StepResult::Retried {
-                    error: format!("worker 未注册：{}", step.worker),
-                },
+                result: StepResult::Retried { error },
             }
         }
-        Err(reason) => {
-            return StepOutcome {
-                step_id: step.id.clone(),
-                attempts: 0,
-                result: StepResult::Retried { error: reason },
-            }
+        WorkerResolution::Disposition(disposition) => {
+            return disposition_outcome(&step, disposition);
         }
     };
-    let input = match prepare_step_input(&step.input, &rt.blackboard).await {
+    let prepared_input = match prepare_step_input(&step.input, &rt.blackboard).await {
         Ok(input) => input,
         Err(e) => {
             return StepOutcome {
@@ -965,6 +1184,17 @@ async fn run_step_attempts(
                 result: StepResult::Retried { error: e },
             }
         }
+    };
+    // 定向绑定把派发上下文注入 `_dispatch`（correlation / CAS 引用 / node 对下游可见）。
+    let input = match &directed_binding {
+        Some(binding) => {
+            let correlation =
+                binding.effective_correlation_id(&format!("{}:{}", rt.run_id, step.id));
+            let mut injected = prepared_input;
+            binding.inject_dispatch_context(&mut injected, &correlation);
+            injected
+        }
+        None => prepared_input,
     };
     // 租约：步骤任务持有（fencing 语义；写结果前校验 epoch/token，防分区双写）。
     // RAII guard：任何返回路径自动 release（防租约表孤儿持有者泄漏）。
@@ -997,7 +1227,17 @@ async fn run_step_attempts(
         .and_then(|v| v.get("rounds"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
-    let max_attempts = step.retries + 1;
+    // 尝试上限：绑定预算 > 0 时对 plan 声明的 retries+1 取 min；时长预算 0 = 不限。
+    let base_max_attempts = step.retries.saturating_add(1);
+    let max_attempts = directed_binding
+        .as_ref()
+        .map(|b| b.cap_attempts(base_max_attempts))
+        .unwrap_or(base_max_attempts);
+    let duration_cap_secs = directed_binding
+        .as_ref()
+        .map(|b| b.budget.max_duration_secs)
+        .unwrap_or(0);
+    let started_at = std::time::Instant::now();
     let mut attempts = 0u32;
     while attempts < max_attempts {
         if rt.aborted.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1006,6 +1246,16 @@ async fn run_step_attempts(
                 attempts,
                 result: StepResult::Retried {
                     error: "调度器已 abort".to_string(),
+                },
+            };
+        }
+        // 绑定级时长预算（三类目标统一语义；超限按可重试错误退出）。
+        if duration_cap_secs > 0 && started_at.elapsed().as_secs() >= duration_cap_secs {
+            return StepOutcome {
+                step_id: step.id.clone(),
+                attempts,
+                result: StepResult::Retried {
+                    error: format!("绑定预算耗尽：时长超过 {duration_cap_secs}s"),
                 },
             };
         }
@@ -1116,6 +1366,8 @@ async fn run_worker_cancellable(
             if let Some(pool) = &rt.worker_pool {
                 let _ = pool.cancel_all().await;
             }
+            // A2：abort 即时取消在飞的远端派发任务（防残留 pending）。
+            rt.cancels.cancel_all().await;
             Err("调度器已 abort".to_string())
         }
     }

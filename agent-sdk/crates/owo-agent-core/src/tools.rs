@@ -102,6 +102,14 @@ impl ToolRegistry {
         registry
     }
 
+    /// 空注册表：产品评测等需要最小受控工具集的场景，由调用方自行注册工具。
+    pub fn empty() -> Self {
+        Self {
+            tools: Vec::new(),
+            full_schemas: HashMap::new(),
+        }
+    }
+
     /// 只读工具表（子代理 explore 使用）：不含写/执行/委派工具。
     pub fn read_only() -> Self {
         let mut registry = Self {

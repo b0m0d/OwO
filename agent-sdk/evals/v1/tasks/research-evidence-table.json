@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "research-evidence-table",
+  "category": "research",
+  "title": "声明-证据溯源表（CSV）",
+  "instruction": "阅读 facts/claims.md 中的 5 条声明（A1..A5，各带来源编号）与 facts/sources.md 的出处清单，产出溯源表 out/evidence.csv：表头必须是 claim,evidence,source；每个声明一行共 5 行数据；source 列填写对应编号；evidence 用不超过 12 字的中文短语概括，不得含逗号。",
+  "inputs": [
+    {
+      "path": "facts/claims.md",
+      "content": "# 声明清单\n\n- A1：本项目日志全部本地留存 [S1]\n- A2：同步通道端到端加密 [S2]\n- A3：免费版限 3 台设备 [S3]\n- A4：正式版 9 月 1 日发布 [S4]\n- A5：付费墙不含导出功能 [S5]\n"
+    },
+    {
+      "path": "facts/sources.md",
+      "content": "# 出处清单\n\n- S1：隐私白皮书 2.3 节\n- S2：安全设计文档 4.1 节\n- S3：定价页 FAQ\n- S4：发布会纪要\n- S5：功能对比表\n"
+    }
+  ],
+  "allow_read": ["facts/**"],
+  "allow_write": ["out/**"],
+  "expected_artifacts": ["out/evidence.csv"],
+  "checkers": [
+    { "type": "contains", "path": "out/evidence.csv", "text": "claim,evidence,source" },
+    { "type": "regex", "path": "out/evidence.csv", "pattern": "A1,[^,\\r\\n]+,S1" },
+    { "type": "regex", "path": "out/evidence.csv", "pattern": "A3,[^,\\r\\n]+,S3" },
+    { "type": "regex", "path": "out/evidence.csv", "pattern": "A5,[^,\\r\\n]+,S5" },
+    { "type": "line_count_min", "path": "out/evidence.csv", "min_lines": 6 }
+  ],
+  "reference_outputs": {
+    "out/evidence.csv": "claim,evidence,source\nA1,日志本地留存,S1\nA2,端到端加密,S2\nA3,限三台设备,S3\nA4,九月一日发布,S4\nA5,导出免费,S5\n"
+  }
+}

@@ -46,7 +46,7 @@ impl ErrorCode {
             other => {
                 return Err(format!(
                     "非法可恢复性标记（retryable/not_retryable）: {other}"
-                ))
+                ));
             }
         };
         let mut code = Self::lookup(domain, reason).unwrap_or_else(|| {

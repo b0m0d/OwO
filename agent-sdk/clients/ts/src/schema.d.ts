@@ -2404,6 +2404,214 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmListTeams"];
+        put?: never;
+        post: operations["workswarmCreateTeam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmGetTeam"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmTeamEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmGetTeamTasks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/steer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["workswarmSteerTeam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmListTemplates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates/proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmListTemplateProposals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates/proposals/{proposal_id}/adopt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["workswarmAdoptTemplateProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates/proposals/{proposal_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["workswarmRejectTemplateProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmGetProjectSpace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/artifacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmListArtifacts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{id}/handoff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["workswarmSubmitHandoff"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{id}/human-result": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["workswarmSubmitHumanResult"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/team/export": {
         parameters: {
             query?: never;
@@ -3076,6 +3284,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/fleet/nodes/{node_id}/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetNodeHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/nodes/{node_id}/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["fleetNodeTasks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/fleet/tasks/submit": {
         parameters: {
             query?: never;
@@ -3102,6 +3342,70 @@ export interface paths {
         get: operations["fleetTaskGet"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTaskClaim"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTaskProgress"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/result": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTaskResult"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/cancel-ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTaskCancelAck"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3156,6 +3460,314 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/desktop-envs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldCreateEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldResetEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/lease": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldLeaseOp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/observe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["desktopWorldObserveEnv"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/step": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldStepEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldSnapshotEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldRestoreEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/judge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldJudgeEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/inject-fault": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldInjectFault"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/world-model/predict": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["worldModelPredict"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/world-model/providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["worldModelProviders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transitions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["transitionGet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/datasets/build": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["datasetBuild"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/datasets/{id}/manifest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["datasetManifest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/model-candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["modelCandidateRegister"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/model-candidates/{id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["modelCandidatePromote"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/product-eval/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 评测运行列表（created_at 倒序） */
+        get: operations["listProductEvalRuns"];
+        put?: never;
+        /** 受理一次产品评测矩阵（异步执行） */
+        post: operations["createProductEvalRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/product-eval/runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 评测运行详情：进度 + 运行参数 + 完整报告（聚合指标/每 case 对比/失败步骤/Artifact refs） */
+        get: operations["getProductEvalRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/product-eval/runs/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 取消评测运行（幂等：置协作令牌并立即 cancelled；重复/终态后取消零副作用） */
+        post: operations["cancelProductEvalRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3183,6 +3795,164 @@ export interface components {
         TurnRequest: {
             attachments?: string[];
             prompt: string;
+        };
+        /** @description 预测校准报告（WM0 聚合：命中、误差与不确定度分桶） */
+        CalibrationReport: {
+            /** Format: int64 */
+            samples: number;
+            success_hit_rate: number;
+            mean_calibration_error: number;
+            mean_delta_jaccard: number;
+            uncertainty_buckets: {
+                label: string;
+                /** Format: int64 */
+                samples: number;
+                hit_rate: number;
+            }[];
+        };
+        /** @description 候选 provider 身份（§5.12.4 治理，声明≠接线）：external 需进程内真实接线后才积累影子样本；metadata_only 零样本且不可晋升 */
+        CandidateProviderRef: {
+            /** @enum {string} */
+            type: "external";
+            /** @description provider 类型标识（如 wm1-http、local-onnx） */
+            kind: string;
+            /** @description 定位串（端点或资源标识） */
+            locator: string;
+        } | {
+            /** @enum {string} */
+            type: "metadata_only";
+        };
+        /** @description 世界模型候选（新候选恒 shadow 起步，达标后显式人工晋升；Option 字段缺省序列化为 null） */
+        ModelCandidate: {
+            candidate_id: string;
+            model_id: string;
+            model_version: string;
+            source: string;
+            /** @enum {string} */
+            status: "shadow" | "active" | "rejected";
+            /** @description RFC3339 */
+            created_at: string;
+            promoted_at: string | null;
+            promote_reason: string | null;
+            /** @description provider 身份治理（响应 wire 字段名为 provider；注册请求侧字段名为 provider_ref） */
+            provider: components["schemas"]["CandidateProviderRef"];
+            /** @description 晋升时刻的校准摘要快照（从未晋升过为 null） */
+            calibration_summary: components["schemas"]["CalibrationReport"] | null;
+        };
+        Error: {
+            error: string;
+        };
+        /** @description ProductEval 运行摘要（列表元素与详情基底；六态：queued/running/cancelled/completed/failed/interrupted） */
+        ProductEvalRunSummary: {
+            run_id: string;
+            suite: string;
+            /** @enum {string} */
+            execution: "reference" | "live";
+            modes: ("single" | "workswarm")[];
+            repetitions: number;
+            /** @enum {string|null} */
+            category?: "code" | "research" | "document" | null;
+            only?: string | null;
+            model?: string | null;
+            /** @enum {string} */
+            status: "queued" | "running" | "cancelled" | "completed" | "failed" | "interrupted";
+            created_at: string;
+            started_at?: string | null;
+            finished_at?: string | null;
+            /** @description 计划单元格总数（modes × cases × repetitions） */
+            planned_total: number;
+            progress: {
+                /** @description 已完成单元格（journal 行数） */
+                done: number;
+                /** @description = planned_total */
+                total: number;
+            };
+            error?: string | null;
+        };
+        /** @description 矩阵单元格：(case_id, agent_mode, repetition)；agent_mode 为核心小写词（workswarm 拓扑序列化为 multi） */
+        MatrixKey: {
+            case_id: string;
+            /** @enum {string} */
+            agent_mode: "single" | "multi";
+            repetition: number;
+        };
+        /** @description 一次运行的完整记录（journal 最小单元；失败记录同样保留；Option 字段缺数据时序列化为 null） */
+        ProductEvalRun: {
+            key: components["schemas"]["MatrixKey"];
+            /** @enum {string} */
+            category: "code" | "research" | "document";
+            /**
+             * @description 单元格级状态（核心 RunStatus 小写词）
+             * @enum {string}
+             */
+            status: "passed" | "failed" | "error" | "timeout" | "cancelled";
+            /** Format: int64 */
+            wall_ms: number;
+            model_calls: number;
+            /** Format: int64 */
+            prompt_tokens: ((number | null) | null) | null;
+            /** Format: int64 */
+            completion_tokens: ((number | null) | null) | null;
+            /** Format: int64 */
+            total_tokens: ((number | null) | null) | null;
+            cost_usd: ((number | null) | null) | null;
+            /** @description 失败步骤（检查器描述/执行器阶段名） */
+            failed_steps: string[];
+            retries: number;
+            cancellations: number;
+            /** @description 最终 Artifact 引用（沙盒内相对路径） */
+            artifact_refs: string[];
+            /** @description 真实工具调用轨迹（单 Agent 执行器填写：工具+实参摘要+结果；旧记录缺省为空数组） */
+            tool_log: string[];
+            model: ((string | null) | null) | null;
+            started_at: string;
+            finished_at: string;
+            error: ((string | null) | null) | null;
+        };
+        /** @description 聚合指标：成功率分母为全部已尝试运行（失败/错误/超时一律计入，禁止剔除重算） */
+        ProductEvalMetrics: {
+            runs_total: number;
+            passed: number;
+            failed: number;
+            errors: number;
+            timeouts: number;
+            cancelled: number;
+            success_rate: number;
+            mean_wall_ms: number;
+            /** Format: int64 */
+            total_model_calls: number;
+            /** Format: int64 */
+            total_tokens: ((number | null) | null) | null;
+            estimated_cost_usd: ((number | null) | null) | null;
+        };
+        /** @description 按 (case_id, mode) 分组的细分统计（单 Agent vs WorkSwarm 对照列） */
+        CaseModeMetrics: {
+            case_id: string;
+            /** @enum {string} */
+            category: "code" | "research" | "document";
+            /** @enum {string} */
+            agent_mode: "single" | "multi";
+            runs_total: number;
+            passed: number;
+            success_rate: number;
+            mean_wall_ms: number;
+            mean_model_calls: number;
+            /** Format: int64 */
+            total_tokens: ((number | null) | null) | null;
+        };
+        /** @description ProductEvalReport 原样（core 序列化；聚合全部 journal 记录含失败 + 未完成单元格清单） */
+        ProductEvalReport: {
+            schema_version: number;
+            suite_name: string;
+            suite_hash: string;
+            /** @enum {string} */
+            execution: "reference" | "live";
+            model: ((string | null) | null) | null;
+            generated_at: string;
+            runs: components["schemas"]["ProductEvalRun"][];
+            pending: components["schemas"]["MatrixKey"][];
+            metrics: components["schemas"]["ProductEvalMetrics"];
+            per_case: components["schemas"]["CaseModeMetrics"][];
         };
     };
     responses: never;
@@ -4066,9 +4836,57 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
-                    config?: {
-                        allow_replan?: boolean;
-                        parallelism?: number;
+                    /** @description wave 内并发执行步数上限 */
+                    parallelism?: number;
+                    allow_replan?: boolean;
+                    /** @description 执行路径选择；缺省 process。mode=worker_pool 必须提供非空 workers */
+                    execution?: {
+                        /** @enum {string} */
+                        mode?: "process" | "worker_pool";
+                        /** @description worker_pool 受控子进程配置（命令仅限当前可执行文件；env 白名单拒凭据键） */
+                        workers?: {
+                            name: string;
+                            command: string;
+                            args?: string[];
+                            cwd: string;
+                            env?: {
+                                [key: string]: string;
+                            };
+                            budget?: {
+                                max_turns?: number;
+                                max_duration_secs?: number;
+                                max_memory_mb?: number;
+                                max_cpu_cores?: number;
+                            };
+                            max_restarts?: number;
+                            base_backoff_secs?: number;
+                        }[];
+                        /** @description A2 显式执行目标绑定（按 worker 一个目标；显式绑定不可用即等待/询问/拒绝，不静默改派） */
+                        targets?: {
+                            /** @description 计划步骤 worker 名（agent 只允许 in_process） */
+                            worker: string;
+                            /** @enum {string} */
+                            target: "in_process" | "local_process" | "fleet_node";
+                            /** @description fleet_node 必填；不允许隐式选节点 */
+                            node_id?: string;
+                            capabilities?: string[];
+                            /** @description 默认 deny：未列出的能力一律不授予；deny 优先于 allow */
+                            permission_scope?: {
+                                allow?: string[];
+                                deny?: string[];
+                                /** @default false */
+                                network_egress?: boolean;
+                            };
+                            budget?: {
+                                /** @description 对 plan 步骤 retries 取 min */
+                                max_attempts?: number;
+                                /** @description 派发等待/池预算派生上限（0=不限） */
+                                max_duration_secs?: number;
+                            };
+                            input_cas_ref?: string;
+                            /** @description 缺省派生 <goal_id>/<run_id>/<worker> */
+                            correlation_id?: string;
+                        }[];
                     };
                 };
             };
@@ -4076,6 +4894,27 @@ export interface operations {
         responses: {
             /** @description run started */
             202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 非法 execution/targets 配置（缺 workers、矛盾绑定、fleet_node 缺 node_id 等） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description goal or plan not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description request body deserialization failed (unknown mode/target literal) */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6521,6 +7360,416 @@ export interface operations {
             };
         };
     };
+    workswarmListTeams: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description team run list; items = TeamRun + 进程内运行标志（R2 additive） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        teams: {
+                            /** @description 运行循环正在执行阶段（人节点等待窗口 / 终态为 false） */
+                            active?: boolean;
+                            /** @description R2：磁盘 Running 但无活动运行 → 已识别为中断，等待显式 continue/retry 恢复 */
+                            interrupted?: boolean;
+                        }[];
+                    };
+                };
+            };
+        };
+    };
+    workswarmCreateTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    budget?: Record<string, never>;
+                    goal_id?: string;
+                    human_policy?: string;
+                    /** @enum {string} */
+                    mode?: "single" | "team" | "swarmflow";
+                    objective: string;
+                    roles?: Record<string, never>[];
+                    template_id?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description team run created; background run loop drives phases */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmGetTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description team + task view + audit tail; R2 additive: interrupted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description TeamRun（透传） */
+                        team: Record<string, never>;
+                        /** @description R2：中断标记（请求时先做一次幂等中断识别） */
+                        interrupted: boolean;
+                        /** @description 任务视图（步骤 × 状态） */
+                        tasks: Record<string, never>;
+                        audit_tail: {
+                            ts?: string;
+                            event?: string;
+                            detail?: string;
+                        }[];
+                    };
+                };
+            };
+        };
+    };
+    workswarmTeamEvents: {
+        parameters: {
+            query?: {
+                format?: "json";
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SSE team event stream (audit replay frames {type:audit,ts,event,detail} + state frames {type:state,status,active,interrupted}; ends at terminal); ?format=json 返回一次性快照（见 content schema，R2 additive: interrupted） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        team_id: string;
+                        /** @description Debug 格式团队状态（如 Running / Created / Completed） */
+                        status: string;
+                        active: boolean;
+                        /** @description R2：中断标记（磁盘 Running 但无活动运行） */
+                        interrupted: boolean;
+                        audit: {
+                            ts?: string;
+                            event?: string;
+                            detail?: string;
+                        }[];
+                    };
+                };
+            };
+        };
+    };
+    workswarmGetTeamTasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description team task graph (step x status) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmSteerTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description R2 冻结契约：retry 局部重试 = { command: retry, step_id, note }，仅允许指定一个 Failed/Aborted/中断中的步骤
+                     * @enum {string}
+                     */
+                    command: "continue" | "retry" | "steer" | "replace" | "cancel";
+                    /** @description steer 专用：合并进步骤输入 */
+                    new_input?: Record<string, never>;
+                    /** @description replace 专用：人节点新用户 ID */
+                    new_user_id?: string;
+                    /** @description replace 专用：agent 节点新 worker */
+                    new_worker?: string;
+                    /** @description retry/steer/replace 的变更理由（进入 DecisionRecord） */
+                    note?: string;
+                    /** @description replace 专用：目标角色 */
+                    role?: string;
+                    /** @description retry 必填（缺失/空 → 400）；steer 可选（空 = 全部未完成节点） */
+                    step_id?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description steer applied (only uncompleted nodes; DecisionRecord kept) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        team_id: string;
+                        /** @description Debug 格式团队状态 */
+                        status: string;
+                        /** @description R2：中断标记（continue/retry 成功恢复后为 false） */
+                        interrupted: boolean;
+                    };
+                };
+            };
+            /** @description validation failed（retry 缺 step_id / 未知 command） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description unknown team or step */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description run is active（retry 目标已成功同样 409，重复发送无额外副作用） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmListTemplates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description adopted team templates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmListTemplateProposals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description team template proposals (proposal only, never auto-enabled) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmAdoptTemplateProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description proposal adopted into template registry (idempotent) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmRejectTemplateProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description proposal rejected (record kept, auditable) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description proposal already adopted */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description proposal not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmGetProjectSpace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description project space summary (tasks/artifacts/decisions/activity) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmListArtifacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description versioned shared artifacts (content via CAS ref) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmSubmitHandoff: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    completed_summary?: string;
+                    evidence_refs?: string[];
+                    from_member: string;
+                    known_risks?: string[];
+                    open_issues?: string[];
+                    output_artifact_refs?: string[];
+                    suggested_next_actions?: string[];
+                    team_id: string;
+                    to_member?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description structured handoff recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmSubmitHumanResult: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    result: string;
+                    team_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description human node result recorded; downstream wakes automatically */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     teamExport: {
         parameters: {
             query?: never;
@@ -7373,6 +8622,59 @@ export interface operations {
             };
         };
     };
+    fleetNodeHeartbeat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    lease_token: string;
+                };
+            };
+        };
+        responses: {
+            /** @description lease renewed with latest epoch/token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description stale token or expired lease (fencing) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetNodeTasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description claimable/claimed tasks for node */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     fleetTasksSubmit: {
         parameters: {
             query?: never;
@@ -7414,6 +8716,132 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description task view with status and events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskClaim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    node_id: string;
+                    lease_token: string;
+                    epoch: number;
+                };
+            };
+        };
+        responses: {
+            /** @description task claimed by node (fencing verified) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description stale token/epoch or node mismatch */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskProgress: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    node_id: string;
+                    lease_token: string;
+                    epoch: number;
+                    text: string;
+                    evidence?: Record<string, never>[];
+                };
+            };
+        };
+        responses: {
+            /** @description progress + structured evidence recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskResult: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    node_id: string;
+                    lease_token: string;
+                    epoch: number;
+                    ok: boolean;
+                    output?: Record<string, never>;
+                    output_cas?: string;
+                    evidence?: Record<string, never>[];
+                    error?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description task result recorded (terminal) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskCancelAck: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    node_id: string;
+                    lease_token: string;
+                    epoch: number;
+                };
+            };
+        };
+        responses: {
+            /** @description node confirmed cancellation */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7489,6 +8917,830 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    desktopWorldCreateEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    env_id?: string;
+                    task: {
+                        task_id: string;
+                        app: string;
+                        seed: number;
+                        assets?: Record<string, never>;
+                    };
+                    owner?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description env created: initial lease proof + first-frame WorldStateV1 observation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env_id already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldResetEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    task: {
+                        task_id: string;
+                        app: string;
+                        seed: number;
+                        assets?: Record<string, never>;
+                    };
+                    lease: {
+                        owner: string;
+                        token: string;
+                        epoch: number;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description env reset to task initial state; lease proof returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict (stale token/epoch) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldLeaseOp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    op: "acquire" | "renew" | "release";
+                    lease?: {
+                        owner: string;
+                        token: string;
+                        epoch: number;
+                    };
+                    owner?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description lease acquired/renewed/released; current lease record returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description renew/release missing lease proof */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldObserveEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description current WorldStateV1 observation (scene graph + window stack) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldStepEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    action: {
+                        action_id: string;
+                        kind: string;
+                        semantic_intent: string;
+                        target_id?: string;
+                        arguments?: Record<string, never>;
+                        risk?: string;
+                        reversible?: boolean;
+                    };
+                    lease: {
+                        owner: string;
+                        token: string;
+                        epoch: number;
+                    };
+                    episode_id?: string;
+                    record?: boolean;
+                    task_goal?: string;
+                    history?: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description step executed: before/after state refs, transition id, verdict + reward parts, shadow prediction evaluation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict (stale token/epoch) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldSnapshotEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description snapshot persisted; snapshot_id returned (read path, no lease) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldRestoreEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    snapshot: string;
+                    lease: {
+                        owner: string;
+                        token: string;
+                        epoch: number;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description env restored from snapshot; observation returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env or snapshot not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldJudgeEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    success: {
+                        name: string;
+                        assertions: Record<string, never>[];
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description verdict against success spec (read path, no lease) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldInjectFault: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    fault: {
+                        /** @enum {string} */
+                        type: "modal_popup" | "element_drift" | "sluggish_steps";
+                        text?: string;
+                        element_id?: string;
+                        dx?: number;
+                        dy?: number;
+                        steps?: number;
+                    };
+                    lease: {
+                        owner: string;
+                        token: string;
+                        epoch: number;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description fault injected into env */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    worldModelPredict: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    env_id: string;
+                    action: {
+                        action_id: string;
+                        kind: string;
+                        semantic_intent: string;
+                        target_id?: string;
+                        arguments?: Record<string, never>;
+                    };
+                    context?: Record<string, never>;
+                    with_advice?: boolean;
+                    candidates?: Record<string, never>[];
+                };
+            };
+        };
+        responses: {
+            /** @description predicted structural state diff + probability (read path, env unchanged); advice with candidates when with_advice */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no active world model (empty transition corpus) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    worldModelProviders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description active rule model + candidates + per-signature samples + calibration report */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    transitionGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description TransitionTraceV1 record */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description transition not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    datasetBuild: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    config?: Record<string, never>;
+                    env_id?: string;
+                    episode_id?: string;
+                    task_id?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description dataset built + split; manifest with dataset_id returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no transition corpus to build from */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    datasetManifest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description DatasetManifest (splits + counts + build config) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description dataset not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    modelCandidateRegister: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 缺省自动生成 model_id-model_version-<uuid8> */
+                    candidate_id?: string;
+                    model_id: string;
+                    model_version: string;
+                    /** @description 来源说明（缺省：手动注册 shadow 起步） */
+                    source?: string;
+                    /** @description 可执行 provider 身份声明（缺省 metadata_only；声明≠接线，还需进程内真实接线才积累影子样本） */
+                    provider_ref?: components["schemas"]["CandidateProviderRef"];
+                };
+            };
+        };
+        responses: {
+            /** @description candidate registered as shadow (never auto-activated); body = ModelCandidate */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelCandidate"];
+                };
+            };
+            /** @description candidate_id already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    modelCandidatePromote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    ack: boolean;
+                    reason: string;
+                };
+            };
+        };
+        responses: {
+            /** @description candidate promoted to active provider (human ack required); body = { candidate, active, previous_active, samples, gates } */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        candidate: components["schemas"]["ModelCandidate"];
+                        active: string;
+                        previous_active: string | null;
+                        /**
+                         * Format: int64
+                         * @description 真实影子样本数
+                         */
+                        samples: number;
+                        /** @description 晋升门控明细快照（审计口径） */
+                        gates: {
+                            /** Format: int64 */
+                            min_shadow_samples: number;
+                            provider_wired: {
+                                kind: string;
+                                locator: string;
+                            };
+                            calibration_summary: components["schemas"]["CalibrationReport"];
+                            /** @description 相对上一任 active 的退化检查（无前任或前任无样本时为 null） */
+                            regression_check?: {
+                                previous_active?: string;
+                                /** Format: int64 */
+                                previous_samples?: number;
+                                hit_rate_delta?: number;
+                                mean_delta_jaccard_delta?: number;
+                                mean_calibration_error_delta?: number;
+                                max_regression_delta?: number;
+                                passed?: boolean;
+                            } | null;
+                        };
+                    };
+                };
+            };
+            /** @description ack=false or empty reason */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description candidate not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description governance gate refused（metadata_only / 未接线 / 样本不足 / 相对前任退化超阈值） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listProductEvalRuns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description runs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        runs?: components["schemas"]["ProductEvalRunSummary"][];
+                    };
+                };
+            };
+        };
+    };
+    createProductEvalRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 仅允许注册名 v1；客户端本地路径一律拒绝
+                     * @enum {string}
+                     */
+                    suite: "v1";
+                    /**
+                     * @description reference=免模型参考回放+检查器；live=真实执行器（single→SingleAgentExecutor，workswarm→WorkSwarmExecutor）
+                     * @enum {string}
+                     */
+                    execution: "reference" | "live";
+                    /** @description 对照拓扑子集；结果报告 wire 中 agent_mode 为核心小写词 single/multi（workswarm ≡ multi） */
+                    modes: ("single" | "workswarm")[];
+                    /** @description 重复次数（覆盖 suite 默认） */
+                    repetitions: number;
+                    /**
+                     * @description 只跑指定分类
+                     * @enum {string|null}
+                     */
+                    category?: "code" | "research" | "document" | null;
+                    /** @description 只跑 id 包含该子串的任务 */
+                    only?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 受理 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description eval-… */
+                        run_id: string;
+                        /** @enum {string} */
+                        status: "queued";
+                    };
+                };
+            };
+            /** @description 语义校验失败（未知 suite/execution/mode、repetitions 越界、suite 加载失败、过滤后无任务） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 结构校验失败（缺字段/类型错） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getProductEvalRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description run summary + report */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductEvalRunSummary"] & {
+                        report?: null | components["schemas"]["ProductEvalReport"];
+                    };
+                };
+            };
+            /** @description 运行不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    cancelProductEvalRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 取消受理或原状态 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        run_id: string;
+                        /** @enum {string} */
+                        status: "queued" | "running" | "cancelled" | "completed" | "failed" | "interrupted";
+                    };
+                };
+            };
+            /** @description 运行不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
             };
         };
     };

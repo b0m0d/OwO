@@ -26,6 +26,8 @@ pub enum ExperienceKind {
     WorkerTask,
     /// 整次 Goal 运行。
     GoalRun,
+    /// DesktopWorld 环境单步状态转换（T0，主文档 §5.12.3）。
+    Transition,
 }
 
 /// 结果归因（来源定位 + 观察元数据）。

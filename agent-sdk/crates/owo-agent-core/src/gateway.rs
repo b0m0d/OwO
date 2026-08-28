@@ -205,10 +205,18 @@ pub struct OpenAiCompatibleConfig {
     pub cloud_enabled: bool,
 }
 
+/// 默认模型 Provider：GLM（智谱 BigModel，OpenAI 兼容协议）。
+///
+/// 端点与模型内置为默认回落，凭据仍**只经 `OPENAI_API_KEY` 环境变量注入**
+/// （仓库红线：密钥禁止写入代码/配置/提交）；未设 key 时给出明确指引错误。
+/// 便于随时一键实测：只需在进程环境提供 key，无需再配 BASE_URL/MODEL。
+pub const DEFAULT_MODEL_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
+pub const DEFAULT_MODEL_ID: &str = "glm-5.3-flash";
+
 impl OpenAiCompatibleConfig {
     pub fn from_env() -> Result<Self, String> {
-        let base_url = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let base_url =
+            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_MODEL_BASE_URL.to_string());
         let api_key = match std::env::var("OPENAI_API_KEY") {
             Ok(value) => value,
             Err(_) if is_local_endpoint(&base_url) => String::new(),
@@ -219,8 +227,7 @@ impl OpenAiCompatibleConfig {
                 )
             }
         };
-        let model =
-            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_ID.to_string());
         let cloud_enabled = std::env::var("OWO_CLOUD_ENABLED")
             .ok()
             .and_then(|value| value.parse::<bool>().ok())
@@ -344,6 +351,26 @@ impl OpenAiCompatibleProvider {
             } else {
                 request.bearer_auth(&self.config.api_key)
             };
+            // 联调诊断（RUST_LOG=owo_gateway=debug 可见）：请求画像不落任何凭据。
+            tracing::debug!(
+                target: "owo_gateway",
+                url = %url,
+                model = %body
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+                tools = body
+                    .get("tools")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0),
+                stream = body
+                    .get("stream")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                channel = label,
+                "模型网关请求"
+            );
             match request.send().await {
                 Ok(response) if response.status().is_success() => return Ok(response),
                 Ok(response) => {
@@ -352,6 +379,7 @@ impl OpenAiCompatibleProvider {
                         .text()
                         .await
                         .unwrap_or_else(|_| "无响应体".to_string());
+                    tracing::debug!(target: "owo_gateway", status = %status, raw_error = %text, "模型网关原始错误");
                     return Err(format!("模型返回 {status}：{text}"));
                 }
                 Err(error) => {

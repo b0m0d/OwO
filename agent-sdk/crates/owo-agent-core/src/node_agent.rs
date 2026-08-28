@@ -113,6 +113,20 @@ impl NodeAgent {
         self.lease_token.lock().ok().and_then(|t| t.clone())
     }
 
+    /// 当前租约（token + epoch + TTL；协议调用方取用，用于 fencing 回传）。
+    pub fn lease(&self) -> Option<Lease> {
+        self.leases
+            .lock()
+            .ok()
+            .and_then(|l| l.clone())
+            .and_then(|leases| leases.lease(&self.id))
+    }
+
+    /// 当前租约纪元（fencing epoch；未挂接控制面时为 None）。
+    pub fn lease_epoch(&self) -> Option<u64> {
+        self.lease().map(|l| l.epoch)
+    }
+
     /// 心跳：刷新活跃时间并计数。
     pub fn heartbeat(&self) {
         if let Ok(mut last) = self.last_heartbeat.lock() {

@@ -1,22 +1,32 @@
-// R12:fleet_api 完成，待主控接线
-//! 控制面 HTTP 契约（P2 双节点网格第一阶段）：节点注册/心跳、任务提交/查询/取消/SSE、审批响应。
+// R13:fleet_api 第二阶段（真实远端节点协议闭环），待主控同步 OpenAPI
+//! 控制面 HTTP 契约（P2 双节点网格）：节点注册/心跳续租、任务提交/查询/取消/SSE、
+//! 审批响应，以及**真实远端节点协议**（领取/进度/证据/结果/取消确认/fencing）。
 //!
-//! 路由（前缀 /fleet，待主控在 `lib.rs::build_router` 挂载 `fleet_api::router(state)`）：
-//! - `POST /fleet/nodes/register`        节点注册（CapabilityCard + 心跳续租）
-//! - `GET  /fleet/nodes`                 节点列表（NodeStatus 快照）
-//! - `POST /fleet/tasks/submit`          任务提交（`Idempotency-Key` 头幂等）
-//! - `GET  /fleet/tasks/{id}`            任务状态 + 事件
-//! - `POST /fleet/tasks/{id}/cancel`     取消任务
-//! - `GET  /fleet/tasks/{id}/events`     SSE（历史重放 + 实时；`?format=json` 拉全量）
-//! - `POST /fleet/approvals/{id}/respond` 审批响应（影响预览 + 结构化证据齐备才批准）
+//! 路由（前缀 /fleet，已在 `lib.rs::build_router` 挂载 `fleet_api::router(state)`）：
+//! - `POST /fleet/nodes/register`           节点注册（CapabilityCard + 心跳续租，返回 lease_token/epoch）
+//! - `GET  /fleet/nodes`                    节点列表（NodeStatus 快照）
+//! - `POST /fleet/nodes/{id}/heartbeat`     节点心跳续租（旧 token 被拒；R13 新增）
+//! - `GET  /fleet/nodes/{id}/tasks`         节点可领取/已领取任务（按自身 node_id 匹配；R13 新增）
+//! - `POST /fleet/tasks/submit`             任务提交（`Idempotency-Key` 头幂等）
+//! - `GET  /fleet/tasks/{id}`               任务状态 + 事件
+//! - `POST /fleet/tasks/{id}/claim`         节点领取匹配任务（fencing 校验；R13 新增）
+//! - `POST /fleet/tasks/{id}/progress`      节点回传进度 + 结构化证据（R13 新增）
+//! - `POST /fleet/tasks/{id}/result`        节点回传成功/失败结果（R13 新增）
+//! - `POST /fleet/tasks/{id}/cancel-ack`    节点确认取消（R13 新增）
+//! - `POST /fleet/tasks/{id}/cancel`        取消任务
+//! - `GET  /fleet/tasks/{id}/events`        SSE（历史重放 + 实时；`?format=json` 拉全量）
+//! - `POST /fleet/approvals/{id}/respond`   审批响应（影响预览 + 结构化证据齐备才批准）
 //!
-//! 运行态：模块内 `OnceLock` 单例 [`FleetHub`]（进程内 [`InMemoryTransport`] 承载任务执行、
-//! [`LeaseManager`] 节点租约/fencing、[`AgentBus`]+[`BusStore`] 节点/任务事件持久化、
-//! [`CasStore`] 产物、[`ExperienceStore`] 节点状态变迁）。后台节点执行器把 Running 任务
-//! 交由匹配节点完成（两节点模拟：注册 node-a/node-b 后任务自动执行）。
+//! 运行态：模块内 `OnceLock` 单例 [`FleetHub`]（进程内 [`InMemoryTransport`] 承载任务状态、
+//! [`LeaseManager`] 节点租约/fencing、[`AgentBus`]+[`BusStore`] 节点/任务/违规审计持久化、
+//! [`CasStore`] 产物、[`ExperienceStore`] 节点状态变迁、`claims` 领取所有权登记）。
+//! **R13 起控制面不再在本进程中"伪执行完成"任务**：任务提交后只进入 Running（等待领取），
+//! 状态推进仅由显式节点领取（claim）+ 结果回传（result）驱动。
 //!
 //! 协议约束：本模块不引用 `crate::`/`super::`；`AppState` 全限定名 `owo_agent_server::AppState`；
 //! 错误统一 `(StatusCode, Json({error}))`；不给 AppState 加字段（状态在模块内）。
+//! 安全：所有节点写操作经 [`LeaseManager::verify_write`] fencing（token + epoch）校验；
+//! 越权/过期 epoch/不匹配节点被拒绝并留审计（bus_store + experience）。协议不携带模型凭据。
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -27,10 +37,15 @@ use axum::{Json, Router};
 use owo_agent_core::bus_store::BusStore;
 use owo_agent_core::capability::{CapabilityCard, CapabilityWorkerRegistry};
 use owo_agent_core::cas_store::CasStore;
-use owo_agent_core::experience_store::ExperienceStore;
-use owo_agent_core::fleet::AgentBus;
+use owo_agent_core::experience_store::{Attribution, ExperienceStore, Outcome};
+use owo_agent_core::fleet::{AgentBus, BusMessage, MessageKind, CONTROL_PLANE_AGENT};
+use owo_agent_core::fleet_node_protocol::{
+    violation_correlation_id, NodeCancelAckBody, NodeClaimBody, NodeHeartbeatBody,
+    NodeHeartbeatResponse, NodeProgressBody, NodeProtocolViolation, NodeResultBody,
+};
 use owo_agent_core::fleet_transport::{
-    FleetTransport, InMemoryTransport, TransportEvent, TransportStatus, TransportTask,
+    FleetTransport, InMemoryTransport, TransportEvent, TransportEventKind, TransportStatus,
+    TransportTask,
 };
 use owo_agent_core::lease::{LeaseConfig, LeaseManager};
 use owo_agent_core::node_agent::{NodeAgent, NodeStatus};
@@ -50,6 +65,100 @@ fn api_err(
     message: impl Into<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({ "error": message.into() })))
+}
+
+// ---------- 节点协议校验与违规审计（R13） ----------
+
+/// 协议违规审计：总线落盘 + 经验记录（幂等键 = node:protocol:violation:<node>:<task>）。
+fn audit_violation(hub: &FleetHub, node_id: &str, task_id: &str, reason: &str) {
+    let violation = NodeProtocolViolation::new(node_id, task_id, reason);
+    let correlation_id = violation_correlation_id(node_id, task_id);
+    let msg = BusMessage {
+        id: 0,
+        from: CONTROL_PLANE_AGENT.to_string(),
+        to: CONTROL_PLANE_AGENT.to_string(),
+        kind: MessageKind::Refusal,
+        correlation_id: correlation_id.clone(),
+        payload: serde_json::to_value(&violation).unwrap_or_default(),
+    };
+    let _ = hub.bus_store.persist(&msg);
+    let _ = hub.experience.record_worker_outcome(
+        correlation_id,
+        node_id.to_string(),
+        Outcome::Failure,
+        Attribution {
+            goal_id: None,
+            plan_id: None,
+            step_id: Some(task_id.to_string()),
+            input_keys: Vec::new(),
+            error: Some(reason.to_string()),
+        },
+    );
+}
+
+/// 校验节点写操作 fencing：节点已注册 + token 匹配 + 未过期 + 纪元匹配。
+/// 越权/过期/旧 token/旧 epoch 一律拒绝（409）并留审计；节点未注册按 404。
+fn check_node_lease(
+    hub: &FleetHub,
+    node_id: &str,
+    lease_token: &str,
+    epoch: u64,
+    task_id: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let registered = {
+        let nodes = hub.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes.contains_key(node_id)
+    };
+    if !registered {
+        audit_violation(hub, node_id, task_id, "节点未注册");
+        return Err(api_err(
+            StatusCode::NOT_FOUND,
+            format!("节点未注册：{node_id}"),
+        ));
+    }
+    match hub.leases.verify_write(node_id, lease_token, epoch) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            audit_violation(hub, node_id, task_id, &format!("fencing 拒绝：{e}"));
+            Err(api_err(StatusCode::CONFLICT, format!("租约校验失败：{e}")))
+        }
+    }
+}
+
+/// 校验任务领取所有权：task 必须由 `node_id` 领取（防节点 B 回传节点 A 的任务）。
+fn check_claim_owner(
+    hub: &FleetHub,
+    node_id: &str,
+    task_id: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let owner = hub
+        .claims
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(task_id)
+        .cloned();
+    match owner {
+        Some(owner) if owner == node_id => Ok(()),
+        Some(owner) => {
+            let reason =
+                format!("越权回传：任务 {task_id} 由 {owner} 领取，节点 {node_id} 无权操作");
+            audit_violation(hub, node_id, task_id, &reason);
+            Err(api_err(StatusCode::FORBIDDEN, reason))
+        }
+        None => {
+            let reason = format!("任务 {task_id} 未被领取，节点 {node_id} 无权回传");
+            audit_violation(hub, node_id, task_id, &reason);
+            Err(api_err(StatusCode::FORBIDDEN, reason))
+        }
+    }
+}
+
+/// 生成 SSE 帧（历史重放 + 实时订阅共用）。
+fn sse_frame(event: &str, payload: serde_json::Value) -> String {
+    format!(
+        "data: {}\n\n",
+        serde_json::json!({ "event": event, "payload": payload })
+    )
 }
 
 // ---------- SSE 集线器（任务事件：历史重放 + 实时） ----------
@@ -121,6 +230,8 @@ pub struct ApprovalRecord {
 pub struct FleetHub {
     pub nodes: Mutex<HashMap<String, Arc<NodeAgent>>>,
     pub approvals: Mutex<HashMap<String, ApprovalRecord>>,
+    /// R13：task_id → 领取节点 node_id（真实远端节点协议：领取所有权登记；防越权回传）。
+    pub claims: Mutex<HashMap<String, String>>,
     pub transport: InMemoryTransport,
     pub leases: LeaseManager,
     pub bus: AgentBus,
@@ -137,6 +248,20 @@ pub struct FleetHub {
 impl FleetHub {
     /// 新建控制面运行态（持久化目录 data_root/fleet；测试可独立构造，避免跨测试污染）。
     pub fn new(data_root: &std::path::Path) -> Result<Arc<FleetHub>, String> {
+        Self::with_lease(
+            data_root,
+            LeaseConfig {
+                ttl_secs: 60,
+                renew_interval_secs: 20,
+            },
+        )
+    }
+
+    /// 自定义租约配置构造（测试用短 TTL 验证租约过期/fencing；生产用 [`Self::new`]）。
+    pub fn with_lease(
+        data_root: &std::path::Path,
+        lease: LeaseConfig,
+    ) -> Result<Arc<FleetHub>, String> {
         let fleet_dir = data_root.join("fleet");
         let bus = AgentBus::new();
         let bus_store = BusStore::new(Some(fleet_dir.join("bus.jsonl")))?;
@@ -153,11 +278,9 @@ impl FleetHub {
         Ok(Arc::new(FleetHub {
             nodes: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
+            claims: Mutex::new(HashMap::new()),
             transport: InMemoryTransport::with_ttl(Duration::from_secs(120)),
-            leases: LeaseManager::with_config(LeaseConfig {
-                ttl_secs: 60,
-                renew_interval_secs: 20,
-            }),
+            leases: LeaseManager::with_config(lease),
             bus,
             bus_store,
             experience,
@@ -226,8 +349,14 @@ pub fn router_with_hub(hub: Arc<FleetHub>) -> Router {
     Router::new()
         .route("/fleet/nodes/register", post(register_node))
         .route("/fleet/nodes", get(list_nodes))
+        .route("/fleet/nodes/{node_id}/heartbeat", post(node_heartbeat))
+        .route("/fleet/nodes/{node_id}/tasks", get(node_claimable_tasks))
         .route("/fleet/tasks/submit", post(submit_task))
         .route("/fleet/tasks/{id}", get(get_task))
+        .route("/fleet/tasks/{id}/claim", post(claim_task))
+        .route("/fleet/tasks/{id}/progress", post(report_progress))
+        .route("/fleet/tasks/{id}/result", post(report_result))
+        .route("/fleet/tasks/{id}/cancel-ack", post(cancel_ack))
         .route("/fleet/tasks/{id}/cancel", post(cancel_task))
         .route("/fleet/tasks/{id}/events", get(task_events))
         .route("/fleet/approvals/{id}/respond", post(respond_approval))
@@ -241,8 +370,9 @@ pub fn router(state: Arc<owo_agent_server::AppState>) -> Router {
     router_with_hub(fleet_hub(&state.data_root))
 }
 
-/// 后台节点执行器说明：R12 第一阶段任务执行由"节点"显式驱动（模拟冒烟中测试扮演节点，
-/// 经 `hub.transport.complete_task` 完成；真实节点进程在 R13 经 HttpTransport 接线）。
+/// 状态推进说明：R13 起控制面不再在本进程"伪执行完成"任务——任务提交后只进入
+/// Running（等待节点领取）；状态推进仅由显式节点领取（`claim`）+ 结果回传（`result`）驱动。
+/// 协议违规（越权/过期 epoch/不匹配节点）经 [`audit_violation`] 留审计。
 impl FleetHub {
     /// 生成任务视图（从传输层读状态/事件）。
     fn task_view(&self, task_id: &str) -> Option<TaskView> {
@@ -286,7 +416,7 @@ async fn register_node(
     };
     let node = match existing {
         Some(node) => {
-            // 幂等重注册 = 心跳续租（复用现有租约 token）。
+            // 幂等重注册 = 心跳续租（复用现有租约 token；token 失效时重新获取）。
             node.heartbeat_and_report_persisted(&hub.registry).await;
             node
         }
@@ -321,10 +451,13 @@ async fn register_node(
             node
         }
     };
+    // 返回 lease_token：真实远端节点后续心跳/领取/回传需以 token + epoch 做 fencing。
     Ok(Json(serde_json::json!({
         "node_id": node_id,
         "status": node.status(),
         "lease_epoch": node.status().lease_epoch,
+        "lease_token": node.lease_token(),
+        "renew_interval_secs": hub.leases.lease(&node_id).map(|l| l.ttl.as_secs()).unwrap_or(0),
     })))
 }
 
@@ -333,6 +466,95 @@ async fn list_nodes(State(hub): State<Arc<FleetHub>>) -> ApiResult<serde_json::V
     let list: Vec<NodeStatus> = nodes.values().map(|n| n.status()).collect();
     Ok(Json(
         serde_json::json!({ "nodes": list, "count": list.len() }),
+    ))
+}
+
+/// 节点心跳续租：`POST /fleet/nodes/{node_id}/heartbeat`。
+/// `lease_token` 必须匹配当前租约；旧 token / 过期租约被拒（409 + 审计），
+/// 节点需重新注册（re-acquire）拿新 token（重连恢复路径）。
+async fn node_heartbeat(
+    State(hub): State<Arc<FleetHub>>,
+    Path(node_id): Path<String>,
+    Json(body): Json<NodeHeartbeatBody>,
+) -> ApiResult<NodeHeartbeatResponse> {
+    let registered = {
+        let nodes = hub.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes.contains_key(&node_id)
+    };
+    if !registered {
+        return Err(api_err(
+            StatusCode::NOT_FOUND,
+            format!("节点未注册：{node_id}"),
+        ));
+    }
+    let lease = match hub.leases.renew(&node_id, &body.lease_token) {
+        Ok(lease) => lease,
+        Err(e) => {
+            // 旧 token / 过期：拒绝并留审计，不静默重签（重连须显式重新注册）。
+            audit_violation(&hub, &node_id, "", &format!("心跳续租失败：{e}"));
+            return Err(api_err(
+                StatusCode::CONFLICT,
+                format!("心跳续租失败（旧 token 或租约过期）：{e}"),
+            ));
+        }
+    };
+    hub.sse.publish(
+        &node_id,
+        sse_frame(
+            "node_heartbeat",
+            serde_json::json!({ "node_id": node_id, "lease_epoch": lease.epoch }),
+        ),
+    );
+    Ok(Json(NodeHeartbeatResponse {
+        node_id,
+        valid: true,
+        lease_epoch: lease.epoch,
+        lease_token: lease.token,
+        renew_interval_secs: lease.ttl.as_secs(),
+    }))
+}
+
+/// 节点可领取/已领取任务：`GET /fleet/nodes/{node_id}/tasks`。
+/// 匹配规则：`task.worker == node_id` 且状态 Running（可领取）或已被本节点领取。
+async fn node_claimable_tasks(
+    State(hub): State<Arc<FleetHub>>,
+    Path(node_id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let registered = {
+        let nodes = hub.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes.contains_key(&node_id)
+    };
+    if !registered {
+        return Err(api_err(
+            StatusCode::NOT_FOUND,
+            format!("节点未注册：{node_id}"),
+        ));
+    }
+    let claims = hub.claims.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut tasks = Vec::new();
+    for task_id in hub.transport.task_ids() {
+        let Some(task) = hub.transport.task(&task_id) else {
+            continue;
+        };
+        if task.worker != node_id {
+            continue;
+        }
+        let status = hub
+            .transport
+            .task_status(&task_id)
+            .unwrap_or(TransportStatus::Pending);
+        let claimed_by = claims.get(&task_id).cloned();
+        tasks.push(serde_json::json!({
+            "task_id": task_id,
+            "worker": task.worker,
+            "status": status,
+            "correlation_id": task.correlation_id,
+            "claimed_by": claimed_by,
+            "claimable": matches!(status, TransportStatus::Running) && claimed_by.is_none(),
+        }));
+    }
+    Ok(Json(
+        serde_json::json!({ "node_id": node_id, "tasks": tasks, "count": tasks.len() }),
     ))
 }
 
@@ -438,6 +660,238 @@ async fn get_task(
     hub.task_view(&task_id)
         .map(Json)
         .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("未知任务：{task_id}")))
+}
+
+// ---------- R13 节点协议：领取 / 进度 / 结果 / 取消确认 ----------
+
+/// 节点领取任务：`POST /fleet/tasks/{id}/claim`。
+/// 规则：节点已注册 + fencing（token + epoch）通过 + `task.worker == node_id` +
+/// 状态 Running + 未被其他节点领取。领取即登记所有权（防越权回传）。
+async fn claim_task(
+    State(hub): State<Arc<FleetHub>>,
+    Path(task_id): Path<String>,
+    Json(body): Json<NodeClaimBody>,
+) -> ApiResult<serde_json::Value> {
+    check_node_lease(&hub, &body.node_id, &body.lease_token, body.epoch, &task_id)?;
+    let Some(task) = hub.transport.task(&task_id) else {
+        return Err(api_err(
+            StatusCode::NOT_FOUND,
+            format!("未知任务：{task_id}"),
+        ));
+    };
+    // 匹配任务：节点按自身 node_id 领取（worker 必须等于 node_id）。
+    if task.worker != body.node_id {
+        let reason = format!(
+            "节点不匹配：任务 {task_id} 指派给 {}，节点 {} 无权领取",
+            task.worker, body.node_id
+        );
+        audit_violation(&hub, &body.node_id, &task_id, &reason);
+        return Err(api_err(StatusCode::FORBIDDEN, reason));
+    }
+    let status = hub
+        .transport
+        .task_status(&task_id)
+        .unwrap_or(TransportStatus::Pending);
+    if !matches!(status, TransportStatus::Running) {
+        let reason = format!("任务 {task_id} 不在可领取状态（当前 {status:?}）");
+        audit_violation(&hub, &body.node_id, &task_id, &reason);
+        return Err(api_err(StatusCode::CONFLICT, reason));
+    }
+    // 领取所有权：已被其他节点领取 → 拒绝。
+    {
+        let mut claims = hub.claims.lock().unwrap_or_else(|e| e.into_inner());
+        match claims.get(&task_id).cloned() {
+            Some(owner) if owner != body.node_id => {
+                let reason = format!("任务 {task_id} 已被节点 {owner} 领取");
+                audit_violation(&hub, &body.node_id, &task_id, &reason);
+                return Err(api_err(StatusCode::CONFLICT, reason));
+            }
+            // 同节点重复领取 = 幂等（返回现状）。
+            Some(_) => {
+                return Ok(Json(serde_json::json!({
+                    "task_id": task_id,
+                    "node_id": body.node_id,
+                    "status": status,
+                })));
+            }
+            None => {
+                claims.insert(task_id.clone(), body.node_id.clone());
+            }
+        }
+    }
+    hub.sse.publish(
+        &task_id,
+        sse_frame(
+            "claimed",
+            serde_json::json!({ "task_id": task_id, "node_id": body.node_id }),
+        ),
+    );
+    Ok(Json(serde_json::json!({
+        "task_id": task_id,
+        "node_id": body.node_id,
+        "status": status,
+    })))
+}
+
+/// 节点回传进度 + 结构化证据：`POST /fleet/tasks/{id}/progress`。
+/// 要求：fencing 通过 + 本节点是领取者 + 任务在 Running。
+async fn report_progress(
+    State(hub): State<Arc<FleetHub>>,
+    Path(task_id): Path<String>,
+    Json(body): Json<NodeProgressBody>,
+) -> ApiResult<serde_json::Value> {
+    check_node_lease(&hub, &body.node_id, &body.lease_token, body.epoch, &task_id)?;
+    check_claim_owner(&hub, &body.node_id, &task_id)?;
+    let status = hub
+        .transport
+        .task_status(&task_id)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("未知任务：{task_id}")))?;
+    if !matches!(status, TransportStatus::Running) {
+        let reason = format!("任务 {task_id} 不在运行态，无法回传进度（当前 {status:?}）");
+        audit_violation(&hub, &body.node_id, &task_id, &reason);
+        return Err(api_err(StatusCode::CONFLICT, reason));
+    }
+    let task = hub.transport.task(&task_id);
+    let event = TransportEvent {
+        task_id: task_id.clone(),
+        kind: TransportEventKind::Progress,
+        correlation_id: task
+            .as_ref()
+            .map(|t| t.correlation_id.clone())
+            .unwrap_or_default(),
+        payload: serde_json::json!({
+            "node_id": body.node_id,
+            "text": body.text,
+            "evidence": body.evidence,
+        }),
+        lineage: task.map(|t| t.lineage).unwrap_or_default(),
+    };
+    if !hub.transport.append_event(&task_id, event) {
+        return Err(api_err(
+            StatusCode::NOT_FOUND,
+            format!("未知任务：{task_id}"),
+        ));
+    }
+    hub.sse.publish(
+        &task_id,
+        sse_frame(
+            "progress",
+            serde_json::json!({ "task_id": task_id, "node_id": body.node_id, "text": body.text }),
+        ),
+    );
+    Ok(Json(serde_json::json!({
+        "task_id": task_id,
+        "node_id": body.node_id,
+        "status": "running",
+    })))
+}
+
+/// 节点回传成功/失败结果：`POST /fleet/tasks/{id}/result`。
+/// 要求：fencing 通过 + 本节点是领取者 + 任务在 Running；
+/// 成功 → Succeeded + Result 事件（携带 output/output_cas/evidence）；
+/// 失败 → Failed + Cancelled 事件（携带 error）。终态任务重复回传被幂等拒绝。
+async fn report_result(
+    State(hub): State<Arc<FleetHub>>,
+    Path(task_id): Path<String>,
+    Json(body): Json<NodeResultBody>,
+) -> ApiResult<serde_json::Value> {
+    check_node_lease(&hub, &body.node_id, &body.lease_token, body.epoch, &task_id)?;
+    check_claim_owner(&hub, &body.node_id, &task_id)?;
+    let status = hub
+        .transport
+        .task_status(&task_id)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("未知任务：{task_id}")))?;
+    if !matches!(status, TransportStatus::Running) {
+        let reason = format!("任务 {task_id} 不在运行态，无法回传结果（当前 {status:?}）");
+        audit_violation(&hub, &body.node_id, &task_id, &reason);
+        return Err(api_err(StatusCode::CONFLICT, reason));
+    }
+    let payload = serde_json::json!({
+        "ok": body.ok,
+        "output": body.output,
+        "output_cas": body.output_cas,
+        "evidence": body.evidence,
+        "error": body.error,
+    });
+    if !hub.transport.complete_task(&task_id, body.ok, payload) {
+        let reason = format!("任务 {task_id} 已是终态，重复结果回传被拒绝");
+        audit_violation(&hub, &body.node_id, &task_id, &reason);
+        return Err(api_err(StatusCode::CONFLICT, reason));
+    }
+    // 释放领取所有权（结果已入终态，防残留）。
+    if let Ok(mut claims) = hub.claims.lock() {
+        claims.remove(&task_id);
+    }
+    hub.sse.publish(
+        &task_id,
+        sse_frame(
+            if body.ok { "succeeded" } else { "failed" },
+            serde_json::json!({ "task_id": task_id, "node_id": body.node_id, "ok": body.ok }),
+        ),
+    );
+    let final_status = hub
+        .transport
+        .task_status(&task_id)
+        .unwrap_or(TransportStatus::Failed);
+    Ok(Json(serde_json::json!({
+        "task_id": task_id,
+        "node_id": body.node_id,
+        "ok": body.ok,
+        "status": final_status,
+    })))
+}
+
+/// 节点确认取消：`POST /fleet/tasks/{id}/cancel-ack`。
+/// 要求：fencing 通过 + 本节点是领取者 + 任务已取消；确认后追加 ack 事件并释放所有权。
+async fn cancel_ack(
+    State(hub): State<Arc<FleetHub>>,
+    Path(task_id): Path<String>,
+    Json(body): Json<NodeCancelAckBody>,
+) -> ApiResult<serde_json::Value> {
+    check_node_lease(&hub, &body.node_id, &body.lease_token, body.epoch, &task_id)?;
+    check_claim_owner(&hub, &body.node_id, &task_id)?;
+    let status = hub
+        .transport
+        .task_status(&task_id)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("未知任务：{task_id}")))?;
+    if !matches!(status, TransportStatus::Cancelled) {
+        let reason = format!("任务 {task_id} 未处于取消态（当前 {status:?}），无需确认");
+        audit_violation(&hub, &body.node_id, &task_id, &reason);
+        return Err(api_err(StatusCode::CONFLICT, reason));
+    }
+    let task = hub.transport.task(&task_id);
+    let event = TransportEvent {
+        task_id: task_id.clone(),
+        kind: TransportEventKind::Cancelled,
+        correlation_id: task
+            .as_ref()
+            .map(|t| t.correlation_id.clone())
+            .unwrap_or_default(),
+        payload: serde_json::json!({ "acknowledged": true, "node_id": body.node_id }),
+        lineage: task.map(|t| t.lineage).unwrap_or_default(),
+    };
+    if !hub.transport.append_event(&task_id, event) {
+        return Err(api_err(
+            StatusCode::NOT_FOUND,
+            format!("未知任务：{task_id}"),
+        ));
+    }
+    if let Ok(mut claims) = hub.claims.lock() {
+        claims.remove(&task_id);
+    }
+    hub.sse.publish(
+        &task_id,
+        sse_frame(
+            "cancel_acknowledged",
+            serde_json::json!({ "task_id": task_id, "node_id": body.node_id }),
+        ),
+    );
+    Ok(Json(serde_json::json!({
+        "task_id": task_id,
+        "node_id": body.node_id,
+        "status": "cancelled",
+        "acknowledged": true,
+    })))
 }
 
 async fn cancel_task(

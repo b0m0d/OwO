@@ -3,7 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>OwO Agent 工作台</title>
+  <!-- 显式声明图标：避免浏览器默认请求 /favicon.ico 产生 404 控制台噪声（第三路 V1-R1-UI） -->
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="alternate icon" href="favicon.svg">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -301,6 +305,7 @@
   <script src="panels/memory.panel.js"></script>
   <script src="panels/command.panel.js"></script>
   <script src="panels/fleet.panel.js"></script>
+  <script src="panels/workswarm.panel.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

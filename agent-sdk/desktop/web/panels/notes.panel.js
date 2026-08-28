@@ -79,8 +79,13 @@
       var self = this;
       return this.get("/notes")
         .then(function (data) {
+          var panel = self.rootEl();
+          // 异步回包时面板可能已被切走（innerHTML 已替换）：rootEl() 为 null 时静默放弃，
+          // 不再抛 "Cannot read properties of null" 挂载错误。
+          if (!panel) return;
           var list = data.notes || [];
-          var ul = self.rootEl().querySelector(".owo-notes-list");
+          var ul = panel.querySelector(".owo-notes-list");
+          if (!ul) return;
           if (!list.length) {
             ul.innerHTML = '<li class="owo-notes-hint">（暂无笔记，点"新建"创建）</li>';
             return;
@@ -118,7 +123,7 @@
         var md = root.querySelector(".owo-notes-md").value;
         if (!title) { self.alert("标题不能为空"); return; }
         var detail = root.querySelector(".owo-notes-detail");
-        var editingId = detail.dataset.id;
+        var editingId = detail && detail.dataset ? detail.dataset.id : null;
         if (editingId) {
           self.post("/notes/" + editingId + "/reindex", {}).catch(function () {});
           self
@@ -175,17 +180,26 @@
           .then(function (doc) { self.renderDetail(doc); })
           .catch(function (err) { self.alert("读取失败：" + self.friendlyError(err)); });
       });
+      var detailOf = function () { return root.querySelector(".owo-notes-detail"); };
+      var currentDetailId = function () {
+        var d = detailOf();
+        // 面板被切走后节点可能已被替换：无节点或无选中 id 时静默忽略点击。
+        return d && d.dataset ? d.dataset.id : null;
+      };
       on(".owo-notes-btn-export-md", "click", function () {
-        var id = root.querySelector(".owo-notes-detail").dataset.id;
+        var id = currentDetailId();
+        if (!id) return;
         self.get("/notes/" + id + "/export/md").then(function (r) { self.download(id + ".md", r.content); });
       });
       on(".owo-notes-btn-export-html", "click", function () {
-        var id = root.querySelector(".owo-notes-detail").dataset.id;
+        var id = currentDetailId();
+        if (!id) return;
         self.get("/notes/" + id + "/export/html").then(function (r) { self.download(id + ".html", r.content); });
       });
       on(".owo-notes-btn-del", "click", function () {
-        var detail = root.querySelector(".owo-notes-detail");
-        var id = detail.dataset.id;
+        var detail = detailOf();
+        var id = currentDetailId();
+        if (!detail || !id) return;
         if (!window.confirm("确认删除这篇笔记？")) return;
         self.post("/notes/" + id + "/reindex", {}).catch(function () {});
         fetch(self.baseUrl + "/notes/" + id, { method: "DELETE" })
@@ -196,7 +210,8 @@
           .catch(function (err) { self.alert("删除失败：" + self.friendlyError(err)); });
       });
       on(".owo-notes-detail-title", "dblclick", function () {
-        var detail = root.querySelector(".owo-notes-detail");
+        var detail = detailOf();
+        if (!detail || !detail.dataset || !detail.dataset.id) return;
         var title = prompt("新标题：", detail.querySelector(".owo-notes-detail-title").textContent);
         if (!title) return;
         fetch(self.baseUrl + "/notes/" + detail.dataset.id, {
@@ -211,7 +226,10 @@
 
     renderDetail: function (doc) {
       var self = this;
-      var detail = this.rootEl().querySelector(".owo-notes-detail");
+      var panel = self.rootEl();
+      if (!panel) return; // 面板已切走：无可渲染节点
+      var detail = panel.querySelector(".owo-notes-detail");
+      if (!detail) return;
       detail.hidden = false;
       detail.dataset.id = doc.id;
       detail.querySelector(".owo-notes-detail-title").textContent = doc.title || doc.id;

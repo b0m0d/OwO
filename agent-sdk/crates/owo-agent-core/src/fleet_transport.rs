@@ -9,7 +9,10 @@
 //!   失败/恢复语义沿用总线持久化（调用方以 `bus_store` 幂等重放兜底）。
 //! - 事件统一带 `correlation_id` 与血缘（`lineage`），与 `bus_store` 持久化对齐。
 
+use crate::capability::CapabilityCard;
+use crate::fleet_node_protocol::{NodeHeartbeatBody, NodeHeartbeatResponse};
 use crate::goal::Worker;
+use crate::remote_step::EvidenceItem;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -172,6 +175,17 @@ impl InMemoryTransport {
             .ok()
             .and_then(|i| i.tasks.get(task_id).map(|t| t.events.clone()))
             .unwrap_or_default()
+    }
+
+    /// 追加事件（节点协议进度/取消确认回传路径；不做状态迁移）。
+    /// 幂等约束由调用方保证（终态任务由 [`Self::complete_task`] 拒绝重复完成）。
+    pub fn append_event(&self, task_id: &str, event: TransportEvent) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(t) = inner.tasks.get_mut(task_id) else {
+            return false;
+        };
+        t.events.push(event);
+        true
     }
 
     /// 全部任务 id（枚举；供执行器/观测）。
@@ -519,6 +533,168 @@ impl HttpTransport {
             }
             tokio::time::sleep(Duration::from_millis(50 * (1u64 << attempt.min(6)))).await;
         }
+    }
+}
+
+// ---------- 节点侧协议客户端（真实远端节点进程 → 控制面 /fleet/*） ----------
+
+/// 节点侧 HTTP 客户端方法（挂在 [`HttpTransport`] 上，复用其有限重试/超时语义）。
+///
+/// 节点进程调用流程：
+/// 1. `node_register` 注册并拿到 `lease_token + lease_epoch`；
+/// 2. 周期 `node_heartbeat` 续租（旧 token 被控制面拒绝）；
+/// 3. `node_claimable` 查询匹配本节点、可领取的任务，`node_claim` 领取；
+/// 4. `node_report_progress` 回传进度与结构化证据，`node_report_result` 回传成功/失败；
+/// 5. 收到取消后 `node_cancel_ack` 确认停止。
+///
+/// 安全：所有请求都带 fencing（token + epoch），控制面校验后拒绝越权/过期回传；
+/// 本客户端不携带、不持久化任何模型凭据（`OPENAI_API_KEY` 等永不出本机）。
+impl HttpTransport {
+    /// 节点注册：`POST /fleet/nodes/register`，返回体含 `lease_token` 与 `lease_epoch`。
+    pub async fn node_register(
+        &self,
+        node_id: &str,
+        card: &CapabilityCard,
+    ) -> Result<serde_json::Value, String> {
+        self.send_with_retry(
+            "POST",
+            self.endpoint("/fleet/nodes/register"),
+            Some(serde_json::json!({ "node_id": node_id, "card": card })),
+            None,
+        )
+        .await
+    }
+
+    /// 节点心跳续租：`POST /fleet/nodes/{node_id}/heartbeat`。
+    pub async fn node_heartbeat(
+        &self,
+        node_id: &str,
+        lease_token: &str,
+    ) -> Result<NodeHeartbeatResponse, String> {
+        let value = self
+            .send_with_retry(
+                "POST",
+                self.endpoint(&format!("/fleet/nodes/{node_id}/heartbeat")),
+                Some(
+                    serde_json::to_value(NodeHeartbeatBody {
+                        lease_token: lease_token.to_string(),
+                    })
+                    .map_err(|e| format!("心跳请求序列化失败：{e}"))?,
+                ),
+                None,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|e| format!("心跳响应解析失败：{e}"))
+    }
+
+    /// 拉取本节点可领取/已领取任务：`GET /fleet/nodes/{node_id}/tasks`。
+    pub async fn node_claimable(&self, node_id: &str) -> Result<serde_json::Value, String> {
+        self.send_with_retry(
+            "GET",
+            self.endpoint(&format!("/fleet/nodes/{node_id}/tasks")),
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// 领取任务：`POST /fleet/tasks/{task_id}/claim`。
+    pub async fn node_claim(
+        &self,
+        node_id: &str,
+        task_id: &str,
+        lease_token: &str,
+        epoch: u64,
+    ) -> Result<serde_json::Value, String> {
+        self.send_with_retry(
+            "POST",
+            self.endpoint(&format!("/fleet/tasks/{task_id}/claim")),
+            Some(serde_json::json!({
+                "node_id": node_id,
+                "lease_token": lease_token,
+                "epoch": epoch,
+            })),
+            None,
+        )
+        .await
+    }
+
+    /// 回传进度 + 结构化证据：`POST /fleet/tasks/{task_id}/progress`。
+    pub async fn node_report_progress(
+        &self,
+        node_id: &str,
+        task_id: &str,
+        lease_token: &str,
+        epoch: u64,
+        text: &str,
+        evidence: Vec<EvidenceItem>,
+    ) -> Result<serde_json::Value, String> {
+        self.send_with_retry(
+            "POST",
+            self.endpoint(&format!("/fleet/tasks/{task_id}/progress")),
+            Some(serde_json::json!({
+                "node_id": node_id,
+                "lease_token": lease_token,
+                "epoch": epoch,
+                "text": text,
+                "evidence": evidence,
+            })),
+            None,
+        )
+        .await
+    }
+
+    /// 回传成功/失败结果：`POST /fleet/tasks/{task_id}/result`。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn node_report_result(
+        &self,
+        node_id: &str,
+        task_id: &str,
+        lease_token: &str,
+        epoch: u64,
+        ok: bool,
+        output: Option<serde_json::Value>,
+        output_cas: Option<String>,
+        evidence: Vec<EvidenceItem>,
+        error: Option<String>,
+    ) -> Result<serde_json::Value, String> {
+        self.send_with_retry(
+            "POST",
+            self.endpoint(&format!("/fleet/tasks/{task_id}/result")),
+            Some(serde_json::json!({
+                "node_id": node_id,
+                "lease_token": lease_token,
+                "epoch": epoch,
+                "ok": ok,
+                "output": output,
+                "output_cas": output_cas,
+                "evidence": evidence,
+                "error": error,
+            })),
+            None,
+        )
+        .await
+    }
+
+    /// 取消确认（节点已停止该任务）：`POST /fleet/tasks/{task_id}/cancel-ack`。
+    pub async fn node_cancel_ack(
+        &self,
+        node_id: &str,
+        task_id: &str,
+        lease_token: &str,
+        epoch: u64,
+    ) -> Result<serde_json::Value, String> {
+        self.send_with_retry(
+            "POST",
+            self.endpoint(&format!("/fleet/tasks/{task_id}/cancel-ack")),
+            Some(serde_json::json!({
+                "node_id": node_id,
+                "lease_token": lease_token,
+                "epoch": epoch,
+            })),
+            None,
+        )
+        .await
     }
 }
 

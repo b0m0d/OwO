@@ -983,6 +983,9 @@ impl WorkerPool {
         if let Some(cwd) = &spec.cwd {
             cmd.current_dir(cwd);
         }
+        // 真白名单：先清空继承环境，再只注入 env_whitelist 声明的变量。
+        // 不清空则子进程继承宿主全部环境（含 OPENAI_API_KEY 等凭据），白名单形同虚设。
+        cmd.env_clear();
         for (key, value) in &spec.env_whitelist {
             cmd.env(key, value);
         }

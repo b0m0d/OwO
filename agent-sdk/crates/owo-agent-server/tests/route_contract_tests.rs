@@ -109,7 +109,23 @@ impl owo_agent_core::gateway::ModelProvider for IdleProvider {
     }
 }
 
+/// 环境变量是进程级共享（OWO_API_RPM_GLOBAL 等），而 AppState::new 构建时读取它们；
+/// 并行测试若一方 set_var、另一方同时 new state，就会把限流配置泄漏给对方。
+/// 因此所有「env 读取敏感」的 state 构建统一经此锁串行化。
+static STATE_ENV_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
 async fn test_state() -> (Arc<owo_agent_server::AppState>, tempfile::TempDir) {
+    let _guard = STATE_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    // 限流用例可能已把进程级 RPM 调小；恢复默认（600）再构建，避免污染其他用例。
+    std::env::remove_var("OWO_API_RPM_GLOBAL");
+    build_state_inner().await
+}
+
+/// 无锁的 state 构建（调用方负责持有 STATE_ENV_LOCK 并管理 OWO_API_* 环境变量）。
+async fn build_state_inner() -> (Arc<owo_agent_server::AppState>, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -226,6 +242,46 @@ fn sample_body(path: &str) -> Option<&'static str> {
         }
         "/fleet/tasks/submit" => Some(r#"{"task_id":"ct-task","worker":"ct-node","input":{}}"#),
         "/fleet/approvals/{id}/respond" => Some(r#"{"decision":"reject","approved_by":"ct"}"#),
+        // V1 三日 /product-eval/*（第四路）：reference 免模型最小合法体（202 受理；
+        // test_state 的 workspace 不含 evals/v1 时则 400「suite 加载失败」，两种都证明路由可达）。
+        "/product-eval/runs" => Some(
+            r#"{"suite":"v1","execution":"reference","modes":["single"],"repetitions":1,"category":null,"only":null}"#,
+        ),
+        // R13 WorkSwarm（§8.5）：空 objective 快速 400，避免契约测试触发真实模型运行。
+        "/teams" => Some(r#"{"objective":"","roles":[]}"#),
+        "/teams/{id}/steer" => Some(r#"{"command":"cancel"}"#),
+        "/tasks/{id}/handoff" => {
+            Some(r#"{"team_id":"no-such-team","from_member":"m-x","completed_summary":"done"}"#)
+        }
+        "/tasks/{id}/human-result" => Some(r#"{"team_id":"no-such-team","result":"ok"}"#),
+        "/teams/templates/proposals/{proposal_id}/adopt" => Some(r#"{}"#),
+        "/teams/templates/proposals/{proposal_id}/reject" => Some(r#"{}"#),
+        // R1 DesktopWorld/WorldModel 训练闭环（§5.11/§5.12）：合法最小输入；
+        // 资源型路径用占位 {id}（不存在资源 → 404 由资源缺失产生，见 resource_404_ok）。
+        "/desktop-envs" => Some(r#"{"task":{"task_id":"ct-dw","app":"chat","seed":1}}"#),
+        "/desktop-envs/{id}/reset" => Some(
+            r#"{"task":{"task_id":"ct-dw","app":"chat","seed":1},"lease":{"owner":"ct","token":"ct","epoch":0}}"#,
+        ),
+        "/desktop-envs/{id}/lease" => Some(r#"{"op":"acquire"}"#),
+        "/desktop-envs/{id}/step" => Some(
+            r#"{"action":{"action_id":"ct-a1","kind":"wait","semantic_intent":"等待"},"lease":{"owner":"ct","token":"ct","epoch":0}}"#,
+        ),
+        "/desktop-envs/{id}/snapshot" => Some(r#"{}"#),
+        "/desktop-envs/{id}/restore" => {
+            Some(r#"{"snapshot":"no-such-snapshot","lease":{"owner":"ct","token":"ct","epoch":0}}"#)
+        }
+        "/desktop-envs/{id}/judge" => Some(r#"{"success":{"name":"ct","assertions":[]}}"#),
+        "/desktop-envs/{id}/inject-fault" => Some(
+            r#"{"fault":{"type":"sluggish_steps","steps":1},"lease":{"owner":"ct","token":"ct","epoch":0}}"#,
+        ),
+        "/world-model/predict" => Some(
+            r#"{"env_id":"no-such-env","action":{"action_id":"ct-a1","kind":"wait","semantic_intent":"等待"}}"#,
+        ),
+        "/transitions/{id}" => Some(r#"{}"#),
+        "/datasets/build" => Some(r#"{}"#),
+        "/datasets/{id}/manifest" => Some(r#"{}"#),
+        "/model-candidates" => Some(r#"{"model_id":"ct-model","model_version":"0.0.1"}"#),
+        "/model-candidates/{id}/promote" => Some(r#"{"ack":true,"reason":"契约测试晋升"}"#),
         _ => Some(r#"{}"#),
     }
 }
@@ -241,9 +297,12 @@ fn sample_path(path: &str, session_id: &str) -> String {
         .replace("{action}", "cancel")
         .replace("{block_id}", "no-such-block")
         .replace("{run_id}", "no-such-run")
+        .replace("{node_id}", "no-such-node")
         // R10：/schemas/{kind}/{version} 契约路径（合法值应 200）。
         .replace("{kind}", "owflow")
         .replace("{version}", "v1")
+        // R13：/teams/templates/proposals/{proposal_id}/adopt
+        .replace("{proposal_id}", "no-such-proposal")
 }
 
 /// 资源型 404 白名单：路由已注册且方法匹配，但目标资源不存在时 handler 正确地返回 404。
@@ -289,10 +348,43 @@ fn resource_404_ok(path: &str) -> bool {
             | "/eval/run"
             | "/session/{id}/permission/{request_id}"
             // R12 /fleet/*（任务/审批资源不存在 → 404 由资源缺失产生，非路由缺失）。
+            | "/fleet/nodes/{node_id}/heartbeat"
+            | "/fleet/nodes/{node_id}/tasks"
             | "/fleet/tasks/{id}"
+            | "/fleet/tasks/{id}/claim"
+            | "/fleet/tasks/{id}/progress"
+            | "/fleet/tasks/{id}/result"
+            | "/fleet/tasks/{id}/cancel-ack"
             | "/fleet/tasks/{id}/cancel"
             | "/fleet/tasks/{id}/events"
             | "/fleet/approvals/{id}/respond"
+            // R13 WorkSwarm（§8.5）：占位 id 指向不存在资源 → 404 由资源缺失产生，非路由缺失。
+            | "/teams/{id}"
+            | "/teams/{id}/tasks"
+            | "/teams/{id}/steer"
+            | "/teams/{id}/events"
+            | "/projects/{id}"
+            | "/projects/{id}/artifacts"
+            | "/tasks/{id}/handoff"
+            | "/tasks/{id}/human-result"
+            | "/teams/templates/proposals/{proposal_id}/adopt"
+            | "/teams/templates/proposals/{proposal_id}/reject"
+            // R1 DesktopWorld/WorldModel（§5.11/§5.12）：占位 id 指向不存在资源 → 404 由资源缺失产生，非路由缺失。
+            | "/desktop-envs/{id}/reset"
+            | "/desktop-envs/{id}/lease"
+            | "/desktop-envs/{id}/observe"
+            | "/desktop-envs/{id}/step"
+            | "/desktop-envs/{id}/snapshot"
+            | "/desktop-envs/{id}/restore"
+            | "/desktop-envs/{id}/judge"
+            | "/desktop-envs/{id}/inject-fault"
+            | "/world-model/predict"
+            | "/transitions/{id}"
+            | "/datasets/{id}/manifest"
+            | "/model-candidates/{id}/promote"
+            // V1 三日 ProductEval（第四路）：占位 id 指向不存在运行 → 404 由资源缺失产生，非路由缺失。
+            | "/product-eval/runs/{id}"
+            | "/product-eval/runs/{id}/cancel"
     )
 }
 
@@ -450,6 +542,174 @@ async fn openapi_json_covers_snapshot_and_registered_routes() {
         served_extra.is_empty(),
         "served /openapi.json 存在快照未登记路径（快照需同步）：{served_extra:?}"
     );
+}
+
+/// R2 冻结契约（第三路实现、第一路接线同步）：
+/// `POST /teams/{id}/steer` 的 `{"command":"retry","step_id":"…","note":"…"}`。
+/// 本用例只锁 HTTP 契约形状，不依赖第三路业务实现细节：
+/// - retry 缺失/空/空白 step_id → 400（校验先于团队存在性，无需已存在团队）；
+/// - 合法 retry + 未知团队 → 404（路由在、资源不在，证明 retry 形状已被契约接受）；
+/// - 未知 command → 400。
+#[tokio::test]
+async fn steer_retry_contract_shape_is_frozen() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    for body in [
+        r#"{"command":"retry","note":"契约"}"#,
+        r#"{"command":"retry","step_id":"","note":"契约"}"#,
+        r#"{"command":"retry","step_id":"   ","note":"契约"}"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                &state,
+                "POST",
+                "/teams/ct-retry-team/steer",
+                Some(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            400,
+            "retry 缺 step_id 必须 400：{body}"
+        );
+    }
+
+    let unknown_team = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            "/teams/ct-retry-team/steer",
+            Some(r#"{"command":"retry","step_id":"builder","note":"契约"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        unknown_team.status().as_u16(),
+        404,
+        "合法 retry + 未知团队应 404（路由在、资源不在）"
+    );
+
+    let unknown_command = app
+        .oneshot(request(
+            &state,
+            "POST",
+            "/teams/ct-retry-team/steer",
+            Some(r#"{"command":"no-such-command"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        unknown_command.status().as_u16(),
+        400,
+        "未知 steer command 应 400"
+    );
+}
+
+/// V1 三日冻结契约（第四路实现并接线，见 AGENTS-COORD.md 留言区「第四路（三期开工）」）：
+/// ProductEval 四路由的校验形状——只锁 HTTP 契约，不依赖后台执行：
+/// - 缺字段/类型错 → 422；未知 suite（含客户端路径）/execution/mode、repetitions 越界 → 400；
+/// - 未知运行：GET /product-eval/runs/{id} 与 POST …/cancel → 404（路由在、资源不在）。
+#[tokio::test]
+async fn product_eval_contract_shapes_are_frozen() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    // 结构错误 → 422
+    for (body, why) in [
+        (
+            r#"{"execution":"reference","modes":["single"],"repetitions":1}"#,
+            "缺 suite",
+        ),
+        (
+            r#"{"suite":"v1","modes":["single"],"repetitions":1}"#,
+            "缺 execution",
+        ),
+        (
+            r#"{"suite":"v1","execution":"reference","repetitions":1}"#,
+            "缺 modes",
+        ),
+        (
+            r#"{"suite":"v1","execution":"reference","modes":"single","repetitions":1}"#,
+            "modes 非数组",
+        ),
+        (
+            r#"{"suite":"v1","execution":"reference","modes":["single"],"repetitions":"1"}"#,
+            "repetitions 非整数",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(&state, "POST", "/product-eval/runs", Some(body)))
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 422, "{why} 必须 422：{body}");
+    }
+
+    // 语义错误 → 400
+    for (body, why) in [
+        (
+            r#"{"suite":"../evil","execution":"reference","modes":["single"],"repetitions":1}"#,
+            "客户端路径拒绝",
+        ),
+        (
+            r#"{"suite":"nope","execution":"reference","modes":["single"],"repetitions":1}"#,
+            "未知 suite 名",
+        ),
+        (
+            r#"{"suite":"v1","execution":"dry","modes":["single"],"repetitions":1}"#,
+            "未知 execution",
+        ),
+        (
+            r#"{"suite":"v1","execution":"reference","modes":["team"],"repetitions":1}"#,
+            "未知 mode",
+        ),
+        (
+            r#"{"suite":"v1","execution":"reference","modes":[],"repetitions":1}"#,
+            "modes 空",
+        ),
+        (
+            r#"{"suite":"v1","execution":"reference","modes":["single"],"repetitions":0}"#,
+            "repetitions 0",
+        ),
+        (
+            r#"{"suite":"v1","execution":"reference","modes":["single"],"repetitions":21}"#,
+            "repetitions 21",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(&state, "POST", "/product-eval/runs", Some(body)))
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 400, "{why} 必须 400：{body}");
+    }
+
+    // 未知运行 → 404（GET 详情 + POST 取消）
+    let detail = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "GET",
+            "/product-eval/runs/eval-ct-unknown",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(detail.status().as_u16(), 404, "未知运行详情应 404");
+    let cancel = app
+        .oneshot(request(
+            &state,
+            "POST",
+            "/product-eval/runs/eval-ct-unknown/cancel",
+            Some("{}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancel.status().as_u16(), 404, "未知运行取消应 404");
 }
 
 #[tokio::test]
@@ -698,15 +958,14 @@ async fn cors_whitelist_enforces_origins() {
 /// 限流：超全局 RPM 后 429 + Retry-After + 审计记录。
 #[tokio::test]
 async fn rate_limit_returns_429_with_retry_after() {
-    // 环境变量进程级共享：串行化本用例，避免污染其他并行用例（tokio Mutex 跨 await 安全）。
-    static RATE_LIMIT_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
-        std::sync::OnceLock::new();
-    let _guard = RATE_LIMIT_LOCK
+    // 环境变量进程级共享：与 test_state 共用 STATE_ENV_LOCK 串行化，
+    // 防止 set_var("...","5") 泄漏进并行用例正在构建的 AppState（ tokio Mutex 跨 await 安全）。
+    let _guard = STATE_ENV_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
     std::env::set_var("OWO_API_RPM_GLOBAL", "5");
-    let (state, _temp) = test_state().await;
+    let (state, _temp) = build_state_inner().await;
     std::env::remove_var("OWO_API_RPM_GLOBAL");
     let app = build_router(Arc::clone(&state));
 

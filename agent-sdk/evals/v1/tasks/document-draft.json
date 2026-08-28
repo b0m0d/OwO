@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "document-draft",
+  "category": "document",
+  "title": "产品发布公告起草",
+  "instruction": "根据 briefs/launch-points.md 的要点，起草对外发布公告 out/draft.md：一级标题 + 正文；必须写明发布日期 9 月 1 日，并覆盖端到端加密、全新同步引擎、免费版限 3 台设备三个亮点；语气正式，全文不得出现占位符 XXX。",
+  "inputs": [
+    {
+      "path": "briefs/launch-points.md",
+      "content": "# 发布要点（内部）\n\n- 正式版发布日期：9 月 1 日\n- 亮点 1：全新同步引擎（增量秒级）\n- 亮点 2：端到端加密\n- 亮点 3：免费版限 3 台设备\n"
+    }
+  ],
+  "allow_read": ["briefs/**"],
+  "allow_write": ["out/**"],
+  "expected_artifacts": ["out/draft.md"],
+  "checkers": [
+    { "type": "contains", "path": "out/draft.md", "text": "9 月 1 日" },
+    { "type": "contains", "path": "out/draft.md", "text": "端到端加密" },
+    { "type": "contains", "path": "out/draft.md", "text": "同步引擎" },
+    { "type": "contains", "path": "out/draft.md", "text": "3 台设备" },
+    { "type": "regex", "path": "out/draft.md", "pattern": "^# " },
+    { "type": "not_contains", "path": "out/draft.md", "text": "XXX" },
+    { "type": "line_count_min", "path": "out/draft.md", "min_lines": 6 }
+  ],
+  "reference_outputs": {
+    "out/draft.md": "# 云笔记正式版发布公告\n\n我们很高兴地宣布，云笔记正式版将于 9 月 1 日发布。\n\n本次版本带来三大亮点：\n\n1. 全新同步引擎：增量同步，秒级到达。\n2. 端到端加密：仅您本人可解密内容。\n3. 免费版限 3 台设备，付费版不限。\n\n感谢所有内测用户的反馈。\n"
+  }
+}

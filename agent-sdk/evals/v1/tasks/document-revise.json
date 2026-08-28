@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "document-revise",
+  "category": "document",
+  "title": "内部通知正式化改写",
+  "instruction": "把 drafts/notice_v1.md 改写成正式商务通知 out/revised.md：保留全部关键信息（尤其是免运费门槛调整为 99 元），消除口语化表达，改写稿中不得出现「非常非常」与「搞出来」，篇幅不少于 4 行。",
+  "inputs": [
+    {
+      "path": "drafts/notice_v1.md",
+      "content": "# 通知\n\n各位：运费政策我们搞出来了，免运费门槛调整为 99 元，非常非常好用，大家以后下单注意一下就行。\n"
+    }
+  ],
+  "allow_read": ["drafts/**"],
+  "allow_write": ["out/**"],
+  "expected_artifacts": ["out/revised.md"],
+  "checkers": [
+    { "type": "contains", "path": "out/revised.md", "text": "99 元" },
+    { "type": "not_contains", "path": "out/revised.md", "text": "非常非常" },
+    { "type": "not_contains", "path": "out/revised.md", "text": "搞出来" },
+    { "type": "regex", "path": "out/revised.md", "pattern": "^# " },
+    { "type": "line_count_min", "path": "out/revised.md", "min_lines": 4 }
+  ],
+  "reference_outputs": {
+    "out/revised.md": "# 关于调整免运费门槛的通知\n\n各位同事：\n\n自本通知发布之日起，平台免运费门槛正式调整为 99 元。\n\n请各渠道同步更新页面文案，并向用户做好解释说明。\n"
+  }
+}

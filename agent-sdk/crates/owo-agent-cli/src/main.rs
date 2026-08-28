@@ -20,10 +20,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod product_eval_cmd;
 mod tui;
+mod worker_child;
 
-/// 千问 Token Plan 的默认通用文本/推理模型；可在工作台设置中覆盖。
-const DEFAULT_MODEL: &str = "qwen3.8-max";
+/// 默认通用文本/推理模型：与核心 gateway 的 `DEFAULT_MODEL_ID` 对齐（GLM / 智谱 BigModel，
+/// OpenAI 兼容端点已内置默认）；可在工作台设置或 OPENAI_MODEL 环境变量覆盖。
+const DEFAULT_MODEL: &str = owo_agent_core::gateway::DEFAULT_MODEL_ID;
 
 const AGENTS_TEMPLATE: &str = r#"# AGENTS.md
 
@@ -88,6 +91,12 @@ fn builtin_skills_root() -> PathBuf {
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+    /// 内部受控子进程协议入口（A1，主文档 §9.1）：stdout 仅承载 JSONL 协议。
+    #[arg(long, hide = true)]
+    owo_worker_child: bool,
+    /// 与 --owo-worker-child 搭配：选择首期受限处理器（echo|sleep|fail）。
+    #[arg(long, hide = true, requires = "owo_worker_child")]
+    handler: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -104,6 +113,8 @@ enum Commands {
     Init(InitArgs),
     /// 运行评估套件（内置 demo 或自定义 JSON）
     Eval(EvalArgs),
+    /// 产品评测底座（V1-R1）：validate/run/compare（固定任务集 × 重复 × 单/多对照）
+    ProductEval(product_eval_cmd::ProductEvalArgs),
     /// 本机 IPC 往返延迟基准
     Bench(BenchArgs),
     /// 云端执行任务（M4a：提交/列表/状态/diff/应用/回滚）
@@ -116,6 +127,8 @@ enum Commands {
     Backup(BackupArgs),
     /// 环境诊断（R10：数据目录/凭据/模型/端点/服务健康逐项检查）
     Doctor(DoctorArgs),
+    /// 受控 worker 子进程运维（A1：demo 演示真实子进程闭环）
+    Worker(WorkerArgs),
 }
 
 /// `owo-agent backup`：本地一键备份（同 HTTP POST /storage/backup 的打包逻辑）。
@@ -135,6 +148,37 @@ struct DoctorArgs {
     /// 目标工作区（缺省当前目录）
     #[arg(long)]
     workspace: Option<PathBuf>,
+}
+
+/// `owo-agent worker`：受控 worker 子进程运维（A1）。
+#[derive(Args)]
+struct WorkerArgs {
+    #[command(subcommand)]
+    action: WorkerAction,
+}
+
+#[derive(Subcommand)]
+enum WorkerAction {
+    /// 用 current_exe 启动真实 owo-agent 子进程，演示 ready→task→result/stopped 闭环
+    /// （父子协议与本机 WorkerPool 同源；子进程零环境继承，凭据不外传）。
+    Demo(DemoArgs),
+}
+
+/// `owo-agent worker demo` 参数。
+#[derive(Args)]
+struct DemoArgs {
+    /// 处理器：echo | sleep | fail
+    #[arg(long, default_value = "echo")]
+    handler: String,
+    /// echo 文本 / fail 说明
+    #[arg(long, default_value = "hello-from-parent")]
+    text: String,
+    /// sleep 秒数（上限 30）
+    #[arg(long, default_value_t = 1)]
+    secs: u64,
+    /// 任务时长预算秒（超时由父进程 kill 兜底）
+    #[arg(long, default_value_t = 10)]
+    budget_secs: u64,
 }
 
 /// `owo-agent audit`：verify|export（复用 core audit_chain::run_audit_cli）。
@@ -376,13 +420,29 @@ struct CloudApplyArgs {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    // A1：受控子进程协议入口最先分流——在任何日志/运行时初始化之前进入协议循环，
+    // 保证 stdout 只承载 JSONL（ready/task/pong/result），人类可读输出只走 stderr。
+    if cli.owo_worker_child {
+        let handler = match cli.handler.as_deref() {
+            Some(name) => worker_child::ChildHandler::parse_name(name)?,
+            None => worker_child::ChildHandler::Echo,
+        };
+        eprintln!(
+            "owo-worker-child: handler={} pid={}",
+            handler.as_str(),
+            std::process::id()
+        );
+        worker_child::run_child(handler);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
-    let cli = Cli::parse();
     match cli.command {
         None => run_async(Repl::run(ReplArgs {
             workspace: PathBuf::from("."),
@@ -397,12 +457,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Tui(args)) => tui::run(args)?,
         Some(Commands::Init(args)) => run_init(args)?,
         Some(Commands::Eval(args)) => run_async(run_eval(args))?,
+        Some(Commands::ProductEval(args)) => run_async(product_eval_cmd::run(args))?,
         Some(Commands::Bench(args)) => run_async(run_bench(args))?,
         Some(Commands::Cloud(args)) => run_async(run_cloud(args))?,
         Some(Commands::Plugin(args)) => run_plugin(args)?,
         Some(Commands::Audit(args)) => run_audit_cmd(args)?,
         Some(Commands::Backup(args)) => run_backup_cmd(args)?,
         Some(Commands::Doctor(args)) => run_async(run_doctor_cmd(args))?,
+        Some(Commands::Worker(args)) => run_async(run_worker_cmd(args))?,
     }
     Ok(())
 }
@@ -517,6 +579,94 @@ async fn run_doctor_cmd(args: DoctorArgs) -> Result<(), Box<dyn std::error::Erro
     }
     println!("诊断完成：全部通过");
     Ok(())
+}
+
+/// `owo-agent worker demo`：以本机 WorkerPool（Goal worker_pool 模式同源机制）启动
+/// 真实 owo-agent 子进程，展示 started → result → stopped 全链路状态。
+///
+/// 安全约束与 Goal 一致：命令仅限当前可执行文件、`env_clear` + 空白名单
+/// （凭据不外传）、任务时长预算到期由父进程 kill 兜底。
+async fn run_worker_cmd(args: WorkerArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use owo_agent_core::fleet::WorkerEventKind;
+    use owo_agent_core::worker_pool::{WorkerBudget, WorkerPool, WorkerSpec};
+
+    match args.action {
+        WorkerAction::Demo(demo) => {
+            let handler = worker_child::ChildHandler::parse_name(&demo.handler)?;
+            let exe = std::env::current_exe()?
+                .canonicalize()
+                .map_err(|e| format!("无法解析当前可执行文件：{e}"))?;
+            if handler == worker_child::ChildHandler::Sleep
+                && demo.secs > worker_child::MAX_SLEEP_SECS
+            {
+                return Err(format!(
+                    "--secs 超限：{}（上限 {} 秒）",
+                    demo.secs,
+                    worker_child::MAX_SLEEP_SECS
+                )
+                .into());
+            }
+
+            let pool = WorkerPool::new();
+            let spec = WorkerSpec::new("demo", exe.to_string_lossy().to_string())
+                .args(vec![
+                    worker_child::CHILD_FLAG.to_string(),
+                    worker_child::HANDLER_FLAG.to_string(),
+                    handler.as_str().to_string(),
+                ])
+                .cwd(std::env::current_dir()?)
+                // 空白名单：子进程零环境继承（凭据不外传；与 goal_api 校验同源约束）。
+                .env_whitelist(Vec::new())
+                .budget(WorkerBudget {
+                    max_duration_secs: demo.budget_secs,
+                    ..Default::default()
+                });
+            let id = pool
+                .spawn(spec)
+                .await
+                .map_err(|e| format!("子进程启动失败：{e}"))?;
+            println!(
+                "[started] worker={id} pid={:?} handler={}",
+                pool.pid(&id).await,
+                handler.as_str()
+            );
+
+            let input = serde_json::json!({
+                "text": demo.text,
+                "secs": demo.secs,
+            });
+            let action_note = match handler {
+                worker_child::ChildHandler::Echo => "echo",
+                worker_child::ChildHandler::Sleep => "sleep",
+                worker_child::ChildHandler::Fail => "fail",
+            };
+            println!("[task] {action_note} {input}");
+            match pool.submit(&id, &input).await {
+                Ok(output) => println!("[result] ok: {output}"),
+                Err(error) => println!("[result] error: {error}"),
+            }
+
+            pool.shutdown().await;
+            println!("[stopped] 生命周期事件：");
+            for event in pool.events().await {
+                println!(
+                    "  worker.{} {}（{}）",
+                    event.kind.label(),
+                    event.worker,
+                    event.detail
+                );
+            }
+            let saw_budget_abort = pool
+                .events()
+                .await
+                .iter()
+                .any(|event| matches!(event.kind, WorkerEventKind::BudgetAborted));
+            if saw_budget_abort {
+                println!("[stopped] 检测到预算中止事件（budget_aborted）：子进程已由父进程回收");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// `owo-agent backup`：复用服务端 backup.rs 打包逻辑，本地一键备份。

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "code-refactor",
+  "category": "code",
+  "title": "重复计税逻辑抽取重构",
+  "instruction": "src/report.py 中同一套计税公式在 3 处复制粘贴。请产出重构说明 out/refactor-notes.md：给出抽取后的统一函数签名（必须逐字包含 def calculate_tax(amount: float, rate: float) -> float），说明 3 个调用点如何替换，并列出重构后的收益。",
+  "inputs": [
+    {
+      "path": "src/report.py",
+      "content": "def invoice_subtotal(amount):\n    tax = amount * 0.13\n    return amount + tax\n\ndef refund(amount):\n    tax = amount * 0.13\n    return amount - tax\n\ndef statement(amount):\n    tax = amount * 0.13\n    return {\"gross\": amount, \"tax\": tax}\n"
+    }
+  ],
+  "allow_read": ["src/**"],
+  "allow_write": ["out/**"],
+  "expected_artifacts": ["out/refactor-notes.md"],
+  "checkers": [
+    { "type": "contains", "path": "out/refactor-notes.md", "text": "def calculate_tax(amount: float, rate: float) -> float" },
+    { "type": "contains", "path": "out/refactor-notes.md", "text": "3" },
+    { "type": "regex", "path": "out/refactor-notes.md", "pattern": "^# " },
+    { "type": "line_count_min", "path": "out/refactor-notes.md", "min_lines": 5 }
+  ],
+  "reference_outputs": {
+    "out/refactor-notes.md": "# 重构说明：计税逻辑去重\n\n## 现状\n\nsrc/report.py 的 invoice_subtotal / refund / statement 共 3 处复制了同一公式 amount * 0.13。\n\n## 抽取结果\n\n```python\ndef calculate_tax(amount: float, rate: float) -> float:\n    return amount * rate\n```\n\n## 调用点替换\n\n- invoice_subtotal：tax = calculate_tax(amount, 0.13)\n- refund：tax = calculate_tax(amount, 0.13)\n- statement：tax = calculate_tax(amount, 0.13)\n\n## 收益\n\n税率调整只改一处；公式可单测；避免三处漂移。\n"
+  }
+}

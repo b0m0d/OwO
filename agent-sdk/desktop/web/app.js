@@ -1943,6 +1943,7 @@ const PANEL_ORDER = [
   "memory",
   "command",
   "fleet",
+  "workswarm",
 ];
 
 function panelHelpers() {
@@ -2005,15 +2006,28 @@ function applyTheme(theme) {
 }
 applyTheme(localStorage.getItem("owo.theme") || "light");
 $("themeToggle").addEventListener("click", () => {
-  applyTheme(document.body.classList.contains("dark-theme") ? "light" : "dark");
+  const next = document.body.classList.contains("dark-theme") ? "light" : "dark";
+  // 主题切换做整页交叉淡入（apple-design：明暗切换忌讳亮度跳变）。
+  // View Transition 不可用或用户偏好减弱动态时直接切换，不引入动效。
+  const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (document.startViewTransition && !reduceMotion) {
+    document.startViewTransition(() => applyTheme(next));
+  } else {
+    applyTheme(next);
+  }
 });
 function enableResize(handleId, variable, min, max, fromRight = false) {
   const handle = $(handleId);
   handle.addEventListener("pointerdown", (event) => {
     event.preventDefault();
     handle.setPointerCapture(event.pointerId);
+    // 拖拽基准取会话栏左缘的实时位置，而不是硬编码 64px：
+    // 功能栏宽度随断点变化（88/56/52px），旧值会让拖拽结果系统性偏移。
+    const baseLeft = fromRight
+      ? 0
+      : Math.round(document.getElementById("sidebar").getBoundingClientRect().left);
     const move = (next) => {
-      const raw = fromRight ? window.innerWidth - next.clientX : next.clientX - 64;
+      const raw = fromRight ? window.innerWidth - next.clientX : next.clientX - baseLeft;
       document.body.style.setProperty(variable, `${Math.max(min, Math.min(max, raw))}px`);
     };
     const up = () => {

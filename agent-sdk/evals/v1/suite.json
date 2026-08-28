@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "name": "v1-r1-product-suite",
+  "description": "V1-R1 固定真实任务集：代码/研究/文档共 10 个任务，单 Agent 与多 Agent 使用相同输入、权限、预算与检查器对照执行；默认每任务重复 20 次。",
+  "defaults": {
+    "repetitions": 20,
+    "timeout_secs": 180,
+    "max_model_calls": 6
+  },
+  "tasks": [
+    "tasks/code-repo-audit.json",
+    "tasks/code-bug-fix.json",
+    "tasks/code-contract-change.json",
+    "tasks/code-refactor.json",
+    "tasks/research-source-compare.json",
+    "tasks/research-evidence-table.json",
+    "tasks/research-technical-brief.json",
+    "tasks/document-draft.json",
+    "tasks/document-revise.json",
+    "tasks/document-structured-extract.json"
+  ]
+}

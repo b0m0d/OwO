@@ -25,6 +25,7 @@
 
 mod auth_token;
 pub mod backup;
+mod desktop_world_api;
 mod error_codes;
 mod eval_gate;
 mod event_stream;
@@ -38,6 +39,7 @@ mod memory_graph_api;
 mod notes_api;
 mod observability_api;
 mod plugin_market_api;
+pub mod product_eval_api;
 mod rate_limit;
 pub mod shutdown;
 mod slo;
@@ -45,6 +47,15 @@ mod sse;
 mod team_api;
 mod usage;
 mod workflow_api;
+mod workswarm_api;
+
+/// R1 测试装配面：集成测试需要用独立 TempDir 数据根构造 DesktopWorld 运行态
+/// （进程级单例仅服务生产 build_router；导出构造函数不新增 AppState 字段、不改路由面）。
+pub use desktop_world_api::{router_with_hub, DesktopWorldHub};
+/// A2 接线面：goal 显式 `fleet_node` 目标复用进程级控制面——绑定任务经真实
+/// `/fleet/*` 节点协议被已注册节点领取与回传，不伪造远程执行。
+#[allow(unused_imports)]
+pub use fleet_api::{fleet_hub, router_with_hub as fleet_router_with_hub, FleetHub};
 
 /// 协议约束：新模块（notes_api 等）一律写全限定名 `owo_agent_server::AppState`，
 /// 以便测试以 `#[path = "../src/xxx.rs"] mod` 独立编译；此处建立 crate 自别名，
@@ -124,6 +135,10 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// R8 服务端韧性：全局并发 turn 上限 + 优雅关闭信号（CLI serve 接线退出）。
     pub shutdown_gate: Arc<shutdown::ShutdownGate>,
+    /// R13 WorkSwarm S0：团队协同状态（协调器懒初始化；/teams、/projects、/tasks 路由）。
+    pub workswarm: Arc<workswarm_api::WorkSwarmState>,
+    /// V1 三日：ProductEval 评测中心（后台矩阵任务 + 取消令牌 + 持久化报告；/product-eval/*）。
+    pub product_eval: Arc<product_eval_api::ProductEvalHub>,
 }
 
 impl AppState {
@@ -168,6 +183,8 @@ impl AppState {
         let auth_token = Arc::new(auth_token::AuthToken::load_or_create(&data_root));
         let rate_limiter = Arc::new(rate_limit::RateLimiter::from_env());
         let shutdown_gate = Arc::new(shutdown::ShutdownGate::from_env());
+        // V1 三日（第四路）：ProductEval suite 注册根目录（v1 → workspace/evals/v1/suite.json）。
+        let product_eval_suite_root = workspace.join("evals");
         Self {
             agent: Arc::new(agent),
             store: Arc::new(store),
@@ -199,6 +216,49 @@ impl AppState {
             scene: Arc::new(Mutex::new(owo_agent_core::scene::SceneGraph::new())),
             computer_tasks: Arc::new(owo_agent_core::ComputerTaskRegistry::new()),
             cloud_queue: Arc::new(tokio::sync::Mutex::new(None)),
+            // R13 WorkSwarm：数据目录 data_root/workswarm（协调器首次使用懒初始化）。
+            workswarm: Arc::new(workswarm_api::WorkSwarmState::new(
+                data_root.join("workswarm"),
+            )),
+            // V1 三日（第四路）：ProductEval 评测中心。运行目录 data_root/product_eval/runs；
+            // suite 注册表固定 v1 → workspace/evals/v1/suite.json。
+            // live 执行器工厂：Provider 按 core 统一入口构建（OPENAI_API_KEY 等环境变量），
+            // single → 第一路 SingleAgentExecutor；multi（workswarm）→ 第二路 WorkSwarmExecutor
+            // （等 core `pub mod workswarm_executor` 登记后接入；未接线前 live 运行 failed，不伪造结果）。
+            product_eval: Arc::new(product_eval_api::ProductEvalHub::new(
+                data_root.join("product_eval").join("runs"),
+                product_eval_suite_root,
+                {
+                    let workswarm_work_root = data_root.join("product_eval").join("workswarm");
+                    Arc::new(move || {
+                        let (provider, model) = owo_agent_core::product_eval::build_live_provider(
+                            None,
+                        )
+                        .map_err(|e| {
+                            format!("live Provider 不可用（检查 OPENAI_API_KEY 等）：{}", e.0)
+                        })?;
+                        let single: Arc<dyn owo_agent_core::product_eval::CaseExecutor> =
+                            Arc::new(owo_agent_core::product_eval::SingleAgentExecutor::new(
+                                Arc::clone(&provider),
+                                model.clone(),
+                            ));
+                        let multi: Option<Arc<dyn owo_agent_core::product_eval::CaseExecutor>> =
+                            Some(Arc::new(
+                                // 第二路适配器以 crate 根模块名注册（物理文件 product_eval/workswarm_executor.rs，
+                                // #[path] 技巧见 core lib.rs——避免与第一路双写 product_eval.rs）。
+                                owo_agent_core::WorkSwarmExecutor::new(
+                                    Arc::clone(&provider),
+                                    model.clone(),
+                                    workswarm_work_root.clone(),
+                                ),
+                            ));
+                        Ok(Arc::new(product_eval_api::ModeDispatchExecutor::new(
+                            Some(single),
+                            multi,
+                        )))
+                    })
+                },
+            )),
             data_root,
             elements,
             auth_token,
@@ -403,7 +463,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Agent 1 的审批（/workflow/run/{run_id}/approval）与 run SSE
         // （/workflow/run/{run_id}/events）已自含在 workflow_api::router 内，无需新 merge。
         .merge(team_api::router(state.clone()))
+        .merge(workswarm_api::router(state.clone()))
+        // R1（§8.5）：DesktopWorld/WorldModel 闭环 /desktop-envs/*、/world-model/*、
+        // /transitions/*、/datasets/*、/model-candidates/*（desktop_world_api 模块内
+        // DesktopWorldHub 单例 + ControllerLease token+epoch 围栏；与 /desktop/* 计算机
+        // 操作路由不同区）。
+        .merge(desktop_world_api::router(state.clone()))
         .merge(eval_gate::router(state.clone()))
+        // V1 三日（第四路）：ProductEval 评测中心（bearer 保护面）。
+        .merge(product_eval_api::router(state.clone()))
         .merge(observability_api::router(state.clone()))
         .merge(memory_graph_api::router(state.clone()))
         .merge(intent_api::router(state.clone()))
@@ -570,6 +638,58 @@ async fn openapi_spec() -> Json<Value> {
             "/skills/{name}": { "get": { "operationId": "skillDetail", "parameters": [path_param("name")], "responses": { "200": { "description": "skill detail with SKILL.md content" } } }, "post": { "operationId": "skillEdit", "parameters": [path_param("name")], "responses": { "200": { "description": "updated" } } } },
             "/skills/{name}/enabled": { "post": { "operationId": "skillEnabled", "parameters": [path_param("name")], "responses": { "200": { "description": "enabled state" } } } },
             "/eval/run": { "post": { "operationId": "runEval", "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvalRunRequest" } } } }, "responses": { "200": { "description": "eval report" } } } },
+            "/product-eval/runs": {
+                "post": {
+                    "operationId": "createProductEvalRun",
+                    "summary": "受理一次产品评测矩阵（异步执行）",
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["suite", "execution", "modes", "repetitions"], "properties": {
+                        "suite": { "type": "string", "enum": ["v1"], "description": "仅允许注册名 v1；客户端本地路径一律拒绝" },
+                        "execution": { "type": "string", "enum": ["reference", "live"], "description": "reference=免模型参考回放+检查器；live=真实执行器（single→SingleAgentExecutor，workswarm→WorkSwarmExecutor）" },
+                        "modes": { "type": "array", "items": { "type": "string", "enum": ["single", "workswarm"] }, "minItems": 1, "description": "对照拓扑子集；结果报告 wire 中 agent_mode 为核心小写词 single/multi（workswarm ≡ multi）" },
+                        "repetitions": { "type": "integer", "minimum": 1, "maximum": 20, "description": "重复次数（覆盖 suite 默认）" },
+                        "category": { "type": ["string", "null"], "enum": ["code", "research", "document", null], "description": "只跑指定分类" },
+                        "only": { "type": ["string", "null"], "description": "只跑 id 包含该子串的任务" }
+                    } } } } },
+                    "responses": {
+                        "202": { "description": "受理", "content": { "application/json": { "schema": { "type": "object", "required": ["run_id", "status"], "properties": { "run_id": { "type": "string", "description": "eval-…" }, "status": { "type": "string", "enum": ["queued"] } } } } } },
+                        "400": { "description": "语义校验失败（未知 suite/execution/mode、repetitions 越界、suite 加载失败、过滤后无任务）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+                        "422": { "description": "结构校验失败（缺字段/类型错）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+                    }
+                },
+                "get": {
+                    "operationId": "listProductEvalRuns",
+                    "summary": "评测运行列表（created_at 倒序）",
+                    "responses": { "200": { "description": "runs", "content": { "application/json": { "schema": { "type": "object", "properties": { "runs": { "type": "array", "items": { "$ref": "#/components/schemas/ProductEvalRunSummary" } } } } } } } }
+                }
+            },
+            "/product-eval/runs/{id}": {
+                "get": {
+                    "operationId": "getProductEvalRun",
+                    "summary": "评测运行详情：进度 + 运行参数 + 完整报告（聚合指标/每 case 对比/失败步骤/Artifact refs）",
+                    "parameters": [path_param("id")],
+                    "responses": {
+                        "200": { "description": "run summary + report", "content": { "application/json": { "schema": { "allOf": [
+                            { "$ref": "#/components/schemas/ProductEvalRunSummary" },
+                            { "type": "object", "properties": { "report": { "oneOf": [
+                                { "type": "null", "description": "尚无报告（未开始执行/工厂失败/损坏）" },
+                                { "$ref": "#/components/schemas/ProductEvalReport" }
+                            ] } } }
+                        ] } } } },
+                        "404": { "description": "运行不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+                    }
+                }
+            },
+            "/product-eval/runs/{id}/cancel": {
+                "post": {
+                    "operationId": "cancelProductEvalRun",
+                    "summary": "取消评测运行（幂等：置协作令牌并立即 cancelled；重复/终态后取消零副作用）",
+                    "parameters": [path_param("id")],
+                    "responses": {
+                        "200": { "description": "取消受理或原状态", "content": { "application/json": { "schema": { "type": "object", "required": ["run_id", "status"], "properties": { "run_id": { "type": "string" }, "status": { "type": "string", "enum": ["queued", "running", "cancelled", "completed", "failed", "interrupted"] } } } } } },
+                        "404": { "description": "运行不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+                    }
+                }
+            },
             "/context/snapshot": { "get": { "operationId": "contextSnapshot", "responses": { "200": { "description": "situation snapshot" } } } },
             "/perception/events": { "get": { "operationId": "perceptionSubscribe", "responses": { "200": { "description": "SSE perception event stream" } } } },
             "/perception/capture": { "post": { "operationId": "perceptionCapture", "responses": { "200": { "description": "capture meta with OCR summary" } } } },
@@ -677,7 +797,74 @@ async fn openapi_spec() -> Json<Value> {
             "/goal": { "get": { "operationId": "goalList", "responses": { "200": { "description": "goal list" } } }, "post": { "operationId": "goalCreate", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "objective": { "type": "string" }, "budget": { "type": "object", "properties": { "max_steps": { "type": "integer" }, "max_replans": { "type": "integer" } } } }, "required": ["objective"] } } } }, "responses": { "201": { "description": "goal created" } } } },
             "/goal/{id}": { "get": { "operationId": "goalGet", "parameters": [path_param("id")], "responses": { "200": { "description": "goal detail" } } } },
             "/goal/{id}/plan": { "get": { "operationId": "goalPlanGet", "parameters": [path_param("id")], "responses": { "200": { "description": "goal plan" } } }, "post": { "operationId": "goalPlanCreate", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "steps": { "type": "array", "items": { "type": "object" } } }, "required": ["steps"] } } } }, "responses": { "201": { "description": "plan created with waves preview" } } } },
-            "/goal/{id}/run": { "post": { "operationId": "goalRun", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "config": { "type": "object", "properties": { "parallelism": { "type": "integer" }, "allow_replan": { "type": "boolean" } } } } } } } }, "responses": { "202": { "description": "run started" } } } },
+            "/goal/{id}/run": { "post": {
+                "operationId": "goalRun",
+                "parameters": [path_param("id")],
+                "requestBody": { "content": { "application/json": { "schema": {
+                    "type": "object",
+                    "properties": {
+                        "parallelism": { "type": "integer", "description": "wave 内并发执行步数上限" },
+                        "allow_replan": { "type": "boolean" },
+                        "execution": {
+                            "type": "object",
+                            "description": "执行路径选择；缺省 process。mode=worker_pool 必须提供非空 workers",
+                            "properties": {
+                                "mode": { "type": "string", "enum": ["process", "worker_pool"] },
+                                "workers": {
+                                    "type": "array",
+                                    "description": "worker_pool 受控子进程配置（命令仅限当前可执行文件；env 白名单拒凭据键）",
+                                    "items": {
+                                        "type": "object",
+                                        "required": ["name", "command", "cwd"],
+                                        "properties": {
+                                            "name": { "type": "string" },
+                                            "command": { "type": "string" },
+                                            "args": { "type": "array", "items": { "type": "string" } },
+                                            "cwd": { "type": "string" },
+                                            "env": { "type": "object", "additionalProperties": { "type": "string" } },
+                                            "budget": { "type": "object", "properties": { "max_turns": { "type": "integer" }, "max_duration_secs": { "type": "integer" }, "max_memory_mb": { "type": "integer" }, "max_cpu_cores": { "type": "number" } } },
+                                            "max_restarts": { "type": "integer" },
+                                            "base_backoff_secs": { "type": "integer" }
+                                        }
+                                    }
+                                },
+                                "targets": {
+                                    "type": "array",
+                                    "description": "A2 显式执行目标绑定（按 worker 一个目标；显式绑定不可用即等待/询问/拒绝，不静默改派）",
+                                    "items": {
+                                        "type": "object",
+                                        "required": ["worker", "target"],
+                                        "properties": {
+                                            "worker": { "type": "string", "description": "绑定键：计划步骤 id 或步骤声明的 worker 名（agent 只允许 in_process）" },
+                                            "target": { "type": "string", "enum": ["in_process", "local_process", "fleet_node"] },
+                                            "node_id": { "type": "string", "description": "fleet_node 必填；不允许隐式选节点" },
+                                            "capabilities": { "type": "array", "items": { "type": "string" } },
+                                            "permission_scope": {
+                                                "type": "object",
+                                                "description": "默认 deny：未列出的能力一律不授予；deny 优先于 allow",
+                                                "properties": {
+                                                    "allow": { "type": "array", "items": { "type": "string" } },
+                                                    "deny": { "type": "array", "items": { "type": "string" } },
+                                                    "network_egress": { "type": "boolean", "default": false }
+                                                }
+                                            },
+                                            "budget": { "type": "object", "properties": { "max_attempts": { "type": "integer", "description": "对 plan 步骤 retries 取 min" }, "max_duration_secs": { "type": "integer", "description": "派发等待/池预算派生上限（0=不限）" } } },
+                                            "input_cas_ref": { "type": "string" },
+                                            "correlation_id": { "type": "string", "description": "缺省派生 <goal_id>/<run_id>/<worker>" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } } } },
+                "responses": {
+                    "202": { "description": "run started" },
+                    "400": { "description": "非法 execution/targets 配置（缺 workers、矛盾绑定、fleet_node 缺 node_id 等）" },
+                    "404": { "description": "goal or plan not found" },
+                    "422": { "description": "request body deserialization failed (unknown mode/target literal)" }
+                }
+            } },
             "/goal/{id}/status": { "get": { "operationId": "goalStatus", "parameters": [path_param("id")], "responses": { "200": { "description": "goal run state snapshot" } } } },
             "/goal/{id}/abort": { "post": { "operationId": "goalAbort", "parameters": [path_param("id")], "responses": { "200": { "description": "abort requested" } } } },
             "/goal/{id}/audit": { "get": { "operationId": "goalAudit", "parameters": [path_param("id")], "responses": { "200": { "description": "goal audit tail" } } } },
@@ -699,6 +886,37 @@ async fn openapi_spec() -> Json<Value> {
             "/team/import": { "post": { "operationId": "teamImport", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "package_b64": { "type": "string" } }, "required": ["package_b64"] } } } }, "responses": { "200": { "description": "imported or blocked with findings" } } } },
             "/team/versions": { "get": { "operationId": "teamVersions", "parameters": [{ "name": "id", "in": "query", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "team package version history" } } } },
             "/team/audit": { "get": { "operationId": "teamAudit", "responses": { "200": { "description": "team api audit tail" } } } },
+            // R13 WorkSwarm S0（§8.5）：多 Agent 协同运行 + Project Space + 模板注册表。
+            "/teams": { "post": { "operationId": "workswarmCreateTeam", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "goal_id": { "type": "string" }, "objective": { "type": "string" }, "mode": { "type": "string", "enum": ["single", "team", "swarmflow"] }, "template_id": { "type": "string" }, "roles": { "type": "array", "items": { "type": "object" } }, "budget": { "type": "object" }, "human_policy": { "type": "string" } }, "required": ["objective"] } } } }, "responses": { "202": { "description": "team run created; background run loop drives phases" } } }, "get": { "operationId": "workswarmListTeams", "responses": { "200": { "description": "team run list; items = TeamRun + 进程内运行标志（R2 additive）", "content": { "application/json": { "schema": { "type": "object", "properties": { "teams": { "type": "array", "items": { "type": "object", "description": "TeamRun 字段（透传）+ 以下运行标志；additive 不改变既有字段", "properties": { "active": { "type": "boolean", "description": "运行循环正在执行阶段（人节点等待窗口 / 终态为 false）" }, "interrupted": { "type": "boolean", "description": "R2：磁盘 Running 但无活动运行 → 已识别为中断，等待显式 continue/retry 恢复" } } } } }, "required": ["teams"] } } } } } } },
+            "/teams/{id}": { "get": { "operationId": "workswarmGetTeam", "parameters": [path_param("id")], "responses": { "200": { "description": "team + task view + audit tail; R2 additive: interrupted", "content": { "application/json": { "schema": { "type": "object", "properties": { "team": { "type": "object", "description": "TeamRun（透传）" }, "interrupted": { "type": "boolean", "description": "R2：中断标记（请求时先做一次幂等中断识别）" }, "tasks": { "type": "object", "description": "任务视图（步骤 × 状态）" }, "audit_tail": { "type": "array", "items": { "type": "object", "properties": { "ts": { "type": "string" }, "event": { "type": "string" }, "detail": { "type": "string" } } } } }, "required": ["team", "interrupted", "tasks", "audit_tail"] } } } }, "404": { "description": "unknown team" } } } },
+            "/teams/{id}/tasks": { "get": { "operationId": "workswarmGetTeamTasks", "parameters": [path_param("id")], "responses": { "200": { "description": "team task graph (step x status)" } } } },
+            "/teams/{id}/events": { "get": { "operationId": "workswarmTeamEvents", "parameters": [path_param("id"), { "name": "format", "in": "query", "required": false, "schema": { "type": "string", "enum": ["json"] } }], "responses": { "200": { "description": "SSE team event stream (audit replay frames {type:audit,ts,event,detail} + state frames {type:state,status,active,interrupted}; ends at terminal); ?format=json 返回一次性快照（见 content schema，R2 additive: interrupted）", "content": { "application/json": { "schema": { "type": "object", "properties": { "team_id": { "type": "string" }, "status": { "type": "string", "description": "Debug 格式团队状态（如 Running / Created / Completed）" }, "active": { "type": "boolean" }, "interrupted": { "type": "boolean", "description": "R2：中断标记（磁盘 Running 但无活动运行）" }, "audit": { "type": "array", "items": { "type": "object", "properties": { "ts": { "type": "string" }, "event": { "type": "string" }, "detail": { "type": "string" } } } } }, "required": ["team_id", "status", "active", "interrupted", "audit"] } } } }, "404": { "description": "unknown team" } } } },
+            "/teams/{id}/steer": { "post": { "operationId": "workswarmSteerTeam", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "command": { "type": "string", "enum": ["continue", "retry", "steer", "replace", "cancel"], "description": "R2 冻结契约：retry 局部重试 = { command: retry, step_id, note }，仅允许指定一个 Failed/Aborted/中断中的步骤" }, "step_id": { "type": "string", "description": "retry 必填（缺失/空 → 400）；steer 可选（空 = 全部未完成节点）" }, "new_input": { "type": "object", "description": "steer 专用：合并进步骤输入" }, "note": { "type": "string", "description": "retry/steer/replace 的变更理由（进入 DecisionRecord）" }, "role": { "type": "string", "description": "replace 专用：目标角色" }, "new_worker": { "type": "string", "description": "replace 专用：agent 节点新 worker" }, "new_user_id": { "type": "string", "description": "replace 专用：人节点新用户 ID" } }, "required": ["command"] } } } }, "responses": { "200": { "description": "steer applied (only uncompleted nodes; DecisionRecord kept)", "content": { "application/json": { "schema": { "type": "object", "properties": { "team_id": { "type": "string" }, "status": { "type": "string", "description": "Debug 格式团队状态" }, "interrupted": { "type": "boolean", "description": "R2：中断标记（continue/retry 成功恢复后为 false）" } }, "required": ["team_id", "status", "interrupted"] } } } }, "400": { "description": "validation failed（retry 缺 step_id / 未知 command）" }, "404": { "description": "unknown team or step" }, "409": { "description": "run is active（retry 目标已成功同样 409，重复发送无额外副作用）" } } } },
+            "/projects/{id}": { "get": { "operationId": "workswarmGetProjectSpace", "parameters": [path_param("id")], "responses": { "200": { "description": "project space summary (tasks/artifacts/decisions/activity)" } } } },
+            "/projects/{id}/artifacts": { "get": { "operationId": "workswarmListArtifacts", "parameters": [path_param("id")], "responses": { "200": { "description": "versioned shared artifacts (content via CAS ref)" } } } },
+            "/tasks/{id}/handoff": { "post": { "operationId": "workswarmSubmitHandoff", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "team_id": { "type": "string" }, "from_member": { "type": "string" }, "to_member": { "type": "string" }, "completed_summary": { "type": "string" }, "open_issues": { "type": "array", "items": { "type": "string" } }, "output_artifact_refs": { "type": "array", "items": { "type": "string" } }, "evidence_refs": { "type": "array", "items": { "type": "string" } }, "suggested_next_actions": { "type": "array", "items": { "type": "string" } }, "known_risks": { "type": "array", "items": { "type": "string" } } }, "required": ["team_id", "from_member"] } } } }, "responses": { "200": { "description": "structured handoff recorded" } } } },
+            "/tasks/{id}/human-result": { "post": { "operationId": "workswarmSubmitHumanResult", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "team_id": { "type": "string" }, "result": { "type": "string" } }, "required": ["team_id", "result"] } } } }, "responses": { "200": { "description": "human node result recorded; downstream wakes automatically" } } } },
+            "/teams/templates": { "get": { "operationId": "workswarmListTemplates", "responses": { "200": { "description": "adopted team templates" } } } },
+            "/teams/templates/proposals": { "get": { "operationId": "workswarmListTemplateProposals", "responses": { "200": { "description": "team template proposals (proposal only, never auto-enabled)" } } } },
+            "/teams/templates/proposals/{proposal_id}/adopt": { "post": { "operationId": "workswarmAdoptTemplateProposal", "parameters": [path_param("proposal_id")], "responses": { "200": { "description": "proposal adopted into template registry (idempotent)" } } } },
+            "/teams/templates/proposals/{proposal_id}/reject": { "post": { "operationId": "workswarmRejectTemplateProposal", "parameters": [path_param("proposal_id")], "responses": { "200": { "description": "proposal rejected (record kept, auditable)" }, "404": { "description": "proposal not found" }, "400": { "description": "proposal already adopted" } } } },
+            // R1 DesktopWorld/WorldModel 训练闭环（§8.5/§5.11-5.12）：仿真环境 + 租约 fencing + transition 语料 + 世界模型候选/晋升。
+            "/desktop-envs": { "post": { "operationId": "desktopWorldCreateEnv", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "env_id": { "type": "string" }, "task": { "type": "object", "properties": { "task_id": { "type": "string" }, "app": { "type": "string" }, "seed": { "type": "integer" }, "assets": { "type": "object" } }, "required": ["task_id", "app", "seed"] }, "owner": { "type": "string" } }, "required": ["task"] } } } }, "responses": { "200": { "description": "env created: initial lease proof + first-frame WorldStateV1 observation" }, "409": { "description": "env_id already exists" } } } },
+            "/desktop-envs/{id}/reset": { "post": { "operationId": "desktopWorldResetEnv", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "task": { "type": "object", "properties": { "task_id": { "type": "string" }, "app": { "type": "string" }, "seed": { "type": "integer" }, "assets": { "type": "object" } }, "required": ["task_id", "app", "seed"] }, "lease": { "type": "object", "properties": { "owner": { "type": "string" }, "token": { "type": "string" }, "epoch": { "type": "integer" } }, "required": ["owner", "token", "epoch"] } }, "required": ["task", "lease"] } } } }, "responses": { "200": { "description": "env reset to task initial state; lease proof returned" }, "404": { "description": "env not found" }, "409": { "description": "lease fencing conflict (stale token/epoch)" } } } },
+            "/desktop-envs/{id}/lease": { "post": { "operationId": "desktopWorldLeaseOp", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "op": { "type": "string", "enum": ["acquire", "renew", "release"] }, "lease": { "type": "object", "properties": { "owner": { "type": "string" }, "token": { "type": "string" }, "epoch": { "type": "integer" } }, "required": ["owner", "token", "epoch"] }, "owner": { "type": "string" } }, "required": ["op"] } } } }, "responses": { "200": { "description": "lease acquired/renewed/released; current lease record returned" }, "404": { "description": "env not found" }, "409": { "description": "lease fencing conflict" }, "400": { "description": "renew/release missing lease proof" } } } },
+            "/desktop-envs/{id}/observe": { "get": { "operationId": "desktopWorldObserveEnv", "parameters": [path_param("id")], "responses": { "200": { "description": "current WorldStateV1 observation (scene graph + window stack)" }, "404": { "description": "env not found" } } } },
+            "/desktop-envs/{id}/step": { "post": { "operationId": "desktopWorldStepEnv", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "action": { "type": "object", "properties": { "action_id": { "type": "string" }, "kind": { "type": "string" }, "semantic_intent": { "type": "string" }, "target_id": { "type": "string" }, "arguments": { "type": "object" }, "risk": { "type": "string" }, "reversible": { "type": "boolean" } }, "required": ["action_id", "kind", "semantic_intent"] }, "lease": { "type": "object", "properties": { "owner": { "type": "string" }, "token": { "type": "string" }, "epoch": { "type": "integer" } }, "required": ["owner", "token", "epoch"] }, "episode_id": { "type": "string" }, "record": { "type": "boolean" }, "task_goal": { "type": "string" }, "history": { "type": "array", "items": { "type": "string" } } }, "required": ["action", "lease"] } } } }, "responses": { "200": { "description": "step executed: before/after state refs, transition id, verdict + reward parts, shadow prediction evaluation" }, "404": { "description": "env not found" }, "409": { "description": "lease fencing conflict (stale token/epoch)" } } } },
+            "/desktop-envs/{id}/snapshot": { "post": { "operationId": "desktopWorldSnapshotEnv", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "snapshot persisted; snapshot_id returned (read path, no lease)" }, "404": { "description": "env not found" } } } },
+            "/desktop-envs/{id}/restore": { "post": { "operationId": "desktopWorldRestoreEnv", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "snapshot": { "type": "string" }, "lease": { "type": "object", "properties": { "owner": { "type": "string" }, "token": { "type": "string" }, "epoch": { "type": "integer" } }, "required": ["owner", "token", "epoch"] } }, "required": ["snapshot", "lease"] } } } }, "responses": { "200": { "description": "env restored from snapshot; observation returned" }, "404": { "description": "env or snapshot not found" }, "409": { "description": "lease fencing conflict" } } } },
+            "/desktop-envs/{id}/judge": { "post": { "operationId": "desktopWorldJudgeEnv", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "success": { "type": "object", "properties": { "name": { "type": "string" }, "assertions": { "type": "array", "items": { "type": "object" } } }, "required": ["name", "assertions"] } }, "required": ["success"] } } } }, "responses": { "200": { "description": "verdict against success spec (read path, no lease)" }, "404": { "description": "env not found" } } } },
+            "/desktop-envs/{id}/inject-fault": { "post": { "operationId": "desktopWorldInjectFault", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "fault": { "type": "object", "properties": { "type": { "type": "string", "enum": ["modal_popup", "element_drift", "sluggish_steps"] }, "text": { "type": "string" }, "element_id": { "type": "string" }, "dx": { "type": "integer" }, "dy": { "type": "integer" }, "steps": { "type": "integer" } }, "required": ["type"] }, "lease": { "type": "object", "properties": { "owner": { "type": "string" }, "token": { "type": "string" }, "epoch": { "type": "integer" } }, "required": ["owner", "token", "epoch"] } }, "required": ["fault", "lease"] } } } }, "responses": { "200": { "description": "fault injected into env" }, "404": { "description": "env not found" }, "409": { "description": "lease fencing conflict" } } } },
+            "/world-model/predict": { "post": { "operationId": "worldModelPredict", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "env_id": { "type": "string" }, "action": { "type": "object", "properties": { "action_id": { "type": "string" }, "kind": { "type": "string" }, "semantic_intent": { "type": "string" }, "target_id": { "type": "string" }, "arguments": { "type": "object" } }, "required": ["action_id", "kind", "semantic_intent"] }, "context": { "type": "object" }, "with_advice": { "type": "boolean" }, "candidates": { "type": "array", "items": { "type": "object" } } }, "required": ["env_id", "action"] } } } }, "responses": { "200": { "description": "predicted structural state diff + probability (read path, env unchanged); advice with candidates when with_advice" }, "404": { "description": "env not found" }, "400": { "description": "no active world model (empty transition corpus)" } } } },
+            "/world-model/providers": { "get": { "operationId": "worldModelProviders", "responses": { "200": { "description": "active rule model + candidates + per-signature samples + calibration report" } } } },
+            "/transitions/{id}": { "get": { "operationId": "transitionGet", "parameters": [path_param("id")], "responses": { "200": { "description": "TransitionTraceV1 record" }, "404": { "description": "transition not found" } } } },
+            "/datasets/build": { "post": { "operationId": "datasetBuild", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "config": { "type": "object" }, "env_id": { "type": "string" }, "episode_id": { "type": "string" }, "task_id": { "type": "string" } } } } } }, "responses": { "200": { "description": "dataset built + split; manifest with dataset_id returned" }, "400": { "description": "no transition corpus to build from" } } } },
+            "/datasets/{id}/manifest": { "get": { "operationId": "datasetManifest", "parameters": [path_param("id")], "responses": { "200": { "description": "DatasetManifest (splits + counts + build config)" }, "404": { "description": "dataset not found" } } } },
+            "/model-candidates": { "post": { "operationId": "modelCandidateRegister", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "candidate_id": { "type": "string", "description": "缺省自动生成 model_id-model_version-<uuid8>" }, "model_id": { "type": "string" }, "model_version": { "type": "string" }, "source": { "type": "string", "description": "来源说明（缺省：手动注册 shadow 起步）" }, "provider_ref": { "$ref": "#/components/schemas/CandidateProviderRef", "description": "可执行 provider 身份声明（缺省 metadata_only；声明≠接线，还需进程内真实接线才积累影子样本）" } }, "required": ["model_id", "model_version"] } } } }, "responses": { "200": { "description": "candidate registered as shadow (never auto-activated); body = ModelCandidate", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelCandidate" } } } }, "409": { "description": "candidate_id already exists" } } } },
+            "/model-candidates/{id}/promote": { "post": { "operationId": "modelCandidatePromote", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "ack": { "type": "boolean" }, "reason": { "type": "string" } }, "required": ["ack", "reason"] } } } }, "responses": { "200": { "description": "candidate promoted to active provider (human ack required); body = { candidate, active, previous_active, samples, gates }", "content": { "application/json": { "schema": { "type": "object", "properties": { "candidate": { "$ref": "#/components/schemas/ModelCandidate" }, "active": { "type": "string" }, "previous_active": { "type": "string", "nullable": true }, "samples": { "type": "integer", "format": "int64", "description": "真实影子样本数" }, "gates": { "type": "object", "description": "晋升门控明细快照（审计口径）", "properties": { "min_shadow_samples": { "type": "integer", "format": "int64" }, "provider_wired": { "type": "object", "properties": { "kind": { "type": "string" }, "locator": { "type": "string" } }, "required": ["kind", "locator"] }, "calibration_summary": { "allOf": [{ "$ref": "#/components/schemas/CalibrationReport" }] }, "regression_check": { "type": "object", "nullable": true, "description": "相对上一任 active 的退化检查（无前任或前任无样本时为 null）", "properties": { "previous_active": { "type": "string" }, "previous_samples": { "type": "integer", "format": "int64" }, "hit_rate_delta": { "type": "number" }, "mean_delta_jaccard_delta": { "type": "number" }, "mean_calibration_error_delta": { "type": "number" }, "max_regression_delta": { "type": "number" }, "passed": { "type": "boolean" } } } }, "required": ["min_shadow_samples", "provider_wired", "calibration_summary"] } }, "required": ["candidate", "active", "previous_active", "samples", "gates"] } } } }, "404": { "description": "candidate not found" }, "400": { "description": "ack=false or empty reason" }, "422": { "description": "governance gate refused（metadata_only / 未接线 / 样本不足 / 相对前任退化超阈值）" } } } },
             "/eval/gate/run": { "post": { "operationId": "evalGateRun", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "suite": { "type": "string" }, "model": { "type": "string" } } } } } }, "responses": { "200": { "description": "eval report or skipped reason" } } } },
             "/eval/gate/report": { "get": { "operationId": "evalGateReport", "responses": { "200": { "description": "latest eval report" } } } },
             "/eval/gate/reports": { "get": { "operationId": "evalGateReports", "responses": { "200": { "description": "eval report history" } } } },
@@ -738,8 +956,14 @@ async fn openapi_spec() -> Json<Value> {
             "/usage/topup": { "post": { "operationId": "usageTopup", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "amount": { "type": "number" } } } } } }, "responses": { "200": { "description": "budget topped up and hard stop cleared" } } } },
             "/fleet/nodes/register": { "post": { "operationId": "fleetNodesRegister", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "node_id": { "type": "string" }, "card": { "type": "object" } }, "required": ["node_id", "card"] } } } }, "responses": { "200": { "description": "node registered with lease" } } } },
             "/fleet/nodes": { "get": { "operationId": "fleetNodesList", "responses": { "200": { "description": "node status snapshots" } } } },
+            "/fleet/nodes/{node_id}/heartbeat": { "post": { "operationId": "fleetNodeHeartbeat", "parameters": [path_param("node_id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "lease_token": { "type": "string" } }, "required": ["lease_token"] } } } }, "responses": { "200": { "description": "lease renewed with latest epoch/token" }, "409": { "description": "stale token or expired lease (fencing)" } } } },
+            "/fleet/nodes/{node_id}/tasks": { "get": { "operationId": "fleetNodeTasks", "parameters": [path_param("node_id")], "responses": { "200": { "description": "claimable/claimed tasks for node" } } } },
             "/fleet/tasks/submit": { "post": { "operationId": "fleetTasksSubmit", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "task_id": { "type": "string" }, "worker": { "type": "string" }, "input": { "type": "object" }, "correlation_id": { "type": "string" }, "lineage": { "type": "array", "items": { "type": "string" } }, "approval_required": { "type": "boolean" } }, "required": ["task_id", "worker", "input"] } } } }, "responses": { "200": { "description": "task submitted with idempotency key" } } } },
             "/fleet/tasks/{id}": { "get": { "operationId": "fleetTaskGet", "parameters": [path_param("id")], "responses": { "200": { "description": "task view with status and events" } } } },
+            "/fleet/tasks/{id}/claim": { "post": { "operationId": "fleetTaskClaim", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "node_id": { "type": "string" }, "lease_token": { "type": "string" }, "epoch": { "type": "integer" } }, "required": ["node_id", "lease_token", "epoch"] } } } }, "responses": { "200": { "description": "task claimed by node (fencing verified)" }, "409": { "description": "stale token/epoch or node mismatch" } } } },
+            "/fleet/tasks/{id}/progress": { "post": { "operationId": "fleetTaskProgress", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "node_id": { "type": "string" }, "lease_token": { "type": "string" }, "epoch": { "type": "integer" }, "text": { "type": "string" }, "evidence": { "type": "array", "items": { "type": "object" } } }, "required": ["node_id", "lease_token", "epoch", "text"] } } } }, "responses": { "200": { "description": "progress + structured evidence recorded" } } } },
+            "/fleet/tasks/{id}/result": { "post": { "operationId": "fleetTaskResult", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "node_id": { "type": "string" }, "lease_token": { "type": "string" }, "epoch": { "type": "integer" }, "ok": { "type": "boolean" }, "output": { "type": "object" }, "output_cas": { "type": "string" }, "evidence": { "type": "array", "items": { "type": "object" } }, "error": { "type": "string" } }, "required": ["node_id", "lease_token", "epoch", "ok"] } } } }, "responses": { "200": { "description": "task result recorded (terminal)" } } } },
+            "/fleet/tasks/{id}/cancel-ack": { "post": { "operationId": "fleetTaskCancelAck", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "node_id": { "type": "string" }, "lease_token": { "type": "string" }, "epoch": { "type": "integer" } }, "required": ["node_id", "lease_token", "epoch"] } } } }, "responses": { "200": { "description": "node confirmed cancellation" } } } },
             "/fleet/tasks/{id}/cancel": { "post": { "operationId": "fleetTaskCancel", "parameters": [path_param("id")], "responses": { "200": { "description": "task cancelled" } } } },
             "/fleet/tasks/{id}/events": { "get": { "operationId": "fleetTaskEvents", "parameters": [path_param("id"), { "name": "format", "in": "query", "required": false, "schema": { "type": "string", "enum": ["json"] } }], "responses": { "200": { "description": "SSE task event stream (history replay + live; ?format=json returns array)" } } } },
             "/fleet/approvals/{id}/respond": { "post": { "operationId": "fleetApprovalRespond", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "decision": { "type": "string", "enum": ["approve", "reject"] }, "approved_by": { "type": "string" } }, "required": ["decision", "approved_by"] } } } }, "responses": { "200": { "description": "approval decision recorded" } } } }
@@ -782,6 +1006,187 @@ async fn openapi_spec() -> Json<Value> {
                     "type": "object",
                     "properties": { "suite_id": { "type": "string" } },
                     "required": ["suite_id"]
+                },
+                "Error": {
+                    "type": "object",
+                    "properties": { "error": { "type": "string" } },
+                    "required": ["error"]
+                },
+                "ProductEvalRunSummary": {
+                    "type": "object",
+                    "description": "ProductEval 运行摘要（列表元素与详情基底；六态：queued/running/cancelled/completed/failed/interrupted）",
+                    "properties": {
+                        "run_id": { "type": "string" },
+                        "suite": { "type": "string" },
+                        "execution": { "type": "string", "enum": ["reference", "live"] },
+                        "modes": { "type": "array", "items": { "type": "string", "enum": ["single", "workswarm"] } },
+                        "repetitions": { "type": "integer" },
+                        "category": { "type": ["string", "null"], "enum": ["code", "research", "document", null] },
+                        "only": { "type": ["string", "null"] },
+                        "model": { "type": ["string", "null"] },
+                        "status": { "type": "string", "enum": ["queued", "running", "cancelled", "completed", "failed", "interrupted"] },
+                        "created_at": { "type": "string" },
+                        "started_at": { "type": ["string", "null"] },
+                        "finished_at": { "type": ["string", "null"] },
+                        "planned_total": { "type": "integer", "description": "计划单元格总数（modes × cases × repetitions）" },
+                        "progress": {
+                            "type": "object",
+                            "properties": {
+                                "done": { "type": "integer", "description": "已完成单元格（journal 行数）" },
+                                "total": { "type": "integer", "description": "= planned_total" }
+                            },
+                            "required": ["done", "total"]
+                        },
+                        "error": { "type": ["string", "null"] }
+                    },
+                    "required": ["run_id", "suite", "execution", "modes", "repetitions", "status", "created_at", "planned_total", "progress"]
+                },
+                "MatrixKey": {
+                    "type": "object",
+                    "description": "矩阵单元格：(case_id, agent_mode, repetition)；agent_mode 为核心小写词（workswarm 拓扑序列化为 multi）",
+                    "properties": {
+                        "case_id": { "type": "string" },
+                        "agent_mode": { "type": "string", "enum": ["single", "multi"] },
+                        "repetition": { "type": "integer" }
+                    },
+                    "required": ["case_id", "agent_mode", "repetition"]
+                },
+                "ProductEvalRun": {
+                    "type": "object",
+                    "description": "一次运行的完整记录（journal 最小单元；失败记录同样保留；Option 字段缺数据时序列化为 null）",
+                    "properties": {
+                        "key": { "$ref": "#/components/schemas/MatrixKey" },
+                        "category": { "type": "string", "enum": ["code", "research", "document"] },
+                        "status": { "type": "string", "enum": ["passed", "failed", "error", "timeout", "cancelled"], "description": "单元格级状态（核心 RunStatus 小写词）" },
+                        "wall_ms": { "type": "integer", "format": "int64" },
+                        "model_calls": { "type": "integer" },
+                        "prompt_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true },
+                        "completion_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true },
+                        "total_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true },
+                        "cost_usd": { "type": ["number", "null"], "nullable": true },
+                        "failed_steps": { "type": "array", "items": { "type": "string" }, "description": "失败步骤（检查器描述/执行器阶段名）" },
+                        "retries": { "type": "integer" },
+                        "cancellations": { "type": "integer" },
+                        "artifact_refs": { "type": "array", "items": { "type": "string" }, "description": "最终 Artifact 引用（沙盒内相对路径）" },
+                        "tool_log": { "type": "array", "items": { "type": "string" }, "description": "真实工具调用轨迹（单 Agent 执行器填写：工具+实参摘要+结果；旧记录缺省为空数组）" },
+                        "model": { "type": ["string", "null"], "nullable": true },
+                        "started_at": { "type": "string" },
+                        "finished_at": { "type": "string" },
+                        "error": { "type": ["string", "null"], "nullable": true }
+                    },
+                    "required": ["key", "category", "status", "wall_ms", "model_calls", "prompt_tokens", "completion_tokens", "total_tokens", "cost_usd", "failed_steps", "retries", "cancellations", "artifact_refs", "tool_log", "model", "started_at", "finished_at", "error"]
+                },
+                "ProductEvalMetrics": {
+                    "type": "object",
+                    "description": "聚合指标：成功率分母为全部已尝试运行（失败/错误/超时一律计入，禁止剔除重算）",
+                    "properties": {
+                        "runs_total": { "type": "integer" },
+                        "passed": { "type": "integer" },
+                        "failed": { "type": "integer" },
+                        "errors": { "type": "integer" },
+                        "timeouts": { "type": "integer" },
+                        "cancelled": { "type": "integer" },
+                        "success_rate": { "type": "number" },
+                        "mean_wall_ms": { "type": "number" },
+                        "total_model_calls": { "type": "integer", "format": "int64" },
+                        "total_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true },
+                        "estimated_cost_usd": { "type": ["number", "null"], "nullable": true }
+                    },
+                    "required": ["runs_total", "passed", "failed", "errors", "timeouts", "cancelled", "success_rate", "mean_wall_ms", "total_model_calls", "total_tokens", "estimated_cost_usd"]
+                },
+                "CaseModeMetrics": {
+                    "type": "object",
+                    "description": "按 (case_id, mode) 分组的细分统计（单 Agent vs WorkSwarm 对照列）",
+                    "properties": {
+                        "case_id": { "type": "string" },
+                        "category": { "type": "string", "enum": ["code", "research", "document"] },
+                        "agent_mode": { "type": "string", "enum": ["single", "multi"] },
+                        "runs_total": { "type": "integer" },
+                        "passed": { "type": "integer" },
+                        "success_rate": { "type": "number" },
+                        "mean_wall_ms": { "type": "number" },
+                        "mean_model_calls": { "type": "number" },
+                        "total_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true }
+                    },
+                    "required": ["case_id", "category", "agent_mode", "runs_total", "passed", "success_rate", "mean_wall_ms", "mean_model_calls", "total_tokens"]
+                },
+                "ProductEvalReport": {
+                    "type": "object",
+                    "description": "ProductEvalReport 原样（core 序列化；聚合全部 journal 记录含失败 + 未完成单元格清单）",
+                    "properties": {
+                        "schema_version": { "type": "integer" },
+                        "suite_name": { "type": "string" },
+                        "suite_hash": { "type": "string" },
+                        "execution": { "type": "string", "enum": ["reference", "live"] },
+                        "model": { "type": ["string", "null"], "nullable": true },
+                        "generated_at": { "type": "string" },
+                        "runs": { "type": "array", "items": { "$ref": "#/components/schemas/ProductEvalRun" } },
+                        "pending": { "type": "array", "items": { "$ref": "#/components/schemas/MatrixKey" } },
+                        "metrics": { "$ref": "#/components/schemas/ProductEvalMetrics" },
+                        "per_case": { "type": "array", "items": { "$ref": "#/components/schemas/CaseModeMetrics" } }
+                    },
+                    "required": ["schema_version", "suite_name", "suite_hash", "execution", "model", "generated_at", "runs", "pending", "metrics", "per_case"]
+                },
+                "CalibrationReport": {
+                    "type": "object",
+                    "description": "预测校准报告（WM0 聚合：命中、误差与不确定度分桶）",
+                    "properties": {
+                        "samples": { "type": "integer", "format": "int64" },
+                        "success_hit_rate": { "type": "number" },
+                        "mean_calibration_error": { "type": "number" },
+                        "mean_delta_jaccard": { "type": "number" },
+                        "uncertainty_buckets": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": { "type": "string" },
+                                    "samples": { "type": "integer", "format": "int64" },
+                                    "hit_rate": { "type": "number" }
+                                },
+                                "required": ["label", "samples", "hit_rate"]
+                            }
+                        }
+                    },
+                    "required": ["samples", "success_hit_rate", "mean_calibration_error", "mean_delta_jaccard", "uncertainty_buckets"]
+                },
+                "CandidateProviderRef": {
+                    "description": "候选 provider 身份（§5.12.4 治理，声明≠接线）：external 需进程内真实接线后才积累影子样本；metadata_only 零样本且不可晋升",
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "type": "string", "enum": ["external"] },
+                                "kind": { "type": "string", "description": "provider 类型标识（如 wm1-http、local-onnx）" },
+                                "locator": { "type": "string", "description": "定位串（端点或资源标识）" }
+                            },
+                            "required": ["type", "kind", "locator"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "type": "string", "enum": ["metadata_only"] }
+                            },
+                            "required": ["type"]
+                        }
+                    ]
+                },
+                "ModelCandidate": {
+                    "type": "object",
+                    "description": "世界模型候选（新候选恒 shadow 起步，达标后显式人工晋升；Option 字段缺省序列化为 null）",
+                    "properties": {
+                        "candidate_id": { "type": "string" },
+                        "model_id": { "type": "string" },
+                        "model_version": { "type": "string" },
+                        "source": { "type": "string" },
+                        "status": { "type": "string", "enum": ["shadow", "active", "rejected"] },
+                        "created_at": { "type": "string", "description": "RFC3339" },
+                        "promoted_at": { "type": "string", "nullable": true },
+                        "promote_reason": { "type": "string", "nullable": true },
+                        "provider": { "$ref": "#/components/schemas/CandidateProviderRef", "description": "provider 身份治理（响应 wire 字段名为 provider；注册请求侧字段名为 provider_ref）" },
+                        "calibration_summary": { "allOf": [{ "$ref": "#/components/schemas/CalibrationReport" }], "nullable": true, "description": "晋升时刻的校准摘要快照（从未晋升过为 null）" }
+                    },
+                    "required": ["candidate_id", "model_id", "model_version", "source", "status", "created_at", "promoted_at", "promote_reason", "provider", "calibration_summary"]
                 }
             },
             "securitySchemes": {
@@ -1187,7 +1592,8 @@ async fn create_session(
         ));
     }
     let model = request.model.unwrap_or_else(|| {
-        std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string())
+        std::env::var("OPENAI_MODEL")
+            .unwrap_or_else(|_| owo_agent_core::gateway::DEFAULT_MODEL_ID.to_string())
     });
     let session = state
         .store
@@ -1787,10 +2193,11 @@ async fn run_eval(
             return Err((
                 StatusCode::NOT_FOUND,
                 format!("未知评估套件：{}", request.suite_id),
-            ))
+            ));
         }
     };
-    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
+    let model = std::env::var("OPENAI_MODEL")
+        .unwrap_or_else(|_| owo_agent_core::gateway::DEFAULT_MODEL_ID.to_string());
     let provider = state.agent.provider();
     let report = owo_agent_core::run_suite(provider, &model, &suite).await;
     Ok(Json(report))
@@ -1878,7 +2285,7 @@ async fn perception_layers(
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!("未知感知层：{other}（l0_event/l1_ui/l2_visual/l3_semantic）"),
-            ))
+            ));
         }
     };
     let mut perception = state.perception.lock().map_err(poison)?;
@@ -3622,7 +4029,7 @@ async fn whitelist_manage(
                 return Err((
                     StatusCode::BAD_REQUEST,
                     format!("未知操作：{other}（upsert / remove）"),
-                ))
+                ));
             }
         }
         whitelist.entries().to_vec()
@@ -3652,7 +4059,7 @@ async fn whitelist_manage(
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!("未知操作：{other}（upsert / remove）"),
-            ))
+            ));
         }
     }
     settings
@@ -4124,7 +4531,8 @@ async fn subagent_run(
         .model
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
-            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string())
+            std::env::var("OPENAI_MODEL")
+                .unwrap_or_else(|_| owo_agent_core::gateway::DEFAULT_MODEL_ID.to_string())
         });
     let agent = Arc::clone(&state.agent);
     let text = agent
@@ -5076,7 +5484,7 @@ async fn schema_get(
             return Err((
                 StatusCode::NOT_FOUND,
                 format!("未知 schema：{kind}/{version}（GET /schemas 查看列表）"),
-            ))
+            ));
         }
     };
     let value: Value = serde_json::from_str(raw)

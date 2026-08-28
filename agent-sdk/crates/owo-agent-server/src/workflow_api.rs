@@ -510,7 +510,7 @@ async fn decide_run_approval(
             return Err(api_err(
                 StatusCode::BAD_REQUEST,
                 format!("decision 只能为 approve|reject：{other}"),
-            ))
+            ));
         }
     };
     decide_approval(&run_id, approve).map_err(|e| api_err(StatusCode::NOT_FOUND, e))?;

@@ -444,7 +444,7 @@ async fn usage_records(
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": format!("未知维度：{other}") })),
-            ))
+            ));
         }
         None => global().records(),
     };

@@ -19,12 +19,16 @@ pub mod computer_use;
 pub mod context;
 pub mod credentials;
 pub mod critic;
+pub mod dataset_builder;
+pub mod desktop_env;
 pub mod element_registry;
 pub mod error;
 pub mod eval;
+pub mod execution_target;
 pub mod executor;
 pub mod experience_store;
 pub mod fleet;
+pub mod fleet_node_protocol;
 pub mod fleet_transport;
 pub mod gateway;
 pub mod goal;
@@ -46,6 +50,12 @@ pub mod permissions;
 pub mod plan;
 pub mod platform;
 pub mod plugin;
+pub mod product_eval;
+/// WorkSwarm 真实团队评测适配器（文件位于 product_eval/ 目录下；
+/// 待 ProductEval 模块目录化后并入其模块树）。
+#[path = "product_eval/workswarm_executor.rs"]
+pub mod product_eval_workswarm;
+pub mod project_space_store;
 pub mod remote_step;
 pub mod sandbox;
 pub mod scene;
@@ -62,11 +72,14 @@ pub mod stt;
 pub mod subagent;
 pub mod tools;
 pub mod trace;
+pub mod transition;
 pub mod vision;
 pub mod whitelist;
 pub mod window_template;
 pub mod worker_pool;
 pub mod workflow;
+pub mod workswarm;
+pub mod world_model;
 
 pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
@@ -112,12 +125,29 @@ pub use critic::{
     review_loop, ConsistencyReport, Critic, CriticConfig, CriticVerdict, ReadOnlyGate,
     ReviewOutcome, ReviewRound, SamplePair, ScriptedCritic,
 };
+pub use dataset_builder::{
+    build_dataset, load_manifest, save_manifest, BuildResult, DatasetBuilderConfig,
+    DatasetManifest, RejectReason, Rejection,
+};
+pub use desktop_env::{
+    ActionKind, Assertion, DesktopEnv, EnvError, EnvLeaseRecord, EnvRegistry, FaultSpec,
+    FieldChange, GroundedAction, LeaseProof, RewardParts, RiskLevel, SimAppKind, SimDesktopEnv,
+    SimElement, StateDelta, StepResult, SuccessSpec, SurfaceEnvAdapter, TaskSeed, Verdict,
+    WorldStateV1, SIM_ENV_PROTOCOL, SIM_ENV_VERSION,
+};
 pub use element_registry::{
     fuse_sources, fuse_sources_with_vision, register_vision_grounding, ElementRegistry,
     SceneElement, VisionGrounding,
 };
 pub use error::AgentError;
 pub use eval::{builtin_suite, eval_suite_path, run_suite, EvalCase, EvalReport, EvalSuite};
+/// A2 统一调度适配层（冻结接口）：显式执行目标 / 绑定 / 派发裁定。
+pub use execution_target::{
+    dispatch_disposition, select_binding, BindingBudget, DispatchCancelRegistry, DispatchChannel,
+    DispatchDisposition, ExecutionTarget, FleetDispatchWorker, FleetProbe, LocalProcessProbe,
+    PermissionScope, ResolvedDispatch, TargetAvailability, WorkerBinding,
+    DEFAULT_FLEET_DISPATCH_TIMEOUT, TARGET_FLEET_NODE, TARGET_IN_PROCESS, TARGET_LOCAL_PROCESS,
+};
 pub use executor::{execute_graph, ExecReport, ExecStep, UiActionSource, WindowsUiaSource};
 pub use experience_store::{
     load_aggregation_report, AggregationReport, Attribution, ExperienceEvent, ExperienceKind,
@@ -130,6 +160,10 @@ pub use fleet::{
     Mailbox, MessageKind, OverflowPolicy, PushOutcome, RestartPolicy, RestartRule,
     SupervisionState, Supervisor, WaitEdge, WaitGraph, WaitResolution, WorkerEvent,
     WorkerEventKind,
+};
+pub use fleet_node_protocol::{
+    violation_correlation_id, NodeAuthHint, NodeCancelAckBody, NodeClaimBody, NodeHeartbeatBody,
+    NodeHeartbeatResponse, NodeProgressBody, NodeProtocolViolation, NodeResultBody,
 };
 /// 控制面 HTTP 传输（cloud_exec 已有 `HttpTransport`，此处以 FleetHttpTransport 区分）。
 pub use fleet_transport::HttpTransport as FleetHttpTransport;
@@ -182,6 +216,26 @@ pub use plugin::{
     PluginManager, PluginManifest, PluginReviewState, PluginSignature, PluginStateStore,
     PluginSubmission, VersionsJson,
 };
+/// V1-R1 产品评测底座：固定任务集 × 重复 × 单/多 Agent 对照。
+pub use product_eval::{
+    aggregate_metrics, aggregate_per_case, build_live_provider, compare_reports,
+    evaluate_checker_on_dir, evaluate_checker_on_map, filter_cases, format_report_summary,
+    format_validation, load_report, load_suite, parse_file_blocks, resolve_suite_input,
+    sanitize_rel_path, scope_matches, suite_hash, validate_case, validate_suite, AgentMode,
+    ArtifactChecker, CaseExecutor, CaseModeMetrics, EvalCategory, ExecContext, GenerativeExecutor,
+    InputFixture, MatrixKey, MatrixRunner, ProductEvalCase, ProductEvalError, ProductEvalMetrics,
+    ProductEvalReport, ProductEvalRun, ProductEvalSuite, RawExecOutcome, ReferenceDryExecutor,
+    RunOptions, RunStatus, SuiteBundle, SuiteDefaults, SuiteValidation, TaskValidation,
+    PRODUCT_EVAL_SCHEMA_VERSION,
+};
+/// WorkSwarm 真实团队评测适配器（V1-R2 多 Agent 对照执行器）。
+pub use product_eval_workswarm::{
+    ArtifactObservation, TeamRunObservation, WorkSwarmExecutor, WorkSwarmExecutorConfig,
+    WorkerObservation,
+};
+pub use project_space_store::{
+    ProjectSpaceStoreBackend, ProjectSpaceStoreError, SqliteProjectSpaceStore,
+};
 pub use remote_step::{
     approval_request_event, approve_transport_task, submit_via_transport,
     submit_via_transport_with_timeout, ApprovalSpec, EvidenceItem, RemoteStep, RemoteStepEvent,
@@ -212,6 +266,11 @@ pub use sqlite_store::SqliteSessionStore;
 pub use stt::{LocalStt, SttOutcome};
 pub use tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
 pub use trace::{list_traces, load_trace, save_trace, TraceRecord};
+pub use transition::{
+    align_fork_point, annotate_fork_points, record_transition_experience, FailureClass,
+    ForkAlignment, ForkDivergence, PredictionRef, PrivacyScope, TransitionOutcome, TransitionStore,
+    TransitionTraceV1, VerifierResult,
+};
 pub use vision::{
     bmp_to_png, capture_vision_bmp, capture_vision_png, capture_vision_png_region,
     cross_validate_box, describe_image, ground_element, ollama_models, parse_verification,
@@ -232,4 +291,16 @@ pub use workflow::{
     AutoApprover, CheckpointRef, HumanApprover, LocateSpec, MockBackend, PermMode, PermissionClaim,
     SenseSpec, StepRecord as WorkflowStepRecord, TriggerKind, WorkflowDefinition, WorkflowEngine,
     WorkflowOutcome, WorkflowState, WorkflowStep, WorkflowTrigger,
+};
+pub use workswarm::{
+    default_relay_roles, wait_cancel, CancelToken, CreateTeamRequest, HandoffFields, HumanWait,
+    PhaseOutcome, RoleSpec, RoleWorker, RunMeta, SteerCommand, TeamCoordinator,
+    TeamTemplateRegistry, WorkSwarmError,
+};
+pub use world_model::{
+    advise_candidates, aggregate_calibration, delta_overlap, evaluate_prediction, shadow_step,
+    Advice, AdviceMode, AssertionProbability, CalibrationReport, GuiWorldModel, ModelError,
+    PredictionEvaluation, RuleWorldModel, RunMode, ShadowStepReport, TransitionMeta,
+    UnavailableWorldModel, UncertaintyBucket, WorldModelContext, WorldPrediction,
+    CLOSE_CANDIDATE_EPS, HIGH_UNCERTAINTY,
 };
