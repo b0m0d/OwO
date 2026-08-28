@@ -931,3 +931,44 @@ fn effective_values_and_filters() {
     assert_eq!(cat.len(), 1);
     assert_eq!(cat[0].id, "doc-one");
 }
+
+// ---------------------------------------------------------------------------
+// 13) R1 统计段：模式快照按拓扑过滤 + 对照 JSON 形状（live 基线用）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mode_statistics_and_report_statistics_shapes() {
+    let runs = vec![
+        dummy_run(
+            MatrixKey::new(String::from("c"), AgentMode::Single, 0),
+            RunStatus::Passed,
+        ),
+        dummy_run(
+            MatrixKey::new(String::from("c"), AgentMode::Single, 1),
+            RunStatus::Failed,
+        ),
+        dummy_run(
+            MatrixKey::new(String::from("c"), AgentMode::Multi, 0),
+            RunStatus::Passed,
+        ),
+    ];
+    let single = mode_statistics(&runs, AgentMode::Single);
+    assert_eq!(single.runs_total, 2);
+    assert_eq!(single.passed, 1);
+    assert!((single.success_rate - 0.5).abs() < 1e-9);
+    assert!(single.ci95_low < 0.5 && single.ci95_high > 0.5);
+    let multi = mode_statistics(&runs, AgentMode::Multi);
+    assert_eq!(multi.runs_total, 1);
+    assert!((multi.success_rate - 1.0).abs() < 1e-9);
+
+    let json = report_statistics(&runs);
+    assert_eq!(
+        json["comparison"]["multi_success_rate_diff"],
+        serde_json::json!(0.5)
+    );
+    assert_eq!(json["comparison"]["rules"].as_array().unwrap().len(), 3);
+    // 渲染段落含统计与启用条件两个小节。
+    let text = format_mode_statistics(&runs);
+    assert!(text.contains("CI95"));
+    assert!(text.contains("多 Agent 启用条件"));
+}

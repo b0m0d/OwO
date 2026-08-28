@@ -24,3 +24,10 @@ crossterm = "0.28"
 [[bin]]
 name = "owo-agent"
 path = "src/main.rs"
+
+# product-eval preflight 的磁盘剩余空间检查（GetDiskFreeSpaceExW，仅 Windows）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }

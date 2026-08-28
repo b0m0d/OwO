@@ -209,7 +209,7 @@ impl Worker for SleepWorker {
             .get("ms")
             .and_then(Value::as_u64)
             .unwrap_or(0)
-            .min(60_000);
+            .min(600_000);
         tokio::time::sleep(Duration::from_millis(ms)).await;
         Ok(format!("slept {ms}ms"))
     }
@@ -646,7 +646,11 @@ async fn get_team(
         .coordinator()
         .map_err(|e| error_response(&e))?;
     // 请求时先做一次单团队中断识别（幂等；CorruptState 在下方 load_run_state 明确报错）。
-    let _ = coordinator.detect_interrupted_for(&id).await;
+    // 响应性（R3）：运行中/循环存活的团队跳过识别——该路径取 team 锁，
+    // 长 Worker 阶段绝不等待（运行中的团队按定义不可能是中断残留）。
+    if !coordinator.is_run_active(&id) && !coordinator.is_loop_alive(&id) {
+        let _ = coordinator.detect_interrupted_for(&id).await;
+    }
     let team = coordinator
         .get_team_run(&id)
         .await
@@ -741,6 +745,16 @@ async fn team_event_stream(
         return;
     }
 
+    // 进度帧（R3）：订阅即发当前快照（客户端立即拿到 current_steps/counts/seq），
+    // 此后仅当代次变化才发（seq 单调递增；客户端以 seq 去重/断线续传）。
+    let mut last_progress_seq: Option<u64> = None;
+    if let Ok(progress) = coordinator.progress_snapshot(&team_id).await {
+        last_progress_seq = Some(progress.seq);
+        if !emit(json!({ "type": "progress", "progress": progress })) {
+            return;
+        }
+    }
+
     // 该团队当前的审计条目（session_id = team_id）。
     let team_entries = || -> Vec<owo_agent_core::audit::AuditEntry> {
         let Some(log) = coordinator.audit_log() else {
@@ -801,10 +815,19 @@ async fn team_event_stream(
                 return;
             }
         }
+        // 进度帧（seq 变化即发；步骤开始/完成/失败/取消都会推进 coordinator 侧序号）。
+        if let Ok(progress) = coordinator.progress_snapshot(&team_id).await {
+            if last_progress_seq != Some(progress.seq) {
+                last_progress_seq = Some(progress.seq);
+                if !emit(json!({ "type": "progress", "progress": progress })) {
+                    return;
+                }
+            }
+        }
         if team.status.is_terminal() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 

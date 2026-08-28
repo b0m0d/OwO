@@ -16,3 +16,48 @@
 - **文件编码**：所有源文件必须为 UTF-8；Windows 下写入含中文的 .rs/.md 文件时禁止经 GBK 控制台中转（会导致 mojibake 损坏）。提交前用 `cargo fmt --check` + `git diff` 抽查。
 - **并行协作**：多个 Agent 并行时按 `AGENTS-COORD.md` 认领文件；同一文件同一时间只允许一个 Agent 修改；涉及 `owo-agent-server/src/lib.rs` 等核心文件的改动需先跑 `cargo check` 验证。
 - **HTTP 契约**：服务端新增/修改路由必须同步 `tests/route_contract_tests.rs`（路由面契约测试），防止接口回归丢失。
+
+## 模型凭据与环境变量（OPENAI_*）
+
+模型凭据**只经环境变量注入**，本仓库已将 `OPENAI_API_KEY` 配置在 **Windows 用户级环境变量**（注册表 `HKCU\Environment`），对全体新开进程生效；密钥本体禁止写入任何代码、配置文件或提交。
+
+### 已配置的变量（当前机器）
+
+| 变量 | 状态 | 说明 |
+|---|---|---|
+| `OPENAI_API_KEY` | ✅ 已配置（用户级） | GLM/BigModel 密钥，格式 `id.secret`，共 49 字符 |
+| `OPENAI_BASE_URL` | 未设置 | 缺省即内置 BigModel 端点 `https://open.bigmodel.cn/api/paas/v4`，无需设置 |
+| `OPENAI_MODEL` | 未设置 | 缺省即内置 `glm-5.3-flash`，无需设置 |
+
+### 如何设置 / 更换密钥
+
+```powershell
+# 设置或更换（写入用户级环境变量，永久生效；对已运行的进程需重开终端）
+[Environment]::SetEnvironmentVariable('OPENAI_API_KEY', '<你的密钥>', 'User')
+
+# 验证是否已配置（只看存在性与长度，不要回显密钥值）
+$k = [Environment]::GetEnvironmentVariable('OPENAI_API_KEY', 'User')
+"SET=$([bool]$k) LEN=$($k.Length)"
+```
+
+### 子进程如何取用（脚本/Agent 任务中的标准写法）
+
+新开的 PowerShell 子进程不会自动继承"用户级"变量的注册表新值（父进程环境是启动时快照），标准注入写法：
+
+```powershell
+$k = [Environment]::GetEnvironmentVariable('OPENAI_API_KEY', 'User')
+$env:OPENAI_API_KEY = $k   # 注入本进程环境，子命令即可继承
+cargo run -q -p owo-agent-cli -- product-eval run --exec agent --agents single --reps 1 --only code-bug-fix --fresh
+```
+
+### 可选辅助变量
+
+- `OPENAI_BASE_URL` / `OPENAI_MODEL`：覆盖缺省端点/模型（如指向 Ollama 等本地端点；指向本地端点时允许空密钥）。
+- `OWO_CLOUD_ENABLED=false`：拒绝一切云端模型调用（数据出境开关）。
+- `OWO_HTTP_PROXY` / `HTTPS_PROXY`：出网代理。
+- `OWO_EVAL_PRICE_IN_PER_MTOK` / `OWO_EVAL_PRICE_OUT_PER_MTOK`：评测报告的成本估算单价（$/百万 token；未设置时报告 cost 字段为 null，tokens 仍真实落盘）。
+- `OWO_MCP_SCHEMA_BUDGET_BYTES`：MCP 工具 schema 压缩阈值。
+
+### 红线重申
+
+密钥只存在于：环境变量 / Windows 注册表（用户级）。**禁止**出现在任何 `.rs`/`.json`/`.md`/`.ps1` 等仓库文件、日志输出或对话回显中；排障时一律用 `SET=True LEN=…` 这类掩码方式确认。

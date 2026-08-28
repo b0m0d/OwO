@@ -164,6 +164,10 @@ pub struct Artifact {
     pub classification: ArtifactClassification,
     #[serde(default = "default_review_state")]
     pub review_state: ReviewState,
+    /// 版本链：本版本所取代的上一版 artifact_id（首版为 None）。
+    /// 评审闭环（R2）用于把同 kind 的历次产出串成可追溯链。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_artifact_id: Option<String>,
     pub created_at: String,
 }
 
@@ -173,6 +177,46 @@ fn default_artifact_classification() -> ArtifactClassification {
 
 fn default_review_state() -> ReviewState {
     ReviewState::Draft
+}
+
+/// 评审决定（§6.6 Artifact 评审闭环，V1-R2）。
+///
+/// - `approve`：批准（进入 approved head 候选）；
+/// - `request_changes`：要求修改（产物回到 Draft 供返工出新版）；
+/// - `reject`：驳回（终态拒绝，留审计）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactReviewDecision {
+    Approve,
+    RequestChanges,
+    Reject,
+}
+
+/// 不可变评审记录（§6.6 Artifact 评审闭环，V1-R2）。
+///
+/// 一旦落盘永不修改/删除：评审历史只能追加（append-only）。
+/// 同一 `idempotency_key` 重复提交不产生第二条记录（幂等回放）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactReviewRecord {
+    pub review_id: String,
+    /// 被评审的产物。
+    pub artifact_id: String,
+    /// 被评审的产物版本（与 `expected_version` 乐观并发目标对应）。
+    pub artifact_version: u32,
+    /// 产物所属团队运行。
+    pub team_id: String,
+    pub decision: ArtifactReviewDecision,
+    /// 评审者（member_id / user_id / 角色名，如 "critic" / "human:u1"）。
+    pub reviewer: String,
+    /// 评语（可空）。
+    #[serde(default)]
+    pub comment: String,
+    /// 幂等键（存储层唯一约束；同键重放返回既有记录）。
+    pub idempotency_key: String,
+    /// 评审时的产物内容引用（取证锚点：证明评审的是这份内容）。
+    #[serde(default)]
+    pub content_ref: String,
+    pub created_at: String,
 }
 
 /// 决策记录（§6.6 DecisionRecord）。

@@ -11,7 +11,10 @@
 //! - 线程安全：内部使用 `Mutex<Connection>`，与既有 `SqliteSessionStore` 一致。
 
 use async_trait::async_trait;
-use owo_agent_protocol::{Artifact, DecisionRecord, HandoffRecord, ProjectSpace, TeamRun};
+use owo_agent_protocol::{
+    Artifact, ArtifactReviewDecision, ArtifactReviewRecord, DecisionRecord, HandoffRecord,
+    ProjectSpace, TeamRun,
+};
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::Mutex;
@@ -73,6 +76,30 @@ pub trait ProjectSpaceStoreBackend: Send + Sync {
     async fn get_team_run(&self, team_id: &str) -> Result<TeamRun>;
     async fn list_team_runs(&self) -> Result<Vec<TeamRun>>;
     async fn delete_team_run(&self, team_id: &str) -> Result<()>;
+
+    // -- ArtifactReview（评审闭环，V1-R2；记录只增不改） --
+    /// 追加一条评审记录（`idempotency_key` 唯一约束，重复插入报错由调用方幂等处理）。
+    async fn save_artifact_review(&self, review: &ArtifactReviewRecord) -> Result<()>;
+    /// 按产物取全部评审记录（created_at 升序）。
+    async fn list_artifact_reviews(&self, artifact_id: &str) -> Result<Vec<ArtifactReviewRecord>>;
+    /// 按幂等键查既有记录（幂等回放依据）。
+    async fn get_artifact_review_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<ArtifactReviewRecord>>;
+    /// 产物所属 project_id（索引列读取；评审头表定位用）。
+    async fn get_artifact_project(&self, artifact_id: &str) -> Result<String>;
+    /// 设置 (project, kind) 的 approved head（真实存在且已批准的版本，调用方保证）。
+    async fn set_approved_head(
+        &self,
+        project_id: &str,
+        kind: &str,
+        artifact_id: &str,
+        approved_at: &str,
+    ) -> Result<()>;
+    /// 读取 approved head（不存在返回 None；head 指向的产物缺失/未批准时返回 None——
+    /// 自愈语义：脏 head 不阻塞读取，等待下次 approve 覆盖）。
+    async fn get_approved_head(&self, project_id: &str, kind: &str) -> Result<Option<Artifact>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +140,26 @@ fn worksarm_schema() -> &'static str {
          data_json TEXT NOT NULL,
          created_at TEXT NOT NULL,
          updated_at TEXT NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS artifact_reviews (
+         review_id TEXT PRIMARY KEY,
+         artifact_id TEXT NOT NULL,
+         artifact_version INTEGER NOT NULL,
+         team_id TEXT NOT NULL,
+         decision TEXT NOT NULL,
+         reviewer TEXT NOT NULL,
+         comment TEXT NOT NULL DEFAULT '',
+         idempotency_key TEXT NOT NULL UNIQUE,
+         content_ref TEXT NOT NULL DEFAULT '',
+         created_at TEXT NOT NULL
+     );
+     CREATE INDEX IF NOT EXISTS idx_artifact_reviews_artifact ON artifact_reviews(artifact_id);
+     CREATE TABLE IF NOT EXISTS artifact_approved_heads (
+         project_id TEXT NOT NULL,
+         kind TEXT NOT NULL,
+         artifact_id TEXT NOT NULL,
+         approved_at TEXT NOT NULL,
+         PRIMARY KEY (project_id, kind)
      );"
 }
 
@@ -125,6 +172,8 @@ impl SqliteProjectSpaceStore {
     /// 打开或创建存储（自动建表）。
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // 多连接共存（协调器 + 评审 API 各持一条连接）：写锁竞争在 busy_timeout 内自旋等待。
+        conn.busy_timeout(std::time::Duration::from_millis(2000))?;
         conn.execute_batch(worksarm_schema())?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -133,6 +182,7 @@ impl SqliteProjectSpaceStore {
 
     /// 使用已有连接（测试注入）。
     pub fn from_connection(conn: Connection) -> Result<Self> {
+        conn.busy_timeout(std::time::Duration::from_millis(2000))?;
         conn.execute_batch(worksarm_schema())?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -400,6 +450,332 @@ impl ProjectSpaceStoreBackend for SqliteProjectSpaceStore {
         conn.execute("DELETE FROM team_runs WHERE team_id = ?1", params![team_id])?;
         Ok(())
     }
+
+    // -- ArtifactReview --
+
+    async fn save_artifact_review(&self, review: &ArtifactReviewRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO artifact_reviews (
+                 review_id, artifact_id, artifact_version, team_id, decision,
+                 reviewer, comment, idempotency_key, content_ref, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                review.review_id,
+                review.artifact_id,
+                review.artifact_version,
+                review.team_id,
+                serde_json::to_string(&review.decision)
+                    .map_err(|e| ProjectSpaceStoreError::Serialization(e.to_string()))?,
+                review.reviewer,
+                review.comment,
+                review.idempotency_key,
+                review.content_ref,
+                review.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    async fn list_artifact_reviews(&self, artifact_id: &str) -> Result<Vec<ArtifactReviewRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT review_id, artifact_id, artifact_version, team_id, decision,
+                    reviewer, comment, idempotency_key, content_ref, created_at
+             FROM artifact_reviews WHERE artifact_id = ?1 ORDER BY created_at, review_id",
+        )?;
+        let rows = stmt.query_map(params![artifact_id], review_from_row)?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    async fn get_artifact_review_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<ArtifactReviewRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT review_id, artifact_id, artifact_version, team_id, decision,
+                    reviewer, comment, idempotency_key, content_ref, created_at
+             FROM artifact_reviews WHERE idempotency_key = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![idempotency_key], review_from_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_artifact_project(&self, artifact_id: &str) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let project_id: String = conn
+            .query_row(
+                "SELECT project_id FROM artifacts WHERE artifact_id = ?1",
+                params![artifact_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    ProjectSpaceStoreError::NotFound(format!("Artifact {artifact_id}"))
+                }
+                other => ProjectSpaceStoreError::Sqlite(other),
+            })?;
+        Ok(project_id)
+    }
+
+    async fn set_approved_head(
+        &self,
+        project_id: &str,
+        kind: &str,
+        artifact_id: &str,
+        approved_at: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO artifact_approved_heads (project_id, kind, artifact_id, approved_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id, kind) DO UPDATE SET
+                 artifact_id = excluded.artifact_id, approved_at = excluded.approved_at",
+            params![project_id, kind, artifact_id, approved_at],
+        )?;
+        Ok(())
+    }
+
+    async fn get_approved_head(&self, project_id: &str, kind: &str) -> Result<Option<Artifact>> {
+        let artifact_id: Option<String> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT artifact_id FROM artifact_approved_heads
+                 WHERE project_id = ?1 AND kind = ?2",
+                params![project_id, kind],
+                |row| row.get::<_, String>(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(ProjectSpaceStoreError::Sqlite(other)),
+            })?
+        };
+        let Some(artifact_id) = artifact_id else {
+            return Ok(None);
+        };
+        // 自愈：head 必须指向真实存在且已批准的版本；否则视为无有效 head。
+        match self.get_artifact(&artifact_id).await {
+            Ok(a) if a.review_state == owo_agent_protocol::ReviewState::Approved => Ok(Some(a)),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// artifact_reviews 行 → 评审记录（decision 以 JSON 文本存 snake_case）。
+fn review_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactReviewRecord> {
+    let decision_json: String = row.get(4)?;
+    Ok(ArtifactReviewRecord {
+        review_id: row.get(0)?,
+        artifact_id: row.get(1)?,
+        artifact_version: row.get(2)?,
+        team_id: row.get(3)?,
+        decision: serde_json::from_str(&decision_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        reviewer: row.get(5)?,
+        comment: row.get(6)?,
+        idempotency_key: row.get(7)?,
+        content_ref: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 评审闭环编排（V1-R2）：乐观并发 + 幂等 + 授权 + approved head
+// ---------------------------------------------------------------------------
+
+/// 评审提交（服务端把 HTTP 请求体映射到此；纯存储编排，不含 HTTP 语义）。
+#[derive(Debug, Clone)]
+pub struct ArtifactReviewInput {
+    pub artifact_id: String,
+    pub team_id: String,
+    pub decision: ArtifactReviewDecision,
+    pub reviewer: String,
+    pub comment: String,
+    /// 乐观并发目标版本；`None` 表示不做版本校验（接受当前版本）。
+    pub expected_version: Option<u32>,
+    pub idempotency_key: String,
+    /// Human 策略是否授权生产者自批（`human_policy == "self_review_allowed"`）。
+    pub self_approve_authorized: bool,
+}
+
+/// 评审业务错误（服务端映射：NotFound→404、VersionConflict/Superseded/Idempotency→409、
+/// Forbidden→403、Validation→400、Store→500）。
+#[derive(Debug, thiserror::Error)]
+pub enum ArtifactReviewError {
+    #[error("产物不存在：{0}")]
+    ArtifactNotFound(String),
+    #[error("版本冲突：产物当前为 v{current}，提交基于 v{expected}")]
+    VersionConflict { current: u32, expected: u32 },
+    #[error("无权评审：{0}")]
+    Forbidden(String),
+    #[error("产物已被新版本取代，不能批准旧版：{0}")]
+    Superseded(String),
+    #[error("幂等键冲突：该键已用于其他产物（{0}）")]
+    IdempotencyConflict(String),
+    #[error("评审输入无效：{0}")]
+    Validation(String),
+    #[error(transparent)]
+    Store(#[from] ProjectSpaceStoreError),
+}
+
+/// 评审结果：`replayed=true` 表示幂等键命中既有记录（零副作用回放）。
+#[derive(Debug, Clone)]
+pub struct ArtifactReviewOutcome {
+    pub replayed: bool,
+    pub review: ArtifactReviewRecord,
+    pub artifact: Artifact,
+    /// decision=approve 时的新 approved head（其余为 None）。
+    pub approved_head: Option<Artifact>,
+}
+
+/// Human 策略判定：生产者自批自己的产物需要显式 `self_review_allowed` 授权；
+/// 缺省（None / human_approval_required / 其他值）一律禁止自批。
+pub fn self_approve_allowed(human_policy: Option<&str>) -> bool {
+    human_policy == Some("self_review_allowed")
+}
+
+/// 执行一次 Artifact 评审（幂等、乐观并发、授权与 approved head 维护）。
+///
+/// 语义：
+/// 1. 幂等键命中且属于同一产物 → 原样回放既有记录（不追加、不改状态）；
+/// 2. 幂等键命中但属于其他产物 → `IdempotencyConflict`；
+/// 3. `expected_version` 与当前版本不符 → `VersionConflict`（旧页面提交 409）；
+/// 4. 评审者=生产者且 decision=approve 且未获 Human 策略授权 → `Forbidden`；
+/// 5. approve 被取代版本（链上已 superseded）→ `Superseded`；
+/// 6. 通过后：追加不可变记录、按决定迁移 `review_state`
+///    （approve→Approved 并把 (project, kind) head 指向本版；request_changes→Draft；reject→Rejected）。
+pub async fn apply_artifact_review(
+    store: &dyn ProjectSpaceStoreBackend,
+    input: &ArtifactReviewInput,
+) -> std::result::Result<ArtifactReviewOutcome, ArtifactReviewError> {
+    if input.reviewer.trim().is_empty() {
+        return Err(ArtifactReviewError::Validation("reviewer 不能为空".into()));
+    }
+    if input.idempotency_key.trim().is_empty() {
+        return Err(ArtifactReviewError::Validation(
+            "idempotency_key 不能为空".into(),
+        ));
+    }
+
+    // 1. 幂等回放（在任何状态变更之前）。
+    if let Some(existing) = store
+        .get_artifact_review_by_idempotency_key(&input.idempotency_key)
+        .await?
+    {
+        if existing.artifact_id != input.artifact_id {
+            return Err(ArtifactReviewError::IdempotencyConflict(
+                existing.artifact_id,
+            ));
+        }
+        let artifact = store.get_artifact(&input.artifact_id).await?;
+        let approved_head = if existing.decision == ArtifactReviewDecision::Approve {
+            let project_id = store.get_artifact_project(&input.artifact_id).await?;
+            store.get_approved_head(&project_id, &artifact.kind).await?
+        } else {
+            None
+        };
+        return Ok(ArtifactReviewOutcome {
+            replayed: true,
+            review: existing,
+            artifact,
+            approved_head,
+        });
+    }
+
+    // 2. 目标产物与乐观并发校验。
+    let artifact = store
+        .get_artifact(&input.artifact_id)
+        .await
+        .map_err(|e| match e {
+            ProjectSpaceStoreError::NotFound(_) => {
+                ArtifactReviewError::ArtifactNotFound(input.artifact_id.clone())
+            }
+            other => ArtifactReviewError::Store(other),
+        })?;
+    if let Some(expected) = input.expected_version {
+        if expected != artifact.version {
+            return Err(ArtifactReviewError::VersionConflict {
+                current: artifact.version,
+                expected,
+            });
+        }
+    }
+
+    // 3. 授权：生产者不得未经 Human 策略授权自批。
+    if input.reviewer == artifact.producer
+        && input.decision == ArtifactReviewDecision::Approve
+        && !input.self_approve_authorized
+    {
+        return Err(ArtifactReviewError::Forbidden(format!(
+            "生产者 {} 不能批准自己的产物（需 Human 策略 self_review_allowed 授权或由他人评审）",
+            artifact.producer
+        )));
+    }
+
+    // 4. 链约束：被新版本取代的旧版不能再被批准为 head。
+    if input.decision == ArtifactReviewDecision::Approve
+        && artifact.review_state == owo_agent_protocol::ReviewState::Superseded
+    {
+        return Err(ArtifactReviewError::Superseded(
+            artifact.artifact_id.clone(),
+        ));
+    }
+
+    // 5. 追加不可变记录。
+    let record = ArtifactReviewRecord {
+        review_id: format!("rev-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        artifact_id: artifact.artifact_id.clone(),
+        artifact_version: artifact.version,
+        team_id: input.team_id.clone(),
+        decision: input.decision,
+        reviewer: input.reviewer.trim().to_string(),
+        comment: input.comment.clone(),
+        idempotency_key: input.idempotency_key.trim().to_string(),
+        content_ref: artifact.content_ref.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    store.save_artifact_review(&record).await?;
+
+    // 6. 迁移 review_state + approved head。
+    let mut updated = artifact.clone();
+    updated.review_state = match input.decision {
+        ArtifactReviewDecision::Approve => owo_agent_protocol::ReviewState::Approved,
+        ArtifactReviewDecision::RequestChanges => owo_agent_protocol::ReviewState::Draft,
+        ArtifactReviewDecision::Reject => owo_agent_protocol::ReviewState::Rejected,
+    };
+    let project_id = store.get_artifact_project(&input.artifact_id).await?;
+    store.save_artifact(&updated, &project_id).await?;
+
+    let approved_head = if input.decision == ArtifactReviewDecision::Approve {
+        store
+            .set_approved_head(
+                &project_id,
+                &updated.kind,
+                &updated.artifact_id,
+                &record.created_at,
+            )
+            .await?;
+        store.get_approved_head(&project_id, &updated.kind).await?
+    } else {
+        None
+    };
+
+    Ok(ArtifactReviewOutcome {
+        replayed: false,
+        review: record,
+        artifact: updated,
+        approved_head,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +826,7 @@ mod tests {
             source_refs: vec!["trace-1".to_string()],
             classification: ArtifactClassification::Private,
             review_state: ReviewState::Draft,
+            supersedes_artifact_id: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         }
     }

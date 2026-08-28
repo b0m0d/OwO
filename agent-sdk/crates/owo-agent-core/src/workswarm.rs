@@ -579,6 +579,51 @@ pub struct HandoffFields {
     pub known_risks: Vec<String>,
 }
 
+/// 进度视图中的执行中步骤（SSE `progress` 事件用）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgressStep {
+    pub step_id: String,
+    /// 角色名（成员名去掉 `m-` 前缀）。
+    pub worker: String,
+    pub status: String,
+    pub attempts: u32,
+    pub started_at: String,
+}
+
+/// 步骤计数（进度视图；`aborted` 为附加口径，前四项与既定契约一致）。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ProgressCounts {
+    pub pending: u32,
+    pub running: u32,
+    pub succeeded: u32,
+    pub failed: u32,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub aborted: u32,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+/// 团队实时进度快照（`seq` 单调递增；变化即代表有状态转移）。
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamProgress {
+    pub seq: u64,
+    pub team_id: String,
+    pub status: String,
+    pub active: bool,
+    pub current_steps: Vec<ProgressStep>,
+    pub counts: ProgressCounts,
+    pub updated_at: String,
+}
+
+/// 阶段领取记录（进程内；进度视图 current_steps 的数据源）。
+#[derive(Debug, Clone)]
+struct PhaseClaim {
+    epoch: u64,
+    steps: Vec<ProgressStep>,
+}
+
 /// WorkSwarm 协调器：组队、阶段执行、接力注册、人节点、steer、模板提案。
 ///
 /// 共享方式：`Arc<TeamCoordinator>`（内部状态均带锁；Clone 成本 = 若干 Arc）。
@@ -601,6 +646,13 @@ pub struct TeamCoordinator {
     loop_alive: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// per-team 取消令牌。
     cancels: Arc<Mutex<HashMap<String, Arc<CancelToken>>>>,
+    /// per-team 阶段代次（进程内单调）：领取阶段读取，cancel/retry/replace 等转向时 +1；
+    /// 旧阶段的合并与产物回传凭代次校验，过期即丢弃（只记审计，不改状态）。
+    phase_epochs: Arc<Mutex<HashMap<String, u64>>>,
+    /// 当前阶段领取信息（进度视图 current_steps 数据源；每团队至多一条）。
+    phase_claims: Arc<Mutex<HashMap<String, PhaseClaim>>>,
+    /// per-team 进度事件序号（进程内单调；状态转移时 +1）。
+    progress_seqs: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl TeamCoordinator {
@@ -622,6 +674,9 @@ impl TeamCoordinator {
             run_flags: Arc::new(Mutex::new(HashMap::new())),
             loop_alive: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
+            phase_epochs: Arc::new(Mutex::new(HashMap::new())),
+            phase_claims: Arc::new(Mutex::new(HashMap::new())),
+            progress_seqs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -691,6 +746,107 @@ impl TeamCoordinator {
     /// 该团队在当前进程中是否有存活的运行循环（磁盘 Running 但此值为假 → 中断候选）。
     pub fn is_loop_alive(&self, team_id: &str) -> bool {
         self.loop_flag(team_id).load(Ordering::SeqCst)
+    }
+
+    // -- 阶段代次 / 实时进度（长任务响应性支撑） --
+
+    /// 当前阶段代次（未领取过 = 0；cancel/retry/replace 等转向时 +1）。
+    fn phase_epoch(&self, team_id: &str) -> u64 {
+        self.phase_epochs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(team_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 阶段代次 +1（转向操作接管现场时调用；返回新代次）。
+    fn bump_phase_epoch(&self, team_id: &str) -> u64 {
+        let mut map = self.phase_epochs.lock().unwrap_or_else(|e| e.into_inner());
+        let next = map.entry(team_id.to_string()).or_insert(0);
+        *next = next.wrapping_add(1);
+        *next
+    }
+
+    /// 登记阶段领取（claim 后调用；进度视图据此外显 current_steps）。
+    fn note_phase_claim(&self, team_id: &str, claim: PhaseClaim) {
+        self.phase_claims
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(team_id.to_string(), claim);
+    }
+
+    /// 清除阶段领取（仅当代次仍匹配；防误清新阶段的领取）。
+    fn clear_phase_claim(&self, team_id: &str, epoch: u64) {
+        let mut map = self.phase_claims.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(team_id).map(|c| c.epoch) == Some(epoch) {
+            map.remove(team_id);
+        }
+    }
+
+    /// 进度序号 +1（每次状态转移调用；返回新序号）。
+    fn advance_progress(&self, team_id: &str) -> u64 {
+        let mut map = self.progress_seqs.lock().unwrap_or_else(|e| e.into_inner());
+        let seq = map.entry(team_id.to_string()).or_insert(0);
+        *seq = seq.wrapping_add(1);
+        *seq
+    }
+
+    /// 当前进度序号（只读；订阅方据此判断是否有新进度）。
+    pub fn progress_seq(&self, team_id: &str) -> u64 {
+        self.progress_seqs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(team_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 实时进度快照（**不取 team_lock**：长 Worker 执行期间随时可安全调用）。
+    ///
+    /// - `current_steps` 来自阶段领取记录（代次匹配时）；
+    /// - 计数：pending = Pending+Ready，running = Running，failed = Failed+Aborted。
+    pub async fn progress_snapshot(&self, team_id: &str) -> WorkSwarmResult<TeamProgress> {
+        let team = self
+            .store
+            .get_team_run(team_id)
+            .await
+            .map_err(|e| match e {
+                ProjectSpaceStoreError::NotFound(_) => {
+                    WorkSwarmError::NotFound(format!("团队 {team_id} 不存在"))
+                }
+                other => WorkSwarmError::Store(other),
+            })?;
+        let state = self.load_goal_state(team_id)?;
+        let mut counts = ProgressCounts::default();
+        for record in state.records.values() {
+            match record.status {
+                StepStatus::Pending | StepStatus::Ready => counts.pending += 1,
+                StepStatus::Running => counts.running += 1,
+                StepStatus::Succeeded => counts.succeeded += 1,
+                StepStatus::Failed => counts.failed += 1,
+                StepStatus::Aborted => counts.aborted += 1,
+            }
+        }
+        let claim = self
+            .phase_claims
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(team_id)
+            .cloned();
+        let current_steps = match claim {
+            Some(claim) if claim.epoch == self.phase_epoch(team_id) => claim.steps,
+            _ => Vec::new(),
+        };
+        Ok(TeamProgress {
+            seq: self.progress_seq(team_id),
+            team_id: team_id.to_string(),
+            status: format!("{:?}", team.status),
+            active: self.is_run_active(team_id),
+            current_steps,
+            counts,
+            updated_at: now_ts(),
+        })
     }
 
     fn audit(&self, team_id: &str, event: &str, detail: String) {
@@ -1171,53 +1327,97 @@ impl TeamCoordinator {
         team_id: &str,
         registry: &WorkerRegistry,
     ) -> WorkSwarmResult<PhaseOutcome> {
-        let lock = self.team_lock(team_id);
-        let _guard = lock.lock().await;
-
-        let (mut team, _space, mut state) = self.load_bundle(team_id).await?;
-        if team.status.is_terminal() {
-            return Ok(PhaseOutcome::Finished);
+        // ---- 阶段 A（短锁）：领取 ready 步骤、标记 Running、持久化 ----
+        // 锁只覆盖领取与落盘，Worker/模型执行的整段时间**不持锁**，
+        // GET 详情 / 任务图 / 产物 / SSE 等读路径不再被长 Worker 阻塞。
+        struct PhaseClaimPlan {
+            epoch: u64,
+            sub_state: GoalRunState,
+            claimed: Vec<ProgressStep>,
+            meta: RunMeta,
         }
-        let meta = RunMeta::load(&self.run_dir, team_id)?;
+        let claim: PhaseClaimPlan = {
+            let lock = self.team_lock(team_id);
+            let _guard = lock.lock().await;
 
-        let ready = Self::ready_steps(&state);
-        let is_human_step = |s: &StepSpec, meta: &RunMeta| -> bool {
-            Self::role_spec_of_member(meta, &s.worker)
-                .map(|r| r.assignee == "human")
-                .unwrap_or(false)
-        };
-        let agent_steps: Vec<StepSpec> = ready
-            .iter()
-            .filter(|s| !is_human_step(s, &meta))
-            .cloned()
-            .collect();
-        let human_steps: Vec<StepSpec> = ready
-            .iter()
-            .filter(|s| is_human_step(s, &meta))
-            .cloned()
-            .collect();
-
-        // 无就绪：全部完成 → Done；否则死锁（上游失败等）→ Failed。
-        if agent_steps.is_empty() && human_steps.is_empty() {
-            if Self::all_succeeded(&state) {
-                return Ok(PhaseOutcome::Done);
+            let (mut team, _space, mut state) = self.load_bundle(team_id).await?;
+            if team.status.is_terminal() {
+                return Ok(PhaseOutcome::Finished);
             }
-            self.fail_run_internal(
-                team_id,
-                &mut team,
-                &mut state,
-                "死锁：存在未完成步骤但无就绪步骤（检查上游失败依赖）",
-            )
-            .await?;
-            return Ok(PhaseOutcome::Failed);
-        }
+            let meta = RunMeta::load(&self.run_dir, team_id)?;
 
-        // agent 批次：子计划 = 已完成步骤 + 本批 agent 步骤（人节点/未来步骤不在子计划内）。
-        if !agent_steps.is_empty() {
+            let ready = Self::ready_steps(&state);
+            let is_human_step = |s: &StepSpec, meta: &RunMeta| -> bool {
+                Self::role_spec_of_member(meta, &s.worker)
+                    .map(|r| r.assignee == "human")
+                    .unwrap_or(false)
+            };
+            let agent_steps: Vec<StepSpec> = ready
+                .iter()
+                .filter(|s| !is_human_step(s, &meta))
+                .cloned()
+                .collect();
+            let human_steps: Vec<StepSpec> = ready
+                .iter()
+                .filter(|s| is_human_step(s, &meta))
+                .cloned()
+                .collect();
+
+            // 无就绪：全部完成 → Done；否则死锁（上游失败等）→ Failed。
+            if agent_steps.is_empty() && human_steps.is_empty() {
+                if Self::all_succeeded(&state) {
+                    return Ok(PhaseOutcome::Done);
+                }
+                self.fail_run_internal(
+                    team_id,
+                    &mut team,
+                    &mut state,
+                    "死锁：存在未完成步骤但无就绪步骤（检查上游失败依赖）",
+                )
+                .await?;
+                return Ok(PhaseOutcome::Failed);
+            }
+            if agent_steps.is_empty() {
+                // 仅人节点就绪：进入门闩（无 Worker 执行，无长锁窗口）。
+                let waits = self.build_human_waits(team_id, &team, &state, &meta, &human_steps);
+                self.mark_awaiting_human(team_id, &mut team, &waits).await?;
+                self.persist_state(&state)?;
+                return Ok(PhaseOutcome::AwaitingHuman { waits });
+            }
+
+            let epoch = self.phase_epoch(team_id);
             self.set_run_active(team_id, true);
             // 磁盘状态 → Running（R2 恢复底座）：进程若在本阶段内崩溃，
             // 磁盘留下 Running 且无活动循环 → 重启后被识别为 interrupted。
             self.mark_team_running(&mut team).await?;
+            let started_at = now_ts();
+            let mut claimed: Vec<ProgressStep> = Vec::with_capacity(agent_steps.len());
+            for step in &agent_steps {
+                if let Some(record) = state.records.get_mut(&step.id) {
+                    record.status = StepStatus::Running;
+                    let role = worker_role(&step.worker).unwrap_or_else(|| step.worker.clone());
+                    claimed.push(ProgressStep {
+                        step_id: step.id.clone(),
+                        worker: role,
+                        status: "Running".to_string(),
+                        attempts: record.attempts.saturating_add(1),
+                        started_at: started_at.clone(),
+                    });
+                }
+            }
+            self.persist_state(&state)?;
+            self.note_phase_claim(
+                team_id,
+                PhaseClaim {
+                    epoch,
+                    steps: claimed.clone(),
+                },
+            );
+            self.advance_progress(team_id);
+
+            // 子计划 = 已完成步骤 + 本批 agent 步骤（人节点/未来步骤不在子计划内）。
+            // 领取步在完整状态中标记为 Running（可观测/可恢复），子计划内转换回
+            // Pending 供 GoalRunner 执行；合并时以终态覆盖。
             let batch_ids: std::collections::HashSet<&str> =
                 agent_steps.iter().map(|s| s.id.as_str()).collect();
             let sub_ids: HashSet<String> = state
@@ -1236,12 +1436,33 @@ impl TeamCoordinator {
                 .iter()
                 .filter(|s| sub_ids.contains(&s.id))
                 .cloned()
+                .map(|mut step| {
+                    if batch_ids.contains(step.id.as_str()) {
+                        // 领取代次注入步骤输入：RoleWorker 回传产物时凭此校验，
+                        // 过期阶段的回传在 register_step_output_checked 被拒收。
+                        if let Some(obj) = step.input.as_object_mut() {
+                            let workswarm = obj
+                                .entry("_workswarm".to_string())
+                                .or_insert_with(|| json!({}));
+                            if let Some(workswarm_obj) = workswarm.as_object_mut() {
+                                workswarm_obj.insert("phase_epoch".to_string(), json!(epoch));
+                            }
+                        }
+                    }
+                    step
+                })
                 .collect();
             let sub_records: BTreeMap<String, _> = state
                 .records
                 .iter()
                 .filter(|(k, _)| sub_ids.contains(*k))
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| {
+                    let mut record = v.clone();
+                    if batch_ids.contains(k.as_str()) && record.status == StepStatus::Running {
+                        record.status = StepStatus::Pending;
+                    }
+                    (k.clone(), record)
+                })
                 .collect();
             let mut sub_state = GoalRunState {
                 run_id: state.run_id.clone(),
@@ -1263,6 +1484,7 @@ impl TeamCoordinator {
             };
             if let Err(e) = sub_state.plan.validate() {
                 self.set_run_active(team_id, false);
+                self.clear_phase_claim(team_id, epoch);
                 return Err(WorkSwarmError::Run(format!("阶段子计划非法：{e}")));
             }
             // 子目标状态：强制可运行（整体 goal 已终态时上面会 Finished；这里处理 Failed 后 continue 的场景）。
@@ -1270,76 +1492,128 @@ impl TeamCoordinator {
                 sub_state.goal.transition(GoalStatus::Running);
                 sub_state.goal.error = None;
             }
-
-            let config = RunnerConfig {
-                max_parallel: 4,
-                persist_dir: None,   // 阶段结束由协调器合并完整状态后统一落盘
-                allow_replan: false, // 团队运行失败 = 显式失败（由 continue 决定重试）
-                ..Default::default()
-            };
-            let mut runner = GoalRunner::from_state(sub_state, config);
-            if let Some(audit) = &self.audit {
-                runner.attach_audit(Arc::clone(audit));
+            PhaseClaimPlan {
+                epoch,
+                sub_state,
+                claimed,
+                meta,
             }
-            let cancel = self.cancel_token(team_id);
-            let result = tokio::select! {
-                r = runner.run(registry) => r,
-                _ = wait_cancel(&cancel) => Ok(GoalStatus::Aborted),
-            };
-            let cancelled = matches!(result, Ok(GoalStatus::Aborted)) && cancel.is_cancelled();
-            if cancelled {
+        }; // —— 阶段 A 结束：锁已释放 ——
+
+        // ---- 阶段 B（无锁）：Worker/模型执行 ----
+        let config = RunnerConfig {
+            max_parallel: 4,
+            persist_dir: None,   // 阶段结束由协调器合并完整状态后统一落盘
+            allow_replan: false, // 团队运行失败 = 显式失败（由 continue 决定重试）
+            ..Default::default()
+        };
+        let mut runner = GoalRunner::from_state(claim.sub_state, config);
+        if let Some(audit) = &self.audit {
+            runner.attach_audit(Arc::clone(audit));
+        }
+        let cancel = self.cancel_token(team_id);
+        let result = tokio::select! {
+            r = runner.run(registry) => r,
+            _ = wait_cancel(&cancel) => {
                 runner.abort();
+                Ok(GoalStatus::Aborted)
             }
-            // 合并子状态 → 完整状态（记录 + 计数器增量），落盘。
-            self.merge_phase_into_full(&mut state, &runner.state);
+        };
 
-            if cancelled {
+        // ---- 阶段 C（短锁）：校验代次后合并结果 ----
+        let lock = self.team_lock(team_id);
+        let _guard = lock.lock().await;
+        let current_epoch = self.phase_epoch(team_id);
+        if current_epoch != claim.epoch {
+            // 过期阶段：cancel/retry/replace 已接管现场。旧结果只记审计——
+            // 不创建 Artifact、不合并记录、不改终态（新阶段会重新领取执行）。
+            self.clear_phase_claim(team_id, claim.epoch);
+            self.set_run_active(team_id, false);
+            self.advance_progress(team_id);
+            self.audit(
+                team_id,
+                "team.phase.stale_drop",
+                format!(
+                    "阶段 epoch={} 结果丢弃（当前 epoch={}；步骤 {:?}；cancel/retry/replace 已接管）",
+                    claim.epoch,
+                    current_epoch,
+                    claim
+                        .claimed
+                        .iter()
+                        .map(|step| step.step_id.as_str())
+                        .collect::<Vec<_>>()
+                ),
+            );
+            let team = self
+                .store
+                .get_team_run(team_id)
+                .await
+                .map_err(|e| match e {
+                    ProjectSpaceStoreError::NotFound(_) => {
+                        WorkSwarmError::NotFound(format!("团队 {team_id} 不存在"))
+                    }
+                    other => WorkSwarmError::Store(other),
+                })?;
+            return Ok(match team.status {
+                TeamRunStatus::Cancelled => PhaseOutcome::Aborted,
+                TeamRunStatus::Failed | TeamRunStatus::Succeeded => PhaseOutcome::Finished,
+                _ if cancel.is_cancelled() => PhaseOutcome::Aborted,
+                _ => PhaseOutcome::MoreReady,
+            });
+        }
+
+        let (mut team, _space, mut state) = self.load_bundle(team_id).await?;
+        // 合并子状态 → 完整状态（记录 + 计数器增量），落盘。
+        self.merge_phase_into_full(&mut state, &runner.state);
+        let meta = claim.meta;
+        let is_human_step = |s: &StepSpec, meta: &RunMeta| -> bool {
+            Self::role_spec_of_member(meta, &s.worker)
+                .map(|r| r.assignee == "human")
+                .unwrap_or(false)
+        };
+        match result {
+            Ok(GoalStatus::Succeeded) => {
                 self.set_run_active(team_id, false);
-                self.cancel_run_internal(team_id, &mut team, &mut state, "steer cancel（运行中）")
+                self.persist_state(&state)?;
+            }
+            Ok(GoalStatus::Aborted) => {
+                self.set_run_active(team_id, false);
+                self.advance_progress(team_id);
+                self.clear_phase_claim(team_id, claim.epoch);
+                self.cancel_run_internal(team_id, &mut team, &mut state, "调度器 abort")
                     .await?;
                 return Ok(PhaseOutcome::Aborted);
             }
-            match result {
-                Ok(GoalStatus::Succeeded) => {
-                    self.set_run_active(team_id, false);
-                    self.persist_state(&state)?;
-                }
-                Ok(GoalStatus::Aborted) => {
-                    self.set_run_active(team_id, false);
-                    self.cancel_run_internal(team_id, &mut team, &mut state, "调度器 abort")
-                        .await?;
-                    return Ok(PhaseOutcome::Aborted);
-                }
-                Ok(GoalStatus::Failed) => {
-                    self.set_run_active(team_id, false);
-                    let reason = state
-                        .goal
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "步骤失败".to_string());
-                    self.persist_state(&state)?;
-                    self.fail_run_internal(team_id, &mut team, &mut state, &reason)
-                        .await?;
-                    return Ok(PhaseOutcome::Failed);
-                }
-                Ok(_) => {
-                    self.set_run_active(team_id, false);
-                    self.persist_state(&state)?;
-                }
-                Err(e) => {
-                    self.set_run_active(team_id, false);
-                    self.persist_state(&state)?;
-                    self.fail_run_internal(
-                        team_id,
-                        &mut team,
-                        &mut state,
-                        &format!("执行异常：{e}"),
-                    )
+            Ok(GoalStatus::Failed) => {
+                self.set_run_active(team_id, false);
+                let reason = state
+                    .goal
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "步骤失败".to_string());
+                self.persist_state(&state)?;
+                self.advance_progress(team_id);
+                self.clear_phase_claim(team_id, claim.epoch);
+                self.fail_run_internal(team_id, &mut team, &mut state, &reason)
                     .await?;
-                    return Ok(PhaseOutcome::Failed);
-                }
+                return Ok(PhaseOutcome::Failed);
+            }
+            Ok(_) => {
+                self.set_run_active(team_id, false);
+                self.persist_state(&state)?;
+            }
+            Err(e) => {
+                self.set_run_active(team_id, false);
+                self.persist_state(&state)?;
+                self.advance_progress(team_id);
+                self.clear_phase_claim(team_id, claim.epoch);
+                self.fail_run_internal(team_id, &mut team, &mut state, &format!("执行异常：{e}"))
+                    .await?;
+                return Ok(PhaseOutcome::Failed);
             }
         }
+        self.advance_progress(team_id);
+        self.clear_phase_claim(team_id, claim.epoch);
 
         // 批次后重评就绪（基于落盘前的最新内存状态）。
         let ready = Self::ready_steps(&state);
@@ -1858,6 +2132,38 @@ impl TeamCoordinator {
         step_id: &str,
         output: &str,
     ) -> WorkSwarmResult<Artifact> {
+        self.register_step_output_checked(team_id, member_id, role, step_id, output, None)
+            .await
+    }
+
+    /// 带阶段代次校验的产物登记：`phase_epoch` 与当前代次不一致（cancel/retry/
+    /// replace 已接管现场）时，**只记审计事件，不创建 Artifact、不改状态**。
+    ///
+    /// `phase_epoch = None` 为兼容入口（人节点/诊断路径），跳过代次校验。
+    pub async fn register_step_output_checked(
+        &self,
+        team_id: &str,
+        member_id: &str,
+        role: &str,
+        step_id: &str,
+        output: &str,
+        phase_epoch: Option<u64>,
+    ) -> WorkSwarmResult<Artifact> {
+        if let Some(epoch) = phase_epoch {
+            let current = self.phase_epoch(team_id);
+            if current != epoch {
+                self.audit(
+                    team_id,
+                    "team.phase.stale_drop",
+                    format!(
+                        "过期阶段产物回传丢弃：member={member_id} step={step_id} epoch={epoch}（当前 {current}）"
+                    ),
+                );
+                return Err(WorkSwarmError::Conflict(format!(
+                    "阶段已过期（epoch {epoch} < {current}）：回传结果已丢弃（cancel/retry/replace 已接管）"
+                )));
+            }
+        }
         let (_team, space, state) = self.load_bundle(team_id).await?;
         let project_id = space.project_id.clone();
         let meta = RunMeta::load(&self.run_dir, team_id)?;
@@ -1910,6 +2216,8 @@ impl TeamCoordinator {
             } else {
                 ReviewState::Draft
             },
+            // 步骤产物首版登记不指向旧版本；重跑版本链由评审闭环（R3）维护。
+            supersedes_artifact_id: None,
             created_at: now_ts(),
         };
         self.store.save_artifact(&artifact, &project_id).await?;
@@ -2384,6 +2692,9 @@ impl TeamCoordinator {
             SteerCommand::Cancel => {
                 let cancel = self.cancel_token(team_id);
                 cancel.cancel(); // 立即（无锁）：进行中的阶段 select 立即感知
+                                 // 代次立即失效：旧阶段的合并与产物回传即刻被拒（阶段 C / 回传校验）。
+                self.bump_phase_epoch(team_id);
+                self.advance_progress(team_id);
                 let lock = self.team_lock(team_id);
                 let _guard = lock.lock().await; // 运行中阶段会先完成取消收尾（同一把锁）
                 let (mut team, mut state) = {
@@ -2416,6 +2727,9 @@ impl TeamCoordinator {
                             .to_string(),
                     ));
                 }
+                // 转向接管现场：阶段代次 +1（此刻无在飞阶段，防御性使旧回传即刻失效）。
+                self.bump_phase_epoch(team_id);
+                self.advance_progress(team_id);
                 // R2：continue/retry 前先就地识别「磁盘 Running 但无活动运行」的中断残留
                 // （幂等；不满足条件时是空操作）。恢复仍必须显式发起——这里只是把
                 // 中断遗留的 Running 步骤转成可恢复状态并落识别标记。
@@ -2993,6 +3307,11 @@ impl Worker for RoleWorker {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        // 领取代次：cancel/retry/replace 接管现场后，旧阶段回传凭此被拒收。
+        let phase_epoch = input
+            .get("_workswarm")
+            .and_then(|w| w.get("phase_epoch"))
+            .and_then(Value::as_u64);
         let ctx = match self
             .coordinator
             .assemble_context_slice(&self.team_id, &self.member_id, &step_id)
@@ -3006,7 +3325,14 @@ impl Worker for RoleWorker {
         let out = self.inner.run(&enriched).await?;
         if let Err(e) = self
             .coordinator
-            .register_step_output(&self.team_id, &self.member_id, &self.role, &step_id, &out)
+            .register_step_output_checked(
+                &self.team_id,
+                &self.member_id,
+                &self.role,
+                &step_id,
+                &out,
+                phase_epoch,
+            )
             .await
         {
             return Err(format!("产物登记失败：{e}"));

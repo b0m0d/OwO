@@ -343,3 +343,99 @@ test("ProductEval 冻结契约（创建/列表/详情/取消 + 六态 + workswar
   const singleMode: ReportRun["key"]["agent_mode"] = "single";
   assert.equal(singleMode, "single");
 });
+
+// ---------------------------------------------------------------------------
+// V1 四期 Artifact 评审闭环冻结契约（第三路）：review/history 路由 +
+// 不可变评审记录 + 版本链 + approved head 的类型级断言。
+// 本用例不发起网络请求——任何字段漂移都会先在 tsc 编译期失败。
+// ---------------------------------------------------------------------------
+
+test("Artifact 评审冻结契约（三决定 + 幂等重放 + 版本链 + approved head）", () => {
+  type ReviewBody = NonNullable<
+    operations["artifactSubmitReview"]["requestBody"]
+  >["content"]["application/json"];
+  type ReviewCreated =
+    operations["artifactSubmitReview"]["responses"][201]["content"]["application/json"];
+  type ReviewReplay =
+    operations["artifactSubmitReview"]["responses"][200]["content"]["application/json"];
+  type History =
+    operations["artifactReviewHistory"]["responses"][200]["content"]["application/json"];
+  type ReviewRecord = components["schemas"]["ArtifactReviewRecord"];
+
+  // 请求体：decision 三枚举 + expected_version 乐观并发 + idempotency_key 幂等。
+  const approveBody: ReviewBody = {
+    team_id: "team-1",
+    decision: "approve",
+    reviewer: "critic",
+    comment: "结构和证据通过",
+    expected_version: 2,
+    idempotency_key: "idem-1",
+  };
+  assert.equal(approveBody.decision, "approve");
+  const requestChanges: ReviewBody["decision"] = "request_changes";
+  const reject: ReviewBody["decision"] = "reject";
+  assert.equal(requestChanges, "request_changes");
+  assert.equal(reject, "reject");
+
+  // 不可变评审记录：决策/取证锚点/幂等键齐备。
+  const record: ReviewRecord = {
+    review_id: "rev-0a1b2c3d",
+    artifact_id: "team-1:builder:v2",
+    artifact_version: 2,
+    team_id: "team-1",
+    decision: "approve",
+    reviewer: "critic",
+    comment: "结构和证据通过",
+    idempotency_key: "idem-1",
+    content_ref: "cas://sha256:abc",
+    created_at: "2026-08-28T10:00:00Z",
+  };
+  assert.equal(record.artifact_version, 2);
+
+  // 201 首次提交：replayed=false + approved head 指向被批准版本。
+  const created: ReviewCreated = {
+    replayed: false,
+    review: record,
+    artifact: {},
+    approved_head: {
+      artifact_id: "team-1:builder:v2",
+      kind: "document",
+      version: 2,
+      review_state: "approved",
+    },
+  };
+  assert.equal(created.replayed, false);
+  assert.equal(created.approved_head?.artifact_id, "team-1:builder:v2");
+
+  // 200 幂等重放：零副作用（同记录 + head 可为 null）。
+  const replay: ReviewReplay = {
+    replayed: true,
+    review: record,
+    artifact: {},
+    approved_head: null,
+  };
+  assert.equal(replay.replayed, true);
+
+  // history：评审历史升序 + 版本链两端 + 五态枚举。
+  const history: History = {
+    artifact_id: "team-1:builder:v2",
+    kind: "document",
+    version: 2,
+    producer: "m-builder",
+    review_state: "approved",
+    supersedes_artifact_id: "team-1:builder:v1",
+    superseded_by: null,
+    reviews: [record],
+    approved_head: null,
+  };
+  assert.equal(history.supersedes_artifact_id, "team-1:builder:v1");
+  assert.equal(history.superseded_by, null);
+  const states: History["review_state"][] = [
+    "draft",
+    "pending_review",
+    "approved",
+    "rejected",
+    "superseded",
+  ];
+  assert.equal(states.length, 5);
+});

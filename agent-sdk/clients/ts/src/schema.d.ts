@@ -3768,6 +3768,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/artifacts/{id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["artifactSubmitReview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/artifacts/{id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["artifactReviewHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3953,6 +3985,23 @@ export interface components {
             pending: components["schemas"]["MatrixKey"][];
             metrics: components["schemas"]["ProductEvalMetrics"];
             per_case: components["schemas"]["CaseModeMetrics"][];
+        };
+        /** @description 不可变评审记录（V1 四期第三路；只增不改，append-only） */
+        ArtifactReviewRecord: {
+            review_id: string;
+            artifact_id: string;
+            /** @description 被评审的产物版本 */
+            artifact_version: number;
+            team_id: string;
+            /** @enum {string} */
+            decision: "approve" | "request_changes" | "reject";
+            reviewer: string;
+            comment?: string;
+            /** @description 唯一约束；同键重放零副作用 */
+            idempotency_key: string;
+            /** @description 评审时的产物内容引用（取证锚点） */
+            content_ref?: string;
+            created_at: string;
         };
     };
     responses: never;
@@ -9741,6 +9790,176 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"];
                 };
+            };
+        };
+    };
+    artifactSubmitReview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    team_id: string;
+                    /**
+                     * @description 评审决定（snake_case）
+                     * @enum {string}
+                     */
+                    decision: "approve" | "request_changes" | "reject";
+                    /** @description 评审者（member_id / user_id / 角色名） */
+                    reviewer: string;
+                    comment?: string;
+                    /** @description 乐观并发目标版本；缺省跳过版本校验；不符 → 409 */
+                    expected_version?: number;
+                    /** @description 幂等键；同键重放零副作用返回既有记录 */
+                    idempotency_key: string;
+                };
+            };
+        };
+        responses: {
+            /** @description idempotent replay（同幂等键重放，零副作用；replayed: true） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description 恒为 true（回放既有记录） */
+                        replayed: boolean;
+                        review: components["schemas"]["ArtifactReviewRecord"];
+                        /** @description 评审后的 Artifact（当前状态） */
+                        artifact: Record<string, never>;
+                        /** @description (project, kind) 的当前 approved head Artifact（指向真实存在且已批准版本；否则 null） */
+                        approved_head?: {
+                            artifact_id: string;
+                            kind: string;
+                            version: number;
+                            producer?: string;
+                            /** @enum {string} */
+                            review_state: "draft" | "pending_review" | "approved" | "rejected" | "superseded";
+                            content_ref?: string;
+                            supersedes_artifact_id?: string | null;
+                            created_at?: string;
+                        } | null;
+                    };
+                };
+            };
+            /** @description review recorded; body = { replayed: false, review, artifact, approved_head } */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        replayed: boolean;
+                        review: components["schemas"]["ArtifactReviewRecord"];
+                        /** @description 评审后的 Artifact（review_state 已迁移） */
+                        artifact: Record<string, never>;
+                        /** @description (project, kind) 的当前 approved head Artifact（指向真实存在且已批准版本；否则 null） */
+                        approved_head?: {
+                            artifact_id: string;
+                            kind: string;
+                            version: number;
+                            producer?: string;
+                            /** @enum {string} */
+                            review_state: "draft" | "pending_review" | "approved" | "rejected" | "superseded";
+                            content_ref?: string;
+                            supersedes_artifact_id?: string | null;
+                            created_at?: string;
+                        } | null;
+                    };
+                };
+            };
+            /** @description validation failed（未知 decision） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description producer self-approve without human policy authorization（需 self_review_allowed） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description artifact or team not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description expected_version stale（旧页面提交）/ artifact superseded / idempotency key reused on other artifact */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description missing required field（Json extractor 语义） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    artifactReviewHistory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description review history (asc) + version chain (supersedes/superseded_by) + approved head */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        artifact_id: string;
+                        kind: string;
+                        version: number;
+                        producer: string;
+                        /** @enum {string} */
+                        review_state: "draft" | "pending_review" | "approved" | "rejected" | "superseded";
+                        supersedes_artifact_id?: string | null;
+                        superseded_by?: string | null;
+                        reviews: components["schemas"]["ArtifactReviewRecord"][];
+                        /** @description (project, kind) 的当前 approved head Artifact（指向真实存在且已批准版本；否则 null） */
+                        approved_head: {
+                            artifact_id: string;
+                            kind: string;
+                            version: number;
+                            producer?: string;
+                            /** @enum {string} */
+                            review_state: "draft" | "pending_review" | "approved" | "rejected" | "superseded";
+                            content_ref?: string;
+                            supersedes_artifact_id?: string | null;
+                            created_at?: string;
+                        } | null;
+                    };
+                };
+            };
+            /** @description artifact not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

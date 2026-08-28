@@ -2267,3 +2267,265 @@ pub fn build_live_provider(
         crate::gateway::ResilientProvider::from_config(config).map_err(ProductEvalError)?;
     Ok((Arc::new(provider), model))
 }
+
+// ---------------------------------------------------------------------------
+// R1 live 基线统计：Wilson 置信区间 / p50-p95 分位数 / 单多对照与启用条件
+// ---------------------------------------------------------------------------
+
+/// 95% 置信区间的 z 值（正态近似）。
+pub const CI95_Z: f64 = 1.96;
+
+/// 成功率的 Wilson score 置信区间（小样本稳健；z 传 [`CI95_Z`] 即 95%）。
+/// total = 0（无样本）时返回 (0.0, 0.0)。
+pub fn wilson_interval(successes: usize, total: usize, z: f64) -> (f64, f64) {
+    if total == 0 {
+        return (0.0, 0.0);
+    }
+    let n = total as f64;
+    let p = successes as f64 / n;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let center = (p + z2 / (2.0 * n)) / denom;
+    let half = (z / denom) * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+    (
+        (center - half).clamp(0.0, 1.0),
+        (center + half).clamp(0.0, 1.0),
+    )
+}
+
+/// 线性插值分位数（p ∈ [0,100]；空集返回 None；单元素直接返回该值）。
+pub fn percentile(values: &[u64], p: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<f64> = values.iter().map(|value| *value as f64).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if sorted.len() == 1 {
+        return Some(sorted[0]);
+    }
+    let rank = (p.clamp(0.0, 100.0) / 100.0) * (sorted.len() - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    let frac = rank - lo as f64;
+    Some(sorted[lo] * (1.0 - frac) + sorted[hi.min(sorted.len() - 1)] * frac)
+}
+
+/// 判定样本量是否足以支撑统计结论（经验阈值：n ≥ 30）。
+pub const SUFFICIENT_SAMPLE_SIZE: usize = 30;
+
+/// 单一拓扑（single/multi）的统计快照（分母一律含失败/错误/超时，不剔除）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeStats {
+    pub mode: String,
+    pub runs_total: usize,
+    pub passed: usize,
+    pub success_rate: f64,
+    pub ci95_low: f64,
+    pub ci95_high: f64,
+    pub p50_wall_ms: Option<f64>,
+    pub p95_wall_ms: Option<f64>,
+    pub mean_wall_ms: f64,
+    pub mean_model_calls: f64,
+    pub total_tokens: Option<u64>,
+    pub total_cost_usd: Option<f64>,
+    /// 样本量是否达到可判定阈值（n ≥ 30）。
+    pub sample_sufficient: bool,
+}
+
+/// 计算一个拓扑的统计快照（无样本时 success_rate=0、区间 (0,0)、分位数 None）。
+pub fn mode_statistics(runs: &[ProductEvalRun], mode: AgentMode) -> ModeStats {
+    let group: Vec<&ProductEvalRun> = runs
+        .iter()
+        .filter(|run| run.key.agent_mode == mode)
+        .collect();
+    let total = group.len();
+    let passed = group
+        .iter()
+        .filter(|run| run.status == RunStatus::Passed)
+        .count();
+    let (low, high) = wilson_interval(passed, total, CI95_Z);
+    let walls: Vec<u64> = group.iter().map(|run| run.wall_ms).collect();
+    let mean_wall = if total == 0 {
+        0.0
+    } else {
+        walls.iter().sum::<u64>() as f64 / total as f64
+    };
+    let mean_calls = if total == 0 {
+        0.0
+    } else {
+        group.iter().map(|run| run.model_calls as f64).sum::<f64>() / total as f64
+    };
+    let tokens_known = group.iter().any(|run| run.total_tokens.is_some());
+    let tokens = if tokens_known {
+        Some(group.iter().filter_map(|run| run.total_tokens).sum())
+    } else {
+        None
+    };
+    let cost_known = group.iter().any(|run| run.cost_usd.is_some());
+    let cost = if cost_known {
+        Some(group.iter().filter_map(|run| run.cost_usd).sum())
+    } else {
+        None
+    };
+    ModeStats {
+        mode: mode.as_str().to_string(),
+        runs_total: total,
+        passed,
+        success_rate: if total == 0 {
+            0.0
+        } else {
+            passed as f64 / total as f64
+        },
+        ci95_low: low,
+        ci95_high: high,
+        p50_wall_ms: percentile(&walls, 50.0),
+        p95_wall_ms: percentile(&walls, 95.0),
+        mean_wall_ms: mean_wall,
+        mean_model_calls: mean_calls,
+        total_tokens: tokens,
+        total_cost_usd: cost,
+        sample_sufficient: total >= SUFFICIENT_SAMPLE_SIZE,
+    }
+}
+
+/// 一条启用条件判定（多 Agent 启用门槛：任一满足即建议启用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnablementRule {
+    pub name: String,
+    pub satisfied: bool,
+    pub detail: String,
+}
+
+/// 单/多 Agent 对照差异与启用条件判定。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeComparison {
+    pub multi_success_rate_diff: f64,
+    pub multi_wall_rel_change: Option<f64>,
+    pub multi_calls_rel_change: Option<f64>,
+    pub multi_tokens_rel_change: Option<f64>,
+    pub multi_cost_rel_change: Option<f64>,
+    pub rules: Vec<EnablementRule>,
+    /// 任一启用条件满足 → true。
+    pub enabled: bool,
+    /// 样本量是否足以支撑对照结论（两组都 ≥ 30 才算充分）。
+    pub sample_sufficient: bool,
+}
+
+fn rel_change(baseline: f64, candidate: f64) -> Option<f64> {
+    if baseline == 0.0 {
+        None
+    } else {
+        Some((candidate - baseline) / baseline)
+    }
+}
+
+/// 对照判定（multi 相对 single）。启用条件：
+/// ① 成功率差 ≥ +5 个百分点；② 成功率相对提升 ≥ +10%（质量代理：检查器为二元
+/// 判定，暂无独立质量指标，以成功率相对改善代替，已在 detail 标注）；③ 平均耗时 −30%。
+pub fn compare_mode_statistics(single: &ModeStats, multi: &ModeStats) -> ModeComparison {
+    let diff = multi.success_rate - single.success_rate;
+    let wall_rel = rel_change(single.mean_wall_ms, multi.mean_wall_ms);
+    let calls_rel = rel_change(single.mean_model_calls, multi.mean_model_calls);
+    let tokens_rel = match (single.total_tokens, multi.total_tokens) {
+        (Some(a), Some(b)) => rel_change(a as f64, b as f64),
+        _ => None,
+    };
+    let cost_rel = match (single.total_cost_usd, multi.total_cost_usd) {
+        (Some(a), Some(b)) => rel_change(a, b),
+        _ => None,
+    };
+    let rate_rel = rel_change(single.success_rate, multi.success_rate);
+    let mut rules = vec![EnablementRule {
+        name: "成功率 +5%".to_string(),
+        satisfied: diff >= 0.05,
+        detail: format!("multi−single = {:+.1}pp（门槛 ≥ +5.0pp）", diff * 100.0),
+    }];
+    rules.push(EnablementRule {
+        name: "质量 +10%".to_string(),
+        satisfied: rate_rel.is_some_and(|value| value >= 0.10),
+        detail: format!(
+            "质量代理 = 成功率相对提升 {:+.1}%（门槛 ≥ +10%；检查器为二元判定，暂无独立质量指标）",
+            rate_rel.map(|value| value * 100.0).unwrap_or(f64::NAN)
+        ),
+    });
+    rules.push(EnablementRule {
+        name: "耗时 -30%".to_string(),
+        satisfied: wall_rel.is_some_and(|value| value <= -0.30),
+        detail: format!(
+            "平均墙钟相对变化 {:+.1}%（门槛 ≤ −30.0%）",
+            wall_rel.map(|value| value * 100.0).unwrap_or(f64::NAN)
+        ),
+    });
+    ModeComparison {
+        multi_success_rate_diff: diff,
+        multi_wall_rel_change: wall_rel,
+        multi_calls_rel_change: calls_rel,
+        multi_tokens_rel_change: tokens_rel,
+        multi_cost_rel_change: cost_rel,
+        enabled: rules.iter().any(|rule| rule.satisfied),
+        rules,
+        sample_sufficient: single.sample_sufficient && multi.sample_sufficient,
+    }
+}
+
+/// 单/多两拓扑的完整统计（报告 JSON 契约形状：供 server/TS 同步）。
+pub fn report_statistics(runs: &[ProductEvalRun]) -> serde_json::Value {
+    let single = mode_statistics(runs, AgentMode::Single);
+    let multi = mode_statistics(runs, AgentMode::Multi);
+    let comparison = compare_mode_statistics(&single, &multi);
+    serde_json::json!({
+        "modes": [serde_json::to_value(&single).unwrap_or_default(),
+                  serde_json::to_value(&multi).unwrap_or_default()],
+        "comparison": serde_json::to_value(&comparison).unwrap_or_default(),
+    })
+}
+
+/// 人类可读的统计段落（run 结束摘要追加 / live 基线报告引用）。
+pub fn format_mode_statistics(runs: &[ProductEvalRun]) -> String {
+    let single = mode_statistics(runs, AgentMode::Single);
+    let multi = mode_statistics(runs, AgentMode::Multi);
+    let mut out = String::from("—— 统计（95% Wilson 置信区间；分母含失败，不剔除）——\n");
+    for stats in [&single, &multi] {
+        if stats.runs_total == 0 {
+            continue;
+        }
+        out.push_str(&format!(
+            "  {:<7} 成功率 {:.1}% CI95 [{:.1}%, {:.1}%]（{}/{}） p50={:.0}ms p95={:.0}ms mean_calls={:.1} tokens={:?} cost={:?}{}\n",
+            stats.mode,
+            stats.success_rate * 100.0,
+            stats.ci95_low * 100.0,
+            stats.ci95_high * 100.0,
+            stats.passed,
+            stats.runs_total,
+            stats.p50_wall_ms.unwrap_or(0.0),
+            stats.p95_wall_ms.unwrap_or(0.0),
+            stats.mean_model_calls,
+            stats.total_tokens,
+            stats.total_cost_usd,
+            if stats.sample_sufficient { "" } else { "（样本不足 n<30，区间仅供参考）" },
+        ));
+    }
+    if single.runs_total > 0 && multi.runs_total > 0 {
+        let comparison = compare_mode_statistics(&single, &multi);
+        out.push_str(&format_mode_comparison(&comparison));
+    }
+    out
+}
+
+/// 启用条件判定的人类可读段落。
+pub fn format_mode_comparison(comparison: &ModeComparison) -> String {
+    let mut out = String::from("  —— 多 Agent 启用条件（任一满足即建议启用）——\n");
+    for rule in &comparison.rules {
+        let mark = if rule.satisfied { "✅" } else { "⬜" };
+        out.push_str(&format!("  {} {}：{}\n", mark, rule.name, rule.detail));
+    }
+    out.push_str(if comparison.enabled {
+        "  结论：建议启用多 Agent（满足至少一条启用条件）\n"
+    } else {
+        "  结论：暂不建议启用多 Agent（未满足任何启用条件）\n"
+    });
+    if !comparison.sample_sufficient {
+        out.push_str("  ⚠️ 样本不足（n<30）：以上对照结论仅具方向性参考\n");
+    }
+    out
+}

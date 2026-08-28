@@ -22,6 +22,31 @@ $sdkRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $sdkRoot
 Write-Host ("R0 closeout gate - root: {0}" -f $sdkRoot) -ForegroundColor Cyan
 
+# ---------------------------------------------------------------------------
+# ORT auto-probe (Lane 1, R1): rust tests statically link ONNX Runtime through
+# the `ort` crate; a fresh terminal without ORT_LIB_PATH fails at link stage.
+# Probe the repo-local cache and set the variable for THIS PROCESS ONLY
+# (never persisted to user/machine settings).
+# ---------------------------------------------------------------------------
+if (-not $env:ORT_LIB_PATH) {
+    $probeRoot = Join-Path $sdkRoot "target\sherpa-onnx-prebuilt"
+    $hit = $null
+    if (Test-Path $probeRoot) {
+        $hit = Get-ChildItem -Path $probeRoot -Recurse -Filter "onnxruntime.lib" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if ($null -ne $hit) {
+        $env:ORT_LIB_PATH = $hit.DirectoryName
+        Write-Host ("[ORT] ORT_LIB_PATH auto-probed (process only): {0}" -f $env:ORT_LIB_PATH) -ForegroundColor Cyan
+    }
+    else {
+        Write-Host "[ORT] ORT_LIB_PATH not set and no onnxruntime.lib found under target\sherpa-onnx-prebuilt - linking may fail" -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Host ("[ORT] ORT_LIB_PATH already set: {0}" -f $env:ORT_LIB_PATH) -ForegroundColor DarkGray
+}
+
 $script:results = New-Object System.Collections.Generic.List[object]
 $script:failedSteps = 0
 
@@ -72,6 +97,14 @@ if (-not $SkipCargo) {
     if (Test-Path "crates/owo-agent-server/tests/product_eval_api_tests.rs") {
         $serverSuites += @("--test", "product_eval_api_tests")
     }
+    # V1 四期 (Lane 3) Artifact review API suite is included as soon as it exists.
+    if (Test-Path "crates/owo-agent-server/tests/artifact_review_api_tests.rs") {
+        $serverSuites += @("--test", "artifact_review_api_tests")
+    }
+    # V1 四期 (Lane 2) WorkSwarm progress SSE API suite is included as soon as it exists.
+    if (Test-Path "crates/owo-agent-server/tests/workswarm_progress_api_tests.rs") {
+        $serverSuites += @("--test", "workswarm_progress_api_tests")
+    }
     Invoke-Step "cargo test server targeted suites" {
         cargo test -p owo-agent-server @serverSuites
     }
@@ -99,6 +132,24 @@ if (-not $SkipCargo) {
     if (Test-Path "crates/owo-agent-core/tests/product_eval_workswarm_tests.rs") {
         Invoke-Step "cargo test core product_eval_workswarm_tests" {
             cargo test -p owo-agent-core --test product_eval_workswarm_tests
+        }
+    }
+    # R1 statistics suite (Lane 1): Wilson CI / percentiles / enablement edges.
+    if (Test-Path "crates/owo-agent-core/tests/product_eval_statistics_tests.rs") {
+        Invoke-Step "cargo test core product_eval_statistics_tests" {
+            cargo test -p owo-agent-core --test product_eval_statistics_tests
+        }
+    }
+    # V1 四期 (Lane 3) artifact review store/core suite is included as soon as it exists.
+    if (Test-Path "crates/owo-agent-core/tests/artifact_review_tests.rs") {
+        Invoke-Step "cargo test core artifact_review_tests" {
+            cargo test -p owo-agent-core --test artifact_review_tests
+        }
+    }
+    # V1 四期 (Lane 2) long-task responsiveness suite is included as soon as it exists.
+    if (Test-Path "crates/owo-agent-core/tests/workswarm_responsiveness_tests.rs") {
+        Invoke-Step "cargo test core workswarm_responsiveness_tests" {
+            cargo test -p owo-agent-core --test workswarm_responsiveness_tests
         }
     }
 }

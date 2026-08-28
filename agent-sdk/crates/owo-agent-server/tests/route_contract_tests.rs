@@ -385,6 +385,9 @@ fn resource_404_ok(path: &str) -> bool {
             // V1 三日 ProductEval（第四路）：占位 id 指向不存在运行 → 404 由资源缺失产生，非路由缺失。
             | "/product-eval/runs/{id}"
             | "/product-eval/runs/{id}/cancel"
+            // V1 四期（第三路）：评审闭环——占位 id 指向不存在产物 → 404 由资源缺失产生，非路由缺失。
+            | "/artifacts/{id}/review"
+            | "/artifacts/{id}/history"
     )
 }
 
@@ -1147,4 +1150,109 @@ async fn deprecation_header_absent_on_current_routes() {
             "{method} {path} 不应携带 Deprecation 头（当前无弃用路由）"
         );
     }
+}
+
+/// V1 四期（第三路）：Artifact 评审闭环契约冻结——路由形状 + 错误语义面
+/// （404 资源缺失 / 400 未知 decision / 鉴权外的路由可达性）。
+#[tokio::test]
+async fn artifact_review_contract_shape_is_frozen() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    // 1) POST /artifacts/{id}/review：未知产物 → 404 + 结构化错误（路由已注册，非 405）。
+    let body = r#"{
+        "team_id": "team-nope",
+        "decision": "approve",
+        "reviewer": "critic",
+        "comment": "契约探针",
+        "expected_version": 1,
+        "idempotency_key": "contract-probe-approve"
+    }"#;
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            "/artifacts/contract-probe:planner:v1/review",
+            Some(body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status().as_u16(),
+        404,
+        "未知产物应 404（路由已注册）"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // handler 先查团队再查产物：探针两者都不存在，命中团队缺失分支（产物缺失分支由 API 集成测试覆盖）。
+    assert!(
+        value["error"].as_str().unwrap_or("").contains("团队不存在"),
+        "404 错误应结构化：{value}"
+    );
+
+    // 2) 未知 decision → 400（handler 先校验决定枚举，再查团队/产物）。
+    let bad_decision = r#"{
+        "team_id": "team-nope",
+        "decision": "maybe",
+        "reviewer": "critic",
+        "idempotency_key": "contract-probe-bad-decision"
+    }"#;
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            "/artifacts/contract-probe:planner:v1/review",
+            Some(bad_decision),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 400, "未知 decision 应 400");
+
+    // 3) GET /artifacts/{id}/history：未知产物 → 404 + 结构化错误。
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "GET",
+            "/artifacts/contract-probe:planner:v1/history",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 404);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        value["error"].as_str().is_some(),
+        "404 应带 error 字段：{value}"
+    );
+
+    // 4) /openapi.json 登记评审路由与 operationId（契约面自描述）。
+    let response = app
+        .clone()
+        .oneshot(request(&state, "GET", "/openapi.json", None))
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+        .await
+        .unwrap();
+    let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        spec["paths"]["/artifacts/{id}/review"]["post"]["operationId"],
+        serde_json::json!("artifactSubmitReview")
+    );
+    assert_eq!(
+        spec["paths"]["/artifacts/{id}/history"]["get"]["operationId"],
+        serde_json::json!("artifactReviewHistory")
+    );
+    assert!(
+        spec["components"]["schemas"]["ArtifactReviewRecord"].is_object(),
+        "ArtifactReviewRecord 组件应登记"
+    );
 }

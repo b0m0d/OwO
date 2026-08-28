@@ -23,6 +23,8 @@
 //! zip-slip 防护、清空二次确认 + 完整性校验）与服务端韧性（shutdown.rs：全局并发 turn 上限、
 //! 优雅关闭 POST /server/shutdown + GET /server/status、CLI serve 强杀恢复 pid 文件）。
 
+/// V1 四期（第三路）：Artifact 评审闭环路由（review / history）。
+pub mod artifact_review_api;
 mod auth_token;
 pub mod backup;
 mod desktop_world_api;
@@ -139,6 +141,9 @@ pub struct AppState {
     pub workswarm: Arc<workswarm_api::WorkSwarmState>,
     /// V1 三日：ProductEval 评测中心（后台矩阵任务 + 取消令牌 + 持久化报告；/product-eval/*）。
     pub product_eval: Arc<product_eval_api::ProductEvalHub>,
+    /// V1 四期（第三路）：Artifact 评审闭环存储（独立 SQLite 连接，
+    /// 与 TeamCoordinator 的连接共存于 `data_root/workswarm/space.db`）。
+    pub artifact_review: artifact_review_api::ArtifactReviewState,
 }
 
 impl AppState {
@@ -149,6 +154,8 @@ impl AppState {
         data_root: PathBuf,
         workspace: PathBuf,
     ) -> Self {
+        // V1 四期（第三路）：评审闭环库路径（在 data_root 被 struct 字面量 move 前取好）。
+        let workswarm_db_root = data_root.join("workswarm");
         let settings = owo_agent_core::Settings::load(&workspace);
         settings.apply_usage_env();
         // R8：用量预算接线（Agent 4 交付 usage）——单价/预算从环境变量注入，turn 入口硬熔断。
@@ -264,6 +271,10 @@ impl AppState {
             auth_token,
             rate_limiter,
             shutdown_gate,
+            // V1 四期（第三路）：评审闭环复用 WorkSwarm 的 space.db（独立连接 + busy_timeout）。
+            artifact_review: artifact_review_api::ArtifactReviewState::new(
+                workswarm_db_root.join("space.db"),
+            ),
         }
     }
 }
@@ -464,6 +475,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // （/workflow/run/{run_id}/events）已自含在 workflow_api::router 内，无需新 merge。
         .merge(team_api::router(state.clone()))
         .merge(workswarm_api::router(state.clone()))
+        // V1 四期（第三路）：Artifact 评审闭环。
+        .merge(artifact_review_api::router(state.clone()))
         // R1（§8.5）：DesktopWorld/WorldModel 闭环 /desktop-envs/*、/world-model/*、
         // /transitions/*、/datasets/*、/model-candidates/*（desktop_world_api 模块内
         // DesktopWorldHub 单例 + ControllerLease token+epoch 围栏；与 /desktop/* 计算机
@@ -900,6 +913,9 @@ async fn openapi_spec() -> Json<Value> {
             "/teams/templates/proposals": { "get": { "operationId": "workswarmListTemplateProposals", "responses": { "200": { "description": "team template proposals (proposal only, never auto-enabled)" } } } },
             "/teams/templates/proposals/{proposal_id}/adopt": { "post": { "operationId": "workswarmAdoptTemplateProposal", "parameters": [path_param("proposal_id")], "responses": { "200": { "description": "proposal adopted into template registry (idempotent)" } } } },
             "/teams/templates/proposals/{proposal_id}/reject": { "post": { "operationId": "workswarmRejectTemplateProposal", "parameters": [path_param("proposal_id")], "responses": { "200": { "description": "proposal rejected (record kept, auditable)" }, "404": { "description": "proposal not found" }, "400": { "description": "proposal already adopted" } } } },
+            // V1 四期（第三路）：Artifact 评审闭环（版本链 + 不可变评审记录 + approved head）。
+            "/artifacts/{id}/review": { "post": { "operationId": "artifactSubmitReview", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "team_id": { "type": "string" }, "decision": { "type": "string", "enum": ["approve", "request_changes", "reject"], "description": "评审决定（snake_case）" }, "reviewer": { "type": "string", "description": "评审者（member_id / user_id / 角色名）" }, "comment": { "type": "string" }, "expected_version": { "type": "integer", "description": "乐观并发目标版本；缺省跳过版本校验；不符 → 409" }, "idempotency_key": { "type": "string", "description": "幂等键；同键重放零副作用返回既有记录" } }, "required": ["team_id", "decision", "reviewer", "idempotency_key"] } } } }, "responses": { "201": { "description": "review recorded; body = { replayed: false, review, artifact, approved_head }", "content": { "application/json": { "schema": { "type": "object", "properties": { "replayed": { "type": "boolean" }, "review": { "$ref": "#/components/schemas/ArtifactReviewRecord" }, "artifact": { "type": "object", "description": "评审后的 Artifact（review_state 已迁移）" }, "approved_head": { "type": "object", "nullable": true, "description": "decision=approve 时的 (project, kind) approved head Artifact" } }, "required": ["replayed", "review", "artifact"] } } } }, "200": { "description": "idempotent replay（同幂等键重放，零副作用；replayed: true）", "content": { "application/json": { "schema": { "type": "object", "properties": { "replayed": { "type": "boolean", "description": "恒为 true（回放既有记录）" }, "review": { "$ref": "#/components/schemas/ArtifactReviewRecord" }, "artifact": { "type": "object", "description": "评审后的 Artifact（当前状态）" }, "approved_head": { "type": "object", "nullable": true, "description": "decision=approve 时的 (project, kind) approved head Artifact" } }, "required": ["replayed", "review", "artifact"] } } } }, "400": { "description": "validation failed（未知 decision；缺必填字段为 Json extractor 422）" }, "403": { "description": "producer self-approve without human policy authorization（需 self_review_allowed）" }, "404": { "description": "artifact or team not found" }, "409": { "description": "expected_version stale（旧页面提交）/ artifact superseded / idempotency key reused on other artifact" }, "422": { "description": "missing required field（team_id/decision/reviewer/idempotency_key）" } } } },
+            "/artifacts/{id}/history": { "get": { "operationId": "artifactReviewHistory", "parameters": [path_param("id")], "responses": { "200": { "description": "review history (asc) + version chain (supersedes/superseded_by) + approved head", "content": { "application/json": { "schema": { "type": "object", "properties": { "artifact_id": { "type": "string" }, "kind": { "type": "string" }, "version": { "type": "integer" }, "producer": { "type": "string" }, "review_state": { "type": "string", "enum": ["draft", "pending_review", "approved", "rejected", "superseded"] }, "supersedes_artifact_id": { "type": "string", "nullable": true }, "superseded_by": { "type": "string", "nullable": true }, "reviews": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactReviewRecord" } }, "approved_head": { "type": "object", "nullable": true, "description": "(project, kind) 的当前 approved head Artifact（指向真实存在且已批准版本；否则 null）" } }, "required": ["artifact_id", "kind", "version", "producer", "review_state", "reviews", "approved_head"] } } } }, "404": { "description": "artifact not found" } } } },
             // R1 DesktopWorld/WorldModel 训练闭环（§8.5/§5.11-5.12）：仿真环境 + 租约 fencing + transition 语料 + 世界模型候选/晋升。
             "/desktop-envs": { "post": { "operationId": "desktopWorldCreateEnv", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "env_id": { "type": "string" }, "task": { "type": "object", "properties": { "task_id": { "type": "string" }, "app": { "type": "string" }, "seed": { "type": "integer" }, "assets": { "type": "object" } }, "required": ["task_id", "app", "seed"] }, "owner": { "type": "string" } }, "required": ["task"] } } } }, "responses": { "200": { "description": "env created: initial lease proof + first-frame WorldStateV1 observation" }, "409": { "description": "env_id already exists" } } } },
             "/desktop-envs/{id}/reset": { "post": { "operationId": "desktopWorldResetEnv", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "task": { "type": "object", "properties": { "task_id": { "type": "string" }, "app": { "type": "string" }, "seed": { "type": "integer" }, "assets": { "type": "object" } }, "required": ["task_id", "app", "seed"] }, "lease": { "type": "object", "properties": { "owner": { "type": "string" }, "token": { "type": "string" }, "epoch": { "type": "integer" } }, "required": ["owner", "token", "epoch"] } }, "required": ["task", "lease"] } } } }, "responses": { "200": { "description": "env reset to task initial state; lease proof returned" }, "404": { "description": "env not found" }, "409": { "description": "lease fencing conflict (stale token/epoch)" } } } },
@@ -970,6 +986,23 @@ async fn openapi_spec() -> Json<Value> {
         },
         "components": {
             "schemas": {
+                "ArtifactReviewRecord": {
+                    "type": "object",
+                    "description": "不可变评审记录（V1 四期第三路；只增不改，append-only）",
+                    "properties": {
+                        "review_id": { "type": "string" },
+                        "artifact_id": { "type": "string" },
+                        "artifact_version": { "type": "integer", "description": "被评审的产物版本" },
+                        "team_id": { "type": "string" },
+                        "decision": { "type": "string", "enum": ["approve", "request_changes", "reject"] },
+                        "reviewer": { "type": "string" },
+                        "comment": { "type": "string" },
+                        "idempotency_key": { "type": "string", "description": "唯一约束；同键重放零副作用" },
+                        "content_ref": { "type": "string", "description": "评审时的产物内容引用（取证锚点）" },
+                        "created_at": { "type": "string" }
+                    },
+                    "required": ["review_id", "artifact_id", "artifact_version", "team_id", "decision", "reviewer", "idempotency_key", "created_at"]
+                },
                 "CreateSessionRequest": {
                     "type": "object",
                     "properties": {
