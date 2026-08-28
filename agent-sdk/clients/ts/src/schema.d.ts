@@ -4,6 +4,54 @@
  */
 
 export interface paths {
+    "/artifacts/{id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["artifactReviewHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/artifacts/{id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["artifactSubmitReview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/artifacts/{id}/rework": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["artifactSubmitRework"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit": {
         parameters: {
             query?: never;
@@ -12,6 +60,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["auditList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["authTokenBootstrap"];
         put?: never;
         post?: never;
         delete?: never;
@@ -324,6 +388,182 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/datasets/build": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["datasetBuild"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/datasets/{id}/manifest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["datasetManifest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldCreateEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/inject-fault": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldInjectFault"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/judge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldJudgeEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/lease": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldLeaseOp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/observe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["desktopWorldObserveEnv"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldResetEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldRestoreEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldSnapshotEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop-envs/{id}/step": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["desktopWorldStepEnv"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/desktop/activate": {
         parameters: {
             query?: never;
@@ -542,6 +782,230 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["runEval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/events/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["eventsStream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/approvals/{id}/respond": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetApprovalRespond"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["fleetNodesList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/nodes/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetNodesRegister"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/nodes/{node_id}/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetNodeHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/nodes/{node_id}/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["fleetNodeTasks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTasksSubmit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["fleetTaskGet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTaskCancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/cancel-ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTaskCancelAck"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTaskClaim"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["fleetTaskEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTaskProgress"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fleet/tasks/{id}/result": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fleetTaskResult"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1188,14 +1652,14 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/schemas": {
+    "/metrics/prometheus": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["schemasList"];
+        get: operations["metricsPrometheus"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1204,14 +1668,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/schemas/{kind}/{version}": {
+    "/metrics/runtime": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["schemaGet"];
+        get: operations["metricsRuntime"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics/slo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["metricsSlo"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics/slo/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["metricsSloAlerts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics/slo/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["metricsSloReport"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1246,6 +1758,38 @@ export interface paths {
         get: operations["metricsTurns"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/model-candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["modelCandidateRegister"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/model-candidates/{id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["modelCandidatePromote"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1908,6 +2452,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/product-eval/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** è¯æµè¿è¡åè¡¨ï¼created_at ååºï¼ */
+        get: operations["listProductEvalRuns"];
+        put?: never;
+        /** åçä¸æ¬¡äº§åè¯æµç©éµï¼å¼æ­¥æ§è¡ï¼ */
+        post: operations["createProductEvalRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/product-eval/runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** è¯æµè¿è¡è¯¦æï¼è¿åº¦ + è¿è¡åæ° + å®æ´æ¥åï¼èåææ /æ¯ case å¯¹æ¯/å¤±è´¥æ­¥éª¤/Artifact refsï¼ */
+        get: operations["getProductEvalRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/product-eval/runs/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** åæ¶è¯æµè¿è¡ï¼å¹ç­ï¼ç½®åä½ä»¤çå¹¶ç«å³ cancelledï¼éå¤/ç»æååæ¶é¶å¯ä½ç¨ï¼ */
+        post: operations["cancelProductEvalRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/project/rules": {
         parameters: {
             query?: never;
@@ -1934,6 +2530,118 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["projectRulesTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmGetProjectSpace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/artifacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmListArtifacts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/deliverables": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["projectDeliverables"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/schemas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["schemasList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/schemas/{kind}/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["schemaGet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/server/shutdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["serverShutdown"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/server/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["serverStatus"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2356,6 +3064,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/storage/backup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storageBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storageClear"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storageExport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storageRestore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/stt/transcribe": {
         parameters: {
             query?: never;
@@ -2388,198 +3160,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/team/audit": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["teamAudit"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["workswarmListTeams"];
-        put?: never;
-        post: operations["workswarmCreateTeam"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["workswarmGetTeam"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams/{id}/events": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["workswarmTeamEvents"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams/{id}/tasks": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["workswarmGetTeamTasks"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams/{id}/steer": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["workswarmSteerTeam"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams/templates": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["workswarmListTemplates"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams/templates/proposals": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["workswarmListTemplateProposals"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams/templates/proposals/{proposal_id}/adopt": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["workswarmAdoptTemplateProposal"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams/templates/proposals/{proposal_id}/reject": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["workswarmRejectTemplateProposal"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/projects/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["workswarmGetProjectSpace"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/projects/{id}/artifacts": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["workswarmListArtifacts"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/tasks/{id}/handoff": {
         parameters: {
             query?: never;
@@ -2606,6 +3186,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["workswarmSubmitHumanResult"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/team/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["teamAudit"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2676,6 +3272,182 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmListTeams"];
+        put?: never;
+        post: operations["workswarmCreateTeam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmListTemplates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates/proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmListTemplateProposals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates/proposals/{proposal_id}/adopt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["workswarmAdoptTemplateProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates/proposals/{proposal_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["workswarmRejectTemplateProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmGetTeam"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/diagnostic": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["teamDiagnostic"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmTeamEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["teamMetrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/steer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["workswarmSteerTeam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmGetTeamTasks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/traces": {
         parameters: {
             query?: never;
@@ -2708,6 +3480,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/transitions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["transitionGet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/usage": {
         parameters: {
             query?: never;
@@ -2718,6 +3506,70 @@ export interface paths {
         get: operations["usageSummary"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/usage/records": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["usageRecords"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/usage/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["usageReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/usage/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["usageSummaryV2"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/usage/topup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["usageTopup"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2980,630 +3832,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/events/stream": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["eventsStream"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/metrics/runtime": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["metricsRuntime"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/auth/token": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["authTokenBootstrap"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/metrics/slo": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["metricsSlo"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/metrics/slo/alerts": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["metricsSloAlerts"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/metrics/slo/report": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["metricsSloReport"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/metrics/prometheus": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["metricsPrometheus"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/server/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["serverStatus"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/server/shutdown": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["serverShutdown"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/storage/backup": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["storageBackup"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/storage/clear": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["storageClear"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/storage/export": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["storageExport"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/storage/restore": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["storageRestore"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/usage/records": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["usageRecords"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/usage/report": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["usageReport"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/usage/summary": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["usageSummaryV2"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/usage/topup": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["usageTopup"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/nodes/register": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["fleetNodesRegister"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/nodes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["fleetNodesList"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/nodes/{node_id}/heartbeat": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["fleetNodeHeartbeat"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/nodes/{node_id}/tasks": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["fleetNodeTasks"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/tasks/submit": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["fleetTasksSubmit"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/tasks/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["fleetTaskGet"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/tasks/{id}/claim": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["fleetTaskClaim"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/tasks/{id}/progress": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["fleetTaskProgress"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/tasks/{id}/result": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["fleetTaskResult"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/tasks/{id}/cancel-ack": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["fleetTaskCancelAck"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/tasks/{id}/cancel": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["fleetTaskCancel"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/tasks/{id}/events": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["fleetTaskEvents"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/fleet/approvals/{id}/respond": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["fleetApprovalRespond"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/desktop-envs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["desktopWorldCreateEnv"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/desktop-envs/{id}/reset": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["desktopWorldResetEnv"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/desktop-envs/{id}/lease": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["desktopWorldLeaseOp"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/desktop-envs/{id}/observe": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["desktopWorldObserveEnv"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/desktop-envs/{id}/step": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["desktopWorldStepEnv"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/desktop-envs/{id}/snapshot": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["desktopWorldSnapshotEnv"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/desktop-envs/{id}/restore": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["desktopWorldRestoreEnv"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/desktop-envs/{id}/judge": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["desktopWorldJudgeEnv"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/desktop-envs/{id}/inject-fault": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["desktopWorldInjectFault"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/world-model/predict": {
         parameters: {
             query?: never;
@@ -3636,181 +3864,192 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/transitions/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["transitionGet"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/datasets/build": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["datasetBuild"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/datasets/{id}/manifest": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["datasetManifest"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/model-candidates": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["modelCandidateRegister"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/model-candidates/{id}/promote": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["modelCandidatePromote"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/product-eval/runs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 评测运行列表（created_at 倒序） */
-        get: operations["listProductEvalRuns"];
-        put?: never;
-        /** 受理一次产品评测矩阵（异步执行） */
-        post: operations["createProductEvalRun"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/product-eval/runs/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 评测运行详情：进度 + 运行参数 + 完整报告（聚合指标/每 case 对比/失败步骤/Artifact refs） */
-        get: operations["getProductEvalRun"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/product-eval/runs/{id}/cancel": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** 取消评测运行（幂等：置协作令牌并立即 cancelled；重复/终态后取消零副作用） */
-        post: operations["cancelProductEvalRun"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/artifacts/{id}/review": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["artifactSubmitReview"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/artifacts/{id}/history": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["artifactReviewHistory"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description ä¸å¯åè¯å®¡è®°å½ï¼V1 åæç¬¬ä¸è·¯ï¼åªå¢ä¸æ¹ï¼append-onlyï¼ */
+        ArtifactReviewRecord: {
+            artifact_id: string;
+            /** @description è¢«è¯å®¡çäº§ç©çæ¬ */
+            artifact_version: number;
+            comment?: string;
+            /** @description è¯å®¡æ¶çäº§ç©åå®¹å¼ç¨ï¼åè¯éç¹ï¼ */
+            content_ref?: string;
+            created_at: string;
+            /** @enum {string} */
+            decision: "approve" | "request_changes" | "reject";
+            /** @description å¯ä¸çº¦æï¼åé®éæ¾é¶å¯ä½ç¨ */
+            idempotency_key: string;
+            review_id: string;
+            reviewer: string;
+            team_id: string;
+        };
+        /** @description é¢æµæ ¡åæ¥åï¼WM0 èåï¼å½ä¸­ãè¯¯å·®ä¸ä¸ç¡®å®åº¦åæ¡¶ï¼ */
+        CalibrationReport: {
+            mean_calibration_error: number;
+            mean_delta_jaccard: number;
+            /** Format: int64 */
+            samples: number;
+            success_hit_rate: number;
+            uncertainty_buckets: {
+                hit_rate: number;
+                label: string;
+                /** Format: int64 */
+                samples: number;
+            }[];
+        };
+        /** @description åé provider èº«ä»½ï¼Â§5.12.4 æ²»çï¼å£°æâ æ¥çº¿ï¼ï¼external éè¿ç¨åçå®æ¥çº¿åæç§¯ç´¯å½±å­æ ·æ¬ï¼metadata_only é¶æ ·æ¬ä¸ä¸å¯æå */
+        CandidateProviderRef: {
+            /** @description provider ç±»åæ è¯ï¼å¦ wm1-httpãlocal-onnxï¼ */
+            kind: string;
+            /** @description å®ä½ä¸²ï¼ç«¯ç¹æèµæºæ è¯ï¼ */
+            locator: string;
+            /** @enum {string} */
+            type: "external";
+        } | {
+            /** @enum {string} */
+            type: "metadata_only";
+        };
+        /** @description æ (case_id, mode) åç»çç»åç»è®¡ï¼å Agent vs WorkSwarm å¯¹ç§åï¼ */
+        CaseModeMetrics: {
+            /** @enum {string} */
+            agent_mode: "single" | "multi";
+            case_id: string;
+            /** @enum {string} */
+            category: "code" | "research" | "document";
+            mean_model_calls: number;
+            mean_wall_ms: number;
+            passed: number;
+            runs_total: number;
+            success_rate: number;
+            /** Format: int64 */
+            total_tokens: ((number | null) | null) | null;
+        };
         CreateSessionRequest: {
             model?: string;
             system_prompt?: string;
             workspace: string;
         };
+        Error: {
+            error: string;
+        };
         EvalRunRequest: {
             suite_id: string;
+        };
+        /** @description ç©éµååæ ¼ï¼(case_id, agent_mode, repetition)ï¼agent_mode ä¸ºæ ¸å¿å°åè¯ï¼workswarm ææåºååä¸º multiï¼ */
+        MatrixKey: {
+            /** @enum {string} */
+            agent_mode: "single" | "multi";
+            case_id: string;
+            repetition: number;
+        };
+        /** @description ä¸çæ¨¡ååéï¼æ°åéæ shadow èµ·æ­¥ï¼è¾¾æ åæ¾å¼äººå·¥æåï¼Option å­æ®µç¼ºçåºååä¸º nullï¼ */
+        ModelCandidate: {
+            /** @description æåæ¶å»çæ ¡åæè¦å¿«ç§ï¼ä»æªæåè¿ä¸º nullï¼ */
+            calibration_summary: components["schemas"]["CalibrationReport"] | null;
+            candidate_id: string;
+            /** @description RFC3339 */
+            created_at: string;
+            model_id: string;
+            model_version: string;
+            promote_reason: string | null;
+            promoted_at: string | null;
+            /** @description provider èº«ä»½æ²»çï¼ååº wire å­æ®µåä¸º providerï¼æ³¨åè¯·æ±ä¾§å­æ®µåä¸º provider_refï¼ */
+            provider: components["schemas"]["CandidateProviderRef"];
+            source: string;
+            /** @enum {string} */
+            status: "shadow" | "active" | "rejected";
+        };
+        /** @description èåææ ï¼æåçåæ¯ä¸ºå¨é¨å·²å°è¯è¿è¡ï¼å¤±è´¥/éè¯¯/è¶æ¶ä¸å¾è®¡å¥ï¼ç¦æ­¢åé¤éç®ï¼ */
+        ProductEvalMetrics: {
+            cancelled: number;
+            errors: number;
+            estimated_cost_usd: ((number | null) | null) | null;
+            failed: number;
+            mean_wall_ms: number;
+            passed: number;
+            runs_total: number;
+            success_rate: number;
+            timeouts: number;
+            /** Format: int64 */
+            total_model_calls: number;
+            /** Format: int64 */
+            total_tokens: ((number | null) | null) | null;
+        };
+        /** @description ProductEvalReport åæ ·ï¼core åºååï¼èåå¨é¨ journal è®°å½å«å¤±è´¥ + æªå®æååæ ¼æ¸åï¼ */
+        ProductEvalReport: {
+            /** @enum {string} */
+            execution: "reference" | "live";
+            generated_at: string;
+            metrics: components["schemas"]["ProductEvalMetrics"];
+            model: ((string | null) | null) | null;
+            pending: components["schemas"]["MatrixKey"][];
+            per_case: components["schemas"]["CaseModeMetrics"][];
+            runs: components["schemas"]["ProductEvalRun"][];
+            schema_version: number;
+            suite_hash: string;
+            suite_name: string;
+        };
+        /** @description ä¸æ¬¡è¿è¡çå®æ´è®°å½ï¼journal æå°ååï¼å¤±è´¥è®°å½åæ ·ä¿çï¼Option å­æ®µç¼ºæ°æ®æ¶åºååä¸º nullï¼ */
+        ProductEvalRun: {
+            /** @description æç» Artifact å¼ç¨ï¼æ²çåç¸å¯¹è·¯å¾ï¼ */
+            artifact_refs: string[];
+            cancellations: number;
+            /** @enum {string} */
+            category: "code" | "research" | "document";
+            /** Format: int64 */
+            completion_tokens: ((number | null) | null) | null;
+            cost_usd: ((number | null) | null) | null;
+            error: ((string | null) | null) | null;
+            /** @description å¤±è´¥æ­¥éª¤ï¼æ£æ¥å¨æè¿°/æ§è¡å¨é¶æ®µåï¼ */
+            failed_steps: string[];
+            finished_at: string;
+            key: components["schemas"]["MatrixKey"];
+            model: ((string | null) | null) | null;
+            model_calls: number;
+            /** Format: int64 */
+            prompt_tokens: ((number | null) | null) | null;
+            retries: number;
+            started_at: string;
+            /**
+             * @description ååæ ¼çº§ç¶æï¼æ ¸å¿ RunStatus å°åè¯ï¼
+             * @enum {string}
+             */
+            status: "passed" | "failed" | "error" | "timeout" | "cancelled";
+            /** @description çå®å·¥å·è°ç¨è½¨è¿¹ï¼å Agent æ§è¡å¨å¡«åï¼å·¥å·+å®åæè¦+ç»æï¼æ§è®°å½ç¼ºçä¸ºç©ºæ°ç»ï¼ */
+            tool_log: string[];
+            /** Format: int64 */
+            total_tokens: ((number | null) | null) | null;
+            /** Format: int64 */
+            wall_ms: number;
+        };
+        /** @description ProductEval è¿è¡æè¦ï¼åè¡¨åç´ ä¸è¯¦æåºåºï¼å­æï¼queued/running/cancelled/completed/failed/interruptedï¼ */
+        ProductEvalRunSummary: {
+            /** @enum {string|null} */
+            category?: "code" | "research" | "document" | null;
+            created_at: string;
+            error?: string | null;
+            /** @enum {string} */
+            execution: "reference" | "live";
+            finished_at?: string | null;
+            model?: string | null;
+            modes: ("single" | "workswarm")[];
+            only?: string | null;
+            /** @description è®¡åååæ ¼æ»æ°ï¼modes Ã cases Ã repetitionsï¼ */
+            planned_total: number;
+            progress: {
+                /** @description å·²å®æååæ ¼ï¼journal è¡æ°ï¼ */
+                done: number;
+                /** @description = planned_total */
+                total: number;
+            };
+            repetitions: number;
+            run_id: string;
+            started_at?: string | null;
+            /** @enum {string} */
+            status: "queued" | "running" | "cancelled" | "completed" | "failed" | "interrupted";
+            suite: string;
         };
         SessionInfo: {
             archived?: boolean;
@@ -3828,181 +4067,6 @@ export interface components {
             attachments?: string[];
             prompt: string;
         };
-        /** @description 预测校准报告（WM0 聚合：命中、误差与不确定度分桶） */
-        CalibrationReport: {
-            /** Format: int64 */
-            samples: number;
-            success_hit_rate: number;
-            mean_calibration_error: number;
-            mean_delta_jaccard: number;
-            uncertainty_buckets: {
-                label: string;
-                /** Format: int64 */
-                samples: number;
-                hit_rate: number;
-            }[];
-        };
-        /** @description 候选 provider 身份（§5.12.4 治理，声明≠接线）：external 需进程内真实接线后才积累影子样本；metadata_only 零样本且不可晋升 */
-        CandidateProviderRef: {
-            /** @enum {string} */
-            type: "external";
-            /** @description provider 类型标识（如 wm1-http、local-onnx） */
-            kind: string;
-            /** @description 定位串（端点或资源标识） */
-            locator: string;
-        } | {
-            /** @enum {string} */
-            type: "metadata_only";
-        };
-        /** @description 世界模型候选（新候选恒 shadow 起步，达标后显式人工晋升；Option 字段缺省序列化为 null） */
-        ModelCandidate: {
-            candidate_id: string;
-            model_id: string;
-            model_version: string;
-            source: string;
-            /** @enum {string} */
-            status: "shadow" | "active" | "rejected";
-            /** @description RFC3339 */
-            created_at: string;
-            promoted_at: string | null;
-            promote_reason: string | null;
-            /** @description provider 身份治理（响应 wire 字段名为 provider；注册请求侧字段名为 provider_ref） */
-            provider: components["schemas"]["CandidateProviderRef"];
-            /** @description 晋升时刻的校准摘要快照（从未晋升过为 null） */
-            calibration_summary: components["schemas"]["CalibrationReport"] | null;
-        };
-        Error: {
-            error: string;
-        };
-        /** @description ProductEval 运行摘要（列表元素与详情基底；六态：queued/running/cancelled/completed/failed/interrupted） */
-        ProductEvalRunSummary: {
-            run_id: string;
-            suite: string;
-            /** @enum {string} */
-            execution: "reference" | "live";
-            modes: ("single" | "workswarm")[];
-            repetitions: number;
-            /** @enum {string|null} */
-            category?: "code" | "research" | "document" | null;
-            only?: string | null;
-            model?: string | null;
-            /** @enum {string} */
-            status: "queued" | "running" | "cancelled" | "completed" | "failed" | "interrupted";
-            created_at: string;
-            started_at?: string | null;
-            finished_at?: string | null;
-            /** @description 计划单元格总数（modes × cases × repetitions） */
-            planned_total: number;
-            progress: {
-                /** @description 已完成单元格（journal 行数） */
-                done: number;
-                /** @description = planned_total */
-                total: number;
-            };
-            error?: string | null;
-        };
-        /** @description 矩阵单元格：(case_id, agent_mode, repetition)；agent_mode 为核心小写词（workswarm 拓扑序列化为 multi） */
-        MatrixKey: {
-            case_id: string;
-            /** @enum {string} */
-            agent_mode: "single" | "multi";
-            repetition: number;
-        };
-        /** @description 一次运行的完整记录（journal 最小单元；失败记录同样保留；Option 字段缺数据时序列化为 null） */
-        ProductEvalRun: {
-            key: components["schemas"]["MatrixKey"];
-            /** @enum {string} */
-            category: "code" | "research" | "document";
-            /**
-             * @description 单元格级状态（核心 RunStatus 小写词）
-             * @enum {string}
-             */
-            status: "passed" | "failed" | "error" | "timeout" | "cancelled";
-            /** Format: int64 */
-            wall_ms: number;
-            model_calls: number;
-            /** Format: int64 */
-            prompt_tokens: ((number | null) | null) | null;
-            /** Format: int64 */
-            completion_tokens: ((number | null) | null) | null;
-            /** Format: int64 */
-            total_tokens: ((number | null) | null) | null;
-            cost_usd: ((number | null) | null) | null;
-            /** @description 失败步骤（检查器描述/执行器阶段名） */
-            failed_steps: string[];
-            retries: number;
-            cancellations: number;
-            /** @description 最终 Artifact 引用（沙盒内相对路径） */
-            artifact_refs: string[];
-            /** @description 真实工具调用轨迹（单 Agent 执行器填写：工具+实参摘要+结果；旧记录缺省为空数组） */
-            tool_log: string[];
-            model: ((string | null) | null) | null;
-            started_at: string;
-            finished_at: string;
-            error: ((string | null) | null) | null;
-        };
-        /** @description 聚合指标：成功率分母为全部已尝试运行（失败/错误/超时一律计入，禁止剔除重算） */
-        ProductEvalMetrics: {
-            runs_total: number;
-            passed: number;
-            failed: number;
-            errors: number;
-            timeouts: number;
-            cancelled: number;
-            success_rate: number;
-            mean_wall_ms: number;
-            /** Format: int64 */
-            total_model_calls: number;
-            /** Format: int64 */
-            total_tokens: ((number | null) | null) | null;
-            estimated_cost_usd: ((number | null) | null) | null;
-        };
-        /** @description 按 (case_id, mode) 分组的细分统计（单 Agent vs WorkSwarm 对照列） */
-        CaseModeMetrics: {
-            case_id: string;
-            /** @enum {string} */
-            category: "code" | "research" | "document";
-            /** @enum {string} */
-            agent_mode: "single" | "multi";
-            runs_total: number;
-            passed: number;
-            success_rate: number;
-            mean_wall_ms: number;
-            mean_model_calls: number;
-            /** Format: int64 */
-            total_tokens: ((number | null) | null) | null;
-        };
-        /** @description ProductEvalReport 原样（core 序列化；聚合全部 journal 记录含失败 + 未完成单元格清单） */
-        ProductEvalReport: {
-            schema_version: number;
-            suite_name: string;
-            suite_hash: string;
-            /** @enum {string} */
-            execution: "reference" | "live";
-            model: ((string | null) | null) | null;
-            generated_at: string;
-            runs: components["schemas"]["ProductEvalRun"][];
-            pending: components["schemas"]["MatrixKey"][];
-            metrics: components["schemas"]["ProductEvalMetrics"];
-            per_case: components["schemas"]["CaseModeMetrics"][];
-        };
-        /** @description 不可变评审记录（V1 四期第三路；只增不改，append-only） */
-        ArtifactReviewRecord: {
-            review_id: string;
-            artifact_id: string;
-            /** @description 被评审的产物版本 */
-            artifact_version: number;
-            team_id: string;
-            /** @enum {string} */
-            decision: "approve" | "request_changes" | "reject";
-            reviewer: string;
-            comment?: string;
-            /** @description 唯一约束；同键重放零副作用 */
-            idempotency_key: string;
-            /** @description 评审时的产物内容引用（取证锚点） */
-            content_ref?: string;
-            created_at: string;
-        };
     };
     responses: never;
     parameters: never;
@@ -4012,6 +4076,209 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    artifactReviewHistory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description review history (asc) + version chain (supersedes/superseded_by) + approved head */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description (project, kind) çå½å approved head Artifactï¼æåçå®å­å¨ä¸å·²æ¹åçæ¬ï¼å¦å nullï¼ */
+                        approved_head: {
+                            [key: string]: unknown;
+                        } | null;
+                        artifact_id: string;
+                        kind: string;
+                        producer: string;
+                        /** @enum {string} */
+                        review_state: "draft" | "pending_review" | "approved" | "rejected" | "superseded";
+                        reviews: components["schemas"]["ArtifactReviewRecord"][];
+                        superseded_by?: string | null;
+                        supersedes_artifact_id?: string | null;
+                        version: number;
+                    };
+                };
+            };
+            /** @description artifact not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    artifactSubmitReview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    comment?: string;
+                    /**
+                     * @description è¯å®¡å³å®ï¼snake_caseï¼
+                     * @enum {string}
+                     */
+                    decision: "approve" | "request_changes" | "reject";
+                    /** @description ä¹è§å¹¶åç®æ çæ¬ï¼ç¼ºçè·³è¿çæ¬æ ¡éªï¼ä¸ç¬¦ â 409 */
+                    expected_version?: number;
+                    /** @description å¹ç­é®ï¼åé®éæ¾é¶å¯ä½ç¨è¿åæ¢æè®°å½ */
+                    idempotency_key: string;
+                    /** @description è¯å®¡èï¼member_id / user_id / è§è²åï¼ */
+                    reviewer: string;
+                    team_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description idempotent replayï¼åå¹ç­é®éæ¾ï¼é¶å¯ä½ç¨ï¼replayed: trueï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description decision=approve æ¶ç (project, kind) approved head Artifact */
+                        approved_head?: {
+                            [key: string]: unknown;
+                        } | null;
+                        /** @description è¯å®¡åç Artifactï¼å½åç¶æï¼ */
+                        artifact: {
+                            [key: string]: unknown;
+                        };
+                        /** @description æä¸º trueï¼åæ¾æ¢æè®°å½ï¼ */
+                        replayed: boolean;
+                        review: components["schemas"]["ArtifactReviewRecord"];
+                    };
+                };
+            };
+            /** @description review recorded; body = { replayed: false, review, artifact, approved_head } */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description decision=approve æ¶ç (project, kind) approved head Artifact */
+                        approved_head?: {
+                            [key: string]: unknown;
+                        } | null;
+                        /** @description è¯å®¡åç Artifactï¼review_state å·²è¿ç§»ï¼ */
+                        artifact: {
+                            [key: string]: unknown;
+                        };
+                        replayed: boolean;
+                        review: components["schemas"]["ArtifactReviewRecord"];
+                    };
+                };
+            };
+            /** @description validation failedï¼æªç¥ decisionï¼ç¼ºå¿å¡«å­æ®µä¸º Json extractor 422ï¼ */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description producer self-approve without human policy authorizationï¼é self_review_allowedï¼ */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description artifact or team not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description expected_version staleï¼æ§é¡µé¢æäº¤ï¼/ artifact superseded / idempotency key reused on other artifact */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description missing required fieldï¼team_id/decision/reviewer/idempotency_keyï¼ */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    artifactSubmitRework: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description å¹ç­é®ï¼åé®/åè¯å®¡éå¤è¯·æ±å¹ç­è¿ååä»»å¡ */
+                    idempotency_key?: string;
+                    /** @description è¿å·¥æä»¤ï¼æ³¨å¥éè·æ­¥éª¤è¾å¥ rework.instructionï¼ */
+                    instruction: string;
+                    /** @description è¦æ±ä¿®æ¹ï¼request_changesï¼è¯å®¡è®°å½ idï¼åä¸è¯å®¡ä»åè®¸ä¸ä¸ªè¿å·¥ä»»å¡ */
+                    review_id: string;
+                    team_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description idempotent replayï¼åè¯å®¡/åå¹ç­é®éå¤è¯·æ±ï¼è¿ååè¿å·¥ä»»å¡ï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description rework task createdï¼éç½®åæ­¥éª¤åæªå®æä¸æ¸¸ï¼éè·åç»è®° v2 å¹¶æ  v1 Supersededï¼approved head ä¸åç´è³ v2 æ¹åï¼ */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description artifact / team / review not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description è¯¥è¯å®¡å·²åå»ºè¿è¿å·¥ä»»å¡ï¼å¹ç­å²çªï¼æå¢éç¶æä¸åè®¸ */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     auditList: {
         parameters: {
             query?: {
@@ -4024,6 +4291,24 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description recent audit entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    authTokenBootstrap: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description public bootstrap token (same-origin pairing; CORS whitelist blocks cross-origin reads) */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4458,6 +4743,458 @@ export interface operations {
             };
         };
     };
+    datasetBuild: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    config?: Record<string, never>;
+                    env_id?: string;
+                    episode_id?: string;
+                    task_id?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description dataset built + split; manifest with dataset_id returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no transition corpus to build from */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    datasetManifest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description DatasetManifest (splits + counts + build config) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description dataset not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldCreateEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    env_id?: string;
+                    owner?: string;
+                    task: {
+                        app: string;
+                        assets?: Record<string, never>;
+                        seed: number;
+                        task_id: string;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description env created: initial lease proof + first-frame WorldStateV1 observation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env_id already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldInjectFault: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    fault: {
+                        dx?: number;
+                        dy?: number;
+                        element_id?: string;
+                        steps?: number;
+                        text?: string;
+                        /** @enum {string} */
+                        type: "modal_popup" | "element_drift" | "sluggish_steps";
+                    };
+                    lease: {
+                        epoch: number;
+                        owner: string;
+                        token: string;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description fault injected into env */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldJudgeEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    success: {
+                        assertions: Record<string, never>[];
+                        name: string;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description verdict against success spec (read path, no lease) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldLeaseOp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    lease?: {
+                        epoch: number;
+                        owner: string;
+                        token: string;
+                    };
+                    /** @enum {string} */
+                    op: "acquire" | "renew" | "release";
+                    owner?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description lease acquired/renewed/released; current lease record returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description renew/release missing lease proof */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldObserveEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description current WorldStateV1 observation (scene graph + window stack) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldResetEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    lease: {
+                        epoch: number;
+                        owner: string;
+                        token: string;
+                    };
+                    task: {
+                        app: string;
+                        assets?: Record<string, never>;
+                        seed: number;
+                        task_id: string;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description env reset to task initial state; lease proof returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict (stale token/epoch) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldRestoreEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    lease: {
+                        epoch: number;
+                        owner: string;
+                        token: string;
+                    };
+                    snapshot: string;
+                };
+            };
+        };
+        responses: {
+            /** @description env restored from snapshot; observation returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env or snapshot not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldSnapshotEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description snapshot persisted; snapshot_id returned (read path, no lease) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktopWorldStepEnv: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    action: {
+                        action_id: string;
+                        arguments?: Record<string, never>;
+                        kind: string;
+                        reversible?: boolean;
+                        risk?: string;
+                        semantic_intent: string;
+                        target_id?: string;
+                    };
+                    episode_id?: string;
+                    history?: string[];
+                    lease: {
+                        epoch: number;
+                        owner: string;
+                        token: string;
+                    };
+                    record?: boolean;
+                    task_goal?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description step executed: before/after state refs, transition id, verdict + reward parts, shadow prediction evaluation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description env not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description lease fencing conflict (stale token/epoch) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     desktopActivate: {
         parameters: {
             query?: never;
@@ -4721,6 +5458,367 @@ export interface operations {
             };
         };
     };
+    eventsStream: {
+        parameters: {
+            query?: {
+                last_event_id?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description reliable SSE event stream (Last-Event-ID resume + bounded backpressure) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetApprovalRespond: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    approved_by: string;
+                    /** @enum {string} */
+                    decision: "approve" | "reject";
+                };
+            };
+        };
+        responses: {
+            /** @description approval decision recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetNodesList: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description node status snapshots */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetNodesRegister: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    card: Record<string, never>;
+                    node_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description node registered with lease */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetNodeHeartbeat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    lease_token: string;
+                };
+            };
+        };
+        responses: {
+            /** @description lease renewed with latest epoch/token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description stale token or expired lease (fencing) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetNodeTasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description claimable/claimed tasks for node */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTasksSubmit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    approval_required?: boolean;
+                    correlation_id?: string;
+                    input: Record<string, never>;
+                    lineage?: string[];
+                    task_id: string;
+                    worker: string;
+                };
+            };
+        };
+        responses: {
+            /** @description task submitted with idempotency key */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description task view with status and events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskCancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description task cancelled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskCancelAck: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    epoch: number;
+                    lease_token: string;
+                    node_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description node confirmed cancellation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskClaim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    epoch: number;
+                    lease_token: string;
+                    node_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description task claimed by node (fencing verified) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description stale token/epoch or node mismatch */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskEvents: {
+        parameters: {
+            query?: {
+                format?: "json";
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SSE task event stream (history replay + live; ?format=json returns array) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskProgress: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    epoch: number;
+                    evidence?: Record<string, never>[];
+                    lease_token: string;
+                    node_id: string;
+                    text: string;
+                };
+            };
+        };
+        responses: {
+            /** @description progress + structured evidence recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fleetTaskResult: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    epoch: number;
+                    error?: string;
+                    evidence?: Record<string, never>[];
+                    lease_token: string;
+                    node_id: string;
+                    ok: boolean;
+                    output?: Record<string, never>;
+                    output_cas?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description task result recorded (terminal) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     goalList: {
         parameters: {
             query?: never;
@@ -4885,58 +5983,58 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
-                    /** @description wave 内并发执行步数上限 */
-                    parallelism?: number;
                     allow_replan?: boolean;
-                    /** @description 执行路径选择；缺省 process。mode=worker_pool 必须提供非空 workers */
+                    /** @description æ§è¡è·¯å¾éæ©ï¼ç¼ºç processãmode=worker_pool å¿é¡»æä¾éç©º workers */
                     execution?: {
                         /** @enum {string} */
                         mode?: "process" | "worker_pool";
-                        /** @description worker_pool 受控子进程配置（命令仅限当前可执行文件；env 白名单拒凭据键） */
-                        workers?: {
-                            name: string;
-                            command: string;
-                            args?: string[];
-                            cwd: string;
-                            env?: {
-                                [key: string]: string;
-                            };
-                            budget?: {
-                                max_turns?: number;
-                                max_duration_secs?: number;
-                                max_memory_mb?: number;
-                                max_cpu_cores?: number;
-                            };
-                            max_restarts?: number;
-                            base_backoff_secs?: number;
-                        }[];
-                        /** @description A2 显式执行目标绑定（按 worker 一个目标；显式绑定不可用即等待/询问/拒绝，不静默改派） */
+                        /** @description A2 æ¾å¼æ§è¡ç®æ ç»å®ï¼æ worker ä¸ä¸ªç®æ ï¼æ¾å¼ç»å®ä¸å¯ç¨å³ç­å¾/è¯¢é®/æç»ï¼ä¸éé»æ¹æ´¾ï¼ */
                         targets?: {
-                            /** @description 计划步骤 worker 名（agent 只允许 in_process） */
-                            worker: string;
-                            /** @enum {string} */
-                            target: "in_process" | "local_process" | "fleet_node";
-                            /** @description fleet_node 必填；不允许隐式选节点 */
-                            node_id?: string;
+                            budget?: {
+                                /** @description å¯¹ plan æ­¥éª¤ retries å min */
+                                max_attempts?: number;
+                                /** @description æ´¾åç­å¾/æ± é¢ç®æ´¾çä¸éï¼0=ä¸éï¼ */
+                                max_duration_secs?: number;
+                            };
                             capabilities?: string[];
-                            /** @description 默认 deny：未列出的能力一律不授予；deny 优先于 allow */
+                            /** @description ç¼ºçæ´¾ç <goal_id>/<run_id>/<worker> */
+                            correlation_id?: string;
+                            input_cas_ref?: string;
+                            /** @description fleet_node å¿å¡«ï¼ä¸åè®¸éå¼éèç¹ */
+                            node_id?: string;
+                            /** @description é»è®¤ denyï¼æªååºçè½åä¸å¾ä¸æäºï¼deny ä¼åäº allow */
                             permission_scope?: {
                                 allow?: string[];
                                 deny?: string[];
                                 /** @default false */
                                 network_egress?: boolean;
                             };
+                            /** @enum {string} */
+                            target: "in_process" | "local_process" | "fleet_node";
+                            /** @description ç»å®é®ï¼è®¡åæ­¥éª¤ id ææ­¥éª¤å£°æç worker åï¼agent åªåè®¸ in_processï¼ */
+                            worker: string;
+                        }[];
+                        /** @description worker_pool åæ§å­è¿ç¨éç½®ï¼å½ä»¤ä»éå½åå¯æ§è¡æä»¶ï¼env ç½ååæå­æ®é®ï¼ */
+                        workers?: {
+                            args?: string[];
+                            base_backoff_secs?: number;
                             budget?: {
-                                /** @description 对 plan 步骤 retries 取 min */
-                                max_attempts?: number;
-                                /** @description 派发等待/池预算派生上限（0=不限） */
+                                max_cpu_cores?: number;
                                 max_duration_secs?: number;
+                                max_memory_mb?: number;
+                                max_turns?: number;
                             };
-                            input_cas_ref?: string;
-                            /** @description 缺省派生 <goal_id>/<run_id>/<worker> */
-                            correlation_id?: string;
+                            command: string;
+                            cwd: string;
+                            env?: {
+                                [key: string]: string;
+                            };
+                            max_restarts?: number;
+                            name: string;
                         }[];
                     };
+                    /** @description wave åå¹¶åæ§è¡æ­¥æ°ä¸é */
+                    parallelism?: number;
                 };
             };
         };
@@ -4948,7 +6046,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description 非法 execution/targets 配置（缺 workers、矛盾绑定、fleet_node 缺 node_id 等） */
+            /** @description éæ³ execution/targets éç½®ï¼ç¼º workersãçç¾ç»å®ãfleet_node ç¼º node_id ç­ï¼ */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5693,7 +6791,7 @@ export interface operations {
             };
         };
     };
-    schemasList: {
+    metricsPrometheus: {
         parameters: {
             query?: never;
             header?: never;
@@ -5702,7 +6800,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description JSON Schema 版本化发布索引（plugin-manifest/owskill/owflow） */
+            /** @description Prometheus text exposition format */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5711,19 +6809,72 @@ export interface operations {
             };
         };
     };
-    schemaGet: {
+    metricsRuntime: {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                kind: string;
-                version: string;
-            };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description JSON Schema (draft-07) */
+            /** @description runtime process metrics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    metricsSlo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SLO registry with error budget and attainment status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    metricsSloAlerts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SLO alert rules and structured alert events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    metricsSloReport: {
+        parameters: {
+            query?: {
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SLO period report (JSON) */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5763,6 +6914,126 @@ export interface operations {
         responses: {
             /** @description recent turn durations */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    modelCandidateRegister: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description ç¼ºçèªå¨çæ model_id-model_version-<uuid8> */
+                    candidate_id?: string;
+                    model_id: string;
+                    model_version: string;
+                    /** @description å¯æ§è¡ provider èº«ä»½å£°æï¼ç¼ºç metadata_onlyï¼å£°æâ æ¥çº¿ï¼è¿éè¿ç¨åçå®æ¥çº¿æç§¯ç´¯å½±å­æ ·æ¬ï¼ */
+                    provider_ref?: components["schemas"]["CandidateProviderRef"];
+                    /** @description æ¥æºè¯´æï¼ç¼ºçï¼æå¨æ³¨å shadow èµ·æ­¥ï¼ */
+                    source?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description candidate registered as shadow (never auto-activated); body = ModelCandidate */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelCandidate"];
+                };
+            };
+            /** @description candidate_id already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    modelCandidatePromote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    ack: boolean;
+                    reason: string;
+                };
+            };
+        };
+        responses: {
+            /** @description candidate promoted to active provider (human ack required); body = { candidate, active, previous_active, samples, gates } */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        active: string;
+                        candidate: components["schemas"]["ModelCandidate"];
+                        /** @description æåé¨æ§æç»å¿«ç§ï¼å®¡è®¡å£å¾ï¼ */
+                        gates: {
+                            calibration_summary: components["schemas"]["CalibrationReport"];
+                            /** Format: int64 */
+                            min_shadow_samples: number;
+                            provider_wired: {
+                                kind: string;
+                                locator: string;
+                            };
+                            /** @description ç¸å¯¹ä¸ä¸ä»» active çéåæ£æ¥ï¼æ åä»»æåä»»æ æ ·æ¬æ¶ä¸º nullï¼ */
+                            regression_check?: {
+                                hit_rate_delta?: number;
+                                max_regression_delta?: number;
+                                mean_calibration_error_delta?: number;
+                                mean_delta_jaccard_delta?: number;
+                                passed?: boolean;
+                                previous_active?: string;
+                                /** Format: int64 */
+                                previous_samples?: number;
+                            } | null;
+                        };
+                        previous_active: string | null;
+                        /**
+                         * Format: int64
+                         * @description çå®å½±å­æ ·æ¬æ°
+                         */
+                        samples: number;
+                    };
+                };
+            };
+            /** @description ack=false or empty reason */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description candidate not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description governance gate refusedï¼metadata_only / æªæ¥çº¿ / æ ·æ¬ä¸è¶³ / ç¸å¯¹åä»»éåè¶éå¼ï¼ */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6711,6 +7982,165 @@ export interface operations {
             };
         };
     };
+    listProductEvalRuns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description runs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        runs?: components["schemas"]["ProductEvalRunSummary"][];
+                    };
+                };
+            };
+        };
+    };
+    createProductEvalRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description åªè·æå®åç±»
+                     * @enum {string|null}
+                     */
+                    category?: "code" | "research" | "document" | null;
+                    /**
+                     * @description reference=åæ¨¡ååèåæ¾+æ£æ¥å¨ï¼live=çå®æ§è¡å¨ï¼singleâSingleAgentExecutorï¼workswarmâWorkSwarmExecutorï¼
+                     * @enum {string}
+                     */
+                    execution: "reference" | "live";
+                    /** @description å¯¹ç§ææå­éï¼ç»ææ¥å wire ä¸­ agent_mode ä¸ºæ ¸å¿å°åè¯ single/multiï¼workswarm â¡ multiï¼ */
+                    modes: ("single" | "workswarm")[];
+                    /** @description åªè· id åå«è¯¥å­ä¸²çä»»å¡ */
+                    only?: string | null;
+                    /** @description éå¤æ¬¡æ°ï¼è¦ç suite é»è®¤ï¼ */
+                    repetitions: number;
+                    /**
+                     * @description ä»åè®¸æ³¨åå v1ï¼å®¢æ·ç«¯æ¬å°è·¯å¾ä¸å¾æç»
+                     * @enum {string}
+                     */
+                    suite: "v1";
+                };
+            };
+        };
+        responses: {
+            /** @description åç */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description eval-â¦ */
+                        run_id: string;
+                        /** @enum {string} */
+                        status: "queued";
+                    };
+                };
+            };
+            /** @description è¯­ä¹æ ¡éªå¤±è´¥ï¼æªç¥ suite/execution/modeãrepetitions è¶çãsuite å è½½å¤±è´¥ãè¿æ»¤åæ ä»»å¡ï¼ */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description ç»ææ ¡éªå¤±è´¥ï¼ç¼ºå­æ®µ/ç±»åéï¼ */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getProductEvalRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description run summary + report */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductEvalRunSummary"] & {
+                        report?: null | components["schemas"]["ProductEvalReport"];
+                    };
+                };
+            };
+            /** @description è¿è¡ä¸å­å¨ */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    cancelProductEvalRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description åæ¶åçæåç¶æ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        run_id: string;
+                        /** @enum {string} */
+                        status: "queued" | "running" | "cancelled" | "completed" | "failed" | "interrupted";
+                    };
+                };
+            };
+            /** @description è¿è¡ä¸å­å¨ */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     projectRulesGet: {
         parameters: {
             query?: never;
@@ -6763,6 +8193,167 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description AGENTS.md template written */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmGetProjectSpace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description project space summary (tasks/artifacts/decisions/activity) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmListArtifacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description versioned shared artifacts (content via CAS ref) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    projectDeliverables: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description æç»äº¤ä»ç©è§å¾ï¼approved = å kind å½åå·²æ¹åçæ¬ï¼ä¾ä¸è½½/ç»§ç»­ä½¿ç¨ï¼ï¼pending = å¾è¯å®¡ï¼rejected_or_superseded = è¢«é©³å/è¢«åä»£çæ¬ï¼åå²ä¿çï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        approved: {
+                            [key: string]: unknown;
+                        }[];
+                        pending: {
+                            [key: string]: unknown;
+                        }[];
+                        project_id: string;
+                        rejected_or_superseded: {
+                            [key: string]: unknown;
+                        }[];
+                    };
+                };
+            };
+            /** @description project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    schemasList: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description JSON Schema çæ¬ååå¸ç´¢å¼ï¼plugin-manifest/owskill/owflowï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    schemaGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description JSON Schema (draft-07) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    serverShutdown: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    confirm: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description graceful shutdown requested */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    serverStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description concurrency gate + storage migration status */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7347,6 +8938,91 @@ export interface operations {
             };
         };
     };
+    storageBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description zip backup (b64 + saved path) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    storageClear: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    confirm?: "CLEAR_ALL";
+                };
+            };
+        };
+        responses: {
+            /** @description cleared with integrity check */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    storageExport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description full standard JSON export */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    storageRestore: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    archive_b64: string;
+                };
+            };
+        };
+        responses: {
+            /** @description restore result with pre-backup */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     sttTranscribe: {
         parameters: {
             query?: never;
@@ -7383,373 +9059,6 @@ export interface operations {
         };
         responses: {
             /** @description subagent execution result */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    teamAudit: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description team api audit tail */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    workswarmListTeams: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description team run list; items = TeamRun + 进程内运行标志（R2 additive） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        teams: {
-                            /** @description 运行循环正在执行阶段（人节点等待窗口 / 终态为 false） */
-                            active?: boolean;
-                            /** @description R2：磁盘 Running 但无活动运行 → 已识别为中断，等待显式 continue/retry 恢复 */
-                            interrupted?: boolean;
-                        }[];
-                    };
-                };
-            };
-        };
-    };
-    workswarmCreateTeam: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    budget?: Record<string, never>;
-                    goal_id?: string;
-                    human_policy?: string;
-                    /** @enum {string} */
-                    mode?: "single" | "team" | "swarmflow";
-                    objective: string;
-                    roles?: Record<string, never>[];
-                    template_id?: string;
-                };
-            };
-        };
-        responses: {
-            /** @description team run created; background run loop drives phases */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    workswarmGetTeam: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description team + task view + audit tail; R2 additive: interrupted */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        /** @description TeamRun（透传） */
-                        team: Record<string, never>;
-                        /** @description R2：中断标记（请求时先做一次幂等中断识别） */
-                        interrupted: boolean;
-                        /** @description 任务视图（步骤 × 状态） */
-                        tasks: Record<string, never>;
-                        audit_tail: {
-                            ts?: string;
-                            event?: string;
-                            detail?: string;
-                        }[];
-                    };
-                };
-            };
-        };
-    };
-    workswarmTeamEvents: {
-        parameters: {
-            query?: {
-                format?: "json";
-            };
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description SSE team event stream (audit replay frames {type:audit,ts,event,detail} + state frames {type:state,status,active,interrupted}; ends at terminal); ?format=json 返回一次性快照（见 content schema，R2 additive: interrupted） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        team_id: string;
-                        /** @description Debug 格式团队状态（如 Running / Created / Completed） */
-                        status: string;
-                        active: boolean;
-                        /** @description R2：中断标记（磁盘 Running 但无活动运行） */
-                        interrupted: boolean;
-                        audit: {
-                            ts?: string;
-                            event?: string;
-                            detail?: string;
-                        }[];
-                    };
-                };
-            };
-        };
-    };
-    workswarmGetTeamTasks: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description team task graph (step x status) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    workswarmSteerTeam: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    /**
-                     * @description R2 冻结契约：retry 局部重试 = { command: retry, step_id, note }，仅允许指定一个 Failed/Aborted/中断中的步骤
-                     * @enum {string}
-                     */
-                    command: "continue" | "retry" | "steer" | "replace" | "cancel";
-                    /** @description steer 专用：合并进步骤输入 */
-                    new_input?: Record<string, never>;
-                    /** @description replace 专用：人节点新用户 ID */
-                    new_user_id?: string;
-                    /** @description replace 专用：agent 节点新 worker */
-                    new_worker?: string;
-                    /** @description retry/steer/replace 的变更理由（进入 DecisionRecord） */
-                    note?: string;
-                    /** @description replace 专用：目标角色 */
-                    role?: string;
-                    /** @description retry 必填（缺失/空 → 400）；steer 可选（空 = 全部未完成节点） */
-                    step_id?: string;
-                };
-            };
-        };
-        responses: {
-            /** @description steer applied (only uncompleted nodes; DecisionRecord kept) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        team_id: string;
-                        /** @description Debug 格式团队状态 */
-                        status: string;
-                        /** @description R2：中断标记（continue/retry 成功恢复后为 false） */
-                        interrupted: boolean;
-                    };
-                };
-            };
-            /** @description validation failed（retry 缺 step_id / 未知 command） */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description unknown team or step */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description run is active（retry 目标已成功同样 409，重复发送无额外副作用） */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    workswarmListTemplates: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description adopted team templates */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    workswarmListTemplateProposals: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description team template proposals (proposal only, never auto-enabled) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    workswarmAdoptTemplateProposal: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                proposal_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description proposal adopted into template registry (idempotent) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    workswarmRejectTemplateProposal: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                proposal_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description proposal rejected (record kept, auditable) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description proposal already adopted */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description proposal not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    workswarmGetProjectSpace: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description project space summary (tasks/artifacts/decisions/activity) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    workswarmListArtifacts: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description versioned shared artifacts (content via CAS ref) */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7811,6 +9120,24 @@ export interface operations {
         };
         responses: {
             /** @description human node result recorded; downstream wakes automatically */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    teamAudit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description team api audit tail */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7912,6 +9239,397 @@ export interface operations {
             };
         };
     };
+    workswarmListTeams: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description team run list; items = TeamRun + è¿ç¨åè¿è¡æ å¿ï¼R2 additiveï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        teams: {
+                            /** @description è¿è¡å¾ªç¯æ­£å¨æ§è¡é¶æ®µï¼äººèç¹ç­å¾çªå£ / ç»æä¸º falseï¼ */
+                            active?: boolean;
+                            /** @description R2ï¼ç£ç Running ä½æ æ´»å¨è¿è¡ â å·²è¯å«ä¸ºä¸­æ­ï¼ç­å¾æ¾å¼ continue/retry æ¢å¤ */
+                            interrupted?: boolean;
+                        }[];
+                    };
+                };
+            };
+        };
+    };
+    workswarmCreateTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    budget?: Record<string, never>;
+                    goal_id?: string;
+                    human_policy?: string;
+                    /** @enum {string} */
+                    mode?: "single" | "team" | "swarmflow";
+                    objective: string;
+                    roles?: Record<string, never>[];
+                    template_id?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description team run created; background run loop drives phases */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmListTemplates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description adopted team templates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmListTemplateProposals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description team template proposals (proposal only, never auto-enabled) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmAdoptTemplateProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description proposal adopted into template registry (idempotent) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmRejectTemplateProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                proposal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description proposal rejected (record kept, auditable) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description proposal already adopted */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description proposal not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmGetTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description team + task view + audit tail; R2 additive: interrupted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        audit_tail: {
+                            detail?: string;
+                            event?: string;
+                            ts?: string;
+                        }[];
+                        /** @description R2ï¼ä¸­æ­æ è®°ï¼è¯·æ±æ¶ååä¸æ¬¡å¹ç­ä¸­æ­è¯å«ï¼ */
+                        interrupted: boolean;
+                        /** @description ä»»å¡è§å¾ï¼æ­¥éª¤ Ã ç¶æï¼ */
+                        tasks: Record<string, never>;
+                        /** @description TeamRunï¼éä¼ ï¼ */
+                        team: Record<string, never>;
+                    };
+                };
+            };
+            /** @description unknown team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    teamDiagnostic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description è±æè¯æ­å¯¼åºï¼TeamRun/ä»»å¡ç¶æ/Artifact ä¸è¯å®¡è®°å½/Handoff/ææ /å®¡è®¡å°¾è¿¹ï¼å­æ®ãAuthorizationãå®æ´ææè¾å¥å·²è±æï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description team not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmTeamEvents: {
+        parameters: {
+            query?: {
+                format?: "json";
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SSE team event stream (audit replay frames {type:audit,ts,event,detail} + state frames {type:state,status,active,interrupted}; ends at terminal); ?format=json è¿åä¸æ¬¡æ§å¿«ç§ï¼è§ content schemaï¼R2 additive: interruptedï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        active: boolean;
+                        audit: {
+                            detail?: string;
+                            event?: string;
+                            ts?: string;
+                        }[];
+                        /** @description R2ï¼ä¸­æ­æ è®°ï¼ç£ç Running ä½æ æ´»å¨è¿è¡ï¼ */
+                        interrupted: boolean;
+                        /** @description Debug æ ¼å¼å¢éç¶æï¼å¦ Running / Created / Completedï¼ */
+                        status: string;
+                        team_id: string;
+                    };
+                };
+            };
+            /** @description unknown team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    teamMetrics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description è§è²ææ ï¼workers[]ï¼èµ·æ­¢/èæ¶/æ¨¡åè°ç¨/token/ä¼°ç®è´¹ç¨/å°è¯/ç»æ/å¤±è´¥åå /è¾åº Artifactï¼+ summaryï¼æ»å¢é/æ»è°ç¨/æ»è´¹ç¨/ææ¢ Worker/å¤±è´¥/è¿å·¥/äº§ç©çæ¬æ°/é¢ç®èå°½åå ï¼ï¼JSONL æä¹åï¼éå¯å¯è¯» */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        summary?: {
+                            [key: string]: unknown;
+                        };
+                        team_id: string;
+                        workers?: {
+                            [key: string]: unknown;
+                        }[];
+                    };
+                };
+            };
+            /** @description team not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmSteerTeam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description R2 å»ç»å¥çº¦ï¼retry å±é¨éè¯ = { command: retry, step_id, note }ï¼ä»åè®¸æå®ä¸ä¸ª Failed/Aborted/ä¸­æ­ä¸­çæ­¥éª¤
+                     * @enum {string}
+                     */
+                    command: "continue" | "retry" | "steer" | "replace" | "cancel";
+                    /** @description steer ä¸ç¨ï¼åå¹¶è¿æ­¥éª¤è¾å¥ */
+                    new_input?: Record<string, never>;
+                    /** @description replace ä¸ç¨ï¼äººèç¹æ°ç¨æ· ID */
+                    new_user_id?: string;
+                    /** @description replace ä¸ç¨ï¼agent èç¹æ° worker */
+                    new_worker?: string;
+                    /** @description retry/steer/replace çåæ´çç±ï¼è¿å¥ DecisionRecordï¼ */
+                    note?: string;
+                    /** @description replace ä¸ç¨ï¼ç®æ è§è² */
+                    role?: string;
+                    /** @description retry å¿å¡«ï¼ç¼ºå¤±/ç©º â 400ï¼ï¼steer å¯éï¼ç©º = å¨é¨æªå®æèç¹ï¼ */
+                    step_id?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description steer applied (only uncompleted nodes; DecisionRecord kept) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description R2ï¼ä¸­æ­æ è®°ï¼continue/retry æåæ¢å¤åä¸º falseï¼ */
+                        interrupted: boolean;
+                        /** @description Debug æ ¼å¼å¢éç¶æ */
+                        status: string;
+                        team_id: string;
+                    };
+                };
+            };
+            /** @description validation failedï¼retry ç¼º step_id / æªç¥ commandï¼ */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description unknown team or step */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description run is activeï¼retry ç®æ å·²æååæ · 409ï¼éå¤åéæ é¢å¤å¯ä½ç¨ï¼ */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmGetTeamTasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description team task graph (step x status) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     tracesList: {
         parameters: {
             query?: never;
@@ -7950,6 +9668,33 @@ export interface operations {
             };
         };
     };
+    transitionGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description TransitionTraceV1 record */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description transition not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     usageSummary: {
         parameters: {
             query?: never;
@@ -7960,6 +9705,89 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description model token usage snapshot and budget config */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    usageRecords: {
+        parameters: {
+            query?: {
+                dimension?: "session" | "workflow_run" | "goal_step" | "tool";
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description usage records filtered by dimension */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    usageReport: {
+        parameters: {
+            query?: {
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description usage aggregation report over window (budget/soak friendly) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    usageSummaryV2: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description four-dimension usage aggregation + budget hard-stop state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    usageTopup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    amount?: number;
+                };
+            };
+        };
+        responses: {
+            /** @description budget topped up and hard stop cleared */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -8288,1078 +10116,6 @@ export interface operations {
             };
         };
     };
-    eventsStream: {
-        parameters: {
-            query?: {
-                last_event_id?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description reliable SSE event stream (Last-Event-ID resume + bounded backpressure) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    metricsRuntime: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description runtime process metrics */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    authTokenBootstrap: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description public bootstrap token (same-origin pairing; CORS whitelist blocks cross-origin reads) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    metricsSlo: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description SLO registry with error budget and attainment status */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    metricsSloAlerts: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description SLO alert rules and structured alert events */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    metricsSloReport: {
-        parameters: {
-            query?: {
-                days?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description SLO period report (JSON) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    metricsPrometheus: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Prometheus text exposition format */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    serverStatus: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description concurrency gate + storage migration status */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    serverShutdown: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    confirm: boolean;
-                };
-            };
-        };
-        responses: {
-            /** @description graceful shutdown requested */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    storageBackup: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description zip backup (b64 + saved path) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    storageClear: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    /** @enum {string} */
-                    confirm?: "CLEAR_ALL";
-                };
-            };
-        };
-        responses: {
-            /** @description cleared with integrity check */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    storageExport: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description full standard JSON export */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    storageRestore: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    archive_b64: string;
-                };
-            };
-        };
-        responses: {
-            /** @description restore result with pre-backup */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    usageRecords: {
-        parameters: {
-            query?: {
-                dimension?: "session" | "workflow_run" | "goal_step" | "tool";
-                limit?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description usage records filtered by dimension */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    usageReport: {
-        parameters: {
-            query?: {
-                days?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description usage aggregation report over window (budget/soak friendly) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    usageSummaryV2: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description four-dimension usage aggregation + budget hard-stop state */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    usageTopup: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    amount?: number;
-                };
-            };
-        };
-        responses: {
-            /** @description budget topped up and hard stop cleared */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetNodesRegister: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    node_id: string;
-                    card: Record<string, never>;
-                };
-            };
-        };
-        responses: {
-            /** @description node registered with lease */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetNodesList: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description node status snapshots */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetNodeHeartbeat: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                node_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    lease_token: string;
-                };
-            };
-        };
-        responses: {
-            /** @description lease renewed with latest epoch/token */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description stale token or expired lease (fencing) */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetNodeTasks: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                node_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description claimable/claimed tasks for node */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetTasksSubmit: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    task_id: string;
-                    worker: string;
-                    input: Record<string, never>;
-                    correlation_id?: string;
-                    lineage?: string[];
-                    approval_required?: boolean;
-                };
-            };
-        };
-        responses: {
-            /** @description task submitted with idempotency key */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetTaskGet: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description task view with status and events */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetTaskClaim: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    node_id: string;
-                    lease_token: string;
-                    epoch: number;
-                };
-            };
-        };
-        responses: {
-            /** @description task claimed by node (fencing verified) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description stale token/epoch or node mismatch */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetTaskProgress: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    node_id: string;
-                    lease_token: string;
-                    epoch: number;
-                    text: string;
-                    evidence?: Record<string, never>[];
-                };
-            };
-        };
-        responses: {
-            /** @description progress + structured evidence recorded */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetTaskResult: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    node_id: string;
-                    lease_token: string;
-                    epoch: number;
-                    ok: boolean;
-                    output?: Record<string, never>;
-                    output_cas?: string;
-                    evidence?: Record<string, never>[];
-                    error?: string;
-                };
-            };
-        };
-        responses: {
-            /** @description task result recorded (terminal) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetTaskCancelAck: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    node_id: string;
-                    lease_token: string;
-                    epoch: number;
-                };
-            };
-        };
-        responses: {
-            /** @description node confirmed cancellation */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetTaskCancel: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description task cancelled */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetTaskEvents: {
-        parameters: {
-            query?: {
-                format?: "json";
-            };
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description SSE task event stream (history replay + live; ?format=json returns array) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    fleetApprovalRespond: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    /** @enum {string} */
-                    decision: "approve" | "reject";
-                    approved_by: string;
-                };
-            };
-        };
-        responses: {
-            /** @description approval decision recorded */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    desktopWorldCreateEnv: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    env_id?: string;
-                    task: {
-                        task_id: string;
-                        app: string;
-                        seed: number;
-                        assets?: Record<string, never>;
-                    };
-                    owner?: string;
-                };
-            };
-        };
-        responses: {
-            /** @description env created: initial lease proof + first-frame WorldStateV1 observation */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description env_id already exists */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    desktopWorldResetEnv: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    task: {
-                        task_id: string;
-                        app: string;
-                        seed: number;
-                        assets?: Record<string, never>;
-                    };
-                    lease: {
-                        owner: string;
-                        token: string;
-                        epoch: number;
-                    };
-                };
-            };
-        };
-        responses: {
-            /** @description env reset to task initial state; lease proof returned */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description env not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description lease fencing conflict (stale token/epoch) */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    desktopWorldLeaseOp: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    /** @enum {string} */
-                    op: "acquire" | "renew" | "release";
-                    lease?: {
-                        owner: string;
-                        token: string;
-                        epoch: number;
-                    };
-                    owner?: string;
-                };
-            };
-        };
-        responses: {
-            /** @description lease acquired/renewed/released; current lease record returned */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description renew/release missing lease proof */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description env not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description lease fencing conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    desktopWorldObserveEnv: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description current WorldStateV1 observation (scene graph + window stack) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description env not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    desktopWorldStepEnv: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    action: {
-                        action_id: string;
-                        kind: string;
-                        semantic_intent: string;
-                        target_id?: string;
-                        arguments?: Record<string, never>;
-                        risk?: string;
-                        reversible?: boolean;
-                    };
-                    lease: {
-                        owner: string;
-                        token: string;
-                        epoch: number;
-                    };
-                    episode_id?: string;
-                    record?: boolean;
-                    task_goal?: string;
-                    history?: string[];
-                };
-            };
-        };
-        responses: {
-            /** @description step executed: before/after state refs, transition id, verdict + reward parts, shadow prediction evaluation */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description env not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description lease fencing conflict (stale token/epoch) */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    desktopWorldSnapshotEnv: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": Record<string, never>;
-            };
-        };
-        responses: {
-            /** @description snapshot persisted; snapshot_id returned (read path, no lease) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description env not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    desktopWorldRestoreEnv: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    snapshot: string;
-                    lease: {
-                        owner: string;
-                        token: string;
-                        epoch: number;
-                    };
-                };
-            };
-        };
-        responses: {
-            /** @description env restored from snapshot; observation returned */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description env or snapshot not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description lease fencing conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    desktopWorldJudgeEnv: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    success: {
-                        name: string;
-                        assertions: Record<string, never>[];
-                    };
-                };
-            };
-        };
-        responses: {
-            /** @description verdict against success spec (read path, no lease) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description env not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    desktopWorldInjectFault: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    fault: {
-                        /** @enum {string} */
-                        type: "modal_popup" | "element_drift" | "sluggish_steps";
-                        text?: string;
-                        element_id?: string;
-                        dx?: number;
-                        dy?: number;
-                        steps?: number;
-                    };
-                    lease: {
-                        owner: string;
-                        token: string;
-                        epoch: number;
-                    };
-                };
-            };
-        };
-        responses: {
-            /** @description fault injected into env */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description env not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description lease fencing conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     worldModelPredict: {
         parameters: {
             query?: never;
@@ -9370,17 +10126,17 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
-                    env_id: string;
                     action: {
                         action_id: string;
+                        arguments?: Record<string, never>;
                         kind: string;
                         semantic_intent: string;
                         target_id?: string;
-                        arguments?: Record<string, never>;
                     };
-                    context?: Record<string, never>;
-                    with_advice?: boolean;
                     candidates?: Record<string, never>[];
+                    context?: Record<string, never>;
+                    env_id: string;
+                    with_advice?: boolean;
                 };
             };
         };
@@ -9419,543 +10175,6 @@ export interface operations {
         responses: {
             /** @description active rule model + candidates + per-signature samples + calibration report */
             200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    transitionGet: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description TransitionTraceV1 record */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description transition not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    datasetBuild: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    config?: Record<string, never>;
-                    env_id?: string;
-                    episode_id?: string;
-                    task_id?: string;
-                };
-            };
-        };
-        responses: {
-            /** @description dataset built + split; manifest with dataset_id returned */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description no transition corpus to build from */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    datasetManifest: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description DatasetManifest (splits + counts + build config) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description dataset not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    modelCandidateRegister: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    /** @description 缺省自动生成 model_id-model_version-<uuid8> */
-                    candidate_id?: string;
-                    model_id: string;
-                    model_version: string;
-                    /** @description 来源说明（缺省：手动注册 shadow 起步） */
-                    source?: string;
-                    /** @description 可执行 provider 身份声明（缺省 metadata_only；声明≠接线，还需进程内真实接线才积累影子样本） */
-                    provider_ref?: components["schemas"]["CandidateProviderRef"];
-                };
-            };
-        };
-        responses: {
-            /** @description candidate registered as shadow (never auto-activated); body = ModelCandidate */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ModelCandidate"];
-                };
-            };
-            /** @description candidate_id already exists */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    modelCandidatePromote: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    ack: boolean;
-                    reason: string;
-                };
-            };
-        };
-        responses: {
-            /** @description candidate promoted to active provider (human ack required); body = { candidate, active, previous_active, samples, gates } */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        candidate: components["schemas"]["ModelCandidate"];
-                        active: string;
-                        previous_active: string | null;
-                        /**
-                         * Format: int64
-                         * @description 真实影子样本数
-                         */
-                        samples: number;
-                        /** @description 晋升门控明细快照（审计口径） */
-                        gates: {
-                            /** Format: int64 */
-                            min_shadow_samples: number;
-                            provider_wired: {
-                                kind: string;
-                                locator: string;
-                            };
-                            calibration_summary: components["schemas"]["CalibrationReport"];
-                            /** @description 相对上一任 active 的退化检查（无前任或前任无样本时为 null） */
-                            regression_check?: {
-                                previous_active?: string;
-                                /** Format: int64 */
-                                previous_samples?: number;
-                                hit_rate_delta?: number;
-                                mean_delta_jaccard_delta?: number;
-                                mean_calibration_error_delta?: number;
-                                max_regression_delta?: number;
-                                passed?: boolean;
-                            } | null;
-                        };
-                    };
-                };
-            };
-            /** @description ack=false or empty reason */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description candidate not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description governance gate refused（metadata_only / 未接线 / 样本不足 / 相对前任退化超阈值） */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    listProductEvalRuns: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description runs */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        runs?: components["schemas"]["ProductEvalRunSummary"][];
-                    };
-                };
-            };
-        };
-    };
-    createProductEvalRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    /**
-                     * @description 仅允许注册名 v1；客户端本地路径一律拒绝
-                     * @enum {string}
-                     */
-                    suite: "v1";
-                    /**
-                     * @description reference=免模型参考回放+检查器；live=真实执行器（single→SingleAgentExecutor，workswarm→WorkSwarmExecutor）
-                     * @enum {string}
-                     */
-                    execution: "reference" | "live";
-                    /** @description 对照拓扑子集；结果报告 wire 中 agent_mode 为核心小写词 single/multi（workswarm ≡ multi） */
-                    modes: ("single" | "workswarm")[];
-                    /** @description 重复次数（覆盖 suite 默认） */
-                    repetitions: number;
-                    /**
-                     * @description 只跑指定分类
-                     * @enum {string|null}
-                     */
-                    category?: "code" | "research" | "document" | null;
-                    /** @description 只跑 id 包含该子串的任务 */
-                    only?: string | null;
-                };
-            };
-        };
-        responses: {
-            /** @description 受理 */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        /** @description eval-… */
-                        run_id: string;
-                        /** @enum {string} */
-                        status: "queued";
-                    };
-                };
-            };
-            /** @description 语义校验失败（未知 suite/execution/mode、repetitions 越界、suite 加载失败、过滤后无任务） */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Error"];
-                };
-            };
-            /** @description 结构校验失败（缺字段/类型错） */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Error"];
-                };
-            };
-        };
-    };
-    getProductEvalRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description run summary + report */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductEvalRunSummary"] & {
-                        report?: null | components["schemas"]["ProductEvalReport"];
-                    };
-                };
-            };
-            /** @description 运行不存在 */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Error"];
-                };
-            };
-        };
-    };
-    cancelProductEvalRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 取消受理或原状态 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        run_id: string;
-                        /** @enum {string} */
-                        status: "queued" | "running" | "cancelled" | "completed" | "failed" | "interrupted";
-                    };
-                };
-            };
-            /** @description 运行不存在 */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Error"];
-                };
-            };
-        };
-    };
-    artifactSubmitReview: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    team_id: string;
-                    /**
-                     * @description 评审决定（snake_case）
-                     * @enum {string}
-                     */
-                    decision: "approve" | "request_changes" | "reject";
-                    /** @description 评审者（member_id / user_id / 角色名） */
-                    reviewer: string;
-                    comment?: string;
-                    /** @description 乐观并发目标版本；缺省跳过版本校验；不符 → 409 */
-                    expected_version?: number;
-                    /** @description 幂等键；同键重放零副作用返回既有记录 */
-                    idempotency_key: string;
-                };
-            };
-        };
-        responses: {
-            /** @description idempotent replay（同幂等键重放，零副作用；replayed: true） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        /** @description 恒为 true（回放既有记录） */
-                        replayed: boolean;
-                        review: components["schemas"]["ArtifactReviewRecord"];
-                        /** @description 评审后的 Artifact（当前状态） */
-                        artifact: Record<string, never>;
-                        /** @description (project, kind) 的当前 approved head Artifact（指向真实存在且已批准版本；否则 null） */
-                        approved_head?: {
-                            artifact_id: string;
-                            kind: string;
-                            version: number;
-                            producer?: string;
-                            /** @enum {string} */
-                            review_state: "draft" | "pending_review" | "approved" | "rejected" | "superseded";
-                            content_ref?: string;
-                            supersedes_artifact_id?: string | null;
-                            created_at?: string;
-                        } | null;
-                    };
-                };
-            };
-            /** @description review recorded; body = { replayed: false, review, artifact, approved_head } */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        replayed: boolean;
-                        review: components["schemas"]["ArtifactReviewRecord"];
-                        /** @description 评审后的 Artifact（review_state 已迁移） */
-                        artifact: Record<string, never>;
-                        /** @description (project, kind) 的当前 approved head Artifact（指向真实存在且已批准版本；否则 null） */
-                        approved_head?: {
-                            artifact_id: string;
-                            kind: string;
-                            version: number;
-                            producer?: string;
-                            /** @enum {string} */
-                            review_state: "draft" | "pending_review" | "approved" | "rejected" | "superseded";
-                            content_ref?: string;
-                            supersedes_artifact_id?: string | null;
-                            created_at?: string;
-                        } | null;
-                    };
-                };
-            };
-            /** @description validation failed（未知 decision） */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description producer self-approve without human policy authorization（需 self_review_allowed） */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description artifact or team not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description expected_version stale（旧页面提交）/ artifact superseded / idempotency key reused on other artifact */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description missing required field（Json extractor 语义） */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    artifactReviewHistory: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description review history (asc) + version chain (supersedes/superseded_by) + approved head */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        artifact_id: string;
-                        kind: string;
-                        version: number;
-                        producer: string;
-                        /** @enum {string} */
-                        review_state: "draft" | "pending_review" | "approved" | "rejected" | "superseded";
-                        supersedes_artifact_id?: string | null;
-                        superseded_by?: string | null;
-                        reviews: components["schemas"]["ArtifactReviewRecord"][];
-                        /** @description (project, kind) 的当前 approved head Artifact（指向真实存在且已批准版本；否则 null） */
-                        approved_head: {
-                            artifact_id: string;
-                            kind: string;
-                            version: number;
-                            producer?: string;
-                            /** @enum {string} */
-                            review_state: "draft" | "pending_review" | "approved" | "rejected" | "superseded";
-                            content_ref?: string;
-                            supersedes_artifact_id?: string | null;
-                            created_at?: string;
-                        } | null;
-                    };
-                };
-            };
-            /** @description artifact not found */
-            404: {
                 headers: {
                     [name: string]: unknown;
                 };

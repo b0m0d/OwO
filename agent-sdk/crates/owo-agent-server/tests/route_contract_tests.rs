@@ -249,7 +249,13 @@ fn sample_body(path: &str) -> Option<&'static str> {
         ),
         // R13 WorkSwarm（§8.5）：空 objective 快速 400，避免契约测试触发真实模型运行。
         "/teams" => Some(r#"{"objective":"","roles":[]}"#),
+        // 五期（第一路）：组队策略（auto 缺省）；空 objective 快速 400 语义不变。
+        // "/teams" 的 strategy 字段随 auto 缺省可省略；此处维持最小体。
         "/teams/{id}/steer" => Some(r#"{"command":"cancel"}"#),
+        // 五期（第二路）：返工请求冻结契约；占位 team/review 不存在 → 404（资源缺失）。
+        "/artifacts/{id}/rework" => Some(
+            r#"{"team_id":"no-such-team","review_id":"no-such-review","instruction":"契约测试返工指令"}"#,
+        ),
         "/tasks/{id}/handoff" => {
             Some(r#"{"team_id":"no-such-team","from_member":"m-x","completed_summary":"done"}"#)
         }
@@ -388,6 +394,11 @@ fn resource_404_ok(path: &str) -> bool {
             // V1 四期（第三路）：评审闭环——占位 id 指向不存在产物 → 404 由资源缺失产生，非路由缺失。
             | "/artifacts/{id}/review"
             | "/artifacts/{id}/history"
+            // 五期：返工/交付物/团队指标/脱敏诊断——占位 id 指向不存在资源 → 404 非路由缺失。
+            | "/artifacts/{id}/rework"
+            | "/projects/{id}/deliverables"
+            | "/teams/{id}/metrics"
+            | "/teams/{id}/diagnostic"
     )
 }
 

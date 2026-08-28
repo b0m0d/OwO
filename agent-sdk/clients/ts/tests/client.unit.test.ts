@@ -439,3 +439,65 @@ test("Artifact 评审冻结契约（三决定 + 幂等重放 + 版本链 + appro
   ];
   assert.equal(states.length, 5);
 });
+
+// ---------------------------------------------------------------------------
+// 五期冻结契约（第二/三路实现，第四路接线）：返工 / 交付物 / 团队指标 / 脱敏诊断。
+// 类型级断言——字段漂移先在 tsc 编译期失败。
+// ---------------------------------------------------------------------------
+
+test("五期契约（返工 + 交付物 + 指标 + 诊断）", () => {
+  // POST /artifacts/{id}/rework：同评审幂等（200 replayed / 201 created）。
+  type ReworkBody = NonNullable<
+    operations["artifactSubmitRework"]["requestBody"]
+  >["content"]["application/json"];
+  const rework: ReworkBody = {
+    team_id: "team-1",
+    review_id: "rev-1",
+    instruction: "修正 JSON scope 字段并保持 schema 不变",
+  };
+  assert.equal(rework.review_id, "rev-1");
+  // 201 created / 200 idempotent replay 响应键在场（类型级存在性断言：缺失时解析为 never）。
+  type Present<R> = [R] extends [never] ? false : true;
+  type ReworkCreatedPresent = Present<operations["artifactSubmitRework"]["responses"][201]>;
+  type ReworkReplayPresent = Present<operations["artifactSubmitRework"]["responses"][200]>;
+  const reworkCreatedPresent: ReworkCreatedPresent = true;
+  const reworkReplayPresent: ReworkReplayPresent = true;
+  assert.equal(reworkCreatedPresent, true);
+  assert.equal(reworkReplayPresent, true);
+
+  // GET /projects/{id}/deliverables：approved/pending/rejected_or_superseded 三桶。
+  type Deliverables =
+    operations["projectDeliverables"]["responses"][200]["content"]["application/json"];
+  const dlv: Deliverables = {
+    project_id: "proj-team-1",
+    approved: [{ artifact_id: "team-1:critic:v2", review_state: "approved" }],
+    pending: [{ artifact_id: "team-1:critic:v1", review_state: "pending_review" }],
+    rejected_or_superseded: [],
+  };
+  assert.equal(dlv.approved.length, 1);
+  assert.equal(dlv.pending.length, 1);
+
+  // GET /teams/{id}/metrics：workers + summary。
+  type Metrics =
+    operations["teamMetrics"]["responses"][200]["content"]["application/json"];
+  const metrics: Metrics = {
+    team_id: "team-1",
+    workers: [
+      {
+        worker: "m-critic",
+        role: "critic",
+        duration_ms: 1200,
+        model_calls: 3,
+        terminal: "Succeeded",
+      },
+    ],
+    summary: { wall_clock_ms: 5000, total_model_calls: 3 },
+  };
+  assert.equal(metrics.workers?.[0]?.model_calls, 3);
+
+  // GET /teams/{id}/diagnostic：脱敏 JSON（additionalProperties 开放对象；200 在场为类型级断言）。
+  type DiagnosticResponse =
+    operations["teamDiagnostic"]["responses"][200]["content"]["application/json"];
+  const diag: DiagnosticResponse = { team_id: "team-1", redacted: true };
+  assert.equal(diag.team_id, "team-1");
+});
