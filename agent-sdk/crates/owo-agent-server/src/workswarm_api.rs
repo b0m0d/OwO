@@ -1238,6 +1238,9 @@ async fn list_artifacts(
             "content_ref": a.content_ref,
             "source_refs": a.source_refs,
             "review_state": format!("{:?}", a.review_state),
+            // 五期：版本链链接（返工重跑登记时指向前版）——前端版本时间线/
+            // v1v2 差异按此字段合并链（null = 首版/无链接）。
+            "supersedes_artifact_id": a.supersedes_artifact_id,
             "created_at": a.created_at,
             "preview": content_preview,
         }));

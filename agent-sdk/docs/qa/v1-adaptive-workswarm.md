@@ -6,6 +6,7 @@
 
 - 本路五期功能全部落地并实测：**契约 14/14、TS unit 9/9、web node --test 106/106、core 七套件 69/69、clippy --all-targets 干净、浏览器产品闭环 E2E ok=YES（0 页面异常 / 0 console 错误）**。
 - **组队策略与返工链标记已全量落地**：第一路交付引擎（`team_strategy.rs`，engine/阈值/测试齐备）后在创建面集成上停滞 80+ 分钟，第四路按 AGENTS.md 协作规则备案接管收尾——`POST /teams` `strategy`（auto 判定/single/team 强制，缺省 auto）+ `strategy_decision` 暴露（mode/roles/parallelism/budget_calls_total/reasons）+ 返工登记 `supersedes_artifact_id` 写入与前版让位。E2E 实测：策略理由框渲染"单 Agent…单 Agent 足够"、时间线 v1"已被取代"、v2 批准切换 approved head。
+- **一路交接项收口**：`GET /projects/{id}/artifacts` 响应补 `supersedes_artifact_id`（其手工组 JSON 原缺此字段，前端链合并依赖）——实测 v2→v1 透出后，版本时间线升级为完整链展示"v1已被取代→v2待评审"，approved head 区显示"版本链（2 个版本）· head：v2"并出现「查看首末版本差异」入口；openapi 条目同步（快照/schema 再生成）。
 
 ## 1. 交付面（本路）
 

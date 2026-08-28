@@ -8232,12 +8232,28 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description versioned shared artifacts (content via CAS ref) */
+            /** @description versioned shared artifacts (content via CAS ref)ï¼äºæ additiveï¼æ¯é¡¹å« supersedes_artifact_idï¼è¿å·¥éè·ç»è®°æ¶æååçï¼åç«¯ææ­¤åå¹¶çæ¬æ¶é´çº¿/v1v2 å·®å¼ï¼null = é¦çï¼ */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": {
+                        artifacts: ({
+                            artifact_id?: string;
+                            content_ref?: string;
+                            kind?: string;
+                            preview?: string;
+                            producer?: string;
+                            review_state?: string;
+                            supersedes_artifact_id?: string | null;
+                            version?: number;
+                        } & {
+                            [key: string]: unknown;
+                        })[];
+                        project_id: string;
+                    };
+                };
             };
         };
     };
