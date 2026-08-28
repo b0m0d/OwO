@@ -323,6 +323,7 @@ fn create_req(roles: &[RoleSpec]) -> CreateTeamRequest {
         roles: roles.to_vec(),
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     }
 }
 

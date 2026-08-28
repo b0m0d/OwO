@@ -5,7 +5,12 @@
 //! - `GET /teams` 团队运行列表（含运行中标志）；
 //! - `GET /teams/{id}` 成员、预算、状态（+ 任务视图 + 审计尾迹）；
 //! - `GET /teams/{id}/tasks` TeamRun 的任务图（步骤 × 状态）；
-//! - `GET /teams/{id}/events` 团队事件流 SSE（审计重放 + 状态轮询；`?format=json` 一次性快照）；
+//! - `GET /teams/{id}/events` 团队事件流 SSE（审计重放 + 状态轮询；`?format=json` 一次性快照，
+//!   五期起快照含 `progress`——轮询降级也能看到当前步骤）；
+//! - `GET /teams/{id}/metrics` TeamRun 指标（角色 span 聚合 / token·费用 / 最慢 Worker /
+//!   失败·返工次数 / Artifact 版本数 / 预算状态；五期 · 第三路）；
+//! - `GET /teams/{id}/diagnostic` 脱敏诊断导出（TeamRun/任务/产物/评审/交接/指标/审计；
+//!   凭据类键值与令牌已脱敏、超长文本截断；五期 · 第三路）；
 //! - `POST /teams/{id}/steer` continue/steer/replace/cancel/retry（R2：retry 局部重试 + 中断恢复）；
 //! - `GET /projects/{id}` Project Space 摘要；
 //! - `GET /projects/{id}/artifacts` 版本化共享产物（ref 列表）；
@@ -15,6 +20,11 @@
 //! - `GET /teams/templates/proposals` 模板提案（只提案，不自动启用）；
 //! - `POST /teams/templates/proposals/{proposal_id}/adopt` 采纳提案；
 //! - `POST /teams/templates/proposals/{proposal_id}/reject` 拒绝提案（保留记录，可审计）。
+//!
+//! 五期（第三路）指标接线：`build_run_registry` 用 `MeasuredRoleWorker` 包装每个
+//! `RoleWorker`（span 指标 JSONL 落盘 TeamRun 数据目录，重启可读）；`run_team_loop`
+//! 在每阶段前做指标预算门（`TeamRun.budget` additive 支持 `max_cost_usd`/`max_wall_secs`，
+//! 超限停止调度下一阶段并留审计）。指标/脱敏实现见子模块 [`workswarm_metrics`]。
 //!
 //! S0 边界：产物经 CAS ref 传递（大对象不进响应体）；agent 角色经
 //! `Agent::run_subagent` 模型驱动；内置 echo/sleep/fail worker 供测试与演示。
@@ -26,8 +36,11 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use owo_agent_core::gateway::ModelProvider;
 use owo_agent_core::goal::{Worker, WorkerRegistry};
-use owo_agent_core::project_space_store::SqliteProjectSpaceStore;
+use owo_agent_core::permissions::AutoApprover;
+use owo_agent_core::project_space_store::{ProjectSpaceStoreBackend, SqliteProjectSpaceStore};
+use owo_agent_core::subagent::SubagentRunner;
 use owo_agent_core::workswarm::{
     CreateTeamRequest, HandoffFields, RoleSpec, RoleWorker, SteerCommand, TeamCoordinator,
     TeamTemplateRegistry, WorkSwarmError,
@@ -37,11 +50,18 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use owo_agent_server::AppState;
+
+// 五期（第三路）：指标/预算/脱敏实现（#[path] 子模块声明 = 零 lib.rs 接线，
+// 物理文件 crates/owo-agent-server/src/workswarm_metrics.rs；接线归第四路，
+// 其后续若要在 crate 根登记 `pub mod workswarm_metrics;` 可平移，无语义差异）。
+#[path = "workswarm_metrics.rs"]
+pub mod workswarm_metrics;
 
 // ---------------------------------------------------------------------------
 // 状态（进程内单例协调器，懒初始化；目录 = data_root/workswarm）
@@ -131,10 +151,17 @@ impl WorkSwarmState {
 // 内层 worker（agent = 模型驱动；echo/sleep/fail = 内置演示/测试）
 // ---------------------------------------------------------------------------
 
-/// 真实 Agent 子代理 worker（name="agent"）：prompt → `Agent::run_subagent`。
+/// 真实 Agent 子代理 worker（name="agent"）：prompt → 子代理执行。
+///
+/// 五期（第三路）：与 `Agent::run_subagent` 同口径（`SubagentRunner`，顶层 depth=0、
+/// 子代理 max_turns 上限 12），但 Provider 支持 [`workswarm_metrics::MeasuredProvider`]
+/// 计数装饰器注入——`model_calls` 由 `MeasuredRoleWorker` 逐 span 精确统计
+/// （每次模型调用恰好经过 `complete`/`complete_stream` 其一）。
 pub struct AgentSubagentWorker {
     agent: Arc<owo_agent_core::Agent>,
     workspace: PathBuf,
+    /// 指标层注入的 per-span 模型调用计数（None = 不计数，行为不变）。
+    model_calls: Option<Arc<AtomicU64>>,
 }
 
 #[async_trait]
@@ -172,9 +199,28 @@ impl Worker for AgentSubagentWorker {
                     .filter(|v| !v.is_empty())
             })
             .unwrap_or_else(|| "gpt-4.1-mini".to_string());
-        let output = self
-            .agent
-            .run_subagent(&self.workspace, &model, prompt, read_only)
+        // 指标计数注入：MeasuredProvider 包装共享 provider（计数仅对本 span 生效）。
+        let provider: Arc<dyn ModelProvider> = match &self.model_calls {
+            Some(counter) => Arc::new(workswarm_metrics::MeasuredProvider::new(
+                self.agent.provider(),
+                Arc::clone(counter),
+            )),
+            None => self.agent.provider(),
+        };
+        // 与 Agent::run_subagent 的默认口径一致：顶层 agent depth=0；
+        // 子代理 max_turns 上限 12（SubagentRunner 内部 .min(12)，默认配置等价）。
+        let approver = AutoApprover { allow: read_only };
+        let abort = AtomicBool::new(false);
+        let runner = SubagentRunner {
+            provider,
+            approver: &approver,
+            abort: &abort,
+            depth: 0,
+            max_turns: 12,
+            model,
+        };
+        let output = runner
+            .run(&self.workspace, prompt, read_only)
             .await
             .map_err(|e| format!("agent 子代理执行失败：{e}"))?;
         Ok(output)
@@ -232,7 +278,14 @@ impl Worker for FailWorker {
 }
 
 /// 按角色 worker 名解析内层 worker（"agent"/缺省 = 模型驱动）。
-fn inner_worker_for(state: &AppState, worker_name: Option<&str>) -> Option<Arc<dyn Worker>> {
+///
+/// 五期（第三路）：agent 角色接收 `model_calls` 计数器（MeasuredProvider 注入；
+/// 仅指标用途，不影响执行行为）。
+fn inner_worker_for(
+    state: &AppState,
+    worker_name: Option<&str>,
+    model_calls: Option<&Arc<AtomicU64>>,
+) -> Option<Arc<dyn Worker>> {
     match worker_name.map(str::trim).filter(|w| !w.is_empty()) {
         Some("echo") => Some(Arc::new(EchoWorker)),
         Some("sleep") => Some(Arc::new(SleepWorker)),
@@ -240,27 +293,55 @@ fn inner_worker_for(state: &AppState, worker_name: Option<&str>) -> Option<Arc<d
         _ => Some(Arc::new(AgentSubagentWorker {
             agent: Arc::clone(&state.agent),
             workspace: state.workspace.clone(),
+            model_calls: model_calls.cloned(),
         })),
     }
 }
 
-/// 构建团队运行 worker 注册表（成员名 → RoleWorker）。失败返回 None（运行任务记录后退出）。
+/// 构建团队运行 worker 注册表（成员名 → MeasuredRoleWorker(RoleWorker(inner))）。
+///
+/// 五期（第三路）：每个角色 worker 外层包一层 [`workswarm_metrics::MeasuredRoleWorker`]——
+/// span 级起止/墙钟/终态/失败原因/尝试序数/输出 Artifact + model_calls/token/费用，
+/// 指标 JSONL 落盘 TeamRun 数据目录（`<run_dir>/<team_id>-metrics.jsonl`，重启可读）。
+/// 包装在 RoleWorker 之外：span 覆盖「上下文切片组装 → 执行 → 产物登记」全窗口。
+/// 失败返回 None（运行任务记录后退出）。
 fn build_run_registry(
     coordinator: &Arc<TeamCoordinator>,
     state: &AppState,
     team_id: &str,
 ) -> Option<WorkerRegistry> {
     let meta = coordinator.load_run_meta(team_id).ok()?;
+    let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), team_id);
     let registry = WorkerRegistry::new();
     for r in &meta.roles {
         let member_id = format!("m-{}", r.role);
-        let inner = inner_worker_for(state, r.worker.as_deref())?;
-        registry.register(Arc::new(RoleWorker::new(
+        let worker_kind = r
+            .worker
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .unwrap_or("agent")
+            .to_string();
+        let model_calls = (worker_kind == "agent").then(|| Arc::new(AtomicU64::new(0)));
+        let inner = inner_worker_for(state, r.worker.as_deref(), model_calls.as_ref())?;
+        let role_worker = Arc::new(RoleWorker::new(
             Arc::clone(coordinator),
+            team_id.to_string(),
+            member_id.clone(),
+            r.role.clone(),
+            inner,
+        ));
+        let provider = (worker_kind == "agent").then(|| state.agent.provider());
+        registry.register(Arc::new(workswarm_metrics::MeasuredRoleWorker::new(
+            role_worker,
+            Arc::clone(coordinator),
+            journal.clone(),
             team_id.to_string(),
             member_id,
             r.role.clone(),
-            inner,
+            worker_kind,
+            provider,
+            model_calls,
         )));
     }
     Some(registry)
@@ -295,13 +376,59 @@ impl Drop for LoopAliveGuard {
     }
 }
 
+/// 五期（第三路）：指标预算门——累计指标超过任务预算（TeamRun.budget additive
+/// `max_cost_usd` / `max_wall_secs`；此前未知键被忽略，与 GoalBudget 步数/重试
+/// 熔断正交互补）即停止调度下一阶段：审计 `team.budget_exhausted`（含明确原因），
+/// 团队显式转 Cancelled（不静默挂起，也不伪装成用户取消——原因可在
+/// `/teams/{id}/metrics` 的 `budget.reason` 与审计尾迹复查）。
+/// 检查失败按「继续调度」处理（可用性优先；run_phase 自身会显式失败）。
+/// 返回 true 表示已停止（调用方应立即退出运行循环）。
+async fn stop_if_budget_exhausted(coordinator: &Arc<TeamCoordinator>, team_id: &str) -> bool {
+    match workswarm_metrics::team_budget_exhaustion(coordinator, team_id).await {
+        Ok(Some(reason)) => {
+            tracing::warn!(team_id = %team_id, %reason, "workswarm 指标超预算，停止调度下一阶段");
+            if let Some(log) = coordinator.audit_log() {
+                if let Ok(mut audit) = log.lock() {
+                    audit.record(
+                        team_id,
+                        "team.budget_exhausted",
+                        Some(format!("workswarm/{team_id}")),
+                        Some(false),
+                        reason,
+                    );
+                }
+            }
+            if let Err(e) = coordinator
+                .apply_steer(team_id, &SteerCommand::Cancel)
+                .await
+            {
+                tracing::error!(team_id = %team_id, %e, "预算停止：团队取消收尾失败");
+            }
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(team_id = %team_id, %e, "指标预算门检查失败（忽略并继续调度）");
+            false
+        }
+    }
+}
+
 /// 团队运行循环：run_phase 阶段推进；人节点等待窗口内轮询（结果落盘即唤醒；cancel 即终止）。
 ///
 /// 每轮外层迭代重建 worker 注册表（steer/replace 修改角色规格后新阶段生效）。
-async fn run_team_loop(state: Arc<AppState>, coordinator: Arc<TeamCoordinator>, team_id: String) {
+pub(crate) async fn run_team_loop(
+    state: Arc<AppState>,
+    coordinator: Arc<TeamCoordinator>,
+    team_id: String,
+) {
     let _alive = LoopAliveGuard::new(&coordinator, &team_id);
     let mut backoff = Duration::from_secs(1);
     loop {
+        // 五期（第三路）：指标预算门（外层调度点；门闩内调度点见下方 latch 循环）。
+        if stop_if_budget_exhausted(&coordinator, &team_id).await {
+            return;
+        }
         let Some(registry) = build_run_registry(&coordinator, &state, &team_id) else {
             tracing::error!(team_id = %team_id, "workswarm 运行循环：worker 注册表构建失败，运行终止");
             return;
@@ -343,6 +470,11 @@ async fn run_team_loop(state: Arc<AppState>, coordinator: Arc<TeamCoordinator>, 
                             }
                             return;
                         }
+                        // 五期（第三路）：门闩内调度点同样过指标预算门（人结果落盘
+                        // 唤醒的下一阶段在此受控，否则会绕过外层门直接执行）。
+                        if stop_if_budget_exhausted(&coordinator, &team_id).await {
+                            return;
+                        }
                         match coordinator.run_phase(&team_id, &registry).await {
                             Ok(owo_agent_core::PhaseOutcome::AwaitingHuman { .. }) => continue,
                             Ok(owo_agent_core::PhaseOutcome::Done) => {
@@ -378,6 +510,9 @@ struct CreateTeamHttpRequest {
     #[serde(default)]
     budget: Value,
     human_policy: Option<String>,
+    /// 五期：组队策略 auto|single|team（缺省 auto；未知值 → 400）。
+    #[serde(default)]
+    strategy: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -532,6 +667,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/teams/{id}", get(get_team))
         .route("/teams/{id}/tasks", get(get_team_tasks))
         .route("/teams/{id}/events", get(team_events))
+        .route("/teams/{id}/metrics", get(team_metrics))
+        .route("/teams/{id}/diagnostic", get(team_diagnostic))
         .route("/teams/{id}/steer", post(steer_team))
         .route("/projects/{id}", get(get_project_space))
         .route("/projects/{id}/artifacts", get(list_artifacts))
@@ -571,6 +708,15 @@ async fn create_team(
             ))));
         }
     };
+    let strategy = match req.strategy.as_deref() {
+        None | Some("") => None,
+        Some(raw) => match owo_agent_core::team_strategy::TeamSelectionMode::parse(raw) {
+            Ok(s) => Some(s),
+            Err(msg) => {
+                return Err(error_response(&WorkSwarmError::Validation(msg)));
+            }
+        },
+    };
     let req = CreateTeamRequest {
         goal_id: req.goal_id,
         objective: req.objective,
@@ -579,6 +725,7 @@ async fn create_team(
         roles: req.roles,
         budget: req.budget,
         human_policy: req.human_policy,
+        strategy,
     };
     let team = coordinator
         .create_team_run(&req)
@@ -596,6 +743,7 @@ async fn create_team(
             "template_id": team.template_id,
             "members": team.members,
             "status": format!("{:?}", team.status),
+            "strategy_decision": team.strategy_decision,
         })),
     ))
 }
@@ -712,11 +860,19 @@ async fn team_events(
         .await
         .map_err(|e| error_response(&e))?;
     if query.format.as_deref() == Some("json") {
+        // 五期（第三路）：快照补 `progress`（seq/counts/current_steps）——轮询降级
+        // 不再完全依赖 SSE 帧也能看到当前步骤（快照不可得时为 null，additive 字段）。
+        let progress = coordinator
+            .progress_snapshot(&id)
+            .await
+            .ok()
+            .and_then(|p| serde_json::to_value(&p).ok());
         return Ok(Json(json!({
             "team_id": team.team_id,
             "status": format!("{:?}", team.status),
             "active": coordinator.is_run_active(&id),
             "interrupted": coordinator.is_interrupted(&id),
+            "progress": progress,
             "audit": audit_tail(&coordinator, &id),
         }))
         .into_response());
@@ -829,6 +985,173 @@ async fn team_event_stream(
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+/// GET /teams/{id}/metrics：TeamRun 指标汇总（五期 · 第三路）。
+///
+/// 数据源 = TeamRun 数据目录的 `metrics.jsonl`（`MeasuredRoleWorker` 追加落盘），
+/// 每次请求从文件聚合——无进程内账本，重启后仍可读取。响应：
+/// `summary`（span 数/成败/返工/总墙钟/调用·token·费用/最慢 Worker/Artifact 版本数）+
+/// `roles`（按角色聚合）+ `workers`（span 明细）+ `budget`（预算状态与耗尽原因）。
+async fn team_metrics(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let coordinator = state
+        .workswarm
+        .coordinator()
+        .map_err(|e| error_response(&e))?;
+    // 团队不存在 → 404（与 /teams/{id} 语义一致）。
+    let team = coordinator
+        .get_team_run(&id)
+        .await
+        .map_err(|e| error_response(&e))?;
+    let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), &id);
+    let records = journal.read_records();
+    let mut payload = workswarm_metrics::aggregate_metrics(&id, &records, &team.budget);
+    // 数据源路径（可观测：UI/运维可直接定位 TeamRun 数据目录里的指标文件）。
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "metrics_file".to_string(),
+            json!(journal.path().display().to_string()),
+        );
+    }
+    Ok(Json(payload))
+}
+
+/// GET /teams/{id}/diagnostic：脱敏诊断导出（五期 · 第三路）。
+///
+/// 汇集 TeamRun / 任务视图 / 产物（含 CAS 内容预览）/ 评审记录 / 交接 / 指标 /
+/// 审计尾迹，统一经脱敏（凭据类键值与令牌 → `[REDACTED]`、超长文本截断），
+/// 供「下载诊断信息」。评审记录复用 WorkSwarm `space.db` 独立连接（打开失败
+/// 不阻塞其余诊断面，reviews 缺席即其信号）。
+async fn team_diagnostic(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let coordinator = state
+        .workswarm
+        .coordinator()
+        .map_err(|e| error_response(&e))?;
+    let team = coordinator
+        .get_team_run(&id)
+        .await
+        .map_err(|e| error_response(&e))?;
+    let run_state = coordinator
+        .load_run_state(&id)
+        .map_err(|e| error_response(&e))?;
+
+    // 任务视图（错误信息等自由文本脱敏）。
+    let tasks: Vec<Value> = task_view(&run_state)
+        .iter()
+        .map(workswarm_metrics::sanitize_value)
+        .collect();
+
+    // 产物 + 评审记录（评审存储打开失败 → 跳过，不阻塞导出）。
+    let review_store =
+        SqliteProjectSpaceStore::open(&state.data_root.join("workswarm").join("space.db")).ok();
+    let mut artifacts_json: Vec<Value> = Vec::new();
+    let mut reviews_json: Vec<Value> = Vec::new();
+    if let Some(space_id) = team.project_space_id.as_deref() {
+        if let Ok(space) = coordinator.get_project_space(space_id).await {
+            if let Ok(artifacts) = coordinator.list_artifacts(&space).await {
+                for a in artifacts {
+                    let preview = coordinator
+                        .cas()
+                        .get_text(a.content_ref.strip_prefix("cas://sha256:").unwrap_or(""))
+                        .map(|c| {
+                            let head: String = c.chars().take(200).collect();
+                            workswarm_metrics::sanitize_text(&head)
+                        })
+                        .unwrap_or_default();
+                    artifacts_json.push(json!({
+                        "artifact_id": a.artifact_id,
+                        "kind": a.kind,
+                        "version": a.version,
+                        "producer": a.producer,
+                        "content_ref": a.content_ref,
+                        "review_state": format!("{:?}", a.review_state),
+                        "supersedes_artifact_id": a.supersedes_artifact_id,
+                        "created_at": a.created_at,
+                        "preview": preview,
+                    }));
+                    if let Some(store) = review_store.as_ref() {
+                        if let Ok(records) = store.list_artifact_reviews(&a.artifact_id).await {
+                            for r in records {
+                                let value = serde_json::to_value(&r).unwrap_or_else(|_| json!({}));
+                                reviews_json.push(workswarm_metrics::sanitize_value(&value));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 交接记录（completed_summary 等自由文本脱敏）。
+    let handoffs_json: Vec<Value> = coordinator
+        .list_handoffs(&id)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|h| workswarm_metrics::sanitize_value(&serde_json::to_value(h).unwrap_or(json!({}))))
+        .collect();
+
+    // 审计尾迹（最近 200 条，detail 脱敏）。
+    let audit_tail_json: Vec<Value> = match coordinator.audit_log() {
+        Some(log) => match log.lock() {
+            Ok(entries) => entries
+                .entries
+                .iter()
+                .filter(|e| e.session_id == id)
+                .rev()
+                .take(200)
+                .map(|e| {
+                    json!({
+                        "ts": e.ts,
+                        "event": e.event,
+                        "tool": e.tool,
+                        "detail": workswarm_metrics::sanitize_text(&e.detail),
+                    })
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+
+    // 指标（与 /teams/{id}/metrics 同一聚合口径）。
+    let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), &id);
+    let metrics = workswarm_metrics::aggregate_metrics(&id, &journal.read_records(), &team.budget);
+    let metrics_file = journal.path().display().to_string();
+
+    // TeamRun 本体（budget 等自由 JSON 脱敏）+ 运行标志。
+    let mut team_value = serde_json::to_value(&team).unwrap_or_else(|_| json!({}));
+    team_value = workswarm_metrics::sanitize_value(&team_value);
+    if let Some(obj) = team_value.as_object_mut() {
+        obj.insert("active".to_string(), json!(coordinator.is_run_active(&id)));
+        obj.insert(
+            "interrupted".to_string(),
+            json!(coordinator.is_interrupted(&id)),
+        );
+    }
+
+    Ok(Json(json!({
+        "team_id": team.team_id,
+        "generated_at": workswarm_metrics::rfc3339(),
+        "team": team_value,
+        "tasks": tasks,
+        "artifacts": artifacts_json,
+        "reviews": reviews_json,
+        "handoffs": handoffs_json,
+        "metrics": metrics,
+        "metrics_file": metrics_file,
+        "audit_tail": audit_tail_json,
+        "redaction": {
+            "applied": true,
+            "note": "凭据类键值与令牌已替换为 [REDACTED]；超长文本截断（*_tokens 为用量计数，不属凭据）"
+        },
+    })))
 }
 
 /// POST /teams/{id}/steer：continue/retry/steer/replace/cancel。

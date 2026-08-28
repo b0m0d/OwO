@@ -13,6 +13,7 @@ use owo_agent_core::product_eval::{
     ProductEvalCase, ProductEvalSuite, ReferenceDryExecutor, RunOptions, RunStatus, SuiteBundle,
     SuiteDefaults, PRODUCT_EVAL_SCHEMA_VERSION,
 };
+use owo_agent_core::team_strategy::TeamSelectionMode;
 use owo_agent_core::{WorkSwarmExecutor, WorkSwarmExecutorConfig};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -156,6 +157,9 @@ fn workswarm_executor(root: &Path, provider: Arc<ScriptedProvider>) -> WorkSwarm
     executor.config = WorkSwarmExecutorConfig {
         max_turns_per_worker: 6,
         max_retries_on_failure: 1,
+        // 本文件脚本化的是完整三角色流水线（producer → critic → leader）：
+        // 显式 ForceTeam 保持既有语义（auto 模式的自适应裁剪见 team_strategy_tests）。
+        selection: TeamSelectionMode::ForceTeam,
     };
     executor
 }

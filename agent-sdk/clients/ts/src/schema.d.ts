@@ -9283,12 +9283,17 @@ export interface operations {
                     mode?: "single" | "team" | "swarmflow";
                     objective: string;
                     roles?: Record<string, never>[];
+                    /**
+                     * @description äºæç»éç­ç¥ï¼ç¼ºç autoï¼æä»»å¡ç»åå¤å®ï¼ä¸åç²ç®å¯ç¨å¤ Agentï¼ï¼æªç¥å¼ 400
+                     * @enum {string}
+                     */
+                    strategy?: "auto" | "single" | "team";
                     template_id?: string;
                 };
             };
         };
         responses: {
-            /** @description team run created; background run loop drives phases */
+            /** @description team run created; background run loop drives phasesï¼body å« strategy_decisionï¼ç»éå³ç­ï¼mode/roles/parallelism/budget_calls_total/reasonsï¼ä¾ UI æ¸²æç»éçç±ä¸è°ç¨é¢ç®ï¼ */
             202: {
                 headers: {
                     [name: string]: unknown;

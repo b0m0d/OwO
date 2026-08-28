@@ -496,6 +496,9 @@ pub struct CreateTeamRequest {
     pub roles: Vec<RoleSpec>,
     pub budget: Value,
     pub human_policy: Option<String>,
+    /// 五期：组队策略（auto 判定 / single / team 强制；缺省 auto——
+    /// 默认不再盲目启用多 Agent，由 TeamStrategyEngine 按任务画像判定）。
+    pub strategy: Option<crate::team_strategy::TeamSelectionMode>,
 }
 
 impl CreateTeamRequest {
@@ -508,6 +511,7 @@ impl CreateTeamRequest {
             roles: Vec::new(),
             budget: Value::Null,
             human_policy: None,
+            strategy: None,
         }
     }
 }
@@ -1148,7 +1152,7 @@ impl TeamCoordinator {
         let correlation_id = new_correlation_id();
 
         // 角色规格（worker 缺省：agent 角色 = "agent" 模型驱动；human = user_id）。
-        let specs: Vec<RoleSpec> = roles
+        let mut specs: Vec<RoleSpec> = roles
             .into_iter()
             .map(|mut r| {
                 if r.assignee.is_empty() {
@@ -1160,6 +1164,40 @@ impl TeamCoordinator {
                 r
             })
             .collect();
+
+        // 五期：组队策略判定（auto 判定 / single / team 强制；缺省 auto）。
+        // 默认不再盲目启用多 Agent：auto 判定为 single 时裁剪到单角色，
+        // 角色数与模型调用量随之下降；判定理由随 strategy_decision 暴露给 UI。
+        let engine = crate::team_strategy::TeamStrategyEngine::default();
+        let profile = crate::team_strategy::TaskProfile {
+            category: None,
+            artifact_count: 1,
+            input_count: 0,
+            needs_independent_review: false,
+            risk: crate::team_strategy::RiskLevel::Normal,
+            single_agent_success_rate: None,
+            expects_json: objective.to_ascii_lowercase().ends_with(".json"),
+        };
+        let selection = req.strategy.unwrap_or_default();
+        let mut strategy_plan = engine.decide(selection, &profile);
+        // 裁剪口径：显式 single 强制单角色；auto 判定 single 仅在「未显式给角色
+        // 且未命中模板」时裁剪——用户显式编排与已采纳模板（复用编排）始终尊重。
+        let trim_to_single = strategy_plan.is_single()
+            && specs.len() > 1
+            && req.mode != TeamMode::Swarmflow
+            && template_id.is_none()
+            && (selection == crate::team_strategy::TeamSelectionMode::ForceSingle
+                || req.roles.is_empty());
+        if trim_to_single {
+            // 单 Agent 判定：保留首个角色（保留用户显式 worker 绑定），其余裁剪。
+            strategy_plan.reasons.push(format!(
+                "判定单 Agent：已裁剪 {} 个附加角色（评审/综合按需在评审闭环补充）",
+                specs.len() - 1
+            ));
+            specs.truncate(1);
+        }
+        let strategy_decision = serde_json::to_value(&strategy_plan).ok();
+        let strategy_mode = strategy_plan.mode.clone();
 
         // 成员（agent/human/worker 运行时绑定）。
         let mut members = Vec::new();
@@ -1263,6 +1301,7 @@ impl TeamCoordinator {
                     .unwrap_or_else(|| "dynamic".to_string()),
             )],
             delivery_manifest_ref: None,
+            rework_tasks: Vec::new(),
             status: ProjectSpaceStatus::Active,
             version: 1,
             created_at: now.clone(),
@@ -1282,11 +1321,23 @@ impl TeamCoordinator {
             shared_context_refs: Vec::new(),
             budget: req.budget.clone(),
             human_policy: req.human_policy.clone(),
+            strategy_decision,
             status: TeamRunStatus::Created,
             created_at: now.clone(),
             updated_at: now,
         };
         self.store.save_team_run(&team).await?;
+        self.audit(
+            &team_id,
+            "team.strategy",
+            format!(
+                "组队策略：{}（selection={}，角色 {} 个，预算 {} 次调用）",
+                strategy_mode,
+                selection.as_str(),
+                strategy_plan.roles.len(),
+                strategy_plan.budget_calls_total
+            ),
+        );
 
         // 运行元数据（correlation + 角色规格 sidecar）。
         RunMeta {
@@ -2202,6 +2253,28 @@ impl TeamCoordinator {
             }
         }
 
+        // 五期：返工重跑登记 → supersedes 指向前版（版本链合并；approved head
+        // 不受影响，仍由评审闭环在 v2 批准时切换）。非返工登记保持 None。
+        let is_rework = step
+            .input
+            .get("rework")
+            .and_then(|r| r.get("instruction"))
+            .map(|v| !v.as_str().unwrap_or_default().trim().is_empty())
+            .unwrap_or(false);
+        let mut supersedes_artifact_id: Option<String> = None;
+        let mut retire_prev: Option<Artifact> = None;
+        if is_rework {
+            if let Some(prev) = self.latest_artifact_for_role(&space, role).await {
+                if prev.review_state != ReviewState::Superseded {
+                    supersedes_artifact_id = Some(prev.artifact_id.clone());
+                    if prev.review_state != ReviewState::Approved {
+                        let mut retired = prev.clone();
+                        retired.review_state = ReviewState::Superseded;
+                        retire_prev = Some(retired);
+                    }
+                }
+            }
+        }
         let artifact = Artifact {
             artifact_id: format!("{team_id}:{role}:v{version}"),
             kind: kind.clone(),
@@ -2216,11 +2289,22 @@ impl TeamCoordinator {
             } else {
                 ReviewState::Draft
             },
-            // 步骤产物首版登记不指向旧版本；重跑版本链由评审闭环（R3）维护。
-            supersedes_artifact_id: None,
+            supersedes_artifact_id,
             created_at: now_ts(),
         };
         self.store.save_artifact(&artifact, &project_id).await?;
+        // 返工登记：前版让位（Superseded）——已批准前版不动（head 语义归评审闭环）。
+        if let Some(retired) = retire_prev {
+            self.audit(
+                team_id,
+                "artifact.rework.supersede",
+                format!(
+                    "返工重跑登记 {}，前版 {} 让位（Superseded）",
+                    artifact.artifact_id, retired.artifact_id
+                ),
+            );
+            self.store.save_artifact(&retired, &project_id).await?;
+        }
 
         // 交接（结构化 context slice 的摘要视图；完整内容在 CAS，下游按 ref 读取）。
         let downstream: Vec<&StepSpec> = state
@@ -2421,8 +2505,12 @@ impl TeamCoordinator {
         out
     }
 
-    /// 角色 prompt（agent worker）：角色 + 目标 + 交接契约 + 上游产物（ref + 截断内容）。
+    /// 角色 prompt（agent worker）：角色 + 目标 + 交接契约 + 上游产物（ref + 摘要）。
+    ///
+    /// R3 降本第 7 条：上游上下文只携带**摘要（截断）+ 版本化引用**，不把全部历史
+    /// 全文重复塞给每个 Worker——需要全文时按 ref 到 Project Space/CAS 取。
     fn build_role_prompt(ctx: &Value) -> String {
+        const UPSTREAM_PREVIEW_CHARS: usize = 2000;
         let objective = ctx
             .get("objective_text")
             .and_then(Value::as_str)
@@ -2442,8 +2530,10 @@ impl TeamCoordinator {
                     .unwrap_or("?");
                 let v = item.get("version").and_then(Value::as_u64).unwrap_or(0);
                 let content = item.get("content").and_then(Value::as_str).unwrap_or("");
-                let content = preview(content, 4000);
-                upstream_blocks.push(format!("### {r} v{v}（{id}）\n{content}"));
+                let content = preview(content, UPSTREAM_PREVIEW_CHARS);
+                upstream_blocks.push(format!(
+                    "### {r} v{v}（{id}）\n{content}\n（以上为摘要；完整内容按版本化引用 {id} v{v} 从 Project Space 获取，不在此重复全文历史）"
+                ));
             }
         }
         let upstream = if upstream_blocks.is_empty() {
@@ -3134,6 +3224,167 @@ impl TeamCoordinator {
             format!("retry：{note}；影响节点：{}", affected.join(", ")),
         );
         Ok(team.clone())
+    }
+
+    /// 评审返工（V1 五期 · 第二路）：重置**已成功**的生产步骤及其未成功下游，
+    /// 并把返工指令注入步骤输入（`rework.instruction`），供重跑 Worker 消费。
+    ///
+    /// 与 [`Self::steer_retry`] 的差异：
+    /// - retry 面向 Failed/Aborted（重复请求零副作用）；rework 面向 Succeeded
+    ///   （评审要求修改 → 重新执行产生新版本），目标是已成功步骤本身；
+    /// - 已成功步骤执行次数清零重跑；已有 Artifact 版本/CAS/交接/评审记录全部保留
+    ///   （新版本经版本链取代旧版，由评审闭环收口 approved head）；
+    /// - 所有校验先于任何持久化（拒绝路径零写副作用）。
+    pub async fn rework_step(
+        &self,
+        team_id: &str,
+        step_id: &str,
+        instruction: &str,
+        note: &str,
+    ) -> WorkSwarmResult<TeamRun> {
+        if instruction.trim().is_empty() {
+            return Err(WorkSwarmError::Validation(
+                "返工指令（instruction）不能为空".to_string(),
+            ));
+        }
+        let note = if note.trim().is_empty() {
+            "rework".to_string()
+        } else {
+            note.trim().to_string()
+        };
+        let lock = self.team_lock(team_id);
+        let _guard = lock.lock().await;
+        if self.is_run_active(team_id) {
+            return Err(WorkSwarmError::Conflict(
+                "运行正在执行中，不能发起返工（待阶段结束后重试）".to_string(),
+            ));
+        }
+        let (mut team, _space, mut state) = self.load_bundle(team_id).await?;
+        if team.status == TeamRunStatus::Running && self.is_run_active(team_id) {
+            return Err(WorkSwarmError::Conflict(format!(
+                "当前状态 {:?} 不可返工（运行中）",
+                team.status
+            )));
+        }
+        let step = state
+            .plan
+            .steps
+            .iter()
+            .find(|s| s.id == step_id)
+            .ok_or_else(|| WorkSwarmError::NotFound(format!("任务 {step_id} 不存在")))?
+            .clone();
+        let target_status = state
+            .records
+            .get(&step.id)
+            .map(|r| r.status)
+            .ok_or_else(|| {
+                WorkSwarmError::Run(format!("任务 {} 缺少执行记录（状态不一致）", step.id))
+            })?;
+        if target_status != StepStatus::Succeeded {
+            return Err(WorkSwarmError::Conflict(format!(
+                "返工目标必须已成功（任务 {} 当前 {:?}）；失败/中断步骤请走 steer retry",
+                step.id, target_status
+            )));
+        }
+
+        // ---- 校验全部通过，开始变更：重置目标 + 未成功下游 ----
+        let downstream = Self::downstream_reset_closure(&state, &step.id);
+        let mut affected = vec![step.id.clone()];
+        affected.extend(downstream.iter().cloned());
+        let reset_ids: std::collections::HashSet<&str> =
+            affected.iter().map(String::as_str).collect();
+        for r in state.records.values_mut() {
+            if reset_ids.contains(r.step_id.as_str()) {
+                r.status = StepStatus::Pending;
+                r.attempts = 0;
+                r.output = None;
+                r.error = None;
+            }
+        }
+        state.aborted = false;
+        if state.goal.status.is_terminal() {
+            state.goal.transition(GoalStatus::Pending);
+        }
+        state.goal.error = None;
+
+        // 注入返工指令（保留原输入与 _workswarm 标记；重跑 Worker 凭此修改产出）。
+        let mut reworked_step = step.clone();
+        if let Some(obj) = reworked_step.input.as_object_mut() {
+            obj.insert(
+                "rework".to_string(),
+                json!({
+                    "instruction": instruction.trim(),
+                    "note": note,
+                    "requested_at": now_ts(),
+                }),
+            );
+        }
+        if let Some(slot) = state.plan.steps.iter_mut().find(|s| s.id == step.id) {
+            *slot = reworked_step;
+        }
+
+        // 受影响成员恢复健康（Degraded → Active）。
+        let affected_members: HashSet<String> = state
+            .plan
+            .steps
+            .iter()
+            .filter(|s| reset_ids.contains(s.id.as_str()))
+            .map(|s| s.worker.clone())
+            .collect();
+        for m in &mut team.members {
+            if m.health == MemberHealth::Degraded && affected_members.contains(&m.member_id) {
+                m.health = MemberHealth::Active;
+            }
+        }
+        team.status = TeamRunStatus::Created;
+        team.updated_at = now_ts();
+
+        // 变更留痕：DecisionRecord。
+        let decision = DecisionRecord {
+            decision_id: format!("{team_id}:rework:{}", now_ms()),
+            proposer: "user".to_string(),
+            choice: format!(
+                "rework：{note}（目标 {} 及未完成下游共 {} 个节点）",
+                step.id,
+                affected.len()
+            ),
+            affected_refs: affected.clone(),
+            rationale: "rework：评审要求修改；重置已成功生产步骤及未成功下游并注入返工指令，历史版本与评审记录保留"
+                .to_string(),
+            created_at: now_ts(),
+        };
+        let pid = team
+            .project_space_id
+            .clone()
+            .ok_or_else(|| WorkSwarmError::Run("缺少 project_space_id".to_string()))?;
+        self.store.save_decision(&decision, &pid).await?;
+        if let Some(space_id) = &team.project_space_id {
+            if let Ok(mut space) = self.store.get_project_space(space_id).await {
+                space.decisions.push(decision.decision_id.clone());
+                space.version += 1;
+                let _ = self.store.save_project_space(&space).await;
+            }
+        }
+
+        self.persist_state(&state)?;
+        self.store.save_team_run(&team).await?;
+        self.clear_interrupted_marker(team_id);
+        self.advance_progress(team_id);
+        self.space_activity(
+            team_id,
+            &format!(
+                "team.rework：{} 影响 {} 个节点（评审返工，指令已注入）",
+                note,
+                affected.len()
+            ),
+        )
+        .await?;
+        self.audit(
+            team_id,
+            "team.rework",
+            format!("rework：{note}；影响节点：{}", affected.join(", ")),
+        );
+        Ok(team)
     }
 
     async fn replace_member(

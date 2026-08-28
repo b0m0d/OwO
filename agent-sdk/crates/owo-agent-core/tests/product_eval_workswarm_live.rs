@@ -80,6 +80,7 @@ async fn live_single_vs_workswarm_three_categories() {
         workswarm.config = WorkSwarmExecutorConfig {
             max_turns_per_worker: 6,
             max_retries_on_failure: 1,
+            selection: owo_agent_core::team_strategy::TeamSelectionMode::Auto,
         };
         let multi_runner = MatrixRunner::new(bundle.clone(), &multi_out);
         let multi_report = multi_runner

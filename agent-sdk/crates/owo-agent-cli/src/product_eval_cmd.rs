@@ -63,6 +63,9 @@ pub enum ProductEvalAction {
         /// 模型覆盖（缺省 OPENAI_MODEL / 内置 GLM 默认）
         #[arg(long)]
         model: Option<String>,
+        /// 组队模式（仅 exec=workswarm 生效）：single|team|auto，缺省 auto
+        #[arg(long)]
+        team_mode: Option<String>,
         /// 清空输出目录重跑（唯一允许的归零入口）
         #[arg(long)]
         fresh: bool,
@@ -100,8 +103,18 @@ pub async fn run(args: ProductEvalArgs) -> Result<(), Box<dyn std::error::Error>
             category,
             out,
             model,
+            team_mode,
             fresh,
-        } => run_matrix_cmd(suite, exec, agents, reps, only, category, out, model, fresh).await,
+        } => {
+            let selection = match team_mode.as_deref() {
+                None => owo_agent_core::team_strategy::TeamSelectionMode::default(),
+                Some(raw) => owo_agent_core::team_strategy::TeamSelectionMode::parse(raw)?,
+            };
+            run_matrix_cmd(
+                suite, exec, agents, reps, only, category, out, model, selection, fresh,
+            )
+            .await
+        }
         ProductEvalAction::Compare {
             report_a,
             report_b,
@@ -331,6 +344,7 @@ async fn run_matrix_cmd(
     category: Option<String>,
     out: Option<PathBuf>,
     model: Option<String>,
+    selection: owo_agent_core::team_strategy::TeamSelectionMode,
     fresh: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let suite_path = resolve_suite_input(suite.as_deref())?;
@@ -387,12 +401,14 @@ async fn run_matrix_cmd(
         let (provider, resolved_model) = build_live_provider(model.as_deref())?;
         // 每个单元格独立 TeamRun 工作目录（CAS/sqlite/状态互不串扰）。
         let work_root = out_dir.join("workswarm-teams");
+        let mut ws_executor = WorkSwarmExecutor::new(provider, resolved_model.clone(), work_root);
+        ws_executor.config.selection = selection;
+        println!(
+            "组队模式：{}（auto=自适应判定：简单任务单 Agent，多来源合并/评审才组队）",
+            selection.as_str()
+        );
         (
-            Arc::new(WorkSwarmExecutor::new(
-                provider,
-                resolved_model.clone(),
-                work_root,
-            )),
+            Arc::new(ws_executor),
             "live-workswarm".to_string(),
             Some(resolved_model),
         )

@@ -117,6 +117,11 @@ pub struct TeamRun {
     /// 人机协作策略（如 human_approval_required / auto_continue）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub human_policy: Option<String>,
+    /// 五期：组队策略决策（TeamPlan 序列化：mode/requested/roles/parallelism/
+    /// budget_calls_total/json_repair/reasons）。`auto` 判定理由供 UI 直接渲染；
+    /// 旧记录反序列化为 None（additive，不破坏既有 wire）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_decision: Option<Value>,
     pub status: TeamRunStatus,
     pub created_at: String,
     #[serde(default)]
@@ -216,7 +221,57 @@ pub struct ArtifactReviewRecord {
     /// 评审时的产物内容引用（取证锚点：证明评审的是这份内容）。
     #[serde(default)]
     pub content_ref: String,
+    /// 生产该产物的任务步骤（`s-{role}`；返工定位用。旧记录缺省为空）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub step_id: String,
+    /// 生产者 member_id（冗余锚点：评审记录自足，不依赖产物表回查）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub producer_member_id: String,
     pub created_at: String,
+}
+
+/// 返工任务状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactReworkStatus {
+    /// 已受理：步骤已重置并注入返工指令，等待重跑产出新版本。
+    Requested,
+    /// 新版本已登记（由版本链/评审闭环体现；任务记录保留供追溯）。
+    Completed,
+    /// 重跑失败（记录失败原因；可再次发起返工）。
+    Failed,
+}
+
+/// Artifact 返工任务（V1 五期 · 第二路）。
+///
+/// 同一 `review_id` 至多一个返工任务（幂等）；重复请求返回原任务。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactReworkTask {
+    pub rework_id: String,
+    /// 被返工的产物（vN）。
+    pub artifact_id: String,
+    pub artifact_version: u32,
+    /// 触发返工的 request_changes 评审（幂等键）。
+    pub review_id: String,
+    pub team_id: String,
+    pub project_id: String,
+    /// 生产步骤（重置目标；下游未完成节点一并重置）。
+    pub step_id: String,
+    /// 评审意见驱动的返工指令（注入步骤输入 `rework.instruction`）。
+    pub instruction: String,
+    pub idempotency_key: String,
+    #[serde(default = "default_rework_status")]
+    pub status: ArtifactReworkStatus,
+    /// 返工产生的新版本 artifact_id（完成后回填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reworked_artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    pub created_at: String,
+}
+
+fn default_rework_status() -> ArtifactReworkStatus {
+    ArtifactReworkStatus::Requested
 }
 
 /// 决策记录（§6.6 DecisionRecord）。
@@ -307,6 +362,9 @@ pub struct ProjectSpace {
     /// 交付清单引用（最终产物集合）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery_manifest_ref: Option<String>,
+    /// Artifact 返工任务（按 review_id 幂等；随空间 JSON 持久化）。
+    #[serde(default)]
+    pub rework_tasks: Vec<ArtifactReworkTask>,
     pub version: u32,
     #[serde(default = "default_project_status")]
     pub status: ProjectSpaceStatus,

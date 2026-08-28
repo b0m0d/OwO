@@ -16,13 +16,14 @@
 
 use crate::agent::{Agent, AgentConfig, TurnEvent};
 use crate::cas_store::CasStore;
-use crate::gateway::{ModelProvider, TokenUsage};
+use crate::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage};
 use crate::goal::{Worker, WorkerRegistry};
 use crate::permissions::{AutoApprover, Policy};
 use crate::plan::StepStatus;
 use crate::product_eval::{AgentMode, CaseExecutor, ExecContext, RawExecOutcome};
 use crate::project_space_store::{ProjectSpaceStoreBackend, SqliteProjectSpaceStore};
 use crate::session::Session;
+use crate::team_strategy::{TaskProfile, TeamPlan, TeamSelectionMode, TeamStrategyEngine};
 use crate::tools::ToolRegistry;
 use crate::workswarm::{
     CreateTeamRequest, PhaseOutcome, RoleSpec, RoleWorker, SteerCommand, TeamCoordinator,
@@ -63,6 +64,17 @@ pub struct ArtifactObservation {
     pub content_ref: String,
 }
 
+/// 自适应组队判定快照（进 observation 供冒烟/报告取证与 UI 展示）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyObservation {
+    pub mode: String,
+    pub requested: String,
+    pub roles: Vec<String>,
+    pub budget_calls_total: usize,
+    pub json_repair: bool,
+    pub reasons: Vec<String>,
+}
+
 /// 一次 WorkSwarm TeamRun 的完整观测。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamRunObservation {
@@ -82,6 +94,9 @@ pub struct TeamRunObservation {
     pub failed_steps: Vec<String>,
     /// 最终被选中的交付 Artifact（版本化 ref）。
     pub final_artifact_ref: Option<String>,
+    /// 自适应组队判定（R3；旧观测文件缺失时为 None）。
+    #[serde(default)]
+    pub strategy: Option<StrategyObservation>,
 }
 
 impl TeamRunObservation {
@@ -99,6 +114,7 @@ impl TeamRunObservation {
             cancelled: false,
             failed_steps: Vec::new(),
             final_artifact_ref: None,
+            strategy: None,
         }
     }
 }
@@ -266,11 +282,14 @@ impl Worker for EvalAgentWorker {
 /// 执行器配置（也承担默认值来源）。
 #[derive(Clone)]
 pub struct WorkSwarmExecutorConfig {
-    /// 每个 Agent Worker 的最大回合数。
+    /// 每个 Agent Worker 的最大回合数（角色无专属预算时的退回值）。
     pub max_turns_per_worker: usize,
     /// TeamRun 失败后允许的局部 retry 次数（复用 R2 `SteerCommand::Retry`，
     /// 只重置失败步骤及其未完成下游，已成功 Worker 不重跑）。
     pub max_retries_on_failure: u32,
+    /// 组队模式选择（R3 自适应组队）：single 强制单 Agent、team 强制完整流水线、
+    /// auto（默认）按任务画像判定——简单任务只建单角色团队。
+    pub selection: TeamSelectionMode,
 }
 
 impl Default for WorkSwarmExecutorConfig {
@@ -278,6 +297,7 @@ impl Default for WorkSwarmExecutorConfig {
         Self {
             max_turns_per_worker: 8,
             max_retries_on_failure: 1,
+            selection: TeamSelectionMode::default(),
         }
     }
 }
@@ -305,38 +325,81 @@ impl WorkSwarmExecutor {
         }
     }
 
-    /// 按任务分类给出角色 DAG（≤3 个 Agent Worker）：
-    /// producer（builder/researcher/writer）→ critic（只读）→ leader（最终裁决）。
-    fn roles_for_case(case: &crate::product_eval::ProductEvalCase) -> Vec<RoleSpec> {
-        let producer_role = match case.category {
-            crate::product_eval::EvalCategory::Code => "builder",
-            crate::product_eval::EvalCategory::Research => "researcher",
-            crate::product_eval::EvalCategory::Document => "writer",
+    /// 任务画像 → 策略引擎输入（R3 自适应组队）。
+    /// 结构化 JSON 任务（期望 .json 产物）的格式风险走**一次修复机会**（expects_json），
+    /// 不再映射为高风险评审组队——critic 读 JSON 修不了格式问题。
+    fn profile_of(case: &crate::product_eval::ProductEvalCase) -> TaskProfile {
+        let expects_json = case
+            .expected_artifacts
+            .iter()
+            .any(|path| path.to_ascii_lowercase().ends_with(".json"));
+        let risk = if case.category == crate::product_eval::EvalCategory::Code {
+            crate::team_strategy::RiskLevel::Normal
+        } else {
+            crate::team_strategy::RiskLevel::Low
         };
-        let mut producer = RoleSpec::agent(producer_role);
+        TaskProfile {
+            category: Some(case.category.as_str().to_string()),
+            artifact_count: case.expected_artifacts.len(),
+            input_count: case.inputs.len(),
+            needs_independent_review: false,
+            risk,
+            single_agent_success_rate: None,
+            expects_json,
+        }
+    }
+
+    /// 组队计划 → 角色 DAG（producer → [critic] → [leader]，按计划裁剪）。
+    fn roles_from_plan(
+        case: &crate::product_eval::ProductEvalCase,
+        plan: &TeamPlan,
+    ) -> Vec<RoleSpec> {
+        let mut specs: Vec<RoleSpec> = Vec::new();
+        let producer_role = plan
+            .roles
+            .first()
+            .map(|r| r.role.clone())
+            .unwrap_or_else(|| "producer".to_string());
+        let mut producer = RoleSpec::agent(producer_role.clone());
         producer.handoff_contract = Some(format!(
             "依据团队目标与任务说明产出主交付物正文。必须产出的交付物将登记为版本化 Artifact：{}。直接输出交付物内容本身。",
             case.expected_artifacts.join("、")
         ));
         producer.verify = Some("non_empty".to_string());
+        specs.push(producer);
 
-        let mut critic = RoleSpec::agent("critic");
-        critic.depends_on = vec![producer_role.to_string()];
-        critic.handoff_contract = Some(
-            "只读评审上游交付物草稿（不修改原文）：检查完整性、一致性、与任务要求的符合度，输出 JSON {\"approved\":bool,\"score\":0-100,\"comments\":[..]}。"
-                .to_string(),
-        );
-        critic.verify = Some("non_empty".to_string());
-
-        let mut leader = RoleSpec::agent("leader");
-        leader.depends_on = vec!["critic".to_string()];
-        leader.handoff_contract = Some(format!(
-            "最终裁决：综合上游交付物草稿与评审意见采纳或修正，输出最终交付物正文（{}）与交付清单。评审未通过的问题必须修正。",
-            case.expected_artifacts.join("、")
-        ));
-        leader.verify = Some("non_empty".to_string());
-
-        vec![producer, critic, leader]
+        for role_plan in &plan.roles[1..] {
+            match role_plan.role.as_str() {
+                "critic" => {
+                    let mut critic = RoleSpec::agent("critic");
+                    critic.depends_on = vec![producer_role.clone()];
+                    critic.handoff_contract = Some(
+                        "只读评审上游交付物草稿（不修改原文）：检查完整性、一致性、与任务要求的符合度，输出 JSON {\"approved\":bool,\"score\":0-100,\"comments\":[..]}。"
+                            .to_string(),
+                    );
+                    critic.verify = Some("non_empty".to_string());
+                    specs.push(critic);
+                }
+                "leader" => {
+                    let upstream = specs
+                        .last()
+                        .map(|s| s.role.clone())
+                        .unwrap_or_else(|| producer_role.clone());
+                    let mut leader = RoleSpec::agent("leader");
+                    leader.depends_on = vec![upstream];
+                    leader.handoff_contract = Some(format!(
+                        "综合上游交付物草稿（与评审意见）采纳或修正，输出最终交付物正文（{}）。上游未通过的问题必须修正。",
+                        case.expected_artifacts.join("、")
+                    ));
+                    leader.verify = Some("non_empty".to_string());
+                    specs.push(leader);
+                }
+                other => {
+                    tracing::warn!(role = %other, "策略计划中的未知角色被忽略");
+                }
+            }
+        }
+        specs
     }
 
     fn objective_of(case: &crate::product_eval::ProductEvalCase) -> String {
@@ -416,9 +479,27 @@ impl WorkSwarmExecutor {
             let _ = std::fs::write(&target, &input.content);
         }
 
+        // —— 自适应组队：策略引擎判定 single/team + 角色 DAG + 每角色调用预算 ——
+        let strategy = TeamStrategyEngine::default();
+        let plan = strategy.decide(self.config.selection, &Self::profile_of(case));
+        tracing::info!(
+            case = %case.id,
+            mode = %plan.mode,
+            roles = plan.roles.iter().map(|r| r.role.as_str()).collect::<Vec<_>>().join("+"),
+            budget = plan.budget_calls_total,
+            "自适应组队判定"
+        );
+
         // —— 组队：角色 DAG + 预算（timeout/预算映射 GoalBudget）——
-        let mut request = CreateTeamRequest::new(Self::objective_of(case), TeamMode::Team);
-        request.roles = Self::roles_for_case(case);
+        let mut request = CreateTeamRequest::new(
+            Self::objective_of(case),
+            if plan.is_single() {
+                TeamMode::Single
+            } else {
+                TeamMode::Team
+            },
+        );
+        request.roles = Self::roles_from_plan(case, &plan);
         request.budget = serde_json::json!({
             "max_steps": 64,
             "max_retries_per_step": 1,
@@ -448,6 +529,8 @@ impl WorkSwarmExecutor {
         for spec in &meta.roles {
             let member_id = format!("m-{}", spec.role);
             let stats = WorkerStats::new();
+            // 每角色调用预算来自策略计划（未知角色退回 producer 缺省 4）。
+            let role_budget = plan.budget_for(&spec.role);
             registry.register(Arc::new(RoleWorker::new(
                 Arc::clone(&coordinator),
                 team_id.clone(),
@@ -457,7 +540,7 @@ impl WorkSwarmExecutor {
                     provider: Arc::clone(&self.provider),
                     model: self.model.clone(),
                     workspace: ws_dir.clone(),
-                    max_turns: self.config.max_turns_per_worker,
+                    max_turns: role_budget,
                     cancel: Arc::clone(&ctx.cancel),
                     stats: Arc::clone(&stats),
                 }),
@@ -624,6 +707,14 @@ impl WorkSwarmExecutor {
             cancelled,
             failed_steps: failed_steps.clone(),
             final_artifact_ref: None,
+            strategy: Some(StrategyObservation {
+                mode: plan.mode.clone(),
+                requested: plan.requested.clone(),
+                roles: plan.roles.iter().map(|r| r.role.clone()).collect(),
+                budget_calls_total: plan.budget_calls_total,
+                json_repair: plan.json_repair,
+                reasons: plan.reasons.clone(),
+            }),
         };
 
         // —— 取消：立即返回，不再产生任何模型/工具调用 ——
@@ -686,6 +777,35 @@ impl WorkSwarmExecutor {
                     final_ref.artifact_id, final_ref.content_ref
                 ))
             })?;
+
+        // —— 结构化 JSON 任务：确定性格式检查 + 一次修复机会（R3 第 8 条）——
+        // 解析失败只修一次；修复后仍非法则如实交给检查器判定（不做无据通过）。
+        let mut content = content;
+        if plan.json_repair
+            && case
+                .expected_artifacts
+                .iter()
+                .any(|path| path.to_ascii_lowercase().ends_with(".json"))
+        {
+            if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
+                outcome
+                    .tool_log
+                    .push("json_format_check:ok（无需修复）".to_string());
+            } else {
+                let (repaired, calls, ok) = self.repair_json_once(&content).await;
+                outcome.model_calls += calls;
+                if ok {
+                    outcome
+                        .tool_log
+                        .push("json_repair:attempt=1 result=parsed".to_string());
+                    content = repaired;
+                } else {
+                    outcome.tool_log.push(
+                        "json_repair:attempt=1 result=still_invalid（交由检查器判定）".to_string(),
+                    );
+                }
+            }
+        }
         observation.final_artifact_ref = Some(final_ref.artifact_id.clone());
 
         // 写入走 ExecContext 受控通道（allow_write 范围强制）；
@@ -713,6 +833,37 @@ impl WorkSwarmExecutor {
         persist_observation(&root, &observation);
         Ok((outcome, observation))
     }
+
+    /// 结构化 JSON 任务的一次修复机会：确定性检查失败后，发起**恰好一次**修复调用，
+    /// 只接受修复结果能通过 `serde_json` 解析的输出；否则原样返回交由检查器判定。
+    /// 返回 (最终文本, 模型调用次数, 是否修复成功)。
+    async fn repair_json_once(&self, broken: &str) -> (String, u32, bool) {
+        let prompt = format!(
+            "下面的文本本应是合法 JSON，但解析失败。请修正为合法 JSON：保持原有字段名与取值语义完全不变，\
+只修复格式问题（缺失引号/多余逗号/未闭合括号/代码围栏包裹等）。只输出修正后的 JSON 本体，\
+不要任何解释、注释或代码围栏。\n\n{broken}"
+        );
+        let messages = [ChatMessage {
+            role: "user".to_string(),
+            content: Some(prompt),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let output = match self.provider.complete(&messages, &[]).await {
+            Ok(output) => output,
+            Err(_) => return (broken.to_string(), 1, false),
+        };
+        let text = match output {
+            ModelOutput::Text(text) => text,
+            _ => return (broken.to_string(), 1, false),
+        };
+        let cleaned = strip_code_fences(&text);
+        if serde_json::from_str::<serde_json::Value>(&cleaned).is_ok() {
+            (cleaned, 1, true)
+        } else {
+            (broken.to_string(), 1, false)
+        }
+    }
 }
 
 /// 把 TeamRun 观测落盘为 `observation.json`（取证/报告用；失败不阻断执行）。
@@ -721,6 +872,24 @@ fn persist_observation(root: &std::path::Path, observation: &TeamRunObservation)
         return;
     };
     let _ = std::fs::write(root.join("observation.json"), text);
+}
+
+/// 去掉模型输出常见的 ```json 围栏（只处理首尾成对围栏）。
+fn strip_code_fences(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed.to_string();
+    };
+    // 跳过语言标记行（```json / ```JSON5 等）。
+    let body = match rest.find('\n') {
+        Some(idx) => &rest[idx + 1..],
+        None => rest,
+    };
+    body.trim()
+        .strip_suffix("```")
+        .map(str::trim)
+        .map(str::to_string)
+        .unwrap_or_else(|| body.trim().to_string())
 }
 
 /// 选择最终交付 Artifact：kind=final 优先，其次 producer kind（document/research/plan），
@@ -1082,7 +1251,13 @@ mod tests {
             EvalCategory::Document,
         ] {
             let case = eval_case("ws-roles", category);
-            let roles = WorkSwarmExecutor::roles_for_case(&case);
+            // 五期自适应组队：显式 team 强制完整流水线（producer → critic → leader）。
+            let engine = crate::team_strategy::TeamStrategyEngine::default();
+            let plan = engine.decide(
+                crate::team_strategy::TeamSelectionMode::ForceTeam,
+                &WorkSwarmExecutor::profile_of(&case),
+            );
+            let roles = WorkSwarmExecutor::roles_from_plan(&case, &plan);
             assert_eq!(roles.len(), 3, "category = {:?}", case.category);
             let mut names: Vec<&str> = roles.iter().map(|role| role.role.as_str()).collect();
             names.sort_unstable();

@@ -70,6 +70,8 @@ pub mod sqlite_store;
 pub mod storage_crypto;
 pub mod stt;
 pub mod subagent;
+/// 自适应组队策略引擎（R3 第一路：single/team/auto 判定 + 可展示理由）。
+pub mod team_strategy;
 pub mod tools;
 pub mod trace;
 pub mod transition;
@@ -264,6 +266,9 @@ pub use skill_pack::{
 };
 pub use sqlite_store::SqliteSessionStore;
 pub use stt::{LocalStt, SttOutcome};
+pub use team_strategy::{
+    RolePlan, TaskProfile, TeamPlan, TeamSelectionMode, TeamStrategyEngine, TeamStrategyThresholds,
+};
 pub use tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
 pub use trace::{list_traces, load_trace, save_trace, TraceRecord};
 pub use transition::{

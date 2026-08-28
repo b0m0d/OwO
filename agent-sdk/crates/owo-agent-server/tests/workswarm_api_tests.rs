@@ -779,3 +779,530 @@ async fn unknown_resources_return_404() {
     .await;
     assert_eq!(status, 404, "未知提案采纳应 404");
 }
+
+// ---------------------------------------------------------------------------
+// 五期（第三路）：TeamRun 指标 / 预算门 / 诊断脱敏
+// ---------------------------------------------------------------------------
+
+/// 往 TeamRun 指标日志注入一条合成 span（走公开的 JSONL 持久化契约；
+/// 用于确定性触发预算门，等价于「已完成阶段的真实指标超限」）。
+fn inject_cost_span(temp: &std::path::Path, team_id: &str, cost_usd: f64) {
+    use std::io::Write;
+    let path = temp
+        .join("workswarm")
+        .join("runs")
+        .join(format!("{team_id}-metrics.jsonl"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .expect("指标日志应可打开（JSONL 持久化契约）");
+    let mut file = file;
+    let line = json!({
+        "span_id": "span-injected",
+        "team_id": team_id,
+        "member_id": "m-injected",
+        "role": "injected",
+        "worker_kind": "agent",
+        "step_id": "s-injected",
+        "started_at": "2026-08-28T00:00:00+00:00",
+        "ended_at": "2026-08-28T00:00:01+00:00",
+        "started_at_ms": 0,
+        "ended_at_ms": 1000,
+        "wall_ms": 1000,
+        "outcome": "succeeded",
+        "model_calls": 1,
+        "prompt_tokens": 1000,
+        "completion_tokens": 500,
+        "total_tokens": 1500,
+        "cost_usd": cost_usd,
+        "attempt": 1
+    });
+    writeln!(file, "{line}").expect("注入 span 行应写入成功");
+}
+
+#[tokio::test]
+async fn team_metrics_report_role_spans_after_relay() {
+    let (state, temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    let create = json!({ "objective": "指标接力", "roles": echo_relay_roles() });
+    let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
+    assert_eq!(status, 202, "{created}");
+    let team_id = created["team_id"].as_str().unwrap().to_string();
+    let _ = poll_team_status(
+        &state,
+        &app,
+        &team_id,
+        &["succeeded", "failed"],
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    let (status, m) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/teams/{team_id}/metrics"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{m}");
+    assert_eq!(m["team_id"], team_id);
+    let summary = &m["summary"];
+    assert_eq!(summary["span_count"], 4, "4 角色各 1 span：{m}");
+    assert_eq!(summary["succeeded_spans"], 4);
+    assert_eq!(summary["failed_spans"], 0);
+    assert_eq!(summary["rework_count"], 0);
+    assert_eq!(summary["model_calls"], 0, "echo worker 零模型调用");
+    assert_eq!(
+        summary["total_tokens"],
+        Value::Null,
+        "无模型用量 → token 为 null（区别于实测 0）"
+    );
+    assert_eq!(summary["cost_usd"], 0.0);
+    assert_eq!(summary["artifact_versions"], 4, "每角色一个版本化产物");
+    assert!(
+        summary["slowest_worker"]["role"].as_str().is_some(),
+        "最慢 Worker 应在场：{m}"
+    );
+    assert!(
+        summary["wall_window_ms"].as_u64().unwrap_or(0)
+            >= summary["worker_wall_ms_sum"].as_u64().unwrap_or(0),
+        "窗口墙钟 ≥ span 墙钟和：{m}"
+    );
+    assert_eq!(m["budget"]["exceeded"], false, "未配置预算 → 不超限：{m}");
+    assert_eq!(m["budget"]["reason"], Value::Null);
+    assert!(m["metrics_file"].as_str().unwrap().contains(&team_id));
+
+    let roles = m["roles"].as_array().unwrap();
+    assert_eq!(roles.len(), 4);
+    for role in roles {
+        assert_eq!(role["spans"], 1, "{role}");
+        assert_eq!(role["succeeded"], 1);
+        assert_eq!(role["model_calls"], 0);
+        assert_eq!(role["artifact_versions"], 1);
+    }
+    let workers = m["workers"].as_array().unwrap();
+    assert_eq!(workers.len(), 4);
+    for w in workers {
+        assert_eq!(w["outcome"], "succeeded", "{w}");
+        assert_eq!(w["attempt"], 1);
+        assert!(w["wall_ms"].as_u64().is_some());
+        assert!(
+            w["artifact"]["artifact_id"].as_str().is_some(),
+            "成功 span 应解析到输出 Artifact：{w}"
+        );
+    }
+
+    // JSONL 落盘契约：文件存在于 TeamRun 数据目录（runs/）且 4 行均可解析。
+    let journal_path = temp
+        .path()
+        .join("workswarm")
+        .join("runs")
+        .join(format!("{team_id}-metrics.jsonl"));
+    let text = std::fs::read_to_string(&journal_path).expect("metrics.jsonl 应存在");
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 4, "4 条 span 落盘：{text}");
+    for line in lines {
+        let value: Value = serde_json::from_str(line).expect("每行应为合法 JSON");
+        assert_eq!(value["team_id"], team_id);
+    }
+}
+
+#[tokio::test]
+async fn team_metrics_survive_restart_via_jsonl() {
+    let (state, temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    let create = json!({ "objective": "重启可读", "roles": echo_relay_roles() });
+    let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
+    assert_eq!(status, 202, "{created}");
+    let team_id = created["team_id"].as_str().unwrap().to_string();
+    let _ = poll_team_status(
+        &state,
+        &app,
+        &team_id,
+        &["succeeded", "failed"],
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+    let (status, before) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/teams/{team_id}/metrics"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(before["summary"]["span_count"], 4);
+
+    // 「重启」：同数据目录新建 AppState（新协调器/新存储连接，无进程内账本），
+    // 指标端点仍从 JSONL 文件聚合出同样数据。
+    let workspace = temp.path().join("ws");
+    let agent2 = Agent::new(
+        Arc::new(IdleProvider),
+        ToolRegistry::new(),
+        Policy::new(&workspace),
+        Default::default(),
+    );
+    let store2 = SqliteSessionStore::open(&workspace.join("index.db")).unwrap();
+    let state2 = Arc::new(owo_agent_server::AppState::new(
+        agent2,
+        store2,
+        workspace.join("traces"),
+        temp.path().to_path_buf(),
+        workspace,
+    ));
+    let app2 = build_router(Arc::clone(&state2));
+    let (status, after) = call(
+        &state2,
+        &app2,
+        "GET",
+        &format!("/teams/{team_id}/metrics"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "重启后指标应可读：{after}");
+    assert_eq!(
+        after["summary"]["span_count"], before["summary"]["span_count"],
+        "重启前后 span 数一致：{before} vs {after}"
+    );
+    assert_eq!(after["summary"]["artifact_versions"], 4);
+}
+
+#[tokio::test]
+async fn team_metrics_record_failures_and_rework() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    // fail worker：步骤失败（GoalRunner 默认每步重试 → 产生多个失败 span）。
+    let create = json!({
+        "objective": "失败指标",
+        "roles": [
+            { "role": "builder", "assignee": "agent", "worker": "fail",
+              "extra_input": { "text": "注入失败" }, "verify": "non_empty" }
+        ]
+    });
+    let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
+    assert_eq!(status, 202, "{created}");
+    let team_id = created["team_id"].as_str().unwrap().to_string();
+    let _ = poll_team_status(
+        &state,
+        &app,
+        &team_id,
+        &["failed"],
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    let (status, m) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/teams/{team_id}/metrics"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{m}");
+    assert!(
+        m["summary"]["failed_spans"].as_u64().unwrap_or(0) >= 1,
+        "失败 span 应被记录：{m}"
+    );
+    assert_eq!(m["summary"]["succeeded_spans"], 0);
+    assert_eq!(m["summary"]["artifact_versions"], 0, "失败步骤不产生产物");
+    let workers = m["workers"].as_array().unwrap();
+    let failed = workers
+        .iter()
+        .find(|w| w["outcome"] == "failed")
+        .expect("应存在 failed span：{m}");
+    assert!(
+        failed["error"]
+            .as_str()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false),
+        "失败原因应落指标：{failed}"
+    );
+    let roles = m["roles"].as_array().unwrap();
+    assert_eq!(roles[0]["failed"], roles[0]["spans"], "该角色全部失败：{m}");
+}
+
+/// 预算门端到端：planner(echo) → approver(human) → builder(echo)。
+/// 团队等待人节点时注入合成费用 span（走 JSONL 持久化契约）；
+/// 人结果提交后，门闩内调度点在 builder 领取前命中费用预算 →
+/// 停止调度 + 审计 `team.budget_exhausted` + 团队显式转 Cancelled。
+#[tokio::test]
+async fn metrics_budget_gate_stops_scheduling_with_reason() {
+    let (state, temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    let create = json!({
+        "objective": "预算门",
+        "budget": { "max_cost_usd": 100.0 },
+        "roles": [
+            { "role": "planner", "assignee": "agent", "worker": "echo", "verify": "non_empty" },
+            { "role": "approver", "assignee": "human", "worker": "u-1", "depends_on": ["planner"] },
+            { "role": "builder", "assignee": "agent", "worker": "echo", "depends_on": ["approver"], "verify": "non_empty" }
+        ]
+    });
+    let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
+    assert_eq!(status, 202, "{created}");
+    let team_id = created["team_id"].as_str().unwrap().to_string();
+
+    // 等人节点门闩（planner 已完成）。
+    let _ = poll_team_status(
+        &state,
+        &app,
+        &team_id,
+        &["awaiting_human"],
+        std::time::Duration::from_secs(20),
+    )
+    .await;
+
+    // 门闩窗口内注入合成费用（999 > 100）。
+    inject_cost_span(temp.path(), &team_id, 999.0);
+
+    // 提交人结果 → 门闩内调度点先过预算门 → 停止调度（builder 不领取）。
+    let (status, res) = call(
+        &state,
+        &app,
+        "POST",
+        "/tasks/s-approver/human-result",
+        Some(&json!({ "team_id": team_id, "result": "approved" }).to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "{res}");
+
+    let detail = poll_team_status(
+        &state,
+        &app,
+        &team_id,
+        &["cancelled"],
+        std::time::Duration::from_secs(20),
+    )
+    .await;
+    assert_eq!(
+        detail["team"]["status"].as_str().unwrap(),
+        "cancelled",
+        "预算耗尽应显式停止：{detail}"
+    );
+    // builder 未被执行。
+    let builder = detail["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["task_id"] == "s-builder")
+        .expect("任务视图应含 builder：{detail}");
+    assert_ne!(
+        builder["status"], "Succeeded",
+        "预算门必须先于 builder 领取：{builder}"
+    );
+    // 审计留痕（明确原因）。
+    let events: Vec<&Value> = detail["audit_tail"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event"] == "team.budget_exhausted")
+        .collect();
+    assert_eq!(events.len(), 1, "预算耗尽审计应恰好一条：{detail}");
+    assert!(
+        events[0]["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("费用预算耗尽"),
+        "审计应含预算耗尽原因：{events:?}"
+    );
+
+    // metrics 复查：exceeded + reason。
+    let (status, m) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/teams/{team_id}/metrics"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{m}");
+    assert_eq!(m["budget"]["exceeded"], true, "{m}");
+    assert!(
+        m["budget"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("费用预算耗尽"),
+        "{m}"
+    );
+    assert_eq!(m["budget"]["max_cost_usd"], 100.0);
+}
+
+#[tokio::test]
+async fn events_json_snapshot_includes_progress() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    let create = json!({
+        "objective": "进度快照",
+        "roles": [
+            { "role": "runner", "assignee": "agent", "worker": "sleep",
+              "extra_input": { "ms": 1200 }, "verify": "non_empty" }
+        ]
+    });
+    let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
+    assert_eq!(status, 202, "{created}");
+    let team_id = created["team_id"].as_str().unwrap().to_string();
+    let _ = poll_team_status(
+        &state,
+        &app,
+        &team_id,
+        &["succeeded", "failed"],
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    let (status, snap) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/teams/{team_id}/events?format=json"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{snap}");
+    // 五期：快照补 progress（轮询降级可看当前步骤/计数；additive 字段）。
+    let progress = &snap["progress"];
+    assert!(progress.is_object(), "快照应含 progress 对象：{snap}");
+    assert_eq!(progress["team_id"], team_id);
+    assert!(progress["seq"].is_u64(), "progress.seq 应在场：{snap}");
+    assert!(
+        progress["counts"].is_object(),
+        "progress.counts 应在场：{snap}"
+    );
+    assert_eq!(progress["counts"]["succeeded"], 1, "终态后计数：{snap}");
+    assert!(
+        progress["current_steps"].is_array(),
+        "progress.current_steps 应为数字段：{snap}"
+    );
+    // 审计与既有字段不回归。
+    assert!(
+        snap["audit"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "审计尾迹应保留：{snap}"
+    );
+}
+
+#[tokio::test]
+async fn diagnostic_export_is_sanitized_and_complete() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    // builder 的 echo 输出内嵌凭据形态文本（经产物/交接进入诊断面）。
+    let secret_text =
+        "机要段落 password: hunter2 api_key=sk-abcdef123456 token: gl-1234567890abcdef";
+    let create = json!({
+        "objective": "诊断脱敏",
+        "roles": [
+            { "role": "planner", "assignee": "agent", "worker": "echo",
+              "extra_input": { "text": "方案大纲" }, "verify": "non_empty" },
+            { "role": "builder", "assignee": "agent", "worker": "echo",
+              "depends_on": ["planner"],
+              "extra_input": { "text": secret_text }, "verify": "non_empty" }
+        ]
+    });
+    let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
+    assert_eq!(status, 202, "{created}");
+    let team_id = created["team_id"].as_str().unwrap().to_string();
+    let project_id = created["project_space_id"].as_str().unwrap().to_string();
+    let _ = poll_team_status(
+        &state,
+        &app,
+        &team_id,
+        &["succeeded", "failed"],
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    // 走既有评审 API 给 planner 产物一条 approve 记录（诊断应含评审记录）。
+    let (status, review) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{team_id}:planner:v1/review"),
+        Some(
+            &json!({
+                "team_id": team_id,
+                "decision": "approve",
+                "reviewer": "human-reviewer",
+                "comment": "诊断用评审",
+                "idempotency_key": "diag-review-1"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert!(
+        status == 201 || status == 200,
+        "评审应受理（评审闭环冻结契约）：{status} {review}"
+    );
+
+    let (status, diag) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/teams/{team_id}/diagnostic"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{diag}");
+
+    // 结构完整性。
+    assert_eq!(diag["team_id"], team_id);
+    assert_eq!(diag["team"]["team_id"], team_id, "TeamRun 本体在场：{diag}");
+    assert_eq!(diag["tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(diag["artifacts"].as_array().unwrap().len(), 2);
+    assert!(
+        diag["reviews"]
+            .as_array()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false),
+        "评审记录应在场：{diag}"
+    );
+    assert_eq!(diag["reviews"][0]["decision"], "approve", "{diag}");
+    assert!(
+        diag["handoffs"]
+            .as_array()
+            .map(|h| !h.is_empty())
+            .unwrap_or(false),
+        "交接记录应在场：{diag}"
+    );
+    assert_eq!(diag["metrics"]["summary"]["span_count"], 2);
+    assert!(
+        diag["audit_tail"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "审计尾迹应在场：{diag}"
+    );
+    assert_eq!(diag["redaction"]["applied"], true);
+    assert!(diag["metrics_file"].as_str().is_some());
+
+    // 脱敏断言：全文（含预览/交接摘要/审计 detail）不得出现凭据形态明文。
+    let dumped = diag.to_string();
+    assert!(
+        !dumped.contains("hunter2"),
+        "诊断泄露 password 值：{dumped}"
+    );
+    assert!(
+        !dumped.contains("sk-abcdef"),
+        "诊断泄露 api_key 值：{dumped}"
+    );
+    assert!(
+        !dumped.contains("gl-1234567890"),
+        "诊断泄露 token 值：{dumped}"
+    );
+    assert!(dumped.contains("[REDACTED]"), "应可见脱敏标记");
+    // 非敏感内容保留（objective、CAS ref、项目 id）。
+    assert!(dumped.contains("诊断脱敏"), "objective 应保留：{dumped}");
+    assert!(dumped.contains(&project_id), "project id 应保留：{dumped}");
+}

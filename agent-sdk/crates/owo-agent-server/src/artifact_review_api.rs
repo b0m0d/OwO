@@ -31,6 +31,11 @@ use std::sync::{Arc, OnceLock};
 
 use owo_agent_server::AppState;
 
+// 返工与最终交付物（V1 五期 · 第二路）：独立文件，经本模块 router 合并挂载，
+// 不改动 lib.rs 装配（子模块可访问本模块私有项：store 连接与错误映射）。
+#[path = "artifact_rework_api.rs"]
+pub(crate) mod artifact_rework;
+
 // ---------------------------------------------------------------------------
 // 状态（进程内单例连接，懒初始化）
 // ---------------------------------------------------------------------------
@@ -92,6 +97,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/artifacts/{id}/review", post(submit_review))
         .route("/artifacts/{id}/history", get(artifact_history))
+        .route(
+            "/artifacts/{id}/rework",
+            post(artifact_rework::submit_rework),
+        )
+        .route(
+            "/projects/{id}/deliverables",
+            get(artifact_rework::project_deliverables),
+        )
         .with_state(state)
 }
 

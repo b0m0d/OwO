@@ -120,6 +120,7 @@ async fn create_team(h: &Harness, roles: Vec<RoleSpec>) -> String {
         roles,
         budget: json!(null),
         human_policy: None,
+        strategy: None,
     };
     h.coordinator
         .create_team_run(&req)

@@ -188,6 +188,7 @@ async fn relay_run_completes_with_artifacts_handoffs_and_proposal() {
         roles: roles.clone(),
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -309,6 +310,7 @@ async fn human_node_waits_then_resumes_downstream() {
         roles: roles.clone(),
         budget: Value::Null,
         human_policy: Some("approve".to_string()),
+        strategy: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -402,6 +404,7 @@ async fn cancel_parked_run_retains_artifacts_and_continue_keeps_progress() {
         roles: roles.clone(),
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -476,6 +479,7 @@ async fn steer_changes_only_uncompleted_nodes_with_decision() {
         roles: roles.clone(),
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -559,6 +563,7 @@ async fn steer_during_active_run_conflicts_and_cancel_propagates() {
         roles: roles.clone(),
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -637,6 +642,7 @@ async fn dynamic_team_agent_members_capped_at_five() {
         roles,
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let err = h.coordinator.create_team_run(&req).await.unwrap_err();
     assert!(
@@ -665,6 +671,7 @@ async fn dynamic_team_agent_members_capped_at_five() {
         roles,
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     assert_eq!(team.members.len(), 5);
@@ -686,6 +693,7 @@ async fn adopted_template_is_reused_for_next_dynamic_run() {
         roles: roles.clone(),
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -716,6 +724,7 @@ async fn adopted_template_is_reused_for_next_dynamic_run() {
         roles: Vec::new(), // 空 = 走模板优先
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let team2 = h.coordinator.create_team_run(&req2).await.unwrap();
     assert_eq!(
@@ -741,6 +750,7 @@ async fn swarmflow_requires_versioned_template() {
         roles: Vec::new(),
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let err = h.coordinator.create_team_run(&req).await.unwrap_err();
     assert!(
@@ -787,6 +797,7 @@ async fn swarmflow_requires_versioned_template() {
         roles: Vec::new(),
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     assert_eq!(team.template_id.as_deref(), Some("tpl-fixed"));
@@ -813,6 +824,7 @@ async fn single_mode_runs_one_step_and_skips_template_proposal() {
         }],
         budget: Value::Null,
         human_policy: None,
+        strategy: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -830,4 +842,81 @@ async fn single_mode_runs_one_step_and_skips_template_proposal() {
         .await
         .unwrap();
     assert!(space.status == owo_agent_protocol::ProjectSpaceStatus::Completed);
+}
+
+// ---------------------------------------------------------------------------
+// 五期（第四路接管集成）：组队策略——auto 判定默认裁剪、强制 single、决策暴露。
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn strategy_auto_trims_default_relay_to_single_and_exposes_decision() {
+    let h = harness();
+    // 无显式角色、无模板命中（全新 objective）→ 默认接力多角色；auto 判定 single → 裁剪为 1。
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "五期策略判定：单产物简单任务".to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: Vec::new(),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    assert_eq!(team.members.len(), 1, "auto+简单任务默认裁剪到单角色");
+    let decision = team
+        .strategy_decision
+        .as_ref()
+        .expect("创建响应应带 strategy_decision");
+    assert_eq!(decision["mode"], "single");
+    assert!(
+        decision["reasons"]
+            .as_array()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false),
+        "auto 判定必须给出可展示理由"
+    );
+    assert!(
+        decision["budget_calls_total"].is_u64(),
+        "预算（调用次数）应暴露"
+    );
+}
+
+#[tokio::test]
+async fn strategy_force_single_trims_explicit_multi_roles() {
+    let h = harness();
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: relay_roles("echo"),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceSingle),
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    assert_eq!(team.members.len(), 1, "强制 single 必须裁剪显式多角色");
+    assert_eq!(team.strategy_decision.as_ref().unwrap()["mode"], "single");
+}
+
+#[tokio::test]
+async fn strategy_force_team_keeps_explicit_roles() {
+    let h = harness();
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: relay_roles("echo"),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    assert_eq!(
+        team.members.len(),
+        relay_roles("echo").len(),
+        "强制 team 保留显式角色"
+    );
+    assert_eq!(team.strategy_decision.as_ref().unwrap()["mode"], "team");
 }

@@ -12,8 +12,8 @@
 
 use async_trait::async_trait;
 use owo_agent_protocol::{
-    Artifact, ArtifactReviewDecision, ArtifactReviewRecord, DecisionRecord, HandoffRecord,
-    ProjectSpace, TeamRun,
+    Artifact, ArtifactReviewDecision, ArtifactReviewRecord, ArtifactReworkTask, DecisionRecord,
+    HandoffRecord, ProjectSpace, TeamRun,
 };
 use rusqlite::{params, Connection};
 use std::path::Path;
@@ -163,6 +163,33 @@ fn worksarm_schema() -> &'static str {
      );"
 }
 
+/// 评审记录步骤关联列迁移（V1 五期 · 第二路）：已存在的旧库按需补列。
+///
+/// `CREATE TABLE IF NOT EXISTS` 不会为旧表加列，这里按 pragma 检查后 ALTER。
+fn migrate_artifact_reviews_columns(conn: &Connection) -> Result<()> {
+    let has_column = |name: &str| -> Result<bool> {
+        let mut stmt = conn.prepare("PRAGMA table_info(artifact_reviews)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            if row.get::<_, String>(1)? == name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    if !has_column("step_id")? {
+        conn.execute_batch(
+            "ALTER TABLE artifact_reviews ADD COLUMN step_id TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
+    if !has_column("producer_member_id")? {
+        conn.execute_batch(
+            "ALTER TABLE artifact_reviews ADD COLUMN producer_member_id TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
+    Ok(())
+}
+
 /// SQLite 后端的项目空间存储。
 pub struct SqliteProjectSpaceStore {
     conn: Mutex<Connection>,
@@ -175,6 +202,7 @@ impl SqliteProjectSpaceStore {
         // 多连接共存（协调器 + 评审 API 各持一条连接）：写锁竞争在 busy_timeout 内自旋等待。
         conn.busy_timeout(std::time::Duration::from_millis(2000))?;
         conn.execute_batch(worksarm_schema())?;
+        migrate_artifact_reviews_columns(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -184,6 +212,7 @@ impl SqliteProjectSpaceStore {
     pub fn from_connection(conn: Connection) -> Result<Self> {
         conn.busy_timeout(std::time::Duration::from_millis(2000))?;
         conn.execute_batch(worksarm_schema())?;
+        migrate_artifact_reviews_columns(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -255,7 +284,42 @@ impl ProjectSpaceStoreBackend for SqliteProjectSpaceStore {
     // -- Artifact --
 
     async fn save_artifact(&self, artifact: &Artifact, project_id: &str) -> Result<()> {
-        let json = Self::serialize(artifact)?;
+        // 版本链回填（V1 五期）：登记更高版本且未显式声明取代关系时，
+        // 自动指向同 (project, kind) 的当前最高版本（追溯链；不改任何 review_state——
+        // 旧版进入 Superseded 由评审 approve 路径统一处理，保证 approved head 恒有效）。
+        let mut artifact = artifact.clone();
+        if artifact.supersedes_artifact_id.is_none() {
+            let latest: Option<Artifact> = {
+                let conn = self.conn.lock().unwrap();
+                let mut stmt =
+                    conn.prepare("SELECT data_json FROM artifacts WHERE project_id = ?1")?;
+                let mut rows = stmt.query(params![project_id])?;
+                let mut latest: Option<Artifact> = None;
+                while let Some(row) = rows.next()? {
+                    let json: String = row.get(0)?;
+                    let candidate: Artifact = Self::deserialize(&json)?;
+                    if candidate.kind != artifact.kind
+                        || candidate.artifact_id == artifact.artifact_id
+                    {
+                        continue;
+                    }
+                    if latest
+                        .as_ref()
+                        .map(|l| candidate.version > l.version)
+                        .unwrap_or(true)
+                    {
+                        latest = Some(candidate);
+                    }
+                }
+                latest
+            };
+            if let Some(latest) = latest {
+                if artifact.version > latest.version {
+                    artifact.supersedes_artifact_id = Some(latest.artifact_id);
+                }
+            }
+        }
+        let json = Self::serialize(&artifact)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO artifacts (artifact_id, project_id, data_json, created_at)
@@ -458,8 +522,9 @@ impl ProjectSpaceStoreBackend for SqliteProjectSpaceStore {
         conn.execute(
             "INSERT INTO artifact_reviews (
                  review_id, artifact_id, artifact_version, team_id, decision,
-                 reviewer, comment, idempotency_key, content_ref, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 reviewer, comment, idempotency_key, content_ref, created_at,
+                 step_id, producer_member_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 review.review_id,
                 review.artifact_id,
@@ -472,6 +537,8 @@ impl ProjectSpaceStoreBackend for SqliteProjectSpaceStore {
                 review.idempotency_key,
                 review.content_ref,
                 review.created_at,
+                review.step_id,
+                review.producer_member_id,
             ],
         )?;
         Ok(())
@@ -481,7 +548,8 @@ impl ProjectSpaceStoreBackend for SqliteProjectSpaceStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT review_id, artifact_id, artifact_version, team_id, decision,
-                    reviewer, comment, idempotency_key, content_ref, created_at
+                    reviewer, comment, idempotency_key, content_ref, created_at,
+                    step_id, producer_member_id
              FROM artifact_reviews WHERE artifact_id = ?1 ORDER BY created_at, review_id",
         )?;
         let rows = stmt.query_map(params![artifact_id], review_from_row)?;
@@ -499,7 +567,8 @@ impl ProjectSpaceStoreBackend for SqliteProjectSpaceStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT review_id, artifact_id, artifact_version, team_id, decision,
-                    reviewer, comment, idempotency_key, content_ref, created_at
+                    reviewer, comment, idempotency_key, content_ref, created_at,
+                    step_id, producer_member_id
              FROM artifact_reviews WHERE idempotency_key = ?1",
         )?;
         let mut rows = stmt.query_map(params![idempotency_key], review_from_row)?;
@@ -586,7 +655,19 @@ fn review_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactReviewRe
         idempotency_key: row.get(7)?,
         content_ref: row.get(8)?,
         created_at: row.get(9)?,
+        step_id: row.get(10)?,
+        producer_member_id: row.get(11)?,
     })
+}
+
+/// 生产者 member → 生产步骤 id（WorkSwarm 计划约定：`m-{role}` → `s-{role}`）。
+///
+/// 非 `m-` 前缀成员（如 `human:u1`）返回空串（该来源无对应团队步骤）。
+fn producer_step_id(producer_member: &str) -> String {
+    producer_member
+        .strip_prefix("m-")
+        .map(|role| format!("s-{role}"))
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +812,8 @@ pub async fn apply_artifact_review(
         ));
     }
 
-    // 5. 追加不可变记录。
+    // 5. 追加不可变记录（含生产步骤关联：WorkSwarm 约定 `m-{role}` → `s-{role}`，
+    //    返工据此定位重置目标；评审记录自足，不依赖产物表回查）。
     let record = ArtifactReviewRecord {
         review_id: format!("rev-{}", &uuid::Uuid::new_v4().to_string()[..8]),
         artifact_id: artifact.artifact_id.clone(),
@@ -742,6 +824,8 @@ pub async fn apply_artifact_review(
         comment: input.comment.clone(),
         idempotency_key: input.idempotency_key.trim().to_string(),
         content_ref: artifact.content_ref.clone(),
+        step_id: producer_step_id(&artifact.producer),
+        producer_member_id: artifact.producer.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
     };
     store.save_artifact_review(&record).await?;
@@ -765,6 +849,25 @@ pub async fn apply_artifact_review(
                 &record.created_at,
             )
             .await?;
+        // 版本链收口（V1 五期）：同 (project, kind) 的其余活动版本被本版取代
+        // （head 只可能有一个；被取代版本保留全部历史记录与评审链）。
+        // Rejected 是终态拒绝、Superseded 已被取代——两者保留原状作历史事实。
+        let siblings = store.list_artifacts_by_project(&project_id).await?;
+        for sibling in siblings {
+            if sibling.kind != updated.kind || sibling.artifact_id == updated.artifact_id {
+                continue;
+            }
+            if matches!(
+                sibling.review_state,
+                owo_agent_protocol::ReviewState::Rejected
+                    | owo_agent_protocol::ReviewState::Superseded
+            ) {
+                continue;
+            }
+            let mut superseded = sibling;
+            superseded.review_state = owo_agent_protocol::ReviewState::Superseded;
+            store.save_artifact(&superseded, &project_id).await?;
+        }
         store.get_approved_head(&project_id, &updated.kind).await?
     } else {
         None
@@ -776,6 +879,33 @@ pub async fn apply_artifact_review(
         artifact: updated,
         approved_head,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Artifact 返工任务（V1 五期 · 第二路）：随 ProjectSpace JSON 持久化
+// ---------------------------------------------------------------------------
+
+/// 保存（插入或更新）一条返工任务；同一 rework_id 覆盖写（状态回填用）。
+pub async fn save_artifact_rework_task(
+    store: &dyn ProjectSpaceStoreBackend,
+    task: &ArtifactReworkTask,
+) -> Result<()> {
+    let mut space = store.get_project_space(&task.project_id).await?;
+    space.rework_tasks.retain(|t| t.rework_id != task.rework_id);
+    space.rework_tasks.push(task.clone());
+    space.version += 1;
+    space.updated_at = chrono::Utc::now().to_rfc3339();
+    store.save_project_space(&space).await
+}
+
+/// 列出项目的全部返工任务（created_at 升序）。
+pub async fn list_artifact_rework_tasks(
+    store: &dyn ProjectSpaceStoreBackend,
+    project_id: &str,
+) -> Result<Vec<ArtifactReworkTask>> {
+    let mut tasks = store.get_project_space(project_id).await?.rework_tasks;
+    tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(tasks)
 }
 
 // ---------------------------------------------------------------------------
@@ -808,6 +938,7 @@ mod tests {
             discussions: vec![],
             activity_stream: vec![],
             delivery_manifest_ref: None,
+            rework_tasks: vec![],
             version: 1,
             status: owo_agent_protocol::ProjectSpaceStatus::Active,
             created_at: now.clone(),
@@ -857,6 +988,7 @@ mod tests {
             shared_context_refs: vec![],
             budget: serde_json::json!({"max_duration_secs": 300}),
             human_policy: Some("human_approval_required".to_string()),
+            strategy_decision: None,
             status: TeamRunStatus::Created,
             created_at: now.clone(),
             updated_at: now,

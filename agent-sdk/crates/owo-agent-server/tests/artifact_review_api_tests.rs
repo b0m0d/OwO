@@ -597,3 +597,327 @@ async fn review_404_and_400_boundaries() {
     .await;
     assert_eq!(status, 422, "缺幂等键应 422（Json extractor 语义）");
 }
+
+// ===========================================================================
+// Artifact 返工闭环（V1 五期 · 第二路）
+// v1 → request_changes → rework → v2（supersedes v1）→ approve → head 切换
+// ===========================================================================
+
+fn rework_body(team_id: &str, review_id: &str, instruction: &str, idem: Option<&str>) -> String {
+    let mut body = json!({
+        "team_id": team_id,
+        "review_id": review_id,
+        "instruction": instruction,
+    });
+    if let Some(k) = idem {
+        body["idempotency_key"] = json!(k);
+    }
+    body.to_string()
+}
+
+/// 轮询团队直到回到终态（返工重跑后）。
+async fn poll_team_terminal(
+    state: &Arc<owo_agent_server::AppState>,
+    app: &axum::Router,
+    team_id: &str,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (st, detail) = call(state, app, "GET", &format!("/teams/{team_id}"), None).await;
+        assert_eq!(st, 200, "GET /teams/{team_id} 应 200：{detail}");
+        let status = detail["team"]["status"].as_str().unwrap_or("");
+        if matches!(status, "succeeded" | "failed" | "cancelled") {
+            return detail;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "返工团队未在超时内回到终态：{detail}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+async fn rework_full_loop_produces_v2_and_switches_head_on_approval() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    // v1：单角色 echo 团队产出 planner 产物。
+    let (team_id, project_id, artifacts) = run_echo_team(&state, &app, planner_roles(), None).await;
+    assert_eq!(artifacts.len(), 1, "v1 阶段应只有一个产物：{artifacts:?}");
+    let v1_id = artifacts[0]["artifact_id"].as_str().unwrap().to_string();
+
+    // request_changes：评审要求修改（产物回 Draft，记录携带生产步骤关联）。
+    let (status, review_resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{v1_id}/review"),
+        Some(&review_body(
+            &team_id,
+            "request_changes",
+            "critic",
+            "rc-v1-1",
+            None,
+        )),
+    )
+    .await;
+    assert_eq!(status, 201, "{review_resp}");
+    assert_eq!(review_resp["artifact"]["review_state"], json!("draft"));
+    let review_id = review_resp["review"]["review_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // rework：按评审发起返工。
+    let (status, rework_resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{v1_id}/rework"),
+        Some(&rework_body(
+            &team_id,
+            &review_id,
+            "修正 scope 字段并保持 schema 不变",
+            Some("rw-v1-1"),
+        )),
+    )
+    .await;
+    assert_eq!(status, 201, "{rework_resp}");
+    assert_eq!(rework_resp["replayed"], json!(false));
+    assert_eq!(rework_resp["rework"]["status"], json!("requested"));
+    assert_eq!(rework_resp["rework"]["step_id"], json!("s-planner"));
+    let rework_id = rework_resp["rework"]["rework_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 幂等重放：同一评审重复请求返回原任务（零副作用）。
+    let (status, replay_resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{v1_id}/rework"),
+        Some(&rework_body(
+            &team_id,
+            &review_id,
+            "修正 scope 字段并保持 schema 不变",
+            Some("rw-v1-1"),
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{replay_resp}");
+    assert_eq!(replay_resp["replayed"], json!(true));
+    assert_eq!(replay_resp["rework"]["rework_id"], json!(rework_id));
+
+    // 重跑完成：回到 Succeeded，产生 v2（版本链指向 v1）。
+    let detail = poll_team_terminal(&state, &app, &team_id).await;
+    assert_eq!(detail["team"]["status"], json!("succeeded"), "{detail}");
+    let (_, arts) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/projects/{project_id}/artifacts"),
+        None,
+    )
+    .await;
+    let all = arts["artifacts"].as_array().unwrap();
+    assert_eq!(all.len(), 2, "返工后应有 v1+v2 两个版本：{all:?}");
+    // 版本链经 history 端点解析（/projects/{id}/artifacts 为投影视图，不含链字段）。
+    let (_, v2_history) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/artifacts/{team_id}:planner:v2/history"),
+        None,
+    )
+    .await;
+    assert_eq!(v2_history["version"], json!(2), "{v2_history}");
+    assert_eq!(
+        v2_history["supersedes_artifact_id"],
+        json!(v1_id),
+        "v2 应指向 v1：{v2_history}"
+    );
+    let v2_id = v2_history["artifact_id"].as_str().unwrap().to_string();
+
+    // v2 未批准前：approved head 为空（不切换），交付物未完成。
+    let (_, deliverables) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/projects/{project_id}/deliverables"),
+        None,
+    )
+    .await;
+    assert_eq!(deliverables["complete"], json!(false), "{deliverables}");
+    assert!(
+        deliverables["approved"].as_array().unwrap().is_empty(),
+        "v2 未批准前不得有 approved head：{deliverables}"
+    );
+    assert_eq!(
+        deliverables["rework_tasks"].as_array().unwrap().len(),
+        1,
+        "应记录一次返工任务：{deliverables}"
+    );
+
+    // approve v2：head 切换到 v2；v1 进入 Superseded（历史保留）。
+    let (status, approve_resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{v2_id}/review"),
+        Some(&review_body(
+            &team_id,
+            "approve",
+            "critic",
+            "ap-v2-1",
+            Some(2),
+        )),
+    )
+    .await;
+    assert_eq!(status, 201, "{approve_resp}");
+    assert_eq!(
+        approve_resp["approved_head"]["artifact_id"],
+        json!(v2_id),
+        "head 应切到 v2：{approve_resp}"
+    );
+
+    let (_, v1_history) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/artifacts/{v1_id}/history"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        v1_history["review_state"],
+        json!("superseded"),
+        "v1 应进入 Superseded：{v1_history}"
+    );
+    assert_eq!(
+        v1_history["superseded_by"],
+        json!(v2_id),
+        "版本链应能解析取代者：{v1_history}"
+    );
+
+    // 最终交付物：只含已批准的 v2；v1 归入被取代桶。
+    let (_, deliverables) = call(
+        &state,
+        &app,
+        "GET",
+        &format!("/projects/{project_id}/deliverables"),
+        None,
+    )
+    .await;
+    assert_eq!(deliverables["complete"], json!(true), "{deliverables}");
+    let approved = deliverables["approved"].as_array().unwrap();
+    assert_eq!(approved.len(), 1, "approved 只含 head：{deliverables}");
+    assert_eq!(approved[0]["artifact_id"], json!(v2_id));
+    let superseded = deliverables["rejected_or_superseded"].as_array().unwrap();
+    assert!(
+        superseded.iter().any(|a| a["artifact_id"] == json!(v1_id)),
+        "v1 应在被取代桶：{deliverables}"
+    );
+    assert!(
+        deliverables["pending_review"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "待评审应为空：{deliverables}"
+    );
+}
+
+#[tokio::test]
+async fn rework_contract_guards() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    let (team_id, _project_id, artifacts) =
+        run_echo_team(&state, &app, planner_roles(), None).await;
+    let artifact_id = artifacts[0]["artifact_id"].as_str().unwrap().to_string();
+
+    // 未知评审 → 404。
+    let (status, resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{artifact_id}/rework"),
+        Some(&rework_body(&team_id, "rev-nope", "指令", None)),
+    )
+    .await;
+    assert_eq!(status, 404, "未知评审应 404：{resp}");
+
+    // 非 request_changes 评审 → 409。
+    let (status, approve_resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{artifact_id}/review"),
+        Some(&review_body(
+            &team_id,
+            "approve",
+            "critic",
+            "ap-guard-1",
+            None,
+        )),
+    )
+    .await;
+    assert_eq!(status, 201, "{approve_resp}");
+    let approve_review_id = approve_resp["review"]["review_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{artifact_id}/rework"),
+        Some(&rework_body(&team_id, &approve_review_id, "指令", None)),
+    )
+    .await;
+    assert_eq!(status, 409, "approve 评审不可返工：{resp}");
+
+    // 空指令 → 400。
+    let (status, rc_resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{artifact_id}/review"),
+        Some(&review_body(
+            &team_id,
+            "request_changes",
+            "critic",
+            "rc-guard-1",
+            None,
+        )),
+    )
+    .await;
+    assert_eq!(status, 201, "{rc_resp}");
+    let rc_review_id = rc_resp["review"]["review_id"].as_str().unwrap().to_string();
+    let (status, resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{artifact_id}/rework"),
+        Some(&rework_body(&team_id, &rc_review_id, "   ", None)),
+    )
+    .await;
+    assert_eq!(status, 400, "空指令应 400：{resp}");
+
+    // 已批准产物上的合法 request_changes 返工：approve 评审可发起（409），rc 评审可发起。
+    let (status, resp) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{artifact_id}/rework"),
+        Some(&rework_body(
+            &team_id,
+            &rc_review_id,
+            "修正 scope 字段",
+            Some("rw-guard-1"),
+        )),
+    )
+    .await;
+    assert_eq!(status, 201, "rc 评审返工应受理：{resp}");
+}
