@@ -4,8 +4,8 @@
 
 ## 0. 结论
 
-- 本路五期功能全部落地并实测：**契约 14/14、TS unit 9/9、web node --test 106/106、浏览器产品闭环 E2E ok=YES（0 页面异常 / 0 console 错误）**。
-- 受控边界：`POST /teams` 创建面的 `strategy` 决策暴露与返工登记处 `supersedes_artifact_id` 写入属第一路，截至本报告仍在途；UI 对两者均已按「缺省降级」设计（策略空态提示 / v2 另起链但仍可评审-批准-交付）。返工 v2 真实生成与 (project,kind) approved head 切换已实测可用。
+- 本路五期功能全部落地并实测：**契约 14/14、TS unit 9/9、web node --test 106/106、core 七套件 69/69、clippy --all-targets 干净、浏览器产品闭环 E2E ok=YES（0 页面异常 / 0 console 错误）**。
+- **组队策略与返工链标记已全量落地**：第一路交付引擎（`team_strategy.rs`，engine/阈值/测试齐备）后在创建面集成上停滞 80+ 分钟，第四路按 AGENTS.md 协作规则备案接管收尾——`POST /teams` `strategy`（auto 判定/single/team 强制，缺省 auto）+ `strategy_decision` 暴露（mode/roles/parallelism/budget_calls_total/reasons）+ 返工登记 `supersedes_artifact_id` 写入与前版让位。E2E 实测：策略理由框渲染"单 Agent…单 Agent 足够"、时间线 v1"已被取代"、v2 批准切换 approved head。
 
 ## 1. 交付面（本路）
 
@@ -50,6 +50,7 @@ E2E 调试中修复的脚本级问题（非产品缺陷）：固定 sleep 改显
 
 ## 6. 已知边界
 
-1. `strategy_decision` 暴露与 `supersedes_artifact_id` 写入在第一路（在途）；UI 缺省降级，字段到场即自动生效。
+1. ~~`strategy_decision` 暴露与 `supersedes_artifact_id` 写入在第一路（在途）~~ **已由第四路接管集成落地并 E2E 实测**（见 §0）；裁剪口径：显式 single 强制单角色；auto 判定 single 仅在「未显式给角色且未命中已采纳模板」时裁剪，用户编排与模板复用始终尊重。
 2. 并发批次下 token/费用为共享 provider 快照差值近似（三路 `attribution_note` 口径），UI 原样展示不换算。
 3. 无模型用量 span 的 token 三字段为 null（区别于 0），指标卡显示「—」。
+4. auto 判定的 `strategy_decision.roles` 为引擎计划角色名（producer），单角色裁剪保留用户首角色绑定（如 critic）——计划角色名与实际成员名在该场景下可不同，duty/预算语义一致。
