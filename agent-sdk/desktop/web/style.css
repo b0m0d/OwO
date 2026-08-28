@@ -793,3 +793,79 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
   .owo-pe-panel .owo-pe-config { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
   .owo-pe-panel .owo-pe-engines { grid-template-columns: 1fr; }
 }
+
+/* ---------- 18. 四期：实时进度 + Artifact 评审闭环 + 统计判读（第四路） ----------
+   作用域收敛在 .owo-ws-* / .owo-pe-* 下，不污染外壳；
+   覆盖：progress 进度区（当前步骤/计数/seq/取消中）、Artifact 版本链与评审表单、
+   eval 统计判读（95% CI / p50 / p95 / 启用建议 / 样本不足）、窄视口无横向溢出。 */
+
+/* —— WorkSwarm 实时进度区 —— */
+.owo-ws-panel .owo-ws-prog { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.owo-ws-panel .owo-ws-prog-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.owo-ws-panel .owo-ws-prog-seq { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--accent); border: 1px solid var(--soft-border); border-radius: 999px; padding: 2px 8px; background: var(--raised); white-space: nowrap; }
+.owo-ws-panel .owo-ws-prog-count { font-size: 11px; color: var(--muted); border: 1px solid var(--soft-border); border-radius: 999px; padding: 2px 8px; background: var(--raised); white-space: nowrap; }
+.owo-ws-panel .owo-ws-prog-count b { color: var(--text); font-variant-numeric: tabular-nums; }
+.owo-ws-panel .owo-ws-prog-count.run b { color: var(--accent); }
+.owo-ws-panel .owo-ws-prog-count.ok b { color: var(--green); }
+.owo-ws-panel .owo-ws-prog-count.bad b { color: var(--red); }
+.owo-ws-panel .owo-ws-prog-steps { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.owo-ws-panel .owo-ws-prog-step { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; border: 1px solid var(--soft-border); border-radius: 9px; padding: 6px 9px; background: var(--surface); min-width: 0; }
+.owo-ws-panel .owo-ws-prog-step.run { border-color: var(--accent); }
+.owo-ws-panel .owo-ws-prog-step > * { min-width: 0; max-width: 100%; }
+.owo-ws-panel .owo-ws-prog-elapsed { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.owo-ws-panel .owo-ws-prog-cancelling { animation: owo-ws-pulse 1.2s ease-in-out infinite; }
+@keyframes owo-ws-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+/* —— Artifact 版本链与评审闭环 —— */
+.owo-ws-panel .owo-ws-art-chain { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--soft-border); border-radius: 10px; padding: 8px 10px; background: var(--raised); min-width: 0; }
+.owo-ws-panel .owo-ws-art-chainhead { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.owo-ws-panel .owo-ws-art-chainhead b { color: var(--text); }
+.owo-ws-panel .owo-ws-art-row { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--soft-border); border-radius: 9px; padding: 7px 9px; background: var(--surface); min-width: 0; }
+.owo-ws-panel .owo-ws-art-row.head { border-color: var(--accent); }
+.owo-ws-panel .owo-ws-art-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+.owo-ws-panel .owo-ws-art-line > * { min-width: 0; max-width: 100%; }
+.owo-ws-panel .owo-ws-art-preview pre { white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow: auto; margin: 6px 0 0; font-size: 11px; }
+.owo-ws-panel .owo-ws-art-histline { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; min-width: 0; }
+.owo-ws-panel .owo-ws-art-history { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.owo-ws-panel .owo-ws-review-rec { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; border-top: 1px dashed var(--soft-border); padding-top: 4px; min-width: 0; }
+.owo-ws-panel .owo-ws-review-rec > * { min-width: 0; max-width: 100%; }
+
+/* 评审状态徽标（版本链/历史通用）：ok=已批准、warn=待评审/要求修改、bad=已驳回、off=草稿 */
+.owo-ws-badge.rv-ok { background: var(--green-soft, rgba(80, 200, 120, 0.14)); color: var(--green); border: 1px solid var(--green-soft, rgba(80, 200, 120, 0.3)); }
+.owo-ws-badge.rv-warn { background: var(--yellow-soft); color: var(--yellow); border: 1px solid var(--yellow-line); }
+.owo-ws-badge.rv-bad { background: var(--red-soft, rgba(240, 90, 90, 0.14)); color: var(--red); border: 1px solid var(--red-soft, rgba(240, 90, 90, 0.3)); }
+.owo-ws-badge.rv-off { background: var(--raised); color: var(--faint); }
+
+/* 评审表单：输入/评语/三动作；提交期间按钮锁定（disabled） */
+.owo-ws-panel .owo-ws-review summary { cursor: pointer; font-size: 12px; color: var(--accent); user-select: none; }
+.owo-ws-panel .owo-ws-review-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; min-width: 0; }
+.owo-ws-panel .owo-ws-review-reviewer, .owo-ws-panel .owo-ws-review-comment { width: 100%; max-width: 100%; box-sizing: border-box; font: inherit; }
+.owo-ws-panel .owo-ws-review-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.owo-ws-panel .owo-ws-review-act { border: 1px solid var(--soft-border); border-radius: 8px; background: var(--raised); color: var(--text); padding: 4px 12px; font-size: 12px; cursor: pointer; }
+.owo-ws-panel .owo-ws-review-act:disabled { opacity: 0.55; cursor: not-allowed; }
+.owo-ws-panel .owo-ws-review-act.ok { border-color: var(--green); color: var(--green); }
+.owo-ws-panel .owo-ws-review-act.warn { border-color: var(--yellow); color: var(--yellow); }
+.owo-ws-panel .owo-ws-review-act.bad { border-color: var(--red); color: var(--red); }
+.owo-ws-panel .owo-ws-review-act:focus-visible { box-shadow: var(--ring); }
+.owo-ws-panel .owo-ws-review-result.bad { color: var(--red); }
+.owo-ws-panel .owo-ws-review-result.ok { color: var(--green); }
+
+/* —— eval 统计判读区 —— */
+.owo-pe-panel .owo-pe-stats { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; border: 1px solid var(--soft-border); border-radius: 10px; padding: 9px 11px; background: var(--raised); min-width: 0; }
+.owo-pe-panel .owo-pe-stat-head { font-size: 12px; font-weight: 700; color: var(--text); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.owo-pe-panel .owo-pe-stat-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; min-width: 0; }
+.owo-pe-panel .owo-pe-stat-row b { color: var(--text); white-space: nowrap; }
+.owo-pe-panel .owo-pe-stat-row .owo-pe-mono { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.owo-pe-panel .owo-pe-stat-row .owo-pe-badge.warn { background: var(--yellow-soft); color: var(--yellow); border: 1px solid var(--yellow-line); }
+.owo-pe-panel .owo-pe-stat-rec { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; border-top: 1px dashed var(--soft-border); padding-top: 6px; color: var(--muted); min-width: 0; }
+.owo-pe-panel .owo-pe-stat-rec.ok { color: var(--green); }
+.owo-pe-panel .owo-pe-stat-note { font-size: 12px; border-radius: 8px; padding: 5px 9px; }
+.owo-pe-panel .owo-pe-stat-note.bad { background: var(--yellow-soft); color: var(--yellow); border: 1px solid var(--yellow-line); }
+
+/* —— 窄视口守卫（1280×720 / 1440×900 / 1920×1080 无整体横向溢出） —— */
+@media (max-width: 1280px) {
+  .owo-ws-panel .owo-ws-prog-step { font-size: 11px; }
+  .owo-ws-panel .owo-ws-art-line { font-size: 11px; }
+  .owo-pe-panel .owo-pe-stat-row { gap: 6px; }
+}
+

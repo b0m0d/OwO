@@ -50,6 +50,13 @@ function resetState() {
   T.state.interrupted = false;
   T.state.artifactCount = null;
   T.state.active = false;
+  // —— 四期字段 ——
+  T.state.progress = null;
+  T.state.lastProgressSeq = 0;
+  T.state.cancelling = false;
+  T.state.reviewBusy = {};
+  T.state.artifacts = [];
+  T.state.reviewResult = null;
 }
 
 // 可记录属性读写的假按钮（模拟 lockBtn/unlockBtn 所需的最小接口）。
@@ -265,4 +272,149 @@ test("style.css 第 16 节守卫：inline 换行/中断徽标/重试按钮/表�
   assert.ok(flat.includes("@media(max-width:1280px)"), "窄栏断点在场");
   assert.ok(flat.includes(".owo-ws-panel.owo-ws-audit:focus-visible"), "审计区键盘焦点环在场");
   assert.ok(flat.includes(".owo-ws-panel.owo-ws-ellip"), "长文本省略工具类在场");
+});
+
+// ==================== 四期：实时进度（progress 事件） ====================
+
+const PROGRESS_EVT = {
+  seq: 18,
+  team_id: "team-1",
+  status: "Running",
+  active: true,
+  current_steps: [
+    { step_id: "builder", worker: "builder", status: "Running", attempts: 1, started_at: new Date(Date.now() - 90_000).toISOString() },
+  ],
+  counts: { pending: 2, running: 1, succeeded: 1, failed: 0 },
+  updated_at: new Date().toISOString(),
+};
+
+test("applyProgress：合法事件入状态并同步 teamStatus/active", () => {
+  resetState();
+  assert.equal(T.applyProgress(PROGRESS_EVT), true);
+  assert.equal(T.state.progress.seq, 18);
+  assert.equal(T.state.teamStatus, "Running");
+  assert.equal(T.state.active, true);
+  assert.equal(T.state.lastProgressSeq, 18);
+});
+
+test("applyProgress：seq 单调守卫——旧/重复/无 seq 一律跳过（断线重连去重）", () => {
+  resetState();
+  T.applyProgress({ ...PROGRESS_EVT, seq: 10 });
+  assert.equal(T.applyProgress({ ...PROGRESS_EVT, seq: 10 }), false, "重复 seq 跳过");
+  assert.equal(T.applyProgress({ ...PROGRESS_EVT, seq: 9 }), false, "旧 seq 跳过");
+  assert.equal(T.state.progress.seq, 10, "状态未被旧事件覆盖");
+  assert.equal(T.applyProgress({ status: "Running", current_steps: [] }), false, "无 seq 不采纳");
+  assert.equal(T.applyProgress(null), false);
+  assert.equal(T.applyProgress("junk"), false);
+  assert.equal(T.state.lastProgressSeq, 10);
+  // 新 seq 采纳
+  assert.equal(T.applyProgress({ ...PROGRESS_EVT, seq: 11 }), true);
+  assert.equal(T.state.progress.seq, 11);
+});
+
+test("applyProgress：current_steps 缺 step_id 的行被剔除、缺失字段归零", () => {
+  resetState();
+  T.applyProgress({ seq: 1, current_steps: [{ worker: "x", status: "Running" }, { step_id: "ok", worker: "w", status: "running" }], counts: null });
+  assert.equal(T.state.progress.current_steps.length, 1);
+  assert.equal(T.state.progress.current_steps[0].step_id, "ok");
+  assert.deepEqual(T.state.progress.counts, { pending: 0, running: 0, succeeded: 0, failed: 0 });
+});
+
+test("computeProgressView：耗时基于 started_at，running 标记与状态中文", () => {
+  resetState();
+  T.applyProgress(PROGRESS_EVT);
+  const now = Date.now();
+  const vm = T.computeProgressView(now);
+  assert.equal(vm.seq, 18);
+  assert.deepEqual(vm.counts, { pending: 2, running: 1, succeeded: 1, failed: 0 });
+  assert.equal(vm.rows.length, 1);
+  assert.equal(vm.rows[0].step_id, "builder");
+  assert.equal(vm.rows[0].running, true);
+  assert.equal(vm.rows[0].statusCn, "运行中");
+  assert.ok(vm.rows[0].elapsedMs >= 89_000 && vm.rows[0].elapsedMs <= 91_500, "耗时约 90s（±容差）");
+  assert.equal(vm.cancelling, false);
+});
+
+test("computeProgressView：无 progress → null；started_at 非法 → elapsed null", () => {
+  resetState();
+  assert.equal(T.computeProgressView(Date.now()), null);
+  T.applyProgress({ seq: 2, current_steps: [{ step_id: "s", worker: "w", status: "Succeeded", attempts: 2, started_at: "not-a-date" }] });
+  const vm = T.computeProgressView(Date.now());
+  assert.equal(vm.rows[0].elapsedMs, null);
+  assert.equal(vm.rows[0].running, false);
+});
+
+test("computeProgressView：取消中标志进入视图", () => {
+  resetState();
+  T.applyProgress({ seq: 3, current_steps: [], counts: {} });
+  T.state.cancelling = true;
+  assert.equal(T.computeProgressView(Date.now()).cancelling, true);
+});
+
+test("renderProgress：空态/计数徽标/取消中/步骤行（worker·状态·尝试·耗时）", () => {
+  resetState();
+  assert.match(T.renderProgress(null), /暂无实时进度事件/);
+  T.applyProgress(PROGRESS_EVT);
+  T.state.cancelling = true;
+  const html = T.renderProgress(T.computeProgressView(Date.now()));
+  assert.match(html, /seq #18/);
+  assert.match(html, /等待 <b>2<\/b>/);
+  assert.match(html, /运行 <b>1<\/b>/);
+  assert.match(html, /完成 <b>1<\/b>/);
+  assert.match(html, /失败 <b>0<\/b>/);
+  assert.match(html, /取消中/);
+  assert.match(html, /第 1 次尝试/);
+  assert.match(html, /已运行 /);
+  assert.match(html, /owo-ws-prog-step run/, "Running 步骤带高亮类");
+});
+
+test("fmtElapsed：秒/分/时边界", () => {
+  assert.equal(T.fmtElapsed(0), "0s");
+  assert.equal(T.fmtElapsed(59_000), "59s");
+  assert.equal(T.fmtElapsed(60_000), "1m");
+  assert.equal(T.fmtElapsed(61_000), "1m1s");
+  assert.equal(T.fmtElapsed(3_600_000), "1h0m");
+  assert.equal(T.fmtElapsed(-5), "—");
+  assert.equal(T.fmtElapsed(null), "—");
+  assert.equal(T.fmtElapsed(NaN), "—");
+});
+
+test("handleEventFrame：嵌套 progress 帧（第二路实现形状）与扁平形状均采纳", () => {
+  resetState();
+  // 嵌套形状：{type:"progress", progress:{...}}
+  T.handleEventFrame({ type: "progress", progress: { seq: 5, status: "Running", active: true, current_steps: [], counts: { pending: 1 } } });
+  assert.equal(T.state.progress.seq, 5);
+  assert.equal(T.state.teamStatus, "Running");
+  // 旧 seq 跳过（含嵌套）
+  T.handleEventFrame({ type: "progress", progress: { seq: 5, status: "Running", current_steps: [], counts: {} } });
+  assert.equal(T.state.progress.seq, 5);
+  // 扁平形状（计划原形）
+  T.handleEventFrame({ type: "progress", seq: 6, status: "Running", current_steps: [], counts: {} });
+  assert.equal(T.state.progress.seq, 6);
+  // state 终态帧清除"取消中"
+  T.state.cancelling = true;
+  T.handleEventFrame({ type: "state", status: "Cancelled", active: false });
+  assert.equal(T.state.cancelling, false);
+});
+
+test("handleEventFrame：audit 帧去重入列", () => {
+  resetState();
+  const audit = { type: "audit", ts: "t1", event: "step.retry", detail: "d" };
+  T.handleEventFrame(audit);
+  T.handleEventFrame(audit); // 重复帧（断线重放）不得重复渲染
+  assert.equal(T.state.audit.length, 1);
+});
+
+test("四期样式守卫：style.css 第 18 节进度区/评审闭环/统计判读/徽标/窄栏守卫在场", () => {
+  const flat = shellCss.replace(/\s+/g, "");
+  assert.ok(flat.includes(".owo-ws-panel.owo-ws-prog-step.run"), "运行中步骤高亮样式在场");
+  assert.ok(flat.includes(".owo-ws-panel.owo-ws-prog-cancelling"), "取消中徽标样式在场");
+  assert.ok(flat.includes(".owo-ws-panel.owo-ws-art-row.head"), "版本链链头样式在场");
+  assert.ok(flat.includes(".owo-ws-badge.rv-ok"), "已批准徽标样式在场");
+  assert.ok(flat.includes(".owo-ws-badge.rv-bad"), "已驳回徽标样式在场");
+  assert.ok(flat.includes(".owo-ws-panel.owo-ws-review-act:disabled"), "评审按钮锁定样式在场");
+  assert.ok(flat.includes(".owo-ws-panel.owo-ws-review-act:focus-visible"), "评审按钮焦点环在场");
+  assert.ok(flat.includes(".owo-pe-panel.owo-pe-stats"), "eval 统计判读区样式在场");
+  assert.ok(flat.includes(".owo-pe-panel.owo-pe-stat-note.bad"), "样本不足提示样式在场");
+  assert.ok(flat.includes("@keyframesowo-ws-pulse"), "取消中脉冲动画在场");
 });

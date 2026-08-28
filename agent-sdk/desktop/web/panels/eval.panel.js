@@ -239,6 +239,189 @@
       return { total: mine.length, passed: passed, rate: passed / mine.length, meanWall: wall / mine.length, calls: calls, tokens: tokens, cost: cost };
     }
 
+    // ==================== 四期：统计判读（第一路统计口径） ====================
+    // Wilson 95% 置信区间（纯函数）：n<=0 或非法输入返回 null。
+    function wilsonCI(passed, n) {
+      if (!isFinite(n) || !isFinite(passed) || n <= 0 || passed < 0 || passed > n) return null;
+      var z = 1.959963984540054; // 双侧 95%
+      var ph = passed / n;
+      var denom = 1 + (z * z) / n;
+      var center = (ph + (z * z) / (2 * n)) / denom;
+      var half = (z * Math.sqrt((ph * (1 - ph)) / n + (z * z) / (4 * n * n))) / denom;
+      return { lo: Math.max(0, center - half), hi: Math.min(1, center + half) };
+    }
+
+    // 最近序统计量（纯函数）：p95 = 第 ⌈p·n⌉ 个（升序）。
+    function percentileOf(values, p) {
+      if (!Array.isArray(values) || !values.length) return null;
+      var a = values
+        .map(function (x) { return Number(x); })
+        .filter(function (x) { return isFinite(x); });
+      if (!a.length) return null;
+      a.sort(function (x, y) { return x - y; });
+      if (a.length === 1) return a[0];
+      var idx = Math.ceil((p / 100) * a.length) - 1;
+      if (idx < 0) idx = 0;
+      if (idx > a.length - 1) idx = a.length - 1;
+      return a[idx];
+    }
+
+    // 单引擎样本统计：n/通过数/成功率/CI/p50/p95/调用/Token/费用。
+    function engineStats(report, mode) {
+      var runs = (report && report.runs) || [];
+      var mine = [];
+      for (var i = 0; i < runs.length; i++) {
+        if (normMode(runs[i] && runs[i].key && runs[i].key.agent_mode) === mode) mine.push(runs[i]);
+      }
+      if (!mine.length) return null;
+      var passed = 0, walls = [], calls = 0, tokens = 0, cost = 0, tokenKnown = 0, costKnown = 0;
+      for (var j = 0; j < mine.length; j++) {
+        var r = mine[j];
+        if (String(r.status) === "passed") passed++;
+        walls.push(Number(r.wall_ms) || 0);
+        calls += Number(r.model_calls) || 0;
+        if (r.total_tokens != null) { tokens += Number(r.total_tokens); tokenKnown++; }
+        if (r.cost_usd != null) { cost += Number(r.cost_usd); costKnown++; }
+      }
+      var ci = wilsonCI(passed, mine.length);
+      return {
+        n: mine.length,
+        passed: passed,
+        rate: passed / mine.length,
+        ci95: ci ? [ci.lo, ci.hi] : null,
+        p50Ms: percentileOf(walls, 50),
+        p95Ms: percentileOf(walls, 95),
+        calls: calls,
+        tokens: tokenKnown ? tokens : null,
+        cost: costKnown ? cost : null,
+      };
+    }
+
+    // 服务端统计（第一路 statistics 字段）宽容归一：识别 {lo,hi}|[lo,hi] 区间、
+    // p50/p95 耗时、verdict/recommendation 文本；形状不符返回 null（走客户端推导）。
+    function serverStats(report) {
+      var s = report && (report.statistics || report.stats);
+      if (!s || typeof s !== "object" || Array.isArray(s)) return null;
+      function pair(v) {
+        if (Array.isArray(v) && v.length === 2 && isFinite(Number(v[0])) && isFinite(Number(v[1]))) return [Number(v[0]), Number(v[1])];
+        if (v && typeof v === "object" && !Array.isArray(v)) {
+          var lo = v.lo != null ? Number(v.lo) : v.lower != null ? Number(v.lower) : NaN;
+          var hi = v.hi != null ? Number(v.hi) : v.upper != null ? Number(v.upper) : NaN;
+          if (isFinite(lo) && isFinite(hi)) return [lo, hi];
+        }
+        return null;
+      }
+      var per = s.per_engine || s.engines || {};
+      function eng(x) {
+        if (!x || typeof x !== "object" || Array.isArray(x)) return null;
+        var rate = x.success_rate != null ? Number(x.success_rate) : x.rate != null ? Number(x.rate) : NaN;
+        var ci = pair(x.success_rate_ci95 || x.ci95 || x.ci);
+        var n = x.n != null ? Number(x.n) : x.samples != null ? Number(x.samples) : NaN;
+        if (!isFinite(rate) && !ci && !isFinite(n)) return null;
+        return {
+          n: isFinite(n) ? n : null,
+          rate: isFinite(rate) ? rate : null,
+          ci95: ci,
+          p50Ms: x.p50_wall_ms != null ? Number(x.p50_wall_ms) : null,
+          p95Ms: x.p95_wall_ms != null ? Number(x.p95_wall_ms) : null,
+        };
+      }
+      var single = eng(per.single || per.single_agent);
+      var workswarm = eng(per.workswarm || per.multi || per.multi_agent);
+      var verdict = s.verdict || s.recommendation || s.decision || null;
+      var verdictText = verdict && typeof verdict === "object" ? verdict.text || verdict.verdict || verdict.summary || null : verdict;
+      if (!single && !workswarm && !verdictText) return null;
+      return { single: single, workswarm: workswarm, verdictText: verdictText };
+    }
+
+    // 统计视图模型：服务端统计在场时优先，否则从 report.runs 客户端推导。
+    // n<30 一律标注"样本不足"；启用阈值（计划冻结）：成功率 +5% / 耗时 -30%。
+    function statisticsFromReport(report) {
+      var srv = serverStats(report);
+      var single = (srv && srv.single) || engineStats(report, "single");
+      var workswarm = (srv && srv.workswarm) || engineStats(report, "workswarm");
+      if (!single && !workswarm && !(srv && srv.verdictText)) return null;
+      function pctChange(a, b) {
+        return a > 0 && b != null ? ((b - a) / a) * 100 : null;
+      }
+      var deltas = null;
+      if (single && workswarm) {
+        deltas = {
+          rateDiff: workswarm.rate != null && single.rate != null ? workswarm.rate - single.rate : null,
+          wallChangePct: pctChange(single.p50Ms, workswarm.p50Ms),
+          callsChangePct: pctChange(single.calls, workswarm.calls),
+          tokensChangePct: pctChange(single.tokens, workswarm.tokens),
+          costChangePct: pctChange(single.cost, workswarm.cost),
+        };
+      }
+      var rec = null;
+      if (srv && srv.verdictText) {
+        rec = { verdict: String(srv.verdictText), source: "server" };
+      } else if (deltas && deltas.rateDiff != null) {
+        var hits = [];
+        if (deltas.rateDiff >= 0.05) hits.push("成功率 +" + (deltas.rateDiff * 100).toFixed(1) + "pp（≥ +5%）");
+        if (deltas.wallChangePct != null && deltas.wallChangePct <= -30) hits.push("p50 耗时 " + deltas.wallChangePct.toFixed(0) + "%（≤ -30%）");
+        rec = {
+          verdict: hits.length ? "建议启用 WorkSwarm：" + hits.join("；") : "暂不建议启用 WorkSwarm（未满足成功率/耗时启用阈值）",
+          source: "client",
+        };
+      }
+      var sampleSmall =
+        (single && single.n != null && single.n < 30) || (workswarm && workswarm.n != null && workswarm.n < 30);
+      return { single: single, workswarm: workswarm, deltas: deltas, recommendation: rec, sampleSmall: sampleSmall };
+    }
+
+    function statEngineLine(label, st) {
+      if (!st) return '<div class="owo-pe-stat-row sub">' + esc(label) + "：暂无样本</div>";
+      var ci = st.ci95 ? "CI95 [" + (st.ci95[0] * 100).toFixed(1) + "%, " + (st.ci95[1] * 100).toFixed(1) + "%]" : "CI —";
+      var small = st.n != null && st.n < 30;
+      return (
+        '<div class="owo-pe-stat-row">' +
+        "<b>" + esc(label) + "</b>" +
+        '<span class="owo-pe-mono">n=' + esc(st.n == null ? "—" : st.n) + "</span>" +
+        '<span class="owo-pe-mono">成功率 ' + esc(st.rate == null ? "—" : (st.rate * 100).toFixed(1) + "%") + "</span>" +
+        '<span class="owo-pe-mono">' + esc(ci) + "</span>" +
+        '<span class="owo-pe-mono">p50 ' + esc(st.p50Ms == null ? "—" : fmtDur(st.p50Ms)) + "</span>" +
+        '<span class="owo-pe-mono">p95 ' + esc(st.p95Ms == null ? "—" : fmtDur(st.p95Ms)) + "</span>" +
+        (small ? '<span class="owo-pe-badge warn" title="n<30：置信区间宽，结论仅供观察">样本不足</span>' : "") +
+        "</div>"
+      );
+    }
+
+    function renderStatistics(stats) {
+      if (!stats) return "";
+      var html = '<div class="owo-pe-stats"><div class="owo-pe-stat-head">统计判读 <span class="hint">成功率 95% 置信区间 · p50/p95 耗时 · 启用阈值（成功率 +5% / p50 耗时 -30%）</span></div>';
+      html += statEngineLine("单 Agent", stats.single);
+      html += statEngineLine("WorkSwarm", stats.workswarm);
+      if (stats.deltas) {
+        var d = stats.deltas;
+        function dPct(x) { return x == null ? "—" : (x > 0 ? "+" : "") + x.toFixed(0) + "%"; }
+        function dPp(x) { return x == null ? "—" : (x > 0 ? "+" : "") + (x * 100).toFixed(1) + "pp"; }
+        html +=
+          '<div class="owo-pe-stat-row sub">' +
+          "<b>差值（多 − 单）</b>" +
+          '<span class="owo-pe-mono">成功率 ' + esc(dPp(d.rateDiff)) + "</span>" +
+          '<span class="owo-pe-mono">p50 耗时 ' + esc(dPct(d.wallChangePct)) + "</span>" +
+          '<span class="owo-pe-mono">模型调用 ' + esc(dPct(d.callsChangePct)) + "</span>" +
+          '<span class="owo-pe-mono">Token ' + esc(dPct(d.tokensChangePct)) + "</span>" +
+          '<span class="owo-pe-mono">费用 ' + esc(dPct(d.costChangePct)) + "</span>" +
+          "</div>";
+      }
+      if (stats.recommendation) {
+        html +=
+          '<div class="owo-pe-stat-rec' + (String(stats.recommendation.verdict).indexOf("建议启用") === 0 ? " ok" : "") + '">' +
+          "<b>启用建议：</b>" + esc(stats.recommendation.verdict) +
+          '<span class="sub">（判定来源：' + (stats.recommendation.source === "server" ? "服务端统计" : "客户端推导") + "）</span>" +
+          "</div>";
+      }
+      if (stats.sampleSmall) {
+        html += '<div class="owo-pe-stat-note bad">样本不足：当前样本量 n<30，置信区间偏宽、差值与启用建议仅供观察，不构成上线依据。</div>';
+      }
+      html += "</div>";
+      return html;
+    }
+
+
     // 详情 → 逐 case 归一化行（单 vs 多对比）。聚合规则：
     //   状态 = 该 case×mode 全部单元格通过则为 passed，否则取最坏非通过状态；
     //   耗时 = 单元格均值；检查 = "通过/总数"；失败步骤/错误取首个失败单元格；
@@ -333,6 +516,7 @@
         completed: isFinite(completed) ? completed : null,
         pct: isFinite(total) && total > 0 && isFinite(completed) ? Math.min(100, Math.round((completed / total) * 100)) : null,
         current: current,
+        stats: statisticsFromReport(report),
         singleRate: aggS ? fmtRate(aggS.rate) : "—",
         wsRate: aggW ? fmtRate(aggW.rate) : "—",
         singleDur: aggS ? fmtDur(aggS.meanWall) : "—",
@@ -458,7 +642,8 @@
         '<div class="owo-pe-engines">' +
         engineStatBlock("single", "单 Agent", sum) +
         engineStatBlock("workswarm", "WorkSwarm", sum) +
-        "</div>"
+        "</div>" +
+        renderStatistics(sum.stats)
       );
     }
 
@@ -888,6 +1073,13 @@
       computeSummary: computeSummary,
       casesFromDetail: casesFromDetail,
       engineAgg: engineAgg,
+      // —— 四期挂钩：统计判读 ——
+      wilsonCI: wilsonCI,
+      percentileOf: percentileOf,
+      engineStats: engineStats,
+      serverStats: serverStats,
+      statisticsFromReport: statisticsFromReport,
+      renderStatistics: renderStatistics,
       normMode: normMode,
       summaryHtml: summaryHtml,
       renderCasesTable: renderCasesTable,

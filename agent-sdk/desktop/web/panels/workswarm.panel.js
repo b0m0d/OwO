@@ -148,6 +148,15 @@
       templates: [],
       proposals: [],
       humanTask: "",
+      // —— 四期：实时进度（第二路 progress 事件）——
+      progress: null, // 最新 progress 事件 {seq,status,active,current_steps[],counts{},updated_at}
+      lastProgressSeq: 0, // 单调递增守卫：断线重连/轮询快照里的旧 seq 一律跳过（不重置于重连）
+      progressTimer: null, // 1s tick：刷新"已运行时间"（仅在存在 Running 步骤时活跃）
+      cancelling: false, // 用户点了取消：立即置位（不等服务端），终态/确认后清除
+      reviewBusy: {}, // artifact_id -> true（评审提交进行中，按钮锁定）
+      artifacts: [], // 最近一次 loadArtifacts 的产物数组（findArtifactById / 评审提交依赖）
+      reviewResult: null, // 最近一次评审提交结果（测试与 DOM 提示共用）
+      reviewFlash: null, // {artifactId, ok, text} 评审结果闪存：产物区重载后仍显示
     };
 
     // ---------- 常量与工具 ----------
@@ -643,6 +652,445 @@
         .join("");
     }
 
+    // ==================== 四期：实时进度（第二路 progress 事件） ====================
+    // progress 事件形状（协作计划冻结）：
+    // { seq, team_id, status, active, current_steps:[{step_id,worker,status,attempts,started_at}],
+    //   counts:{pending,running,succeeded,failed}, updated_at }
+    var PROGRESS_STEP_CN = {
+      pending: "等待",
+      ready: "就绪",
+      running: "运行中",
+      succeeded: "完成",
+      failed: "失败",
+      aborted: "中止",
+      cancelled: "已取消",
+    };
+
+    // 应用一条 progress 事件：seq 单调递增守卫 —— 断线重连后的重复推送、
+    // 轮询快照里的旧事件一律跳过（返回 false），保证"重复事件不得重复渲染"。
+    // lastProgressSeq 不因重连/轮询切换而重置；仅在切换团队（loadDetail）时清零。
+    function applyProgress(evt) {
+      if (!evt || typeof evt !== "object") return false;
+      var seq = Number(evt.seq);
+      if (!isFinite(seq)) return false; // 无有效 seq 的形状一律不采纳
+      if (seq <= state.lastProgressSeq) return false; // 旧/重复事件
+      state.lastProgressSeq = seq;
+      var steps = Array.isArray(evt.current_steps) ? evt.current_steps : [];
+      state.progress = {
+        seq: seq,
+        status: String(evt.status || ""),
+        active: !!evt.active,
+        current_steps: steps
+          .map(function (s) {
+            s = s || {};
+            return {
+              step_id: String(s.step_id || ""),
+              worker: String(s.worker || ""),
+              status: String(s.status || ""),
+              attempts: Number(s.attempts) || 0,
+              started_at: String(s.started_at || ""),
+            };
+          })
+          .filter(function (s) {
+            return s.step_id;
+          }),
+        counts: {
+          pending: Number(evt.counts && evt.counts.pending) || 0,
+          running: Number(evt.counts && evt.counts.running) || 0,
+          succeeded: Number(evt.counts && evt.counts.succeeded) || 0,
+          failed: Number(evt.counts && evt.counts.failed) || 0,
+        },
+        updated_at: String(evt.updated_at || ""),
+      };
+      if (state.progress.status) {
+        state.teamStatus = state.progress.status; // progress 是最新状态源
+        state.active = state.progress.active;
+      }
+      return true;
+    }
+
+    function fmtElapsed(ms) {
+      if (!isFinite(ms) || ms == null || ms < 0) return "—";
+      var s = Math.floor(ms / 1000);
+      if (s < 60) return s + "s";
+      var m = Math.floor(s / 60);
+      var rs = s % 60;
+      if (m < 60) return m + "m" + (rs ? rs + "s" : "");
+      var h = Math.floor(m / 60);
+      return h + "h" + (m % 60) + "m";
+    }
+
+    // 进度视图模型（纯函数）：耗时基于 started_at 与 nowMs；rows 只收有 step_id 的步骤。
+    // 无 progress 快照但用户已点取消：仍返回最小视图，让"取消中"徽标立即可见。
+    function computeProgressView(nowMs) {
+      var p = state.progress;
+      if (!p) {
+        if (!state.cancelling) return null;
+        return { seq: null, counts: { pending: 0, running: 0, succeeded: 0, failed: 0 }, updated_at: "", rows: [], cancelling: true, active: false };
+      }
+      var now = typeof nowMs === "number" && isFinite(nowMs) ? nowMs : Date.now();
+      var rows = (p.current_steps || []).map(function (s) {
+        var started = Date.parse(s.started_at);
+        var elapsed = isFinite(started) ? Math.max(0, now - started) : null;
+        var st = normStatus(s.status);
+        return {
+          step_id: s.step_id,
+          worker: s.worker,
+          status: st,
+          statusCn: PROGRESS_STEP_CN[st] || s.status,
+          attempts: s.attempts,
+          elapsedMs: elapsed,
+          running: st === "running",
+        };
+      });
+      return {
+        seq: p.seq,
+        counts: p.counts,
+        updated_at: p.updated_at,
+        rows: rows,
+        cancelling: state.cancelling,
+        active: p.active,
+      };
+    }
+
+    function progressCountChip(label, n, cls) {
+      return '<span class="owo-ws-prog-count' + (cls ? " " + cls : "") + '">' + esc(label) + " <b>" + esc(n) + "</b></span>";
+    }
+
+    function renderProgress(vm) {
+      if (!vm) return '<div class="hint owo-ws-prog-empty">暂无实时进度事件（等待 progress 推送…）</div>';
+      var c = vm.counts || {};
+      var html =
+        '<div class="owo-ws-prog-head">' +
+        (vm.seq != null ? '<span class="owo-ws-prog-seq" title="最新 progress 事件序号（单调递增，断线恢复依据）">seq #' + esc(vm.seq) + "</span>" : "") +
+        progressCountChip("等待", c.pending || 0, "off") +
+        progressCountChip("运行", c.running || 0, "run") +
+        progressCountChip("完成", c.succeeded || 0, "ok") +
+        progressCountChip("失败", c.failed || 0, "bad") +
+        (vm.cancelling ? '<span class="owo-ws-badge st-interrupted owo-ws-prog-cancelling">取消中…（已下发，等待执行器停止）</span>' : "") +
+        "</div>";
+      if (!vm.rows.length) {
+        return html + '<div class="hint">当前无活动步骤</div>';
+      }
+      html += '<div class="owo-ws-prog-steps">';
+      for (var i = 0; i < vm.rows.length; i++) {
+        var r = vm.rows[i];
+        html +=
+          '<div class="owo-ws-prog-step' + (r.running ? " run" : "") + '">' +
+          '<span class="owo-ws-mono owo-ws-ellip" title="' + esc(r.step_id) + '">' + esc(r.worker || r.step_id) + "</span>" +
+          '<span class="owo-ws-badge">' + esc(r.statusCn) + "</span>" +
+          '<span class="hint">第 ' + esc(r.attempts) + " 次尝试</span>" +
+          '<span class="owo-ws-prog-elapsed" title="自 started_at 起的已运行时间">' +
+          (r.running ? "已运行 " : "耗时 ") + esc(r.elapsedMs == null ? "—" : fmtElapsed(r.elapsedMs)) +
+          "</span>" +
+          "</div>";
+      }
+      html += "</div>";
+      return html;
+    }
+
+    function paintProgress() {
+      var box = el("#ws-d-progress");
+      if (!box) return;
+      var vm = computeProgressView(Date.now());
+      box.innerHTML = renderProgress(vm);
+      var hasRunning = vm && vm.rows.some(function (r) {
+        return r.running;
+      });
+      if (hasRunning) ensureProgressTimer();
+      else stopProgressTimer();
+    }
+
+    // 1s tick：仅在存在 Running 步骤时刷新"已运行时间"；无活动步骤自动停止。
+    function ensureProgressTimer() {
+      if (state.progressTimer) return;
+      state.progressTimer = setInterval(function () {
+        if (el("#ws-d-progress")) paintProgress();
+        else stopProgressTimer(); // 视图已切走
+      }, 1000);
+    }
+
+    function stopProgressTimer() {
+      if (state.progressTimer) {
+        clearInterval(state.progressTimer);
+        state.progressTimer = null;
+      }
+    }
+
+    // ==================== 四期：Artifact 版本链与评审（第三路 review API） ====================
+    // 评审接口（协作计划冻结）：
+    //   POST /artifacts/{id}/review  body {team_id, decision, reviewer, comment, expected_version, idempotency_key}
+    //   GET  /artifacts/{id}/history → 不可变 ArtifactReviewRecord 列表
+    var REVIEW_CN = { draft: "草稿（返工中）", pendingreview: "待评审", approved: "已批准", changesrequested: "要求修改", rejected: "已驳回", superseded: "已被取代" };
+    var REVIEW_CLS = { draft: "off", pendingreview: "warn", approved: "ok", changesrequested: "warn", rejected: "bad", superseded: "off" };
+    var REVIEW_DECISIONS = ["approve", "request_changes", "reject"];
+    var DECISION_CN = { approve: "批准", request_changes: "要求修改", reject: "驳回" };
+
+    function normReviewState(s) {
+      return String(s == null ? "" : s).toLowerCase().replace(/[_\s-]/g, "");
+    }
+
+    function reviewBadgeHtml(st) {
+      var k = normReviewState(st);
+      var cls = REVIEW_CLS[k] || "off";
+      return '<span class="owo-ws-badge rv-' + cls + '" data-art-state="' + esc(k || "unknown") + '">' + esc(REVIEW_CN[k] || String(st || "—")) + "</span>";
+    }
+
+    function isReviewable(a) {
+      return !!a && normReviewState(a.review_state) === "pendingreview" && !state.reviewBusy[String(a.artifact_id)];
+    }
+
+    // 版本链分组（纯函数）：supersedes_artifact_id 指向链内既有产物则续链；
+    // 链内按 version 升序；链头（items 末位）为最新版本。
+    function groupArtifactChain(arts) {
+      var list = (arts || []).filter(function (a) {
+        return a && a.artifact_id != null;
+      });
+      var byId = {};
+      list.forEach(function (a) {
+        byId[String(a.artifact_id)] = a;
+      });
+      list.sort(function (x, y) {
+        return String(x.created_at).localeCompare(String(y.created_at));
+      });
+      var chains = [];
+      var chainOf = {};
+      list.forEach(function (a) {
+        var id = String(a.artifact_id);
+        var sup = a.supersedes_artifact_id == null ? "" : String(a.supersedes_artifact_id);
+        if (sup && byId[sup] && chainOf[sup] != null) {
+          var c = chains[chainOf[sup]];
+          c.items.push(a);
+          chainOf[id] = chainOf[sup];
+        } else {
+          chainOf[id] = chains.length;
+          chains.push({ items: [a] });
+        }
+      });
+      chains.forEach(function (c) {
+        c.items.sort(function (x, y) {
+          return (Number(x.version) || 0) - (Number(y.version) || 0) || String(x.created_at).localeCompare(String(y.created_at));
+        });
+        var approved = null;
+        c.items.forEach(function (a) {
+          if (normReviewState(a.review_state) === "approved") approved = a; // 取最高版本（链已升序）
+        });
+        c.approvedHead = approved;
+      });
+      return chains;
+    }
+
+    // 评审请求体（纯函数）：expected_version 乐观并发控制 + 幂等键；生产者禁止自行批准。
+    function buildReviewBody(input) {
+      var a = input.artifact || {};
+      var decision = String(input.decision || "");
+      if (REVIEW_DECISIONS.indexOf(decision) < 0) throw new Error("未知评审动作：" + decision);
+      var reviewer = String(input.reviewer || "").trim();
+      if (!reviewer) throw new Error("请先填写评审者（critic 或 human 用户名）");
+      if (decision === "approve") {
+        var producer = String(a.producer || "");
+        var producerRole = producer.replace(/^m-/, "");
+        if (reviewer === producer || reviewer === producerRole) {
+          throw new Error("生产者不能自行批准自己的产物（approve 需 Human 策略授权的 critic/human 执行）");
+        }
+      }
+      return {
+        team_id: input.teamId || state.current || "",
+        decision: decision,
+        reviewer: reviewer,
+        comment: String(input.comment == null ? "" : input.comment),
+        expected_version: Number(a.version) || 0,
+        idempotency_key: input.idempotencyKey || aidemKey(a, decision, reviewer),
+      };
+    }
+
+    // 幂等键：不同意图的提交生成新键（时间戳 + 进程内序号，同毫秒两次提交也互异）；
+    // 同键重复提交由服务端保证零副作用。
+    var aidemSeq = 0;
+    function aidemKey(a, decision, reviewer) {
+      aidemSeq += 1;
+      return [String((a && a.artifact_id) || ""), (a && a.version) || 0, decision, reviewer, Date.now(), aidemSeq].join(":");
+    }
+
+    // 评审错误文案：409/403 用计划规定的可操作提示，其余退回 explainError。
+    // 传输层把状态码嵌在 message 头部（"409: {...}"），此处一并识别。
+    function explainReviewError(err) {
+      var st = err && err.status;
+      if (!st && err && typeof err.message === "string") {
+        var m = /^(\d{3}):/.exec(err.message);
+        if (m) st = Number(m[1]);
+      }
+      if (st === 409) return "版本已更新，请刷新后重试（你提交的 expected_version 已过期，可能有更新的评审或版本）";
+      if (st === 403) return "无评审权限（403）：生产者不能自行批准自己的产物；请使用已授权的 critic/human 身份重试";
+      return explainError(err, "评审提交");
+    }
+
+    // 提交评审（transport 可注入，Node 测试直接调用）。结果与错误同时记录到
+    // state.reviewResult，供 DOM 层与测试读取；按钮锁定由 reviewBusy 保证。
+    function submitArtifactReview(opts) {
+      var aid = String((opts && opts.artifactId) || "");
+      var a = findArtifactById(aid);
+      if (!a) return Promise.reject(new Error("产物不存在或列表已刷新，请刷新后重试"));
+      var body;
+      try {
+        body = buildReviewBody({
+          artifact: a,
+          decision: opts && opts.decision,
+          reviewer: opts && opts.reviewer,
+          comment: opts && opts.comment,
+          idempotencyKey: opts && opts.idempotencyKey,
+          teamId: opts && opts.teamId,
+        });
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      if (state.reviewBusy[aid]) return Promise.reject(new Error("该产物已有评审提交进行中，请等待完成"));
+      state.reviewBusy[aid] = true;
+      return H.post("/artifacts/" + encodeURIComponent(aid) + "/review", body).then(
+        function (resp) {
+          delete state.reviewBusy[aid];
+          state.reviewResult = { ok: true, artifactId: aid, decision: body.decision, reviewer: body.reviewer, resp: resp || null };
+          state.reviewFlash = { artifactId: aid, ok: true, text: "评审已提交：" + (DECISION_CN[body.decision] || body.decision) + "（记录不可变）" };
+          return resp;
+        },
+        function (e) {
+          delete state.reviewBusy[aid];
+          state.reviewResult = { ok: false, artifactId: aid, decision: body.decision, reviewer: body.reviewer, error: explainReviewError(e) };
+          state.reviewFlash = { artifactId: aid, ok: false, text: explainReviewError(e) };
+          throw e;
+        }
+      );
+    }
+
+    function findArtifactById(aid) {
+      var list = state.artifacts || [];
+      for (var i = 0; i < list.length; i++) {
+        if (String(list[i].artifact_id) === String(aid)) return list[i];
+      }
+      return null;
+    }
+
+    // 评审历史（懒加载）：GET /artifacts/{id}/history → 不可变记录列表。
+    function artifactHistoryHtml(records) {
+      if (!records || !records.length) return '<div class="hint">暂无评审记录</div>';
+      return records
+        .map(function (r) {
+          var dec = String((r && r.decision) || "");
+          var cn = { approve: "批准", request_changes: "要求修改", reject: "驳回" }[dec] || dec;
+          return (
+            '<div class="owo-ws-review-rec">' +
+            reviewBadgeHtml(dec === "approve" ? "approved" : dec === "request_changes" ? "changes_requested" : "rejected") +
+            "<b>" + esc(r.reviewer || "—") + "</b>" +
+            '<span class="owo-ws-ellip" title="' + esc(r.comment || "") + '">' + esc(r.comment || "（无评语）") + "</span>" +
+            '<span class="hint">' + esc(r.created_at || "") + "</span>" +
+            "</div>"
+          );
+        })
+        .join("");
+    }
+
+    function loadArtifactHistory(aid) {
+      var box = el("#ws-d-artifacts");
+      if (!box) return Promise.resolve();
+      var target = null;
+      var boxes = box.querySelectorAll("[data-art-history-box]");
+      for (var i = 0; i < boxes.length; i++) {
+        if (boxes[i].getAttribute("data-art-history-box") === String(aid)) target = boxes[i];
+      }
+      if (!target) return Promise.resolve();
+      target.innerHTML = '<div class="hint">加载评审历史…</div>';
+      return H.get("/artifacts/" + encodeURIComponent(aid) + "/history")
+        .then(function (d) {
+          // 第三路响应：reviews[]（评审记录）+ supersedes/superseded_by/approved_head
+          var recs = (d && (d.reviews || d.records || d.history)) || [];
+          target.innerHTML = artifactHistoryHtml(recs);
+        })
+        .catch(function (e) {
+          target.innerHTML = stateBox("error", explainError(e, "评审历史"), "history-" + aid);
+        });
+    }
+
+    // 产物行（链内）：版本徽标 + 评审状态 + 产出者 + 取代关系 + 预览 + 评审表单 + 历史。
+    function artifactRowHtml(a, chain) {
+      var aid = String(a.artifact_id == null ? "" : a.artifact_id);
+      var busy = !!state.reviewBusy[aid];
+      var isHead = chain && chain.items[chain.items.length - 1] === a;
+      var sup = a.supersedes_artifact_id == null ? "" : String(a.supersedes_artifact_id);
+      var supVer = "";
+      if (sup) {
+        for (var i = 0; i < (chain ? chain.items : []).length; i++) {
+          if (String(chain.items[i].artifact_id) === sup) supVer = "v" + chain.items[i].version;
+        }
+      }
+      var formHtml = "";
+      if (normReviewState(a.review_state) === "pendingreview") {
+        formHtml =
+          '<details class="owo-ws-review"' + (busy ? ' data-busy="1"' : "") + ">" +
+          '<summary>评审此版本（批准 / 要求修改 / 驳回）</summary>' +
+          '<div class="owo-ws-review-form">' +
+          '<input class="owo-ws-review-reviewer" placeholder="评审者：critic 或 human 用户名（生产者不能自行批准）">' +
+          '<textarea class="owo-ws-review-comment" rows="2" placeholder="评语（随不可变评审记录保存）"></textarea>' +
+          '<div class="owo-ws-review-actions">' +
+          '<button type="button" class="owo-ws-review-act ok" data-art-act="approve" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">批准</button>" +
+          '<button type="button" class="owo-ws-review-act warn" data-art-act="request_changes" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">要求修改</button>" +
+          '<button type="button" class="owo-ws-review-act bad" data-art-act="reject" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">驳回</button>" +
+          "</div>" +
+          "</div></details>";
+      }
+      // 评审结果行（行级，独立于表单）：状态迁移后表单可能消失，但 flash 提示仍在。
+      var flash = state.reviewFlash && String(state.reviewFlash.artifactId) === aid ? state.reviewFlash : null;
+      var resultHtml =
+        '<div class="owo-ws-review-result sub' + (flash && !flash.ok ? " bad" : flash ? " ok" : "") + '" data-art-result="' + esc(aid) + '" aria-live="polite">' +
+        (flash ? esc(flash.text) : "") +
+        "</div>";
+      return (
+        '<div class="owo-ws-art-row' + (isHead ? " head" : "") + '" data-art-row="' + esc(aid) + '">' +
+        '<div class="owo-ws-art-line">' +
+        '<span class="owo-ws-mono">v' + esc(a.version) + (isHead ? "（最新）" : "") + "</span>" +
+        reviewBadgeHtml(a.review_state) +
+        '<span class="hint">产出者 ' + esc(roleOfProducer(a.producer)) + "</span>" +
+        (supVer ? '<span class="hint">取代 ' + esc(supVer) + "</span>" : "") +
+        '<span class="hint owo-ws-ellip" title="' + esc(a.created_at || "") + '">' + esc(a.created_at || "") + "</span>" +
+        "</div>" +
+        (a.preview != null
+          ? '<details class="owo-ws-art-preview"><summary>预览</summary><pre>' + esc(a.preview || "（空）") + "</pre></details>"
+          : "") +
+        formHtml +
+        resultHtml +
+        '<div class="owo-ws-art-histline">' +
+        '<button type="button" class="owo-ws-mini" data-art-history="' + esc(aid) + '">评审历史</button>' +
+        '<span class="owo-ws-art-history" data-art-history-box="' + esc(aid) + '"></span>' +
+        "</div>" +
+        "</div>"
+      );
+    }
+
+    function roleOfProducer(p) {
+      return String(p || "").replace(/^m-/, "");
+    }
+
+    function renderArtifactsChains(chains) {
+      if (!chains || !chains.length) return "";
+      return chains
+        .map(function (c) {
+          var kind = (c.items[0] && c.items[0].kind) || "—";
+          var headHtml = c.approvedHead
+            ? '当前 approved head：<span class="owo-ws-badge rv-ok">v' + esc(c.approvedHead.version) + "</span>"
+            : '<span class="hint">无已批准版本（approved head 未建立）</span>';
+          return (
+            '<div class="owo-ws-art-chain">' +
+            '<div class="owo-ws-art-chainhead"><b>' + esc(kind) + "</b> 版本链（" + c.items.length + " 个版本）· " + headHtml + "</div>" +
+            c.items
+              .map(function (a) {
+                return artifactRowHtml(a, c);
+              })
+              .join("") +
+            "</div>"
+          );
+        })
+        .join("");
+    }
+
     // ---------- 成员 / 任务 ----------
     function membersByMId() {
       var m = {};
@@ -978,6 +1426,7 @@
       paintMembers();
       paintDag();
       paintAudit();
+      paintProgress();
       paintHumanSelect();
       paintHandoffSelect();
       paintFromSelect();
@@ -1110,35 +1559,18 @@
         .then(function (d) {
           if (el("#ws-d-artifacts") !== box) return; // 视图已切走
           var arts = (d && d.artifacts) || [];
+          state.artifacts = arts;
           state.artifactCount = arts.length; // 运行摘要「产物」计数
           paintRunSummary();
           if (!arts.length) {
             box.innerHTML = '<div class="hint">project_id：' + esc(pid) + '</div><div class="hint">暂无产物（任务产出后会出现在这里）</div>';
             return;
           }
-          var roleOf = function (producer) {
-            return String(producer || "").replace(/^m-/, "");
-          };
+          var chains = groupArtifactChain(arts);
           box.innerHTML =
-            '<div class="hint">project_id：' + esc(pid) + " · 共 " + arts.length + " 个产物</div>" +
-            '<div class="owo-ws-tablewrap"><table class="owo-ws-table"><tr><th>artifact_id</th><th>类型</th><th>版本</th><th>产出者</th><th>评审状态</th><th>创建时间</th><th>预览</th></tr>' +
-            arts
-              .map(function (a) {
-                var aid = String(a.artifact_id == null ? "" : a.artifact_id);
-                return (
-                  "<tr>" +
-                  '<td class="owo-ws-mono owo-ws-ellip" title="' + esc(aid) + '">' + esc(aid) + "</td>" +
-                  "<td>" + esc(a.kind) + "</td>" +
-                  "<td>v" + esc(a.version) + "</td>" +
-                  "<td>" + esc(roleOf(a.producer)) + "</td>" +
-                  "<td>" + esc(a.review_state) + "</td>" +
-                  "<td class=\"hint\">" + esc(a.created_at) + "</td>" +
-                  '<td class="hint"><details><summary>预览（' + (a.preview != null ? "内容摘录" : "无") + "）</summary><pre>" + esc(a.preview || "（无预览，内容存于 CAS）") + "</pre></details></td>" +
-                  "</tr>"
-                );
-              })
-              .join("") +
-            "</table></div>";
+            '<div class="hint">project_id：' + esc(pid) + " · 共 " + arts.length + " 个产物 · " + chains.length + " 条版本链</div>" +
+            renderArtifactsChains(chains);
+          bindArtifactReviewHandlers(box);
         })
         .catch(function (e) {
           if (el("#ws-d-artifacts") !== box) return;
@@ -1146,6 +1578,54 @@
             '<div class="hint">project_id：' + esc(pid) + "</div>" +
             stateBox("error", explainError(e, "产物加载"), "artifacts");
         });
+    }
+
+    // 产物区事件委托：评审动作 / 评审历史懒加载。box 每次 loadArtifacts 只换
+    // innerHTML，委托绑定标记在 box 元素自身上，元素随 renderDetail 重建时重绑。
+    function bindArtifactReviewHandlers(box) {
+      if (!box || box.getAttribute("data-review-bound") === "1") return;
+      box.setAttribute("data-review-bound", "1");
+      box.addEventListener("click", function (ev) {
+        var target = ev.target;
+        if (!target || !target.closest) return;
+        var actBtn = target.closest("[data-art-act]");
+        if (actBtn) {
+          var aid = actBtn.getAttribute("data-art-id") || "";
+          var act = actBtn.getAttribute("data-art-act") || "";
+          var form = actBtn.closest(".owo-ws-review-form");
+          var reviewerEl = form ? form.querySelector(".owo-ws-review-reviewer") : null;
+          var commentEl = form ? form.querySelector(".owo-ws-review-comment") : null;
+          var resultEl = form ? form.querySelector("[data-art-result]") : null;
+          // 锁定该产物全部评审按钮（提交期间防重复）
+          var allBtns = box.querySelectorAll('[data-art-act][data-art-id="' + aid.replace(/"/g, '\\"') + '"]');
+          for (var i = 0; i < allBtns.length; i++) allBtns[i].disabled = true;
+          if (actBtn.setAttribute) actBtn.setAttribute("data-busy", "1");
+          submitArtifactReview({
+            artifactId: aid,
+            decision: act,
+            reviewer: reviewerEl ? reviewerEl.value : "",
+            comment: commentEl ? commentEl.value : "",
+          }).then(
+            function () {
+              if (resultEl) resultEl.textContent = "评审已提交：" + (DECISION_CN[act] || act) + "（记录不可变）";
+              loadArtifacts(); // 重取产物/链头状态
+            },
+            function (e) {
+              for (var j = 0; j < allBtns.length; j++) allBtns[j].disabled = false;
+              if (actBtn.removeAttribute) actBtn.removeAttribute("data-busy");
+              if (resultEl) {
+                resultEl.textContent = explainReviewError(e);
+                resultEl.className = "owo-ws-review-result sub bad";
+              }
+            }
+          );
+          return;
+        }
+        var histBtn = target.closest("[data-art-history]");
+        if (histBtn) {
+          loadArtifactHistory(histBtn.getAttribute("data-art-history"));
+        }
+      });
     }
 
     // ---------- 详情数据 ----------
@@ -1166,6 +1646,14 @@
           state.interrupted = !!d.interrupted;
           state.audit = [];
           state.auditKeys = {};
+          state.progress = null; // 换团队：进度状态清零（seq 守卫随之重置）
+          state.lastProgressSeq = 0;
+          state.cancelling = false;
+          state.artifacts = [];
+          state.reviewBusy = {};
+          state.reviewResult = null;
+          state.reviewFlash = null;
+          stopProgressTimer();
           var tail = (d.audit_tail || []).slice();
           tail.sort(function (a, b) {
             return String(a.ts).localeCompare(String(b.ts));
@@ -1238,7 +1726,8 @@
     function stopLive(note) {
       if (state.es) {
         try {
-          state.es.close();
+          if (typeof state.es.abort === "function") state.es.abort(); // fetch 流式 SSE 的 AbortController
+          else state.es.close();
         } catch (e) {
           /* ignore */
         }
@@ -1252,6 +1741,7 @@
         clearTimeout(state.refreshDebounce);
         state.refreshDebounce = null;
       }
+      stopProgressTimer();
       state.pollNoteShown = false;
       state.liveMode = "off";
       if (note) {
@@ -1271,9 +1761,16 @@
           state.teamStatus = snap.status;
           state.interrupted = !!snap.interrupted;
           (snap.audit || []).forEach(addAudit);
+          if (snap.progress && applyProgress(snap.progress)) {
+            paintStatusLive();
+            paintProgress();
+          }
           paintStatusLive();
           paintAudit();
-          if (isTerminalTeam(snap.status)) stopLive("已结束：团队进入终态（" + String(snap.status) + "）");
+          if (isTerminalTeam(snap.status)) {
+            state.cancelling = false; // 终态确认：清除"取消中"
+            stopLive("已结束：团队进入终态（" + String(snap.status) + "）");
+          }
         })
         .catch(function (e) {
           if (!state.pollNoteShown) {
@@ -1320,9 +1817,106 @@
       }, 800);
     }
 
+    // 事件帧统一分发（EventSource 与 fetch 流式 SSE 共用）。progress 帧兼容两种
+    // 形状：嵌套 {type:"progress", progress:{...}}（第二路实现）与扁平（计划原形）。
+    function handleEventFrame(f) {
+      if (!f || !f.type) return;
+      if (f.type === "audit") {
+        addAudit(f);
+        paintAudit();
+        scheduleTasks();
+      } else if (f.type === "progress") {
+        var payload = f.progress && typeof f.progress === "object" ? f.progress : f;
+        if (applyProgress(payload)) {
+          paintStatusLive();
+          paintRunSummary();
+          paintProgress();
+          scheduleTasks(); // 步骤状态变化 → 防抖刷新 DAG/任务表
+        }
+      } else if (f.type === "state") {
+        state.active = !!f.active;
+        state.teamStatus = f.status;
+        state.interrupted = !!f.interrupted;
+        paintStatusLive();
+        paintRunSummary();
+        paintInterrupted();
+        if (isTerminalTeam(f.status)) {
+          state.cancelling = false; // 终态确认：清除"取消中"
+          stopLive("已结束：团队进入终态（" + String(f.status) + "）");
+        }
+      }
+    }
+
+    // fetch 流式 SSE：与 EventSource 等价的 text/event-stream 解析，但可携带
+    // Authorization 头（受保护路由必需）。逐帧解析 data: 行；多行 data 按规范拼接。
+    function connectFetchSse(teamId, note) {
+      var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      state.es = ctrl;
+      defaultToken()
+        .then(function (tok) {
+          if (state.es !== ctrl) return null; // 已被取代
+          return fetch(H.baseUrl + "/teams/" + encodeURIComponent(teamId) + "/events", {
+            headers: { "Authorization": "Bearer " + tok, "Accept": "text/event-stream" },
+            signal: ctrl ? ctrl.signal : undefined,
+          }).then(function (resp) {
+            if (!resp.ok || !resp.body || typeof resp.body.getReader !== "function") {
+              throw new Error("SSE HTTP " + resp.status);
+            }
+            state.liveMode = "sse";
+            state.streamNote = note || "SSE 已连接（fetch 流式，实时推送）";
+            paintStreamNote();
+            var reader = resp.body.getReader();
+            var decoder = new TextDecoder();
+            var buf = "";
+            function pump() {
+              return reader.read().then(function (chunk) {
+                if (state.es !== ctrl) return; // 已被取代/停止
+                if (chunk.done) {
+                  startPolling("SSE 流结束，已切换 2.5s 轮询");
+                  return;
+                }
+                buf += decoder.decode(chunk.value, { stream: true });
+                var idx;
+                while ((idx = buf.indexOf("\n\n")) >= 0) {
+                  var frame = buf.slice(0, idx);
+                  buf = buf.slice(idx + 2);
+                  var dataLines = frame.split("\n").filter(function (l) {
+                    return l.indexOf("data:") === 0;
+                  });
+                  if (!dataLines.length) continue;
+                  var payload = dataLines.map(function (l) { return l.slice(5).replace(/^ /, ""); }).join("\n");
+                  var f;
+                  try {
+                    f = JSON.parse(payload);
+                  } catch (e) {
+                    continue;
+                  }
+                  handleEventFrame(f);
+                }
+                return pump();
+              });
+            }
+            return pump();
+          });
+        })
+        .catch(function (e) {
+          if (state.es !== ctrl) return; // 已被新连接/停流取代
+          startPolling("SSE 不可用（" + short(String((e && e.message) || e), 60) + "），已切换 2.5s 轮询");
+        });
+    }
+
     function connectEvents(teamId) {
       stopLive();
       state.pollNoteShown = false;
+      // 首选 fetch 流式 SSE（可带 Bearer，progress/audit/state 实时推送）；
+      // 不支持 ReadableStream 的环境退回裸 EventSource（大概率 401 → 轮询兜底）。
+      if (typeof fetch === "function" && win.ReadableStream !== undefined) {
+        state.liveMode = "sse";
+        state.streamNote = "正在连接 SSE（fetch 流式）…";
+        paintStreamNote();
+        connectFetchSse(teamId, "SSE 已连接（fetch 流式，实时推送）");
+        return;
+      }
       if (typeof EventSource === "undefined") {
         startPolling("浏览器不支持 EventSource，使用 2.5s 轮询");
         return;
@@ -1353,20 +1947,7 @@
         } catch (e) {
           return;
         }
-        if (!f || !f.type) return;
-        if (f.type === "audit") {
-          addAudit(f);
-          paintAudit();
-          scheduleTasks();
-        } else if (f.type === "state") {
-          state.active = !!f.active;
-          state.teamStatus = f.status;
-          state.interrupted = !!f.interrupted;
-          paintStatusLive();
-          paintRunSummary();
-          paintInterrupted();
-          if (isTerminalTeam(f.status)) stopLive("已结束：团队进入终态（" + String(f.status) + "）");
-        }
+        handleEventFrame(f);
       };
       es.onerror = function () {
         if (state.es !== es) return;
@@ -2094,7 +2675,11 @@
         '<pre class="owo-ws-result sub" id="ws-x-result">—</pre>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>产物 <span class="hint">GET /projects/{pid}/artifacts —— CAS 引用，含内容预览</span> <button class="owo-ws-mini" id="ws-art-refresh">刷新产物</button></h3>' +
+        '<h3>实时进度 <span class="hint">progress 事件（步骤开始/完成/失败/取消，seq 单调递增；断线恢复后旧 seq 自动跳过）</span></h3>' +
+        '<div id="ws-d-progress" class="owo-ws-prog" aria-live="polite"><div class="hint">等待进度数据…</div></div>' +
+        "</div>" +
+        '<div class="owo-ws-sec">' +
+        '<h3>产物 <span class="hint">GET /projects/{pid}/artifacts —— CAS 引用，版本链 + 评审闭环</span> <button class="owo-ws-mini" id="ws-art-refresh">刷新产物</button></h3>' +
         '<div id="ws-d-artifacts">' + stateBox("loading", "正在加载产物…") + "</div>" +
         "</div>" +
         '<div class="owo-ws-sec">' +
@@ -2132,7 +2717,18 @@
       bindLockedButton(el("#ws-act-replace-go"), doReplace, "提交中…");
       bindLockedButton(el("#ws-act-cancel"), function () {
         if (!win.confirm("取消该团队运行？未完成的任务将被中止，运行无法恢复。")) return null;
-        return doSteerPost({ command: "cancel", note: "用户取消" }, "取消");
+        state.cancelling = true; // 立即反馈"取消中"，不等服务端往返
+        paintProgress();
+        var p = doSteerPost({ command: "cancel", note: "用户取消" }, "取消");
+        // 下发失败（网络/权限）：撤销"取消中"标记，让用户可重试
+        if (p && typeof p.catch === "function") {
+          p = p.catch(function (e) {
+            state.cancelling = false;
+            paintProgress();
+            throw e;
+          });
+        }
+        return p;
       }, "取消中…");
       bindLockedButton(el("#ws-h-go"), doHumanResult, "提交中…");
       bindLockedButton(el("#ws-x-go"), doHandoff, "提交中…");
@@ -2161,6 +2757,14 @@
       state.interrupted = false;
       state.artifactCount = null;
       state.humanTask = "";
+      state.progress = null;
+      state.lastProgressSeq = 0;
+      state.cancelling = false;
+      state.artifacts = [];
+      state.reviewBusy = {};
+      state.reviewResult = null;
+      state.reviewFlash = null;
+      stopProgressTimer();
       renderView();
     }
 
@@ -2375,6 +2979,26 @@
       handleRetryClick: handleRetryClick,
       submitRetry: submitRetry,
       syncDetail: syncDetail,
+      // —— 四期挂钩：实时进度 + Artifact 评审 ——
+      applyProgress: applyProgress,
+      handleEventFrame: handleEventFrame,
+      computeProgressView: computeProgressView,
+      renderProgress: renderProgress,
+      fmtElapsed: fmtElapsed,
+      paintProgress: paintProgress,
+      stopProgressTimer: stopProgressTimer,
+      normReviewState: normReviewState,
+      reviewBadgeHtml: reviewBadgeHtml,
+      isReviewable: isReviewable,
+      groupArtifactChain: groupArtifactChain,
+      buildReviewBody: buildReviewBody,
+      explainReviewError: explainReviewError,
+      submitArtifactReview: submitArtifactReview,
+      artifactHistoryHtml: artifactHistoryHtml,
+      artifactRowHtml: artifactRowHtml,
+      renderArtifactsChains: renderArtifactsChains,
+      loadArtifactHistory: loadArtifactHistory,
+      findArtifactById: findArtifactById,
       css: function () {
         return CSS;
       },

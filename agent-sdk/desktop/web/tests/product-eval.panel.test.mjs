@@ -544,7 +544,167 @@ test("style.css 第 17 节守卫：配置网格换行/表格包裹/省略/中断
 });
 
 // ----------------------------------------------------------------------------
-// 10. 进程收敛守卫
+// 10. 统计判读（第四路四期：95% CI / p50/p95 / 启用建议 / 样本不足）
+// ----------------------------------------------------------------------------
+
+// 稳定样本构造：n 个 runs，passed 个通过，耗时 1000..1000+n-1 ms。
+function makeRuns(n, passed, mode) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push({
+      key: { case_id: "c" + i, agent_mode: mode || "single" },
+      status: i < passed ? "passed" : "failed",
+      wall_ms: 1000 + i,
+      model_calls: 2,
+      total_tokens: 100 + i,
+      cost_usd: 0.01,
+      failed_steps: i < passed ? [] : ["检查器"],
+    });
+  }
+  return out;
+}
+
+test("wilsonCI 边界：0 样本 / 全成功 / 全失败 / 半数 / 非法输入", () => {
+  assert.equal(T.wilsonCI(0, 0), null, "0 样本无区间");
+  assert.equal(T.wilsonCI(3, -1), null, "非法 n");
+  assert.equal(T.wilsonCI(-1, 5), null, "非法 passed");
+  assert.equal(T.wilsonCI(6, 5), null, "passed > n");
+  const all = T.wilsonCI(10, 10);
+  assert.equal(all.lo > 0.7 && all.lo < 1, true, "全成功下界 > 0.7（10/10）");
+  assert.ok(all.hi > 0.999, "全成功上界收敛到 1（浮点容差）");
+  const none = T.wilsonCI(0, 10);
+  assert.equal(none.lo, 0, "全失败下界收敛到 0");
+  assert.equal(none.hi < 0.35, true, "全失败上界 < 0.35（10/10）");
+  const half = T.wilsonCI(5, 10);
+  assert.ok(Math.abs(half.lo - 0.2366) < 0.02 && Math.abs(half.hi - 0.7634) < 0.02, "5/10 区间 ≈ [23.7%, 76.3%]");
+  // 单调性：通过率越高，区间整体越高
+  assert.ok(T.wilsonCI(8, 10).lo > T.wilsonCI(2, 10).lo);
+});
+
+test("percentileOf：空 / 单元素 / 已知 p50 与 p95 / 非数值剔除", () => {
+  assert.equal(T.percentileOf([], 50), null);
+  assert.equal(T.percentileOf(null, 50), null);
+  assert.equal(T.percentileOf([42], 95), 42);
+  assert.equal(T.percentileOf([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 50), 5, "p50 = ⌈0.5·10⌉ = 第 5 个");
+  assert.equal(T.percentileOf([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 95), 10, "p95 = ⌈0.95·10⌉ = 第 10 个");
+  assert.equal(T.percentileOf([3, "x", 1, 2], 50), 2, "非数值剔除后 3 个取第 2 个");
+});
+
+test("engineStats：无样本 → null；样本齐全时 n/CI/p50/p95/汇总字段正确", () => {
+  assert.equal(T.engineStats({ runs: [] }, "single"), null);
+  assert.equal(T.engineStats(null, "single"), null);
+  const st = T.engineStats({ runs: makeRuns(20, 15, "single") }, "single");
+  assert.equal(st.n, 20);
+  assert.equal(st.passed, 15);
+  assert.equal(st.rate, 0.75);
+  assert.ok(st.ci95[0] > 0.5 && st.ci95[0] < st.rate && st.ci95[1] > st.rate && st.ci95[1] < 0.95);
+  assert.equal(st.p50Ms, 1009, "p50 = 第 ⌈0.5·20⌉=10 个（1000..1019 升序第 10 个 = 1009）");
+  assert.equal(st.p95Ms, 1018, "p95 = 第 ⌈0.95·20⌉=19 个（= 1018）");
+  assert.equal(st.calls, 40);
+  assert.equal(typeof st.cost, "number");
+});
+
+test("engineStats：全失败样本 rate=0，CI 下界收敛 0", () => {
+  const st = T.engineStats({ runs: makeRuns(4, 0, "workswarm") }, "workswarm");
+  assert.equal(st.rate, 0);
+  assert.equal(st.ci95[0], 0);
+});
+
+test("serverStats：宽容识别服务端 statistics（{lo,hi} 与 [lo,hi]、p50/p95、verdict）", () => {
+  const obj = T.serverStats({ statistics: { per_engine: { single: { n: 30, success_rate: 0.9, success_rate_ci95: { lo: 0.8, hi: 0.95 }, p50_wall_ms: 120, p95_wall_ms: 400 }, workswarm: { n: 30, success_rate: 0.95, success_rate_ci95: [0.86, 0.99], p50_wall_ms: 90, p95_wall_ms: 300 } }, verdict: { text: "建议启用 WorkSwarm" } } });
+  assert.equal(obj.single.ci95[0], 0.8);
+  assert.equal(obj.workswarm.ci95[0], 0.86);
+  assert.equal(obj.verdictText, "建议启用 WorkSwarm");
+  assert.equal(T.serverStats({ statistics: { junk: 1 } }), null, "形状不符 → null");
+  assert.equal(T.serverStats({}), null);
+  assert.equal(T.serverStats(null), null);
+});
+
+test("statisticsFromReport：服务端统计在场时优先且 sampleSmall 按服务端 n 判定", () => {
+  const vm = T.statisticsFromReport({
+    runs: makeRuns(2, 1, "single"),
+    statistics: {
+      per_engine: { single: { n: 60, success_rate: 0.8, ci95: [0.7, 0.88] }, workswarm: { n: 60, success_rate: 0.9, ci95: [0.82, 0.95] } },
+      verdict: { text: "建议启用 WorkSwarm（服务端判定）" },
+    },
+  });
+  assert.equal(vm.single.n, 60, "采用服务端 n，而非 runs 推导的 2");
+  assert.equal(vm.sampleSmall, false);
+  assert.equal(vm.recommendation.source, "server");
+  assert.match(vm.recommendation.verdict, /服务端判定/);
+  // 服务端给了统计但没给 verdict：判定来源如实标注为客户端推导
+  const vm2 = T.statisticsFromReport({
+    runs: makeRuns(2, 1, "single"),
+    statistics: { per_engine: { single: { n: 60, success_rate: 0.8 }, workswarm: { n: 60, success_rate: 0.9 } } },
+  });
+  assert.equal(vm2.recommendation.source, "client");
+});
+
+test("statisticsFromReport：客户端推导路径 + 样本不足 + 启用建议（阈值判定）", () => {
+  // 10 样本：多引擎成功率 +20pp（≥+5% 触发），p50 相同（不触发耗时项）→ 建议启用
+  const runs = [...makeRuns(10, 6, "single"), ...makeRuns(10, 8, "workswarm")];
+  const vm1 = T.statisticsFromReport({ runs });
+  assert.equal(vm1.single.n, 10);
+  assert.equal(vm1.workswarm.n, 10);
+  assert.equal(vm1.sampleSmall, true, "n<30 必须标注样本不足");
+  assert.ok(Math.abs(vm1.deltas.rateDiff - 0.2) < 1e-9, "成功率差 +0.2");
+  assert.match(vm1.recommendation.verdict, /建议启用 WorkSwarm：成功率 \+20\.0pp/);
+  assert.equal(vm1.recommendation.source, "client");
+  // 相同通过数：不满足阈值 → 暂不建议
+  const runs2 = [...makeRuns(5, 3, "single"), ...makeRuns(5, 3, "workswarm")];
+  const vm2 = T.statisticsFromReport({ runs: runs2 });
+  assert.match(vm2.recommendation.verdict, /暂不建议启用/);
+});
+
+test("statisticsFromReport：无 runs / 单引擎样本各有明确结果", () => {
+  assert.equal(T.statisticsFromReport(null), null);
+  assert.equal(T.statisticsFromReport({ runs: [] }), null);
+  const onlySingle = T.statisticsFromReport({ runs: makeRuns(8, 8, "single") });
+  assert.ok(onlySingle && onlySingle.single && !onlySingle.workswarm, "仅单引擎也有统计（多引擎侧显示暂无样本）");
+  assert.equal(onlySingle.deltas, null);
+  assert.equal(onlySingle.recommendation, null, "缺另一引擎不产生启用建议");
+});
+
+test("renderStatistics：null → 空串（无数据不渲染）；有数据 → CI/p50/p95/样本不足/启用建议在场", () => {
+  assert.equal(T.renderStatistics(null), "");
+  const vm = T.statisticsFromReport({ runs: [...makeRuns(10, 6, "single"), ...makeRuns(10, 8, "workswarm")] });
+  const html = T.renderStatistics(vm);
+  assert.match(html, /统计判读/);
+  assert.match(html, /CI95 \[/);
+  assert.match(html, /p50 /);
+  assert.match(html, /p95 /);
+  assert.match(html, /样本不足/);
+  assert.match(html, /启用建议：/);
+  assert.match(html, /样本不足：当前样本量 n<30/);
+  assert.match(html, /判定来源：客户端推导/);
+});
+
+test("summaryHtml 挂载统计区：computeSummary 带 stats，完成态报告渲染统计判读", () => {
+  const detail = {
+    run_id: "run-x",
+    status: "completed",
+    suite: "v1",
+    execution: "reference",
+    modes: ["single", "workswarm"],
+    progress: { total: 2, done: 2 },
+    report: { runs: [...makeRuns(6, 4, "single"), ...makeRuns(6, 5, "workswarm")] },
+  };
+  const sum = T.computeSummary(detail);
+  assert.ok(sum.stats, "computeSummary 暴露 stats 视图模型");
+  const html = T.summaryHtml(sum);
+  assert.match(html, /owo-pe-stats/);
+  assert.match(html, /统计判读/);
+});
+
+test("四期样式守卫：style.css 第 18 节统计判读区在场", () => {
+  const flat = shellCss.replace(/\s+/g, "");
+  assert.ok(flat.includes(".owo-pe-panel.owo-pe-stats"), "统计判读区样式在场");
+  assert.ok(flat.includes(".owo-pe-panel.owo-pe-stat-rec.ok"), "建议启用绿色语义在场");
+  assert.ok(flat.includes(".owo-pe-panel.owo-pe-stat-note.bad"), "样本不足提示样式在场");
+});
+
+// ----------------------------------------------------------------------------
+// 11. 进程收敛守卫
 // ----------------------------------------------------------------------------
 
 // 本机（node v24.19 + Windows 管道/重定向 stdio）下，含真实 setInterval 的套件
