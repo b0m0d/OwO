@@ -166,6 +166,12 @@
       reworkResult: null, // 最近一次返工提交结果
       historyReviews: {}, // artifact_id -> 最近一次评审历史记录（rework 预填 review_id 用）
       diagnostic: null, // 最近一次下载的诊断 JSON（已脱敏）
+      // —— 六期：工作区绑定 / 模板信息 / 输出契约失败原因 ——
+      workspace: null, // workspaceFromTeam(team) 归一（root/read_only/write_paths/tree_depth）
+      workspaceView: null, // 最近一次目录树/git-status 载荷（workspaceViewKind 标记类型）
+      workspaceViewKind: "", // "tree" | "git" | ""
+      workspaceBusy: false, // 目录树/git-status 拉取中
+      templateInfo: null, // {template_id, version, title}（目录懒加载解析版本）
     };
 
     // ---------- 常量与工具 ----------
@@ -1345,6 +1351,242 @@
       return html;
     }
 
+    // ---------- 六期：工作区绑定 / 模板信息 / 输出契约失败原因 ----------
+    /// TeamRun.workspace（六期冻结契约）容错归一：字段缺失/旧记录均安全。
+    function workspaceFromTeam(team) {
+      var ws = team && typeof team === "object" ? team.workspace : null;
+      if (!ws || typeof ws !== "object") return null;
+      var root = typeof ws.root === "string" ? ws.root : "";
+      if (!root) return null; // 未绑定工作区的旧团队
+      var paths = Array.isArray(ws.write_allowed_paths) ? ws.write_allowed_paths.map(String) : [];
+      var readOnly = ws.read_only != null ? !!ws.read_only : true;
+      var depth = ws.tree_depth != null ? Number(ws.tree_depth) : null;
+      return {
+        root: root,
+        readOnly: readOnly,
+        writePaths: paths,
+        treeDepth: isFinite(depth) ? depth : null,
+      };
+    }
+
+    /// 工作区框 HTML（root/读写模式/允许范围/深度 + 目录树与 Git 状态按钮）。
+    function workspaceBoxHtml(ws, view, viewKind, busy) {
+      if (!ws) {
+        return '<div class="hint">未绑定项目工作区（该团队使用服务端默认工作区）。新建项目任务面板可绑定真实目录。</div>';
+      }
+      var html = '<div class="owo-pl-wsbox">';
+      html += "<div><b>工作区</b> <code>" + esc(ws.root) + "</code></div>";
+      html += "<div><b>模式</b> " + (ws.readOnly ? "只读（默认）" : "受控写入") +
+        (ws.writePaths && ws.writePaths.length ? '<span class="hint">（允许路径：' + esc(ws.writePaths.join("、")) + "）</span>" : ws.readOnly ? "" : '<span class="hint">（未列允许路径：写入将被拒绝）</span>') + "</div>";
+      if (ws.treeDepth != null) html += "<div><b>目录树深度</b> " + esc(String(ws.treeDepth)) + "</div>";
+      html += '<div class="owo-ws-inline">' +
+        '<button class="owo-ws-mini" id="ws-ws-tree"' + (busy ? " disabled" : "") + ">目录树</button>" +
+        '<button class="owo-ws-mini" id="ws-ws-git"' + (busy ? " disabled" : "") + ">Git 状态</button>" +
+        "</div>";
+      if (view && viewKind === "tree") html += workspaceTreeHtml(view);
+      if (view && viewKind === "git") html += gitStatusHtml(view);
+      html += "</div>";
+      return html;
+    }
+
+    /// 目录树载荷 HTML（扁平列表按层级缩进渲染）。
+    function workspaceTreeHtml(payload) {
+      if (!payload || typeof payload !== "object") return "";
+      var entries = Array.isArray(payload.entries) ? payload.entries : [];
+      if (!entries.length) return '<div class="hint">目录为空（或深度内无条目）。</div>';
+      var rows = entries.map(function (e) {
+        var path = String((e && e.path) || "");
+        var isDir = (e && e.type) === "dir";
+        var depth = path.split(/[\\/]/).length - 1;
+        var pad = depth > 0 ? ' style="padding-left:' + Math.min(depth, 8) * 14 + 'px"' : "";
+        return '<div' + pad + ">" + (isDir ? "📁" : "📄") + " " + esc(path.split(/[\\/]/).pop() || path) +
+          (isDir ? '<span class="hint">/</span>' : (e && e.size != null ? '<span class="hint"> ' + esc(String(e.size)) + "B</span>" : "")) + "</div>";
+      }).join("");
+      return '<div class="owo-pl-tree">' + rows + "</div>";
+    }
+
+    /// Git 状态载荷 HTML（双形状：porcelain 行字符串数组 / 冻结契约对象数组）。
+    function gitStatusHtml(payload) {
+      if (!payload || typeof payload !== "object") return "";
+      if (payload.is_git_repo === false || payload.git === false)
+        return '<div class="hint">该目录不是 Git 仓库。</div>';
+      var rawEntries = Array.isArray(payload.entries) ? payload.entries : [];
+      var rows = [];
+      var count = 0;
+      rawEntries.slice(0, 50).forEach(function (e) {
+        var path, state;
+        if (typeof e === "string") {
+          // porcelain 行：" M path" / "?? path" / "MM path"
+          var m = e.match(/^(\S+)\s+(.*)$/);
+          state = m ? m[1] : "";
+          path = m ? m[2] : e;
+        } else {
+          path = String((e && e.path) || "");
+          state = String((e && e.state) || "");
+        }
+        if (!path) return;
+        count++;
+        rows.push('<div><code>' + esc(path) + '</code> <span class="owo-pl-badge">' + esc(state || "?") + "</span></div>");
+      });
+      var more = rawEntries.length > 50 ? '<div class="hint">…其余 ' + (rawEntries.length - 50) + " 项略</div>" : "";
+      var branch = payload.branch ? "<div><b>分支</b> " + esc(String(payload.branch)) + "</div>" : "";
+      return '<div class="owo-pl-tree">' + branch +
+        "<div><b>状态</b> " + (count === 0 ? "干净（无未提交变更）" : "有变更 " + count + " 项") + "</div>" + rows.join("") + more + "</div>";
+    }
+
+    /// 模板信息框（使用的模板及版本；版本经目录懒加载解析）。
+    function templateBoxHtml(team, templateInfo) {
+      var tid = team && typeof team === "object" ? String(team.template_id || "") : "";
+      if (!tid) {
+        return '<div class="hint">动态组队（未使用模板）——角色由组队策略判定，理由见下方策略区。</div>';
+      }
+      var v = templateInfo && templateInfo.template_id === tid && templateInfo.version != null
+        ? " v" + esc(String(templateInfo.version))
+        : "";
+      var title = templateInfo && templateInfo.template_id === tid && templateInfo.title
+        ? esc(String(templateInfo.title)) + "（" + esc(tid) + "）"
+        : esc(tid);
+      return '<div><b>模板</b> ' + title + v + '<span class="hint">（固定角色/DAG/预算，保证可复现编队）</span></div>';
+    }
+
+    /// 失败原因代码 → 中文标签（六期输出契约失败原因）。
+    function failureCodeLabel(code) {
+      var map = {
+        output_contract_invalid: "输出契约无效",
+        artifact_missing: "缺少交付物",
+        scope_violation: "越权访问",
+      };
+      return map[String(code || "")] || "";
+    }
+
+    /// 单个失败任务的失败原因徽章（failure_code 优先，error 前缀兜底）。
+    function failureBadgeHtml(task) {
+      if (!task) return "";
+      var st = String(task.status || "");
+      if (st !== "Failed" && st !== "Aborted") return "";
+      var code = String(task.failure_code || "");
+      var label = failureCodeLabel(code);
+      if (!label) {
+        var err = String(task.error || "");
+        if (/output_contract_invalid/i.test(err)) code = "output_contract_invalid";
+        else if (/artifact_missing/i.test(err)) code = "artifact_missing";
+        else if (/scope_violation/i.test(err)) code = "scope_violation";
+        label = failureCodeLabel(code);
+      }
+      return label ? '<span class="owo-pl-badge bad" title="失败原因代码：' + esc(code) + '">' + esc(label) + "</span>" : "";
+    }
+
+    /// 详情失败原因汇总（所有失败步骤的代码列表；无失败 → 空串）。
+    function failureSummaryHtml(tasks) {
+      var list = (Array.isArray(tasks) ? tasks : []).filter(function (t) {
+        return t && (t.status === "Failed" || t.status === "Aborted");
+      });
+      if (!list.length) return "";
+      var rows = list.map(function (t) {
+        return "<div>" + esc(String(t.task_id || "")) + " " + failureBadgeHtml(t) +
+          (t.error ? '<span class="hint"> ' + esc(String(t.error).slice(0, 120)) + "</span>" : "") + "</div>";
+      }).join("");
+      return '<div class="owo-pl-failures"><b>失败原因</b>' + rows + "</div>";
+    }
+
+    /// 拉取工作区绑定（/projects/{pid}/workspace；路由未接线时静默降级）。
+    function loadWorkspace() {
+      var tid = state.current;
+      if (!tid) return Promise.resolve();
+      return H.get("/projects/proj-" + encodeURIComponent(tid) + "/workspace").then(function (d) {
+        // 双形状：{workspace:{...}} 包装（二路实现）或直接绑定对象（冻结契约）。
+        var ws = d && d.workspace && typeof d.workspace === "object" ? d.workspace : d;
+        state.workspace = ws && ws.root
+          ? workspaceFromTeam({ workspace: ws }) || {
+              root: String(ws.root),
+              readOnly: ws.read_only != null ? !!ws.read_only : true,
+              writePaths: Array.isArray(ws.write_allowed_paths) ? ws.write_allowed_paths.map(String) : [],
+              treeDepth: ws.tree_depth != null ? Number(ws.tree_depth) : null,
+            }
+          : null;
+        paintWorkspace();
+      }).catch(function () {
+        /* 404（未绑定/未接线）→ 保持 team.workspace 或空态，不打扰 */
+        paintWorkspace();
+      });
+    }
+
+    function loadWorkspaceView(kind) {
+      var tid = state.current;
+      if (!tid || state.workspaceBusy) return Promise.resolve();
+      state.workspaceBusy = true;
+      var path = kind === "git"
+        ? "/projects/proj-" + encodeURIComponent(tid) + "/workspace/git-status"
+        : "/projects/proj-" + encodeURIComponent(tid) + "/workspace/tree" + (state.workspace && state.workspace.treeDepth ? "?depth=" + encodeURIComponent(String(state.workspace.treeDepth)) : "");
+      paintWorkspace();
+      return H.get(path).then(function (d) {
+        state.workspaceView = d || null;
+        state.workspaceViewKind = kind;
+      }).catch(function (e) {
+        state.workspaceView = { error: friendly(e) };
+        state.workspaceViewKind = kind;
+      }).then(function () {
+        state.workspaceBusy = false;
+        paintWorkspace();
+      });
+    }
+
+    function paintWorkspace() {
+      var box = el("#ws-d-workspace");
+      if (box)
+        box.innerHTML =
+          templateBoxHtml(state.team, state.templateInfo) +
+          workspaceBoxHtml(state.workspace, state.workspaceView, state.workspaceViewKind, state.workspaceBusy);
+      var bind = el("#ws-ws-tree");
+      if (bind)
+        bind.onclick = function () {
+          loadWorkspaceView("tree");
+        };
+      var git = el("#ws-ws-git");
+      if (git)
+        git.onclick = function () {
+          loadWorkspaceView("git");
+        };
+      var refresh = el("#ws-ws-refresh");
+      if (refresh)
+        refresh.onclick = function () {
+          state.workspaceView = null;
+          state.workspaceViewKind = "";
+          loadWorkspace();
+        };
+      var fails = el("#ws-d-failures");
+      if (fails) fails.innerHTML = failureSummaryHtml(state.tasks);
+    }
+
+    /// 模板版本解析（经模板目录；目录路由不可用时静默）。
+    function loadTemplateInfo() {
+      var tid = state.team && state.team.template_id;
+      if (!tid || (state.templateInfo && state.templateInfo.template_id === tid)) return Promise.resolve();
+      return H.get("/teams/templates/catalog").then(function (d) {
+        var list = (d && d.catalog) || [];
+        for (var i = 0; i < list.length; i++) {
+          var e = list[i];
+          if (!e || typeof e !== "object") continue;
+          // 双形状：冻结契约顶层 / 三路实现嵌套 template{}
+          var eid = String(e.template_id || (e.template && e.template.template_id) || "");
+          if (eid === tid) {
+            state.templateInfo = {
+              template_id: tid,
+              version: e.version != null ? e.version : null,
+              title: String(e.title || (e.template && e.template.name) || ""),
+            };
+            break;
+          }
+        }
+        var box = el("#ws-d-workspace");
+        if (box) {
+          // 模板行与工作区同区，重画一次。
+          box.innerHTML = workspaceBoxHtml(state.workspace, state.workspaceView, state.workspaceViewKind, state.workspaceBusy);
+          paintWorkspace();
+        }
+      }).catch(function () { /* 目录不可用 → 仅显示 template_id */ });
+    }
+
     // ---------- 五期：下载脱敏诊断（GET /teams/{id}/diagnostic） ----------
     function downloadDiagnostic(teamId) {
       var tid = String(teamId || state.current || "");
@@ -2240,6 +2482,11 @@
           state.reworkResult = null;
           state.historyReviews = {};
           state.diagnostic = null;
+          // 六期：工作区绑定（team.workspace 优先，补 GET /projects/{pid}/workspace）
+          state.workspace = workspaceFromTeam(d.team || null);
+          state.workspaceView = null;
+          state.workspaceViewKind = "";
+          state.workspaceBusy = false;
           stopProgressTimer();
           var tail = (d.audit_tail || []).slice();
           tail.sort(function (a, b) {
@@ -2249,6 +2496,9 @@
           populateSelects();
           paintDetailLive();
           paintStrategy();
+          paintWorkspace();
+          loadWorkspace();
+          loadTemplateInfo();
           loadMetrics();
           loadArtifacts();
           connectEvents(teamId);
@@ -3281,6 +3531,12 @@
         '<div id="ws-d-progress" class="owo-ws-prog" aria-live="polite"><div class="hint">等待进度数据…</div></div>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
+        '<h3>工作区与模板 <span class="hint">六期：绑定目录 / 读写范围 / 模板及版本 / 失败原因代码</span>' +
+        '<button class="owo-ws-mini" id="ws-ws-refresh">刷新工作区</button></h3>' +
+        '<div id="ws-d-workspace"></div>' +
+        '<div id="ws-d-failures"></div>' +
+        "</div>" +
+        '<div class="owo-ws-sec">' +
         '<h3>组队策略与角色指标 <span class="hint">auto 判定理由 / GET /teams/{id}/metrics —— 耗时·调用·token·费用·预算余量</span>' +
         '<button class="owo-ws-mini" id="ws-metrics-refresh">刷新指标</button></h3>' +
         '<div id="ws-d-strategy" class="owo-ws-strategybox">' + strategyBoxHtml(state.strategyDecision) + "</div>" +
@@ -3408,6 +3664,12 @@
       state.reworkResult = null;
       state.historyReviews = {};
       state.diagnostic = null;
+      // 六期：工作区/模板/失败原因重置
+      state.workspace = null;
+      state.workspaceView = null;
+      state.workspaceViewKind = "";
+      state.workspaceBusy = false;
+      state.templateInfo = null;
       stopProgressTimer();
       renderView();
     }
@@ -3661,6 +3923,18 @@
       loadMetrics: loadMetrics,
       loadDeliverables: loadDeliverables,
       downloadDiagnostic: downloadDiagnostic,
+      // —— 六期 ——
+      workspaceFromTeam: workspaceFromTeam,
+      workspaceBoxHtml: workspaceBoxHtml,
+      workspaceTreeHtml: workspaceTreeHtml,
+      gitStatusHtml: gitStatusHtml,
+      templateBoxHtml: templateBoxHtml,
+      failureCodeLabel: failureCodeLabel,
+      failureBadgeHtml: failureBadgeHtml,
+      failureSummaryHtml: failureSummaryHtml,
+      loadWorkspace: loadWorkspace,
+      loadWorkspaceView: loadWorkspaceView,
+      paintWorkspace: paintWorkspace,
       css: function () {
         return CSS;
       },
@@ -3681,6 +3955,7 @@
       nav: nav,
       mount: mount,
       refresh: refresh,
+      open: openTeam, // 六期：Project Launcher 创建成功后直达团队详情
       _test: TEST_API,
     };
   })();

@@ -52,6 +52,9 @@ pub struct WorkerObservation {
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub error: Option<String>,
+    /// 输出契约定向修复次数（R4：解析失败只允许一次）。
+    #[serde(default)]
+    pub output_repairs: u32,
 }
 
 /// 版本化 Artifact 观测。
@@ -62,6 +65,9 @@ pub struct ArtifactObservation {
     pub version: u32,
     pub producer: String,
     pub content_ref: String,
+    /// 评审状态（Approved/Draft/PendingReview/Superseded…；旧观测文件缺省 Draft）。
+    #[serde(default)]
+    pub review_state: String,
 }
 
 /// 自适应组队判定快照（进 observation 供冒烟/报告取证与 UI 展示）。
@@ -127,6 +133,7 @@ struct WorkerStats {
     tool_calls: Mutex<u32>,
     permission_denied: Mutex<u32>,
     tool_failures: Mutex<u32>,
+    output_repairs: Mutex<u32>,
     wall_ms: Mutex<u64>,
     usage: Mutex<TokenUsage>,
     usage_known: Mutex<bool>,
@@ -196,6 +203,7 @@ impl WorkerStats {
             tool_calls: counter(&self.tool_calls),
             permission_denied: counter(&self.permission_denied),
             tool_failures: counter(&self.tool_failures),
+            output_repairs: counter(&self.output_repairs),
             wall_ms: wall,
             prompt_tokens: (usage.prompt_tokens > 0).then_some(usage.prompt_tokens),
             completion_tokens: (usage.completion_tokens > 0).then_some(usage.completion_tokens),
@@ -252,8 +260,13 @@ impl Worker for EvalAgentWorker {
             ..AgentConfig::default()
         };
         let agent = Agent::new(Arc::clone(&self.provider), registry, policy, config);
-        let system = "你是 WorkSwarm 团队中的角色成员。严格依据交接契约处理上游上下文并输出交付物正文本身；不要输出与交付物无关的过程解释。";
-        let mut session = Session::new(&self.workspace, &self.model, Some(system.to_string()));
+        // 输出契约（V1）：Worker 必须返回 WorkerOutputV1 结构化 JSON
+        //（producer 带 artifact；critic 只给评审结论）。
+        let system = format!(
+            "你是 WorkSwarm 团队中的角色成员。严格依据交接契约处理上游上下文；不要输出与交付物无关的过程解释。\n{}",
+            crate::workswarm_output::contract_system_prompt(read_only)
+        );
+        let mut session = Session::new(&self.workspace, &self.model, Some(system));
         let started = Instant::now();
         let outcome = agent
             .run_turn(
@@ -268,13 +281,80 @@ impl Worker for EvalAgentWorker {
         match outcome {
             Ok(turn) => {
                 self.stats.record_success(wall_ms, turn.usage);
-                Ok(turn.final_text.unwrap_or_default())
+                let text = turn.final_text.unwrap_or_default();
+                self.enforce_output_contract(&text, read_only).await
             }
             Err(error) => {
                 let message = format!("agent 回合失败：{error}");
                 self.stats.record_failure(wall_ms, message.clone());
                 Err(message)
             }
+        }
+    }
+}
+
+impl EvalAgentWorker {
+    /// 输出契约执行：非契约输出（自由文本/坏 JSON/字段缺失/critic 越权带 artifact）
+    /// → **恰好一次**定向修复；仍不合规 → `output_contract_invalid`
+    ///（可定位失败原因，禁止无限重试）。
+    async fn enforce_output_contract(&self, text: &str, is_critic: bool) -> Result<String, String> {
+        let parse = crate::workswarm_output::parse_worker_output(text);
+        let contract_ok = match &parse {
+            crate::workswarm_output::WorkerOutputParse::Parsed(output) => {
+                // 角色规则在执行层判定：critic 不得带 artifact；producer 必须带。
+                if is_critic {
+                    output.validate_critic().is_ok()
+                } else {
+                    output.validate().is_ok()
+                }
+            }
+            _ => false,
+        };
+        if contract_ok {
+            return Ok(text.to_string());
+        }
+        // 一次定向修复（直接 provider 调用；计入该 worker 的 model_calls/repairs）。
+        WorkerStats::bump(&self.stats.model_calls);
+        if let Ok(mut value) = self.stats.output_repairs.lock() {
+            *value = value.saturating_add(1);
+        }
+        let role_rule = if is_critic {
+            "你是评审角色：禁止提交 artifact 字段，评审结论 JSON 放 summary"
+        } else {
+            "你是交付角色：status=done 必须携带 artifact（content=交付物正文本体）"
+        };
+        let repair_prompt = format!(
+            "你上一次的回复不符合 WorkerOutputV1 输出契约（必须是合法 JSON：status/summary/\
+artifact{{kind,format,content}}/evidence/open_issues/handoff）。{role_rule}。\
+请修正后**只输出**符合契约的 JSON 本体。\n原始输出：\n{text}\n\n请重新输出符合契约的 JSON："
+        );
+        let messages = [ChatMessage {
+            role: "user".to_string(),
+            content: Some(repair_prompt),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let repaired = match self.provider.complete(&messages, &[]).await {
+            Ok(ModelOutput::Text(text)) => strip_code_fences(&text),
+            _ => String::new(),
+        };
+        match crate::workswarm_output::parse_worker_output(&repaired) {
+            crate::workswarm_output::WorkerOutputParse::Parsed(output) => {
+                let valid = if is_critic {
+                    output.validate_critic().is_ok()
+                } else {
+                    true
+                };
+                if valid {
+                    Ok(repaired)
+                } else {
+                    Err("output_contract_invalid:定向修复一次后仍不符合契约".to_string())
+                }
+            }
+            _ => Err(
+                "output_contract_invalid:定向修复一次后仍不符合契约（自由文本冒充交付物或字段缺失）"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -663,6 +743,7 @@ impl WorkSwarmExecutor {
                             version: artifact.version,
                             producer: artifact.producer.clone(),
                             content_ref: artifact.content_ref.clone(),
+                            review_state: format!("{:?}", artifact.review_state),
                         })
                         .collect();
                     (
@@ -765,8 +846,10 @@ impl WorkSwarmExecutor {
 
         let Some(final_ref) = final_ref else {
             persist_observation(&root, &observation);
-            outcome.error =
-                Some(run_error.unwrap_or_else(|| "TeamRun 未产生任何版本化 Artifact".to_string()));
+            // R4 可定位失败原因：producer 版本链为空（排除 critic 评审产物后无交付物）。
+            outcome.error = Some(run_error.unwrap_or_else(|| {
+                "artifact_missing:producer 版本链无交付物（评审产物不参与最终交付）".to_string()
+            }));
             return Ok((outcome, observation));
         };
         let content = coordinator
@@ -892,25 +975,37 @@ fn strip_code_fences(text: &str) -> String {
         .unwrap_or_else(|| body.trim().to_string())
 }
 
-/// 选择最终交付 Artifact：kind=final 优先，其次 producer kind（document/research/plan），
-/// 再退回版本号最大的 Artifact。
+/// 最终交付选择（R4 输出契约）：只从 **producer 版本链**挑选——
+/// 排除 critic 评审产物（kind=review / producer=m-critic，评审无权成为交付物）；
+/// 优先 review_state=Approved 的最高版本（approved head），否则取最高版本；
+/// 同版本时 leader 综合产物（kind=final）优先于草稿。空链返回 None
+///（上游记 `artifact_missing`）。
 fn pick_final_artifact(artifacts: &[ArtifactObservation]) -> Option<ArtifactObservation> {
-    if artifacts.is_empty() {
+    let chain: Vec<&ArtifactObservation> = artifacts
+        .iter()
+        .filter(|a| a.kind != "review")
+        .filter(|a| a.producer_role() != Some("critic"))
+        .collect();
+    if chain.is_empty() {
         return None;
     }
-    let by_version = |a: &ArtifactObservation, b: &ArtifactObservation| b.version.cmp(&a.version);
-    let mut sorted: Vec<&ArtifactObservation> = artifacts.iter().collect();
-    sorted.sort_by(|a, b| by_version(a, b));
-    sorted
-        .iter()
-        .find(|a| a.kind == "final")
-        .or_else(|| {
-            sorted
-                .iter()
-                .find(|a| matches!(a.kind.as_str(), "document" | "research" | "plan"))
+    let approved = |a: &ArtifactObservation| a.review_state == "Approved";
+    chain
+        .into_iter()
+        .max_by(|a, b| {
+            approved(a)
+                .cmp(&approved(b))
+                .then(a.version.cmp(&b.version))
+                .then_with(|| (a.kind == "final").cmp(&(b.kind == "final")))
         })
-        .or_else(|| sorted.first())
-        .map(|a| (*a).clone())
+        .cloned()
+}
+
+impl ArtifactObservation {
+    /// 从 producer（member_id `m-{role}`）还原角色名。
+    fn producer_role(&self) -> Option<&str> {
+        self.producer.strip_prefix("m-")
+    }
 }
 
 async fn first_failed_step(coordinator: &TeamCoordinator, team_id: &str) -> Option<String> {
@@ -1032,18 +1127,29 @@ mod tests {
         }
     }
 
-    const BUILDER_DRAFT: &str = "## 草稿\n关键结论 A 的初稿，结构完整，待评审。";
-    const CRITIC_REVIEW: &str =
-        "{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\",\"证据充分\"]}";
     const LEADER_FINAL: &str =
         "# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。";
 
+    // —— WorkerOutputV1 契约信封（六期一路：worker 必须返回结构化 JSON，正文在
+    //    artifact.content；与 tests/product_eval_workswarm_tests.rs 同款写法）——
+    const BUILDER_CONTRACT: &str = r###"{"status":"done","summary":"交付完成","artifact":{"kind":"document","format":"markdown","content":"## 草稿\n关键结论 A 的初稿，结构完整，待评审。"},"evidence":[],"open_issues":[]}"###;
+    const CRITIC_CONTRACT: &str = r###"{"status":"done","summary":"{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\",\"证据充分\"]}","evidence":[],"open_issues":[]}"###;
+    const LEADER_CONTRACT: &str = r###"{"status":"done","summary":"最终交付","artifact":{"kind":"final","format":"markdown","content":"# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。"},"evidence":[],"open_issues":[]}"###;
+
     fn scripted_executor(provider: Arc<ScriptedProvider>, root: &Path) -> WorkSwarmExecutor {
-        WorkSwarmExecutor::new(
+        let mut executor = WorkSwarmExecutor::new(
             provider as Arc<dyn ModelProvider>,
             "scripted-model",
             root.join("teams"),
-        )
+        );
+        // 本文件脚本化的是完整三角色流水线（producer → critic → leader）：
+        // 显式 ForceTeam 保持既有语义（auto 模式的自适应裁剪见 team_strategy_tests）。
+        executor.config = WorkSwarmExecutorConfig {
+            max_turns_per_worker: 6,
+            max_retries_on_failure: 1,
+            selection: crate::team_strategy::TeamSelectionMode::ForceTeam,
+        };
+        executor
     }
 
     async fn run_observed(
@@ -1071,7 +1177,8 @@ mod tests {
     #[tokio::test]
     async fn real_teamrun_yields_workers_artifacts_handoffs_and_final_from_cas() {
         let root = fresh_root("happy");
-        let provider = ScriptedProvider::new(&[BUILDER_DRAFT, CRITIC_REVIEW, LEADER_FINAL], 0);
+        let provider =
+            ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT], 0);
         let case = eval_case("ws-happy", EvalCategory::Document);
         let executor = scripted_executor(provider, &root);
 
@@ -1127,7 +1234,8 @@ mod tests {
     #[tokio::test]
     async fn cancel_before_start_keeps_zero_calls_and_zero_team_activity() {
         let root = fresh_root("pre-cancel");
-        let provider = ScriptedProvider::new(&[BUILDER_DRAFT, CRITIC_REVIEW, LEADER_FINAL], 0);
+        let provider =
+            ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT], 0);
         let case = eval_case("ws-pre-cancel", EvalCategory::Document);
         let executor = scripted_executor(Arc::clone(&provider), &root);
         let cancel = Arc::new(AtomicBool::new(true));
@@ -1144,7 +1252,8 @@ mod tests {
     #[tokio::test]
     async fn cancel_mid_flight_freezes_provider_calls_and_marks_steps_aborted() {
         let root = fresh_root("mid-cancel");
-        let provider = ScriptedProvider::new(&[BUILDER_DRAFT, CRITIC_REVIEW, LEADER_FINAL], 250);
+        let provider =
+            ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT], 250);
         let case = eval_case("ws-mid-cancel", EvalCategory::Document);
         let executor = scripted_executor(provider.clone(), &root);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1180,8 +1289,9 @@ mod tests {
     async fn failed_producer_reuses_local_retry_without_rerunning_successful_workers() {
         let root = fresh_root("retry");
         // 第一次产出为空（verify non_empty 失败 → 局部 Retry 只重置 producer 及其下游），
-        // 随后 producer 成功、critic/leader 各一次：全程 4 次模型调用。
-        let provider = ScriptedProvider::new(&["", BUILDER_DRAFT, CRITIC_REVIEW, LEADER_FINAL], 0);
+        // 随后 producer 契约信封成功、critic/leader 各一次：全程 4 次模型调用。
+        let provider =
+            ScriptedProvider::new(&["", BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT], 0);
         let case = eval_case("ws-retry", EvalCategory::Document);
         let executor = scripted_executor(provider, &root);
 
@@ -1192,8 +1302,18 @@ mod tests {
             observation.status, "Succeeded",
             "observation = {observation:?}"
         );
-        assert_eq!(observation.retries_used, 1);
-        assert_eq!(outcome.model_calls, 4, "成功 Worker 不得重跑（2+1+1）");
+        // 六期一路：空输出 = 契约无效 → 恰好一次定向修复（writer model_calls=2、
+        // output_repairs=1、attempts=1）；修复在 worker 内部消化，不触发步骤级 Retry。
+        assert_eq!(observation.retries_used, 0, "workers = {observation:?}");
+        let writer = observation
+            .workers
+            .iter()
+            .find(|w| w.role == "writer")
+            .expect("必须有 producer（writer）记录");
+        assert_eq!(writer.output_repairs, 1, "空输出必须触发恰好一次定向修复");
+        assert_eq!(writer.attempts, 1, "定向修复不算新尝试");
+        assert_eq!(writer.model_calls, 2, "首次空输出 + 一次修复");
+        assert_eq!(outcome.model_calls, 4, "成功 Worker 不得重跑（修复+1+1+1）");
         assert!(
             outcome.error.is_none(),
             "outcome.error = {:?}",

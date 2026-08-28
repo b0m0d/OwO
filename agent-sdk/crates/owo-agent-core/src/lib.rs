@@ -10,6 +10,9 @@ pub mod audit_chain;
 pub mod automation;
 pub mod autoreview;
 pub mod blackboard;
+/// 内置团队模板目录（六期第三路：四类稳定团队候选，安装后参与匹配；见
+/// `team_template_catalog_api`——目录只展示，安装幂等且不自动扩权）。
+pub mod builtin_team_templates;
 pub mod bus_store;
 pub mod capability;
 pub mod cas_store;
@@ -81,6 +84,8 @@ pub mod window_template;
 pub mod worker_pool;
 pub mod workflow;
 pub mod workswarm;
+/// Worker 结构化输出契约（V1：结构化交付物 + critic 评审分离 + 一次定向修复）。
+pub mod workswarm_output;
 pub mod world_model;
 
 pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};

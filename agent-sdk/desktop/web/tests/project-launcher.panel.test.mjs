@@ -1,0 +1,448 @@
+// ============================================================================
+// Project Launcher 面板 Node 前端测试 —— desktop/web/tests/project-launcher.panel.test.mjs
+//
+// 运行：node --test "tests/*.test.mjs"（在 agent-sdk/desktop/web 下）
+// 依赖：仅 node:test / node:assert；无 DOM、无网络（传输层经 _test.setTransport 注入）。
+//
+// 覆盖面（六期第四路验收守卫）：
+//   - 纯逻辑：写入路径解析/安全校验、状态校验、POST /teams 冻结契约请求体；
+//   - 预览：模板/策略两种来源的角色·预算·权限视图模型与 HTML；
+//   - 目录：未安装模板禁用、安装按钮、幂等选用；
+//   - 行为：创建提交锁（快速双击只发一次）、校验失败零请求、成功直达按钮；
+//   - 渲染守卫：七步骨架、无 "## 选择器" 回归、aria-live 错误区；
+//   - 样式守卫：style.css 第 20 节 Launcher/工作区/徽标/窄栏守卫在场。
+// ============================================================================
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const here = dirname(fileURLToPath(import.meta.url));
+const panel = require(join(here, "../panels/project-launcher.panel.js"));
+const T = panel._test;
+const shellCss = readFileSync(join(here, "../style.css"), "utf8");
+
+const drain = () => new Promise((r) => setTimeout(r, 5));
+
+function resetState() {
+  T.state.objective = "";
+  T.state.root = "";
+  T.state.readOnly = true;
+  T.state.writePathsRaw = "";
+  T.state.treeDepth = 2;
+  T.state.strategy = "auto";
+  T.state.catalog = [];
+  T.state.catalogLoaded = false;
+  T.state.selectedTemplate = "";
+  T.state.installBusy = {};
+  T.state.creating = false;
+  T.state.result = null;
+  T.state.error = "";
+}
+
+// ---------- 纯逻辑 ----------
+
+test("parseWritePaths：逗号/换行/去重/去空白", () => {
+  assert.deepEqual(T.parseWritePaths("src/, tests/\ntarget\n,target"), ["src/", "tests/", "target"]);
+  assert.deepEqual(T.parseWritePaths("  "), []);
+  assert.deepEqual(T.parseWritePaths(null), []);
+});
+
+test("pathIsSafe：拒绝 .. 与绝对路径转义", () => {
+  assert.equal(T.pathIsSafe(".."), false);
+  assert.equal(T.pathIsSafe("../etc"), false);
+  assert.equal(T.pathIsSafe("a/../b"), false);
+  assert.equal(T.pathIsSafe("a\\..\\b"), false);
+  assert.equal(T.pathIsSafe("C:/abs"), false);
+  assert.equal(T.pathIsSafe(""), false);
+  assert.equal(T.pathIsSafe("src/main.rs"), true);
+  assert.equal(T.pathIsSafe("tests/"), true);
+});
+
+test("validateState：目标/目录必填 + 不安全路径 + 深度边界", () => {
+  resetState();
+  const errs0 = T.validateState(T.state);
+  assert.equal(errs0.length, 2, "空目标+空目录 = 2 条错误");
+  assert.match(errs0[0], /任务目标/);
+  assert.match(errs0[1], /项目目录/);
+  T.state.objective = "修复登录超时";
+  T.state.root = "T:\\demo";
+  T.state.writePathsRaw = "src, ../escape";
+  const errs1 = T.validateState(T.state);
+  assert.equal(errs1.length, 1);
+  assert.match(errs1[0], /不安全路径/);
+  T.state.writePathsRaw = "src";
+  T.state.treeDepth = 9;
+  const errs2 = T.validateState(T.state);
+  assert.equal(errs2.length, 1);
+  assert.match(errs2[0], /深度/);
+  T.state.treeDepth = 2;
+  assert.deepEqual(T.validateState(T.state), []);
+});
+
+test("buildCreateBody：冻结契约形状（workspace/strategy/mode/template）", () => {
+  resetState();
+  T.state.objective = " 修复登录超时 ";
+  T.state.root = " T:\\demo ";
+  T.state.writePathsRaw = "src/, tests/";
+  T.state.treeDepth = 3;
+  T.state.strategy = "team";
+  T.state.selectedTemplate = "";
+  const body = T.buildCreateBody(T.state);
+  assert.equal(body.objective, "修复登录超时");
+  assert.equal(body.strategy, "team");
+  assert.equal(body.mode, "team", "team 策略显式带 mode");
+  assert.equal(body.workspace.root, "T:\\demo");
+  assert.equal(body.workspace.read_only, true, "默认只读");
+  assert.deepEqual(body.workspace.write_allowed_paths, ["src/", "tests/"]);
+  assert.equal(body.workspace.tree_depth, 3);
+  assert.ok(!("template_id" in body));
+
+  T.state.strategy = "single";
+  T.state.selectedTemplate = "code-change-v1";
+  const b2 = T.buildCreateBody(T.state);
+  assert.equal(b2.mode, "single");
+  assert.equal(b2.template_id, "code-change-v1");
+
+  T.state.strategy = "auto";
+  const b3 = T.buildCreateBody(T.state);
+  assert.ok(!("mode" in b3), "auto 不带 mode（缺省 Team 由策略判定）");
+
+  T.state.root = "";
+  const b4 = T.buildCreateBody(T.state);
+  assert.ok(!("workspace" in b4), "root 为空时不带 workspace");
+});
+
+test("buildCreateBody：tree_depth 越界收敛到 1–8", () => {
+  resetState();
+  T.state.objective = "x";
+  T.state.root = "T:\\demo";
+  T.state.treeDepth = 99;
+  assert.equal(T.buildCreateBody(T.state).workspace.tree_depth, 8);
+  T.state.treeDepth = 0;
+  assert.equal(T.buildCreateBody(T.state).workspace.tree_depth, 1);
+});
+
+// ---------- 预览 ----------
+
+test("previewFromTemplate：角色/依赖/预算/产物类型", () => {
+  const entry = {
+    template_id: "research-brief-v1",
+    version: 1,
+    title: "研究简报",
+    roles: [{ role: "researcher", duty: "并行检索" }, { role: "verifier", duty: "证据核验" }],
+    edges: [{ from: "researcher", to: "verifier" }],
+    budget_calls_total: 9,
+    artifact_kinds: ["report"],
+  };
+  const p = T.previewFromTemplate(entry);
+  assert.equal(p.roleCount, 2);
+  assert.equal(p.edgeCount, 1);
+  assert.equal(p.budget, 9);
+  assert.deepEqual(p.artifactKinds, ["report"]);
+  assert.equal(T.previewFromTemplate(null), null);
+});
+
+test("previewFromStrategy：single 一角色 / team 双角色 / auto 交策略判定", () => {
+  const s = T.previewFromStrategy("single");
+  assert.equal(s.roleCount, 1);
+  assert.match(s.roles[0].role, /producer/);
+  const t = T.previewFromStrategy("team");
+  assert.ok(t.roleCount === null && t.roles.length === 2);
+  const a = T.previewFromStrategy("auto");
+  assert.ok(a.roleCount === null && /判定理由/.test(a.note));
+});
+
+test("permissionsSummary：只读/受控写入/无允许路径告警", () => {
+  resetState();
+  assert.match(T.permissionsSummary(T.state), /只读/);
+  T.state.readOnly = false;
+  assert.match(T.permissionsSummary(T.state), /写入将被拒绝/);
+  T.state.writePathsRaw = "src/, docs";
+  const s = T.permissionsSummary(T.state);
+  assert.match(s, /src/);
+  assert.match(s, /docs/);
+  assert.match(s, /深度 2/);
+});
+
+test("buildPreview：目录命中模板；未命中回退策略预览", () => {
+  const catalog = [{ template_id: "code-change-v1", title: "代码变更", version: 1, roles: [{ role: "analyzer" }, { role: "writer" }, { role: "reviewer" }], budget_calls_total: 10 }];
+  resetState();
+  T.state.selectedTemplate = "code-change-v1";
+  const p1 = T.buildPreview(T.state, catalog);
+  assert.equal(p1.source, "template");
+  assert.equal(p1.roleCount, 3);
+  assert.equal(p1.budget, 10);
+  T.state.selectedTemplate = "no-such";
+  assert.equal(T.buildPreview(T.state, catalog).source, "strategy");
+});
+
+// ---------- 目录渲染 ----------
+
+test("templateOptionsHtml：未安装禁用 + 选中态", () => {
+  const catalog = [
+    { template_id: "code-change-v1", title: "代码变更", version: 1, installed: true },
+    { template_id: "research-brief-v1", title: "研究简报", version: 1, installed: false },
+  ];
+  const html = T.templateOptionsHtml(catalog, "code-change-v1");
+  assert.match(html, /value="code-change-v1" selected/);
+  assert.match(html, /value="research-brief-v1" disabled/);
+  assert.match(html, /未安装/);
+  assert.match(T.templateOptionsHtml([], ""), /不使用模板/);
+});
+
+test("catalogHtml：候选徽标/安装按钮/选用按钮/角色与预算行", () => {
+  const catalog = [
+    { template_id: "code-change-v1", title: "代码变更", version: 1, installed: true, roles: [{ role: "analyzer" }, { role: "writer" }], budget_calls_total: 10 },
+    { template_id: "structured-extract-v1", title: "结构化抽取", installed: false },
+  ];
+  const html = T.catalogHtml(catalog, {});
+  assert.match(html, /data-pl-install="structured-extract-v1"/);
+  assert.match(html, /data-pl-select="code-change-v1"/);
+  assert.match(html, /已安装/);
+  assert.match(html, /预算 10 次/);
+  assert.match(T.catalogHtml([], {}), /目录为空/);
+});
+
+test("normTemplate：三路实现嵌套形状（template.template_id/name/depends_on/预算逐角色）", () => {
+  const raw = {
+    installed: false,
+    template: {
+      template_id: "code-change-v1",
+      name: "代码变更（分析 → 单写者实现 → 只读审查）",
+      mode: "team",
+      roles: [
+        { role: "code_analyzer", depends_on: [], handoff_contract: "只读分析" },
+        { role: "implementer", depends_on: ["code_analyzer"], handoff_contract: "单写者" },
+        { role: "reviewer", depends_on: ["implementer"], handoff_contract: "只读审查" },
+      ],
+    },
+    budget_calls_per_role: [
+      { role: "code_analyzer", budget_calls: 3 },
+      { role: "implementer", budget_calls: 5 },
+      { role: "reviewer", budget_calls: 3 },
+    ],
+    artifact_kinds: ["analysis", "code"],
+  };
+  const n = T.normTemplate(raw);
+  assert.equal(n.id, "code-change-v1");
+  assert.match(n.title, /代码变更/);
+  assert.equal(n.version, null);
+  assert.equal(n.roles.length, 3);
+  assert.equal(n.roles[1].duty, "单写者");
+  assert.equal(n.edgeCount, 2, "depends_on 折算为边");
+  assert.equal(n.budgetTotal, 11, "逐角色预算求和");
+  assert.deepEqual(n.kinds, ["analysis", "code"]);
+  assert.equal(T.normTemplate(null), null);
+  assert.equal(T.normTemplate({ installed: true }), null, "无 id 拒绝");
+
+  // 渲染走嵌套形状：安装按钮与角色行在场
+  const html = T.catalogHtml([raw], {});
+  assert.match(html, /data-pl-install="code-change-v1"/);
+  assert.match(html, /code_analyzer/);
+  assert.match(html, /预算 11 次/);
+});
+
+// ---------- 行为：创建流程（无 DOM，传输层注入） ----------
+
+function makeTransport() {
+  const calls = { post: [], get: [] };
+  return {
+    calls,
+    get(path) {
+      calls.get.push(path);
+      return Promise.resolve({ catalog: [] });
+    },
+    post(path, body) {
+      calls.post.push({ path, body });
+      return Promise.resolve({ team_id: "team-x1", project_space_id: "proj-team-x1", strategy_decision: { mode: "single" } });
+    },
+  };
+}
+
+test("doCreate：校验失败零请求；成功一次 POST /teams 且结果进入状态", async () => {
+  resetState();
+  const tr = makeTransport();
+  T.setTransport(tr);
+  T.state.objective = "";
+  T.doCreate(); // 校验失败：不得发请求
+  await drain();
+  assert.equal(tr.calls.post.length, 0);
+
+  T.state.objective = "修复登录超时";
+  T.state.root = "T:\\demo";
+  T.state.strategy = "auto";
+  T.doCreate();
+  await drain();
+  assert.equal(tr.calls.post.length, 1);
+  assert.equal(tr.calls.post[0].path, "/teams");
+  assert.equal(tr.calls.post[0].body.workspace.root, "T:\\demo");
+  assert.equal(T.state.result.team_id, "team-x1");
+  assert.equal(T.state.error, "");
+});
+
+test("doCreate：快速双击只发一次请求（提交锁）", async () => {
+  resetState();
+  const tr = makeTransport();
+  T.setTransport(tr);
+  T.state.objective = "修复";
+  T.state.root = "T:\\demo";
+  T.doCreate();
+  T.doCreate(); // creating 锁内第二次调用
+  T.doCreate();
+  await drain();
+  assert.equal(tr.calls.post.length, 1);
+  assert.equal(T.state.creating, false, "结束后解锁");
+});
+
+test("doCreate：服务端 400 错误进入友好错误且解锁", async () => {
+  resetState();
+  T.setTransport({
+    get() { return Promise.resolve({ catalog: [] }); },
+    post() { return Promise.reject(new Error("400: 缺少 objective")); },
+  });
+  T.state.objective = "x";
+  T.state.root = "T:\\demo";
+  T.doCreate();
+  await drain();
+  assert.match(T.state.error, /400|请求被拒绝/);
+  assert.equal(T.state.creating, false);
+});
+
+test("gotoTeam：切导航按钮并调 workswarm.open(team_id)", async () => {
+  // 最小 document/OwoPanels shim
+  const clicks = [];
+  const navBtn = { click: () => clicks.push("nav") };
+  globalThis.document = { querySelector: (sel) => (sel === '#panelNav button[data-panel="workswarm"]' ? navBtn : null) };
+  let opened = null;
+  win().OwoPanels.workswarm = { open: (id) => (opened = id) };
+  T.gotoTeam("team-x1");
+  await new Promise((r) => setTimeout(r, 90));
+  assert.deepEqual(clicks, ["nav"]);
+  assert.equal(opened, "team-x1");
+  delete globalThis.document;
+});
+
+function win() {
+  return typeof window !== "undefined" ? window : globalThis;
+}
+
+// ---------- 渲染守卫 ----------
+
+test("viewHtml：七步骨架 + 错误区 aria-live + 预览区在场", () => {
+  resetState();
+  const html = T.viewHtml();
+  assert.match(html, /id="pl-objective"/);
+  assert.match(html, /id="pl-root"/);
+  assert.match(html, /id="pl-readonly" checked/);
+  assert.match(html, /id="pl-writebox" hidden/);
+  assert.match(html, /id="pl-strategy"/);
+  assert.match(html, /id="pl-template"/);
+  assert.match(html, /id="pl-preview"/);
+  assert.match(html, /id="pl-create" class="primary"/);
+  assert.match(html, /id="pl-errors" aria-live="polite"/);
+  assert.match(html, /id="pl-result"/);
+  assert.ok(!html.includes("##"), "不得出现 '## 选择器' 回归");
+});
+
+test("viewHtml：写入模式展开 + 只读隐藏切换", () => {
+  resetState();
+  T.state.readOnly = false;
+  T.state.writePathsRaw = "src/";
+  const html = T.viewHtml();
+  assert.ok(!html.includes('id="pl-writebox" hidden'), "写入模式不隐藏写路径框");
+  assert.match(html, /允许写入路径/);
+});
+
+test("resultHtml：team_id 与直达按钮", () => {
+  const html = T.resultHtml({ team_id: "team-x1", project_space_id: "proj-team-x1" });
+  assert.match(html, /team-x1/);
+  assert.match(html, /id="pl-goto-team"/);
+  assert.equal(T.resultHtml(null), "");
+});
+
+// ---------- WorkSwarm 详情六期补充（同面板内纯函数） ----------
+
+test("workspaceFromTeam：完整/缺字段/旧记录", () => {
+  const wsw = require(join(here, "../panels/workswarm.panel.js"))._test;
+  const full = wsw.workspaceFromTeam({ workspace: { root: "T:\\demo", read_only: false, write_allowed_paths: ["src/"], tree_depth: 3 } });
+  assert.equal(full.root, "T:\\demo");
+  assert.equal(full.readOnly, false);
+  assert.deepEqual(full.writePaths, ["src/"]);
+  assert.equal(full.treeDepth, 3);
+  assert.equal(wsw.workspaceFromTeam({ workspace: null }), null);
+  assert.equal(wsw.workspaceFromTeam({ workspace: {} }), null, "无 root 视为未绑定");
+  assert.equal(wsw.workspaceFromTeam(null), null);
+});
+
+test("workspaceBoxHtml：未绑定空态/绑定内容/目录树与 Git 按钮", () => {
+  const wsw = require(join(here, "../panels/workswarm.panel.js"))._test;
+  assert.match(wsw.workspaceBoxHtml(null, null, "", false), /未绑定项目工作区/);
+  const ws = { root: "T:\\demo", readOnly: false, writePaths: ["src/"], treeDepth: 2 };
+  const html = wsw.workspaceBoxHtml(ws, null, "", false);
+  assert.match(html, /id="ws-ws-tree"/);
+  assert.match(html, /id="ws-ws-git"/);
+  assert.match(html, /T:\\demo/);
+  assert.match(html, /src\//);
+});
+
+test("workspaceTreeHtml：层级缩进渲染；空条目空态", () => {
+  const wsw = require(join(here, "../panels/workswarm.panel.js"))._test;
+  const html = wsw.workspaceTreeHtml({ entries: [{ path: "src", type: "dir" }, { path: "src/main.rs", type: "file", size: 10 }] });
+  assert.match(html, /src/);
+  assert.match(html, /main\.rs/);
+  assert.match(html, /padding-left/);
+  assert.match(wsw.workspaceTreeHtml({ entries: [] }), /目录为空/);
+});
+
+test("gitStatusHtml：非 Git 仓库不报错；分支与变更行", () => {
+  const wsw = require(join(here, "../panels/workswarm.panel.js"))._test;
+  assert.match(wsw.gitStatusHtml({ is_git_repo: false }), /不是 Git 仓库/);
+  const html = wsw.gitStatusHtml({ is_git_repo: true, branch: "main", clean: false, entries: [{ path: "a.rs", state: "M" }] });
+  assert.match(html, /main/);
+  assert.match(html, /a\.rs/);
+});
+
+test("templateBoxHtml：动态组队提示/模板 id 与版本", () => {
+  const wsw = require(join(here, "../panels/workswarm.panel.js"))._test;
+  assert.match(wsw.templateBoxHtml({}, null), /动态组队/);
+  const html = wsw.templateBoxHtml({ template_id: "code-change-v1" }, { template_id: "code-change-v1", version: 1, title: "代码变更" });
+  assert.match(html, /代码变更/);
+  assert.match(html, /v1/);
+});
+
+test("failureCodeLabel / failureBadgeHtml：三码映射与 error 前缀兜底", () => {
+  const wsw = require(join(here, "../panels/workswarm.panel.js"))._test;
+  assert.equal(wsw.failureCodeLabel("output_contract_invalid"), "输出契约无效");
+  assert.equal(wsw.failureCodeLabel("artifact_missing"), "缺少交付物");
+  assert.equal(wsw.failureCodeLabel("scope_violation"), "越权访问");
+  assert.equal(wsw.failureCodeLabel("other"), "");
+  assert.match(wsw.failureBadgeHtml({ status: "Failed", failure_code: "artifact_missing" }), /缺少交付物/);
+  assert.match(wsw.failureBadgeHtml({ status: "Failed", error: "output_contract_invalid: JSON 不可解析" }), /输出契约无效/);
+  assert.equal(wsw.failureBadgeHtml({ status: "Succeeded" }), "");
+  const sum = wsw.failureSummaryHtml([
+    { task_id: "t1", status: "Failed", failure_code: "scope_violation", error: "越界写 /etc" },
+    { task_id: "t2", status: "Succeeded" },
+  ]);
+  assert.match(sum, /t1/);
+  assert.match(sum, /越权访问/);
+  assert.ok(!sum.includes("t2"));
+});
+
+// ---------- 样式守卫 ----------
+
+test("style.css 第 20 节守卫：Launcher 布局/预览/目录/工作区/徽标/窄栏在场", () => {
+  assert.match(shellCss, /20\. 六期：Project Launcher/);
+  assert.match(shellCss, /\.owo-pl \{ display: flex; flex-direction: column;/);
+  assert.match(shellCss, /\.owo-pl-step \{[^}]*min-width: 0/);
+  assert.match(shellCss, /\.owo-pl-roles \{ display: flex; flex-wrap: wrap;/);
+  assert.match(shellCss, /\.owo-pl-cats \{[^}]*min-width: 0/);
+  assert.match(shellCss, /\.owo-pl-badge/);
+  assert.match(shellCss, /\.owo-pl-wsbox \{[^}]*min-width: 0/);
+  assert.match(shellCss, /\.owo-pl-tree \{[^}]*overflow: auto/);
+  assert.match(shellCss, /owo-pl-tree > div \{ overflow-wrap: anywhere/);
+  assert.match(shellCss, /@media \(max-width: 1280px\)/);
+});

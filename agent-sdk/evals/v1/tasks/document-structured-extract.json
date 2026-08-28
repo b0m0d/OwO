@@ -18,9 +18,9 @@
     { "type": "json_field_equals", "path": "out/extract.json", "field": "owner", "expected": "张三" },
     { "type": "json_field_equals", "path": "out/extract.json", "field": "deadline", "expected": "2026-09-05" },
     { "type": "json_field_equals", "path": "out/extract.json", "field": "budget", "expected": 42000 },
-    { "type": "json_field_equals", "path": "out/extract.json", "field": "scope", "expected": "重构结算模块" }
+    { "type": "json_field_equals", "path": "out/extract.json", "field": "scope", "expected": "重构结算模块，仅限清算子域" }
   ],
   "reference_outputs": {
-    "out/extract.json": "{\"owner\":\"张三\",\"deadline\":\"2026-09-05\",\"budget\":42000,\"scope\":\"重构结算模块\"}"
+    "out/extract.json": "{\"owner\":\"张三\",\"deadline\":\"2026-09-05\",\"budget\":42000,\"scope\":\"重构结算模块，仅限清算子域\"}"
   }
 }

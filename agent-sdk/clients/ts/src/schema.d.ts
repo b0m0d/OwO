@@ -2584,6 +2584,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/projects/{id}/workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["projectGetWorkspace"];
+        put: operations["projectBindWorkspace"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/workspace/git-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["projectWorkspaceGitStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/workspace/tree": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["projectWorkspaceTree"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/schemas": {
         parameters: {
             query?: never;
@@ -3298,6 +3346,38 @@ export interface paths {
         get: operations["workswarmListTemplates"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["teamTemplateCatalog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/templates/catalog/{id}/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["teamTemplateCatalogInstall"];
         delete?: never;
         options?: never;
         head?: never;
@@ -8297,6 +8377,166 @@ export interface operations {
             };
         };
     };
+    projectGetWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description å½åå·¥ä½åºç»å®ï¼body = {workspace:{project_id/root/read_only/write_allowed_paths/tree_depth/created_at/root_canonical/write_allowed_canonical}}ï¼UI å®¹éåæ¶æ¥åé¡¶å±å½¢ç¶ï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        workspace: {
+                            project_id?: string;
+                            read_only?: boolean;
+                            root?: string;
+                            team_id?: string;
+                            tree_depth?: number | null;
+                            write_allowed_paths?: string[];
+                        } & {
+                            [key: string]: unknown;
+                        };
+                    };
+                };
+            };
+            /** @description project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    projectBindWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    read_only?: boolean;
+                    root: string;
+                    tree_depth?: number;
+                    write_allowed_paths?: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description å·¥ä½åºç»å®å·²åå¥ï¼body = ç»å®åæ¾ï¼project_id/root/read_only/write_allowed_paths/tree_depth/bound_atï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description root ä¸å­å¨/éæ³æè¶çè·¯å¾ */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    projectWorkspaceGitStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Git å·¥ä½åºç¶æï¼entries = git status --porcelain è¡å­ç¬¦ä¸²æ°ç»ï¼å¦ " M path"/"?? path"ï¼ï¼å¦æ root/gitï¼å¸å°ï¼æ¯å¦ Git ä»åºï¼/porcelainï¼åæï¼ï¼é Git ä»åº entries ä¸ºç©ºæ°ç»ï¼ä¸æ¥é */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        entries: string[];
+                        git?: boolean;
+                        porcelain?: string;
+                        root?: string;
+                    };
+                };
+            };
+            /** @description project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    projectWorkspaceTree: {
+        parameters: {
+            query?: {
+                depth?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description æå¹³ç®å½æ ï¼entries:[{path,type:dir|file,size?}]ï¼root/truncated éå ï¼UI æè·¯å¾å±çº§ç¼©è¿æ¸²æï¼ï¼å·¥ä½åºæªç»å®/ä¸å­å¨ â 404 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        depth?: number;
+                        entries: ({
+                            path?: string;
+                            size?: number | null;
+                            /** @enum {string} */
+                            type?: "dir" | "file";
+                        } & {
+                            [key: string]: unknown;
+                        })[];
+                        root?: string;
+                        truncated?: boolean;
+                    };
+                };
+            };
+            /** @description project / workspace not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     schemasList: {
         parameters: {
             query?: never;
@@ -9305,11 +9545,22 @@ export interface operations {
                      */
                     strategy?: "auto" | "single" | "team";
                     template_id?: string;
+                    /** @description å­æï¼å¯éï¼ï¼ç»å®çå®é¡¹ç®å·¥ä½åºï¼ç¼ºç = æå¡ç«¯é»è®¤å·¥ä½åº */
+                    workspace?: {
+                        /** @description ç¼ºç trueï¼åªè¯»ï¼ï¼åå¥éåè®¸è·¯å¾+æéå®¡æ¹ */
+                        read_only?: boolean;
+                        /** @description é¡¹ç®ç®å½ï¼ç»å¯¹è·¯å¾ï¼ */
+                        root: string;
+                        /** @description ç®å½æ å±ç¤ºæ·±åº¦ï¼1-8ï¼ */
+                        tree_depth?: number;
+                        /** @description ç¸å¯¹ root çåè®¸åå¥è·¯å¾ */
+                        write_allowed_paths?: string[];
+                    };
                 };
             };
         };
         responses: {
-            /** @description team run created; background run loop drives phasesï¼body å« strategy_decisionï¼ç»éå³ç­ï¼mode/roles/parallelism/budget_calls_total/reasonsï¼ä¾ UI æ¸²æç»éçç±ä¸è°ç¨é¢ç®ï¼ */
+            /** @description team run created; background run loop drives phasesï¼body å« strategy_decisionï¼ç»éå³ç­ï¼mode/roles/parallelism/budget_calls_total/reasonsï¼ä¾ UI æ¸²æç»éçç±ä¸è°ç¨é¢ç®ï¼ä¸ workspaceï¼å­æç»å®åæ¾ï¼ */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -9329,6 +9580,66 @@ export interface operations {
         responses: {
             /** @description adopted team templates */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    teamTemplateCatalog: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description åç½®æ¨¡æ¿ç®å½ï¼åéåºï¼ï¼æ¯é¡¹å« installed ä¸ template å¯¹è±¡ï¼template_id/name/mode/roles[{role,depends_on,handoff_contract}]ï¼+ budget_calls_per_role[]/completion_criteria[]/tool_scope/artifact_kinds[]/auto_match_keywordsï¼å®è£ç» POST /teams/templates/catalog/{id}/install å installed=true å¹¶åä¸èªå¨å¹é */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        catalog: ({
+                            installed?: boolean;
+                            template?: {
+                                mode?: string;
+                                name?: string;
+                                template_id?: string;
+                            } & {
+                                [key: string]: unknown;
+                            };
+                        } & {
+                            [key: string]: unknown;
+                        })[];
+                    };
+                };
+            };
+        };
+    };
+    teamTemplateCatalogInstall: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description é¦æ¬¡å®è£ {installed:true, already_installed:false, template, auto_match, budget_hint}ï¼å¹ç­éæ¾ {installed:false, already_installed:true, note}ï¼ä¸è¦çæ¢æååæ¨¡æ¿ï¼ãå®è£åæ¨¡æ¿è¿å¥æ³¨åè¡¨å¹¶åä¸èªå¨å¹éï¼find_matchï¼ï¼ä¸èªå¨æ©å¤§æä»¶/å½ä»¤/ç½ç»æé */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description template not found in catalog */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

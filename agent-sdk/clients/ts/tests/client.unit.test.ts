@@ -501,3 +501,107 @@ test("五期契约（返工 + 交付物 + 指标 + 诊断）", () => {
   const diag: DiagnosticResponse = { team_id: "team-1", redacted: true };
   assert.equal(diag.team_id, "team-1");
 });
+
+// ---------------------------------------------------------------------------
+// 六期冻结契约（第二/三路实现，第四路接线）：工作区绑定 / 模板目录 / POST /teams workspace。
+// 类型级断言——字段漂移先在 tsc 编译期失败。
+// ---------------------------------------------------------------------------
+
+test("六期契约（工作区绑定 + 模板目录 + teams workspace 字段）", () => {
+  type Present<R> = [R] extends [never] ? false : true;
+
+  // POST /teams 请求体 additive workspace（六期冻结：root 必填、read_only 缺省 true）。
+  type CreateTeamBody = NonNullable<
+    operations["workswarmCreateTeam"]["requestBody"]
+  >["content"]["application/json"];
+  const createBody: CreateTeamBody = {
+    objective: "修复登录超时并补充回归测试",
+    strategy: "auto",
+    workspace: {
+      root: "T:\\demo",
+      read_only: true,
+      write_allowed_paths: ["src/", "tests/"],
+      tree_depth: 2,
+    },
+  };
+  assert.equal(createBody.workspace?.root, "T:\\demo");
+  assert.equal(createBody.workspace?.read_only, true);
+
+  // PUT /projects/{id}/workspace 绑定 → 200 绑定回显。
+  type BindBody = NonNullable<
+    operations["projectBindWorkspace"]["requestBody"]
+  >["content"]["application/json"];
+  const bind: BindBody = { root: "T:\\demo", read_only: true, tree_depth: 2 };
+  assert.equal(bind.root, "T:\\demo");
+  type BindOk = Present<operations["projectBindWorkspace"]["responses"][200]>;
+  const bindOk: BindOk = true;
+  assert.equal(bindOk, true);
+
+  // GET /projects/{id}/workspace：body = {workspace:{...}}（二路实现包装形状）。
+  type Workspace = operations["projectGetWorkspace"]["responses"][200]["content"]["application/json"];
+  const ws: Workspace = {
+    workspace: {
+      project_id: "proj-team-1",
+      team_id: "team-1",
+      root: "T:\\demo",
+      read_only: true,
+      write_allowed_paths: ["src/"],
+      tree_depth: 2,
+    },
+  };
+  assert.equal(ws.workspace.root, "T:\\demo");
+  assert.equal(ws.workspace.read_only, true);
+
+  // GET /projects/{id}/workspace/tree：扁平 entries（root/depth/truncated 附加）。
+  type Tree =
+    operations["projectWorkspaceTree"]["responses"][200]["content"]["application/json"];
+  const tree: Tree = {
+    root: "T:\\demo",
+    depth: 2,
+    truncated: false,
+    entries: [
+      { path: "src", type: "dir" },
+      { path: "src/main.rs", type: "file", size: 1024 },
+    ],
+  };
+  assert.equal(tree.entries[0]?.type, "dir");
+
+  // GET /projects/{id}/workspace/git-status：porcelain 行字符串数组（非 Git 仓库为空数组）。
+  type Git =
+    operations["projectWorkspaceGitStatus"]["responses"][200]["content"]["application/json"];
+  const git: Git = {
+    root: "T:\\demo",
+    git: true,
+    porcelain: " M a.rs\n?? b.txt",
+    entries: [" M a.rs", "?? b.txt"],
+  };
+  assert.equal(git.entries.length, 2);
+
+  // GET /teams/templates/catalog：候选区（installed 标记）。
+  type Catalog =
+    operations["teamTemplateCatalog"]["responses"][200]["content"]["application/json"];
+  const cat: Catalog = {
+    catalog: [
+      { template_id: "code-change-v1", version: 1, installed: true, builtin: true },
+      { template_id: "research-brief-v1", version: 1, installed: false, builtin: true },
+    ],
+  };
+  assert.equal(cat.catalog.length, 2);
+
+  // POST /teams/templates/catalog/{id}/install：幂等（replayed）。
+  type InstallOk = Present<
+    operations["teamTemplateCatalogInstall"]["responses"][200]
+  >;
+  const installOk: InstallOk = true;
+  assert.equal(installOk, true);
+
+  // 404 语义在场：未知 project / 未知模板 id。
+  type WsNotFound = Present<operations["projectGetWorkspace"]["responses"][404]>;
+  type InstallNotFound = Present<
+    operations["teamTemplateCatalogInstall"]["responses"][404]
+  >;
+  const wsNotFound: WsNotFound = true;
+  const installNotFound: InstallNotFound = true;
+  assert.equal(wsNotFound, true);
+  assert.equal(installNotFound, true);
+});

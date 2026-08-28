@@ -70,10 +70,16 @@ impl ModelProvider for ScriptedProvider {
 // ---------------------------------------------------------------------------
 
 const ARTIFACT: &str = "out/report.md";
-const BUILDER_DRAFT: &str = "## 草稿\n关键结论 A 的初稿，结构完整，待评审。";
-const CRITIC_REVIEW: &str = "{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\"]}";
 const LEADER_FINAL: &str =
     "# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。";
+
+// —— WorkerOutputV1 契约信封（R4：worker 必须返回结构化 JSON，正文在 artifact.content）——
+// 手写 const JSON（r###：正文含 `"##` 序列，需三重 # 终止）；content 内 \n 为
+// JSON 转义 = 真实换行，与 LEADER_FINAL 字面一致。
+
+const BUILDER_CONTRACT: &str = r###"{"status":"done","summary":"交付完成","artifact":{"kind":"document","format":"markdown","content":"## 草稿\n关键结论 A 的初稿，结构完整，待评审。"},"evidence":[],"open_issues":[]}"###;
+const CRITIC_CONTRACT: &str = r###"{"status":"done","summary":"{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\"]}","evidence":[],"open_issues":[]}"###;
+const LEADER_CONTRACT: &str = r###"{"status":"done","summary":"最终交付","artifact":{"kind":"final","format":"markdown","content":"# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。"},"evidence":[],"open_issues":[]}"###;
 
 fn ws_case(id: &str) -> ProductEvalCase {
     ProductEvalCase {
@@ -186,7 +192,7 @@ fn run_report(report: &owo_agent_core::product_eval::ProductEvalReport) {
 #[tokio::test]
 async fn multi_mode_matrix_cell_passes_with_workswarm_semantics() {
     let root = fresh_out("multi-pass");
-    let provider = ScriptedProvider::new(&[BUILDER_DRAFT, CRITIC_REVIEW, LEADER_FINAL]);
+    let provider = ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT]);
     let case = ws_case("ws-multi-pass");
     let runner = MatrixRunner::new(bundle_with(case, &root), root.join("out"));
     let report = runner
@@ -241,7 +247,7 @@ async fn same_runner_parity_between_dry_single_and_workswarm_multi() {
         .await
         .unwrap();
 
-    let provider = ScriptedProvider::new(&[BUILDER_DRAFT, CRITIC_REVIEW, LEADER_FINAL]);
+    let provider = ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT]);
     let ws_runner = MatrixRunner::new(bundle_with(case, &root), root.join("out-ws"));
     let ws_report = ws_runner
         .run(
@@ -276,7 +282,7 @@ async fn same_runner_parity_between_dry_single_and_workswarm_multi() {
 #[tokio::test]
 async fn preset_cancel_at_matrix_level_records_zero_executed_cells() {
     let root = fresh_out("matrix-cancel");
-    let provider = ScriptedProvider::new(&[BUILDER_DRAFT, CRITIC_REVIEW, LEADER_FINAL]);
+    let provider = ScriptedProvider::new(&[]);
     let case = ws_case("ws-matrix-cancel");
     let runner = MatrixRunner::new(bundle_with(case, &root), root.join("out"));
     let report = runner
@@ -305,8 +311,17 @@ async fn preset_cancel_at_matrix_level_records_zero_executed_cells() {
 #[tokio::test]
 async fn retry_semantics_are_persisted_in_journal_run_record() {
     let root = fresh_out("journal-retry");
-    // 首次产出为空触发局部 Retry；随后 3 次成功调用。
-    let provider = ScriptedProvider::new(&["", BUILDER_DRAFT, CRITIC_REVIEW, LEADER_FINAL]);
+    // 首次产出为坏契约触发定向修复 + 局部 Retry；随后 3 次成功调用。
+    let provider = ScriptedProvider::new(&[
+        // 第 1 次尝试：契约 JSON 但 artifact.content 为空 → 角色校验不过 → 一次定向修复；
+        // 修复输出仍是自由文本 → 仍不合规 → output_contract_invalid（worker Err，2 次调用）。
+        "{\"status\":\"done\",\"summary\":\"x\",\"artifact\":{\"kind\":\"document\",\"format\":\"markdown\",\"content\":\"\"}}",
+        "自由文本修复失败样例",
+        // 局部 retry 重跑本步骤：3 次契约调用成功（producer + critic + leader）。
+        BUILDER_CONTRACT,
+        CRITIC_CONTRACT,
+        LEADER_CONTRACT,
+    ]);
     let case = ws_case("ws-journal-retry");
     let runner = MatrixRunner::new(bundle_with(case, &root), root.join("out"));
     let report = runner
@@ -328,6 +343,9 @@ async fn retry_semantics_are_persisted_in_journal_run_record() {
     let run = &report.runs[0];
     assert_eq!(run.status, RunStatus::Passed, "run = {run:?}");
     assert_eq!(run.retries, 1, "局部 Retry 次数必须入 journal");
-    assert_eq!(run.model_calls, 4, "成功 Worker 不重跑（2+1+1）");
+    assert_eq!(
+        run.model_calls, 5,
+        "失败尝试 2 次（turn+repair）+ 成功重跑 3 次"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

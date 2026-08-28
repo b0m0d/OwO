@@ -8,6 +8,11 @@
 mod slo;
 
 use serde_json::Value;
+use std::sync::Mutex;
+
+/// 六期收口备案：check_slo_global/reset_global 两用例共享 global() 注册表，并行互踩
+/// （对端 reset 清掉本端违规样本 → global_achieving 误判达标）。串行化消除竞态，仅测试端改动。
+static SLO_GLOBAL_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn default_registry_contains_five_slo_baselines() {
@@ -154,6 +159,7 @@ fn report_empty_registry_no_panic() {
 
 #[test]
 fn check_slo_global_records_into_global() {
+    let _guard = SLO_GLOBAL_LOCK.lock().unwrap();
     slo::reset_global_for_test();
     let within = slo::check_slo_global("panel_wake", Some(100), true);
     assert!(within);
@@ -173,6 +179,7 @@ fn check_slo_global_records_into_global() {
 
 #[test]
 fn reset_global_for_test_isolates_observations() {
+    let _guard = SLO_GLOBAL_LOCK.lock().unwrap();
     slo::reset_global_for_test();
     let _ = slo::check_slo_global("ipc", Some(9), true); // 违规
     assert_eq!(slo::global().get("ipc").unwrap().violation_count(), 1);

@@ -2,7 +2,11 @@
 //!
 //! 独立编译：`#[path = "../src/usage.rs"] mod usage;`（usage.rs 不引用 crate::/super::）。
 
-use std::path::Path;
+use std::sync::Mutex;
+
+/// 六期收口备案：summary/persist_load 两用例共享 global() 全局态，并行 reset 会互踩
+/// （persist_load 曾观察到恢复 2 条 = 对方用例写入）。串行化消除竞态，仅测试端改动。
+static USAGE_GLOBAL_LOCK: Mutex<()> = Mutex::new(());
 
 #[path = "../src/usage.rs"]
 mod usage;
@@ -43,8 +47,12 @@ fn topup_recovers_hard_stop() {
 
 #[test]
 fn summary_aggregates_four_dimensions_and_budget_state() {
+    let _guard = USAGE_GLOBAL_LOCK.lock().unwrap();
     usage::reset_global_for_test();
     let store = usage::global();
+    // 六期收口备案：summary 的 cost_usd 舍入到 3 位小数，默认单价 0.002 下
+    // 150 token = 3e-7 → 恒为 0.0，断言 >0 永假；测试内显式设定可观测单价。
+    store.set_price_per_mtok(50.0);
     store.set_budget(UsageDimension::Session, 10.0);
     store.set_budget(UsageDimension::Tool, 10.0);
     store.record_tokens(UsageDimension::Session, "s1", None, 100, 50);
@@ -68,6 +76,7 @@ fn summary_aggregates_four_dimensions_and_budget_state() {
 
 #[test]
 fn persist_load_restores_records_budgets_and_hard_stop() {
+    let _guard = USAGE_GLOBAL_LOCK.lock().unwrap();
     usage::reset_global_for_test();
     let dir = std::env::temp_dir().join(format!("owo-usage-t-{}", uuid::Uuid::new_v4()));
     let store = usage::global();

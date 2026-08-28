@@ -924,3 +924,50 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
   .owo-ws-metrics-sum { gap: 8px; }
 }
 
+/* ===========================================================================
+   20. 六期：Project Launcher（新建项目任务）+ 工作区/模板/失败原因
+   =========================================================================== */
+/* Launcher 主布局：步骤纵列，控件不横向溢出 */
+.owo-pl { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 860px; }
+.owo-pl-step { display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--soft-border); border-radius: 12px; padding: 10px 12px; min-width: 0; background: var(--surface-2, transparent); }
+.owo-pl-label { font-weight: 600; font-size: 13px; }
+.owo-pl .hint { min-width: 0; overflow-wrap: anywhere; }
+.owo-pl textarea, .owo-pl input[size], .owo-pl select { max-width: 100%; }
+.owo-pl textarea { width: 100%; resize: vertical; }
+.owo-pl-step input[type="text"], .owo-pl-step input:not([type]) { width: 100%; box-sizing: border-box; }
+.owo-pl-step input[type="number"] { width: 72px; }
+
+/* 预览：角色胶囊 + 键值行，全部可换行 */
+.owo-pl-preview { display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 13px; }
+.owo-pl-roles { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.owo-pl-role { display: inline-flex; flex-direction: column; border: 1px solid var(--soft-border); border-radius: 8px; padding: 3px 8px; min-width: 0; max-width: 100%; }
+.owo-pl-role .hint { font-weight: 400; }
+
+/* 模板目录卡片 */
+.owo-pl-cats { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; min-width: 0; }
+.owo-pl-cat { border: 1px solid var(--soft-border); border-radius: 10px; padding: 7px 9px; min-width: 0; }
+.owo-pl-cat .hint { display: block; }
+.owo-pl-badge { display: inline-block; border: 1px solid var(--soft-border); border-radius: 999px; padding: 1px 8px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.owo-pl-badge.ok { border-color: var(--green-line); background: var(--green-soft); color: var(--green); }
+.owo-pl-badge.bad { border-color: var(--red-line); background: var(--red-soft); color: var(--red); }
+
+/* 创建结果与错误 */
+.owo-pl-result { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.owo-pl-result.ok { border: 1px solid var(--green-line); background: var(--green-soft); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.owo-pl-failed { color: var(--red); font-size: 12px; overflow-wrap: anywhere; }
+.owo-pl-errors { display: flex; flex-direction: column; gap: 3px; }
+
+/* WorkSwarm 详情：工作区与模板 / 失败原因 / 目录树 */
+.owo-pl-wsbox { display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 13px; }
+.owo-pl-wsbox code { overflow-wrap: anywhere; }
+.owo-pl-tree { border: 1px dashed var(--soft-border); border-radius: 8px; padding: 8px; max-height: 240px; overflow: auto; font-size: 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.owo-pl-tree > div { overflow-wrap: anywhere; }
+.owo-pl-failures { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; font-size: 12px; min-width: 0; }
+.owo-pl-failures .hint { overflow-wrap: anywhere; }
+
+/* 窄视口：Launcher 步骤卡内边距收窄 */
+@media (max-width: 1280px) {
+  .owo-pl-step { padding: 8px 10px; }
+}
+
+

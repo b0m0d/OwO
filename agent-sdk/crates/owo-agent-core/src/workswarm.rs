@@ -2498,6 +2498,8 @@ impl TeamCoordinator {
             }
             let role = ctx.get("role").and_then(Value::as_str).unwrap_or("");
             obj.insert("read_only".to_string(), json!(is_critic_role(role)));
+            // 输出契约需要角色身份（producer 类 / critic 类的修复提示不同）。
+            obj.insert("role".to_string(), json!(role));
         } else if obj.get("text").map(Value::is_null).unwrap_or(true) {
             // 内置 worker（echo 等）：text 承载上下文切片 → 接力链在产物内容中可见。
             obj.insert("text".to_string(), json!(ctx.to_string()));
@@ -3574,6 +3576,36 @@ impl Worker for RoleWorker {
         let worker_kind = self.inner.name().to_string();
         let enriched = TeamCoordinator::build_enriched_input(&ctx, input, &worker_kind);
         let out = self.inner.run(&enriched).await?;
+        // 输出契约（V1）：结构化 JSON → 登记前防御——producer 取 artifact.content
+        //（交付物正文，不再拿整段自由文本/信封当产物），critic 禁止携带 artifact
+        //（评审无权覆盖交付物，越权即 scope_violation）。契约失败已在 worker 层
+        // 定向修复过一次；此处 Invalid 视为 legacy 纯文本登记（不二次重试）。
+        let out = match crate::workswarm_output::parse_worker_output(&out) {
+            crate::workswarm_output::WorkerOutputParse::Parsed(output) => {
+                if is_critic_role(&self.role) {
+                    if let Err(e) = output.validate_critic() {
+                        return Err(format!("scope_violation:{e}"));
+                    }
+                    output.summary
+                } else {
+                    if let Err(e) = output.validate() {
+                        return Err(format!("output_contract_invalid:{e}"));
+                    }
+                    match output.status {
+                        crate::workswarm_output::WorkerOutputStatus::Done => {
+                            output.artifact.map(|a| a.content).unwrap_or_default()
+                        }
+                        other => {
+                            // producer 如实申报 failed/blocked：步骤失败（可局部重试），不登记空产物。
+                            return Err(format!("worker_{}:{}", other.as_str(), output.summary));
+                        }
+                    }
+                }
+            }
+            // 契约解析/校验失败：worker 层已做一次定向修复并失败会直接 Err，
+            // 走不到这里；此处保守按 legacy 纯文本登记（服务端旧流程不受影响）。
+            _ => out,
+        };
         if let Err(e) = self
             .coordinator
             .register_step_output_checked(

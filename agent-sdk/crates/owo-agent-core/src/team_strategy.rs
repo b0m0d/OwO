@@ -387,3 +387,59 @@ fn producer_role_name(profile: &TaskProfile) -> String {
         _ => "producer".to_string(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// 模板适用性匹配共享谓词（六期 · 第三路）
+// ---------------------------------------------------------------------------
+
+/// 适用条件关键词切分（`TeamTemplateRegistry::find_match` 同一口径：按空白与
+/// 中英标点切段，长度 ≥2）。目录层与策略层共用，保持单一判定语义。
+pub fn applicability_tokens(applicability: &str) -> Vec<String> {
+    applicability
+        .split([' ', '，', ',', '、', '/', '\n', '\t'])
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && token.chars().count() >= 2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// 目标文本是否命中模板适用条件（大小写不敏感子串，与 find_match 一致）。
+///
+/// 目录层（`builtin_team_templates` / server `team_template_catalog_api`）用它
+/// 预览「哪些目标会自动匹配该模板」；安装状态由调用方保证——**未安装模板不得
+/// 参与自动匹配**（注册表只含已安装/已采纳模板，find_match 天然满足）。
+pub fn applicability_matches(applicability: &str, objective: &str) -> bool {
+    let objective_lower = objective.to_lowercase();
+    applicability_tokens(applicability)
+        .iter()
+        .any(|token| objective_lower.contains(&token.to_lowercase()))
+}
+
+#[cfg(test)]
+mod applicability_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_split_on_cjk_and_ascii_separators() {
+        let tokens = applicability_tokens("代码 修改，重构、bug/fix\n接口");
+        assert_eq!(tokens, vec!["代码", "修改", "重构", "bug", "fix", "接口"]);
+    }
+
+    #[test]
+    fn matches_objective_case_insensitive_substring() {
+        assert!(applicability_matches(
+            "代码 重构 修复",
+            "重构登录模块的代码"
+        ));
+        assert!(applicability_matches("文档 报告", "请编写一份 API 报告"));
+        assert!(!applicability_matches("代码 重构", "撰写研究简报"));
+        // 短于 2 的 token 不参与（避免误命中）。
+        assert!(!applicability_matches("a b", "修改代码"));
+    }
+
+    #[test]
+    fn empty_inputs_never_match() {
+        assert!(!applicability_matches("", "任意目标"));
+        assert!(!applicability_matches("代码", ""));
+    }
+}

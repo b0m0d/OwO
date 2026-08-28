@@ -55,6 +55,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
+// 六期（第二路）：项目工作区绑定（真实目录 / 只读 / 写白名单）。
+// 独立文件，经本模块 router 合并挂载（子模块可访问本模块私有项）。
+#[path = "project_workspace_api.rs"]
+pub(crate) mod project_workspace;
+
 use owo_agent_server::AppState;
 
 // 五期（第三路）：指标/预算/脱敏实现（#[path] 子模块声明 = 零 lib.rs 接线，
@@ -162,6 +167,9 @@ pub struct AgentSubagentWorker {
     workspace: PathBuf,
     /// 指标层注入的 per-span 模型调用计数（None = 不计数，行为不变）。
     model_calls: Option<Arc<AtomicU64>>,
+    /// 六期（第二路）：项目工作区绑定作用域（None = 全局工作区，行为不变）。
+    /// 绑定后：运行目录 = 绑定根；只读绑定强制 read_only；写白名单经审批器强制。
+    workspace_scope: Option<project_workspace::WorkspaceScope>,
 }
 
 #[async_trait]
@@ -181,6 +189,13 @@ impl Worker for AgentSubagentWorker {
             .get("read_only")
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        // 六期（第二路）：绑定只读是团队级上限——即使步骤输入要求可写也不放开。
+        let read_only = read_only
+            || self
+                .workspace_scope
+                .as_ref()
+                .map(|s| s.read_only)
+                .unwrap_or(false);
         if std::env::var("OPENAI_API_KEY")
             .map(|v| v.trim().is_empty())
             .unwrap_or(true)
@@ -207,13 +222,29 @@ impl Worker for AgentSubagentWorker {
             )),
             None => self.agent.provider(),
         };
+        // 六期（第二路）：绑定作用域审批器（只读强制 + 写白名单）；
+        // 未绑定时保持 AutoApprover 原行为。
+        let scope = self.workspace_scope.as_ref();
+        let allow_writes = !read_only;
+        let workspace_approver;
+        let fallback_approver = AutoApprover { allow: read_only };
+        let approver: &dyn owo_agent_core::permissions::Approver = match scope {
+            Some(s) => {
+                workspace_approver = project_workspace::WorkspaceScopeApprover {
+                    allow_writes,
+                    root: s.root.clone(),
+                    allowed: s.allowed.clone(),
+                };
+                &workspace_approver
+            }
+            None => &fallback_approver,
+        };
         // 与 Agent::run_subagent 的默认口径一致：顶层 agent depth=0；
         // 子代理 max_turns 上限 12（SubagentRunner 内部 .min(12)，默认配置等价）。
-        let approver = AutoApprover { allow: read_only };
         let abort = AtomicBool::new(false);
         let runner = SubagentRunner {
             provider,
-            approver: &approver,
+            approver,
             abort: &abort,
             depth: 0,
             max_turns: 12,
@@ -281,20 +312,30 @@ impl Worker for FailWorker {
 ///
 /// 五期（第三路）：agent 角色接收 `model_calls` 计数器（MeasuredProvider 注入；
 /// 仅指标用途，不影响执行行为）。
+/// 六期（第二路）：`scope` 为团队工作区绑定（None = 全局工作区，行为不变）。
 fn inner_worker_for(
     state: &AppState,
     worker_name: Option<&str>,
     model_calls: Option<&Arc<AtomicU64>>,
+    scope: Option<&project_workspace::WorkspaceScope>,
 ) -> Option<Arc<dyn Worker>> {
     match worker_name.map(str::trim).filter(|w| !w.is_empty()) {
         Some("echo") => Some(Arc::new(EchoWorker)),
         Some("sleep") => Some(Arc::new(SleepWorker)),
         Some("fail") => Some(Arc::new(FailWorker)),
-        _ => Some(Arc::new(AgentSubagentWorker {
-            agent: Arc::clone(&state.agent),
-            workspace: state.workspace.clone(),
-            model_calls: model_calls.cloned(),
-        })),
+        _ => {
+            // 绑定后：Worker 实际运行目录 = 项目绑定目录。
+            let workspace = scope
+                .map(|s| s.root.clone())
+                .unwrap_or_else(|| state.workspace.clone());
+            let workspace_scope = scope.cloned();
+            Some(Arc::new(AgentSubagentWorker {
+                agent: Arc::clone(&state.agent),
+                workspace,
+                model_calls: model_calls.cloned(),
+                workspace_scope,
+            }))
+        }
     }
 }
 
@@ -311,6 +352,9 @@ fn build_run_registry(
     team_id: &str,
 ) -> Option<WorkerRegistry> {
     let meta = coordinator.load_run_meta(team_id).ok()?;
+    // 六期（第二路）：团队工作区绑定（cancel/retry/resume 后循环按迭代重读——
+    // 绑定生命周期独立于运行状态，恢复后继续生效）。
+    let scope = project_workspace::load_binding(coordinator.run_dir(), team_id).map(|b| b.scope());
     let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), team_id);
     let registry = WorkerRegistry::new();
     for r in &meta.roles {
@@ -323,7 +367,12 @@ fn build_run_registry(
             .unwrap_or("agent")
             .to_string();
         let model_calls = (worker_kind == "agent").then(|| Arc::new(AtomicU64::new(0)));
-        let inner = inner_worker_for(state, r.worker.as_deref(), model_calls.as_ref())?;
+        let inner = inner_worker_for(
+            state,
+            r.worker.as_deref(),
+            model_calls.as_ref(),
+            scope.as_ref(),
+        )?;
         let role_worker = Arc::new(RoleWorker::new(
             Arc::clone(coordinator),
             team_id.to_string(),
@@ -513,6 +562,9 @@ struct CreateTeamHttpRequest {
     /// 五期：组队策略 auto|single|team（缺省 auto；未知值 → 400）。
     #[serde(default)]
     strategy: Option<String>,
+    /// 六期（第二路）：可选项目工作区绑定（root 必须已存在；缺省只读）。
+    #[serde(default)]
+    workspace: Option<project_workspace::WorkspaceSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,6 +724,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/teams/{id}/steer", post(steer_team))
         .route("/projects/{id}", get(get_project_space))
         .route("/projects/{id}/artifacts", get(list_artifacts))
+        // 六期（第二路）：项目工作区绑定（真实目录 / 只读 / 写白名单 / 树 / git 状态）。
+        .route(
+            "/projects/{id}/workspace",
+            get(project_workspace::get_workspace).put(project_workspace::put_workspace),
+        )
+        .route(
+            "/projects/{id}/workspace/tree",
+            get(project_workspace::get_workspace_tree),
+        )
+        .route(
+            "/projects/{id}/workspace/git-status",
+            get(project_workspace::get_workspace_git_status),
+        )
         .route("/tasks/{id}/handoff", post(submit_handoff))
         .route("/tasks/{id}/human-result", post(submit_human_result))
         .route("/teams/templates", get(list_templates))
@@ -717,6 +782,14 @@ async fn create_team(
             }
         },
     };
+    // 六期（第二路）：工作区绑定先校验（不依赖团队存在；路径非法 → 400，不建队）。
+    let workspace_binding = match &req.workspace {
+        Some(spec) => Some(
+            project_workspace::validate_workspace_spec(spec)
+                .map_err(|msg| (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))))?,
+        ),
+        None => None,
+    };
     let req = CreateTeamRequest {
         goal_id: req.goal_id,
         objective: req.objective,
@@ -732,6 +805,19 @@ async fn create_team(
         .await
         .map_err(|e| error_response(&e))?;
     let team_id = team.team_id.clone();
+    // 绑定在运行循环启动前落盘（首迭代 build_run_registry 即生效）。
+    let mut bound_workspace = false;
+    if let Some(mut binding) = workspace_binding {
+        binding.team_id = team_id.clone();
+        binding.project_id = team.project_space_id.clone().unwrap_or_default();
+        project_workspace::save_binding(coordinator.run_dir(), &binding).map_err(|msg| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": msg })),
+            )
+        })?;
+        bound_workspace = true;
+    }
     // 后台运行循环（单写者：阶段边界串行化；人节点等待 = 门闩）。
     tokio::spawn(run_team_loop(state, coordinator, team_id.clone()));
     Ok((
@@ -744,6 +830,7 @@ async fn create_team(
             "members": team.members,
             "status": format!("{:?}", team.status),
             "strategy_decision": team.strategy_decision,
+            "workspace_bound": bound_workspace,
         })),
     ))
 }

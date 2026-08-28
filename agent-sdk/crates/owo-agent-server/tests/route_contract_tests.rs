@@ -256,6 +256,12 @@ fn sample_body(path: &str) -> Option<&'static str> {
         "/artifacts/{id}/rework" => Some(
             r#"{"team_id":"no-such-team","review_id":"no-such-review","instruction":"契约测试返工指令"}"#,
         ),
+        // 六期（第二路）：工作区绑定冻结契约；占位 project 不存在 → 404（资源缺失）。
+        "/projects/{id}/workspace" => {
+            Some(r#"{"root":".","read_only":true,"write_allowed_paths":[],"tree_depth":2}"#)
+        }
+        // 六期（第三路）：模板目录安装（幂等）；占位 id 不存在 → 404（资源缺失）。
+        "/teams/templates/catalog/{id}/install" => Some(r#"{}"#),
         "/tasks/{id}/handoff" => {
             Some(r#"{"team_id":"no-such-team","from_member":"m-x","completed_summary":"done"}"#)
         }
@@ -399,6 +405,11 @@ fn resource_404_ok(path: &str) -> bool {
             | "/projects/{id}/deliverables"
             | "/teams/{id}/metrics"
             | "/teams/{id}/diagnostic"
+            // 六期：工作区绑定四路由 + 模板目录安装——占位 id 指向不存在资源 → 404 非路由缺失。
+            | "/projects/{id}/workspace"
+            | "/projects/{id}/workspace/tree"
+            | "/projects/{id}/workspace/git-status"
+            | "/teams/templates/catalog/{id}/install"
     )
 }
 
