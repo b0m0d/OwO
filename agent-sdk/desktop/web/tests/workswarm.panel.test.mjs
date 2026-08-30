@@ -1058,3 +1058,151 @@ test("七期 loadWorkspaceChanges：成功落地归一视图；404/失败容错�
   await T.loadWorkspaceChanges();
   assert.equal(T.state.changesRemote, null, "404 → 容错为 null（详情 changes[] 兜底）");
 });
+
+// ============================================================================
+// 八期（第四路）守卫：ChangeSet 审批闭环（列表 / 状态徽标 / accept-reject-revert）
+// ============================================================================
+
+function csFixture(id, status, extra) {
+  return Object.assign(
+    { change_set_id: id, team_id: "team-a", step_id: "s-impl", role: "implementer",
+      changed_files: ["src/calc.rs"], diff_ref: null,
+      status: status || "pending_review", created_at: "2026-08-30T04:00:00Z" },
+    extra || {}
+  );
+}
+
+test("normCsStatus：Debug/混合形式归一", () => {
+  assert.equal(T.normCsStatus("PendingReview"), "pending_review");
+  assert.equal(T.normCsStatus("pending-review"), "pending_review");
+  assert.equal(T.normCsStatus("accepted"), "accepted");
+});
+
+test("changeSetsView：归一 + 容错（非对象条目/缺 id 丢弃/文件清单数组化）", () => {
+  const list = T.changeSetsView({
+    change_sets: [
+      csFixture("cs1", "PendingReview", { diff_ref: "patch-1" }),
+      csFixture("cs2", "conflicted", { changed_files: "not-array" }),
+      { broken: true },
+      null,
+      csFixture(""),
+    ],
+  });
+  assert.equal(list.length, 2);
+  assert.equal(list[0].status, "pending_review");
+  assert.equal(list[0].diff_ref, "patch-1");
+  assert.equal(list[1].status, "conflicted");
+  assert.deepEqual(list[1].changed_files, []);
+  assert.equal(T.changeSetsView(null).length, 0);
+});
+
+test("changeSetBadge：状态徽标配色（accepted 绿 / conflicted 红 / pending 警示）", () => {
+  assert.match(T.changeSetBadge("accepted"), /rv-ok/);
+  assert.match(T.changeSetBadge("conflicted"), /rv-bad/);
+  assert.match(T.changeSetBadge("pending_review"), /rv-warn/);
+  assert.match(T.changeSetBadge("reverted"), /已撤销/);
+});
+
+test("changeSetsHtml：空态 + 待审批动作（data 属性/提交锁）+ 结果区", () => {
+  assert.match(T.changeSetsHtml([]), /暂无 ChangeSet/);
+  assert.match(T.changeSetsHtml(null), /暂无 ChangeSet/);
+
+  T.state.csBusy = {};
+  T.state.csResults = {};
+  const html = T.changeSetsHtml([csFixture("cs1")]);
+  assert.match(html, /data-cs-act="accept"/);
+  assert.match(html, /data-cs-act="reject"/);
+  assert.match(html, /data-cs-act="revert"/);
+  assert.match(html, /data-cs-id="cs1"/);
+  assert.match(html, /src\/calc\.rs/);
+
+  // 非待审批状态：无动作按钮
+  const html2 = T.changeSetsHtml([csFixture("cs2", "accepted")]);
+  assert.ok(!html2.includes('data-cs-act="accept"'));
+
+  // 提交锁 + 结果文本
+  T.state.csBusy["cs1:accept"] = true;
+  T.state.csResults["cs1"] = { ok: true, text: "已接受。" };
+  const html3 = T.changeSetsHtml([csFixture("cs1")]);
+  assert.match(html3, /disabled/);
+  assert.match(html3, /已接受。/);
+  T.state.csBusy = {};
+  T.state.csResults = {};
+});
+
+test("startChangeSetAction()：成功路径（POST /change-sets/{id}/{action}）+ 幂等重放文案", async () => {
+  resetState();
+  T.state.current = "team-a";
+  const log = [];
+  T.setTransport({
+    get(path) {
+      if (path === "/teams/team-a/change-sets") {
+        return Promise.resolve({ team_id: "team-a", change_sets: [csFixture("cs1", "accepted")] });
+      }
+      return Promise.reject(new Error("404: " + path));
+    },
+    post(path) {
+      log.push("POST " + path);
+      return Promise.resolve({ change_set: csFixture("cs1", "accepted"), replayed: false });
+    },
+  });
+  await T.startChangeSetAction("cs1", "accept");
+  assert.deepEqual(log, ["POST /change-sets/cs1/accept"]);
+  assert.match(T.state.csResults["cs1"].text, /已接受。/);
+  assert.equal(T.state.csBusy["cs1:accept"], false);
+  // 动作后重拉列表
+  assert.equal(T.state.changeSets.length, 1);
+  assert.equal(T.state.changeSets[0].status, "accepted");
+});
+
+test("startChangeSetAction()：幂等重放（replayed）提示", async () => {
+  resetState();
+  T.state.current = "team-a";
+  T.setTransport({
+    get() { return Promise.resolve({ change_sets: [] }); },
+    post() { return Promise.resolve({ change_set: csFixture("cs1", "accepted"), replayed: true }); },
+  });
+  await T.startChangeSetAction("cs1", "accept");
+  assert.match(T.state.csResults["cs1"].text, /幂等重放/);
+});
+
+test("startChangeSetAction()：409 冲突文案（不覆盖用户新内容）", async () => {
+  resetState();
+  T.state.current = "team-a";
+  T.setTransport({
+    get() { return Promise.resolve({ change_sets: [csFixture("cs1", "conflicted")] }); },
+    post() { return Promise.reject(new Error("409: {\"error\":\"文件已被用户修改\"}")); },
+  });
+  await T.startChangeSetAction("cs1", "revert");
+  assert.equal(T.state.csResults["cs1"].ok, false);
+  assert.match(T.state.csResults["cs1"].text, /冲突（409）/);
+  assert.match(T.state.csResults["cs1"].text, /未覆盖新内容/);
+});
+
+test("startChangeSetAction()：提交锁双击只发一次；未知动作零请求", async () => {
+  resetState();
+  T.state.current = "team-a";
+  const log = [];
+  T.setTransport({
+    get() { return Promise.resolve({ change_sets: [] }); },
+    post(path) { log.push("POST " + path); return Promise.resolve({}); },
+  });
+  const p1 = T.startChangeSetAction("cs1", "reject");
+  const p2 = T.startChangeSetAction("cs1", "reject");
+  await Promise.all([p1, p2]);
+  assert.equal(log.length, 1);
+  const before = log.length;
+  await T.startChangeSetAction("cs1", "bogus");
+  assert.equal(log.length, before, "未知动作零请求");
+});
+
+test("loadChangeSets()：404 容错为 null（端点未上线空态）", async () => {
+  resetState();
+  T.state.current = "team-a";
+  T.setTransport({
+    get() { return Promise.reject(new Error("404: not found")); },
+    post() { return Promise.reject(new Error("404: not found")); },
+  });
+  await T.loadChangeSets();
+  assert.equal(T.state.changeSets, null);
+});

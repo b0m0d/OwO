@@ -1947,6 +1947,7 @@ const PANEL_ORDER = [
   "fleet",
   "workswarm",
   "project-launcher",
+  "project-history",
 ];
 
 function panelHelpers() {

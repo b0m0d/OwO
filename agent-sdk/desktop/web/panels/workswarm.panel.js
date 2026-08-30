@@ -177,6 +177,10 @@
       writeLease: null, // 单写租约（null=未持有；released_at_ms 非空=已释放）
       changes: [], // 工作区文件变更 [{path,state,diff?,added_lines?,deleted_lines?}]
       changesRemote: null, // 二路 changes 端点归一视图（changesRemoteView）；null=未拉取/404 容错
+      // —— 八期：ChangeSet 审批闭环（二路交接；端点未上线时全部容错为空态） ——
+      changeSets: null, // GET /teams/{id}/change-sets 归一列表（changeSetsView）；null=未拉取/404
+      csBusy: {}, // key(change_set_id:action) -> true（accept/reject/revert 提交锁）
+      csResults: {}, // change_set_id -> { ok, text }（动作结果行）
     };
 
     // ---------- 常量与工具 ----------
@@ -1856,6 +1860,7 @@
       if (lb) lb.innerHTML = writeLeaseBox(state.writeLease);
       var cb = el("#ws-d-changes");
       if (cb) cb.innerHTML = changesRuntimeHtml(state.changesRemote, state.changes);
+      paintChangeSets();
     }
 
     // 二路 changes 端点拉取（详情打开时一次；404/失败容错为 null，不影响详情 changes[] 回退）。
@@ -1869,6 +1874,192 @@
         })
         .catch(function () {
           state.changesRemote = null; // 端点未上线/项目未绑定 → 详情 changes[] 兜底
+        });
+    }
+
+    // ===========================================================================
+    // 八期（二路交接）：ChangeSet 审批闭环 —— 列表 / 状态徽标 / accept-reject-revert。
+    // 口径（AGENTS-COORD 八期冻结②）：
+    //   GET  /teams/{id}/change-sets        {team_id, change_sets:[ChangeSet]}
+    //   POST /change-sets/{id}/accept|reject|revert   200 {change_set, replayed?}
+    // ChangeSet: {change_set_id, team_id, step_id, role?, base_hashes{}, result_hashes{},
+    //   changed_files[], diff_ref?, status: pending_review|accepted|rejected|reverted|
+    //   conflicted, decisions?[], created_at, resolved_at?}（全字段容错）。
+    // ===========================================================================
+
+    var CS_STATUS_CN = {
+      pending_review: "待审批",
+      accepted: "已接受",
+      rejected: "已拒绝",
+      reverted: "已撤销",
+      conflicted: "冲突",
+    };
+    var CS_ACTION_CN = { accept: "接受", reject: "拒绝", revert: "撤销" };
+
+    function normCsStatus(s) {
+      return String(s == null ? "" : s)
+        .replace(/([a-z0-9])([A-Z])/g, "$1_$2") // camelCase → snake（serde Debug 形式容错）
+        .toLowerCase()
+        .replace(/[\s-]+/g, "_");
+    }
+
+    function changeSetsView(payload) {
+      return ((payload && Array.isArray(payload.change_sets) ? payload.change_sets : []) || [])
+        .map(function (c) {
+          var x = c && typeof c === "object" ? c : {};
+          return {
+            change_set_id: String(x.change_set_id || ""),
+            team_id: x.team_id == null ? "" : String(x.team_id),
+            step_id: x.step_id == null ? "" : String(x.step_id),
+            role: x.role == null ? "" : String(x.role),
+            changed_files: Array.isArray(x.changed_files) ? x.changed_files.map(String) : [],
+            diff_ref: x.diff_ref == null ? null : String(x.diff_ref),
+            status: normCsStatus(x.status) || "pending_review",
+            created_at: x.created_at == null ? "" : String(x.created_at),
+            resolved_at: x.resolved_at == null ? "" : String(x.resolved_at),
+          };
+        })
+        .filter(function (x) {
+          return !!x.change_set_id;
+        });
+    }
+
+    function changeSetBadge(status) {
+      var st = normCsStatus(status);
+      var cls =
+        st === "accepted"
+          ? "rv-ok"
+          : st === "conflicted"
+            ? "rv-bad"
+            : st === "pending_review"
+              ? "rv-warn"
+              : "";
+      return '<span class="owo-ws-badge ' + cls + '">' + esc(CS_STATUS_CN[st] || st || "未知") + "</span>";
+    }
+
+    function changeSetsHtml(list) {
+      list = list || [];
+      if (!list.length) {
+        return '<div class="hint">暂无 ChangeSet（写角色执行后自动生成；端点未上线时本区保持空态）。</div>';
+      }
+      var rows = list
+        .map(function (c) {
+          var st = state.csResults[c.change_set_id];
+          var actions = "";
+          if (c.status === "pending_review") {
+            actions = [
+              ["accept", "接受"],
+              ["reject", "拒绝"],
+              ["revert", "撤销"],
+            ]
+              .map(function (pair) {
+                var busy = state.csBusy[c.change_set_id + ":" + pair[0]];
+                return (
+                  '<button type="button" class="owo-ws-mini" data-cs-act="' + pair[0] +
+                  '" data-cs-id="' + esc(c.change_set_id) + '"' + (busy ? " disabled" : "") +
+                  ">" + pair[1] + "</button>"
+                );
+              })
+              .join("");
+          }
+          return (
+            '<div class="owo-ws-chg-row">' +
+            changeSetBadge(c.status) +
+            "<b><code>" + esc(c.change_set_id) + "</code></b>" +
+            '<span class="hint">' + esc(c.role || "—") + " · 步骤 " + esc(c.step_id || "—") +
+            (c.created_at ? " · " + esc(String(c.created_at).replace("T", " ").slice(0, 19)) : "") +
+            (c.diff_ref ? " · patch " + esc(c.diff_ref) : "") + "</span>" +
+            "</div>" +
+            (c.changed_files.length
+              ? '<div class="hint">' + c.changed_files.map(esc).join("、") + "</div>"
+              : '<div class="hint">（无变更文件清单）</div>') +
+            (actions ? '<div class="owo-ac-actions">' + actions + "</div>" : "") +
+            '<div class="owo-ac-result' + (st ? (st.ok ? " ok" : " bad") : "") +
+            '" data-cs-result="' + esc(c.change_set_id) + '" aria-live="polite">' +
+            (st ? esc(st.text) : "") +
+            "</div>"
+          );
+        })
+        .join("");
+      return '<div class="owo-ws-chg-list">' + rows + "</div>";
+    }
+
+    // 重绘 + 事件委托（容器标记防重复绑定；detail 重建后容器为新元素、标记自然清零）。
+    function paintChangeSets() {
+      var sb = el("#ws-d-csets");
+      if (!sb) return;
+      sb.innerHTML = changeSetsHtml(state.changeSets);
+      if (!sb.dataset.csBound) {
+        sb.dataset.csBound = "1";
+        sb.addEventListener("click", function (ev) {
+          var btn = ev.target && ev.target.closest ? ev.target.closest("[data-cs-act]") : null;
+          if (btn) {
+            startChangeSetAction(btn.getAttribute("data-cs-id") || "", btn.getAttribute("data-cs-act") || "");
+          }
+        });
+      }
+    }
+
+    // 拉取（详情打开时一次）：404/失败容错为 null（端点未上线 → 空态，不阻塞详情）。
+    function loadChangeSets() {
+      var tid = state.current;
+      if (!tid) return Promise.resolve();
+      return H.get("/teams/" + encodeURIComponent(tid) + "/change-sets")
+        .then(function (d) {
+          state.changeSets = changeSetsView(d);
+          paintChangeSets();
+        })
+        .catch(function () {
+          state.changeSets = null;
+        });
+    }
+
+    function paintChangeSetResult(csId) {
+      var sb = el("#ws-d-csets");
+      if (!sb) return;
+      var res = state.csResults[csId];
+      var div = sb.querySelector('[data-cs-result="' + String(csId).replace(/"/g, '\\"') + '"]');
+      if (div) {
+        div.textContent = res ? res.text : "";
+        div.className = "owo-ac-result" + (res ? (res.ok ? " ok" : " bad") : "");
+      }
+    }
+
+    // accept/reject/revert：幂等重放（replayed）与 409 冲突（文件被用户再次修改、
+    // 恢复被拒绝且不覆盖新内容）文案如实提示；动作完成后重拉列表。
+    function startChangeSetAction(csId, action) {
+      var id = String(csId || "");
+      var act = String(action || "");
+      if (!id || ["accept", "reject", "revert"].indexOf(act) < 0) return Promise.resolve();
+      var key = id + ":" + act;
+      if (state.csBusy[key]) return Promise.resolve();
+      state.csBusy[key] = true;
+      paintChangeSets();
+      return H.post("/change-sets/" + encodeURIComponent(id) + "/" + act, {})
+        .then(function (resp) {
+          var replayed = !!(resp && resp.replayed);
+          var cs = resp && resp.change_set && resp.change_set.status ? normCsStatus(resp.change_set.status) : "";
+          state.csResults[id] = {
+            ok: true,
+            text: replayed
+              ? "已" + (CS_ACTION_CN[act] || act) + "（幂等重放，无重复副作用）。"
+              : cs === "conflicted"
+                ? "检测到冲突：文件已被用户再次修改，未覆盖新内容，ChangeSet 置为 conflicted。"
+                : "已" + (CS_ACTION_CN[act] || act) + "。",
+          };
+        })
+        .catch(function (e) {
+          var msg = String((e && e.message) || e || "");
+          state.csResults[id] = {
+            ok: false,
+            text: /^409/.test(msg)
+              ? "冲突（409）：文件已被用户再次修改，恢复被拒绝、未覆盖新内容。"
+              : "操作失败：" + msg,
+          };
+        })
+        .then(function () {
+          state.csBusy[key] = false;
+          return loadChangeSets();
         });
     }
 
@@ -2862,6 +3053,7 @@
           paintWorkspace();
           loadWorkspace();
           loadWorkspaceChanges(); // 七期（二路）：变更追踪端点（容错 404 → 详情 changes[] 兜底）
+          loadChangeSets(); // 八期（二路交接）：ChangeSet 审批列表（容错 404 → 空态）
           loadTemplateInfo();
           loadMetrics();
           loadArtifacts();
@@ -3905,10 +4097,11 @@
         '<div id="ws-d-failures"></div>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>Worker 能力与执行详情 <span class="hint">七期：WorkerProfile 实际工具权限与调用预算 / 单写租约 / 文件变更与 diff</span></h3>' +
+        '<h3>Worker 能力与执行详情 <span class="hint">七期：WorkerProfile 实际工具权限与调用预算 / 单写租约 / 文件变更与 diff；八期：ChangeSet 审批（接受/拒绝/撤销）</span></h3>' +
         '<div id="ws-d-profiles"></div>' +
         '<div id="ws-d-lease"></div>' +
         '<div id="ws-d-changes"></div>' +
+        '<div id="ws-d-csets"></div>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
         '<h3>组队策略与角色指标 <span class="hint">auto 判定理由 / GET /teams/{id}/metrics —— 耗时·调用·token·费用·预算余量</span>' +
@@ -4342,6 +4535,13 @@
       changeRecordsHtml: changeRecordsHtml,
       changesRuntimeHtml: changesRuntimeHtml,
       loadWorkspaceChanges: loadWorkspaceChanges,
+      // 八期：ChangeSet 审批闭环
+      normCsStatus: normCsStatus,
+      changeSetsView: changeSetsView,
+      changeSetBadge: changeSetBadge,
+      changeSetsHtml: changeSetsHtml,
+      loadChangeSets: loadChangeSets,
+      startChangeSetAction: startChangeSetAction,
       validationBadgeHtml: validationBadgeHtml,
       artifactFileName: artifactFileName,
       fmtAbsTime: fmtAbsTime,

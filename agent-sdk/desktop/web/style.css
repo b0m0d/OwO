@@ -995,6 +995,7 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
 
 /* 条目卡：徽标行 + 副行 + 动作行 + 操作结果 */
 .owo-ac-item { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--soft-border); border-radius: 10px; padding: 7px 9px; min-width: 0; font-size: 13px; }
+.owo-ac-note { flex: 1 1 160px; min-width: 0; max-width: 320px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--soft-border); background: var(--surface, transparent); color: inherit; }
 .owo-ac-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .owo-ac-sub { font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
 .owo-ac-sub.bad { color: var(--red); }
@@ -1014,4 +1015,50 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
 /* 窄视口：条目卡内边距收窄 */
 @media (max-width: 1280px) {
   .owo-ac-sec { padding: 8px 10px; }
+}
+
+/* ===========================================================================
+   22. 八期：项目与运行历史（project-history）—— 历史检索 / 同配置复跑
+   =========================================================================== */
+/* 主布局：头部 + 错误区 + 过滤条 + 行列表；长 team_id 与长目标全部可换行不溢出 */
+.ph { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 960px; }
+.ph-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.ph-head h2 { margin: 0; }
+.ph-head .hint { min-width: 0; overflow-wrap: anywhere; }
+.ph .owo-ac-mini { flex: none; }
+
+/* 过滤条：四个控件单行 wrap，窄屏自动换行 */
+.ph-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.ph-filters select, .ph-filters input[type="search"] {
+  max-width: 240px; min-width: 0; padding: 4px 8px; border-radius: 8px;
+  border: 1px solid var(--soft-border); background: var(--surface, transparent); color: inherit;
+}
+
+/* 行卡片：头部（id/状态/模式/模板）+ 元信息（创建/耗时/预算/任务/交付物/目标）+ 动作 */
+.ph-row { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--soft-border); border-radius: 12px; padding: 10px 12px; min-width: 0; background: var(--surface-2, transparent); }
+.ph-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.ph-tid { overflow-wrap: anywhere; font-size: 12px; }
+.ph-mode { font-size: 11px; color: var(--muted); border: 1px solid var(--soft-border); border-radius: 999px; padding: 1px 8px; }
+.ph-tpl { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.ph-tpl-none { opacity: 0.75; }
+.ph-row-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
+.ph-row-meta .hint { min-width: 0; overflow-wrap: anywhere; }
+.ph-obj { max-width: 100%; }
+.ph-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.ph-result { min-height: 0; font-size: 12px; overflow-wrap: anywhere; }
+.ph-result.ok { color: var(--green); }
+.ph-result.bad { color: var(--red); }
+.ph-empty { color: var(--muted); font-size: 12px; }
+
+/* 状态徽标：与 WorkSwarm/Action Center 停止态配色同族 */
+.ph-st { font-size: 11px; font-weight: 600; border: 1px solid var(--soft-border); border-radius: 999px; padding: 1px 8px; }
+.ph-st-running { border-color: var(--blue-line, var(--soft-border)); background: var(--blue-soft, rgba(64, 120, 192, 0.12)); color: var(--blue, #3568a8); }
+.ph-st-awaiting_human { border-color: var(--red-line); background: var(--red-soft); color: var(--red); }
+.ph-st-succeeded { border-color: var(--green-line); background: var(--green-soft); color: var(--green); }
+.ph-st-failed { border-color: var(--red-line); background: var(--red-soft); color: var(--red); }
+.ph-st-cancelled, .ph-st-created { color: var(--muted); }
+
+/* 窄视口：行卡内边距收窄 */
+@media (max-width: 1280px) {
+  .ph-row { padding: 8px 10px; }
 }

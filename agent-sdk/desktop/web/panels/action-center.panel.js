@@ -1,8 +1,10 @@
 // ============================================================================
 // Action Center（待我处理）面板 —— desktop/web/panels/action-center.panel.js
 //
-// 七期第四路：把四类"需要人工处理"的事项聚合为一个日常工作台。全部数据来自
-// **既有路由**的客户端聚合，不新增任何服务端接口：
+// 七期第四路：把四类"需要人工处理"的事项聚合为一个日常工作台。
+// 八期第四路：升级为**正式 Human Inbox 优先**（GET /human/inbox + claim/release/
+// resolve 直接处理，口径见 AGENTS-COORD 八期冻结③）；inbox 404/空/失败时回退
+// 七期客户端聚合（legacyLoad），面板永远可用。回退路径仍不新增服务端接口：
 //   GET  /teams                          {teams:[{team_id,status,mode,interrupted,
 //                                         active,members[],project_space_id,...}]}
 //   GET  /teams/{id}                     {team,tasks,interrupted,audit_tail,
@@ -134,6 +136,11 @@
       retryBusy: {},        // key(teamId/stepId) -> true
       retryResults: {},     // key -> { ok, text }
       lastLoadedAt: "",
+      // 八期三路：正式 Human Inbox（/human/inbox）优先；404/空/失败 → 回退客户端聚合。
+      inbox: [],            // HumanWorkItem 归一化列表（inbox 模式）
+      inboxSource: "",      // "inbox" | "legacy" | ""（渲染分支 + 头部口径提示）
+      inboxBusy: {},        // key(item_id:action) -> true
+      inboxResults: {},     // item_id -> { ok, text }
     };
 
     // ---------- 纯逻辑层（Node 测试挂钩覆盖） ----------
@@ -335,6 +342,282 @@
       };
     }
 
+    // ===========================================================================
+    // 八期三路：正式 Human Inbox（/human/inbox）——领取/释放/直接处理四类待办。
+    // 口径（AGENTS-COORD 八期冻结③）：
+    //   GET  /human/inbox                {items:[HumanWorkItem]}
+    //   POST /human/inbox/{id}/claim | release
+    //   POST /human/inbox/{id}/resolve   按 kind 分派（resolve 重放幂等 200）
+    // HumanWorkItem: {item_id, kind: human_result|artifact_review|change_set|step_retry,
+    //   team_id, project_id, target_id, status: open|claimed|resolved, assignee?,
+    //   summary, created_at, claimed_at?, resolved_at?}
+    // 回退原则：inbox 404/空/任何失败 → 回退七期客户端聚合（legacyLoad），面板永远可用。
+    // ===========================================================================
+
+    var INBOX_KIND_CN = {
+      human_result: "等待 Human 结果",
+      artifact_review: "待评审产物",
+      change_set: "ChangeSet 审批",
+      step_retry: "失败步骤重试",
+    };
+    var INBOX_KIND_ORDER = ["human_result", "artifact_review", "change_set", "step_retry"];
+
+    function normItemStatus(s) {
+      return String(s == null ? "" : s).toLowerCase();
+    }
+
+    // 归一化 Inbox 条目：字段全部容错；item_id/kind 非法条目丢弃。
+    function inboxItemsOf(payload) {
+      var items = (payload && payload.items) || [];
+      return items
+        .filter(function (it) {
+          return !!(it && it.item_id && INBOX_KIND_CN[it.kind]);
+        })
+        .map(function (it) {
+          return {
+            item_id: String(it.item_id),
+            kind: String(it.kind),
+            team_id: it.team_id == null ? "" : String(it.team_id),
+            project_id: it.project_id == null ? "" : String(it.project_id),
+            target_id: it.target_id == null ? "" : String(it.target_id),
+            status: normItemStatus(it.status) || "open",
+            assignee: it.assignee == null ? "" : String(it.assignee),
+            summary: String(it.summary || ""),
+            created_at: it.created_at == null ? "" : String(it.created_at),
+            claimed_at: it.claimed_at == null ? "" : String(it.claimed_at),
+            resolved_at: it.resolved_at == null ? "" : String(it.resolved_at),
+          };
+        });
+    }
+
+    // 分组展示：已处理（resolved）条目不再出现（服务端已收敛，这里双保险过滤）。
+    function groupInbox(items) {
+      var out = {};
+      INBOX_KIND_ORDER.forEach(function (k) {
+        out[k] = [];
+      });
+      (items || []).forEach(function (it) {
+        if (it && INBOX_KIND_CN[it.kind] && it.status !== "resolved") out[it.kind].push(it);
+      });
+      return out;
+    }
+
+    function buildInboxActionPath(itemId, action) {
+      return "/human/inbox/" + encodeURIComponent(String(itemId == null ? "" : itemId)) + "/" +
+        String(action || "");
+    }
+
+    // 处理人标识（三路 claim/release 必填 user；resolve 审计/领取校验用）。
+    // 桌面单用户场景：localStorage 持久化，缺省「本地用户」（Node 测试环境无
+    // localStorage → 安全回退）。
+    function currentUser() {
+      try {
+        var v = win.localStorage && win.localStorage.getItem("owo.user");
+        if (v && String(v).trim()) return String(v).trim();
+      } catch (e) {
+        /* 无 localStorage（Node）→ 缺省 */
+      }
+      return "本地用户";
+    }
+
+    // resolve 请求体按 kind 分派（冻结③）：artifact_review → decision；
+    // change_set → action(accept|reject)；step_retry → {}；human_result → {result}。
+    function buildResolveBody(kind, action, extra) {
+      if (kind === "artifact_review") {
+        var d = String(action || "").trim();
+        if (d !== "approve" && d !== "request_changes" && d !== "reject") {
+          return { error: "unknown_decision" };
+        }
+        var body = { decision: d };
+        var c = String((extra && extra.comment) == null ? "" : extra.comment).trim();
+        if (c) body.comment = c;
+        return body;
+      }
+      if (kind === "change_set") {
+        var a = String(action || "").trim();
+        if (a !== "accept" && a !== "reject") return { error: "unknown_action" };
+        return { action: a };
+      }
+      if (kind === "human_result") {
+        var r = String((extra && extra.result) == null ? "" : extra.result).trim();
+        if (!r) return { error: "missing_result" };
+        return { result: r };
+      }
+      if (kind === "step_retry") return {};
+      return { error: "unknown_kind" };
+    }
+
+    function inboxStatusBadge(it) {
+      var st = normItemStatus(it && it.status);
+      if (st === "claimed") return '<span class="owo-ac-badge info">已领取</span>';
+      if (st === "resolved") return '<span class="owo-ac-badge ok">已处理</span>';
+      return '<span class="owo-ac-badge warn">待领取</span>';
+    }
+
+    // 动作按钮：open → 领取；claimed → 释放 + 按 kind 的直接处理动作。
+    function inboxActionButtons(it) {
+      var tid = it.item_id;
+      function btn(action, label, attrs) {
+        var key = tid + ":" + action;
+        return (
+          '<button type="button" class="owo-ac-mini' + (attrs && attrs.primary ? " primary" : "") +
+          '" data-ic-act="' + esc(action) + '" data-ic-item="' + esc(tid) + '"' +
+          (state.inboxBusy[key] ? " disabled" : "") + ">" + esc(label) + "</button>"
+        );
+      }
+      var out = [];
+      if (it.status === "open") {
+        out.push(btn("claim", "领取", { primary: true }));
+      } else if (it.status === "claimed") {
+        out.push(btn("release", "释放"));
+        if (it.kind === "artifact_review") {
+          out.push(btn("approve", "批准"));
+          out.push(btn("request_changes", "要求修改"));
+          out.push(btn("reject", "拒绝"));
+        } else if (it.kind === "change_set") {
+          out.push(btn("accept", "接受", { primary: true }));
+          out.push(btn("reject", "拒绝"));
+        } else if (it.kind === "step_retry") {
+          out.push(btn("resolve", "重试", { primary: true }));
+        } else if (it.kind === "human_result") {
+          out.push(
+            '<input type="text" class="owo-ac-note" placeholder="填写 Human 结果…" data-ic-note="' +
+              esc(tid) + '" />'
+          );
+          out.push(btn("resolve", "提交结果", { primary: true }));
+        }
+      }
+      return out.join("");
+    }
+
+    function inboxItemHtml(it) {
+      var res = state.inboxResults[it.item_id];
+      return (
+        '<div class="owo-ac-item" data-ic-item-row="' + esc(it.item_id) + '">' +
+        '<div class="owo-ac-line">' +
+        inboxStatusBadge(it) +
+        "<b>" + esc(it.team_id || it.project_id || "—") + "</b>" +
+        '<span class="hint">' + esc(it.summary || "") + "</span>" +
+        "</div>" +
+        (it.assignee ? '<div class="owo-ac-sub hint">领取人：' + esc(it.assignee) + "</div>" : "") +
+        '<div class="owo-ac-actions">' + inboxActionButtons(it) + "</div>" +
+        '<div class="owo-ac-result' + (res ? (res.ok ? " ok" : " bad") : "") +
+        '" data-ic-result="' + esc(it.item_id) + '" aria-live="polite">' +
+        (res ? esc(res.text) : "") +
+        "</div>" +
+        "</div>"
+      );
+    }
+
+    function inboxSectionsHtml(items) {
+      var grouped = groupInbox(items);
+      return INBOX_KIND_ORDER.map(function (kind) {
+        var list = grouped[kind] || [];
+        var body = list.length
+          ? list.map(inboxItemHtml).join("")
+          : '<div class="owo-ac-empty">当前无此类待办。</div>';
+        return (
+          '<section class="owo-ac-sec" data-ic-sec="' + esc(kind) + '">' +
+          "<h3>" + esc(INBOX_KIND_CN[kind]) +
+          ' <span class="owo-ac-count' + (list.length ? " has" : "") + '">' + list.length + "</span>" +
+          ' <span class="hint">正式 Inbox（/human/inbox）</span></h3>' +
+          '<div class="owo-ac-items">' + body + "</div>" +
+          "</section>"
+        );
+      }).join("");
+    }
+
+    function inboxTotal(items) {
+      return (items || []).filter(function (it) {
+        return it.status !== "resolved";
+      }).length;
+    }
+
+    function paintInboxResult(itemId) {
+      var box = el("#ac-sections");
+      if (!box) return;
+      var res = state.inboxResults[itemId];
+      var div = box.querySelector('[data-ic-result="' + String(itemId).replace(/"/g, '\\"') + '"]');
+      if (div) {
+        div.textContent = res ? res.text : "";
+        div.className = "owo-ac-result" + (res ? (res.ok ? " ok" : " bad") : "");
+      }
+    }
+
+    // 领取/释放/直接处理：claim|release 走对应端点；resolve 类动作统一 POST
+    // /human/inbox/{id}/resolve（请求体按 kind 分派）。幂等重放（replayed）如实提示。
+    function startInboxAction(itemId, action, extra) {
+      var id = String(itemId == null ? "" : itemId);
+      var act = String(action || "");
+      if (!id || !act) return Promise.resolve();
+      var it = null;
+      (state.inbox || []).forEach(function (x) {
+        if (x.item_id === id) it = x;
+      });
+      if (!it || it.status === "resolved") return Promise.resolve();
+      var isResolve = act !== "claim" && act !== "release";
+      var key = id + ":" + act;
+      if (state.inboxBusy[key]) return Promise.resolve();
+      var body = {};
+      if (isResolve) {
+        body = buildResolveBody(it.kind, it.kind === "step_retry" ? "resolve" : act, extra);
+        if (body && body.error) {
+          state.inboxResults[id] = { ok: false, text: "无法构建请求：" + body.error };
+          paintInboxResult(id);
+          return Promise.resolve();
+        }
+      }
+      state.inboxBusy[key] = true;
+      render();
+      var path = buildInboxActionPath(id, isResolve ? "resolve" : act);
+      if (isResolve) {
+        body.user = currentUser(); // 审计/领取校验（review 类兼作 reviewer 缺省）
+      } else {
+        body = { user: currentUser() }; // claim/release：ActorRequest {user}
+      }
+      return H.post(path, body)
+        .then(function (resp) {
+          var replayed = !!(resp && resp.replayed);
+          state.inboxResults[id] = {
+            ok: true,
+            text: isResolve
+              ? replayed
+                ? "已处理（幂等重放，无重复副作用）。"
+                : "已处理。"
+              : act === "claim"
+                ? "已领取。"
+                : "已释放。",
+          };
+        })
+        .catch(function (e) {
+          state.inboxResults[id] = { ok: false, text: "操作失败：" + friendly(e) };
+        })
+        .then(function () {
+          state.inboxBusy[key] = false;
+          if (state.inboxSource === "inbox") return refreshInbox();
+          render();
+        });
+    }
+
+    // Inbox 重取（动作后刷新列表口径；失败只记错误、不回退 legacy）。
+    function refreshInbox() {
+      return H.get("/human/inbox")
+        .then(function (d) {
+          state.inbox = inboxItemsOf(d);
+          if (!state.inbox.length) {
+            // Inbox 已清空 → 回退客户端聚合视图（同一份剩余工作的另一口径）。
+            state.inboxSource = "legacy";
+            return legacyLoad();
+          }
+          state.lastLoadedAt = new Date().toLocaleTimeString();
+          render();
+        })
+        .catch(function (e) {
+          state.errors.push("Inbox 刷新失败：" + friendly(e));
+          render();
+        });
+    }
+
     // ---------- 渲染（纯 HTML 构建器，render 只负责赋值与绑定） ----------
     function fmtWhen(ms) {
       var n = Number(ms);
@@ -494,12 +777,21 @@
     function render() {
       if (!rootEl) return;
       var box = el("#ac-sections");
-      if (box) box.innerHTML = sectionsHtml(state.items, state);
+      if (box) {
+        box.innerHTML =
+          state.inboxSource === "inbox"
+            ? inboxSectionsHtml(state.inbox)
+            : sectionsHtml(state.items, state);
+      }
       paintErrors();
       paintMeta(
         state.loading
           ? "加载中…"
-          : "共 " + totalOf(state.items) + " 项待办" + (state.lastLoadedAt ? " · 更新于 " + state.lastLoadedAt : "")
+          : state.inboxSource === "inbox"
+            ? "正式 Inbox：" + inboxTotal(state.inbox) + " 项待办" +
+              (state.lastLoadedAt ? " · 更新于 " + state.lastLoadedAt : "")
+            : "共 " + totalOf(state.items) + " 项待办（客户端聚合）" +
+              (state.lastLoadedAt ? " · 更新于 " + state.lastLoadedAt : "")
       );
     }
 
@@ -567,11 +859,36 @@
       }
     }
 
+    // 八期三路：Inbox 优先，失败/空回退客户端聚合（面板永远可用）。
     function load() {
       if (state.loading) return Promise.resolve();
       state.loading = true;
       state.errors = [];
       paintMeta("加载中…");
+      return H.get("/human/inbox")
+        .then(function (d) {
+          state.inbox = inboxItemsOf(d);
+          if (state.inbox.length) {
+            state.inboxSource = "inbox";
+            state.loading = false;
+            state.loadedOnce = true;
+            state.lastLoadedAt = new Date().toLocaleTimeString();
+            render();
+            return;
+          }
+          // Inbox 在线但为空 → 客户端聚合可能仍有可重试/租约等口径，回退补充展示。
+          return legacyLoad();
+        })
+        .catch(function () {
+          // 404 = Inbox 尚未上线；其他错误同样回退（保持面板可用）。
+          state.inboxSource = "legacy";
+          return legacyLoad();
+        });
+    }
+
+    // 七期客户端聚合路径（Inbox 不可用/为空时的回退；原 load() 本体）。
+    function legacyLoad() {
+      state.inboxSource = "legacy";
       return H.get("/teams")
         .then(function (d) {
           state.teams = (d && d.teams) || [];
@@ -629,6 +946,19 @@
     function onSectionClick(ev) {
       var t = ev.target;
       if (!t || !t.closest) return;
+      var inboxBtn = t.closest("[data-ic-act]");
+      if (inboxBtn) {
+        var itemId = inboxBtn.getAttribute("data-ic-item") || "";
+        var act = inboxBtn.getAttribute("data-ic-act") || "";
+        var extra = null;
+        if (act !== "claim" && act !== "release") {
+          // human_result：取同条目输入框中的结果文本；其余 kind 无额外字段。
+          var noteInput = el('[data-ic-note="' + itemId.replace(/"/g, '\\"') + '"]');
+          if (noteInput) extra = { result: noteInput.value };
+        }
+        startInboxAction(itemId, act, extra);
+        return;
+      }
       var retryBtn = t.closest("[data-ac-retry]");
       if (retryBtn) {
         submitRetry(retryBtn.getAttribute("data-team") || "", retryBtn.getAttribute("data-step") || "");
@@ -683,6 +1013,16 @@
       load: load,
       submitRetry: submitRetry,
       gotoWorkswarm: gotoWorkswarm,
+      // 八期三路：Inbox 优先 + 回退口径
+      normItemStatus: normItemStatus,
+      inboxItemsOf: inboxItemsOf,
+      groupInbox: groupInbox,
+      buildInboxActionPath: buildInboxActionPath,
+      buildResolveBody: buildResolveBody,
+      inboxSectionsHtml: inboxSectionsHtml,
+      inboxItemHtml: inboxItemHtml,
+      startInboxAction: startInboxAction,
+      refreshInbox: refreshInbox,
       getTransport: function () {
         return { get: H.get, post: H.post };
       },

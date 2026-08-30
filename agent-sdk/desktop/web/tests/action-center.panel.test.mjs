@@ -70,6 +70,11 @@ function resetState() {
   T.state.retryBusy = {};
   T.state.retryResults = {};
   T.state.lastLoadedAt = "";
+  // 八期三路：Inbox 优先 + 回退口径
+  T.state.inbox = [];
+  T.state.inboxSource = "";
+  T.state.inboxBusy = {};
+  T.state.inboxResults = {};
   T.setRoot(null);
 }
 
@@ -509,4 +514,179 @@ test("接线守卫：index.html 脚本 + app.js PANEL_ORDER + style.css 第 21 �
   for (const cls of [".owo-ac-item", ".owo-ac-badge.warn", ".owo-ac-count.has", ".owo-ac-result.ok"]) {
     assert.ok(shellCss.includes(cls), "style.css 缺 " + cls);
   }
+});
+
+// ============================================================================
+// 八期三路守卫：正式 Human Inbox（/human/inbox）优先 + 直接处理
+// ============================================================================
+
+function inboxItem(id, kind, status, extra) {
+  return Object.assign(
+    { item_id: id, kind: kind, team_id: "team-a", project_id: "proj-a", target_id: "target-1",
+      status: status || "open", summary: "待办 " + id, created_at: "2026-08-30T04:00:00Z" },
+    extra || {}
+  );
+}
+
+test("inboxItemsOf：归一化 + 非法条目丢弃 + 字段缺省", () => {
+  const items = T.inboxItemsOf({
+    items: [
+      inboxItem("i1", "artifact_review", "open"),
+      inboxItem("i2", "change_set", "claimed", { assignee: "alice" }),
+      { item_id: "", kind: "artifact_review" },            // 无 id → 丢弃
+      { item_id: "i3", kind: "unknown_kind" },             // 未知 kind → 丢弃
+      null,
+    ],
+  });
+  assert.equal(items.length, 2);
+  assert.equal(items[0].status, "open");
+  assert.equal(items[0].team_id, "team-a");
+  assert.equal(items[1].status, "claimed");
+  assert.equal(items[1].assignee, "alice");
+  assert.equal(T.inboxItemsOf(null).length, 0);
+});
+
+test("normItemStatus/groupInbox：四类分组，resolved 不再出现", () => {
+  assert.equal(T.normItemStatus("Claimed"), "claimed");
+  const items = T.inboxItemsOf({
+    items: [
+      inboxItem("i1", "artifact_review", "open"),
+      inboxItem("i2", "change_set", "resolved"),
+      inboxItem("i3", "step_retry", "claimed"),
+      inboxItem("i4", "human_result", "open"),
+    ],
+  });
+  const g = T.groupInbox(items);
+  assert.equal(g.artifact_review.length, 1);
+  assert.equal(g.change_set.length, 0, "resolved 已处理条目不再出现");
+  assert.equal(g.step_retry.length, 1);
+  assert.equal(g.human_result.length, 1);
+});
+
+test("buildInboxActionPath：id encodeURIComponent + 动作分段", () => {
+  assert.equal(T.buildInboxActionPath("i 1", "claim"), "/human/inbox/i%201/claim");
+  assert.equal(T.buildInboxActionPath("i1", "resolve"), "/human/inbox/i1/resolve");
+});
+
+test("buildResolveBody：按 kind 分派（冻结③）+ 非法动作报错", () => {
+  assert.deepEqual(T.buildResolveBody("artifact_review", "approve"), { decision: "approve" });
+  assert.deepEqual(T.buildResolveBody("artifact_review", "request_changes", { comment: "改吧" }),
+    { decision: "request_changes", comment: "改吧" });
+  assert.deepEqual(T.buildResolveBody("change_set", "accept"), { action: "accept" });
+  assert.deepEqual(T.buildResolveBody("change_set", "reject"), { action: "reject" });
+  assert.deepEqual(T.buildResolveBody("step_retry"), {});
+  assert.deepEqual(T.buildResolveBody("human_result", "resolve", { result: " 结果文本 " }),
+    { result: "结果文本" });
+  assert.deepEqual(T.buildResolveBody("artifact_review", "bogus"), { error: "unknown_decision" });
+  assert.deepEqual(T.buildResolveBody("change_set", "bogus"), { error: "unknown_action" });
+  assert.deepEqual(T.buildResolveBody("human_result", "resolve", { result: "  " }),
+    { error: "missing_result" });
+});
+
+test("inboxSectionsHtml：四节骨架 + 计数徽标 + 动作按钮 data 属性", () => {
+  const items = T.inboxItemsOf({
+    items: [inboxItem("i1", "artifact_review", "claimed"), inboxItem("i2", "change_set", "claimed"), inboxItem("i3", "step_retry", "open")],
+  });
+  const html = T.inboxSectionsHtml(items);
+  assert.match(html, /data-ic-sec="artifact_review"/);
+  assert.match(html, /data-ic-sec="change_set"/);
+  assert.match(html, /data-ic-sec="human_result"/);
+  assert.match(html, /data-ic-sec="step_retry"/);
+  assert.match(html, /data-ic-act="approve"/);
+  assert.match(html, /data-ic-act="request_changes"/);
+  assert.match(html, /data-ic-act="accept"/);
+  assert.match(html, /data-ic-act="claim"/);
+  assert.match(html, /正式 Inbox（\/human\/inbox）/);
+});
+
+test("load()：inbox 优先（不触发 /teams 客户端聚合）", async () => {
+  resetState();
+  const log = [];
+  T.setTransport({
+    get(path) {
+      log.push("GET " + path);
+      if (path === "/human/inbox") {
+        return Promise.resolve({ items: [inboxItem("i1", "step_retry", "open")] });
+      }
+      throw new Error("unexpected GET " + path);
+    },
+    post() { throw new Error("unexpected POST"); },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+  await T.load();
+  assert.equal(T.state.inboxSource, "inbox");
+  assert.equal(T.state.inbox.length, 1);
+  assert.ok(!log.some((x) => x.startsWith("GET /teams")));
+  assert.ok(!log.some((x) => x.startsWith("GET /human/inbox/i1/claim")));
+});
+
+test("startInboxAction()：claim → POST /human/inbox/{id}/claim；提交锁双击一次", async () => {
+  resetState();
+  const log = [];
+  T.state.inbox = T.inboxItemsOf({ items: [inboxItem("i1", "change_set", "open")] });
+  T.state.inboxSource = "inbox";
+  T.setTransport({
+    get(path) {
+      if (path === "/human/inbox") {
+        return Promise.resolve({ items: [inboxItem("i1", "change_set", "claimed", { assignee: "me" })] });
+      }
+      return Promise.reject(new Error("404: " + path));
+    },
+    post(path) {
+      log.push("POST " + path);
+      return Promise.resolve({ item_id: "i1", replayed: false });
+    },
+  });
+  const p1 = T.startInboxAction("i1", "claim");
+  const p2 = T.startInboxAction("i1", "claim");
+  await Promise.all([p1, p2]);
+  const posts = log.filter((x) => x.startsWith("POST"));
+  assert.equal(posts.length, 1, JSON.stringify(posts));
+  assert.equal(posts[0], "POST /human/inbox/i1/claim");
+  assert.equal(T.state.inboxResults["i1"].ok, true);
+});
+
+test("startInboxAction()：artifact_review resolve 按 decision 分派到 resolve 端点", async () => {
+  resetState();
+  const log = [];
+  T.state.inbox = T.inboxItemsOf({ items: [inboxItem("i1", "artifact_review", "claimed")] });
+  T.state.inboxSource = "inbox";
+  T.setTransport({
+    get() { return Promise.resolve({ items: [] }); },
+    post(path, body) {
+      log.push("POST " + path + " " + JSON.stringify(body));
+      return Promise.resolve({ replayed: true });
+    },
+  });
+  await T.startInboxAction("i1", "approve");
+  assert.equal(log.length, 1);
+  assert.equal(log[0], 'POST /human/inbox/i1/resolve {"decision":"approve","user":"本地用户"}');
+  assert.match(T.state.inboxResults["i1"].text, /幂等重放/);
+});
+
+test("startInboxAction()：human_result 缺 result 不发请求", async () => {
+  resetState();
+  const log = [];
+  T.state.inbox = T.inboxItemsOf({ items: [inboxItem("i1", "human_result", "claimed")] });
+  T.state.inboxSource = "inbox";
+  T.setTransport({
+    get() { return Promise.resolve({ items: [] }); },
+    post(path) { log.push("POST " + path); return Promise.resolve({}); },
+  });
+  await T.startInboxAction("i1", "resolve", { result: "   " });
+  assert.equal(log.length, 0);
+  assert.match(T.state.inboxResults["i1"].text, /无法构建请求/);
+});
+
+test("startInboxAction()：失败兜底（friendly 文本，不抛错）", async () => {
+  resetState();
+  T.state.inbox = T.inboxItemsOf({ items: [inboxItem("i1", "change_set", "claimed")] });
+  T.state.inboxSource = "inbox";
+  T.setTransport({
+    get() { return Promise.resolve({ items: [] }); },
+    post() { return Promise.reject(new Error("409: conflicted")); },
+  });
+  await T.startInboxAction("i1", "accept");
+  assert.equal(T.state.inboxResults["i1"].ok, false);
+  assert.match(T.state.inboxResults["i1"].text, /操作失败/);
 });
