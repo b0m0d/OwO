@@ -122,19 +122,19 @@ pub fn compile_upstream(items: &[Value], budget: PromptBudget) -> CompiledUpstre
             .get("cas_ref")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let total_bytes = content.as_bytes().len();
+        let total_bytes = content.len();
         let hash = sha256_of_ref(cas_ref).unwrap_or("");
         let header = format!("### {role} v{version}（{id}）");
         if total_bytes <= budget.per_artifact_bytes {
             // 小 Artifact：全文传递。
             let body = format!("{header}\n{content}");
-            used += content.as_bytes().len();
+            used += content.len();
             out.full_count += 1;
             blocks.push(body);
         } else if used + budget.summary_chars * 4 <= budget.total_upstream_bytes {
             // 大 Artifact：摘要 + 哈希 + ref（截断原因明确记录）。
             let summary = char_truncate(content.trim(), budget.summary_chars);
-            let summary_bytes = summary.as_bytes().len();
+            let summary_bytes = summary.len();
             used += summary_bytes;
             out.summarized_count += 1;
             out.truncations.push(TruncationRecord {
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(compiled.summarized_count, 1);
         let t = &compiled.truncations[0];
         assert_eq!(t.reason, "per_artifact_budget");
-        assert_eq!(t.total_bytes, big.as_bytes().len());
+        assert_eq!(t.total_bytes, big.len());
         assert!(t.kept_bytes > 0 && t.kept_bytes < t.total_bytes);
         assert!(compiled.text.contains("sha256=hash-of-a1"));
         assert!(compiled.text.contains("cas://sha256:hash-of-a1"));

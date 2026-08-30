@@ -3395,7 +3395,7 @@ impl TeamCoordinator {
                     return Err(WorkSwarmError::Conflict(format!(
                         "当前状态 {:?} 不可 continue（仅 Failed/Cancelled/Created/中断遗留）",
                         team.status
-                    )))
+                    )));
                 }
             }
             // 重置未完成步骤（已完成永不重跑）；清除失败/取消现场。
@@ -3459,7 +3459,7 @@ impl TeamCoordinator {
                 return Err(WorkSwarmError::Conflict(format!(
                     "当前状态 {:?} 不可 steer",
                     team.status
-                )))
+                )));
             }
         }
         let note = if note.trim().is_empty() {
@@ -3894,7 +3894,7 @@ impl TeamCoordinator {
                 return Err(WorkSwarmError::Conflict(format!(
                     "当前状态 {:?} 不可 replace",
                     team.status
-                )))
+                )));
             }
         }
         let member = team
@@ -3929,7 +3929,7 @@ impl TeamCoordinator {
             _ => {
                 return Err(WorkSwarmError::Validation(
                     "replace 需要 new_worker 或 new_user_id 之一".to_string(),
-                ))
+                ));
             }
         }
         // 角色规格 sidecar 同步（运行循环每阶段据此重建 worker 注册表 → 新阶段生效）。

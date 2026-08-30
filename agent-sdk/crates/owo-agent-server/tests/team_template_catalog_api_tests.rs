@@ -287,7 +287,13 @@ async fn install_is_idempotent_and_enables_auto_match_only_after_install() {
         json!("code-change-v1"),
         "安装后自动匹配应命中 code-change-v1"
     );
-    assert_eq!(body["members"].as_array().unwrap().len(), 3, "模板角色数");
+    // 八期（一路自适应 DAG）：简单代码任务自动裁剪角色——analyzer + implementer
+    //（reviewer 仅在有实际变更或高风险时启用），模板角色数 3 → 2。
+    assert_eq!(
+        body["members"].as_array().unwrap().len(),
+        2,
+        "模板角色数（自适应裁剪后）"
+    );
 }
 
 #[tokio::test]

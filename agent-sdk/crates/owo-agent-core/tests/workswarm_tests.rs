@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use owo_agent_core::builtin_team_templates;
 use owo_agent_core::goal::{Worker, WorkerRegistry};
 use owo_agent_core::project_space_store::{ProjectSpaceStoreBackend, SqliteProjectSpaceStore};
 use owo_agent_core::{
@@ -919,4 +920,169 @@ async fn strategy_force_team_keeps_explicit_roles() {
         "强制 team 保留显式角色"
     );
     assert_eq!(team.strategy_decision.as_ref().unwrap()["mode"], "team");
+}
+
+// ---------------------------------------------------------------------------
+// 8. 八期一路：自适应角色策略（创建期裁剪 + 运行期跳过 + 提前结束）
+// ---------------------------------------------------------------------------
+
+/// 安装内置模板到测试注册表并返回其角色（含依赖）。
+fn install_template(h: &Harness, template_id: &str) -> Vec<RoleSpec> {
+    let d = builtin_team_templates::descriptor(template_id).expect("内置模板应存在");
+    h.coordinator
+        .templates()
+        .save_template(&d.template)
+        .expect("模板安装失败");
+    d.template
+        .roles
+        .iter()
+        .cloned()
+        .map(RoleSpec::from)
+        .collect()
+}
+
+#[tokio::test]
+async fn adaptive_code_template_trims_reviewer_at_creation() {
+    let h = harness();
+    let template_roles = install_template(&h, builtin_team_templates::CODE_CHANGE_V1);
+    // 角色来自模板（req.roles 为空）→ 创建期裁剪生效。
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "修复 src/calc.rs 的减法符号错误".to_string(),
+        mode: TeamMode::Team,
+        template_id: Some(builtin_team_templates::CODE_CHANGE_V1.to_string()),
+        roles: Vec::new(),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    // 简单代码任务：analyzer + implementer（reviewer 被自适应裁剪，减少 1 个 Worker）。
+    assert_eq!(team.members.len(), template_roles.len() - 1);
+    assert!(!team.members.iter().any(|m| m.role == "reviewer"));
+    let adaptive = team
+        .strategy_decision
+        .as_ref()
+        .expect("strategy_decision 应存在")["adaptive"]
+        .clone();
+    assert_eq!(adaptive["saved_budget_calls"], 3, "reviewer 预算 3 次调用");
+    let skipped = adaptive["skipped_roles"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["role"], "reviewer");
+    assert!(
+        skipped[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("analyzer + implementer"),
+        "skip_reason 应可展示：{}",
+        skipped[0]["reason"]
+    );
+    // 全链路可运行（DAG 合法且收尾成功）。
+    let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &template_roles);
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    assert!(
+        matches!(outcome, PhaseOutcome::Done),
+        "裁剪后团队应正常收尾：{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn adaptive_research_template_rewrites_deps_and_keeps_one_summarizer() {
+    let h = harness();
+    let template_roles = install_template(&h, builtin_team_templates::RESEARCH_BRIEF_V1);
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "对比两种缓存淘汰策略并产出研究简报".to_string(),
+        mode: TeamMode::Team,
+        template_id: Some(builtin_team_templates::RESEARCH_BRIEF_V1.to_string()),
+        roles: Vec::new(),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    // 并行研究保留（researcher_a/b），核验被裁 → 只剩一个汇总角色。
+    assert_eq!(team.members.len(), template_roles.len() - 1);
+    assert!(team.members.iter().any(|m| m.role == "researcher_a"));
+    assert!(team.members.iter().any(|m| m.role == "researcher_b"));
+    assert!(team.members.iter().any(|m| m.role == "brief_writer"));
+    assert!(!team.members.iter().any(|m| m.role == "evidence_verifier"));
+    let adaptive = team.strategy_decision.as_ref().unwrap()["adaptive"].clone();
+    assert_eq!(adaptive["skipped_roles"][0]["role"], "evidence_verifier");
+    assert_eq!(adaptive["saved_budget_calls"], 3);
+    // 依赖重定向生效：brief_writer（原依赖 s-evidence_verifier）若未重写到
+    // researcher_a/b，create_team_run 内 plan.validate() 会因依赖缺失直接报错；
+    // 能走到这里即证明 DAG 合法，再驱动到成功收尾确认无死锁。
+    let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &template_roles);
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    assert!(
+        matches!(outcome, PhaseOutcome::Done),
+        "重定向后研究团队应正常收尾（无双路依赖死锁）：{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn adaptive_runtime_skip_ends_dag_early_when_no_changes() {
+    let h = harness();
+    let template_roles = install_template(&h, builtin_team_templates::CODE_CHANGE_V1);
+    // 用户显式编排（含 reviewer）→ 创建期尊重不裁剪；reviewer 由运行期跳过兜底。
+    let mut roles = template_roles.clone();
+    for r in &mut roles {
+        r.worker = Some("echo".to_string());
+    }
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "重构登录模块的错误处理".to_string(),
+        mode: TeamMode::Team,
+        template_id: Some(builtin_team_templates::CODE_CHANGE_V1.to_string()),
+        roles,
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    assert_eq!(
+        team.members.len(),
+        template_roles.len(),
+        "显式编排保留 reviewer"
+    );
+    let adaptive_at_creation = team.strategy_decision.as_ref().unwrap()["adaptive"].clone();
+    assert!(
+        adaptive_at_creation["skipped_roles"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "显式编排创建期不裁剪"
+    );
+    // 运行：echo worker 不产生任何工作区变更 → reviewer 就绪时被运行期跳过，
+    // 全部完成条件满足 → DAG 提前结束（Done + early_exit 指标）。
+    let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &template_roles);
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    assert!(
+        matches!(outcome, PhaseOutcome::Done),
+        "运行期跳过后应提前收尾：{outcome:?}"
+    );
+    let team = h.store.get_team_run(&team.team_id).await.unwrap();
+    assert_eq!(team.status, TeamRunStatus::Succeeded);
+    let adaptive = team.strategy_decision.as_ref().unwrap()["adaptive"].clone();
+    let runtime_skipped = adaptive["runtime_skipped"].as_array().unwrap();
+    assert_eq!(runtime_skipped.len(), 1);
+    assert_eq!(runtime_skipped[0]["role"], "reviewer");
+    assert!(
+        runtime_skipped[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("提前结束"),
+        "运行期跳过原因应可展示：{}",
+        runtime_skipped[0]["reason"]
+    );
+    // early_exit_reason 平铺字段应存在（四路冻结口径），reason 含提前结束语义。
+    assert!(
+        adaptive["early_exit_reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("提前结束"),
+        "early_exit_reason 应存在：{}",
+        adaptive["early_exit_reason"]
+    );
 }
