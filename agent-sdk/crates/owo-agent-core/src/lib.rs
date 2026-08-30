@@ -19,6 +19,12 @@ pub mod builtin_team_templates;
 pub mod bus_store;
 pub mod capability;
 pub mod cas_store;
+/// ChangeSet（八期 · 二路）：执行前基线快照（内容进 CAS）+ 变更集合构建 + 安全恢复
+/// （逐文件哈希比对，用户改动 → conflicted 不覆盖）。
+pub mod change_set;
+/// ChangeSet 存储（八期 · 二路）：`<run_dir>/<team_id>-change-sets.json` upsert +
+/// 幂等决定状态机 + 批准门控（approved head 阻断）。
+pub mod change_set_store;
 pub mod cloud_exec;
 pub mod computer_task;
 pub mod computer_use;
@@ -77,6 +83,9 @@ pub mod sqlite_store;
 pub mod storage_crypto;
 pub mod stt;
 pub mod subagent;
+/// 模板级 Prompt 编译器与上下文字节预算（八期 · 一路：角色专属 Prompt +
+/// 截断记录；新增模块登记见 AGENTS-COORD 八期一路留言）。
+pub mod team_prompt;
 /// 自适应组队策略引擎（R3 第一路：single/team/auto 判定 + 可展示理由）。
 pub mod team_strategy;
 pub mod tools;

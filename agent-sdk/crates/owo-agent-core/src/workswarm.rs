@@ -199,6 +199,13 @@ pub struct RunMeta {
     pub team_id: String,
     pub correlation_id: String,
     pub roles: Vec<RoleSpec>,
+    /// 八期一路：模板 id（内置模板 → 角色专属 Prompt 段；动态组队为 None）。
+    #[serde(default)]
+    pub template_id: Option<String>,
+    /// 八期一路：角色 → 调用预算（模板 `budget_calls_per_role`；Prompt 预算段与
+    /// 运行期跳过的 `saved_budget_calls` 口径来源）。旧 sidecar 缺省为空。
+    #[serde(default)]
+    pub budgets: BTreeMap<String, usize>,
 }
 
 impl RunMeta {
@@ -1233,7 +1240,90 @@ impl TeamCoordinator {
             ));
             specs.truncate(1);
         }
-        let strategy_decision = serde_json::to_value(&strategy_plan).ok();
+
+        // 八期一路：模板级自适应角色策略——简单任务自动减少 Worker（创建期裁剪）。
+        // 仅作用于「角色来自模板」（req.roles 为空）且多角色团队——用户显式编排
+        // 始终尊重（与 trim_to_single 同口径），其 reviewer 由运行期无变更跳过兜底；
+        // 被跳过角色的依赖重定向到其上游（保持 DAG 可拓扑排序）；跳过名单与节省
+        // 预算进 strategy_decision.adaptive + 审计。
+        let budget_map: BTreeMap<String, usize> = template_id
+            .as_deref()
+            .and_then(crate::builtin_team_templates::descriptor)
+            .map(|d| {
+                d.budget_calls_per_role
+                    .iter()
+                    .map(|rb| (rb.role.clone(), rb.budget_calls))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut adaptive_skips: Vec<crate::team_strategy::SkippedRole> = Vec::new();
+        let mut adaptive_saved_calls = 0usize;
+        if specs.len() > 1 && req.roles.is_empty() {
+            let role_names: Vec<String> = specs.iter().map(|s| s.role.clone()).collect();
+            let adaptive = crate::team_strategy::plan_adaptive_roles(
+                template_id.as_deref(),
+                &role_names,
+                &budget_map,
+                &profile,
+            );
+            if !adaptive.skipped.is_empty() {
+                for skip in &adaptive.skipped {
+                    let deps_of_skip = specs
+                        .iter()
+                        .find(|s| s.role == skip.role)
+                        .map(|s| s.depends_on.clone())
+                        .unwrap_or_default();
+                    // 指向被跳过角色的依赖 → 重定向到该角色的上游（去重保序）。
+                    for s in &mut specs {
+                        if s.role == skip.role || !s.depends_on.iter().any(|d| d == &skip.role) {
+                            continue;
+                        }
+                        let mut rewritten: Vec<String> = Vec::new();
+                        for d in &s.depends_on {
+                            if d == &skip.role {
+                                for up in &deps_of_skip {
+                                    if !rewritten.contains(up) {
+                                        rewritten.push(up.clone());
+                                    }
+                                }
+                            } else if !rewritten.contains(d) {
+                                rewritten.push(d.clone());
+                            }
+                        }
+                        s.depends_on = rewritten;
+                    }
+                    specs.retain(|s| s.role != skip.role);
+                    strategy_plan.reasons.push(format!(
+                        "自适应裁剪：跳过角色 {}（{}）",
+                        skip.role, skip.reason
+                    ));
+                    adaptive_skips.push(skip.clone());
+                }
+                adaptive_saved_calls = adaptive.saved_budget_calls;
+                strategy_plan.budget_calls_total = strategy_plan
+                    .budget_calls_total
+                    .saturating_sub(adaptive.saved_budget_calls);
+            }
+        }
+        let mut strategy_decision = serde_json::to_value(&strategy_plan).ok();
+        if let Some(obj) = strategy_decision.as_mut().and_then(Value::as_object_mut) {
+            // 八期一路 additive：自适应指标（skipped_roles/skip_reason/saved_budget_calls/
+            // context_bytes/提前结束原因）。运行期事件由 note_adaptive_event 追加。
+            obj.insert(
+                "adaptive".to_string(),
+                json!({
+                    "skipped_roles": adaptive_skips
+                        .iter()
+                        .map(|s| json!({"role": s.role, "reason": s.reason}))
+                        .collect::<Vec<_>>(),
+                    "saved_budget_calls": adaptive_saved_calls,
+                    "context_bytes_total": 0,
+                    "runtime_skipped": [],
+                    "events": [],
+                    "early_exit": Value::Null,
+                }),
+            );
+        }
         let strategy_mode = strategy_plan.mode.clone();
 
         // 成员（agent/human/worker 运行时绑定）。
@@ -1381,8 +1471,28 @@ impl TeamCoordinator {
             team_id: team_id.clone(),
             correlation_id,
             roles: specs,
+            template_id: template_id.clone(),
+            budgets: budget_map,
         }
         .save(&self.run_dir)?;
+
+        // 八期一路：创建期自适应裁剪审计（跳过角色/节省预算，best-effort 可读性）。
+        if !adaptive_skips.is_empty() {
+            self.audit(
+                &team_id,
+                "team.adaptive_skip",
+                format!(
+                    "自适应裁剪 {} 个角色（节省预算 {} 次调用）：{}",
+                    adaptive_skips.len(),
+                    adaptive_saved_calls,
+                    adaptive_skips
+                        .iter()
+                        .map(|s| s.role.as_str())
+                        .collect::<Vec<_>>()
+                        .join("、")
+                ),
+            );
+        }
 
         self.audit(
             &team_id,
@@ -1423,6 +1533,8 @@ impl TeamCoordinator {
             sub_state: GoalRunState,
             claimed: Vec<ProgressStep>,
             meta: RunMeta,
+            /// 八期一路：本阶段运行期跳过的角色（role, reason, saved_calls）。
+            runtime_skips: Vec<(String, String, usize)>,
         }
         let claim: PhaseClaimPlan = {
             let lock = self.team_lock(team_id);
@@ -1440,7 +1552,7 @@ impl TeamCoordinator {
                     .map(|r| r.assignee == "human")
                     .unwrap_or(false)
             };
-            let agent_steps: Vec<StepSpec> = ready
+            let mut agent_steps: Vec<StepSpec> = ready
                 .iter()
                 .filter(|s| !is_human_step(s, &meta))
                 .cloned()
@@ -1451,9 +1563,83 @@ impl TeamCoordinator {
                 .cloned()
                 .collect();
 
+            // 八期一路：运行期可选角色跳过——code-change 模板的 reviewer 在上游实现
+            // 步骤未产生任何实际工作区变更时无可评审对象 → 跳过（标记 Succeeded，
+            // 下游不再等待）；有实际变更（Git 变更跟踪文件有记录）→ 正常执行。
+            // 高风险/要求评审的团队在创建期即保留 reviewer，本判定不影响其执行。
+            let mut runtime_skips: Vec<(String, String, usize)> = Vec::new();
+            if meta.template_id.as_deref() == Some(crate::builtin_team_templates::CODE_CHANGE_V1) {
+                let has_changes = self.workspace_has_changes(team_id);
+                let mut remaining: Vec<StepSpec> = Vec::with_capacity(agent_steps.len());
+                for step in agent_steps {
+                    let role = worker_role(&step.worker).unwrap_or_default();
+                    if let Some(reason) =
+                        crate::team_strategy::reviewer_runtime_skip_reason(&role, has_changes)
+                    {
+                        let skippable = state
+                            .records
+                            .get(&step.id)
+                            .is_some_and(|r| r.status.can_resume());
+                        if skippable {
+                            if let Some(record) = state.records.get_mut(&step.id) {
+                                record.status = StepStatus::Succeeded;
+                            }
+                            let saved = meta.budgets.get(&role).copied().unwrap_or(0);
+                            runtime_skips.push((role, reason, saved));
+                            continue;
+                        }
+                    }
+                    remaining.push(step);
+                }
+                agent_steps = remaining;
+            }
+
             // 无就绪：全部完成 → Done；否则死锁（上游失败等）→ Failed。
             if agent_steps.is_empty() && human_steps.is_empty() {
                 if Self::all_succeeded(&state) {
+                    if !runtime_skips.is_empty() {
+                        // 跳过标记必须先落盘（否则磁盘 reviewer 停留在 Pending 而团队已终态）。
+                        self.persist_state(&state)?;
+                        drop(_guard);
+                        // 锁外记录自适应指标与审计（note_adaptive_event 自行持锁）。
+                        for (role, reason, saved) in &runtime_skips {
+                            self.audit(
+                                team_id,
+                                "team.role_skipped",
+                                format!("运行期跳过角色 {role}：{reason}"),
+                            );
+                            self.note_adaptive_event(
+                                team_id,
+                                json!({
+                                    "kind": "role_skipped",
+                                    "role": role,
+                                    "reason": reason,
+                                    "saved_budget_calls": saved,
+                                    "role_skipped": {"role": role, "reason": reason},
+                                }),
+                            )
+                            .await;
+                        }
+                        self.audit(
+                            team_id,
+                            "team.early_exit",
+                            "运行期跳过使全部完成条件满足，DAG 提前结束".to_string(),
+                        );
+                        self.note_adaptive_event(
+                            team_id,
+                            json!({
+                                "kind": "early_exit",
+                                "early_exit": {
+                                    "reason": "运行期跳过使全部完成条件满足，DAG 提前结束",
+                                    "skipped_roles": runtime_skips
+                                        .iter()
+                                        .map(|(r, _, _)| r.clone())
+                                        .collect::<Vec<_>>(),
+                                },
+                            }),
+                        )
+                        .await;
+                    }
                     return Ok(PhaseOutcome::Done);
                 }
                 self.fail_run_internal(
@@ -1585,8 +1771,29 @@ impl TeamCoordinator {
                 sub_state,
                 claimed,
                 meta,
+                runtime_skips,
             }
         }; // —— 阶段 A 结束：锁已释放 ——
+
+        // ---- 阶段 A'（锁外）：运行期跳过 → 自适应指标 + 审计（Done 路径已在锁内处理）。
+        for (role, reason, saved) in &claim.runtime_skips {
+            self.audit(
+                team_id,
+                "team.role_skipped",
+                format!("运行期跳过角色 {role}：{reason}"),
+            );
+            self.note_adaptive_event(
+                team_id,
+                json!({
+                    "kind": "role_skipped",
+                    "role": role,
+                    "reason": reason,
+                    "saved_budget_calls": saved,
+                    "role_skipped": {"role": role, "reason": reason},
+                }),
+            )
+            .await;
+        }
 
         // ---- 阶段 B（无锁）：Worker/模型执行 ----
         let config = RunnerConfig {
@@ -2630,6 +2837,8 @@ impl TeamCoordinator {
                     "artifact_id": a.artifact_id,
                     "version": a.version,
                     "content": content,
+                    // 八期一路：CAS ref 随切片透出（大 Artifact 摘要块需带哈希与 ref）。
+                    "cas_ref": a.content_ref,
                     "review_state": format!("{:?}", a.review_state),
                 }));
             }
@@ -2640,6 +2849,9 @@ impl TeamCoordinator {
             "role": spec.role,
             "member_id": member_id,
             "handoff_contract": spec.handoff_contract,
+            // 八期一路：模板 id + 角色调用预算（角色专属 Prompt 编译输入）。
+            "template_id": meta.template_id,
+            "budget_calls": meta.budgets.get(&spec.role).copied().unwrap_or(0),
             "upstream": upstream,
         }))
     }
@@ -2649,6 +2861,99 @@ impl TeamCoordinator {
             .strip_prefix("cas://sha256:")
             .and_then(|h| self.cas.get_text(h))
             .unwrap_or_default()
+    }
+
+    /// 八期一路：自适应指标追加落盘（best-effort——任何失败都不阻塞运行）。
+    ///
+    /// 事件写入 `strategy_decision.adaptive.events`（上限 64 条），并按事件种类
+    /// 维护聚合字段：`context_bytes_total`（context 事件累计）、`runtime_skipped`
+    /// （运行期跳过名单，上限 16 条）、`early_exit`（提前结束原因）。事件 kind：
+    /// `context` | `role_skipped` | `early_exit`；第四路 UI 直接读 strategy_decision。
+    pub async fn note_adaptive_event(&self, team_id: &str, event: Value) {
+        let lock = self.team_lock(team_id);
+        let _guard = lock.lock().await;
+        let Ok(mut team) = self.store.get_team_run(team_id).await else {
+            return;
+        };
+        let mut sd = team.strategy_decision.clone().unwrap_or_else(|| json!({}));
+        if !sd.is_object() {
+            sd = json!({});
+        }
+        if let Some(obj) = sd.as_object_mut() {
+            let adaptive = obj
+                .entry("adaptive".to_string())
+                .or_insert_with(|| json!({}));
+            if !adaptive.is_object() {
+                *adaptive = json!({});
+            }
+            if let Some(a) = adaptive.as_object_mut() {
+                if let Some(bytes) = event.get("context_bytes").and_then(Value::as_u64) {
+                    let total = a
+                        .get("context_bytes_total")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let sum = total + bytes;
+                    // 八期四路冻结口径：`context_bytes`（平铺）；保留 `context_bytes_total` 同值别名。
+                    a.insert("context_bytes".to_string(), json!(sum));
+                    a.insert("context_bytes_total".to_string(), json!(sum));
+                }
+                if let Some(skip) = event.get("role_skipped") {
+                    let arr = a
+                        .entry("runtime_skipped".to_string())
+                        .or_insert_with(|| json!([]));
+                    if let Some(list) = arr.as_array_mut() {
+                        if list.len() < 16 {
+                            list.push(skip.clone());
+                        }
+                    }
+                    // 冻结口径 `skip_reason`：最近一次运行期跳过原因（逐角色原因在
+                    // skipped_roles[].reason / runtime_skipped[].reason）。
+                    if let Some(reason) = skip.get("reason").and_then(Value::as_str) {
+                        a.insert("skip_reason".to_string(), json!(reason));
+                    }
+                }
+                if let Some(exit) = event.get("early_exit") {
+                    a.insert("early_exit".to_string(), exit.clone());
+                    // 冻结口径：`early_exit_reason?`（字符串平铺别名）。
+                    if let Some(reason) = exit.get("reason").and_then(Value::as_str) {
+                        a.insert("early_exit_reason".to_string(), json!(reason));
+                    }
+                }
+                let events = a.entry("events".to_string()).or_insert_with(|| json!([]));
+                if let Some(list) = events.as_array_mut() {
+                    if list.len() < 64 {
+                        list.push(event);
+                    }
+                }
+            }
+        }
+        team.strategy_decision = Some(sd);
+        team.updated_at = now_ts();
+        let _ = self.store.save_team_run(&team).await;
+    }
+
+    /// 八期一路：服务端 Git 变更跟踪记录是否存在实际工作区变更
+    /// （读 `<run_dir>/<team_id>-workspace-changes.json`；文件缺失/无记录/解析
+    /// 失败一律视为无变更——运行期 reviewer 跳过判定的输入）。
+    fn workspace_has_changes(&self, team_id: &str) -> bool {
+        let path = self
+            .run_dir
+            .join(format!("{team_id}-workspace-changes.json"));
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        serde_json::from_str::<Value>(&raw)
+            .ok()
+            .and_then(|v| {
+                v.as_array().map(|arr| {
+                    arr.iter().any(|r| {
+                        r.get("changed_files")
+                            .and_then(Value::as_array)
+                            .is_some_and(|files| !files.is_empty())
+                    })
+                })
+            })
+            .unwrap_or(false)
     }
 
     /// 组装内层 worker 输入：agent 角色注入 prompt（critic 只读）；内置 worker 注入 text。
@@ -2668,7 +2973,14 @@ impl TeamCoordinator {
                 .map(|p| !p.trim().is_empty())
                 .unwrap_or(false);
             if !has_prompt {
-                obj.insert("prompt".to_string(), json!(Self::build_role_prompt(ctx)));
+                // 八期一路：角色专属 Prompt 由 TeamPromptCompiler 编译（模板段 +
+                // 上下文字节预算 + 截断记录）；prompt 元数据随步骤输入回传，
+                // RoleWorker 转报自适应指标（best-effort，不阻塞执行）。
+                let (prompt_text, prompt_meta) = Self::compile_role_prompt_with_meta(ctx);
+                obj.insert("prompt".to_string(), json!(prompt_text));
+                if let Some(ws) = obj.get_mut("_workswarm").and_then(Value::as_object_mut) {
+                    ws.insert("prompt_meta".to_string(), prompt_meta);
+                }
             }
             let role = ctx.get("role").and_then(Value::as_str).unwrap_or("");
             obj.insert("read_only".to_string(), json!(is_critic_role(role)));
@@ -2681,54 +2993,50 @@ impl TeamCoordinator {
         out
     }
 
-    /// 角色 prompt（agent worker）：角色 + 目标 + 交接契约 + 上游产物（ref + 摘要）。
-    ///
-    /// R3 降本第 7 条：上游上下文只携带**摘要（截断）+ 版本化引用**，不把全部历史
-    /// 全文重复塞给每个 Worker——需要全文时按 ref 到 Project Space/CAS 取。
-    fn build_role_prompt(ctx: &Value) -> String {
-        const UPSTREAM_PREVIEW_CHARS: usize = 2000;
-        let objective = ctx
-            .get("objective_text")
-            .and_then(Value::as_str)
+    /// 角色 prompt 编译（八期一路）：`TeamPromptCompiler` 按模板 + 角色 + 工具权限
+    /// 生成角色专属 Prompt——当前目标 / 输入 Artifact（字节预算：小传正文、大传
+    /// 摘要+哈希+ref、超总预算仅引用）/ 必须完成 / 禁止执行 / 输出格式 / 验收条件 /
+    /// 剩余调用预算。返回 (prompt, prompt_meta)；prompt_meta 含 context_bytes 与
+    /// 截断记录（进自适应指标，UI 可展示上下文大小）。
+    fn compile_role_prompt_with_meta(ctx: &Value) -> (String, Value) {
+        let upstream_items = ctx
+            .get("upstream")
+            .and_then(Value::as_array)
+            .cloned()
             .unwrap_or_default();
+        let compiled = crate::team_prompt::compile_upstream(
+            &upstream_items,
+            crate::team_prompt::PromptBudget::default(),
+        );
         let role = ctx.get("role").and_then(Value::as_str).unwrap_or("member");
-        let contract = ctx
-            .get("handoff_contract")
-            .and_then(Value::as_str)
-            .unwrap_or("按角色职责交付产物");
-        let mut upstream_blocks = Vec::new();
-        if let Some(items) = ctx.get("upstream").and_then(Value::as_array) {
-            for item in items {
-                let r = item.get("role").and_then(Value::as_str).unwrap_or("?");
-                let id = item
-                    .get("artifact_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("?");
-                let v = item.get("version").and_then(Value::as_u64).unwrap_or(0);
-                let content = item.get("content").and_then(Value::as_str).unwrap_or("");
-                let content = preview(content, UPSTREAM_PREVIEW_CHARS);
-                upstream_blocks.push(format!(
-                    "### {r} v{v}（{id}）\n{content}\n（以上为摘要；完整内容按版本化引用 {id} v{v} 从 Project Space 获取，不在此重复全文历史）"
-                ));
-            }
-        }
-        let upstream = if upstream_blocks.is_empty() {
-            "（无上游产物；你是首个执行者）".to_string()
-        } else {
-            upstream_blocks.join("\n\n")
+        let pctx = crate::team_prompt::PromptContext {
+            objective: ctx
+                .get("objective_text")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            role,
+            handoff_contract: ctx
+                .get("handoff_contract")
+                .and_then(Value::as_str)
+                .unwrap_or("按角色职责交付产物"),
+            template_id: ctx.get("template_id").and_then(Value::as_str),
+            budget_calls: ctx
+                .get("budget_calls")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(0),
+            is_critic: is_critic_role(role),
+            upstream: &compiled,
         };
-        let critic_hint = if is_critic_role(role) {
-            "\n你是只读评审者：不得要求修改或覆盖上游产物，只输出评审结论。"
-        } else {
-            ""
-        };
-        format!(
-            "# 角色：{role}\n你是 WorkSwarm 团队中的 {role} 成员，与团队成员围绕共享项目空间协作。\n\
-## 团队目标\n{objective}\n\n\
-## 你的交接契约\n{contract}\n\n\
-## 上游产物（来自 Project Space 的版本化共享产物，按 ref 传递）\n{upstream}\n\n\
-## 要求\n直接输出你的产物正文（不要输出解释过程）。{critic_hint}"
-        )
+        let prompt = crate::team_prompt::compile_prompt(&pctx);
+        let meta = json!({
+            "context_bytes": compiled.context_bytes,
+            "full_count": compiled.full_count,
+            "summarized_count": compiled.summarized_count,
+            "ref_only_count": compiled.ref_only_count,
+            "truncated": compiled.truncations,
+        });
+        (prompt, meta)
     }
 
     /// 输出中可选的结构化字段（`{"open_issues":[..],"known_risks":[..]}`；非对象 → 空）。
@@ -3751,6 +4059,29 @@ impl Worker for RoleWorker {
         };
         let worker_kind = self.inner.name().to_string();
         let enriched = TeamCoordinator::build_enriched_input(&ctx, input, &worker_kind);
+        // 八期一路：Prompt 编译元数据 → 自适应指标（context_bytes/截断记录）。
+        // best-effort：指标落盘失败不影响 Worker 执行。
+        if worker_kind == "agent" {
+            if let Some(prompt_meta) = enriched
+                .get("_workswarm")
+                .and_then(|w| w.get("prompt_meta"))
+                .cloned()
+            {
+                let mut event = json!({
+                    "kind": "context",
+                    "role": self.role,
+                    "step_id": step_id,
+                });
+                if let (Some(obj), Some(meta)) = (event.as_object_mut(), prompt_meta.as_object()) {
+                    for (key, value) in meta {
+                        obj.insert(key.clone(), value.clone());
+                    }
+                }
+                self.coordinator
+                    .note_adaptive_event(&self.team_id, event)
+                    .await;
+            }
+        }
         let out = self.inner.run(&enriched).await?;
         // 输出契约（V1）：结构化 JSON → 登记前防御——producer 取 artifact.content
         //（交付物正文，不再拿整段自由文本/信封当产物），critic 禁止携带 artifact

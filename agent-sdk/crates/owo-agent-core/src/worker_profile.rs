@@ -181,6 +181,41 @@ impl WorkerProfile {
         }
         registry
     }
+
+    /// 角色 Prompt 的「禁止执行/边界」行（八期 · 一路）：按族与工具面派生，
+    /// 供 [`crate::team_prompt::compile_prompt`] 使用——Prompt 声称的能力边界与
+    /// `build_registry` 装配的真实工具面一致（注册表面即权限边界的 Prompt 侧投影）。
+    pub fn prompt_guard_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.visible_tools.is_empty() {
+            lines
+                .push("工具面未声明：仅可使用缺省只读文件面，禁止任何写入/命令/联网。".to_string());
+        } else {
+            lines.push(format!(
+                "可见工具仅限：{}（工具面之外没有其他执行手段）。",
+                self.visible_tools.join(" / ")
+            ));
+        }
+        if self.read_only {
+            lines.push(
+                "禁止写入工作区文件（你是只读角色）：交付与结论一律通过产物正文/评审声明完成。"
+                    .to_string(),
+            );
+        } else {
+            lines.push(
+                "只允许在允许写路径内用 write_file 落盘最终变更；禁止改写白名单外文件，\
+                 禁止把变更只留在说明里而不落盘。"
+                    .to_string(),
+            );
+        }
+        if !self.can_run_command {
+            lines.push("禁止执行命令（run_command 不在你的工具面）。".to_string());
+        }
+        if !self.can_use_browser {
+            lines.push("禁止联网浏览（浏览器工具不在你的工具面）。".to_string());
+        }
+        lines
+    }
 }
 
 /// 路径白名单交集（七期 · 二路）：角色写白名单 ∩ 团队绑定写白名单。
@@ -420,6 +455,40 @@ mod tests {
             PROFILE_MAX_TURNS_CAP,
             "预算超硬上限 → 截到 12"
         );
+    }
+
+    #[test]
+    fn prompt_guard_lines_match_tool_surface() {
+        // 写角色：写面 + 命令提示，无只读禁令。
+        let writer = WorkerProfile::for_role("implementer", 5);
+        let writer_lines = writer.prompt_guard_lines().join("\n");
+        assert!(writer_lines.contains("write_file"));
+        assert!(writer_lines.contains("允许写路径"));
+        assert!(!writer_lines.contains("禁止写入工作区文件"));
+        assert!(writer_lines.contains("禁止联网浏览"));
+        // 读角色：只读禁令 + 无命令/浏览器。
+        let reader = WorkerProfile::for_role("reviewer", 3);
+        let reader_lines = reader.prompt_guard_lines().join("\n");
+        assert!(reader_lines.contains("禁止写入工作区文件"));
+        assert!(reader_lines.contains("禁止执行命令"));
+        assert!(reader_lines.contains("禁止联网浏览"));
+        assert!(reader_lines.contains("read_file"));
+        // 研究族：浏览器放开，仍只读。
+        let researcher = WorkerProfile::for_role("researcher_a", 4);
+        let researcher_lines = researcher.prompt_guard_lines().join("\n");
+        assert!(researcher_lines.contains("browser_search"));
+        assert!(!researcher_lines.contains("禁止联网浏览"));
+        assert!(researcher_lines.contains("禁止写入工作区文件"));
+        // 未声明工具面（缺省画像不会出现，防御性分支仍如实告知）。
+        let empty = WorkerProfile {
+            visible_tools: Vec::new(),
+            read_only: true,
+            write_allowed_paths: Vec::new(),
+            max_turns: 3,
+            can_use_browser: false,
+            can_run_command: false,
+        };
+        assert!(empty.prompt_guard_lines()[0].contains("未声明"));
     }
 
     #[test]

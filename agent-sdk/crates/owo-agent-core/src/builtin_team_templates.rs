@@ -392,6 +392,228 @@ pub fn descriptor(template_id: &str) -> Option<BuiltinTemplateDescriptor> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 角色专属 Prompt 段（八期 · 第一路）
+// ---------------------------------------------------------------------------
+
+/// 单角色的结构化 Prompt 段（八期一路）：由 [`prompt_sections_for`] 按
+/// 模板 + 角色取用，`TeamPromptCompiler` 据此生成角色专属 Prompt
+/// （不再让所有角色共用同一段通用提示）。
+#[derive(Debug, Clone, Serialize)]
+pub struct RolePromptSections {
+    /// 必须完成的工作（逐条）。
+    pub must_do: Vec<String>,
+    /// 禁止执行的工作（逐条；与 WorkerProfile 工具面护栏叠加）。
+    pub must_not_do: Vec<String>,
+    /// 输出格式（契约口径）。
+    pub output_format: String,
+    /// 验收条件（逐条；Prompt 侧口径，引擎侧 verify 仍独立强制）。
+    pub acceptance: Vec<String>,
+}
+
+/// 模板 + 角色 → 角色专属 Prompt 段（未知组合 → None，编译器回退交接契约）。
+///
+/// 内容与各模板角色的 `handoff_contract`/`tool_scope`/`artifact_kinds` 同口径，
+/// 但按「必须做 / 禁止做 / 输出格式 / 验收」结构化——通用契约给引擎，
+/// 结构化段给模型。
+pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSections> {
+    let sections = match (template_id, role) {
+        (CODE_CHANGE_V1, "code_analyzer") => RolePromptSections {
+            must_do: vec![
+                "只读定位目标代码与调用点，梳理影响面（受影响的函数/调用方/测试）。".to_string(),
+                "输出风险清单：每项风险标注代码位置与建议的验证方式。".to_string(),
+            ],
+            must_not_do: vec![
+                "不修改任何文件（你是只读分析角色）。".to_string(),
+                "不产出代码变更（实现由 implementer 承担）。".to_string(),
+            ],
+            output_format: "分析报告（Markdown）：影响面清单 + 风险清单 + 建议实现要点。".to_string(),
+            acceptance: vec![
+                "影响面覆盖目标代码及其直接调用方。".to_string(),
+                "每项风险均有位置与建议验证方式。".to_string(),
+            ],
+        },
+        (CODE_CHANGE_V1, "implementer") => RolePromptSections {
+            must_do: vec![
+                "依据上游分析产出完整变更：你是全队唯一写者，用 write_file 把最终文件内容真实写入允许路径内的文件。".to_string(),
+                "artifact.content 只写变更说明、影响面与验证方式（不要把完整变更只放在 artifact 里而不落盘）。".to_string(),
+            ],
+            must_not_do: vec![
+                "不触碰允许写路径之外的文件。".to_string(),
+                "不改写 reviewer 的评审结论（评审独立）。".to_string(),
+            ],
+            output_format: "契约 JSON 的 artifact.content = 变更说明；工作区文件 = 真实落盘后的最终内容。".to_string(),
+            acceptance: vec![
+                "工作区存在真实落盘的变更（git 可见）。".to_string(),
+                "变更与上游分析的影响面一致。".to_string(),
+                "无越界文件改动。".to_string(),
+            ],
+        },
+        (CODE_CHANGE_V1, "reviewer") => RolePromptSections {
+            must_do: vec![
+                "核对工作区真实变更与目标/上游影响面是否一致。".to_string(),
+                "输出评审结论：approved/score/comments，逐条指出问题位置。".to_string(),
+            ],
+            must_not_do: vec![
+                "只读：不改写交付物、不产出代码。".to_string(),
+                "不直接重新实现（发现问题写进评审结论，不动手改）。".to_string(),
+            ],
+            output_format: "评审结论 JSON：{\"approved\":bool,\"score\":0-100,\"comments\":[..]}。".to_string(),
+            acceptance: vec![
+                "结论覆盖「与目标一致」与「无越界修改」两个维度。".to_string(),
+                "每条意见可定位到文件/函数级。".to_string(),
+            ],
+        },
+        (RESEARCH_BRIEF_V1, "researcher_a") => RolePromptSections {
+            must_do: vec![
+                "围绕目标检索与阅读（主视角），输出带来源（URL/文件路径）的证据列表。".to_string(),
+                "每条证据标注来源与可信度说明。".to_string(),
+            ],
+            must_not_do: vec![
+                "不写工作区文件（研究族只读 + 浏览器）。".to_string(),
+                "不编造来源：无来源的判断不得作为证据输出。".to_string(),
+            ],
+            output_format: "证据列表（逐条：结论 + 来源 + 简注）。".to_string(),
+            acceptance: vec![
+                "证据覆盖目标的主要方面。".to_string(),
+                "每条证据都有可核验来源。".to_string(),
+            ],
+        },
+        (RESEARCH_BRIEF_V1, "researcher_b") => RolePromptSections {
+            must_do: vec![
+                "从对立/边界视角检索反例与限制条件，输出带来源的证据列表。".to_string(),
+                "明确指出主视角结论可能不成立的条件。".to_string(),
+            ],
+            must_not_do: vec![
+                "不写工作区文件（研究族只读 + 浏览器）。".to_string(),
+                "不编造来源：无来源的判断不得作为证据输出。".to_string(),
+            ],
+            output_format: "证据列表（逐条：反例/限制 + 来源 + 简注）。".to_string(),
+            acceptance: vec![
+                "至少覆盖一个对立视角或适用边界。".to_string(),
+                "每条证据都有可核验来源。".to_string(),
+            ],
+        },
+        (RESEARCH_BRIEF_V1, "evidence_verifier") => RolePromptSections {
+            must_do: vec![
+                "逐条核对两路证据的来源存在性与相关性。".to_string(),
+                "剔除无源/弱源结论，输出核验后的合并证据列表。".to_string(),
+            ],
+            must_not_do: vec![
+                "不自行补充新证据（只核验上游证据）。".to_string(),
+                "不改写研究结论的实质内容（剔除需给理由）。".to_string(),
+            ],
+            output_format: "核验后的合并证据列表（保留/剔除 + 理由）。".to_string(),
+            acceptance: vec![
+                "每条保留证据都通过来源核对。".to_string(),
+                "剔除项均有明确理由。".to_string(),
+            ],
+        },
+        (RESEARCH_BRIEF_V1, "brief_writer") => RolePromptSections {
+            must_do: vec![
+                "汇总上游核验证据产出研究简报。".to_string(),
+                "每条结论附来源引用；被核验剔除的判断不得进入结论。".to_string(),
+            ],
+            must_not_do: vec![
+                "不写工作区文件（研究族只读）。".to_string(),
+                "不引入上游不存在的「新事实」。".to_string(),
+            ],
+            output_format: "研究简报（Markdown）：结论 + 来源引用列表。".to_string(),
+            acceptance: vec![
+                "简报每条结论附来源引用。".to_string(),
+                "结论与核验后的证据一致。".to_string(),
+            ],
+        },
+        (DOCUMENT_DELIVERY_V1, "drafter") => RolePromptSections {
+            must_do: vec![
+                "产出完整文档初稿（结构完整、覆盖目标要点）。".to_string(),
+                "对不确定的事实显式标注，不冒充确定。".to_string(),
+            ],
+            must_not_do: vec![
+                "不越过初稿定位去吸收（尚不存在的）评审意见。".to_string(),
+            ],
+            output_format: "结构化 Markdown 初稿。".to_string(),
+            acceptance: vec![
+                "覆盖目标列出的全部要点。".to_string(),
+                "章节结构完整可评审。".to_string(),
+            ],
+        },
+        (DOCUMENT_DELIVERY_V1, "content_reviewer") => RolePromptSections {
+            must_do: vec![
+                "检查结构/一致性/事实性/覆盖度，输出逐条修订意见。".to_string(),
+                "每条意见给出位置与可执行的修改建议。".to_string(),
+            ],
+            must_not_do: vec![
+                "只读：不改写原文、不产出新稿。".to_string(),
+            ],
+            output_format: "修订意见列表（逐条：位置 + 问题 + 建议）。".to_string(),
+            acceptance: vec![
+                "意见覆盖结构与事实两类。".to_string(),
+                "每条意见可执行（不是泛泛评价）。".to_string(),
+            ],
+        },
+        (DOCUMENT_DELIVERY_V1, "finalizer") => RolePromptSections {
+            must_do: vec![
+                "吸收审查意见产出终稿（结构化 Markdown），用 write_file 落盘。".to_string(),
+                "附修订说明：采纳/驳回逐条意见的理由。".to_string(),
+            ],
+            must_not_do: vec![
+                "不忽略未处理的意见（驳回需给理由）。".to_string(),
+            ],
+            output_format: "契约 JSON 的 artifact.content = 终稿 + 修订说明；工作区文件 = 终稿落盘内容。".to_string(),
+            acceptance: vec![
+                "终稿为完整最终版本且附修订说明。".to_string(),
+                "全部意见有采纳/驳回去向。".to_string(),
+            ],
+        },
+        (STRUCTURED_EXTRACT_V1, "extractor") => RolePromptSections {
+            must_do: vec![
+                "严格按目标 schema 输出 JSON（裸 JSON，无围栏/无解释文本）。".to_string(),
+                "字段缺失用 null 并在 open_issues 中说明，不猜测。".to_string(),
+            ],
+            must_not_do: vec![
+                "不输出 Markdown 围栏或解释性文字。".to_string(),
+                "不虚构源数据中不存在的字段值。".to_string(),
+            ],
+            output_format: "裸 JSON（可直接 serde 解析）。".to_string(),
+            acceptance: vec![
+                "输出可解析为 JSON 对象。".to_string(),
+                "键与目标 schema 一致。".to_string(),
+            ],
+        },
+        (STRUCTURED_EXTRACT_V1, "schema_validator") => RolePromptSections {
+            must_do: vec![
+                "验证 JSON 可解析且符合目标 schema；失败时逐条列出违规字段、期望与修复建议。".to_string(),
+                "输出结构化校验结论（通过/违规清单）。".to_string(),
+            ],
+            must_not_do: vec![
+                "不自行改写数据（修复建议留给 formatter）。".to_string(),
+            ],
+            output_format: "结构化校验结论（JSON：valid + violations[]）。".to_string(),
+            acceptance: vec![
+                "覆盖可解析性与 schema 符合性两层。".to_string(),
+                "违规项可定位到字段级。".to_string(),
+            ],
+        },
+        (STRUCTURED_EXTRACT_V1, "artifact_formatter") => RolePromptSections {
+            must_do: vec![
+                "把校验通过的数据输出为 JSON 或 CSV Artifact（二选一并在输出首行标注格式）。".to_string(),
+                "结构确定、可直接机器消费。".to_string(),
+            ],
+            must_not_do: vec![
+                "不改变数据的实质内容（只做格式化）。".to_string(),
+            ],
+            output_format: "首行标注格式（json/csv），随后为对应格式的机器可解析正文。".to_string(),
+            acceptance: vec![
+                "输出可被对应格式解析器直接解析。".to_string(),
+                "数据内容与校验通过的输入一致。".to_string(),
+            ],
+        },
+        _ => return None,
+    };
+    Some(sections)
+}
+
 /// 目录条目的自动匹配关键词（与 `applicability` 同一口径切分；进 UI 预览）。
 pub fn auto_match_keywords(applicability: &str) -> Vec<String> {
     crate::team_strategy::applicability_tokens(applicability)
@@ -601,5 +823,64 @@ mod tests {
             keywords.iter().all(|k| k.chars().count() >= 2),
             "关键词长度 ≥2：{keywords:?}"
         );
+    }
+
+    #[test]
+    fn every_catalog_role_has_prompt_sections() {
+        // 四个内置模板的每个角色都必须有角色专属 Prompt 段（八期一路完工判据）。
+        for d in catalog() {
+            for r in &d.template.roles {
+                let s = prompt_sections_for(&d.template.template_id, &r.role)
+                    .unwrap_or_else(|| panic!("{} 缺角色段：{}", d.template.template_id, r.role));
+                assert!(
+                    !s.must_do.is_empty(),
+                    "{}.{} must_do 空",
+                    d.template.template_id,
+                    r.role
+                );
+                assert!(
+                    !s.must_not_do.is_empty(),
+                    "{}.{} must_not_do 空",
+                    d.template.template_id,
+                    r.role
+                );
+                assert!(
+                    !s.output_format.trim().is_empty(),
+                    "{}.{} output_format 空",
+                    d.template.template_id,
+                    r.role
+                );
+                assert!(
+                    !s.acceptance.is_empty(),
+                    "{}.{} acceptance 空",
+                    d.template.template_id,
+                    r.role
+                );
+            }
+        }
+        assert!(prompt_sections_for("no-such-template", "any").is_none());
+        assert!(prompt_sections_for(CODE_CHANGE_V1, "unknown_role").is_none());
+    }
+
+    #[test]
+    fn code_template_sections_keep_single_writer_semantics() {
+        let implementer = prompt_sections_for(CODE_CHANGE_V1, "implementer").unwrap();
+        assert!(implementer
+            .must_do
+            .iter()
+            .any(|l| l.contains("单写者") || l.contains("write_file")));
+        let reviewer = prompt_sections_for(CODE_CHANGE_V1, "reviewer").unwrap();
+        assert!(
+            reviewer
+                .must_not_do
+                .iter()
+                .any(|l| l.contains("不改写交付物") || l.contains("只读")),
+            "评审角色段必须保持只读语义：{reviewer:?}"
+        );
+        assert!(reviewer
+            .must_do
+            .iter()
+            .chain(reviewer.must_not_do.iter())
+            .all(|l| !l.contains("唯一允许产出代码")));
     }
 }

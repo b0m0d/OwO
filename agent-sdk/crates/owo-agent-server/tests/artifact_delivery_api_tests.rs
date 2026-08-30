@@ -636,6 +636,8 @@ async fn gate_coordinator(
         team_id: team_id.to_string(),
         correlation_id: "corr-gate".to_string(),
         roles: vec![],
+        template_id: None,           // 八期一路 additive：动态组队为 None
+        budgets: Default::default(), // 八期一路 additive：角色 → 调用预算
     };
     std::fs::create_dir_all(&run_dir).unwrap();
     std::fs::write(

@@ -415,6 +415,108 @@ pub fn applicability_matches(applicability: &str, objective: &str) -> bool {
         .any(|token| objective_lower.contains(&token.to_lowercase()))
 }
 
+// ---------------------------------------------------------------------------
+// 自适应角色策略（八期 · 第一路）：模板级 DAG 的角色裁剪
+// ---------------------------------------------------------------------------
+
+use std::collections::BTreeMap;
+
+/// 跳过角色记录（`skipped_roles` / `skip_reason` 指标来源）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkippedRole {
+    pub role: String,
+    pub reason: String,
+}
+
+/// 自适应角色决策：跳过名单 + 节省的调用预算（`saved_budget_calls`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AdaptiveRoleDecision {
+    pub skipped: Vec<SkippedRole>,
+    pub saved_budget_calls: usize,
+    /// 可展示的判定理由（进 strategy_decision / 审计 / UI）。
+    pub reasons: Vec<String>,
+}
+
+/// 模板级自适应角色策略（八期一路；纯函数）：
+///
+/// - `code-change-v1` 简单任务 → 跳过 reviewer（analyzer + implementer 足够；
+///   有实际变更或高风险时由运行期跳过判定/人工评审兜底）；
+/// - `research-brief-v1` 简单任务 → 并行研究（researcher_a/b）后只保留一个
+///   汇总角色（跳过 evidence_verifier；来源要求移交 brief_writer 验收段）；
+/// - 高风险 / 明确要求独立评审 → 不裁剪（评审是硬需求）；
+/// - 其余模板与未知模板 → 不裁剪（结构化抽取的 Schema 校验、文档终稿链是
+///   交付语义的一部分）。
+///
+/// 返回值只描述决策；调用方负责从 DAG 中移除角色并**把指向被跳过角色的依赖
+/// 重定向到其上游**（保持 DAG 可拓扑排序）。
+pub fn plan_adaptive_roles(
+    template_id: Option<&str>,
+    role_names: &[String],
+    budgets: &BTreeMap<String, usize>,
+    profile: &TaskProfile,
+) -> AdaptiveRoleDecision {
+    let mut decision = AdaptiveRoleDecision::default();
+    let Some(template_id) = template_id else {
+        return decision;
+    };
+    // 高风险或明确要求独立评审 → 一律保留评审/核验角色。
+    if profile.risk == RiskLevel::High || profile.needs_independent_review {
+        return decision;
+    }
+    let simple = |role: &str| -> Option<SkippedRole> {
+        match template_id {
+            crate::builtin_team_templates::CODE_CHANGE_V1 if role == "reviewer" => {
+                Some(SkippedRole {
+                    role: role.to_string(),
+                    reason: "简单代码任务自适应裁剪：analyzer + implementer 足够；出现实际变更或高风险时由运行期判定/人工评审兜底".to_string(),
+                })
+            }
+            crate::builtin_team_templates::RESEARCH_BRIEF_V1 if role == "evidence_verifier" => {
+                // 并行研究保留（researcher_a/b 都在）才裁核验：汇总前仍有双路证据。
+                let parallel_kept = role_names.iter().any(|r| r == "researcher_a")
+                    && role_names.iter().any(|r| r == "researcher_b");
+                if parallel_kept {
+                    Some(SkippedRole {
+                        role: role.to_string(),
+                        reason: "研究任务并行研究后只保留一个汇总角色：来源要求移交 brief_writer 验收段（每条结论附引用）".to_string(),
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+    for role in role_names {
+        if let Some(skip) = simple(role) {
+            decision.saved_budget_calls += budgets.get(role).copied().unwrap_or(0);
+            decision
+                .reasons
+                .push(format!("跳过角色 {}：{}", skip.role, skip.reason));
+            decision.skipped.push(skip);
+        }
+    }
+    decision
+}
+
+/// 运行期 reviewer 跳过判定（八期一路，`code-change-v1` 专用）：
+/// 实现步骤未产生任何实际工作区变更时，只读评审没有可评审对象 → 跳过；
+/// 有实际变更（或非 reviewer 角色）→ None（正常执行）。
+///
+/// 「实际变更」由调用方判定：服务端 Git 变更跟踪文件
+/// （`<run_dir>/<team_id>-workspace-changes.json`，含 `changed_files` 窗口增量）
+/// 或评测执行器的等价信号；无记录视为无变更。
+pub fn reviewer_runtime_skip_reason(role: &str, has_actual_changes: bool) -> Option<String> {
+    if role != "reviewer" || has_actual_changes {
+        return None;
+    }
+    Some(
+        "上游实现步骤未产生任何实际工作区变更（无可评审对象），按自适应策略跳过；\
+         下游完成条件已满足，DAG 提前结束"
+            .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod applicability_tests {
     use super::*;
@@ -441,5 +543,119 @@ mod applicability_tests {
     fn empty_inputs_never_match() {
         assert!(!applicability_matches("", "任意目标"));
         assert!(!applicability_matches("代码", ""));
+    }
+}
+
+#[cfg(test)]
+mod adaptive_role_tests {
+    use super::*;
+    use crate::builtin_team_templates::{CODE_CHANGE_V1, RESEARCH_BRIEF_V1};
+
+    fn budgets(pairs: &[(&str, usize)]) -> BTreeMap<String, usize> {
+        pairs.iter().map(|(r, b)| ((*r).to_string(), *b)).collect()
+    }
+
+    fn code_roles() -> Vec<String> {
+        vec![
+            "code_analyzer".to_string(),
+            "implementer".to_string(),
+            "reviewer".to_string(),
+        ]
+    }
+
+    #[test]
+    fn simple_code_task_skips_reviewer() {
+        let b = budgets(&[("code_analyzer", 3), ("implementer", 5), ("reviewer", 3)]);
+        let d = plan_adaptive_roles(
+            Some(CODE_CHANGE_V1),
+            &code_roles(),
+            &b,
+            &TaskProfile::default(),
+        );
+        assert_eq!(d.skipped.len(), 1);
+        assert_eq!(d.skipped[0].role, "reviewer");
+        assert_eq!(d.saved_budget_calls, 3, "节省调用预算 = reviewer 预算");
+        assert!(!d.reasons.is_empty());
+        // 普通风险 + 无强制评审是前提（TaskProfile::default 满足）。
+    }
+
+    #[test]
+    fn high_risk_or_required_review_keeps_reviewer() {
+        let b = budgets(&[("reviewer", 3)]);
+        let mut profile = TaskProfile::default();
+        profile.risk = RiskLevel::High;
+        assert!(
+            plan_adaptive_roles(Some(CODE_CHANGE_V1), &code_roles(), &b, &profile)
+                .skipped
+                .is_empty()
+        );
+        let mut profile = TaskProfile::default();
+        profile.needs_independent_review = true;
+        assert!(
+            plan_adaptive_roles(Some(CODE_CHANGE_V1), &code_roles(), &b, &profile)
+                .skipped
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn research_task_keeps_parallel_research_and_one_summarizer() {
+        let roles: Vec<String> = [
+            "researcher_a",
+            "researcher_b",
+            "evidence_verifier",
+            "brief_writer",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let b = budgets(&[
+            ("researcher_a", 4),
+            ("researcher_b", 4),
+            ("evidence_verifier", 3),
+            ("brief_writer", 4),
+        ]);
+        let d = plan_adaptive_roles(Some(RESEARCH_BRIEF_V1), &roles, &b, &TaskProfile::default());
+        assert_eq!(d.skipped.len(), 1);
+        assert_eq!(d.skipped[0].role, "evidence_verifier");
+        assert_eq!(d.saved_budget_calls, 3);
+        // 跳过核验的前提是双路并行研究都保留。
+        let single: Vec<String> = vec![
+            "researcher_a".to_string(),
+            "evidence_verifier".to_string(),
+            "brief_writer".to_string(),
+        ];
+        let d = plan_adaptive_roles(
+            Some(RESEARCH_BRIEF_V1),
+            &single,
+            &b,
+            &TaskProfile::default(),
+        );
+        assert!(d.skipped.is_empty(), "无双路并行研究时不裁核验：{d:?}");
+    }
+
+    #[test]
+    fn other_templates_and_dynamic_teams_never_skip() {
+        let b = budgets(&[("x", 3)]);
+        for template in [
+            "document-delivery-v1",
+            "structured-extract-v1",
+            "custom-tpl",
+        ] {
+            let d = plan_adaptive_roles(Some(template), &code_roles(), &b, &TaskProfile::default());
+            assert!(d.skipped.is_empty(), "{template} 不应裁剪：{d:?}");
+            assert_eq!(d.saved_budget_calls, 0);
+        }
+        // 动态组队（无模板）不裁剪。
+        let d = plan_adaptive_roles(None, &code_roles(), &b, &TaskProfile::default());
+        assert!(d.skipped.is_empty());
+    }
+
+    #[test]
+    fn reviewer_runtime_skip_only_without_changes() {
+        assert!(reviewer_runtime_skip_reason("reviewer", true).is_none());
+        assert!(reviewer_runtime_skip_reason("code_analyzer", false).is_none());
+        let reason = reviewer_runtime_skip_reason("reviewer", false).expect("无变更应跳过");
+        assert!(reason.contains("提前结束"));
     }
 }
