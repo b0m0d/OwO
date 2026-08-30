@@ -49,6 +49,17 @@ fn artifact(
         },
         supersedes_artifact_id: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        // 七期（第三路）交付扩展字段：评审测试不涉及，取缺省值。
+        team_id: "test-team".to_string(),
+        format: "text".to_string(),
+        media_type: "text/plain".to_string(),
+        file_name: String::new(),
+        sha256: String::new(),
+        size_bytes: 0,
+        evidence_refs: vec![],
+        open_issues: vec![],
+        validation: None,
+        handoff: None,
     }
 }
 

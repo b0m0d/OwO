@@ -4,6 +4,9 @@
 pub mod accessibility;
 pub mod action_program;
 pub mod agent;
+/// Artifact 校验与交付管线（七期 · 第三路）：格式门控（json/csv/research/
+/// markdown）+ 交付元数据（media_type/file_name/sha256/size_bytes）+ 证据链。
+pub mod artifact_pipeline;
 pub mod assert;
 pub mod audit;
 pub mod audit_chain;
@@ -20,6 +23,7 @@ pub mod cloud_exec;
 pub mod computer_task;
 pub mod computer_use;
 pub mod context;
+pub mod contract_worker;
 pub mod credentials;
 pub mod critic;
 pub mod dataset_builder;
@@ -82,6 +86,9 @@ pub mod vision;
 pub mod whitelist;
 pub mod window_template;
 pub mod worker_pool;
+/// 角色画像（七期 · 二路）：模板角色 → 工具面/只读/写白名单/回合上限/浏览器/命令，
+/// 画像驱动子代理执行器（注册表面即权限边界）。
+pub mod worker_profile;
 pub mod workflow;
 pub mod workswarm;
 /// Worker 结构化输出契约（V1：结构化交付物 + critic 评审分离 + 一次定向修复）。

@@ -26,9 +26,10 @@
 
 use async_trait::async_trait;
 use owo_agent_protocol::{
-    Artifact, ArtifactClassification, DecisionRecord, HandoffRecord, MemberHealth, ProjectSpace,
-    ProjectSpaceStatus, ReviewState, RuntimeBinding, TeamMember, TeamMode, TeamRun, TeamRunStatus,
-    TeamTemplate, TeamTemplateProposal, TeamTemplateProposalStatus, TeamTemplateRole,
+    Artifact, ArtifactClassification, ArtifactValidation, DecisionRecord, HandoffRecord,
+    MemberHealth, ProjectSpace, ProjectSpaceStatus, ReviewState, RuntimeBinding, TeamMember,
+    TeamMode, TeamRun, TeamRunStatus, TeamTemplate, TeamTemplateProposal,
+    TeamTemplateProposalStatus, TeamTemplateRole,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -37,6 +38,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::artifact_pipeline::{
+    effective_format, evidence_refs_of, file_name_of, media_type_of, validate_artifact_content,
+};
 use crate::audit::AuditLog;
 use crate::cas_store::CasStore;
 use crate::fleet::{new_correlation_id, AgentBus, MessageKind, OverflowPolicy};
@@ -45,6 +49,7 @@ use crate::goal::{
 };
 use crate::plan::{verify_output, Plan, StepSpec, StepStatus, VerificationSpec};
 use crate::project_space_store::{ProjectSpaceStoreBackend, ProjectSpaceStoreError};
+use crate::workswarm_output::WorkerOutputV1;
 
 // ---------------------------------------------------------------------------
 // 错误
@@ -659,6 +664,34 @@ pub struct TeamCoordinator {
     progress_seqs: Arc<Mutex<HashMap<String, u64>>>,
 }
 
+/// 产物登记载荷（七期 · 第三路：legacy 纯文本 / 契约 V1 两条路径的统一内部形状）。
+///
+/// `open_issues` / `known_risks` 为 `None` 时按 legacy 语义从内容反解析
+/// （[`TeamCoordinator::parse_optional_json_lists`]）；为 `Some` 时以结构化值为准。
+/// `validation` 为 `None` 表示未做格式门控（legacy 路径，空内容照旧登记）；
+/// 为 `Some` 表示登记前已按 [`crate::artifact_pipeline::validate_artifact_content`]
+/// 通过门控。
+#[derive(Debug, Clone)]
+struct StepOutput {
+    /// 交付物正文（CAS 内容本体）。
+    content: String,
+    /// 版本链 / 评审口径的产物分类（角色链 kind）。
+    kind: String,
+    /// 落盘内容格式（有效校验格式）。
+    format: String,
+    /// 下载交付 media type。
+    media_type: String,
+    /// 下载交付文件名。
+    file_name: String,
+    /// Worker 证据引用链（Artifact.evidence_refs / HandoffRecord.evidence_refs 同源）。
+    evidence_refs: Vec<String>,
+    open_issues: Option<Vec<String>>,
+    known_risks: Option<Vec<String>>,
+    validation: Option<ArtifactValidation>,
+    /// Worker 交接说明原文（WorkerOutputV1.handoff；critic 为评审结论）。
+    handoff_note: Option<String>,
+}
+
 impl TeamCoordinator {
     pub fn new(
         store: Arc<dyn ProjectSpaceStoreBackend>,
@@ -698,6 +731,10 @@ impl TeamCoordinator {
 
     pub fn cas(&self) -> &CasStore {
         &self.cas
+    }
+    /// 项目空间存储（七期 · 第三路：交付端点/诊断用只读访问器）。
+    pub fn store(&self) -> &Arc<dyn ProjectSpaceStoreBackend> {
+        &self.store
     }
 
     pub fn run_dir(&self) -> &Path {
@@ -2187,10 +2224,14 @@ impl TeamCoordinator {
             .await
     }
 
-    /// 带阶段代次校验的产物登记：`phase_epoch` 与当前代次不一致（cancel/retry/
-    /// replace 已接管现场）时，**只记审计事件，不创建 Artifact、不改状态**。
+    /// 带阶段代次校验的产物登记（legacy 纯文本路径，行为不变）：`phase_epoch`
+    /// 与当前代次不一致（cancel/retry/replace 已接管现场）时，
+    /// **只记审计事件，不创建 Artifact、不改状态**。
     ///
     /// `phase_epoch = None` 为兼容入口（人节点/诊断路径），跳过代次校验。
+    /// 本路径不做格式门控（校验记录为 None），空内容照旧登记——
+    /// 供 echo 演示 worker 与旧流程保持兼容；契约路径见
+    /// [`TeamCoordinator::register_step_output_contract`]。
     pub async fn register_step_output_checked(
         &self,
         team_id: &str,
@@ -2198,6 +2239,120 @@ impl TeamCoordinator {
         role: &str,
         step_id: &str,
         output: &str,
+        phase_epoch: Option<u64>,
+    ) -> WorkSwarmResult<Artifact> {
+        let out = StepOutput {
+            content: output.to_string(),
+            kind: role_kind(role).to_string(),
+            format: "text".to_string(),
+            media_type: "text/plain".to_string(),
+            file_name: file_name_of(role_kind(role), "text"),
+            evidence_refs: Vec::new(),
+            open_issues: None,
+            known_risks: None,
+            validation: None,
+            handoff_note: None,
+        };
+        self.register_step_output_inner(team_id, member_id, role, step_id, &out, phase_epoch)
+            .await
+    }
+
+    /// 结构化契约产物登记（七期 · 第三路）：Worker 输出经输出契约（V1）解析后，
+    /// 以 [`WorkerOutputV1`] 提交——交付元数据（format/media_type/file_name/
+    /// sha256/size_bytes）、证据链（evidence_refs/open_issues/validation）与
+    /// 交接说明（handoff_note）随 Artifact 与 HandoffRecord 落盘，供下载交付
+    /// 端点与交付清单使用。
+    ///
+    /// **格式门控（登记前）**：有效格式（[`effective_format`]）未通过
+    /// [`validate_artifact_content`] 的产物**不登记**——不进 CAS、不进版本链、
+    /// 不进 PendingReview、不写 HandoffRecord，只记审计事件并返回
+    /// `Run("artifact_invalid: …")`（步骤失败，可局部重试）。
+    ///
+    /// critic 角色登记评审结论（kind=review/markdown），不做格式门控；
+    /// producer 必须携带 artifact（缺失即 Validation 错误）。
+    pub async fn register_step_output_contract(
+        &self,
+        team_id: &str,
+        member_id: &str,
+        role: &str,
+        step_id: &str,
+        output: &WorkerOutputV1,
+        phase_epoch: Option<u64>,
+    ) -> WorkSwarmResult<Artifact> {
+        if is_critic_role(role) {
+            // critic：评审结论（kind=review/markdown），证据与未决问题随落盘。
+            let out = StepOutput {
+                content: output.summary.clone(),
+                kind: "review".to_string(),
+                format: "markdown".to_string(),
+                media_type: "text/markdown".to_string(),
+                file_name: file_name_of("review", "markdown"),
+                evidence_refs: evidence_refs_of(&output.evidence),
+                open_issues: Some(output.open_issues.clone()),
+                known_risks: Some(Vec::new()),
+                validation: None,
+                handoff_note: Some(output.summary.clone()),
+            };
+            return self
+                .register_step_output_inner(team_id, member_id, role, step_id, &out, phase_epoch)
+                .await;
+        }
+
+        // producer：交付物正文 + 声明格式。kind 取交付物声明的产物分类
+        //（空则回退角色链 kind），驱动文件名与有效格式（research 证据链规则）。
+        let declared = output.artifact.as_ref().ok_or_else(|| {
+            WorkSwarmError::Validation("producer 契约产物必须携带 artifact".to_string())
+        })?;
+        let chain_kind = role_kind(role).to_string();
+        let declared_kind = declared.kind.trim();
+        let kind_for_meta = if declared_kind.is_empty() {
+            chain_kind.clone()
+        } else {
+            declared_kind.to_string()
+        };
+        let eff = effective_format(&declared.format, &kind_for_meta);
+        let validation = validate_artifact_content(&eff, &declared.content, &output.evidence);
+        if !validation.valid {
+            // 门控（登记前）：未通过格式校验的产物不进任何登记流程。
+            self.audit(
+                team_id,
+                "team.artifact.validation_rejected",
+                format!(
+                    "产物格式校验未通过（{eff}，{}）：member={member_id} step={step_id}，不登记",
+                    validation.reason.as_deref().unwrap_or("")
+                ),
+            );
+            return Err(WorkSwarmError::Run(format!(
+                "artifact_invalid: {}",
+                validation.reason.as_deref().unwrap_or("未知原因")
+            )));
+        }
+        let out = StepOutput {
+            content: declared.content.clone(),
+            kind: chain_kind,
+            format: eff.clone(),
+            media_type: media_type_of(&eff).to_string(),
+            file_name: file_name_of(&kind_for_meta, &eff),
+            evidence_refs: evidence_refs_of(&output.evidence),
+            open_issues: Some(output.open_issues.clone()),
+            known_risks: Some(Vec::new()),
+            validation: Some(validation),
+            handoff_note: output.handoff.clone(),
+        };
+        self.register_step_output_inner(team_id, member_id, role, step_id, &out, phase_epoch)
+            .await
+    }
+
+    /// 产物登记内部实现（legacy / 契约两路径共用）：CAS 落盘、版本链、
+    /// Artifact / HandoffRecord 持久化、空间活动流与总线交接消息。
+    /// 格式门控已在契约路径入口完成，此处假定内容已通过（或无需门控）。
+    async fn register_step_output_inner(
+        &self,
+        team_id: &str,
+        member_id: &str,
+        role: &str,
+        step_id: &str,
+        out: &StepOutput,
         phase_epoch: Option<u64>,
     ) -> WorkSwarmResult<Artifact> {
         if let Some(epoch) = phase_epoch {
@@ -2223,10 +2378,10 @@ impl TeamCoordinator {
         let version = self.next_artifact_version(&space, role).await?;
         let hash = self
             .cas
-            .put(output.as_bytes())
+            .put(out.content.as_bytes())
             .map_err(|e| WorkSwarmError::Run(format!("产物 CAS 落盘失败：{e}")))?;
         let content_ref = format!("cas://sha256:{hash}");
-        let kind = role_kind(role).to_string();
+        let kind = out.kind.clone();
 
         // 来源引用：直接上游的最新产物（ref 传递）。
         let step = state
@@ -2275,9 +2430,12 @@ impl TeamCoordinator {
                 }
             }
         }
+        let parsed = Self::parse_optional_json_lists(&out.content);
+        let open_issues = out.open_issues.clone().unwrap_or_else(|| parsed.0.clone());
+        let known_risks = out.known_risks.clone().unwrap_or(parsed.1);
         let artifact = Artifact {
             artifact_id: format!("{team_id}:{role}:v{version}"),
-            kind: kind.clone(),
+            kind,
             version,
             producer: member_id.to_string(),
             content_ref: content_ref.clone(),
@@ -2291,6 +2449,16 @@ impl TeamCoordinator {
             },
             supersedes_artifact_id,
             created_at: now_ts(),
+            team_id: team_id.to_string(),
+            format: out.format.clone(),
+            media_type: out.media_type.clone(),
+            file_name: out.file_name.clone(),
+            sha256: hash.clone(),
+            size_bytes: out.content.len() as u64,
+            evidence_refs: out.evidence_refs.clone(),
+            open_issues: open_issues.clone(),
+            validation: out.validation.clone(),
+            handoff: out.handoff_note.clone(),
         };
         self.store.save_artifact(&artifact, &project_id).await?;
         // 返工登记：前版让位（Superseded）——已批准前版不动（head 语义归评审闭环）。
@@ -2317,15 +2485,20 @@ impl TeamCoordinator {
             .first()
             .map(|d| d.worker.clone())
             .unwrap_or_else(|| "*".to_string());
-        let (open_issues, known_risks) = Self::parse_optional_json_lists(output);
+        // 证据链（同源）：CAS 内容引用 + Worker 证据引用。
+        let handoff_evidence_refs = {
+            let mut refs = vec![content_ref];
+            refs.extend(out.evidence_refs.iter().cloned());
+            refs
+        };
         let handoff = HandoffRecord {
             handoff_id: format!("{team_id}:{step_id}:v{version}"),
             from_member: member_id.to_string(),
             to_member: to_member.clone(),
-            completed_summary: preview(output, 500),
+            completed_summary: preview(&out.content, 500),
             open_issues,
             output_artifact_refs: vec![artifact.artifact_id.clone()],
-            evidence_refs: vec![content_ref],
+            evidence_refs: handoff_evidence_refs,
             suggested_next_actions: downstream
                 .iter()
                 .filter_map(|d| {
@@ -2335,6 +2508,7 @@ impl TeamCoordinator {
                 .collect(),
             known_risks,
             created_at: now_ts(),
+            handoff_note: out.handoff_note.clone(),
         };
         self.store.save_handoff(&handoff, &project_id).await?;
 
@@ -2706,6 +2880,8 @@ impl TeamCoordinator {
             suggested_next_actions: fields.suggested_next_actions.clone(),
             known_risks: fields.known_risks.clone(),
             created_at: now_ts(),
+            // 显式交接无 WorkerOutputV1.handoff 概念（七期 · 第三路）：保持 None。
+            handoff_note: None,
         };
         let pid = team
             .project_space_id
@@ -3580,11 +3756,27 @@ impl Worker for RoleWorker {
         //（交付物正文，不再拿整段自由文本/信封当产物），critic 禁止携带 artifact
         //（评审无权覆盖交付物，越权即 scope_violation）。契约失败已在 worker 层
         // 定向修复过一次；此处 Invalid 视为 legacy 纯文本登记（不二次重试）。
+        // 七期（第三路）：Parsed 输出走契约登记（格式门控 + 交付元数据 + 证据链
+        // 随 Artifact/HandoffRecord 落盘）；legacy 纯文本登记行为不变。
         let out = match crate::workswarm_output::parse_worker_output(&out) {
             crate::workswarm_output::WorkerOutputParse::Parsed(output) => {
                 if is_critic_role(&self.role) {
                     if let Err(e) = output.validate_critic() {
                         return Err(format!("scope_violation:{e}"));
+                    }
+                    if let Err(e) = self
+                        .coordinator
+                        .register_step_output_contract(
+                            &self.team_id,
+                            &self.member_id,
+                            &self.role,
+                            &step_id,
+                            &output,
+                            phase_epoch,
+                        )
+                        .await
+                    {
+                        return Err(format!("产物登记失败：{e}"));
                     }
                     output.summary
                 } else {
@@ -3593,6 +3785,20 @@ impl Worker for RoleWorker {
                     }
                     match output.status {
                         crate::workswarm_output::WorkerOutputStatus::Done => {
+                            if let Err(e) = self
+                                .coordinator
+                                .register_step_output_contract(
+                                    &self.team_id,
+                                    &self.member_id,
+                                    &self.role,
+                                    &step_id,
+                                    &output,
+                                    phase_epoch,
+                                )
+                                .await
+                            {
+                                return Err(format!("产物登记失败：{e}"));
+                            }
                             output.artifact.map(|a| a.content).unwrap_or_default()
                         }
                         other => {
@@ -3604,22 +3810,24 @@ impl Worker for RoleWorker {
             }
             // 契约解析/校验失败：worker 层已做一次定向修复并失败会直接 Err，
             // 走不到这里；此处保守按 legacy 纯文本登记（服务端旧流程不受影响）。
-            _ => out,
+            _ => {
+                if let Err(e) = self
+                    .coordinator
+                    .register_step_output_checked(
+                        &self.team_id,
+                        &self.member_id,
+                        &self.role,
+                        &step_id,
+                        &out,
+                        phase_epoch,
+                    )
+                    .await
+                {
+                    return Err(format!("产物登记失败：{e}"));
+                }
+                out
+            }
         };
-        if let Err(e) = self
-            .coordinator
-            .register_step_output_checked(
-                &self.team_id,
-                &self.member_id,
-                &self.role,
-                &step_id,
-                &out,
-                phase_epoch,
-            )
-            .await
-        {
-            return Err(format!("产物登记失败：{e}"));
-        }
         Ok(out)
     }
 }

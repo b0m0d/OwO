@@ -204,6 +204,37 @@ summary/open_issues 说明原因。\n",
     prompt
 }
 
+/// 剥掉模型输出常见的代码围栏（``` 包裹），只处理首尾成对的一对（七期一路自
+/// `product_eval::workswarm_executor` 私有函数移入，成为两路共享工具）。
+pub fn strip_code_fences(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed.to_string();
+    };
+    // 跳过语言标记行（```json / ```JSON5 等）。
+    let body = match rest.find('\n') {
+        Some(idx) => &rest[idx + 1..],
+        None => rest,
+    };
+    body.trim()
+        .strip_suffix("```")
+        .map(str::trim)
+        .map(str::to_string)
+        .unwrap_or_else(|| body.trim().to_string())
+}
+
+/// 输出契约定向修复提示词（七期一路）：角色规则 + 具体违例原因 + “只输出 JSON 本体”要求。
+pub fn contract_repair_prompt(is_critic: bool, violation: &str, broken: &str) -> String {
+    let role_rule = if is_critic {
+        "你是评审角色：禁止提交 artifact 字段，把评审结论 JSON 放进 summary"
+    } else {
+        "你是交付角色：status=done 必须携带 artifact（content=交付物正文本体）"
+    };
+    format!(
+        "你的上一次回复不符合 WorkerOutputV1 输出契约（必须是合法 JSON：status/summary/artifact{{kind,format,content}}/evidence/open_issues/handoff）。具体违例：{violation}。{role_rule}。请修正后**只输出**契约合规的 JSON 本体。\n原输出：\n{broken}\n\n请重新输出契约合规的 JSON："
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

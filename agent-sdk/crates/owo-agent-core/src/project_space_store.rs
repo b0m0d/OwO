@@ -959,6 +959,17 @@ mod tests {
             review_state: ReviewState::Draft,
             supersedes_artifact_id: None,
             created_at: chrono::Utc::now().to_rfc3339(),
+            // 七期（第三路）交付扩展字段：测试样例取缺省值。
+            team_id: String::new(),
+            format: "text".to_string(),
+            media_type: "text/plain".to_string(),
+            file_name: String::new(),
+            sha256: String::new(),
+            size_bytes: 0,
+            evidence_refs: vec![],
+            open_issues: vec![],
+            validation: None,
+            handoff: None,
         }
     }
 
@@ -1105,6 +1116,8 @@ mod tests {
             suggested_next_actions: vec!["Execute step 1-2".to_string()],
             known_risks: vec!["Step 4 may timeout".to_string()],
             created_at: now.clone(),
+            // 七期（第三路）：Worker 交接说明（测试样例不涉及，保持 None）。
+            handoff_note: None,
         };
         store.save_handoff(&handoff, "proj-1").await.unwrap();
         let loaded_ho = store.get_handoff("ho-1").await.unwrap();

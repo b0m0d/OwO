@@ -151,6 +151,12 @@ impl WorkerStats {
         }
     }
 
+    fn bump_output_repairs(&self) {
+        if let Ok(mut value) = self.output_repairs.lock() {
+            *value = value.saturating_add(1);
+        }
+    }
+
     fn observe_turn(&self, event: &TurnEvent) {
         match event {
             TurnEvent::ModelCall => Self::bump(&self.model_calls),
@@ -282,79 +288,34 @@ impl Worker for EvalAgentWorker {
             Ok(turn) => {
                 self.stats.record_success(wall_ms, turn.usage);
                 let text = turn.final_text.unwrap_or_default();
-                self.enforce_output_contract(&text, read_only).await
+                // 七期一路：共享契约执行器（与生产 SubagentRunner 同一逻辑）；
+                // repairs 计数计入 stats（六期基线：修复一次即计，失败也计）。
+                match crate::contract_worker::enforce_worker_output_contract(
+                    &self.provider,
+                    &text,
+                    read_only,
+                )
+                .await
+                {
+                    Ok(enforced) if enforced.repairs > 0 => {
+                        WorkerStats::bump(&self.stats.model_calls);
+                        self.stats.bump_output_repairs();
+                        Ok(enforced.text)
+                    }
+                    Ok(enforced) => Ok(enforced.text),
+                    Err(error) if error.repairs > 0 => {
+                        WorkerStats::bump(&self.stats.model_calls);
+                        self.stats.bump_output_repairs();
+                        Err(error.message)
+                    }
+                    Err(error) => Err(error.message),
+                }
             }
             Err(error) => {
                 let message = format!("agent 回合失败：{error}");
                 self.stats.record_failure(wall_ms, message.clone());
                 Err(message)
             }
-        }
-    }
-}
-
-impl EvalAgentWorker {
-    /// 输出契约执行：非契约输出（自由文本/坏 JSON/字段缺失/critic 越权带 artifact）
-    /// → **恰好一次**定向修复；仍不合规 → `output_contract_invalid`
-    ///（可定位失败原因，禁止无限重试）。
-    async fn enforce_output_contract(&self, text: &str, is_critic: bool) -> Result<String, String> {
-        let parse = crate::workswarm_output::parse_worker_output(text);
-        let contract_ok = match &parse {
-            crate::workswarm_output::WorkerOutputParse::Parsed(output) => {
-                // 角色规则在执行层判定：critic 不得带 artifact；producer 必须带。
-                if is_critic {
-                    output.validate_critic().is_ok()
-                } else {
-                    output.validate().is_ok()
-                }
-            }
-            _ => false,
-        };
-        if contract_ok {
-            return Ok(text.to_string());
-        }
-        // 一次定向修复（直接 provider 调用；计入该 worker 的 model_calls/repairs）。
-        WorkerStats::bump(&self.stats.model_calls);
-        if let Ok(mut value) = self.stats.output_repairs.lock() {
-            *value = value.saturating_add(1);
-        }
-        let role_rule = if is_critic {
-            "你是评审角色：禁止提交 artifact 字段，评审结论 JSON 放 summary"
-        } else {
-            "你是交付角色：status=done 必须携带 artifact（content=交付物正文本体）"
-        };
-        let repair_prompt = format!(
-            "你上一次的回复不符合 WorkerOutputV1 输出契约（必须是合法 JSON：status/summary/\
-artifact{{kind,format,content}}/evidence/open_issues/handoff）。{role_rule}。\
-请修正后**只输出**符合契约的 JSON 本体。\n原始输出：\n{text}\n\n请重新输出符合契约的 JSON："
-        );
-        let messages = [ChatMessage {
-            role: "user".to_string(),
-            content: Some(repair_prompt),
-            tool_calls: None,
-            tool_call_id: None,
-        }];
-        let repaired = match self.provider.complete(&messages, &[]).await {
-            Ok(ModelOutput::Text(text)) => strip_code_fences(&text),
-            _ => String::new(),
-        };
-        match crate::workswarm_output::parse_worker_output(&repaired) {
-            crate::workswarm_output::WorkerOutputParse::Parsed(output) => {
-                let valid = if is_critic {
-                    output.validate_critic().is_ok()
-                } else {
-                    true
-                };
-                if valid {
-                    Ok(repaired)
-                } else {
-                    Err("output_contract_invalid:定向修复一次后仍不符合契约".to_string())
-                }
-            }
-            _ => Err(
-                "output_contract_invalid:定向修复一次后仍不符合契约（自由文本冒充交付物或字段缺失）"
-                    .to_string(),
-            ),
         }
     }
 }
@@ -940,7 +901,7 @@ impl WorkSwarmExecutor {
             ModelOutput::Text(text) => text,
             _ => return (broken.to_string(), 1, false),
         };
-        let cleaned = strip_code_fences(&text);
+        let cleaned = crate::workswarm_output::strip_code_fences(&text);
         if serde_json::from_str::<serde_json::Value>(&cleaned).is_ok() {
             (cleaned, 1, true)
         } else {
@@ -955,24 +916,6 @@ fn persist_observation(root: &std::path::Path, observation: &TeamRunObservation)
         return;
     };
     let _ = std::fs::write(root.join("observation.json"), text);
-}
-
-/// 去掉模型输出常见的 ```json 围栏（只处理首尾成对围栏）。
-fn strip_code_fences(text: &str) -> String {
-    let trimmed = text.trim();
-    let Some(rest) = trimmed.strip_prefix("```") else {
-        return trimmed.to_string();
-    };
-    // 跳过语言标记行（```json / ```JSON5 等）。
-    let body = match rest.find('\n') {
-        Some(idx) => &rest[idx + 1..],
-        None => rest,
-    };
-    body.trim()
-        .strip_suffix("```")
-        .map(str::trim)
-        .map(str::to_string)
-        .unwrap_or_else(|| body.trim().to_string())
 }
 
 /// 最终交付选择（R4 输出契约）：只从 **producer 版本链**挑选——

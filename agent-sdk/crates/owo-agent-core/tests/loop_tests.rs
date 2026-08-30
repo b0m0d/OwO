@@ -586,7 +586,11 @@ async fn explore_subagent_runs_read_only_child_and_returns_report() {
     std::fs::write(workspace.join("info.txt"), "重要信息").unwrap();
     let provider = ScriptedProvider::new(vec![
         call("c1", "explore", json!({ "query": "info.txt 的内容" })),
-        ModelOutput::Text("子代理发现：重要信息".to_string()),
+        // 七期一路：子代理最终结果必须是 WorkerOutputV1 契约 JSON（critic 角色禁带 artifact）。
+        ModelOutput::Text(
+            r#"{"status":"done","summary":"子代理发现：重要信息","evidence":[],"open_issues":[]}"#
+                .to_string(),
+        ),
         ModelOutput::Text("done".to_string()),
     ]);
     let agent = build_agent(&workspace, provider);
@@ -758,7 +762,15 @@ async fn context_compaction_summarizes_old_history() {
 async fn direct_subagent_invocation_returns_result() {
     let workspace = temp_workspace("at-subagent");
     std::fs::write(workspace.join("x.txt"), "内容").unwrap();
-    let provider = ScriptedProvider::new(vec![ModelOutput::Text("找到 x.txt".to_string())]);
+    // 七期一路：首轮自由文本会触发一次定向修复（第二个脚本输出），修复后须为
+    // WorkerOutputV1 契约 JSON（critic 角色，禁带 artifact）。
+    let provider = ScriptedProvider::new(vec![
+        ModelOutput::Text("找到 x.txt".to_string()),
+        ModelOutput::Text(
+            r#"{"status":"done","summary":"找到 x.txt","evidence":[],"open_issues":[]}"#
+                .to_string(),
+        ),
+    ]);
     let agent = build_agent(&workspace, provider);
     let text = agent
         .run_subagent(&workspace, "mock", "调查", true)
@@ -777,6 +789,12 @@ async fn direct_general_subagent_cannot_write_without_approval_channel() {
             json!({ "path": "blocked.txt", "content": "must not write" }),
         ),
         ModelOutput::Text("已完成委派".to_string()),
+        // 七期一路：producer 角色 done 必须携带 artifact；首轮自由文本经一次
+        // 定向修复（第三个脚本输出）转为 WorkerOutputV1 契约 JSON。
+        ModelOutput::Text(
+            r#"{"status":"done","summary":"已完成委派","artifact":{"kind":"text","format":"text","content":"已完成委派，写入被权限策略拒绝"},"evidence":[],"open_issues":[]}"#
+                .to_string(),
+        ),
     ]);
     let agent = build_agent(&workspace, provider);
 

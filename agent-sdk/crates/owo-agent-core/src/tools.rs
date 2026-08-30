@@ -122,6 +122,73 @@ impl ToolRegistry {
         registry
     }
 
+    // -------------------------------------------------------------------
+    // 按角色分组注册（七期 · 二路）：角色画像按「组」装配工具面，
+    // 注册表只含该角色允许的工具——权限在工具面层生效，而非仅靠审批拒绝。
+    // -------------------------------------------------------------------
+
+    /// 文件读取组：`read_file` / `list_dir` / `search_files`（只读角色基线）。
+    pub fn register_file_read_tools(&mut self) {
+        self.register(ReadFileTool);
+        self.register(ListDirTool);
+        self.register(SearchFilesTool);
+    }
+
+    /// 文件写入（无白名单限制；受 `Policy` 审批约束）。
+    pub fn register_write_file(&mut self) {
+        self.register(WriteFileTool);
+    }
+
+    /// 白名单受限写入：写目标必须落在 `allowed` 绝对路径前缀内（见
+    /// [`WhitelistWriteFileTool`]）；`allowed` 为空 = 工作区内可写。
+    pub fn register_whitelist_write_file(&mut self, allowed: Vec<PathBuf>) {
+        self.register(WhitelistWriteFileTool { allowed });
+    }
+
+    /// 受控命令执行：`run_command`（实现族角色专用；沙箱 + 审批约束不变）。
+    pub fn register_run_command(&mut self) {
+        self.register(RunCommandTool);
+    }
+
+    /// 委派组：`explore` / `subagent` / `use_skill`。
+    pub fn register_delegation_tools(&mut self) {
+        self.register(ExploreTool);
+        self.register(SubagentTool);
+        self.register(UseSkillTool);
+    }
+
+    /// 浏览器组：导航/搜索/快照 + 交互与写工作区变体（含 `browser_screenshot` /
+    /// `browser_download_image` 写文件、`browser_close`）。只读角色的可见面
+    /// 应经 `retain_names` 裁掉写工作区变体。
+    pub fn register_browser_tools(&mut self) {
+        let browser = crate::computer_use::BrowserTools::new();
+        self.register(crate::computer_use::BrowserNavigateTool {
+            tools: browser.clone(),
+        });
+        self.register(crate::computer_use::BrowserSearchTool {
+            tools: browser.clone(),
+        });
+        self.register(crate::computer_use::BrowserSnapshotTool {
+            tools: browser.clone(),
+        });
+        self.register(crate::computer_use::BrowserClickTool {
+            tools: browser.clone(),
+        });
+        self.register(crate::computer_use::BrowserTypeTool {
+            tools: browser.clone(),
+        });
+        self.register(crate::computer_use::BrowserPressTool {
+            tools: browser.clone(),
+        });
+        self.register(crate::computer_use::BrowserScreenshotWriteTool {
+            tools: browser.clone(),
+        });
+        self.register(crate::computer_use::BrowserDownloadImageWriteTool {
+            tools: browser.clone(),
+        });
+        self.register(crate::computer_use::BrowserCloseTool { tools: browser });
+    }
+
     pub fn register(&mut self, tool: impl Tool + 'static) {
         self.tools.push(Arc::new(tool));
     }
@@ -134,6 +201,21 @@ impl ToolRegistry {
     /// 返回被移除的工具数。
     pub fn remove_prefix(&mut self, prefix: &str) -> usize {
         self.remove_prefix_inner(prefix)
+    }
+
+    /// 按名单保留工具（角色画像可见工具面，七期 · 二路）：名单为空 = 全部保留
+    /// （未声明可见面时按注册顺序全量可用）；返回被移除的工具数。
+    /// MCP 完整 schema 副本随名单同步清理。
+    pub fn retain_names(&mut self, names: &[String]) -> usize {
+        if names.is_empty() {
+            return 0;
+        }
+        let before = self.tools.len();
+        self.tools
+            .retain(|tool| names.iter().any(|name| tool.spec().name == *name));
+        self.full_schemas
+            .retain(|name, _| names.iter().any(|keep| keep == name));
+        before - self.tools.len()
     }
 
     /// 取工具句柄（Arc 克隆，锁外可跨 await 执行）。
@@ -368,29 +450,126 @@ impl Tool for WriteFileTool {
         let path = required_string(&args, "path")?;
         let content = required_string(&args, "content")?;
         let abs = resolve_session_path(ctx, &path)?;
-        let key = snapshot_key(&abs);
-        if let std::collections::hash_map::Entry::Vacant(entry) = ctx.session.snapshots.entry(key) {
-            let original = match tokio::fs::read(&abs).await {
-                Ok(bytes) => Some(BASE64.encode(bytes)),
-                Err(_) => None,
-            };
-            entry.insert(crate::session::SnapshotEntry {
-                original_b64: original,
-            });
-        }
-        if let Some(parent) = abs.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("创建目录失败：{e}"))?;
-        }
-        tokio::fs::write(&abs, content.as_bytes())
+        write_file_body(ctx, &path, &abs, &content).await
+    }
+}
+
+/// 写入执行体（[`WriteFileTool`] / [`WhitelistWriteFileTool`] 共享）：
+/// 首写快照（可 diff/revert）→ 建父目录 → 写盘。
+async fn write_file_body(
+    ctx: &mut ToolContext<'_>,
+    path: &str,
+    abs: &Path,
+    content: &str,
+) -> Result<Value, String> {
+    let key = snapshot_key(abs);
+    if let std::collections::hash_map::Entry::Vacant(entry) = ctx.session.snapshots.entry(key) {
+        let original = match tokio::fs::read(abs).await {
+            Ok(bytes) => Some(BASE64.encode(bytes)),
+            Err(_) => None,
+        };
+        entry.insert(crate::session::SnapshotEntry {
+            original_b64: original,
+        });
+    }
+    if let Some(parent) = abs.parent() {
+        tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| format!("写入 {path} 失败：{e}"))?;
-        Ok(json!({
-            "path": path,
-            "written": true,
-            "bytes": content.len(),
-        }))
+            .map_err(|e| format!("创建目录失败：{e}"))?;
+    }
+    tokio::fs::write(abs, content.as_bytes())
+        .await
+        .map_err(|e| format!("写入 {path} 失败：{e}"))?;
+    Ok(json!({
+        "path": path,
+        "written": true,
+        "bytes": content.len(),
+    }))
+}
+
+/// 白名单受限写入工具（七期 · 二路）：与 [`WriteFileTool`] 同语义（快照可
+/// diff/revert），但写目标必须落在 `allowed` 绝对路径前缀内——工具面层强制，
+/// 叠加在审批策略之上（权限三道闸：注册表面 → 白名单前缀 → 审批）。
+struct WhitelistWriteFileTool {
+    /// 允许写入的绝对路径前缀（canonicalize 口径；空 = 仅限工作区根内）。
+    allowed: Vec<PathBuf>,
+}
+
+/// 白名单前缀判定（纯路径版，便于测试）：candidate 是否落在任一 allowed 前缀内。
+/// 空白名单在此返回 false——「空 = 未约束」的放行语义由调用方
+/// （[`WhitelistWriteFileTool::resolve_whitelisted`]）短路处理。
+fn path_in_whitelist(candidate: &Path, allowed: &[PathBuf]) -> bool {
+    allowed.iter().any(|base| candidate.starts_with(base))
+}
+
+/// 去掉 Windows verbatim 前缀（`\\?\C:\...` → `C:\...`）：canonicalize 语义不变。
+/// 与服务端绑定侧（root/allowed 存储前去前缀）的路径口径对齐——否则
+/// `starts_with` 前缀比对在 verbatim × 非 verbatim 混用时恒为 false，
+/// 白名单内写入会被误拒。
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(stripped) => PathBuf::from(stripped.to_string()),
+        None => path.to_path_buf(),
+    }
+}
+
+impl WhitelistWriteFileTool {
+    /// 解析 + 白名单校验：与 [`resolve_session_path`] 同口径解析目标路径
+    /// （canonicalize；不存在的目标按「父目录 canonicalize + 文件名」解析），
+    /// 比对前去 verbatim 前缀（两侧同口径），不在白名单内 → Err。
+    fn resolve_whitelisted(&self, ctx: &ToolContext<'_>, path: &str) -> Result<PathBuf, String> {
+        let abs = resolve_session_path(ctx, path)?;
+        if self.allowed.is_empty() {
+            return Ok(abs);
+        }
+        let candidate = abs.canonicalize().unwrap_or_else(|_| {
+            abs.parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .map(|parent| parent.join(abs.file_name().unwrap_or_default()))
+                .unwrap_or_else(|| abs.clone())
+        });
+        let candidate = strip_verbatim_prefix(&candidate);
+        let allowed: Vec<PathBuf> = self
+            .allowed
+            .iter()
+            .map(|base| strip_verbatim_prefix(base))
+            .collect();
+        if path_in_whitelist(&candidate, &allowed) {
+            return Ok(abs);
+        }
+        let list = self
+            .allowed
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(format!("写入目标不在写白名单内：{path}（白名单：{list}）"))
+    }
+}
+
+#[async_trait]
+impl Tool for WhitelistWriteFileTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "write_file".into(),
+            description: "写入工作区内的文件（仅限白名单路径；自动快照，可 diff/revert）".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            }),
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let path = required_string(&args, "path")?;
+        let content = required_string(&args, "content")?;
+        let abs = self.resolve_whitelisted(ctx, &path)?;
+        write_file_body(ctx, &path, &abs, &content).await
     }
 }
 
@@ -778,5 +957,91 @@ mod tests {
             .iter()
             .any(|name| name.starts_with("owo_plugin_demo_")));
         assert!(names.iter().any(|name| name == "builtin_tool"));
+    }
+
+    #[test]
+    fn retain_names_keeps_only_listed_tools() {
+        // 空名单 = 全部保留。
+        let mut registry = ToolRegistry::new();
+        assert_eq!(registry.retain_names(&[]), 0);
+        // 非空名单 = 只留名单内工具（含 MCP 完整 schema 副本同步清理）。
+        let mut registry = ToolRegistry::new();
+        let before = registry.specs().len();
+        let removed = registry.retain_names(&["read_file".to_string()]);
+        assert_eq!(removed, before - 1);
+        let names: Vec<String> = registry
+            .specs()
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect();
+        assert_eq!(names, vec!["read_file".to_string()]);
+    }
+
+    #[test]
+    fn grouped_role_constructors_assemble_expected_surface() {
+        // 只读组：读三件套（与 read_only() 等价）。
+        let mut registry = ToolRegistry::empty();
+        registry.register_file_read_tools();
+        let names: Vec<String> = registry
+            .specs()
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "read_file".to_string(),
+                "list_dir".to_string(),
+                "search_files".to_string()
+            ]
+        );
+        // 浏览器组：含读变体与写工作区变体（写变体靠 retain_names 按角色裁剪）。
+        let mut registry = ToolRegistry::empty();
+        registry.register_browser_tools();
+        let names: Vec<String> = registry
+            .specs()
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect();
+        assert!(names.contains(&"browser_navigate".to_string()));
+        assert!(names.contains(&"browser_screenshot".to_string()));
+    }
+
+    #[test]
+    fn path_in_whitelist_prefix_match() {
+        let base = PathBuf::from("T:/ws/src");
+        // 四路集成微修：clippy 冗余 clone（单元素切片用 from_ref 借用即可）。
+        assert!(path_in_whitelist(
+            &PathBuf::from("T:/ws/src/lib/a.rs"),
+            std::slice::from_ref(&base)
+        ));
+        assert!(!path_in_whitelist(
+            &PathBuf::from("T:/ws/docs/b.md"),
+            std::slice::from_ref(&base)
+        ));
+        // 空白名单在此判 false（无前缀可匹配）——「空 = 未约束」由
+        // resolve_whitelisted 短路放行，纯函数只做前缀匹配。
+        assert!(!path_in_whitelist(
+            &PathBuf::from("T:/ws/anything.txt"),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_normalizes_windows_canonical_paths() {
+        // 回归（七期二路冒烟发现）：canonicalize 产物带 `\\?\` 前缀，与绑定侧
+        // simplify 后的 allowed 混用比对会恒 false。
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\ws\src\a.rs")),
+            PathBuf::from(r"C:\ws\src\a.rs")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"C:\ws\src\a.rs")),
+            PathBuf::from(r"C:\ws\src\a.rs")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new("/home/ws/src/a.rs")),
+            PathBuf::from("/home/ws/src/a.rs")
+        );
     }
 }
