@@ -410,6 +410,12 @@ fn resource_404_ok(path: &str) -> bool {
             | "/projects/{id}/workspace/tree"
             | "/projects/{id}/workspace/git-status"
             | "/teams/templates/catalog/{id}/install"
+            // 七期（第二路）：Worker 代码变更追踪——占位 id 指向不存在项目/团队 → 404 非路由缺失。
+            | "/projects/{id}/workspace/changes"
+            // 七期（第三路）：交付三路由——接线前路由未注册（fallback 404），接线后 404 由资源缺失产生；均非路由缺失。
+            | "/artifacts/{id}/content"
+            | "/artifacts/{id}/metadata"
+            | "/projects/{id}/delivery-manifest"
     )
 }
 

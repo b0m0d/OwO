@@ -14,6 +14,8 @@
 //! - `POST /teams/{id}/steer` continue/steer/replace/cancel/retry（R2：retry 局部重试 + 中断恢复）；
 //! - `GET /projects/{id}` Project Space 摘要；
 //! - `GET /projects/{id}/artifacts` 版本化共享产物（ref 列表）；
+//! - `GET /projects/{id}/workspace/changes` Worker 代码变更追踪（七期 · 二路：
+//!   变更文件 + diff 摘要 + 逐步骤记录 + 白名单越界原因）；
 //! - `POST /tasks/{id}/handoff` 结构化接力（team_id 在请求体）；
 //! - `POST /tasks/{id}/human-result` Human 节点提交结果（team_id 在请求体）；
 //! - `GET /teams/templates` 已采纳模板；
@@ -25,6 +27,12 @@
 //! `RoleWorker`（span 指标 JSONL 落盘 TeamRun 数据目录，重启可读）；`run_team_loop`
 //! 在每阶段前做指标预算门（`TeamRun.budget` additive 支持 `max_cost_usd`/`max_wall_secs`，
 //! 超限停止调度下一阶段并留审计）。指标/脱敏实现见子模块 [`workswarm_metrics`]。
+//!
+//! 七期（第二路）权限接线：`build_run_registry` 按角色画像（`WorkerProfile`）装配
+//! 每个角色的工具注册表（注册表面即权限边界，模板 `budget_calls_per_role` → 真实
+//! `max_turns`）；写角色经单写租约互斥，执行前后 git 快照 → 变更摘要/diff ref 落盘
+//! （子模块 [`workspace_change_tracker`]；白名单越界 → `scope_violation` 步骤失败）；
+//! 团队取消令牌经桥接任务置位共享 abort 标志，运行中 Worker 协作即时中断。
 //!
 //! S0 边界：产物经 CAS ref 传递（大对象不进响应体）；agent 角色经
 //! `Agent::run_subagent` 模型驱动；内置 echo/sleep/fail worker 供测试与演示。
@@ -59,6 +67,14 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 // 独立文件，经本模块 router 合并挂载（子模块可访问本模块私有项）。
 #[path = "project_workspace_api.rs"]
 pub(crate) mod project_workspace;
+
+// 七期（第二路）：工作区变更追踪（Worker 执行前后 git 快照 + 写白名单校验 +
+// 变更摘要/diff ref 落盘；经本模块 router 挂载读取面）。
+#[path = "workspace_change_tracker.rs"]
+pub(crate) mod workspace_change_tracker;
+
+// 七期（第二路）：角色画像（工具面/只读/写白名单/回合上限）驱动真实 Worker。
+use owo_agent_core::worker_profile::{intersect_paths, ProfileSubagentRunner, WorkerProfile};
 
 use owo_agent_server::AppState;
 
@@ -158,10 +174,12 @@ impl WorkSwarmState {
 
 /// 真实 Agent 子代理 worker（name="agent"）：prompt → 子代理执行。
 ///
-/// 五期（第三路）：与 `Agent::run_subagent` 同口径（`SubagentRunner`，顶层 depth=0、
+/// 五期（第三路）：与 `Agent::run_subagent` 同口径（顶层 depth=0、
 /// 子代理 max_turns 上限 12），但 Provider 支持 [`workswarm_metrics::MeasuredProvider`]
 /// 计数装饰器注入——`model_calls` 由 `MeasuredRoleWorker` 逐 span 精确统计
 /// （每次模型调用恰好经过 `complete`/`complete_stream` 其一）。
+/// 七期（第二路）：角色画像驱动——工具注册表按 `WorkerProfile` 装配（注册表面即
+/// 权限边界）、回合上限取模板预算、写面为「角色 ∩ 绑定」交集白名单。
 pub struct AgentSubagentWorker {
     agent: Arc<owo_agent_core::Agent>,
     workspace: PathBuf,
@@ -170,6 +188,15 @@ pub struct AgentSubagentWorker {
     /// 六期（第二路）：项目工作区绑定作用域（None = 全局工作区，行为不变）。
     /// 绑定后：运行目录 = 绑定根；只读绑定强制 read_only；写白名单经审批器强制。
     workspace_scope: Option<project_workspace::WorkspaceScope>,
+    /// 七期（第二路）：角色画像（工具面/只读/回合上限；None = 防御分支退回通用执行器）。
+    profile: Option<WorkerProfile>,
+    /// 七期（第二路）：critic 角色代理（服务端口径：`role == "critic"` 字面量；
+    /// 引擎注入的 read_only 只覆盖 critic，其余内置角色都是 producer，画像另管只读面）。
+    is_critic: bool,
+    /// 七期（第二路）：团队取消桥共享标志（None = 本地标志，行为退化为不可中断）。
+    cancel_flag: Option<Arc<AtomicBool>>,
+    /// 七期（第二路）：最终写白名单（角色 ∩ 绑定交集；空 = 工作区内可写）。
+    write_allowed: Vec<PathBuf>,
 }
 
 #[async_trait]
@@ -185,17 +212,19 @@ impl Worker for AgentSubagentWorker {
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .ok_or_else(|| "agent 步骤缺少 prompt 参数".to_string())?;
-        let read_only = input
+        let input_read_only = input
             .get("read_only")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        // 六期（第二路）：绑定只读是团队级上限——即使步骤输入要求可写也不放开。
-        let read_only = read_only
+        // 只读三层叠加（七期 · 二路）：步骤输入 → 团队绑定只读（团队级上限）→
+        // 角色画像只读（角色级上限）。任一只读即只读。
+        let read_only = input_read_only
             || self
                 .workspace_scope
                 .as_ref()
                 .map(|s| s.read_only)
-                .unwrap_or(false);
+                .unwrap_or(false)
+            || self.profile.as_ref().map(|p| p.read_only).unwrap_or(false);
         if std::env::var("OPENAI_API_KEY")
             .map(|v| v.trim().is_empty())
             .unwrap_or(true)
@@ -222,38 +251,64 @@ impl Worker for AgentSubagentWorker {
             )),
             None => self.agent.provider(),
         };
-        // 六期（第二路）：绑定作用域审批器（只读强制 + 写白名单）；
-        // 未绑定时保持 AutoApprover 原行为。
+        // 审批器（七期 · 二路）：绑定作用域 → 白名单审批器，白名单取「角色 ∩ 绑定」
+        // 交集（角色白名单空 = 绑定原样）；未绑定保持 AutoApprover 原行为。
         let scope = self.workspace_scope.as_ref();
         let allow_writes = !read_only;
         let workspace_approver;
         let fallback_approver = AutoApprover { allow: read_only };
         let approver: &dyn owo_agent_core::permissions::Approver = match scope {
             Some(s) => {
+                let allowed = if self.write_allowed.is_empty() {
+                    s.allowed.clone()
+                } else {
+                    self.write_allowed.clone()
+                };
                 workspace_approver = project_workspace::WorkspaceScopeApprover {
                     allow_writes,
                     root: s.root.clone(),
-                    allowed: s.allowed.clone(),
+                    allowed,
                 };
                 &workspace_approver
             }
             None => &fallback_approver,
         };
-        // 与 Agent::run_subagent 的默认口径一致：顶层 agent depth=0；
-        // 子代理 max_turns 上限 12（SubagentRunner 内部 .min(12)，默认配置等价）。
-        let abort = AtomicBool::new(false);
-        let runner = SubagentRunner {
-            provider,
-            approver,
-            abort: &abort,
-            depth: 0,
-            max_turns: 12,
-            model,
+        // 中断标志（七期 · 二路）：优先团队取消桥共享标志（cancel → 即时置位，
+        // run_turn 协作式中断）；None = 本地标志（行为退化为不可中断）。
+        let local_abort = AtomicBool::new(false);
+        let abort: &AtomicBool = match &self.cancel_flag {
+            Some(flag) => flag,
+            None => &local_abort,
         };
-        let output = runner
-            .run(&self.workspace, prompt, read_only)
-            .await
-            .map_err(|e| format!("agent 子代理执行失败：{e}"))?;
+        // 七期（第二路）：画像执行器——注册表面即权限边界 + 模板预算回合上限；
+        // 无画像（防御分支，现网构建路径恒有画像）退回通用执行器保持旧行为。
+        let output = match &self.profile {
+            Some(profile) => {
+                let runner = ProfileSubagentRunner {
+                    provider,
+                    approver,
+                    abort,
+                    depth: 0,
+                    model,
+                    is_critic: self.is_critic,
+                    write_allowed: self.write_allowed.clone(),
+                    profile: profile.clone(),
+                };
+                runner.run(&self.workspace, prompt).await
+            }
+            None => {
+                let runner = SubagentRunner {
+                    provider,
+                    approver,
+                    abort,
+                    depth: 0,
+                    max_turns: 12,
+                    model,
+                };
+                runner.run(&self.workspace, prompt, read_only).await
+            }
+        }
+        .map_err(|e| format!("agent 子代理执行失败：{e}"))?;
         Ok(output)
     }
 }
@@ -308,16 +363,90 @@ impl Worker for FailWorker {
     }
 }
 
+/// 追踪型 worker 包装（七期 · 二路）：插在内层 worker 与 `RoleWorker` 之间——
+/// 1) 写角色先取单写租约（同一工作区同时只允许一个写角色在执行；读角色不参与）；
+/// 2) 拿到租约后采集前快照（等待租约的时间不计入变更窗口——否则会把其他写角色
+///    正在进行的变更记到本步骤头上）；
+/// 3) 执行后采集后快照，登记「变更文件 + diff 摘要 + diff ref」，并对窗口内新增
+///    变更做写白名单校验——越界转 `scope_violation` 步骤失败（引擎按失败处理，
+///    不登记成功 Artifact）。
+///
+/// 仅写角色包装追踪（`tracking`/`lease` 均为 None 时纯透传）：读角色没有写工具
+/// 不会改文件，而并行读角色的快照窗口会误捕写角色的变更。
+struct TrackedRoleWorker {
+    inner: Arc<dyn Worker>,
+    /// 单写租约（None = 只读角色，不参与租约）。
+    lease: Option<Arc<tokio::sync::Mutex<()>>>,
+    /// 变更追踪配置（None = 不追踪，纯透传）。
+    tracking: Option<workspace_change_tracker::Tracker>,
+}
+
+#[async_trait]
+impl Worker for TrackedRoleWorker {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn run(&self, input: &Value) -> Result<String, String> {
+        let Some(tracking) = &self.tracking else {
+            return self.inner.run(input).await;
+        };
+        // 单写租约：写角色串行化（等待发生在前快照之前——窗口只覆盖本步骤）。
+        let _lease = match &self.lease {
+            Some(lease) => Some(lease.lock().await),
+            None => None,
+        };
+        let pre = workspace_change_tracker::GitSnapshot::snapshot(&tracking.root).await;
+        let result = self.inner.run(input).await;
+        // 租约在前快照窗口结束后即可释放（后续只是 git 子进程与落盘，不占写窗口）。
+        drop(_lease);
+        let output = result?;
+        let post = workspace_change_tracker::GitSnapshot::snapshot(&tracking.root).await;
+        let changed = post.changed_files(&pre);
+        let violation =
+            workspace_change_tracker::check_whitelist(&changed, &tracking.root, &tracking.allowed)
+                .err();
+        let step = input
+            .get("_workswarm")
+            .and_then(|meta| meta.get("step_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        if let Err(error) = tracking
+            .record(&step, &post, &changed, violation.as_deref())
+            .await
+        {
+            tracing::warn!(
+                team_id = %tracking.team_id,
+                role = %tracking.role,
+                %error,
+                "工作区变更记录落盘失败（旁路数据，不阻断步骤）"
+            );
+        }
+        if let Some(violation) = violation {
+            return Err(violation);
+        }
+        Ok(output)
+    }
+}
+
 /// 按角色 worker 名解析内层 worker（"agent"/缺省 = 模型驱动）。
 ///
 /// 五期（第三路）：agent 角色接收 `model_calls` 计数器（MeasuredProvider 注入；
 /// 仅指标用途，不影响执行行为）。
 /// 六期（第二路）：`scope` 为团队工作区绑定（None = 全局工作区，行为不变）。
+/// 七期（第二路）：agent 角色带角色画像（工具面/只读/回合上限）+ critic 代理 +
+/// 团队取消桥标志 + 「角色 ∩ 绑定」写白名单交集（内置 echo/sleep/fail 不受影响）。
+#[allow(clippy::too_many_arguments)]
 fn inner_worker_for(
     state: &AppState,
     worker_name: Option<&str>,
     model_calls: Option<&Arc<AtomicU64>>,
     scope: Option<&project_workspace::WorkspaceScope>,
+    profile: &WorkerProfile,
+    is_critic: bool,
+    cancel_flag: &Arc<AtomicBool>,
+    write_allowed: Vec<PathBuf>,
 ) -> Option<Arc<dyn Worker>> {
     match worker_name.map(str::trim).filter(|w| !w.is_empty()) {
         Some("echo") => Some(Arc::new(EchoWorker)),
@@ -334,28 +463,54 @@ fn inner_worker_for(
                 workspace,
                 model_calls: model_calls.cloned(),
                 workspace_scope,
+                profile: Some(profile.clone()),
+                is_critic,
+                cancel_flag: Some(Arc::clone(cancel_flag)),
+                write_allowed,
             }))
         }
     }
 }
 
-/// 构建团队运行 worker 注册表（成员名 → MeasuredRoleWorker(RoleWorker(inner))）。
+/// 构建团队运行 worker 注册表（成员名 → MeasuredRoleWorker(RoleWorker(Tracked(inner)))）。
 ///
 /// 五期（第三路）：每个角色 worker 外层包一层 [`workswarm_metrics::MeasuredRoleWorker`]——
 /// span 级起止/墙钟/终态/失败原因/尝试序数/输出 Artifact + model_calls/token/费用，
 /// 指标 JSONL 落盘 TeamRun 数据目录（`<run_dir>/<team_id>-metrics.jsonl`，重启可读）。
 /// 包装在 RoleWorker 之外：span 覆盖「上下文切片组装 → 执行 → 产物登记」全窗口。
 /// 失败返回 None（运行任务记录后退出）。
-fn build_run_registry(
+///
+/// 七期（第二路）：
+/// - 角色画像：模板 `budget_calls_per_role` → 真实 `max_turns`；`WorkerProfile::for_role`
+///   决定每个角色实际可见工具面（注册表面即权限边界，不靠审批事后拒绝）；
+/// - 单写租约 + 变更追踪：写角色包 `TrackedRoleWorker`（同一工作区同时只允许一个
+///   写角色；执行前后 git 快照 → 变更摘要/diff ref 落盘 → 白名单越界 `scope_violation`）；
+/// - 取消桥：`cancel_flag` 由 run_team_loop 的令牌监听任务置位，Worker 协作中断。
+async fn build_run_registry(
     coordinator: &Arc<TeamCoordinator>,
     state: &AppState,
     team_id: &str,
+    cancel_flag: &Arc<AtomicBool>,
 ) -> Option<WorkerRegistry> {
     let meta = coordinator.load_run_meta(team_id).ok()?;
     // 六期（第二路）：团队工作区绑定（cancel/retry/resume 后循环按迭代重读——
     // 绑定生命周期独立于运行状态，恢复后继续生效）。
     let scope = project_workspace::load_binding(coordinator.run_dir(), team_id).map(|b| b.scope());
+    // 七期（第二路）：模板角色预算 → 真实 max_turns（无模板 / 未知角色 → 缺省 12）。
+    let budgets: Vec<owo_agent_core::builtin_team_templates::RoleBudget> = coordinator
+        .get_team_run(team_id)
+        .await
+        .ok()
+        .and_then(|run| {
+            run.template_id
+                .as_deref()
+                .and_then(owo_agent_core::builtin_team_templates::descriptor)
+        })
+        .map(|descriptor| descriptor.budget_calls_per_role)
+        .unwrap_or_default();
     let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), team_id);
+    // 单写租约（每次重建注册表新发一份：同一轮注册表内的写角色互斥）。
+    let write_lease = Arc::new(tokio::sync::Mutex::new(()));
     let registry = WorkerRegistry::new();
     for r in &meta.roles {
         let member_id = format!("m-{}", r.role);
@@ -367,12 +522,55 @@ fn build_run_registry(
             .unwrap_or("agent")
             .to_string();
         let model_calls = (worker_kind == "agent").then(|| Arc::new(AtomicU64::new(0)));
+        // 七期（第二路）：角色画像（模板预算 → 回合上限；工具面/只读按角色族）。
+        let budget_calls = budgets
+            .iter()
+            .find(|budget| budget.role == r.role)
+            .map(|budget| budget.budget_calls)
+            .unwrap_or(0);
+        let profile = WorkerProfile::for_role(&r.role, budget_calls);
+        let is_critic = r.role == "critic";
+        let is_writer = profile.is_writer();
+        // 最终写面 = 角色白名单 ∩ 团队绑定白名单（角色白名单空 = 交由绑定决定；
+        // 两侧都空 = 工作区内可写，仍受审批约束）。
+        let tracking_root = scope
+            .as_ref()
+            .map(|s| s.root.clone())
+            .unwrap_or_else(|| state.workspace.clone());
+        let scope_allowed: Vec<PathBuf> = scope
+            .as_ref()
+            .map(|s| s.allowed.clone())
+            .unwrap_or_default();
+        let profile_allowed: Vec<PathBuf> = profile
+            .write_allowed_paths
+            .iter()
+            .map(|relative| tracking_root.join(relative))
+            .collect();
+        let write_allowed = intersect_paths(&profile_allowed, &scope_allowed);
         let inner = inner_worker_for(
             state,
             r.worker.as_deref(),
             model_calls.as_ref(),
             scope.as_ref(),
+            &profile,
+            is_critic,
+            cancel_flag,
+            write_allowed.clone(),
         )?;
+        // 追踪 + 租约只作用于写角色（读角色没有写工具不会改文件；并行读角色的
+        // 快照窗口会误捕写角色的变更）。
+        let tracking = is_writer.then(|| workspace_change_tracker::Tracker {
+            root: tracking_root,
+            run_dir: coordinator.run_dir().to_path_buf(),
+            team_id: team_id.to_string(),
+            role: r.role.clone(),
+            allowed: write_allowed.clone(),
+        });
+        let inner: Arc<dyn Worker> = Arc::new(TrackedRoleWorker {
+            inner,
+            lease: is_writer.then(|| Arc::clone(&write_lease)),
+            tracking,
+        });
         let role_worker = Arc::new(RoleWorker::new(
             Arc::clone(coordinator),
             team_id.to_string(),
@@ -472,13 +670,29 @@ pub(crate) async fn run_team_loop(
     team_id: String,
 ) {
     let _alive = LoopAliveGuard::new(&coordinator, &team_id);
+    // 七期（第二路）：团队取消令牌 → 运行中 Worker 的即时中断桥。`wait_cancel`
+    // 只在真实取消（令牌值变 true）时置位共享 abort 标志（Worker 在回合边界协作
+    // 中断）；发送端随团队收尾关闭返回 false，不置位（运行已结束，无需中断）。
+    // 桥存活期 = 团队运行循环存活期（令牌由协调器持有，跨注册表重建共用一份标志）。
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let token = coordinator.cancel_token(&team_id);
+        let flag = Arc::clone(&cancel_flag);
+        tokio::spawn(async move {
+            if owo_agent_core::wait_cancel(&token).await {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                tracing::info!("workswarm 取消桥：运行中 Worker 中断标志已置位");
+            }
+        });
+    }
     let mut backoff = Duration::from_secs(1);
     loop {
         // 五期（第三路）：指标预算门（外层调度点；门闩内调度点见下方 latch 循环）。
         if stop_if_budget_exhausted(&coordinator, &team_id).await {
             return;
         }
-        let Some(registry) = build_run_registry(&coordinator, &state, &team_id) else {
+        let Some(registry) = build_run_registry(&coordinator, &state, &team_id, &cancel_flag).await
+        else {
             tracing::error!(team_id = %team_id, "workswarm 运行循环：worker 注册表构建失败，运行终止");
             return;
         };
@@ -736,6 +950,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/projects/{id}/workspace/git-status",
             get(project_workspace::get_workspace_git_status),
+        )
+        // 七期（第二路）：Worker 代码变更追踪（变更文件 + diff 摘要 + 逐步骤记录）。
+        .route(
+            "/projects/{id}/workspace/changes",
+            get(project_workspace::get_workspace_changes),
         )
         .route("/tasks/{id}/handoff", post(submit_handoff))
         .route("/tasks/{id}/human-result", post(submit_human_result))

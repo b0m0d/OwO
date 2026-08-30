@@ -2,7 +2,10 @@
 //!
 //! 路由面：
 //! - `POST /artifacts/{id}/review`：提交评审（approve / request_changes / reject）；
-//! - `GET  /artifacts/{id}/history`：评审历史 + 版本链 + approved head。
+//! - `GET  /artifacts/{id}/history`：评审历史 + 版本链 + approved head；
+//! - `GET  /artifacts/{id}/content`：产物正文交付（JSON 信封 / `?raw=true` 原始下载流）；
+//! - `GET  /artifacts/{id}/metadata`：交付元数据（格式/哈希/校验/证据链/交接）；
+//! - `GET  /projects/{id}/delivery-manifest`：最终交付清单（每 kind 最新版本）。
 //!
 //! 契约要点：
 //! - `expected_version` 乐观并发：与当前版本不符 → 409（旧页面提交被拒）；
@@ -35,6 +38,11 @@ use owo_agent_server::AppState;
 // 不改动 lib.rs 装配（子模块可访问本模块私有项：store 连接与错误映射）。
 #[path = "artifact_rework_api.rs"]
 pub(crate) mod artifact_rework;
+
+// Artifact 校验、证据链与下载交付（七期 · 第三路）：独立文件，经本模块 router
+// 合并挂载，不改动 lib.rs 装配（子模块可访问本模块私有项：store 连接与错误映射）。
+#[path = "artifact_delivery_api.rs"]
+pub(crate) mod artifact_delivery;
 
 // ---------------------------------------------------------------------------
 // 状态（进程内单例连接，懒初始化）
@@ -104,6 +112,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/projects/{id}/deliverables",
             get(artifact_rework::project_deliverables),
+        )
+        .route(
+            "/artifacts/{id}/content",
+            get(artifact_delivery::artifact_content),
+        )
+        .route(
+            "/artifacts/{id}/metadata",
+            get(artifact_delivery::artifact_metadata),
+        )
+        .route(
+            "/projects/{id}/delivery-manifest",
+            get(artifact_delivery::project_delivery_manifest),
         )
         .with_state(state)
 }

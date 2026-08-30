@@ -4,7 +4,9 @@
 //! - `PUT  /projects/{id}/workspace`：绑定/更新项目工作区（root 只读默认开）；
 //! - `GET  /projects/{id}/workspace`：读取绑定；
 //! - `GET  /projects/{id}/workspace/tree`：绑定目录树（深度受限，不跟随符号链接）；
-//! - `GET  /projects/{id}/workspace/git-status`：绑定目录的 `git status --porcelain`。
+//! - `GET  /projects/{id}/workspace/git-status`：绑定目录的 `git status --porcelain`；
+//! - `GET  /projects/{id}/workspace/changes`：Worker 代码变更追踪（七期 · 二路：
+//!   变更文件 + diff 摘要 + 逐步骤记录 + 白名单越界原因）。
 //!
 //! 安全模型：
 //! - 绑定持久化为运行数据 sidecar（`<run_dir>/<team_id>-workspace.json`），
@@ -499,6 +501,58 @@ pub(crate) async fn get_workspace_git_status(
             "error": format!("git 不可用：{e}"),
         }))),
     }
+}
+
+/// GET /projects/{id}/workspace/changes（七期 · 二路）：Worker 代码变更追踪读取面。
+///
+/// 返回当前 TeamRun 的逐步骤变更记录（`<run_dir>/<team_id>-workspace-changes.json`，
+/// 由 [`workspace_change_tracker`] 落盘）与汇总，供代码任务详情面板展示
+/// 「变更文件 + diff 摘要」：
+/// - `changed_files`：全部记录窗口新增变更文件（去重保序）；
+/// - `diff_summary`：最近一条记录的 `git diff --stat` 摘要；
+/// - `has_violation`：是否存在白名单越界记录；
+/// - `records`：逐步骤记录（角色 / 步骤 / 时间 / 变更文件 / diff ref / 越界原因）。
+pub(crate) async fn get_workspace_changes(
+    State(state): State<Arc<AppState>>,
+    AxumPath(project_id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (coordinator, team_id, _) = team_of_project(&state, &project_id).await?;
+    let records = match super::workspace_change_tracker::load_records(
+        coordinator.run_dir(),
+        &team_id,
+    )
+    .await
+    {
+        Ok(records) => records,
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": error })),
+            ))
+        }
+    };
+    // 汇总：全部窗口新增变更文件（去重保序）+ 最近 diff 摘要 + 越界标记。
+    let mut changed_files: Vec<String> = Vec::new();
+    for record in &records {
+        for file in &record.changed_files {
+            if !changed_files.contains(file) {
+                changed_files.push(file.clone());
+            }
+        }
+    }
+    let diff_summary = records
+        .last()
+        .map(|record| record.diff_summary.clone())
+        .unwrap_or_default();
+    let has_violation = records.iter().any(|record| record.violation.is_some());
+    Ok(Json(json!({
+        "team_id": team_id,
+        "git": records.last().map(|record| record.git).unwrap_or(false),
+        "changed_files": changed_files,
+        "diff_summary": diff_summary,
+        "has_violation": has_violation,
+        "records": records,
+    })))
 }
 
 #[cfg(test)]
