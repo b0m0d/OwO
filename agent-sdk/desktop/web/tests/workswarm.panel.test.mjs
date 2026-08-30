@@ -771,3 +771,290 @@ test("五期样式守卫：style.css 第 19 节策略/指标/时间线/差异/�
   assert.ok(flat.includes(".owo-ws-dlv-item"), "交付物条目样式在场");
 });
 
+// ============================================================================
+// 七期（第四路）：Worker 能力 / 写租约 / 文件变更 / 产物校验与下载交付
+// ============================================================================
+
+test("七期 workerProfilesTable：角色×权限×预算表 + 空态容错", () => {
+  resetState();
+  const html = T.workerProfilesTable([
+    {
+      role: "code_analyzer",
+      visible_tools: ["fs_read", "grep"],
+      read_only: true,
+      write_allowed_paths: null,
+      max_turns: 12,
+      can_run_command: false,
+      can_use_browser: false,
+    },
+    {
+      role: "implementer",
+      visible_tools: ["fs_read", "fs_write", "shell"],
+      read_only: false,
+      write_allowed_paths: ["src/", "tests/"],
+      max_turns: 30,
+      can_run_command: true,
+      can_use_browser: false,
+    },
+  ]);
+  assert.match(html, /<table class="owo-ws-table">/);
+  assert.match(html, /code_analyzer/);
+  assert.match(html, /implementer/);
+  assert.match(html, /fs_read、grep/, "可见工具顿号连接");
+  assert.match(html, /src\/、tests\//, "允许写路径顿号连接");
+  assert.match(html, /<td>30<\/td>/, "最大轮次（预算）列");
+  assert.match(html, /只读/);
+  // 容错：未声明写路径的可写角色给出拒绝写入提示；空/缺字段安全
+  const sparse = T.workerProfilesTable([{ role: "x", read_only: false }]);
+  assert.match(sparse, /未声明（写入将被拒绝）/);
+  assert.match(T.workerProfilesTable([]), /暂无 WorkerProfile/);
+  assert.match(T.workerProfilesTable(null), /暂无 WorkerProfile/);
+  assert.match(T.workerProfilesTable([null, 42]), /暂无 WorkerProfile/, "非对象条目被过滤");
+});
+
+test("七期 writeLeaseBox：持有/已释放/无租约三态", () => {
+  resetState();
+  const held = T.writeLeaseBox({ holder_role: "implementer", holder_step_id: "s-2", acquired_at_ms: 1700000000000 });
+  assert.match(held, /写租约持有中/);
+  assert.match(held, /implementer/);
+  assert.match(held, /s-2/);
+  assert.match(held, /自 .* 起持有/);
+  const released = T.writeLeaseBox({ holder_role: "implementer", holder_step_id: "s-2", acquired_at_ms: 1700000000000, released_at_ms: 1700000001000 });
+  assert.match(released, /已于 .* 释放/);
+  assert.match(T.writeLeaseBox(null), /当前无角色持有写租约/);
+  assert.match(T.writeLeaseBox(undefined), /当前无角色持有写租约/);
+  assert.match(T.writeLeaseBox("junk"), /当前无角色持有写租约/, "非对象容错");
+});
+
+test("七期 changesListHtml：变更行状态徽标 + ±行数 + diff 预览 + 空态", () => {
+  resetState();
+  const html = T.changesListHtml([
+    { path: "src/lib.rs", state: "modified", added_lines: 12, deleted_lines: 3, diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new" },
+    { path: "tests/new_test.rs", state: "added" },
+    { path: "old.rs", state: "deleted", added_lines: 0, deleted_lines: 40 },
+  ]);
+  assert.match(html, /共 3 个文件变更/);
+  assert.match(html, /src\/lib\.rs/);
+  assert.match(html, /\+12 \/ -3/);
+  assert.match(html, /<details class="owo-ws-chg-diff">/);
+  assert.match(html, /<pre class="owo-ws-diff">/, "diff 复用差异配色容器");
+  assert.match(html, /\+0 \/ -40/);
+  assert.ok(html.includes("new") && html.includes("old"), "diff 正文转义后在场");
+  // 状态徽标语义色
+  assert.match(html, /owo-ws-badge st-awaiting_human">修改</);
+  assert.match(html, /owo-ws-badge st-running">新增</);
+  assert.match(html, /owo-ws-badge st-failed">删除</);
+  // 空态与非对象容错
+  assert.match(T.changesListHtml([]), /暂无文件变更/);
+  assert.match(T.changesListHtml(null), /暂无文件变更/);
+  assert.match(T.changesListHtml([null, 7]), /暂无文件变更/);
+});
+
+test("七期 validationBadgeHtml + artifactFileName：校验徽标三态与扩展名推断", () => {
+  resetState();
+  assert.match(T.validationBadgeHtml({ valid: true }), /校验通过/);
+  const bad = T.validationBadgeHtml({ valid: false, reason: "JSON 解析失败：禁止 Markdown 围栏" });
+  assert.match(bad, /校验未通过/);
+  assert.match(bad, /title="JSON 解析失败：禁止 Markdown 围栏"/);
+  assert.equal(T.validationBadgeHtml(null), "", "字段缺失不渲染（旧产物兼容）");
+  assert.equal(T.validationBadgeHtml({}), "", "valid 缺失不渲染");
+  assert.equal(T.artifactFileName({ artifact_id: "a-1", format: "markdown" }), "a-1.md");
+  assert.equal(T.artifactFileName({ artifact_id: "a-2", format: "JSON" }), "a-2.json");
+  assert.equal(T.artifactFileName({ artifact_id: "a-3", format: "research" }), "a-3.md");
+  assert.equal(T.artifactFileName({ artifact_id: "a-4", format: "weird" }), "a-4.weird");
+  assert.equal(T.artifactFileName({ artifact_id: "a-5" }), "a-5.txt");
+  assert.equal(T.artifactFileName(null), "artifact.txt");
+});
+
+test("七期 deliveryManifestText：容错文本化（版本/哈希/大小/批准态/引用）", () => {
+  resetState();
+  const text = T.deliveryManifestText({
+    project_id: "proj-t-1",
+    generated_at: "2025-01-01T00:00:00Z",
+    manifest: [
+      { artifact_id: "a-1", kind: "code_diff", format: "markdown", version: 2, sha256: "abc123", size_bytes: 512, approved: true, content_url: "/artifacts/a-1/content" },
+      { artifact_id: "a-2", kind: "report", format: "json", version: 1, sha256: null, size_bytes: null, approved: false, content_url: "" },
+      null,
+    ],
+  });
+  assert.match(text, /project_id: proj-t-1/);
+  assert.match(text, /artifacts: 2/, "null 条目不计");
+  assert.match(text, /a-1 {2}code_diff\/markdown {2}v2 {2}sha256:abc123 {2}512B {2}已批准/);
+  assert.match(text, /a-2/);
+  assert.match(text, /未批准/);
+  assert.match(T.deliveryManifestText(null), /project_id: —/);
+  assert.match(T.deliveryManifestText({}), /artifacts: 0/);
+});
+
+test("七期 stopping/stopped：门控与状态中文化 + 模块 CSS 在场", () => {
+  resetState();
+  assert.equal(T.isGatedTeam("stopping"), true);
+  assert.equal(T.isGatedTeam("Stopped"), true, "Debug/大小写归一");
+  assert.equal(T.isGatedTeam("cancelled"), true, "终态同样门控");
+  assert.equal(T.isGatedTeam("failed"), true, "failed 终态仍门控运行操作");
+  assert.equal(T.isGatedTeam("running"), false);
+  assert.equal(T.isGatedTeam(""), false);
+  // 运行摘要：状态标签与阶段中文化
+  const stopping = T.computeRunSummary({ team: { status: "stopping" }, tasks: [] });
+  assert.equal(stopping.statusLabel, "正在停止");
+  assert.equal(stopping.phase, "正在停止（Worker 退出中）");
+  const stopped = T.computeRunSummary({ team: { status: "stopped" }, tasks: [] });
+  assert.equal(stopped.statusLabel, "已停止");
+  assert.equal(stopped.phase, "已停止");
+  // 模块内联 CSS：停止态徽标 + rv-* 评审徽标 + 变更列表样式
+  const css = T.css();
+  assert.ok(css.includes(".owo-ws-badge.st-stopping"), "st-stopping 徽标样式在场");
+  assert.ok(css.includes(".owo-ws-badge.st-stopped"), "st-stopped 徽标样式在场");
+  assert.ok(css.includes(".owo-ws-badge.rv-ok") && css.includes(".owo-ws-badge.rv-bad"), "rv-* 评审徽标配色在场");
+  assert.ok(css.includes(".owo-ws-chg-row") && css.includes(".owo-ws-lease"), "变更列表与写租约样式在场");
+});
+
+test("七期 artifactRowHtml：校验徽标/证据/Handoff/sha256/下载按钮在场", () => {
+  resetState();
+  const a = {
+    artifact_id: "p:w:v2",
+    kind: "code_diff",
+    version: 2,
+    producer: "m-implementer",
+    review_state: "PendingReview",
+    supersedes_artifact_id: null,
+    validation: { valid: false, reason: "CSV 列数不一致" },
+    evidence_refs: ["cas://sha256:aa", "file://src/lib.rs"],
+    sha256: "deadbeefcafe1234567890",
+    handoff: { completed_summary: "完成" },
+  };
+  const html = T.artifactRowHtml(a, { items: [a] });
+  assert.match(html, /校验未通过/);
+  assert.match(html, /title="CSV 列数不一致"/);
+  assert.match(html, /证据 2 条/);
+  assert.match(html, /title="证据引用：cas:\/\/sha256:aa，file:\/\/src\/lib\.rs"/);
+  assert.match(html, /含 Handoff/);
+  assert.match(html, /sha256 deadbeefca…/, "短哈希 10 字符截断");
+  assert.match(html, /title="sha256: deadbeefcafe1234567890"/, "完整哈希在 tooltip");
+  assert.match(html, /data-art-dl="p:w:v2"/, "每行一个下载按钮");
+  // 无七期字段的旧产物：不渲染徽标/按钮外的附加节点（下载按钮恒在）
+  const old = T.artifactRowHtml({ artifact_id: "p:w:v1", kind: "doc", version: 1, producer: "m-w", review_state: "Approved", supersedes_artifact_id: null }, { items: [{ artifact_id: "p:w:v1", version: 1 }] });
+  assert.ok(!old.includes("校验通过"), "validation 缺失时不渲染校验徽标");
+  assert.ok(!old.includes("含 Handoff"));
+  assert.match(old, /data-art-dl="p:w:v1"/);
+});
+
+// ============================================================================
+// 七期（二路交接）：GET /projects/{pid}/workspace/changes 变更追踪读取面
+// ============================================================================
+
+test("七期 changesRemoteView：端点载荷归一 + 全字段容错", () => {
+  resetState();
+  const view = T.changesRemoteView({
+    team_id: "team-1",
+    git: true,
+    changed_files: ["src/calc.rs", "out/fix-report.md"],
+    diff_summary: " src/calc.rs | 2 +-",
+    has_violation: false,
+    records: [
+      { role: "implementer", step: "s-2", at: 1753680000000, git: true, changed_files: ["src/calc.rs"], diff_summary: " src/calc.rs | 2 +-", diff_ref: "team-1-changes/s-2.patch", violation: null },
+      { role: "finalizer", step: "s-3", git: false, violation: "越界写入 /etc" },
+    ],
+  });
+  assert.equal(view.team_id, "team-1");
+  assert.equal(view.git, true);
+  assert.deepEqual(view.changed_files, ["src/calc.rs", "out/fix-report.md"]);
+  assert.equal(view.has_violation, false);
+  assert.equal(view.records.length, 2);
+  assert.equal(view.records[0].diff_ref, "team-1-changes/s-2.patch");
+  assert.equal(view.records[0].violation, null);
+  assert.equal(view.records[1].at, null, "缺 at 容错为 null");
+  assert.deepEqual(view.records[1].changed_files, []);
+
+  // 容错：null / 空对象 / records 内非对象条目
+  const empty = T.changesRemoteView(null);
+  assert.deepEqual(empty.changed_files, []);
+  assert.deepEqual(empty.records, []);
+  assert.equal(empty.has_violation, false);
+  const sparse = T.changesRemoteView({ records: [null, 42, { role: "r" }] });
+  assert.equal(sparse.records.length, 3, "非对象记录归一为缺省行");
+  assert.equal(sparse.records[0].role, "—");
+  assert.equal(sparse.records[2].step, "unknown", "缺 step 缺省 unknown（与服务端一致）");
+});
+
+test("七期 changeRecordsHtml：越界/通过徽标 + 文件行 + diff 容器", () => {
+  resetState();
+  const html = T.changeRecordsHtml([
+    { role: "implementer", step: "s-2", at: 1753680000000, git: true, changed_files: ["src/calc.rs"], diff_summary: " 1 file changed", diff_ref: "team-1-changes/s-2.patch", violation: null },
+    { role: "finalizer", step: "s-3", at: null, git: false, changed_files: [], diff_summary: "", diff_ref: null, violation: "越界写入 /etc" },
+  ]);
+  assert.match(html, /owo-ws-badge rv-ok">通过</);
+  assert.match(html, /owo-ws-badge rv-bad" title="越界写入 \/etc">越界</);
+  assert.match(html, /implementer/);
+  assert.match(html, /finalizer/);
+  assert.match(html, /步骤 s-2/);
+  assert.match(html, /patch team-1-changes\/s-2\.patch/);
+  assert.match(html, /src\/calc\.rs/);
+  assert.match(html, /<pre class="owo-ws-diff"> 1 file changed<\/pre>/);
+  assert.match(html, /（本窗口无新增变更文件）/, "空文件窗口给出占位");
+  assert.equal(T.changeRecordsHtml([]), "", "空 records 输出空串");
+  assert.equal(T.changeRecordsHtml(null), "");
+});
+
+test("七期 changesRuntimeHtml：远程优先 + 详情文件清单补充 + 双空态", () => {
+  resetState();
+  // 远程有数据：越界警示 + diff 摘要 + 记录
+  const remote = T.changesRemoteView({
+    team_id: "team-1",
+    git: true,
+    changed_files: ["src/calc.rs"],
+    diff_summary: " src/calc.rs | 2 +-",
+    has_violation: true,
+    records: [{ role: "implementer", step: "s-2", at: 1, git: true, changed_files: ["src/calc.rs"], diff_summary: " x", diff_ref: null, violation: null }],
+  });
+  const html = T.changesRuntimeHtml(remote, []);
+  assert.match(html, /存在白名单越界写记录/, "has_violation 警示行");
+  assert.match(html, /最近 diff 摘要/);
+  assert.match(html, /<pre class="owo-ws-diff"> src\/calc\.rs \| 2 \+-<\/pre>/);
+  assert.match(html, /步骤 s-2/);
+  // 远程有数据 + 详情文件清单：两者都渲染
+  const both = T.changesRuntimeHtml(remote, [{ path: "src/lib.rs", state: "modified", added_lines: 1, deleted_lines: 0, diff: "" }]);
+  assert.match(both, /步骤 s-2/);
+  assert.match(both, /src\/lib\.rs/);
+  // 远程空记录（无摘要/无越界）→ 回退详情文件清单
+  const fallback = T.changesRuntimeHtml({ team_id: "t", git: false, changed_files: [], diff_summary: "", has_violation: false, records: [] }, [{ path: "a.rs", state: "added" }]);
+  assert.match(fallback, /共 1 个文件变更/);
+  assert.ok(!fallback.includes("最近 diff 摘要"));
+  // 双空 → 既有空态
+  assert.match(T.changesRuntimeHtml(null, []), /暂无文件变更/);
+  assert.match(T.changesRuntimeHtml(null, null), /暂无文件变更/);
+  // 远程无数据但详情有 → 详情文件清单
+  assert.match(T.changesRuntimeHtml(null, [{ path: "b.rs", state: "added" }]), /b\.rs/);
+});
+
+test("七期 loadWorkspaceChanges：成功落地归一视图；404/失败容错为 null", async () => {
+  resetState();
+  const view = T.changesRemoteView({
+    team_id: "team-1",
+    git: true,
+    changed_files: ["src/calc.rs"],
+    diff_summary: " 1 file changed",
+    has_violation: false,
+    records: [],
+  });
+  T.setTransport({
+    get(path) {
+      if (path === "/projects/proj-t-1/workspace/changes") return Promise.resolve(view);
+      if (path === "/projects/proj-bad/workspace/changes") return Promise.reject(new Error("404: project not found"));
+      return Promise.reject(new Error("unexpected GET " + path));
+    },
+    post() {
+      return Promise.reject(new Error("unexpected POST"));
+    },
+  });
+  // rootEl 为 null（无 DOM）：paintSevenRuntime 内部 el() 全部守卫，不触碰 DOM。
+  T.state.current = "t-1";
+  T.state.team = { team_id: "t-1", project_space_id: null };
+  await T.loadWorkspaceChanges();
+  assert.deepEqual(T.state.changesRemote, view, "成功 → 归一视图落地");
+
+  T.state.current = "bad";
+  T.state.team = { team_id: "bad", project_space_id: null };
+  await T.loadWorkspaceChanges();
+  assert.equal(T.state.changesRemote, null, "404 → 容错为 null（详情 changes[] 兜底）");
+});

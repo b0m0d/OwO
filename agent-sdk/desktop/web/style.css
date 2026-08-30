@@ -971,3 +971,47 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
 }
 
 
+
+
+/* ===========================================================================
+   21. 七期：Action Center（待我处理）—— 四类待办日常工作台
+   =========================================================================== */
+/* 主布局：头部 + 错误区 + 四个类目节，全部可换行不横向溢出 */
+.owo-ac { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 960px; }
+.owo-ac-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.owo-ac-head h2 { margin: 0; }
+.owo-ac-head .hint { min-width: 0; overflow-wrap: anywhere; }
+.owo-ac .owo-ac-mini { flex: none; }
+
+/* 类目节：标题行（编号 + 计数徽标 + 口径说明）+ 条目列 */
+.owo-ac-sec { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--soft-border); border-radius: 12px; padding: 10px 12px; min-width: 0; background: var(--surface-2, transparent); }
+.owo-ac-sec h3 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; font-size: 14px; }
+.owo-ac-sec h3 .hint { font-weight: 400; min-width: 0; overflow-wrap: anywhere; }
+.owo-ac-count { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 18px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--soft-border); background: var(--surface, transparent); color: var(--muted); font-size: 11px; font-weight: 600; }
+.owo-ac-count.has { border-color: var(--red-line); background: var(--red-soft); color: var(--red); }
+.owo-ac-items { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.owo-ac-empty { color: var(--muted); font-size: 12px; }
+.owo-ac-err { color: var(--red); font-size: 12px; overflow-wrap: anywhere; }
+
+/* 条目卡：徽标行 + 副行 + 动作行 + 操作结果 */
+.owo-ac-item { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--soft-border); border-radius: 10px; padding: 7px 9px; min-width: 0; font-size: 13px; }
+.owo-ac-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.owo-ac-sub { font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
+.owo-ac-sub.bad { color: var(--red); }
+.owo-ac-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.owo-ac-actions .hint { min-width: 0; overflow-wrap: anywhere; }
+.owo-ac-result { font-size: 12px; min-height: 1em; overflow-wrap: anywhere; }
+.owo-ac-result.ok { color: var(--green); }
+.owo-ac-result.bad { color: var(--red); }
+
+/* 徽标（与 WorkSwarm 徽标配色一致：warn 黄 / ok 绿 / bad 红 / info 中性） */
+.owo-ac-badge { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: 11px; white-space: nowrap; border: 1px solid var(--soft-border); color: var(--muted); }
+.owo-ac-badge.warn { border-color: var(--yellow-line, var(--soft-border)); background: var(--yellow-soft, rgba(199, 138, 26, 0.13)); color: var(--yellow, #a06a04); }
+.owo-ac-badge.ok { border-color: var(--green-line); background: var(--green-soft); color: var(--green); }
+.owo-ac-badge.bad { border-color: var(--red-line); background: var(--red-soft); color: var(--red); }
+.owo-ac-badge.info { border-color: var(--blue-line, var(--soft-border)); background: var(--blue-soft, rgba(64, 120, 192, 0.12)); color: var(--blue, #3568a8); }
+
+/* 窄视口：条目卡内边距收窄 */
+@media (max-width: 1280px) {
+  .owo-ac-sec { padding: 8px 10px; }
+}

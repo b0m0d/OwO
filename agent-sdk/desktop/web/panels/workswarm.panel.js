@@ -172,6 +172,11 @@
       workspaceViewKind: "", // "tree" | "git" | ""
       workspaceBusy: false, // 目录树/git-status 拉取中
       templateInfo: null, // {template_id, version, title}（目录懒加载解析版本）
+      // —— 七期：Worker 能力 / 写租约 / 文件变更（详情字段缺失时全部容错为空） ——
+      workerProfiles: [], // WorkerProfile[]：visible_tools/read_only/max_turns/write_allowed_paths/...
+      writeLease: null, // 单写租约（null=未持有；released_at_ms 非空=已释放）
+      changes: [], // 工作区文件变更 [{path,state,diff?,added_lines?,deleted_lines?}]
+      changesRemote: null, // 二路 changes 端点归一视图（changesRemoteView）；null=未拉取/404 容错
     };
 
     // ---------- 常量与工具 ----------
@@ -182,6 +187,9 @@
       succeeded: "已成功",
       failed: "失败",
       cancelled: "已取消",
+      // 七期：cancel 接入 Worker 取消令牌后的过渡/停止状态（服务端下发才出现；UI 容错）
+      stopping: "正在停止",
+      stopped: "已停止",
     };
     var STEP_STATUS_CN = {
       pending: "等待",
@@ -307,6 +315,8 @@
       else if (st === "running") phase = counts.total ? "调度中" : "等待任务图生成";
       else if (st === "created") phase = counts.total ? "准备启动" : "尚未开始";
       else if (st === "cancelled") phase = "已取消";
+      else if (st === "stopping") phase = "正在停止（Worker 退出中）";
+      else if (st === "stopped") phase = "已停止";
       else if (st === "failed") phase = "已失败";
       else phase = "—";
       return {
@@ -475,35 +485,50 @@
       return state.teamStatus || ((state.team && state.team.status) || "");
     }
 
+    // 七期：停止中/已停止与终态同样不可操作（cancel 已受理，等待 Worker 退出）。
+    function isGatedTeam(s) {
+      var st = normStatus(s);
+      return isTerminalTeam(st) || st === "stopping" || st === "stopped";
+    }
+
     function applyGating() {
-      var term = isTerminalTeam(currentTeamStatus());
+      var st = normStatus(currentTeamStatus());
+      var term = isTerminalTeam(st);
+      var gated = isGatedTeam(st);
       TEAM_ACTION_BTNS.forEach(function (id) {
         var b = el(id);
         if (!b) return;
         if (b.getAttribute("data-busy") === "1") return; // 提交中的锁优先
-        b.disabled = term;
-        b.title = term ? "团队已进入终态，该操作不可用" : "";
+        b.disabled = gated;
+        b.title = term
+          ? "团队已进入终态，该操作不可用"
+          : gated
+            ? "团队正在停止/已停止，该操作不可用"
+            : "";
       });
-      var hGo = el("ws-h-go"); // 人节点结果提交：终态禁用；没有未完成的人节点任务也禁用
+      var hGo = el("ws-h-go"); // 人节点结果提交：终态/停止禁用；没有未完成的人节点任务也禁用
       if (hGo && hGo.getAttribute("data-busy") !== "1") {
         var noHuman = humanTasks().length === 0;
-        hGo.disabled = term || noHuman;
+        hGo.disabled = gated || noHuman;
         hGo.title = term
           ? "团队已进入终态，人节点结果提交不可用"
-          : noHuman
-            ? "当前没有未完成的人节点任务"
-            : "";
+          : gated
+            ? "团队正在停止/已停止，人节点结果提交不可用"
+            : noHuman
+              ? "当前没有未完成的人节点任务"
+              : "";
       }
-      var xGo = el("ws-x-go"); // 任务交接：终态禁用
+      var xGo = el("ws-x-go"); // 任务交接：终态/停止禁用
       if (xGo && xGo.getAttribute("data-busy") !== "1") {
-        xGo.disabled = term;
-        xGo.title = term ? "团队已进入终态，交接不可用" : "";
+        xGo.disabled = gated;
+        xGo.title = term ? "团队已进入终态，交接不可用" : gated ? "团队正在停止/已停止，交接不可用" : "";
       }
-      // 节点重试按钮：仅 succeeded / cancelled 终态隐藏为禁用（failed 终态正是
-      // retry 的合法场景）；提交中的锁优先。渲染层已按 shouldShowRetry 控制可见性。
+      // 节点重试按钮：仅 succeeded / cancelled / stopping / stopped 隐藏为禁用
+      //（failed 终态正是 retry 的合法场景）；提交中的锁优先。渲染层已按
+      // shouldShowRetry 控制可见性。
       var noRetry = (function () {
         var s = normStatus(currentTeamStatus());
-        return s === "succeeded" || s === "cancelled";
+        return s === "succeeded" || s === "cancelled" || s === "stopping" || s === "stopped";
       })();
       var rbtns = rootEl ? rootEl.querySelectorAll("[data-ws-retry]") : [];
       for (var ri = 0; ri < rbtns.length; ri++) {
@@ -511,11 +536,19 @@
         if (rb.getAttribute("data-busy") === "1") continue;
         rb.disabled = noRetry;
         rb.title = noRetry
-          ? "团队已成功/已取消，无可重试节点"
+          ? "团队已成功/已取消/已停止，无可重试节点"
           : "重置此节点及其未完成下游；已成功步骤、产物与交接保持不变";
       }
       var gate = el("ws-d-gate");
-      if (gate) gate.style.display = term ? "" : "none";
+      if (gate) {
+        // 七期：停止中/已停止给出专门文案（其余沿用静态终态文案，不覆盖）。
+        if (st === "stopping") {
+          gate.textContent = "⏳ 正在停止：取消指令已受理，等待运行中的 Worker 退出（通常数秒内完成）…";
+        } else if (st === "stopped") {
+          gate.textContent = "⛔ 团队已停止：运行操作已停用（任务进度、审计与产物保留，可继续查看）。";
+        }
+        gate.style.display = gated ? "" : "none";
+      }
     }
 
     // 结果区与实时通道标注 aria-live，供读屏器播报状态变化。
@@ -1609,6 +1642,315 @@
       });
     }
 
+    // ---------- 七期：Worker 能力 / 写租约 / 文件变更 / 产物校验与下载交付 ----------
+    var FORMAT_EXT = { json: "json", csv: "csv", markdown: "md", research: "md" };
+
+    // 下载文件名：artifact_id + 按格式推断的扩展名（未知格式回退原串/txt）。
+    function artifactFileName(a) {
+      var fmt = String((a && a.format) || "").toLowerCase();
+      var ext = FORMAT_EXT[fmt] || (fmt || "txt");
+      return String((a && a.artifact_id) || "artifact") + "." + ext;
+    }
+
+    // 绝对时间格式化（fmtMs 是时长格式化器，写租约时间戳另用）。
+    function fmtAbsTime(ms) {
+      var n = Number(ms);
+      if (!isFinite(n) || n <= 0) return "";
+      try {
+        return new Date(n).toLocaleString();
+      } catch (e) {
+        return String(ms);
+      }
+    }
+
+    // 产物格式校验徽标：validation 为七期可选字段——缺失/未校验时不渲染（旧产物兼容）。
+    function validationBadgeHtml(validation) {
+      var v = validation && typeof validation === "object" ? validation : null;
+      if (!v || v.valid == null) return "";
+      if (v.valid) return '<span class="owo-ws-badge rv-ok" title="格式校验通过">校验通过</span>';
+      return '<span class="owo-ws-badge rv-bad" title="' + esc(String(v.reason || "格式校验未通过")) + '">校验未通过</span>';
+    }
+
+    // WorkerProfile 表：角色 × 实际工具权限 × 调用预算（max_turns）。全字段容错。
+    function workerProfilesTable(profiles) {
+      var list = (profiles || []).filter(function (p) {
+        return p && typeof p === "object";
+      });
+      if (!list.length) {
+        return '<div class="hint">暂无 WorkerProfile（权限/预算字段未下发或团队尚未生成角色配置）。</div>';
+      }
+      var rows = list
+        .map(function (p) {
+          var tools = Array.isArray(p.visible_tools) && p.visible_tools.length ? p.visible_tools.join("、") : "—";
+          var paths = Array.isArray(p.write_allowed_paths) && p.write_allowed_paths.length
+            ? p.write_allowed_paths.join("、")
+            : p.read_only
+              ? "—"
+              : "未声明（写入将被拒绝）";
+          return (
+            "<tr>" +
+            "<td><b>" + esc(p.role || "—") + "</b></td>" +
+            "<td>" + (p.read_only ? "只读" : "可写") + "</td>" +
+            '<td class="hint">' + esc(tools) + "</td>" +
+            "<td>" + (p.can_run_command ? "✓" : "✗") + "</td>" +
+            "<td>" + (p.can_use_browser ? "✓" : "✗") + "</td>" +
+            "<td>" + esc(p.max_turns == null ? "—" : String(p.max_turns)) + "</td>" +
+            '<td class="hint">' + esc(paths) + "</td>" +
+            "</tr>"
+          );
+        })
+        .join("");
+      return (
+        '<table class="owo-ws-table"><tr><th>角色</th><th>读写</th><th>可见工具</th><th>命令</th><th>浏览器</th><th>最大轮次（预算）</th><th>允许写路径</th></tr>' +
+        rows +
+        "</table>"
+      );
+    }
+
+    // 单写租约状态盒：write_lease 归一后传入（null=未持有；released_at_ms 非空=已释放）。
+    function writeLeaseBox(lease) {
+      if (!lease || typeof lease !== "object") {
+        return '<div class="hint">当前无角色持有写租约（同一工作区同时只允许一个写角色）。</div>';
+      }
+      var head =
+        '<span class="owo-ws-badge st-running">写租约持有中</span>' +
+        "<b>" + esc(lease.holder_role || "—") + "</b>" +
+        '<span class="hint">步骤 ' + esc(lease.holder_step_id || "—") + "</span>";
+      if (lease.released_at_ms != null) {
+        return '<div class="owo-ws-lease">' + head + '<span class="hint">已于 ' + esc(fmtAbsTime(lease.released_at_ms)) + " 释放</span></div>";
+      }
+      return (
+        '<div class="owo-ws-lease">' +
+        head +
+        (lease.acquired_at_ms != null ? '<span class="hint">自 ' + esc(fmtAbsTime(lease.acquired_at_ms)) + " 起持有</span>" : "") +
+        "</div>"
+      );
+    }
+
+    // 文件变更列表 + diff 预览（changes[].state: added|modified|deleted；白名单外变更
+    // 服务端会判 scope_violation，不会出现在成功登记的变更集中）。
+    var CHG_STATE_CN = { added: "新增", modified: "修改", deleted: "删除" };
+    var CHG_STATE_CLS = { added: "st-running", modified: "st-awaiting_human", deleted: "st-failed" };
+
+    function changeStateBadge(stateKey) {
+      var k = String(stateKey || "").toLowerCase();
+      return '<span class="owo-ws-badge ' + (CHG_STATE_CLS[k] || "") + '">' + esc(CHG_STATE_CN[k] || k || "—") + "</span>";
+    }
+
+    function changesListHtml(changes) {
+      var list = (changes || []).filter(function (c) {
+        return c && typeof c === "object";
+      });
+      if (!list.length) {
+        return '<div class="hint">暂无文件变更（可写 Worker 执行前后采集 Git status/diff；只读任务无变更）。</div>';
+      }
+      var head = '<div class="hint">共 ' + list.length + " 个文件变更</div>";
+      var rows = list
+        .map(function (c) {
+          var delta =
+            c.added_lines == null && c.deleted_lines == null
+              ? ""
+              : '<span class="hint">+' + esc(String(c.added_lines == null ? 0 : c.added_lines)) + " / -" + esc(String(c.deleted_lines == null ? 0 : c.deleted_lines)) + "</span>";
+          var diff =
+            c.diff == null || c.diff === ""
+              ? ""
+              : '<details class="owo-ws-chg-diff"><summary>diff 预览</summary><pre class="owo-ws-diff">' + esc(String(c.diff)) + "</pre></details>";
+          return (
+            '<div class="owo-ws-chg-row">' +
+            changeStateBadge(c.state) +
+            "<b>" + esc(c.path || "—") + "</b>" +
+            delta +
+            "</div>" +
+            diff
+          );
+        })
+        .join("");
+      return head + '<div class="owo-ws-chg-list">' + rows + "</div>";
+    }
+
+    // 七期（二路交接）：GET /projects/{pid}/workspace/changes 归一视图。
+    // 响应 {team_id, git, changed_files[], diff_summary, has_violation, records[]}；
+    // 记录元素 {role, step, at, git, changed_files[], diff_summary, diff_ref?, violation?}。
+    // 全字段容错：非对象/缺键 → 缺省（空串/空数组/false/null）。
+    function changesRemoteView(payload) {
+      var p = payload && typeof payload === "object" ? payload : {};
+      var records = (Array.isArray(p.records) ? p.records : []).map(function (r) {
+        var rec = r && typeof r === "object" ? r : {};
+        return {
+          role: String(rec.role || "—"),
+          step: String(rec.step || "unknown"),
+          at: rec.at == null ? null : Number(rec.at),
+          git: !!rec.git,
+          changed_files: Array.isArray(rec.changed_files) ? rec.changed_files.map(String) : [],
+          diff_summary: String(rec.diff_summary || ""),
+          diff_ref: rec.diff_ref == null ? null : String(rec.diff_ref),
+          violation: rec.violation == null ? null : String(rec.violation),
+        };
+      });
+      return {
+        team_id: p.team_id == null ? "" : String(p.team_id),
+        git: !!p.git,
+        changed_files: Array.isArray(p.changed_files) ? p.changed_files.map(String) : [],
+        diff_summary: String(p.diff_summary || ""),
+        has_violation: !!p.has_violation,
+        records: records,
+      };
+    }
+
+    // 逐步骤变更记录行：越界红徽标 / 通过静默；diff_summary 以差异容器呈现。
+    function changeRecordsHtml(records) {
+      var list = records || [];
+      if (!list.length) return "";
+      var rows = list
+        .map(function (r) {
+          var badge = r.violation
+            ? '<span class="owo-ws-badge rv-bad" title="' + esc(r.violation) + '">越界</span>'
+            : '<span class="owo-ws-badge rv-ok">通过</span>';
+          var files = r.changed_files.length
+            ? '<div class="hint">' + r.changed_files.map(esc).join("、") + "</div>"
+            : '<div class="hint">（本窗口无新增变更文件）</div>';
+          var diff = r.diff_summary
+            ? '<pre class="owo-ws-diff">' + esc(r.diff_summary) + "</pre>"
+            : "";
+          return (
+            '<div class="owo-ws-chg-row">' +
+            badge +
+            "<b>" + esc(r.role) + "</b>" +
+            '<span class="hint">步骤 ' + esc(r.step) + (r.at ? " · " + esc(fmtAbsTime(r.at)) : "") + (r.diff_ref ? " · patch " + esc(r.diff_ref) : "") + "</span>" +
+            "</div>" +
+            files +
+            diff
+          );
+        })
+        .join("");
+      return '<div class="owo-ws-chg-list">' + rows + "</div>";
+    }
+
+    // 变更区组装：二路端点数据（越界警示 + diff 摘要 + 逐步骤记录）优先；
+    // 详情 changes[] 文件清单补充在后；两者皆空 → 既有空态文案。
+    function changesRuntimeHtml(remote, detailChanges) {
+      var parts = [];
+      var r = remote && typeof remote === "object" ? remote : null;
+      if (r && (r.records.length || r.has_violation || r.diff_summary)) {
+        if (r.has_violation) {
+          parts.push(
+            '<div class="owo-pl-failures"><div class="hint err">⚠ 存在白名单越界写记录（scope_violation）：越界变更不会被登记为成功产物，请核对写角色行为。</div></div>'
+          );
+        }
+        if (r.diff_summary) {
+          parts.push('<div class="hint">最近 diff 摘要（git diff --stat）：</div><pre class="owo-ws-diff">' + esc(r.diff_summary) + "</pre>");
+        }
+        parts.push(changeRecordsHtml(r.records));
+      }
+      var files = detailChanges || [];
+      if (files.length) parts.push(changesListHtml(files));
+      if (!parts.length) return changesListHtml([]);
+      return parts.join("");
+    }
+
+    // 七期详情区一次性重绘（容器仅在详情视图存在；缺容器时静默）。
+    function paintSevenRuntime() {
+      var pb = el("#ws-d-profiles");
+      if (pb) pb.innerHTML = workerProfilesTable(state.workerProfiles);
+      var lb = el("#ws-d-lease");
+      if (lb) lb.innerHTML = writeLeaseBox(state.writeLease);
+      var cb = el("#ws-d-changes");
+      if (cb) cb.innerHTML = changesRuntimeHtml(state.changesRemote, state.changes);
+    }
+
+    // 二路 changes 端点拉取（详情打开时一次；404/失败容错为 null，不影响详情 changes[] 回退）。
+    function loadWorkspaceChanges() {
+      var pid = projectIdOfTeam();
+      if (!pid) return Promise.resolve();
+      return H.get("/projects/" + encodeURIComponent(pid) + "/workspace/changes")
+        .then(function (d) {
+          state.changesRemote = changesRemoteView(d);
+          paintSevenRuntime();
+        })
+        .catch(function () {
+          state.changesRemote = null; // 端点未上线/项目未绑定 → 详情 changes[] 兜底
+        });
+    }
+
+    // 浏览器文本下载（Node 测试环境无 Blob/document → 返回 false 不抛错）。
+    function saveTextFile(name, text, mime) {
+      if (typeof Blob !== "function" || !win.document || !win.URL || !win.URL.createObjectURL) return false;
+      var blob = new Blob([String(text == null ? "" : text)], { type: mime || "text/plain;charset=utf-8" });
+      var a = win.document.createElement("a");
+      a.href = win.URL.createObjectURL(blob);
+      a.download = String(name || "download.txt");
+      win.document.body.appendChild(a);
+      a.click();
+      setTimeout(function () {
+        win.URL.revokeObjectURL(a.href);
+        a.remove();
+      }, 400);
+      return true;
+    }
+
+    // Artifact 内容下载（GET /artifacts/{id}/content；路由未上线/404 → 行级闪存提示）。
+    function downloadArtifact(aid) {
+      var id = String(aid == null ? "" : aid);
+      if (!id) return Promise.resolve();
+      var a = findArtifactById(id) || { artifact_id: id };
+      return H.get("/artifacts/" + encodeURIComponent(id) + "/content")
+        .then(function (d) {
+          var info = d && typeof d === "object" ? d : {};
+          saveTextFile(
+            artifactFileName({ artifact_id: info.artifact_id || a.artifact_id, format: info.format || a.format }),
+            info.content || ""
+          );
+          return d;
+        })
+        .catch(function (e) {
+          state.reviewFlash = { artifactId: id, ok: false, text: "下载失败：" + explainError(e, "GET /artifacts/{id}/content") };
+          loadArtifacts(); // 重绘产物区以显示行级提示（reviewFlash 跨重绘保留）
+        });
+    }
+
+    // 交付清单文本化（容错缺字段）：project/generated_at/逐项 版本·哈希·大小·批准态·content_url。
+    function deliveryManifestText(d) {
+      var payload = d && typeof d === "object" ? d : {};
+      var all = Array.isArray(payload.manifest) ? payload.manifest : [];
+      var items = all.filter(function (m) {
+        return m && typeof m === "object";
+      });
+      var lines = [
+        "project_id: " + String(payload.project_id || "—"),
+        "generated_at: " + String(payload.generated_at || "—"),
+        "artifacts: " + items.length,
+        "",
+      ];
+      items.forEach(function (m) {
+        lines.push(
+          "- " + String(m.artifact_id || "?") +
+            "  " + String(m.kind || "?") + "/" + String(m.format || "?") +
+            "  v" + String(m.version == null ? "?" : m.version) +
+            "  sha256:" + String(m.sha256 || "—") +
+            "  " + String(m.size_bytes == null ? "?" : m.size_bytes) + "B" +
+            "  " + (m.approved ? "已批准" : "未批准") +
+            "  " + String(m.content_url || "")
+        );
+      });
+      return lines.join("\n");
+    }
+
+    // 交付清单下载（GET /projects/{pid}/delivery-manifest；路由未上线 → ws-act-result 提示）。
+    function downloadDeliveryManifest() {
+      var t = state.team;
+      var pid = (t && t.project_space_id) || (state.current ? "proj-" + state.current : "");
+      if (!pid) return Promise.reject(new Error("缺少项目空间 id：请先打开团队详情"));
+      return H.get("/projects/" + encodeURIComponent(pid) + "/delivery-manifest")
+        .then(function (d) {
+          saveTextFile("delivery-manifest-" + pid + ".txt", deliveryManifestText(d));
+          return d;
+        })
+        .catch(function (e) {
+          show("ws-act-result", "err", "交付清单下载失败：" + explainError(e, "GET /projects/{pid}/delivery-manifest"));
+          throw e; // 交由 bindLockedButton 解锁
+        });
+    }
+
     // 评审历史（懒加载）：GET /artifacts/{id}/history → 不可变记录列表。
     function artifactHistoryHtml(records) {
       if (!records || !records.length) return '<div class="hint">暂无评审记录</div>';
@@ -1715,8 +2057,16 @@
         '<div class="owo-ws-art-line">' +
         '<span class="owo-ws-mono">v' + esc(a.version) + (isHead ? "（最新）" : "") + "</span>" +
         reviewBadgeHtml(a.review_state) +
+        validationBadgeHtml(a.validation) +
         '<span class="hint">产出者 ' + esc(roleOfProducer(a.producer)) + "</span>" +
         (supVer ? '<span class="hint">取代 ' + esc(supVer) + "</span>" : "") +
+        (a.evidence_refs && a.evidence_refs.length
+          ? '<span class="hint" title="证据引用：' + esc(a.evidence_refs.join("，")) + '">证据 ' + esc(String(a.evidence_refs.length)) + " 条</span>"
+          : "") +
+        (a.handoff ? '<span class="hint" title="该产物携带 Handoff 交接记录">含 Handoff</span>' : "") +
+        (a.sha256
+          ? '<span class="hint owo-ws-ellip" title="sha256: ' + esc(String(a.sha256)) + '">sha256 ' + esc(String(a.sha256).slice(0, 10)) + "…</span>"
+          : "") +
         '<span class="hint owo-ws-ellip" title="' + esc(a.created_at || "") + '">' + esc(a.created_at || "") + "</span>" +
         "</div>" +
         (a.preview != null
@@ -1726,6 +2076,7 @@
         reworkHtml +
         resultHtml +
         '<div class="owo-ws-art-histline">' +
+        '<button type="button" class="owo-ws-mini" data-art-dl="' + esc(aid) + '" title="GET /artifacts/{id}/content —— 以推断扩展名保存正文">下载</button>' +
         '<button type="button" class="owo-ws-mini" data-art-history="' + esc(aid) + '">评审历史</button>' +
         '<span class="owo-ws-art-history" data-art-history-box="' + esc(aid) + '"></span>' +
         "</div>" +
@@ -2106,6 +2457,7 @@
       paintHumanSelect();
       paintHandoffSelect();
       paintFromSelect();
+      paintSevenRuntime(); // 七期：Worker 能力/写租约/文件变更
     }
 
     // ---------- 人节点 / 交接 下拉 ----------
@@ -2316,6 +2668,12 @@
       box.addEventListener("click", function (ev) {
         var target = ev.target;
         if (!target || !target.closest) return;
+        // 七期：产物内容下载（GET /artifacts/{id}/content，404 容错为行级提示）。
+        var dlBtn = target.closest("[data-art-dl]");
+        if (dlBtn) {
+          downloadArtifact(dlBtn.getAttribute("data-art-dl") || "");
+          return;
+        }
         var actBtn = target.closest("[data-art-act]");
         if (actBtn) {
           var aid = actBtn.getAttribute("data-art-id") || "";
@@ -2465,6 +2823,11 @@
           state.team = d.team || null;
           state.tasks = d.tasks || [];
           state.interrupted = !!d.interrupted;
+          // 七期：Worker 能力/写租约/文件变更——顶层或 team 对象内双路径容错读取。
+          state.workerProfiles = d.worker_profiles || (d.team && d.team.worker_profiles) || [];
+          state.writeLease = d.write_lease !== undefined ? d.write_lease : (d.team && d.team.write_lease) || null;
+          state.changes = d.changes || (d.team && d.team.changes) || [];
+          state.changesRemote = null; // 二路 changes 端点随详情重拉
           state.audit = [];
           state.auditKeys = {};
           state.progress = null; // 换团队：进度状态清零（seq 守卫随之重置）
@@ -2498,6 +2861,7 @@
           paintStrategy();
           paintWorkspace();
           loadWorkspace();
+          loadWorkspaceChanges(); // 七期（二路）：变更追踪端点（容错 404 → 详情 changes[] 兜底）
           loadTemplateInfo();
           loadMetrics();
           loadArtifacts();
@@ -2522,6 +2886,10 @@
           state.team = d.team || state.team;
           state.tasks = d.tasks || [];
           state.interrupted = !!d.interrupted;
+          // 七期：轮询同步同样刷新 Worker 能力/写租约/文件变更（容错同上）。
+          state.workerProfiles = d.worker_profiles || (state.team && state.team.worker_profiles) || [];
+          state.writeLease = d.write_lease !== undefined ? d.write_lease : (state.team && state.team.write_lease) || null;
+          state.changes = d.changes || (state.team && state.team.changes) || [];
           (d.audit_tail || []).forEach(addAudit);
           populateSelects();
           paintDetailLive();
@@ -3537,6 +3905,12 @@
         '<div id="ws-d-failures"></div>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
+        '<h3>Worker 能力与执行详情 <span class="hint">七期：WorkerProfile 实际工具权限与调用预算 / 单写租约 / 文件变更与 diff</span></h3>' +
+        '<div id="ws-d-profiles"></div>' +
+        '<div id="ws-d-lease"></div>' +
+        '<div id="ws-d-changes"></div>' +
+        "</div>" +
+        '<div class="owo-ws-sec">' +
         '<h3>组队策略与角色指标 <span class="hint">auto 判定理由 / GET /teams/{id}/metrics —— 耗时·调用·token·费用·预算余量</span>' +
         '<button class="owo-ws-mini" id="ws-metrics-refresh">刷新指标</button></h3>' +
         '<div id="ws-d-strategy" class="owo-ws-strategybox">' + strategyBoxHtml(state.strategyDecision) + "</div>" +
@@ -3545,7 +3919,8 @@
         '<div class="owo-ws-sec">' +
         '<h3>产物 <span class="hint">GET /projects/{pid}/artifacts —— CAS 引用，版本链 + 评审闭环</span>' +
         '<button class="owo-ws-mini" id="ws-art-refresh">刷新产物</button>' +
-        '<button class="owo-ws-mini" id="ws-dlv-toggle">最终交付物</button></h3>' +
+        '<button class="owo-ws-mini" id="ws-dlv-toggle">最终交付物</button>' +
+        '<button class="owo-ws-mini" id="ws-dlv-dl" title="GET /projects/{pid}/delivery-manifest —— 版本/哈希/校验/证据汇总文本">下载交付清单</button></h3>' +
         '<div id="ws-dlv-box" hidden></div>' +
         '<div id="ws-d-artifacts">' + stateBox("loading", "正在加载产物…") + "</div>" +
         "</div>" +
@@ -3631,6 +4006,13 @@
           dlvBtn.setAttribute("data-open", state.deliverablesOpen ? "1" : "0");
           if (state.deliverablesOpen) loadDeliverables();
         };
+      // 七期：交付清单下载（路由未上线/404 → ws-act-result 提示，不阻塞页面）。
+      bindLockedButton(el("#ws-dlv-dl"), function () {
+        return downloadDeliveryManifest().then(function (d) {
+          show("ws-act-result", "ok", "交付清单已下载（版本 / sha256 / 大小 / 批准态 / 证据引用）。");
+          return d;
+        });
+      }, "生成中…");
       markLiveRegions();
       applyGating(); // 以当前已知状态初始化按钮可用性（数据到达后再刷新）
     }
@@ -3826,6 +4208,22 @@
       ".owo-ws-dagsum b.run{color:var(--accent,#2563eb);}" +
       // 加载中状态轻微弱化，便于与空态区分（焦点/禁用反馈由全局原语统一提供）
       ".owo-ws-loading{opacity:.75;}" +
+      // 七期：停止中/已停止状态徽标（cancel 接入 Worker 取消令牌后的过渡/停止态）
+      ".owo-ws-badge.st-stopping{background:var(--yellow-soft,rgba(199,138,26,.13));color:var(--yellow,#a06a04);}" +
+      ".owo-ws-badge.st-stopped{background:var(--red-soft,rgba(207,63,53,.1));color:var(--red,#cd3f35);}" +
+      // 七期：评审语义徽标补全（REVIEW_CLS 一直输出 rv-* 类，此处补齐配色）
+      ".owo-ws-badge.rv-ok{background:var(--green-soft,rgba(20,133,90,.11));color:var(--green,#14855a);}" +
+      ".owo-ws-badge.rv-warn{background:var(--yellow-soft,rgba(199,138,26,.13));color:var(--yellow,#a06a04);}" +
+      ".owo-ws-badge.rv-bad{background:var(--red-soft,rgba(207,63,53,.1));color:var(--red,#cd3f35);}" +
+      // 七期：单写租约状态盒
+      ".owo-ws-lease{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;min-width:0;}" +
+      // 七期：文件变更列表 + diff 预览（复用 .owo-ws-diff 的差异配色）
+      ".owo-ws-chg-list{display:flex;flex-direction:column;gap:4px;margin-top:4px;min-width:0;}" +
+      ".owo-ws-chg-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;border:1px solid var(--soft-border,#edf0f5);border-radius:8px;padding:4px 8px;min-width:0;}" +
+      ".owo-ws-chg-row b{overflow-wrap:anywhere;}" +
+      ".owo-ws-chg-diff{margin-top:3px;min-width:0;}" +
+      ".owo-ws-chg-diff > summary{cursor:pointer;font-size:12px;color:var(--accent,#2563eb);}" +
+      ".owo-ws-chg-diff > summary::marker{content:\"▸ \";}" +
       "";
 
     function nav() {
@@ -3935,6 +4333,24 @@
       loadWorkspace: loadWorkspace,
       loadWorkspaceView: loadWorkspaceView,
       paintWorkspace: paintWorkspace,
+      // —— 七期挂钩：Worker 能力 / 写租约 / 文件变更 / 产物校验与下载交付 ——
+      workerProfilesTable: workerProfilesTable,
+      writeLeaseBox: writeLeaseBox,
+      changesListHtml: changesListHtml,
+      changeStateBadge: changeStateBadge,
+      changesRemoteView: changesRemoteView,
+      changeRecordsHtml: changeRecordsHtml,
+      changesRuntimeHtml: changesRuntimeHtml,
+      loadWorkspaceChanges: loadWorkspaceChanges,
+      validationBadgeHtml: validationBadgeHtml,
+      artifactFileName: artifactFileName,
+      fmtAbsTime: fmtAbsTime,
+      deliveryManifestText: deliveryManifestText,
+      paintSevenRuntime: paintSevenRuntime,
+      saveTextFile: saveTextFile,
+      downloadArtifact: downloadArtifact,
+      downloadDeliveryManifest: downloadDeliveryManifest,
+      isGatedTeam: isGatedTeam,
       css: function () {
         return CSS;
       },

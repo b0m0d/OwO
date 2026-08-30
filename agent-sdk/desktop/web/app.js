@@ -1931,8 +1931,10 @@ async function createComputerTask() {
 
 // ---------- 扩展面板（第四轮：notes / plugin-market / workflow / goal；第五轮：team / eval / observability / memory / command） ----------
 
-// 挂载顺序（与 index.html 的 script 引入顺序一致）。
+// 挂载顺序（与 index.html 的 script 引入顺序一致）。七期：action-center（待我处理）
+// 置于首位——日常工作台作为默认落地面板。
 const PANEL_ORDER = [
+  "action-center",
   "notes",
   "plugin-market",
   "workflow",

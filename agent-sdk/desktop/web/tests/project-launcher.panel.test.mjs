@@ -446,3 +446,84 @@ test("style.css 第 20 节守卫：Launcher 布局/预览/目录/工作区/徽�
   assert.match(shellCss, /owo-pl-tree > div \{ overflow-wrap: anywhere/);
   assert.match(shellCss, /@media \(max-width: 1280px\)/);
 });
+
+// ---------- 七期：预览"实际执行权限" ----------
+
+test("rolePermissions：只读工作区全员只读；评审角色恒只读；可写按路径下发；未声明路径拒绝写入", () => {
+  resetState();
+  // 默认只读工作区：所有角色 read_only，无命令执行
+  const ro = T.rolePermissions("producer", T.state);
+  assert.equal(ro.read_only, true);
+  assert.equal(ro.can_run_command, false);
+  assert.deepEqual(ro.write_allowed_paths, []);
+  assert.equal(ro.write_mode, "read_only");
+  // 可写工作区：producer 按允许路径下发
+  T.state.readOnly = false;
+  T.state.writePathsRaw = "src/, tests/";
+  const w = T.rolePermissions("producer", T.state);
+  assert.equal(w.read_only, false);
+  assert.equal(w.can_run_command, true);
+  assert.deepEqual(w.write_allowed_paths, ["src/", "tests/"]);
+  assert.equal(w.write_mode, "scoped");
+  // 可写工作区但未声明路径：写入将被拒绝
+  T.state.writePathsRaw = "";
+  const denied = T.rolePermissions("producer", T.state);
+  assert.equal(denied.read_only, false);
+  assert.deepEqual(denied.write_allowed_paths, []);
+  assert.equal(denied.write_mode, "denied");
+  // 评审角色在工作区可写时仍然恒只读
+  T.state.writePathsRaw = "src/";
+  const critic = T.rolePermissions("critic", T.state);
+  assert.equal(critic.read_only, true);
+  assert.equal(critic.can_run_command, false);
+  assert.deepEqual(critic.write_allowed_paths, []);
+  assert.equal(critic.write_mode, "read_only");
+  // 浏览器能力按角色画像推导，与读写正交（只读 researcher 也可浏览）
+  assert.equal(T.rolePermissions("researcher", { readOnly: true }).can_use_browser, true);
+  assert.equal(T.rolePermissions("implementer", T.state).can_use_browser, false);
+  assert.equal(T.rolePermissions("Web Searcher", { readOnly: true }).can_use_browser, true);
+  // 容错：空/null
+  assert.equal(T.rolePermissions("", T.state).role, "");
+  assert.equal(T.rolePermissions(null, null).read_only, true, "null 状态按默认只读处理");
+});
+
+test("rolePermText：三写模式文案 + 命令/浏览器附加能力", () => {
+  assert.match(T.rolePermText({ role: "producer", read_only: true, can_run_command: false, can_use_browser: false, write_allowed_paths: [], write_mode: "read_only" }), /实际执行权限：只读/);
+  const scoped = T.rolePermText({ role: "producer", read_only: false, can_run_command: true, can_use_browser: false, write_allowed_paths: ["src/", "tests/"], write_mode: "scoped" });
+  assert.match(scoped, /可写 src\/、tests\//);
+  assert.match(scoped, /可执行命令/);
+  assert.match(T.rolePermText({ role: "p", read_only: false, can_run_command: true, can_use_browser: true, write_allowed_paths: [], write_mode: "denied" }), /写入被拒绝（未声明允许路径）/);
+  assert.match(T.rolePermText({ role: "r", read_only: false, can_run_command: false, can_use_browser: true, write_allowed_paths: ["x/"], write_mode: "scoped" }), /可浏览网页/);
+  assert.equal(T.rolePermText({ role: "" }), "");
+  assert.equal(T.rolePermText(null), "");
+});
+
+test("previewHtml：每角色附实际执行权限行（模板与策略两来源）", () => {
+  resetState();
+  T.state.readOnly = false;
+  T.state.writePathsRaw = "src/";
+  // 模板来源：producer 可写路径、critic 只读
+  const tpl = T.previewFromTemplate({
+    template_id: "code-change-v1",
+    version: 1,
+    title: "代码变更",
+    roles: [{ role: "producer", duty: "实现" }, { role: "critic", duty: "评审" }],
+  });
+  const html = T.previewHtml(tpl, T.state);
+  assert.match(html, /owo-pl-role/);
+  assert.match(html, /实际执行权限：可写 src\//, "producer 显示可写路径");
+  assert.match(html, /实际执行权限：只读/, "critic 恒只读");
+  // 默认只读工作区：所有角色只读
+  T.state.readOnly = true;
+  T.state.writePathsRaw = "";
+  const htmlRo = T.previewHtml(tpl, T.state);
+  assert.ok(!htmlRo.includes("可写"), "只读工作区预览不出现可写文案");
+  assert.equal((htmlRo.match(/实际执行权限：只读/g) || []).length, 2, "两角色均只读");
+  // 策略来源（team）：producer + critic 同样带权限行
+  const strat = T.previewFromStrategy("team");
+  assert.match(T.previewHtml(strat, T.state), /实际执行权限：只读/);
+  // single 来源：单 producer
+  const single = T.previewFromStrategy("single");
+  const htmlSingle = T.previewHtml(single, { readOnly: false, writePathsRaw: "docs/" });
+  assert.match(htmlSingle, /实际执行权限：可写 docs\//);
+});

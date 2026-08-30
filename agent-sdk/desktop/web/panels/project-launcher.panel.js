@@ -19,6 +19,10 @@
 // 幂等（replayed 如实提示）。创建成功后经 window.OwoPanels.workswarm.open()
 // 直达团队详情（不重复挂载面板）。
 //
+// 七期第四路：步骤⑥预览升级为"实际执行权限"——每角色附由工作区设置 + 角色
+// 画像推导的权限行（只读/可写路径/命令/浏览器；真实生效以团队详情
+// worker_profiles 为准），不再只展示模板描述文字。
+//
 // Node 兼容：globalThis 回退 + module.exports 导出 _test 纯逻辑挂钩（浏览器
 // 零差异），供 tests/project-launcher.panel.test.mjs 断言。
 // ============================================================================
@@ -300,6 +304,47 @@
       return parts.join(" · ");
     }
 
+    // ---------- 七期：角色实际执行权限预览（纯函数） ----------
+    // 与二路 WorkerProfile 语义对齐的客户端推导：
+    //   - 工作区只读（默认）→ 全部角色 read_only；
+    //   - 评审类角色（critic/reviewer）恒只读（评审只提交结论，不覆盖交付物）；
+    //   - 可写工作区按允许路径下发；路径留空 = 拒绝一切写入；
+    //   - 浏览器能力按角色画像（research/search/browser 命名）推导，与读写正交。
+    // 真实生效以团队详情 worker_profiles 为准（运行中可见）。
+    var REVIEWER_ROLE_RE = /critic|review|judge|arbitrat/i;
+    var BROWSER_ROLE_RE = /research|search|browser/i;
+
+    function rolePermissions(role, s) {
+      var name = String(role == null ? "" : role).trim();
+      var workspaceReadOnly = !(s && s.readOnly === false);
+      var isReviewer = REVIEWER_ROLE_RE.test(name);
+      var readOnly = workspaceReadOnly || isReviewer;
+      var paths = readOnly ? [] : parseWritePaths(s && s.writePathsRaw);
+      return {
+        role: name,
+        read_only: readOnly,
+        can_run_command: !readOnly,
+        can_use_browser: BROWSER_ROLE_RE.test(name),
+        write_allowed_paths: paths,
+        // read_only=工作区只读或评审角色；scoped=按允许路径下发；denied=可写工作区但未声明路径
+        write_mode: readOnly ? "read_only" : paths.length ? "scoped" : "denied",
+      };
+    }
+
+    /// 角色权限行文案。
+    function rolePermText(perm) {
+      if (!perm || !perm.role) return "";
+      var head = perm.read_only
+        ? "实际执行权限：只读"
+        : perm.write_mode === "scoped"
+          ? "实际执行权限：可写 " + perm.write_allowed_paths.join("、")
+          : "实际执行权限：写入被拒绝（未声明允许路径）";
+      var extra = [];
+      if (perm.can_run_command) extra.push("可执行命令");
+      if (perm.can_use_browser) extra.push("可浏览网页");
+      return head + (extra.length ? " · " + extra.join(" · ") : "");
+    }
+
     /// 组装预览视图模型。
     function buildPreview(s, catalog) {
       var tpl = String((s && s.selectedTemplate) || "");
@@ -322,8 +367,14 @@
       html += "<div><b>来源</b> " + esc(p.source === "template" ? "模板 " + (p.title || "") + (p.version ? " v" + p.version : "") : "组队模式") + "</div>";
       html += "<div><b>角色</b> " + (p.roleCount != null ? esc(String(p.roleCount)) + " 个" : "由策略判定");
       if (p.roles && p.roles.length) {
+        // 七期：每个角色附"实际执行权限"行（由工作区设置 + 角色画像推导；
+        // 真实生效以团队详情 worker_profiles 为准）。
         html += '<div class="owo-pl-roles">' + p.roles.map(function (r) {
-          return '<span class="owo-pl-role"><b>' + esc(r.role) + "</b>" + (r.duty ? '<span class="hint">' + esc(r.duty) + "</span>" : "") + "</span>";
+          return (
+            '<span class="owo-pl-role"><b>' + esc(r.role) + "</b>" +
+            (r.duty ? '<span class="hint">' + esc(r.duty) + "</span>" : "") +
+            '<span class="hint">' + esc(rolePermText(rolePermissions(r.role, s))) + "</span></span>"
+          );
         }).join("") + "</div>";
       }
       html += "</div>";
@@ -636,6 +687,8 @@
       normTemplate: normTemplate,
       previewFromStrategy: previewFromStrategy,
       permissionsSummary: permissionsSummary,
+      rolePermissions: rolePermissions,
+      rolePermText: rolePermText,
       buildPreview: buildPreview,
       previewHtml: previewHtml,
       templateOptionsHtml: templateOptionsHtml,
