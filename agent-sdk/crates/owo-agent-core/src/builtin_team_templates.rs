@@ -120,7 +120,10 @@ fn code_change_v1() -> BuiltinTemplateDescriptor {
         budget_calls_per_role: vec![
             RoleBudget {
                 role: "code_analyzer".to_string(),
-                budget_calls: 3,
+                // 九期（一路）：3→4——冒烟实测 3 回合下 analyzer 稳定在预算上溢出
+                //（探索调用点后没有剩余回合输出契约 JSON）；4 = 3 回合探索 + 1 回合
+                //纯输出（末回合禁工具，见 team_prompt 预算段）。
+                budget_calls: 4,
             },
             RoleBudget {
                 role: "implementer".to_string(),
@@ -427,7 +430,9 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
                 "不修改任何文件（你是只读分析角色）。".to_string(),
                 "不产出代码变更（实现由 implementer 承担）。".to_string(),
             ],
-            output_format: "分析报告（Markdown）：影响面清单 + 风险清单 + 建议实现要点。".to_string(),
+            // 九期（一路）：明确 artifact.format 枚举与默认值——冒烟中 analyzer 曾
+            // 输出白名单外格式且修复提示未传达枚举，导致契约失败。
+            output_format: "分析报告：artifact.kind=\"analysis\"、artifact.format=\"markdown\"（代码分析报告默认 markdown；format 只能取 text|markdown|json|csv），artifact.content 为报告正文（影响面清单 + 风险清单 + 建议实现要点）。".to_string(),
             acceptance: vec![
                 "影响面覆盖目标代码及其直接调用方。".to_string(),
                 "每项风险均有位置与建议验证方式。".to_string(),
@@ -442,7 +447,7 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
                 "不触碰允许写路径之外的文件。".to_string(),
                 "不改写 reviewer 的评审结论（评审独立）。".to_string(),
             ],
-            output_format: "契约 JSON 的 artifact.content = 变更说明；工作区文件 = 真实落盘后的最终内容。".to_string(),
+            output_format: "artifact.kind=\"code\"、artifact.format=\"markdown\"（补丁/变更报告默认 markdown；format 只能取 text|markdown|json|csv），artifact.content = 变更说明；工作区文件 = 真实落盘后的最终内容。".to_string(),
             acceptance: vec![
                 "工作区存在真实落盘的变更（git 可见）。".to_string(),
                 "变更与上游分析的影响面一致。".to_string(),
@@ -457,6 +462,7 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
             must_not_do: vec![
                 "只读：不改写交付物、不产出代码。".to_string(),
                 "不直接重新实现（发现问题写进评审结论，不动手改）。".to_string(),
+                "禁止提交最终 Artifact（artifact 字段必须省略）：评审/审查角色只输出结论，交付物归 producer 链。".to_string(),
             ],
             output_format: "评审结论 JSON：{\"approved\":bool,\"score\":0-100,\"comments\":[..]}。".to_string(),
             acceptance: vec![

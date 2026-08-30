@@ -246,7 +246,7 @@ pub fn compile_prompt(ctx: &PromptContext) -> String {
 ## 禁止执行\n{must_not}\n\n\
 ## 输出格式\n{output_format}\n\n\
 ## 验收条件\n{acceptance}\n\n\
-## 剩余调用预算\n你的回合预算为 {max_turns} 回合（含工具调用）：尽量少花回合，最后一个回合直接输出最终结果，不再调用任何工具。",
+## 剩余调用预算\n你的回合预算为 {max_turns} 回合（含工具调用）：尽量少花回合。**当只剩最后 1 个回合时，禁止再调用任何工具**，必须立即直接输出完整的 WorkerOutputV1 契约 JSON（发现/结论放 artifact.content 或 summary）——超预算后引擎不再给你输出机会，宁可当回合内容不完美也不能失去最终输出。",
         role = ctx.role,
         objective = ctx.objective,
         upstream = ctx.upstream.text,
@@ -399,6 +399,12 @@ mod tests {
         assert!(prompt.contains("### code_analyzer v1（a1）"));
         // 预算来自模板声明（implementer=5）。
         assert!(prompt.contains("回合预算为 5 回合"));
+        // 九期（一路）：末回合禁工具纪律必须逐字出现（预算上溢出失败模式的回归锁）。
+        assert!(
+            prompt.contains("禁止再调用任何工具"),
+            "预算段应明确末回合禁工具：\n{prompt}"
+        );
+        assert!(prompt.contains("WorkerOutputV1"));
     }
 
     #[test]

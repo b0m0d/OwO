@@ -178,6 +178,9 @@ pub fn parse_worker_output(text: &str) -> WorkerOutputParse {
     }
 }
 
+/// `artifact.format` 合法枚举（九期一路冻结口径：契约提示与修复提示必须逐字传达）。
+pub const ARTIFACT_FORMAT_WHITELIST: &str = "text|markdown|json|csv";
+
 /// 契约的系统提示片段（执行器拼进 Worker system prompt；schema 即机器可校验规则）。
 pub fn contract_system_prompt(is_critic: bool) -> String {
     let mut prompt = String::from(
@@ -186,19 +189,24 @@ pub fn contract_system_prompt(is_critic: bool) -> String {
 {\n  \"status\": \"done\" | \"failed\" | \"blocked\",\n  \"summary\": \"一句话结论\",\n\
   \"artifact\": {\"kind\": \"产物分类\", \"format\": \"text|markdown|json|csv\", \"content\": \"产物正文本体\"},\n\
   \"evidence\": [{\"source\": \"来源\", \"note\": \"说明\"}],\n\
-  \"open_issues\": [\"未解决问题\"],\n  \"handoff\": \"给下游的交接说明（可省略）\"\n}\n",
+  \"open_issues\": [\"未解决问题\"],\n  \"handoff\": \"给下游的交接说明（可省略）\"\n}\n\
+artifact.format 只能取 text|markdown|json|csv 之一（大小写敏感，用小写）。\n",
     );
     if is_critic {
         prompt.push_str(
-            "你是评审角色：**禁止**提交 artifact 字段（或置为省略）；把评审结论 JSON \
-{\"approved\":bool,\"score\":0-100,\"comments\":[..]} 放进 summary。交付物归 producer 链，评审无权覆盖。\n",
+            "你是评审角色（critic/reviewer）：**禁止**提交最终 Artifact——artifact 字段必须省略；\
+把评审结论 JSON {\"approved\":bool,\"score\":0-100,\"comments\":[..]} 放进 summary。\
+交付物归 producer 链，评审无权覆盖。\n",
         );
     } else {
         prompt.push_str(
             "你是交付角色：status=done 时**必须**提交 artifact（content=交付物正文本体，\
-不是你的过程描述）。交付物内容必须**逐字满足**任务指令的字面要求（如指定必须出现的\
+不是你的过程描述）。代码分析与补丁/变更报告的 artifact.format 一律用 \"markdown\"、\
+kind 分别用 \"analysis\"/\"code\"。交付物内容必须**逐字满足**任务指令的字面要求（如指定必须出现的\
 映射行、签名行、字段值与文件路径）；若无法完成，用 status=failed/blocked 并在 \
-summary/open_issues 说明原因。\n",
+summary/open_issues 说明原因。\n\
+回合预算纪律：最后一个回合（只剩 1 次调用时）**禁止再调用任何工具**，必须直接输出完整契约 JSON——\
+把已取得的发现写进 artifact.content/summary，宁可内容不完美也不要因超预算失去输出机会。\n",
         );
     }
     prompt
@@ -224,14 +232,20 @@ pub fn strip_code_fences(text: &str) -> String {
 }
 
 /// 输出契约定向修复提示词（七期一路）：角色规则 + 具体违例原因 + “只输出 JSON 本体”要求。
+///
+/// 九期（一路）：修复提示必须**逐字传达** `artifact.format` 白名单（text|markdown|json|csv）、
+/// 代码分析/补丁报告默认 markdown、critic/reviewer 禁止输出最终 Artifact——八期冒烟中
+/// 修复提示只回显了违例原因，模型第二次仍输出白名单外格式（如 "md"/"Markdown"）。
 pub fn contract_repair_prompt(is_critic: bool, violation: &str, broken: &str) -> String {
     let role_rule = if is_critic {
-        "你是评审角色：禁止提交 artifact 字段，把评审结论 JSON 放进 summary"
+        "你是评审角色（critic/reviewer）：禁止提交最终 Artifact——artifact 字段必须省略，把评审结论 JSON 放进 summary"
     } else {
-        "你是交付角色：status=done 必须携带 artifact（content=交付物正文本体）"
+        "你是交付角色：status=done 必须携带 artifact（content=交付物正文本体；artifact.format 只能取 text|markdown|json|csv 之一，代码分析与补丁/变更报告一律用 \"markdown\"，kind 用 \"analysis\"/\"code\"）"
     };
     format!(
-        "你的上一次回复不符合 WorkerOutputV1 输出契约（必须是合法 JSON：status/summary/artifact{{kind,format,content}}/evidence/open_issues/handoff）。具体违例：{violation}。{role_rule}。请修正后**只输出**契约合规的 JSON 本体。\n原输出：\n{broken}\n\n请重新输出契约合规的 JSON："
+        "你的上一次回复不符合 WorkerOutputV1 输出契约（必须是合法 JSON：status/summary/artifact{{kind,format,content}}/evidence/open_issues/handoff）。\
+artifact.format 的合法枚举只有 text|markdown|json|csv——不要输出 \"md\"、\"Markdown\"、\"plaintext\" 等白名单外写法；\
+评审/审查角色（critic/reviewer）禁止输出最终 Artifact。具体违例：{violation}。{role_rule}。请修正后**只输出**契约合规的 JSON 本体。\n原输出：\n{broken}\n\n请重新输出契约合规的 JSON："
     )
 }
 
@@ -350,5 +364,37 @@ mod tests {
         assert!(producer.contains("必须") && producer.contains("artifact"));
         let critic = contract_system_prompt(true);
         assert!(critic.contains("禁止") && critic.contains("summary"));
+    }
+
+    // 九期（一路）：契约提示与修复提示必须传达 format 白名单/默认值/critic 禁令/
+    // 末回合禁工具——八期冒烟失败模式（analyzer 白名单外 format、修复提示未传达
+    // 枚举）的回归锁。
+    #[test]
+    fn system_prompt_states_format_whitelist_and_defaults() {
+        let producer = contract_system_prompt(false);
+        assert!(producer.contains("text|markdown|json|csv"));
+        assert!(
+            producer.contains("markdown"),
+            "代码分析/补丁报告默认 markdown"
+        );
+        assert!(producer.contains("最后一个回合"), "末回合禁工具纪律");
+        assert!(
+            !producer.contains("禁止**提交最终 Artifact"),
+            "producer 允许提交 artifact"
+        );
+        let critic = contract_system_prompt(true);
+        assert!(critic.contains("禁止**提交最终 Artifact"));
+        assert!(critic.contains("critic/reviewer"));
+    }
+
+    #[test]
+    fn repair_prompt_states_whitelist_default_and_critic_rule() {
+        let producer = contract_repair_prompt(false, "format 不合法", "{\"status\":\"done\"}");
+        assert!(producer.contains("text|markdown|json|csv"));
+        assert!(producer.contains("markdown"));
+        assert!(producer.contains("\"md\""), "点名白名单外常见写法");
+        let critic = contract_repair_prompt(true, "携带 artifact", "{\"status\":\"done\"}");
+        assert!(critic.contains("禁止提交最终 Artifact"));
+        assert!(critic.contains("critic/reviewer"));
     }
 }
