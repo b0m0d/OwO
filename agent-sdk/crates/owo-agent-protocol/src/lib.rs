@@ -330,6 +330,113 @@ fn default_rework_status() -> ArtifactReworkStatus {
     ArtifactReworkStatus::Requested
 }
 
+// ---------------------------------------------------------------------------
+// ChangeSet（八期 · 二路）：可审查/可接受/可拒绝/可撤销的代码变更闭环
+// ---------------------------------------------------------------------------
+
+/// ChangeSet 文件哈希条目。
+///
+/// `base_hashes` 侧三态（恢复语义）：
+///
+/// - `(Some(hash), content_available=true)`：基线内容在 CAS，可自动恢复；
+/// - `(None, content_available=true)`：执行前不存在（新建文件，恢复即删除）；
+/// - `(_, content_available=false)`：基线不可用/未知（超限/读取失败/快照不完整），
+///   恢复按冲突处理（409 + conflicted，绝不误删）。
+///
+/// `result_hashes` 侧恒为 `content_available=false`（结果内容以磁盘为准，恢复用基线）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChangeSetFileHash {
+    /// 相对工作区根路径（`/` 分隔，与 git porcelain / 变更追踪口径一致）。
+    pub path: String,
+    /// 内容 SHA-256（十六进制）；`None` = 该状态下文件不存在。
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// 基线内容是否可自动恢复（见结构体文档三态；结果侧恒 false）。
+    #[serde(default = "default_content_available")]
+    pub content_available: bool,
+}
+
+fn default_content_available() -> bool {
+    true
+}
+
+/// ChangeSet 状态机。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeSetStatus {
+    /// 待人工审查（写 Worker 成功落盘变更后自动进入）。
+    PendingReview,
+    /// 已接受：保留文件现状，该团队代码 Artifact 允许批准为最终 approved head。
+    Accepted,
+    /// 已拒绝：该 ChangeSet 修改的文件已恢复到基线。
+    Rejected,
+    /// 已撤销：同拒绝（语义为「撤销变更」，文件恢复到基线）。
+    Reverted,
+    /// 冲突：恢复前检测到用户改过文件（当前哈希 ≠ 结果哈希 ≠ 基线哈希），
+    /// 不覆盖用户新内容；用户处理后可重试 accept/reject/revert。
+    Conflicted,
+}
+
+/// ChangeSet 决定记录（幂等 + 审计锚点）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeSetDecision {
+    /// accept / reject / revert。
+    pub action: String,
+    /// 幂等键：同动作重放零副作用（返回现状，`replayed: true`）。
+    pub idempotency_key: String,
+    pub decided_at: String,
+    /// 备注（可空）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// ChangeSet：一次写角色执行的「工作区变更集合」（八期 · 二路）。
+///
+/// 由服务端 `TrackedRoleWorker` 在写角色成功路径自动生成：
+/// 执行前对允许路径做内容基线快照（进 CAS）→ 执行 → 窗口内 git 变更差集 →
+/// ChangeSet 落盘（`<run_dir>/<team_id>-change-sets.json`）。reject/revert 只恢复
+/// 该 ChangeSet 修改的文件；未接受（pending_review/conflicted）时该团队代码
+/// Artifact 可评审但不能成为最终 approved head。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeSet {
+    pub change_set_id: String,
+    pub team_id: String,
+    /// 产生该变更集合的步骤（`s-{role}`）。
+    pub step_id: String,
+    /// 产生该变更集合的角色。
+    pub role: String,
+    /// 执行前基线（仅本次变更涉及的文件；三态见 [`ChangeSetFileHash`]）。
+    pub base_hashes: Vec<ChangeSetFileHash>,
+    /// 执行后结果哈希（与 changed_files 一一对应）。
+    pub result_hashes: Vec<ChangeSetFileHash>,
+    /// 本次执行窗口内新增变更的文件（相对路径）。
+    pub changed_files: Vec<String>,
+    /// diff 补丁引用（`<team_id>-changes/<file>.patch`，相对 run_dir；可空）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_ref: Option<String>,
+    pub status: ChangeSetStatus,
+    pub created_at: String,
+    /// 决定记录（accept/reject/revert 各至多一条；幂等重放零副作用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ChangeSetDecision>,
+    /// 最近一次冲突文件清单（conflicted 时非空；落决定后清空）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+}
+
+impl ChangeSet {
+    /// 状态中文名（UI/审计展示）。
+    pub fn status_label(&self) -> &'static str {
+        match self.status {
+            ChangeSetStatus::PendingReview => "待评审",
+            ChangeSetStatus::Accepted => "已接受",
+            ChangeSetStatus::Rejected => "已拒绝",
+            ChangeSetStatus::Reverted => "已撤销",
+            ChangeSetStatus::Conflicted => "冲突",
+        }
+    }
+}
+
 /// 决策记录（§6.6 DecisionRecord）。
 ///
 /// 每项会改变任务路线的结论必须写成 DecisionRecord，不能只留在聊天中。
