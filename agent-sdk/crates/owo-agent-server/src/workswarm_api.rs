@@ -12,6 +12,10 @@
 //! - `GET /teams/{id}/diagnostic` 脱敏诊断导出（TeamRun/任务/产物/评审/交接/指标/审计；
 //!   凭据类键值与令牌已脱敏、超长文本截断；五期 · 第三路）；
 //! - `POST /teams/{id}/steer` continue/steer/replace/cancel/retry（R2：retry 局部重试 + 中断恢复）；
+//! - `GET  /teams/{id}/change-sets` 团队 ChangeSet 列表 + 批准门控状态（八期 · 二路）；
+//! - `GET  /change-sets/{id}` 单个 ChangeSet；
+//! - `POST /change-sets/{id}/accept|reject|revert` 接受/拒绝/撤销（reject/revert
+//!   安全恢复：用户改过的文件 409 + conflicted，不覆盖；八期 · 二路）；
 //! - `GET /projects/{id}` Project Space 摘要；
 //! - `GET /projects/{id}/artifacts` 版本化共享产物（ref 列表）；
 //! - `GET /projects/{id}/workspace/changes` Worker 代码变更追踪（七期 · 二路：
@@ -72,6 +76,11 @@ pub(crate) mod project_workspace;
 // 变更摘要/diff ref 落盘；经本模块 router 挂载读取面）。
 #[path = "workspace_change_tracker.rs"]
 pub(crate) mod workspace_change_tracker;
+
+// 八期（第二路）：ChangeSet 审批、接受与安全撤销（独立文件，经本模块 router
+// 合并挂载；子模块可访问本模块私有项：error_response 与 project_workspace）。
+#[path = "change_set_api.rs"]
+pub(crate) mod change_set_api;
 
 // 七期（第二路）：角色画像（工具面/只读/写白名单/回合上限）驱动真实 Worker。
 use owo_agent_core::worker_profile::{intersect_paths, ProfileSubagentRunner, WorkerProfile};
@@ -373,6 +382,10 @@ impl Worker for FailWorker {
 ///
 /// 仅写角色包装追踪（`tracking`/`lease` 均为 None 时纯透传）：读角色没有写工具
 /// 不会改文件，而并行读角色的快照窗口会误捕写角色的变更。
+///
+/// 八期（二路）：执行前对允许路径做内容基线快照（进 CAS）；成功路径自动生成
+/// `ChangeSet`（pending_review，等人工 accept/reject/revert；未接受时该团队代码
+/// Artifact 不得成为最终 approved head——门控函数见 `change_set_store`）。
 struct TrackedRoleWorker {
     inner: Arc<dyn Worker>,
     /// 单写租约（None = 只读角色，不参与租约）。
@@ -397,6 +410,15 @@ impl Worker for TrackedRoleWorker {
             None => None,
         };
         let pre = workspace_change_tracker::GitSnapshot::snapshot(&tracking.root).await;
+        // 八期（二路）：执行前对允许路径做内容基线快照（进 CAS）——ChangeSet
+        // reject/revert 的恢复依据；快照尽力而为（超限/读取失败的文件基线记为
+        // 「未知」，之后被改只能走 conflicted 人工路径，绝不误删）。
+        let base = owo_agent_core::change_set::snapshot_allowed_paths(
+            &tracking.root,
+            &tracking.allowed,
+            &tracking.cas,
+        )
+        .await;
         let result = self.inner.run(input).await;
         // 租约在前快照窗口结束后即可释放（后续只是 git 子进程与落盘，不占写窗口）。
         drop(_lease);
@@ -412,19 +434,64 @@ impl Worker for TrackedRoleWorker {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
-        if let Err(error) = tracking
+        let record = match tracking
             .record(&step, &post, &changed, violation.as_deref())
             .await
         {
-            tracing::warn!(
-                team_id = %tracking.team_id,
-                role = %tracking.role,
-                %error,
-                "工作区变更记录落盘失败（旁路数据，不阻断步骤）"
-            );
-        }
+            Ok(record) => Some(record),
+            Err(error) => {
+                tracing::warn!(
+                    team_id = %tracking.team_id,
+                    role = %tracking.role,
+                    %error,
+                    "工作区变更记录落盘失败（旁路数据，不阻断步骤）"
+                );
+                None
+            }
+        };
         if let Some(violation) = violation {
             return Err(violation);
+        }
+        // 八期（二路）：成功路径生成 ChangeSet（pending_review，等人工 accept/
+        // reject/revert；未接受时该团队代码 Artifact 不得成为最终 approved head）。
+        // 记录/落盘失败不回滚步骤（变更本身已被 git 追踪），留 error 审计与日志。
+        let change_set = owo_agent_core::change_set::build_change_set(
+            &tracking.team_id,
+            &step,
+            &tracking.role,
+            &base,
+            &changed,
+            &tracking.root,
+            record.as_ref().and_then(|record| record.diff_ref.clone()),
+        );
+        let store = owo_agent_core::change_set_store::ChangeSetStore::new(&tracking.run_dir);
+        match store.save_upsert(&change_set) {
+            Ok(()) => {
+                if let Some(audit) = &tracking.audit {
+                    if let Ok(mut audit) = audit.lock() {
+                        audit.record(
+                            &tracking.team_id,
+                            "change_set.created",
+                            Some(format!("workswarm/{}", tracking.team_id)),
+                            Some(true),
+                            format!(
+                                "{} 生成（步骤 {}，文件：{}）",
+                                change_set.change_set_id,
+                                step,
+                                changed.join(", ")
+                            ),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    team_id = %tracking.team_id,
+                    role = %tracking.role,
+                    error = %error,
+                    "ChangeSet 落盘失败（变更已在 git 追踪中，但审批闭环缺失）"
+                );
+            }
         }
         Ok(output)
     }
@@ -565,6 +632,9 @@ async fn build_run_registry(
             team_id: team_id.to_string(),
             role: r.role.clone(),
             allowed: write_allowed.clone(),
+            // 八期（二路）：ChangeSet 基线快照进团队 CAS + 生成留痕审计。
+            cas: coordinator.cas().clone(),
+            audit: coordinator.audit_log(),
         });
         let inner: Arc<dyn Worker> = Arc::new(TrackedRoleWorker {
             inner,
@@ -936,6 +1006,24 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/teams/{id}/metrics", get(team_metrics))
         .route("/teams/{id}/diagnostic", get(team_diagnostic))
         .route("/teams/{id}/steer", post(steer_team))
+        // 八期（第二路）：ChangeSet 审批、接受与安全撤销。
+        .route(
+            "/teams/{id}/change-sets",
+            get(change_set_api::list_team_change_sets),
+        )
+        .route("/change-sets/{id}", get(change_set_api::get_change_set))
+        .route(
+            "/change-sets/{id}/accept",
+            post(change_set_api::accept_change_set),
+        )
+        .route(
+            "/change-sets/{id}/reject",
+            post(change_set_api::reject_change_set),
+        )
+        .route(
+            "/change-sets/{id}/revert",
+            post(change_set_api::revert_change_set),
+        )
         .route("/projects/{id}", get(get_project_space))
         .route("/projects/{id}/artifacts", get(list_artifacts))
         // 六期（第二路）：项目工作区绑定（真实目录 / 只读 / 写白名单 / 树 / git 状态）。

@@ -17,6 +17,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// porcelain 状态行数上限（防超大仓库膨胀快照体）。
@@ -219,6 +220,10 @@ pub struct Tracker {
     pub role: String,
     /// 最终写白名单（角色 ∩ 绑定；空 = 工作区内可写，校验放行）。
     pub allowed: Vec<PathBuf>,
+    /// 八期（二路）：团队 CAS（ChangeSet 基线内容寻址存储；与 Artifact 共用）。
+    pub cas: owo_agent_core::cas_store::CasStore,
+    /// 八期（二路）：团队审计日志（ChangeSet 生成留痕；None = 不审计）。
+    pub audit: Option<Arc<std::sync::Mutex<owo_agent_core::AuditLog>>>,
 }
 
 /// 步骤 ID → 补丁文件名安全片段（只留字母数字与 `-_`）。
@@ -245,6 +250,7 @@ impl Tracker {
     }
 
     /// 落盘：best-effort 保存执行后 diff 补丁 + 追加变更记录。
+    /// 返回落盘的记录（调用方据此生成 ChangeSet：diff_ref 等由记录携带）；
     /// 返回 Err 仅表示记录未落盘（旁路数据），由调用方告警不阻断。
     pub async fn record(
         &self,
@@ -252,7 +258,7 @@ impl Tracker {
         post: &GitSnapshot,
         changed: &[String],
         violation: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<ChangeRecord, String> {
         // diff 补丁（best-effort）：执行后全量 `git diff`（暂存 + 未暂存）。
         let mut diff_ref = None;
         if post.git {
@@ -279,7 +285,8 @@ impl Tracker {
             diff_ref,
             violation: violation.map(str::to_string),
         };
-        self.append_record(record).await
+        self.append_record(record.clone()).await?;
+        Ok(record)
     }
 
     /// 追加一条记录（读-改-写 JSON 数组；缺失/损坏按空数组重建——记录文件是
