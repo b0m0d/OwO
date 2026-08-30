@@ -174,6 +174,62 @@ pub struct Artifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes_artifact_id: Option<String>,
     pub created_at: String,
+    // -- 七期（第三路）Artifact 交付扩展（全部 additive：旧记录 serde 缺省反序列化） --
+    /// 所属团队运行（七期 additive；旧记录缺省为空）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub team_id: String,
+    /// 内容格式（七期：text|markdown|json|csv|research；旧记录缺省 "text"）。
+    #[serde(default = "default_artifact_format")]
+    pub format: String,
+    /// 下载交付 media type（七期；旧记录缺省 "text/plain"）。
+    #[serde(default = "default_artifact_media_type")]
+    pub media_type: String,
+    /// 下载交付文件名（七期；旧记录缺省为空）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file_name: String,
+    /// 内容 SHA-256（七期；与 content_ref 的 CAS 哈希一致。旧记录缺省为空，
+    /// 服务端可由 content_ref 回退解析）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sha256: String,
+    /// 内容字节数（七期；旧记录缺省 0，服务端可由 CAS 内容回退计算）。
+    #[serde(default)]
+    pub size_bytes: u64,
+    /// 证据引用链（七期：Worker 证据来源列表；旧记录缺省为空）。
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    /// 未解决问题（七期：Worker 如实上报；旧记录缺省为空）。
+    #[serde(default)]
+    pub open_issues: Vec<String>,
+    /// 格式校验结果（七期：登记前门控产物；legacy 记录为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<ArtifactValidation>,
+    /// Worker 交接说明原文（七期：WorkerOutputV1.handoff；旧记录为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<String>,
+}
+
+fn default_artifact_format() -> String {
+    "text".to_string()
+}
+
+fn default_artifact_media_type() -> String {
+    "text/plain".to_string()
+}
+
+/// Artifact 格式校验结果（七期 · 第三路：Artifact 校验与下载交付）。
+///
+/// 登记前门控：JSON 必须可解析且不得裹 Markdown 围栏；CSV 需表头 + 列数一致；
+/// research 需至少一条有效证据（文件引用或 URL）；markdown 拒绝 TBD/空模板占位。
+/// 校验未通过的产物**不登记**（不进版本链、不进 PendingReview）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactValidation {
+    /// 被校验的格式（json|csv|research|markdown|text|…）。
+    pub format: String,
+    /// 是否通过。
+    pub valid: bool,
+    /// 失败原因（valid=true 时为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 fn default_artifact_classification() -> ArtifactClassification {
@@ -320,6 +376,10 @@ pub struct HandoffRecord {
     #[serde(default)]
     pub known_risks: Vec<String>,
     pub created_at: String,
+    /// Worker 交接说明原文（七期 · 第三路：WorkerOutputV1.handoff 逐字落盘，
+    /// 不再依赖自动摘要/反解析；旧记录为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_note: Option<String>,
 }
 
 /// 项目空间状态。
