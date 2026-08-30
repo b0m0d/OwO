@@ -4,6 +4,38 @@
  */
 
 export interface paths {
+    "/artifacts/{id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["artifactContent"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/artifacts/{id}/metadata": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["artifactMetadata"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/artifacts/{id}/history": {
         parameters: {
             query?: never;
@@ -2584,6 +2616,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/projects/{id}/delivery-manifest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["projectDeliveryManifest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/projects/{id}/workspace": {
         parameters: {
             query?: never;
@@ -3944,6 +3992,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/projects/{id}/workspace/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["projectWorkspaceChanges"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4156,6 +4220,90 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    artifactContent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 七期（第三路）：Artifact 下载/预览载荷（content = 原始文本，非 JSON 编码）；接线前 404（未注册），UI 容错读取 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        artifact_id: string;
+                        /** @enum {string} */
+                        format: "json" | "csv" | "research" | "markdown";
+                        sha256: string;
+                        size_bytes: number;
+                        content: string;
+                    };
+                };
+            };
+            /** @description artifact not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    artifactMetadata: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 七期（第三路）：Artifact 元数据：格式校验结果 + SHA256 + 证据引用（handoff 可选，位于既有 handoff 键下） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        artifact_id: string;
+                        team_id: string;
+                        kind: string;
+                        /** @enum {string} */
+                        format: "json" | "csv" | "research" | "markdown";
+                        version: number;
+                        sha256: string;
+                        size_bytes: number;
+                        validation: {
+                            format: string;
+                            valid: boolean;
+                            reason?: string | null;
+                        };
+                        evidence_refs: string[];
+                        /** @description 可选：WorkerOutputV1 handoff 记录（谁完成/遗留问题/下一步建议） */
+                        handoff?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+            /** @description artifact not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     artifactReviewHistory: {
         parameters: {
             query?: never;
@@ -8328,6 +8476,18 @@ export interface operations {
                             review_state?: string;
                             supersedes_artifact_id?: string | null;
                             version?: number;
+                            /** @description 七期（三路）additive：证据引用 */
+                            evidence_refs?: string[];
+                            /** @description 七期（三路）additive：内容 SHA256（hex） */
+                            sha256?: string;
+                            /** @description 七期（三路）additive：内容字节数 */
+                            size_bytes?: number;
+                            /** @description 七期（三路）additive：格式校验 {format, valid, reason?} */
+                            validation?: {
+                                format?: string;
+                                reason?: string | null;
+                                valid?: boolean;
+                            };
                         } & {
                             [key: string]: unknown;
                         })[];
@@ -8364,6 +8524,49 @@ export interface operations {
                         project_id: string;
                         rejected_or_superseded: {
                             [key: string]: unknown;
+                        }[];
+                    };
+                };
+            };
+            /** @description project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    projectDeliveryManifest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 七期（第三路）：项目交付清单（approved 版本概览 + 内容端点相对路径 content_url，供下载/校验）；接线前 404（未注册），UI 容错读取 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        project_id: string;
+                        generated_at: string;
+                        manifest: {
+                            artifact_id: string;
+                            kind: string;
+                            format: string;
+                            version: number;
+                            sha256: string;
+                            size_bytes: number;
+                            approved: boolean;
+                            /** @description 内容端点相对路径（GET /artifacts/{id}/content） */
+                            content_url: string;
                         }[];
                     };
                 };
@@ -9730,7 +9933,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description team + task view + audit tail; R2 additive: interrupted */
+            /** @description team + task view + audit tail; R2 additive: interrupted; 七期 additive（二/三路 wire）: worker_profiles / write_lease / changes（字段可能位于响应顶层或 team 对象内，UI 双路径容错读取） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9746,8 +9949,35 @@ export interface operations {
                         interrupted: boolean;
                         /** @description ä»»å¡è§å¾ï¼æ­¥éª¤ Ã ç¶æï¼ */
                         tasks: Record<string, never>;
-                        /** @description TeamRunï¼éä¼ ï¼ */
+                        /** @description TeamRun（透传）；七期 additive 字段（worker_profiles/write_lease/changes，见顶层同名属性）亦可能位于 team 对象内 */
                         team: Record<string, never>;
+                        /** @description 七期（二路 wire）additive：文件变更列表（与既有 workspace git-status 路由可互用；diff 预览容错读 diff / diff_content 双键） */
+                        changes?: {
+                            added_lines?: number | null;
+                            deleted_lines?: number | null;
+                            /** @description 可选：该文件的 unified diff（UI 容错读 diff / diff_content 双键） */
+                            diff?: string | null;
+                            path: string;
+                            /** @enum {string} */
+                            state: "added" | "modified" | "deleted";
+                        }[] | null;
+                        /** @description 七期（二路 wire）additive：单一写租约（null = 未持有；取消中团队状态 stopping/stopped 渲染为 正在停止/已停止） */
+                        write_lease?: {
+                            acquired_at_ms: number;
+                            holder_role: string;
+                            holder_step_id: string;
+                            released_at_ms?: number | null;
+                        } | null;
+                        /** @description 七期（二路 wire）additive：按角色 WorkerProfile（工具权限 + 调用预算）；旧记录缺失 → UI 缺省空/false/null */
+                        worker_profiles?: {
+                            can_run_command: boolean;
+                            can_use_browser: boolean;
+                            max_turns?: number | null;
+                            read_only: boolean;
+                            role: string;
+                            visible_tools: string[];
+                            write_allowed_paths?: string[] | null;
+                        }[] | null;
                     };
                 };
             };
@@ -10507,6 +10737,58 @@ export interface operations {
         responses: {
             /** @description active rule model + candidates + per-signature samples + calibration report */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    projectWorkspaceChanges: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 七期（二路 wire）additive：Worker 代码变更追踪——changed_files = 全部记录窗口新增变更文件（去重保序）；diff_summary = 最近一条记录的 git diff --stat 摘要；has_violation = 是否存在白名单越界记录（scope_violation）；records = 逐步骤记录（角色/步骤/时刻/变更文件/diff ref/越界原因）；无记录（只读团队/未执行写角色）返回空 records，UI 全字段容错读取 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        team_id: string;
+                        /** @description 最近一条记录是否取得有效 git 快照；无记录为 false */
+                        git: boolean;
+                        changed_files: string[];
+                        /** @description 最近一条记录的 git diff --stat 文本；无记录为空串 */
+                        diff_summary: string;
+                        has_violation: boolean;
+                        records: ({
+                            role?: string;
+                            step?: string;
+                            /** @description 记录时刻（Unix 毫秒） */
+                            at?: number;
+                            git?: boolean;
+                            changed_files?: string[];
+                            diff_summary?: string;
+                            /** @description diff 补丁文件相对 run_dir 路径；非 git / 无变更为 null */
+                            diff_ref?: string | null;
+                            /** @description 白名单越界原因（scope_violation）；null = 通过 */
+                            violation?: string | null;
+                        } & {
+                            [key: string]: unknown;
+                        })[];
+                    };
+                };
+            };
+            /** @description project / team not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

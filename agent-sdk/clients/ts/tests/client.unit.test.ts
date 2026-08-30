@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createClient, type TurnEvent } from "../src/index.js";
-import type { components, operations } from "../src/schema.js";
+import type { components, operations, paths } from "../src/schema.js";
 
 test("runTurn 复用自定义请求头并处理无换行的最后一个 SSE 事件", async () => {
   const originalFetch = globalThis.fetch;
@@ -604,4 +604,231 @@ test("六期契约（工作区绑定 + 模板目录 + teams workspace 字段）"
   const installNotFound: InstallNotFound = true;
   assert.equal(wsNotFound, true);
   assert.equal(installNotFound, true);
+});
+
+// ---------------------------------------------------------------------------
+// 七期冻结契约（二/三路 wire，第四路接线）：/teams/{id} additive
+// worker_profiles / write_lease / changes + /projects/{id}/artifacts additive
+// validation / sha256 / size_bytes / evidence_refs + 3 条新路由
+//（artifactContent / artifactMetadata / projectDeliveryManifest）。
+// 类型级断言——二/三路 wire 形状漂移先在 tsc 编译期失败。
+// 接线前 3 条路由 404（未注册），UI 容错读取；字段均为 nullable/可缺省。
+// ---------------------------------------------------------------------------
+
+test("七期契约（teams/{id} 新字段 + artifacts 新字段 + 3 条新路由）", () => {
+  type Present<R> = [R] extends [never] ? false : true;
+
+  // GET /teams/{id} 200：additive worker_profiles / write_lease / changes
+  //（不在 required 内，旧记录缺字段仍可解析；也可能位于 team 对象内，UI 双路径容错）。
+  type Team200 =
+    operations["workswarmGetTeam"]["responses"][200]["content"]["application/json"];
+  const team: Team200 = {
+    team: {},
+    interrupted: false,
+    tasks: {},
+    audit_tail: [],
+    worker_profiles: [
+      {
+        role: "implementer",
+        visible_tools: ["read", "edit", "run_command"],
+        read_only: false,
+        can_use_browser: false,
+        can_run_command: true,
+        write_allowed_paths: ["src/"],
+        max_turns: 8,
+      },
+      {
+        role: "researcher",
+        visible_tools: ["read", "browser"],
+        read_only: true,
+        can_use_browser: true,
+        can_run_command: false,
+      },
+    ],
+    write_lease: {
+      holder_role: "implementer",
+      holder_step_id: "step-3",
+      acquired_at_ms: 1720000000000,
+      released_at_ms: null,
+    },
+    changes: [
+      {
+        path: "src/main.rs",
+        state: "modified",
+        added_lines: 12,
+        deleted_lines: 3,
+        diff: "@@ -1,4 +1,14 @@",
+      },
+      { path: "src/legacy.rs", state: "deleted" },
+    ],
+  };
+  assert.equal(team.worker_profiles?.[0]?.role, "implementer");
+  assert.equal(team.worker_profiles?.[1]?.can_use_browser, true);
+  assert.equal(team.write_lease?.holder_role, "implementer");
+  assert.equal(team.changes?.[0]?.state, "modified");
+  assert.equal(team.changes?.[1]?.state, "deleted");
+  // 旧记录形状：3 个新字段整体缺省（required 未变）必须仍合法。
+  const teamLegacy: Team200 = {
+    team: {},
+    interrupted: false,
+    tasks: {},
+    audit_tail: [],
+  };
+  assert.equal(teamLegacy.worker_profiles, undefined);
+  assert.equal(teamLegacy.write_lease, undefined);
+  assert.equal(teamLegacy.changes, undefined);
+
+  // GET /projects/{id}/artifacts 200：items additive
+  // validation / sha256 / size_bytes / evidence_refs（全部可缺省）。
+  type ArtList =
+    operations["workswarmListArtifacts"]["responses"][200]["content"]["application/json"];
+  const arts: ArtList = {
+    project_id: "proj-team-1",
+    artifacts: [
+      {
+        artifact_id: "art-1",
+        kind: "report",
+        review_state: "pending",
+        version: 2,
+        sha256: "ab12",
+        size_bytes: 4096,
+        evidence_refs: ["evidence://audit/1"],
+        validation: { format: "markdown", valid: true },
+      },
+    ],
+  };
+  assert.equal(arts.artifacts[0]?.sha256, "ab12");
+  assert.equal(arts.artifacts[0]?.validation?.valid, true);
+  assert.equal(arts.artifacts[0]?.evidence_refs?.length, 1);
+
+  // GET /artifacts/{id}/content：下载/预览载荷（content = 原始文本，非 JSON 编码）。
+  type ArtContent =
+    operations["artifactContent"]["responses"][200]["content"]["application/json"];
+  const content: ArtContent = {
+    artifact_id: "art-1",
+    format: "markdown",
+    sha256: "ab12",
+    size_bytes: 4096,
+    content: "# 报告\n正文",
+  };
+  assert.equal(content.content.startsWith("# "), true);
+  type ArtContent404 = Present<operations["artifactContent"]["responses"][404]>;
+  const artContent404: ArtContent404 = true;
+  assert.equal(artContent404, true);
+
+  // GET /artifacts/{id}/metadata：元数据 + validation + evidence_refs + handoff（可空）。
+  type ArtMeta =
+    operations["artifactMetadata"]["responses"][200]["content"]["application/json"];
+  const meta: ArtMeta = {
+    artifact_id: "art-1",
+    team_id: "team-1",
+    kind: "report",
+    format: "markdown",
+    version: 2,
+    sha256: "ab12",
+    size_bytes: 4096,
+    validation: { format: "markdown", valid: true, reason: null },
+    evidence_refs: ["evidence://audit/1"],
+    handoff: null,
+  };
+  assert.equal(meta.handoff, null);
+  type ArtMeta404 = Present<operations["artifactMetadata"]["responses"][404]>;
+  const artMeta404: ArtMeta404 = true;
+  assert.equal(artMeta404, true);
+
+  // GET /projects/{id}/delivery-manifest：交付清单（approved 概览 + content_url 相对路径）。
+  type Manifest =
+    operations["projectDeliveryManifest"]["responses"][200]["content"]["application/json"];
+  const manifest: Manifest = {
+    project_id: "proj-team-1",
+    generated_at: "2026-07-28T00:00:00Z",
+    manifest: [
+      {
+        artifact_id: "art-1",
+        kind: "report",
+        format: "markdown",
+        version: 2,
+        sha256: "ab12",
+        size_bytes: 4096,
+        approved: true,
+        content_url: "/artifacts/art-1/content",
+      },
+    ],
+  };
+  assert.equal(manifest.manifest[0]?.content_url, "/artifacts/art-1/content");
+  type Manifest404 = Present<
+    operations["projectDeliveryManifest"]["responses"][404]
+  >;
+  const manifest404: Manifest404 = true;
+  assert.equal(manifest404, true);
+});
+
+test("七期契约（二路交接：GET /projects/{id}/workspace/changes 变更追踪）", () => {
+  type Present<R> = [R] extends [never] ? false : true;
+
+  // 路径面：operationId 冻结为 projectWorkspaceChanges，GET 方法挂在项目工作区路径下。
+  type ChangesRoute = paths["/projects/{id}/workspace/changes"]["get"];
+  type SameSource = [operations["projectWorkspaceChanges"]] extends [
+    ChangesRoute,
+  ]
+    ? true
+    : false;
+  const sameSource: SameSource = true;
+  assert.equal(sameSource, true, "路径 get 与 operations 同源");
+
+  // 200：六个顶层字段全部 required（team_id/git/changed_files/diff_summary/has_violation/records）。
+  type Changes200 =
+    operations["projectWorkspaceChanges"]["responses"][200]["content"]["application/json"];
+  const payload: Changes200 = {
+    team_id: "team-1",
+    git: true,
+    changed_files: ["src/calc.rs", "out/fix-report.md"],
+    diff_summary: " src/calc.rs | 2 +-",
+    has_violation: false,
+    records: [
+      {
+        role: "implementer",
+        step: "s-2",
+        at: 1753680000000,
+        git: true,
+        changed_files: ["src/calc.rs"],
+        diff_summary: " src/calc.rs | 2 +-",
+        diff_ref: "team-1-changes/s-2.patch",
+        violation: null,
+      },
+      {
+        role: "finalizer",
+        step: "s-3",
+        at: 1753680001000,
+        git: false,
+        changed_files: [],
+        diff_summary: "",
+        diff_ref: null,
+        violation: "越界写入 /etc/passwd（不在允许路径）",
+      },
+    ],
+  };
+  assert.equal(payload.records.length, 2);
+  assert.equal(payload.records[1]?.violation, "越界写入 /etc/passwd（不在允许路径）");
+  // 记录元素为开放对象（additionalProperties）：未知字段可读不报错。
+  const open: Record<string, unknown> = payload.records[0] ?? {};
+  assert.equal(typeof open["role"], "string");
+
+  // 容错语义：字段全部可选（additionalProperties: true 的 items），缺省读取不报类型错。
+  const sparse: Changes200 = {
+    team_id: "team-2",
+    git: false,
+    changed_files: [],
+    diff_summary: "",
+    has_violation: false,
+    records: [],
+  };
+  assert.deepEqual(sparse.changed_files, []);
+
+  // 404：未知项目/团队。
+  type Changes404 = Present<
+    operations["projectWorkspaceChanges"]["responses"][404]
+  >;
+  const changes404: Changes404 = true;
+  assert.equal(changes404, true);
 });
