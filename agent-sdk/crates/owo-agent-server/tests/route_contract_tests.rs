@@ -294,6 +294,14 @@ fn sample_body(path: &str) -> Option<&'static str> {
         "/datasets/{id}/manifest" => Some(r#"{}"#),
         "/model-candidates" => Some(r#"{"model_id":"ct-model","model_version":"0.0.1"}"#),
         "/model-candidates/{id}/promote" => Some(r#"{"ack":true,"reason":"契约测试晋升"}"#),
+        // 八期（第二路）：ChangeSet 动作——占位 id → 404（资源缺失），最小体。
+        "/change-sets/{id}/accept" => Some(r#"{}"#),
+        "/change-sets/{id}/reject" => Some(r#"{}"#),
+        "/change-sets/{id}/revert" => Some(r#"{}"#),
+        // 八期（第三路）：Human Inbox 领取/释放/处理——user 必填；占位 id → 404（资源缺失）。
+        "/human/inbox/{id}/claim" => Some(r#"{"user":"contract-ct"}"#),
+        "/human/inbox/{id}/release" => Some(r#"{"user":"contract-ct"}"#),
+        "/human/inbox/{id}/resolve" => Some(r#"{"user":"contract-ct"}"#),
         _ => Some(r#"{}"#),
     }
 }
@@ -416,6 +424,17 @@ fn resource_404_ok(path: &str) -> bool {
             | "/artifacts/{id}/content"
             | "/artifacts/{id}/metadata"
             | "/projects/{id}/delivery-manifest"
+            // 八期（第二路）：ChangeSet 审批闭环——占位 id 指向不存在资源 → 404 非路由缺失。
+            | "/teams/{id}/change-sets"
+            | "/change-sets/{id}"
+            | "/change-sets/{id}/accept"
+            | "/change-sets/{id}/reject"
+            | "/change-sets/{id}/revert"
+            // 八期（第三路）：统一 Human Inbox——占位 id 指向不存在待办 → 404 非路由缺失。
+            | "/human/inbox/{id}"
+            | "/human/inbox/{id}/claim"
+            | "/human/inbox/{id}/release"
+            | "/human/inbox/{id}/resolve"
     )
 }
 

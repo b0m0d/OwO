@@ -832,3 +832,112 @@ test("七期契约（二路交接：GET /projects/{id}/workspace/changes 变更�
   const changes404: Changes404 = true;
   assert.equal(changes404, true);
 });
+
+// ============================================================================
+// 八期冻结契约（二/三路 wire，第四路接线）：ChangeSet 审批闭环 + Human Inbox
+// ============================================================================
+
+test("八期契约（ChangeSet 五路由：列表/详情/accept/reject/revert）", () => {
+  // 路径面：operationId 与 operations 同源。
+  type ListRoute = paths["/teams/{id}/change-sets"]["get"];
+  const listSameSource: [operations["teamChangeSets"]] extends [ListRoute] ? true : false = true;
+  assert.equal(listSameSource, true);
+
+  // 200：{team_id, change_sets[]}，change_set 元素状态枚举冻结。
+  type CsList = operations["teamChangeSets"]["responses"][200]["content"]["application/json"];
+  const payload: CsList = {
+    team_id: "team-1",
+    change_sets: [
+      {
+        change_set_id: "cs-1",
+        team_id: "team-1",
+        step_id: "s-impl",
+        role: "implementer",
+        changed_files: ["src/calc.rs"],
+        diff_ref: null,
+        status: "pending_review",
+        created_at: "2026-08-30T04:00:00Z",
+        resolved_at: null,
+      },
+    ],
+  };
+  assert.equal(payload.change_sets[0]?.status, "pending_review");
+  assert.deepEqual(payload.change_sets[0]?.changed_files, ["src/calc.rs"]);
+
+  // 动作端点 200：{change_set, replayed}（幂等重放零副作用）。
+  type CsAccept = operations["changeSetAccept"]["responses"][200]["content"]["application/json"];
+  const accepted: CsAccept = { change_set: payload.change_sets[0] ?? {}, replayed: true };
+  assert.equal(accepted.replayed, true);
+
+  // 409：文件被用户再次修改 / 已终态跨动作；404：未知 ChangeSet。
+  type CsAccept409 = [operations["changeSetAccept"]["responses"][409]] extends [never] ? false : true;
+  type CsAccept404 = [operations["changeSetAccept"]["responses"][404]] extends [never] ? false : true;
+  const csAccept409: CsAccept409 = true;
+  const csAccept404: CsAccept404 = true;
+  assert.equal(csAccept409, true);
+  assert.equal(csAccept404, true);
+});
+
+test("八期契约（Human Inbox 五路由：列表/详情/claim/release/resolve）", () => {
+  type ListRoute = paths["/human/inbox"]["get"];
+  const listSameSource: [operations["humanInboxList"]] extends [ListRoute] ? true : false = true;
+  assert.equal(listSameSource, true);
+
+  // 200：{items, counts}；item.kind 四类枚举冻结；item.status 三态。
+  type InboxList = operations["humanInboxList"]["responses"][200]["content"]["application/json"];
+  const payload: InboxList = {
+    items: [
+      {
+        item_id: "i1",
+        kind: "artifact_review",
+        status: "claimed",
+        assignee: "本地用户",
+        team_id: "team-1",
+        project_id: "proj-1",
+        target_id: "team-1:builder:v1",
+        summary: "待评审产物",
+        created_at: "2026-08-30T04:00:00Z",
+        claimed_at: "2026-08-30T04:05:00Z",
+        resolved_at: null,
+        detail: {},
+      },
+    ],
+    counts: { artifact_review: 1 },
+  };
+  assert.equal(payload.items[0]?.kind, "artifact_review");
+  assert.equal(payload.items[0]?.status, "claimed");
+
+  // resolve 200：{resolved, replayed, item_id, kind, result}（按 kind 分派到既有领域端点）。
+  type Resolve200 = operations["humanInboxResolve"]["responses"][200]["content"]["application/json"];
+  const resolved: Resolve200 = {
+    resolved: true,
+    replayed: false,
+    item_id: "i1",
+    kind: "artifact_review",
+    result: {},
+  };
+  assert.equal(resolved.resolved, true);
+  assert.equal(resolved.replayed, false);
+
+  // claim 请求体：{user} 必填；409 已被他人领取；404 未知待办。
+  type ClaimBody = NonNullable<operations["humanInboxClaim"]["requestBody"]>["content"]["application/json"];
+  const claim: ClaimBody = { user: "本地用户" };
+  assert.equal(claim.user, "本地用户");
+  type Claim409 = [operations["humanInboxClaim"]["responses"][409]] extends [never] ? false : true;
+  type Claim404 = [operations["humanInboxClaim"]["responses"][404]] extends [never] ? false : true;
+  const claim409: Claim409 = true;
+  const claim404: Claim404 = true;
+  assert.equal(claim409, true);
+  assert.equal(claim404, true);
+
+  // resolve 幂等重放 200；409 未领取/领域冲突。
+  type ResolveReplay = operations["humanInboxResolve"]["responses"][200]["content"]["application/json"];
+  const replay: ResolveReplay = {
+    resolved: true,
+    replayed: true,
+    item_id: "i1",
+    kind: "artifact_review",
+    result: {},
+  };
+  assert.equal(replay.replayed, true);
+});
