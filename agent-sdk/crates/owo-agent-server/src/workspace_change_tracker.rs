@@ -1,27 +1,39 @@
-//! 工作区变更追踪（七期 · 二路）：Worker 执行前后 git 快照、写白名单校验、变更落盘。
+//! 工作区变更追踪（七期 · 二路；九期 · 一路修正检测算法）：Worker 执行前后
+//! git 快照、写白名单校验、变更落盘。
 //!
 //! 数据面（都在 TeamRun 数据目录，重启可读）：
 //! - `<run_dir>/<team_id>-workspace-changes.json`：变更记录数组（追加写，逐步骤）；
-//! - `<run_dir>/<team_id>-changes/<step>-<ts>.patch`：执行后 `git diff` 全量补丁
-//!   （best-effort；非 git 工作区跳过）。
+//! - `<run_dir>/<team_id>-changes/<step>-<ts>.patch`：本次实际变更文件的 git 补丁
+//!   （best-effort）；git 不可用/补丁为空时落退化差异摘要
+//!   `<step>-<ts>.diff.txt`（执行前 CAS 基线 × 执行后内容，见
+//!   `change_set::degraded_diff_summary`）。
 //!
-//! 语义：
+//! 语义（九期一路修正）：
 //! - 快照 = `git status --porcelain`（状态行）+ `git diff --stat`（摘要文本）；
 //!   非 git 目录 / 无 git 可执行 → `git=false`：变更不可检测，白名单校验对空变更
 //!   自然放行（检测能力以环境为准，能力缺失不判违规，不阻塞任务）；
-//! - 白名单校验只对「本次执行窗口新增的变更文件」做（前快照已有的变更不追溯）；
+//! - **changed_files = 窗口差集 ∪ 重命名 old 侧 ∪ 内容哈希差集**（九期前只做
+//!   「前后两次 porcelain 的路径集合差」，漏掉「执行前已脏、执行后仍脏但内容变了」
+//!   的文件——Agent 二次修改用户已改文件时 changed_files 为空、ChangeSet 丢失）；
+//!   内容哈希差集以「执行前内容哈希 × 执行后内容哈希」为准（执行前哈希来自
+//!   ChangeSet 基线快照 + 执行前已脏文件的直接读取），删除（内容消失）同样计入；
+//! - 白名单校验对上述合并后的 `changed_files` 做（含执行前已脏但本次被继续修改的
+//!   文件——越界写不再因「路径早已脏」而漏检）；
 //! - 越界 → `Err("scope_violation: …")`（失败码前缀与 workswarm 失败口径一致），
 //!   由包装层转成步骤失败——不登记成功 Artifact；
 //! - 追踪是旁路：落盘 IO 失败只告警不阻断任务。
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// porcelain 状态行数上限（防超大仓库膨胀快照体）。
 const STATUS_LINE_CAP: usize = 500;
+
+/// diff 补丁限定路径数上限：超过则退回全树 `git diff HEAD`（避免命令行超长）。
+const DIFF_PATH_ARG_CAP: usize = 100;
 
 /// 工作区 git 快照。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +86,22 @@ pub fn parse_porcelain_path(line: &str) -> Option<String> {
     }
 }
 
+/// porcelain 重命名/拷贝行 → `(old, new)` 路径对（非重命名行 → None）。
+///
+/// 九期（一路）：重命名的 old 侧在 `parse_porcelain_path` 里被丢弃，恢复时无法
+/// 还原被移走的源文件——合并检测需要两侧。
+pub fn parse_porcelain_rename(line: &str) -> Option<(String, String)> {
+    let rest = line.get(3..)?.trim();
+    let index = rest.find(" -> ")?;
+    let old = rest[..index].trim().trim_matches('"');
+    let new = rest[index + 4..].trim().trim_matches('"');
+    if old.is_empty() || new.is_empty() {
+        None
+    } else {
+        Some((old.to_string(), new.to_string()))
+    }
+}
+
 impl GitSnapshot {
     /// 采集快照（git 不可用 → `git:false` 空快照，不视为错误）。
     ///
@@ -110,6 +138,9 @@ impl GitSnapshot {
     }
 
     /// 本次执行窗口新增的变更文件（porcelain 状态行差集 → 相对路径，去重保序）。
+    ///
+    /// 注意：这是**纯路径集合差**——执行前已脏的文件不在结果里（九期一路的合并
+    /// 检测见 [`merge_changed_files`]；本方法保留为合并算法的第一层）。
     pub fn changed_files(&self, before: &GitSnapshot) -> Vec<String> {
         if !self.git || !before.git {
             return Vec::new();
@@ -132,6 +163,86 @@ impl GitSnapshot {
         }
         changed
     }
+
+    /// 快照中的脏路径（去重保序；`git=false` → 空）。
+    pub fn dirty_paths(&self) -> Vec<String> {
+        if !self.git {
+            return Vec::new();
+        }
+        let mut seen = HashSet::new();
+        self.status
+            .iter()
+            .filter_map(|line| parse_porcelain_path(line))
+            .filter(|path| seen.insert(path.clone()))
+            .collect()
+    }
+}
+
+/// 单文件当前内容哈希（不存在/不可读 → None）。父模块（TrackedRoleWorker 基线
+/// 采集）与本模块共用；与 core `change_set::file_hash` 同口径。
+pub(crate) fn content_hash(root: &Path, relative: &str) -> Option<String> {
+    let bytes = std::fs::read(root.join(relative)).ok()?;
+    Some(owo_agent_core::cas_store::CasStore::hash_of(&bytes))
+}
+
+/// 九期（一路）：合并变更检测——`changed_files` = **窗口差集 ∪ 重命名 old 侧 ∪
+/// 内容哈希差集**。
+///
+/// - `pre_dirty_hashes`：执行前已脏文件的内容哈希（执行前采集；`Some(Some(hash))` =
+///   有基线，`Some(None)` = 执行前不存在/不可读，键缺失 = 未登记——后两者只有
+///   「内容消失（删除）」可证明变更，保守不计修改）；
+/// - 窗口差集捕获：新建/暂存新增/干净文件被修改或删除/重命名 new 侧；
+/// - 内容哈希差集捕获：执行前已脏 → 执行后仍脏但内容变化（核心修复点）、执行前
+///   已脏文件被删除、执行前已脏文件被恢复到 HEAD（内容 ≠ 执行前脏内容，同样计入
+///   ——ChangeSet 恢复目标是「执行前状态」，回退到 HEAD 对它而言也是一次修改）；
+/// - 重命名 old 侧捕获：post 有 `R old -> new` 且 pre 没有同一重命名 → old 被移走，
+///   计入 changed（恢复时才能还原源文件）。
+pub fn merge_changed_files(
+    pre: &GitSnapshot,
+    post: &GitSnapshot,
+    pre_dirty_hashes: &HashMap<String, Option<String>>,
+    root: &Path,
+) -> Vec<String> {
+    if !pre.git || !post.git {
+        return Vec::new();
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut changed: Vec<String> = Vec::new();
+    // 1) 窗口差集（新建/删除干净文件/重命名 new 侧/首次修改）。
+    for path in post.changed_files(pre) {
+        if seen.insert(path.clone()) {
+            changed.push(path);
+        }
+    }
+    // 2) 重命名 old 侧（pre 不存在同一重命名 → old 在窗口内被移走）。
+    let pre_renames: HashSet<(String, String)> = pre
+        .status
+        .iter()
+        .filter_map(|line| parse_porcelain_rename(line))
+        .collect();
+    for line in &post.status {
+        if let Some((old, new)) = parse_porcelain_rename(line) {
+            if !pre_renames.contains(&(old.clone(), new.clone())) && seen.insert(old.clone()) {
+                changed.push(old);
+            }
+        }
+    }
+    // 3) 内容哈希差集（执行前已脏路径 × 执行后内容）。
+    for path in pre.dirty_paths() {
+        if seen.contains(&path) {
+            continue;
+        }
+        let current = content_hash(root, &path);
+        let changed_now = match pre_dirty_hashes.get(&path) {
+            Some(Some(pre_hash)) => current.as_deref() != Some(pre_hash.as_str()),
+            // 执行前不存在/不可读/未登记：只有删除可证明变更（保守，不误报修改）。
+            _ => current.is_none(),
+        };
+        if changed_now && seen.insert(path.clone()) {
+            changed.push(path);
+        }
+    }
+    changed
 }
 
 /// 去掉 Windows verbatim 前缀（`\\?\C:\...` → `C:\...`）：canonicalize 语义不变。
@@ -203,7 +314,8 @@ pub struct ChangeRecord {
     pub changed_files: Vec<String>,
     /// diff 摘要（执行后快照的 `git diff --stat` 文本）。
     pub diff_summary: String,
-    /// diff 补丁引用（`<team_id>-changes/<file>.patch`，相对 run_dir；非 git / 无变更 → None）。
+    /// diff 引用（`<team_id>-changes/<file>.patch|.diff.txt`，相对 run_dir；九期一路：
+    /// 仅当有实际变更文件时生成——git 补丁不可用落退化差异摘要，无变更为 None）。
     pub diff_ref: Option<String>,
     /// 白名单越界原因（None = 通过）。
     pub violation: Option<String>,
@@ -249,29 +361,58 @@ impl Tracker {
         self.run_dir.join(format!("{}-changes", self.team_id))
     }
 
-    /// 落盘：best-effort 保存执行后 diff 补丁 + 追加变更记录。
+    /// 本次实际变更文件的 git 补丁（staged + unstaged 相对 HEAD；限定到 changed
+    /// 路径——不再落全仓 diff，执行前已有的无关脏文件不会混进本步骤补丁）。
+    async fn git_diff_patch(&self, changed: &[String]) -> Option<String> {
+        if changed.len() > DIFF_PATH_ARG_CAP {
+            return git_output(&self.root, &["diff", "HEAD"]).await;
+        }
+        let mut args: Vec<&str> = vec!["diff", "HEAD", "--"];
+        args.extend(changed.iter().map(String::as_str));
+        git_output(&self.root, &args).await
+    }
+
+    /// 落盘：best-effort 保存本次实际变更的差异 + 追加变更记录。
     /// 返回落盘的记录（调用方据此生成 ChangeSet：diff_ref 等由记录携带）；
     /// 返回 Err 仅表示记录未落盘（旁路数据），由调用方告警不阻断。
+    ///
+    /// 九期（一路）diff_ref 口径：仅当 `changed` 非空时生成——git 可用且补丁非空
+    /// 落 `.patch`（限定变更文件）；git 不可用/补丁为空（如全部是未跟踪新文件）
+    /// 落 `.diff.txt` 退化摘要（执行前 CAS 基线 × 执行后内容）。
+    /// `changed` 为空 → `diff_ref = None`（也不再产生空补丁文件）。
     pub async fn record(
         &self,
         step: &str,
         post: &GitSnapshot,
         changed: &[String],
         violation: Option<&str>,
+        base: Option<&owo_agent_core::change_set::WorkspaceBaseSnapshot>,
     ) -> Result<ChangeRecord, String> {
-        // diff 补丁（best-effort）：执行后全量 `git diff`（暂存 + 未暂存）。
         let mut diff_ref = None;
-        if post.git {
-            if let Some(patch) = git_output(&self.root, &["diff"]).await {
-                if !patch.trim().is_empty() {
-                    let dir = self.changes_dir();
-                    if tokio::fs::create_dir_all(&dir).await.is_ok() {
-                        let file_name = format!("{}-{}.patch", sanitize_step(step), post.at);
-                        let path = dir.join(&file_name);
-                        if tokio::fs::write(&path, patch).await.is_ok() {
-                            diff_ref = Some(format!("{}-changes/{}", self.team_id, file_name));
-                        }
-                    }
+        if !changed.is_empty() {
+            let git_patch = self
+                .git_diff_patch(changed)
+                .await
+                .filter(|patch| !patch.trim().is_empty());
+            let (content, extension) = match git_patch {
+                Some(patch) => (patch, "patch"),
+                None => {
+                    let default_base = owo_agent_core::change_set::WorkspaceBaseSnapshot::default();
+                    let fallback = base.unwrap_or(&default_base);
+                    (
+                        owo_agent_core::change_set::degraded_diff_summary(
+                            &self.root, fallback, changed, &self.cas,
+                        ),
+                        "diff.txt",
+                    )
+                }
+            };
+            let dir = self.changes_dir();
+            if tokio::fs::create_dir_all(&dir).await.is_ok() {
+                let file_name = format!("{}-{}.{}", sanitize_step(step), post.at, extension);
+                let path = dir.join(&file_name);
+                if tokio::fs::write(&path, content).await.is_ok() {
+                    diff_ref = Some(format!("{}-changes/{}", self.team_id, file_name));
                 }
             }
         }
@@ -291,8 +432,14 @@ impl Tracker {
 
     /// 追加一条记录（读-改-写 JSON 数组；缺失/损坏按空数组重建——记录文件是
     /// 旁路数据，损坏不阻断任务，也不覆盖其他角色已有记录之外的内容）。
+    /// run_dir 缺失时先建目录（无变更路径不会创建 changes 子目录，记录仍须落盘）。
     async fn append_record(&self, record: ChangeRecord) -> Result<(), String> {
         let path = self.records_path();
+        if let Some(parent) = path.parent() {
+            if tokio::fs::create_dir_all(parent).await.is_err() {
+                return Err("变更记录目录创建失败".to_string());
+            }
+        }
         let mut records: Vec<ChangeRecord> = match tokio::fs::read(&path).await {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
             Err(_) => Vec::new(),
@@ -428,5 +575,200 @@ mod tests {
     fn sanitize_step_keeps_safe_filename_fragment() {
         assert_eq!(sanitize_step("s12"), "s12");
         assert_eq!(sanitize_step("step/1 x"), "step_1_x");
+    }
+
+    // ------------------------------------------------------------------
+    // 九期（一路）：合并变更检测
+    // ------------------------------------------------------------------
+
+    fn snapshot(status: &[&str], at: u64) -> GitSnapshot {
+        GitSnapshot {
+            git: true,
+            status: status.iter().map(|l| l.to_string()).collect(),
+            diff_stat: String::new(),
+            at,
+        }
+    }
+
+    fn hash_map(entries: &[(&str, &str)]) -> HashMap<String, Option<String>> {
+        entries
+            .iter()
+            .map(|(p, h)| (p.to_string(), Some(h.to_string())))
+            .collect()
+    }
+
+    /// 核心修复点：执行前已脏（M）、执行后仍脏（M）但内容变化 → 必须进 changed_files。
+    /// 内容未变 → 不得进入（不把用户的既有脏文件误记到 Agent 头上）。
+    #[test]
+    fn merge_catches_pre_dirty_file_modified_again() {
+        let dir = std::env::temp_dir().join(format!(
+            "owo-merge-test-{}-{}",
+            std::process::id(),
+            unique_tag_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // a.rs：执行前内容 "user edit v1"（基线哈希），Agent 改为 "agent content"。
+        std::fs::write(src.join("a.rs"), b"agent content").unwrap();
+        // b.rs：执行前内容与执行后一致（既有脏文件未被本次触碰）。
+        std::fs::write(src.join("b.rs"), b"user dirty").unwrap();
+        let hash = |bytes: &[u8]| owo_agent_core::cas_store::CasStore::hash_of(bytes);
+        let pre = snapshot(&[" M src/a.rs", " M src/b.rs"], 1);
+        let post = snapshot(&[" M src/a.rs", " M src/b.rs"], 2);
+        let hashes = hash_map(&[
+            ("src/a.rs", hash(b"user edit v1").as_str()),
+            ("src/b.rs", hash(b"user dirty").as_str()),
+        ]);
+        // a.rs 执行前哈希 ≠ 执行后内容哈希 → 计入；b.rs 相同 → 不计入。
+        let changed = merge_changed_files(&pre, &post, &hashes, &dir);
+        assert!(
+            changed.contains(&"src/a.rs".to_string()),
+            "执行前已脏、Agent 再次修改的文件必须出现：{changed:?}"
+        );
+        assert!(
+            !changed.contains(&"src/b.rs".to_string()),
+            "内容未变的既有脏文件不得误报：{changed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_catches_pre_dirty_file_deleted_and_reports_unchanged_as_absent() {
+        // 执行前已脏的文件被 Agent 删除：porcelain 从 pre 有 → post 无，路径差集
+        // 漏检（路径本来就在 before 集合里），内容哈希差集必须捕获。
+        let dir = std::env::temp_dir().join(format!(
+            "owo-merge-del-{}-{}",
+            std::process::id(),
+            unique_tag_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("kept.rs"), b"kept content").unwrap();
+        // gone.rs 已被 Agent 删除（磁盘上不存在）。
+        let hash = owo_agent_core::cas_store::CasStore::hash_of(b"kept content");
+        let pre = snapshot(&[" M src/gone.rs", " M src/kept.rs"], 1);
+        let post = snapshot(&[" M src/kept.rs"], 2);
+        let hashes = hash_map(&[
+            ("src/gone.rs", "pre-hash-of-gone"),
+            ("src/kept.rs", hash.as_str()),
+        ]);
+        let changed = merge_changed_files(&pre, &post, &hashes, &dir);
+        assert!(changed.contains(&"src/gone.rs".to_string()), "{changed:?}");
+        assert!(!changed.contains(&"src/kept.rs".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_includes_rename_old_side_for_recovery() {
+        // 窗口内发生暂存重命名：new 侧走窗口差集；old 侧必须并入（恢复才能还原源文件）。
+        let pre = snapshot(&["?? src/new-name.rs"], 1);
+        let post = snapshot(&["R  src/old-name.rs -> src/new-name.rs"], 2);
+        let hashes = HashMap::new();
+        let changed = merge_changed_files(&pre, &post, &hashes, Path::new("."));
+        assert!(changed.contains(&"src/new-name.rs".to_string()));
+        assert!(
+            changed.contains(&"src/old-name.rs".to_string()),
+            "重命名 old 侧必须进入 changed_files：{changed:?}"
+        );
+        // pre 里已存在的同一重命名（执行前就发生）→ 不重复计入。
+        let pre2 = snapshot(&["R  src/old-name.rs -> src/new-name.rs"], 1);
+        let changed2 = merge_changed_files(&pre2, &post, &hashes, Path::new("."));
+        assert!(
+            !changed2.contains(&"src/old-name.rs".to_string()),
+            "{changed2:?}"
+        );
+    }
+
+    #[test]
+    fn merge_is_conservative_without_pre_hash() {
+        // 执行前哈希未知（未登记）且文件仍存在 → 只可证明的变更是删除，修改不误报。
+        let dir = std::env::temp_dir().join(format!(
+            "owo-merge-cons-{}-{}",
+            std::process::id(),
+            unique_tag_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.rs"), b"whatever").unwrap();
+        let pre = snapshot(&[" M x.rs"], 1);
+        let post = snapshot(&[" M x.rs"], 2);
+        let changed = merge_changed_files(&pre, &post, &HashMap::new(), &dir);
+        assert!(
+            !changed.contains(&"x.rs".to_string()),
+            "无基线哈希时不得把文件记为修改：{changed:?}"
+        );
+        // 删除仍可证明。
+        std::fs::remove_file(dir.join("x.rs")).unwrap();
+        let changed2 = merge_changed_files(&pre, &post, &HashMap::new(), &dir);
+        assert!(changed2.contains(&"x.rs".to_string()), "{changed2:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_parse_extracts_both_sides() {
+        assert_eq!(
+            parse_porcelain_rename("R  old.txt -> new.txt"),
+            Some(("old.txt".to_string(), "new.txt".to_string()))
+        );
+        assert_eq!(parse_porcelain_rename(" M src/a.rs"), None);
+        assert_eq!(parse_porcelain_rename("?? x"), None);
+    }
+
+    #[tokio::test]
+    async fn record_skips_diff_and_uses_degraded_summary() {
+        // changed 为空 → 无 diff_ref、不落差异文件；changed 非空 + git 不可用
+        //（临时目录不是 git 仓库）→ 退化摘要落盘且引用非空。
+        let dir = std::env::temp_dir().join(format!(
+            "owo-record-test-{}-{}",
+            std::process::id(),
+            unique_tag_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let run_dir = dir.join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let cas = owo_agent_core::cas_store::CasStore::new(dir.join("cas")).unwrap();
+        let tracker = Tracker {
+            root: root.clone(),
+            run_dir: run_dir.clone(),
+            team_id: "t1".to_string(),
+            role: "implementer".to_string(),
+            allowed: Vec::new(),
+            cas,
+            audit: None,
+        };
+        let post = GitSnapshot {
+            git: false,
+            status: Vec::new(),
+            diff_stat: String::new(),
+            at: 42,
+        };
+        // 空变更：无 diff_ref。
+        let record = tracker.record("s1", &post, &[], None, None).await.unwrap();
+        assert!(record.diff_ref.is_none());
+        // 非空变更 + git 不可用：退化摘要。
+        std::fs::write(root.join("out.md"), b"# report\n").unwrap();
+        let mut base = owo_agent_core::change_set::WorkspaceBaseSnapshot::default();
+        base.complete = true;
+        let record = tracker
+            .record("s2", &post, &["out.md".to_string()], None, Some(&base))
+            .await
+            .unwrap();
+        let diff_ref = record.diff_ref.expect("有真实修改时 diff_ref 必须非空");
+        assert!(diff_ref.ends_with(".diff.txt"), "{diff_ref}");
+        let body = std::fs::read_to_string(run_dir.join(&diff_ref)).unwrap();
+        assert!(body.contains("out.md"), "{body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 测试辅助：毫秒时间戳（唯一临时目录用）。
+    fn unique_tag_ms() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
     }
 }

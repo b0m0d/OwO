@@ -419,12 +419,32 @@ impl Worker for TrackedRoleWorker {
             &tracking.cas,
         )
         .await;
+        // 九期（一路）：执行前已脏文件的内容哈希——合并变更检测的第二基线。
+        // 允许路径内的文件直接复用 base.entries（同一份数据，避免重复读盘）；
+        // 之外（或基线未覆盖）的执行前脏文件现场读哈希。
+        let mut pre_dirty_hashes: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for path in pre.dirty_paths() {
+            if let Some(hash) = base.entries.get(&path) {
+                pre_dirty_hashes.insert(path, Some(hash.clone()));
+            } else {
+                let hash = workspace_change_tracker::content_hash(&tracking.root, &path);
+                pre_dirty_hashes.insert(path, hash);
+            }
+        }
         let result = self.inner.run(input).await;
         // 租约在前快照窗口结束后即可释放（后续只是 git 子进程与落盘，不占写窗口）。
         drop(_lease);
         let output = result?;
         let post = workspace_change_tracker::GitSnapshot::snapshot(&tracking.root).await;
-        let changed = post.changed_files(&pre);
+        // 九期（一路）：合并检测（窗口差集 ∪ 重命名 old 侧 ∪ 内容哈希差集）——
+        // 「执行前已脏、执行后仍脏但内容变化」的文件不再漏检。
+        let changed = workspace_change_tracker::merge_changed_files(
+            &pre,
+            &post,
+            &pre_dirty_hashes,
+            &tracking.root,
+        );
         let violation =
             workspace_change_tracker::check_whitelist(&changed, &tracking.root, &tracking.allowed)
                 .err();
@@ -435,7 +455,7 @@ impl Worker for TrackedRoleWorker {
             .unwrap_or("unknown")
             .to_string();
         let record = match tracking
-            .record(&step, &post, &changed, violation.as_deref())
+            .record(&step, &post, &changed, violation.as_deref(), Some(&base))
             .await
         {
             Ok(record) => Some(record),
@@ -451,6 +471,22 @@ impl Worker for TrackedRoleWorker {
         };
         if let Some(violation) = violation {
             return Err(violation);
+        }
+        // 九期（一路）：无实际变更 → 不创建空 pending ChangeSet（此前会生成
+        // changed_files 为空的空壳待办，人工审批无法操作），只记审计留痕。
+        if changed.is_empty() {
+            if let Some(audit) = &tracking.audit {
+                if let Ok(mut audit) = audit.lock() {
+                    audit.record(
+                        &tracking.team_id,
+                        "change_set.no_change",
+                        Some(format!("workswarm/{}", tracking.team_id)),
+                        Some(true),
+                        format!("步骤 {} 无实际工作区变更，跳过 ChangeSet 生成", step),
+                    );
+                }
+            }
+            return Ok(output);
         }
         // 八期（二路）：成功路径生成 ChangeSet（pending_review，等人工 accept/
         // reject/revert；未接受时该团队代码 Artifact 不得成为最终 approved head）。
@@ -1756,4 +1792,180 @@ async fn reject_proposal(
         "proposal_id": proposal_id,
         "status": "rejected",
     })))
+}
+
+// ---------------------------------------------------------------------------
+// 九期（一路）：TrackedRoleWorker 合并检测 / 空 ChangeSet 守卫（真实 git 仓库）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tracked_worker_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// 唯一临时目录。
+    fn unique_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "owo-tracked-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 建一个带初始提交的真实 git 仓库，src/a.rs 处于「执行前已脏」状态。
+    /// 返回 (root, head_content, pre_agent_content)。
+    fn git_repo_with_pre_dirty_file(tag: &str) -> (PathBuf, &'static str, &'static str) {
+        let root = unique_dir(tag);
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("git 可执行");
+            assert!(
+                output.status.success(),
+                "git {args:?} 失败：{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "test"]);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), b"fn a() {} // HEAD\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        // 用户先手改（执行前已脏）。
+        std::fs::write(root.join("src/a.rs"), b"fn a() {} // user dirty\n").unwrap();
+        (root, "fn a() {} // HEAD\n", "fn a() {} // user dirty\n")
+    }
+
+    fn tracking_for(root: &Path, dir: &Path) -> workspace_change_tracker::Tracker {
+        workspace_change_tracker::Tracker {
+            root: root.to_path_buf(),
+            run_dir: dir.join("run"),
+            team_id: "t1".to_string(),
+            role: "implementer".to_string(),
+            allowed: Vec::new(),
+            cas: owo_agent_core::cas_store::CasStore::new(dir.join("cas")).unwrap(),
+            audit: None,
+        }
+    }
+
+    /// 模拟 Agent 写文件的测试 worker。
+    struct WriteWorker(PathBuf, &'static str);
+
+    #[async_trait]
+    impl Worker for WriteWorker {
+        fn name(&self) -> &str {
+            "agent"
+        }
+        async fn run(&self, _input: &Value) -> Result<String, String> {
+            std::fs::write(&self.0, self.1).unwrap();
+            Ok("ok".to_string())
+        }
+    }
+
+    fn step_input(step_id: &str) -> Value {
+        json!({ "prompt": "p", "_workswarm": { "step_id": step_id } })
+    }
+
+    /// 核心完工要求：执行前已经修改过的文件，Agent 再次修改后必须出现在
+    /// changed_files；基线哈希 = 执行前内容（reject 恢复到执行前状态，不是 HEAD）；
+    /// 有真实修改时 diff_ref 非空。
+    #[tokio::test]
+    async fn pre_dirty_file_modified_again_enters_changed_files() {
+        let dir = unique_dir("dirty");
+        let (root, head, pre_agent) = git_repo_with_pre_dirty_file("dirty");
+        let tracking = tracking_for(&root, &dir);
+        let worker = TrackedRoleWorker {
+            inner: Arc::new(WriteWorker(
+                root.join("src/a.rs"),
+                "fn a() { /* agent fix */ }\n",
+            )),
+            lease: None,
+            tracking: Some(tracking),
+        };
+        let output = worker.run(&step_input("s-impl")).await;
+        assert!(output.is_ok(), "{output:?}");
+
+        let records = workspace_change_tracker::load_records(&dir.join("run"), "t1")
+            .await
+            .unwrap();
+        let record = records.last().expect("应有变更记录");
+        assert!(
+            record.changed_files.contains(&"src/a.rs".to_string()),
+            "执行前已脏 + Agent 再次修改 → 必须在 changed_files：{:?}",
+            record.changed_files
+        );
+        assert!(record.diff_ref.is_some(), "有真实修改时 diff_ref 非空");
+
+        // ChangeSet：changed_files 含该文件；基线 = 执行前内容（≠ HEAD 内容）。
+        let store = owo_agent_core::change_set_store::ChangeSetStore::new(&dir.join("run"));
+        let sets = store.list_for_team("t1").unwrap();
+        assert_eq!(sets.len(), 1, "恰好一个 ChangeSet");
+        let set = &sets[0];
+        assert!(set.changed_files.contains(&"src/a.rs".to_string()));
+        let base_hash = set
+            .base_hashes
+            .iter()
+            .find(|h| h.path == "src/a.rs")
+            .expect("基线含该文件");
+        assert_eq!(
+            base_hash.sha256.as_deref(),
+            Some(owo_agent_core::cas_store::CasStore::hash_of(pre_agent.as_bytes()).as_str()),
+            "基线必须是执行前内容，不是 Git HEAD（{head:?}）"
+        );
+        // 恢复 → 执行前脏内容回来（reject 语义的核心）。
+        let report = owo_agent_core::change_set::restore_change_set(
+            &root,
+            set,
+            &tracking_for(&root, &dir).cas,
+        )
+        .await;
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert_eq!(
+            std::fs::read(root.join("src/a.rs")).unwrap(),
+            pre_agent.as_bytes()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空变更：不创建 ChangeSet（列表为空），记录 changed_files 为空、diff_ref None。
+    #[tokio::test]
+    async fn no_change_creates_no_change_set() {
+        let dir = unique_dir("nochange");
+        let (root, _head, _pre) = git_repo_with_pre_dirty_file("nochange");
+        // EchoWorker 无副作用：窗口内没有任何新变更。
+        let worker = TrackedRoleWorker {
+            inner: Arc::new(EchoWorker) as Arc<dyn Worker>,
+            lease: None,
+            tracking: Some(tracking_for(&root, &dir)),
+        };
+        let output = worker.run(&step_input("s-echo")).await;
+        assert!(output.is_ok(), "{output:?}");
+        let store = owo_agent_core::change_set_store::ChangeSetStore::new(&dir.join("run"));
+        assert!(
+            store.list_for_team("t1").unwrap().is_empty(),
+            "无实际变更不得创建空 ChangeSet"
+        );
+        let records = workspace_change_tracker::load_records(&dir.join("run"), "t1")
+            .await
+            .unwrap();
+        let record = records.last().unwrap();
+        assert!(
+            record.changed_files.is_empty(),
+            "{:?}",
+            record.changed_files
+        );
+        assert!(record.diff_ref.is_none(), "无变更不得产生 diff 引用");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

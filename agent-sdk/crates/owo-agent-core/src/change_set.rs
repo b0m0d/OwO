@@ -164,6 +164,116 @@ fn sanitize_step(step: &str) -> String {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// 退化差异摘要（九期 · 一路）
+// ---------------------------------------------------------------------------
+
+/// 行级差异每侧行数上限（退化摘要不是全量补丁，超长截断）。
+const DIFF_LINE_CAP: usize = 40;
+/// 单行宽度上限（字符）。
+const DIFF_LINE_WIDTH: usize = 200;
+
+fn clip_line(line: &str) -> String {
+    if line.chars().count() <= DIFF_LINE_WIDTH {
+        line.to_string()
+    } else {
+        let mut clipped: String = line.chars().take(DIFF_LINE_WIDTH).collect();
+        clipped.push('…');
+        clipped
+    }
+}
+
+/// 退化差异摘要：Git diff 不可用/为空时，用**执行前 CAS 基线内容 × 执行后磁盘内容**
+/// 生成逐文件差异说明（新建/修改/删除 + 行级增删摘录），作为 diff_ref 落盘内容。
+///
+/// 不是标准 unified patch（无 hunk 头/@ 行号）——是「退化摘要」：保证有真实修改时
+/// diff_ref 非空且可读；行级摘录按「基线有而结果无 = 删除行、结果有而基线无 = 新增行」
+/// 的集合差口径（不保序、与真正 diff 相比可能多列上下文重复行）。
+pub fn degraded_diff_summary(
+    root: &Path,
+    base: &WorkspaceBaseSnapshot,
+    changed: &[String],
+    cas: &CasStore,
+) -> String {
+    let mut out =
+        String::from("# 变更摘要（Git diff 不可用——执行前 CAS 基线 × 执行后内容 退化口径）\n");
+    for relative in changed {
+        let result = file_hash(root, relative);
+        let base_entry = base.entries.get(relative);
+        let pre_existing = base_entry.is_some() || base.scanned.contains(relative);
+        let status = match (base_entry, &result) {
+            (Some(_), None) | (None, None) if pre_existing => "删除",
+            (None, Some(_)) if !pre_existing => "新建",
+            (Some(base_hash), Some(result_hash)) if base_hash == result_hash => "内容未变",
+            _ => "修改",
+        };
+        out.push_str(&format!("\n## {relative}（{status}）\n"));
+        match base_entry {
+            Some(hash) => out.push_str(&format!("- 基线: cas://{hash}（可恢复）\n")),
+            None if pre_existing => out.push_str("- 基线: 不可用（恢复按冲突处理）\n"),
+            None => out.push_str("- 基线: （执行前不存在）\n"),
+        }
+        match &result {
+            Some(hash) => out.push_str(&format!("- 结果: sha256:{hash}\n")),
+            None => out.push_str("- 结果: （文件已删除）\n"),
+        }
+        // 行级摘录（文本可读时）。
+        let baseline_text = base_entry.and_then(|hash| cas.get_text(hash));
+        let result_text = std::fs::read(root.join(relative))
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        match (baseline_text, result_text) {
+            (Some(base_body), Some(result_body)) => {
+                let base_lines: Vec<&str> = base_body.lines().collect();
+                let result_lines: Vec<&str> = result_body.lines().collect();
+                let result_set: std::collections::HashSet<&str> =
+                    result_lines.iter().copied().collect();
+                let base_set: std::collections::HashSet<&str> =
+                    base_lines.iter().copied().collect();
+                let removed: Vec<&str> = base_lines
+                    .iter()
+                    .copied()
+                    .filter(|line| !result_set.contains(line))
+                    .take(DIFF_LINE_CAP)
+                    .collect();
+                let added: Vec<&str> = result_lines
+                    .iter()
+                    .copied()
+                    .filter(|line| !base_set.contains(line))
+                    .take(DIFF_LINE_CAP)
+                    .collect();
+                if removed.is_empty() && added.is_empty() {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "- 行级摘录（退化口径，各截 {} 行）\n",
+                    DIFF_LINE_CAP
+                ));
+                for line in removed {
+                    out.push_str(&format!("- {}\n", clip_line(line)));
+                }
+                for line in added {
+                    out.push_str(&format!("+ {}\n", clip_line(line)));
+                }
+            }
+            (None, Some(result_body)) if status == "新建" => {
+                out.push_str("- 新文件内容摘录\n");
+                for line in result_body.lines().take(DIFF_LINE_CAP) {
+                    out.push_str(&format!("+ {}\n", clip_line(line)));
+                }
+            }
+            (Some(base_body), None) if status == "删除" => {
+                out.push_str("- 被删除内容摘录\n");
+                for line in base_body.lines().take(DIFF_LINE_CAP) {
+                    out.push_str(&format!("- {}\n", clip_line(line)));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// 以「本次执行窗口内实际变更的文件」为界生成 ChangeSet。
 ///
 /// 基线三态（见模块文档）：内容在 CAS / 执行前不存在（新建）/ 基线未知。
@@ -585,6 +695,87 @@ mod tests {
             !base.entries.contains_key("docs/b.md"),
             "白名单外不得入基线"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 九期（一路）：执行前已脏的文件被 Agent 再次修改后——
+    // ① 必须进入 changed_files（由调用方检测，这里锁 build_change_set/恢复语义）；
+    // ② 基线哈希 = 执行前内容（脏内容），reject 恢复到「Agent 执行前状态」，
+    //    绝不能恢复到 Git HEAD 内容。
+    #[tokio::test]
+    async fn pre_dirty_file_recovers_to_pre_agent_content_not_head() {
+        let dir = unique_temp_dir("pre-dirty");
+        let root = dir.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let cas = test_cas(&dir);
+        let head_content = b"fn a() {} // HEAD"; // Git HEAD 内容（Agent 未参与）
+        let pre_agent_content = b"fn a() {} // user dirty edit"; // 执行前已脏内容
+        let agent_content = b"fn a() { /* agent fix */ }"; // Agent 执行后内容
+        std::fs::write(root.join("a.rs"), head_content).unwrap();
+        // 用户先手改（执行前已脏）→ Agent 拿到基线。
+        std::fs::write(root.join("a.rs"), pre_agent_content).unwrap();
+        let base = snapshot_allowed_paths(&root, &[], &cas).await;
+        assert_eq!(
+            base.entries["a.rs"],
+            CasStore::hash_of(pre_agent_content),
+            "基线必须是执行前内容，不是 HEAD"
+        );
+        // Agent 修改。
+        std::fs::write(root.join("a.rs"), agent_content).unwrap();
+        let change_set = build_change_set(
+            "team-x",
+            "s-impl",
+            "implementer",
+            &base,
+            &["a.rs".to_string()],
+            &root,
+            None,
+        );
+        assert_eq!(
+            change_set.base_hashes[0].sha256.as_deref(),
+            Some(CasStore::hash_of(pre_agent_content).as_str())
+        );
+        // reject → 回到执行前脏内容（不是 HEAD）。
+        let report = restore_change_set(&root, &change_set, &cas).await;
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert_eq!(std::fs::read(root.join("a.rs")).unwrap(), pre_agent_content);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn degraded_diff_summary_reports_new_modified_deleted() {
+        let dir = unique_temp_dir("degraded");
+        let root = dir.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let cas = test_cas(&dir);
+        std::fs::write(root.join("mod.rs"), "line1\nline2\n").unwrap();
+        std::fs::write(root.join("del.rs"), "gone\n").unwrap();
+        let mut base = WorkspaceBaseSnapshot::default();
+        base.complete = true;
+        let mod_hash = cas.put(b"line1\nline2\n").unwrap();
+        let del_hash = cas.put(b"gone\n").unwrap();
+        base.entries.insert("mod.rs".to_string(), mod_hash);
+        base.entries.insert("del.rs".to_string(), del_hash);
+        // Agent：改 mod.rs、删 del.rs、建 new.rs。
+        std::fs::write(root.join("mod.rs"), "line1\nline2-changed\nline3\n").unwrap();
+        std::fs::remove_file(root.join("del.rs")).unwrap();
+        std::fs::write(root.join("new.rs"), "brand new\n").unwrap();
+        let changed = vec![
+            "mod.rs".to_string(),
+            "del.rs".to_string(),
+            "new.rs".to_string(),
+        ];
+        let summary = degraded_diff_summary(&root, &base, &changed, &cas);
+        assert!(summary.contains("mod.rs（修改）"), "{summary}");
+        assert!(summary.contains("del.rs（删除）"));
+        assert!(summary.contains("new.rs（新建）"));
+        assert!(
+            summary.contains("+ line2-changed"),
+            "修改文件应有行级摘录：{summary}"
+        );
+        assert!(summary.contains("- gone"), "删除文件应有内容摘录");
+        assert!(summary.contains("+ brand new"));
+        assert!(summary.contains("cas://"), "基线应带 CAS 引用");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
