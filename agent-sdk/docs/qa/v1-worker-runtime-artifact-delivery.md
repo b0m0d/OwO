@@ -17,7 +17,7 @@
 | desktop/web 面板测试（5 文件） | ✅ **163/163**（action-center 17 / workswarm 55 / launcher 29 / artifact-review / product-eval） |
 | 真实模型冒烟 ①代码任务 | ✅（二路执行，详见 §3.1） |
 | 真实模型冒烟 ②研究/结构化 | ✅（收口补跑，详见 §3.2） |
-| `git diff --check` | ✅ 0（简报所列 3 处格式问题复核时已不存在：AGENTS-COORD.md 全文无行尾空格、workswarm.panel.test.mjs 以单换行结尾；收口时逐字节复检确认） |
+| `git diff --check` | ✅ 0（收口终检时简报所列 3 处**实际仍在树**：AGENTS-COORD.md ×2 行尾空格、workswarm.panel.test.mjs EOF 空行；已修复并复验 0——真实退出码） |
 
 ## 1. 交付面（四路汇总）
 
@@ -78,6 +78,29 @@ cargo run -q -p owo-agent-cli -- product-eval run --exec workswarm --agents mult
   - `evidence_refs: ["sources/source_a.md (…)", "sources/source_b.md (…)"]`——研究证据链真实落盘（两处源文件引用）；
   - `sha256` / `size_bytes` / `handoff` 全部落盘；`open_issues: []`。
 - 最终交付：`final_artifact_ref = team-…:leader:v1`（producer 链 approved head 语义）。
+
+### 3.2′ 冒烟②补充：真实服务器 HTTP 全栈交付链验证（第四路收口终验，2026-08-30）
+
+在 §3.2（product-eval 进程内管线）之外，另以真实 `owo-agent.exe serve`（端口 4199、
+仓库外临时 workspace、用户级凭据标准注入）走 **HTTP 全链路**建研究团队
+（`POST /teams`：`researcher`/agent，`budget.max_steps=8`；组队策略 auto→single）：
+
+- 约 2 分钟终态 `Succeeded`（`s-researcher` 1 次尝试通过，审计 `team.handoff` →
+  `team.succeeded`）；产物 `team-…:researcher:v1`（真实研究简报：定位/对比矩阵/性能
+  特征/要点结论/来源引用五节）。
+- `GET /artifacts/{id}/metadata`：`kind=research`、`validation.valid=true`、
+  `evidence_refs=5`（4 条官方文档 URL 带 note + 1 条工作区核查说明）、`handoff` 在场、
+  `review_state=draft`、`content_ref=cas://sha256:8b62e796…`、`size_bytes=3261`。
+- `GET /artifacts/{id}/content?raw=true`：3261 字节、`Content-Type: text/markdown;
+  charset=utf-8` + `Content-Disposition: attachment; filename="artifact.md"`；**字节级
+  SHA-256 与 metadata.sha256 完全一致**。
+- `GET /projects/{id}/delivery-manifest`：1 entry（research/markdown/v1）、
+  `approved=false`（Draft 待评审）、`validation`/`evidence_refs` 随行、
+  `content_url=/artifacts/{id}/content`。
+- **观察项（反馈八期一路 Prompt 编译器）**：模型声明产物 `kind` 为自由文本（本次为
+  中文分类）→ 交付文件名回退 `artifact.md`，且 `effective_format` 的 research 证据链
+  门控未触发（按 markdown 规则通过、门控仍有效）。八期应在角色提示词中把 `kind`
+  固定为模板 `artifact_kinds` 枚举值，使研究类交付稳定命中证据链门控。
 
 ### 3.3 证据留痕
 - 冒烟输出目录：`scratch-eval-runs/product-eval/`（gitignored，不入提交）。
