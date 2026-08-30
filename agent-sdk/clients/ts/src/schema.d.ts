@@ -20,22 +20,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/artifacts/{id}/metadata": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["artifactMetadata"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/artifacts/{id}/history": {
         parameters: {
             query?: never;
@@ -44,6 +28,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["artifactReviewHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/artifacts/{id}/metadata": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["artifactMetadata"];
         put?: never;
         post?: never;
         delete?: never;
@@ -190,6 +190,70 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["automationsToggle"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/change-sets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["changeSetDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/change-sets/{id}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["changeSetAccept"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/change-sets/{id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["changeSetReject"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/change-sets/{id}/revert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["changeSetRevert"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1182,6 +1246,86 @@ export interface paths {
         get: operations["health"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/human/inbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["humanInboxList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/human/inbox/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["humanInboxItem"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/human/inbox/{id}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["humanInboxClaim"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/human/inbox/{id}/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["humanInboxRelease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/human/inbox/{id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["humanInboxResolve"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2648,6 +2792,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/projects/{id}/workspace/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["projectWorkspaceChanges"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/projects/{id}/workspace/git-status": {
         parameters: {
             query?: never;
@@ -3496,6 +3656,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams/{id}/change-sets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["teamChangeSets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/teams/{id}/diagnostic": {
         parameters: {
             query?: never;
@@ -3992,182 +4168,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/projects/{id}/workspace/changes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["projectWorkspaceChanges"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/teams/{id}/change-sets": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["teamChangeSets"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/change-sets/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["changeSetDetail"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/change-sets/{id}/accept": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["changeSetAccept"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/change-sets/{id}/reject": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["changeSetReject"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/change-sets/{id}/revert": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["changeSetRevert"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/human/inbox": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["humanInboxList"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/human/inbox/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["humanInboxItem"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/human/inbox/{id}/claim": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["humanInboxClaim"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/human/inbox/{id}/release": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["humanInboxRelease"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/human/inbox/{id}/resolve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["humanInboxResolve"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4391,7 +4391,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 七期（第三路）：Artifact 下载/预览载荷（content = 原始文本，非 JSON 编码）；接线前 404（未注册），UI 容错读取 */
+            /** @description Artifact ä¸è½½/é¢è§è½½è·ï¼content = åå§ææ¬ï¼é JSON ç¼ç ï¼ */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4399,59 +4399,11 @@ export interface operations {
                 content: {
                     "application/json": {
                         artifact_id: string;
-                        /** @enum {string} */
-                        format: "json" | "csv" | "research" | "markdown";
-                        sha256: string;
-                        size_bytes: number;
                         content: string;
-                    };
-                };
-            };
-            /** @description artifact not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    artifactMetadata: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 七期（第三路）：Artifact 元数据：格式校验结果 + SHA256 + 证据引用（handoff 可选，位于既有 handoff 键下） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        artifact_id: string;
-                        team_id: string;
-                        kind: string;
                         /** @enum {string} */
                         format: "json" | "csv" | "research" | "markdown";
-                        version: number;
                         sha256: string;
                         size_bytes: number;
-                        validation: {
-                            format: string;
-                            valid: boolean;
-                            reason?: string | null;
-                        };
-                        evidence_refs: string[];
-                        /** @description 可选：WorkerOutputV1 handoff 记录（谁完成/遗留问题/下一步建议） */
-                        handoff?: {
-                            [key: string]: unknown;
-                        } | null;
                     };
                 };
             };
@@ -4494,6 +4446,54 @@ export interface operations {
                         reviews: components["schemas"]["ArtifactReviewRecord"][];
                         superseded_by?: string | null;
                         supersedes_artifact_id?: string | null;
+                        version: number;
+                    };
+                };
+            };
+            /** @description artifact not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    artifactMetadata: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Artifact åæ°æ®ï¼æ ¼å¼æ ¡éªç»æ + SHA256 + è¯æ®å¼ç¨ï¼handoff å¯éï¼ä½äºæ¢æ handoff é®ä¸ï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        artifact_id: string;
+                        evidence_refs: string[];
+                        /** @enum {string} */
+                        format: "json" | "csv" | "research" | "markdown";
+                        /** @description å¯éï¼WorkerOutputV1 handoff è®°å½ï¼è°å®æ/éçé®é¢/ä¸ä¸æ­¥å»ºè®®ï¼ */
+                        handoff?: {
+                            [key: string]: unknown;
+                        } | null;
+                        kind: string;
+                        sha256: string;
+                        size_bytes: number;
+                        team_id: string;
+                        validation: {
+                            format: string;
+                            reason?: string | null;
+                            valid: boolean;
+                        };
                         version: number;
                     };
                 };
@@ -4810,6 +4810,198 @@ export interface operations {
         responses: {
             /** @description enabled state */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    changeSetDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description åä¸ª ChangeSetï¼å½¢ç¶å teamChangeSets.change_sets åç´ ï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        change_set_id: string;
+                        changed_files?: string[];
+                        created_at?: string;
+                        diff_ref?: string | null;
+                        resolved_at?: string | null;
+                        role?: string;
+                        /** @enum {string} */
+                        status: "pending_review" | "accepted" | "rejected" | "reverted" | "conflicted";
+                        step_id?: string;
+                        team_id?: string;
+                    } & {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description change set not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    changeSetAccept: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description å¹ç­é®ï¼åé®éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ */
+                    idempotency_key: string;
+                };
+            };
+        };
+        responses: {
+            /** @description æ¥ååæ´ï¼å¹ç­éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ï¼ï¼accept ä¿çä¿®æ¹å¹¶è§£é¤è¯¥ ChangeSet å¯¹æç» approved head çé»æ­ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        change_set?: {
+                            [key: string]: unknown;
+                        };
+                        replayed?: boolean;
+                    } & {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description change set not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description å·²ç»æï¼è·¨å¨ä½ï¼ææä»¶è¢«ç¨æ·åæ¬¡ä¿®æ¹ï¼status=conflictedï¼ä¸è¦çç¨æ·æ°åå®¹ï¼ */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    changeSetReject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description å¹ç­é®ï¼åé®éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ */
+                    idempotency_key: string;
+                };
+            };
+        };
+        responses: {
+            /** @description æç»åæ´ï¼å¹ç­éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ï¼ï¼reject ä»æ¢å¤è¯¥ ChangeSet ä¿®æ¹çæä»¶ï¼æ°å»ºæä»¶=å é¤æ¢å¤ï¼ï¼æ¢å¤åéæä»¶æ¯å¯¹å½ååå¸ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        change_set?: {
+                            [key: string]: unknown;
+                        };
+                        replayed?: boolean;
+                    } & {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description change set not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description æä»¶è¢«ç¨æ·åæ¬¡ä¿®æ¹ï¼status=conflictedï¼ä¸è¦çç¨æ·æ°åå®¹ï¼æå·²ç»æè·¨å¨ä½ */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    changeSetRevert: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description å¹ç­é®ï¼åé®éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ */
+                    idempotency_key: string;
+                };
+            };
+        };
+        responses: {
+            /** @description å®å¨æ¤éï¼å¹ç­éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ï¼ï¼ä»æ¢å¤è¯¥ ChangeSet ä¿®æ¹çæä»¶ï¼æ¢å¤åæ¯è¾å½åæä»¶åå¸ï¼=ç»æåå¸âæ¢å¤ã=åºçº¿åå¸âå·²æ¢å¤è·³è¿ãå¦å 409 + status=conflicted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        change_set?: {
+                            [key: string]: unknown;
+                        };
+                        replayed?: boolean;
+                    } & {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description change set not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description æä»¶è¢«ç¨æ·åæ¬¡ä¿®æ¹ï¼status=conflictedï¼ä¸è¦çç¨æ·æ°åå®¹ï¼æå·²ç»æè·¨å¨ä½ */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6508,6 +6700,264 @@ export interface operations {
         responses: {
             /** @description ok */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    humanInboxList: {
+        parameters: {
+            query?: {
+                kind?: "human_result" | "artifact_review" | "change_set" | "step_retry";
+                status?: "open" | "claimed" | "resolved";
+                team_id?: string;
+                project_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description ç»ä¸å¾ååè¡¨ï¼items åç´ å« item_id/kind/status/assignee/team_id/project_id/target_id/summary/created_at/claimed_at/resolved_at/detailï¼detail ä¸ºæ kind çé¢åä¸ä¸æï¼å¼æ¾å¯¹è±¡ï¼ï¼counts = æ kind è®¡æ°ï¼æå¡éå¯åæªå¤çäºé¡¹æ¢å¤ï¼å·²è§£å³äºé¡¹ä¸ååºç° */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        counts: {
+                            [key: string]: unknown;
+                        };
+                        items: ({
+                            assignee?: string | null;
+                            claimed_at?: string | null;
+                            created_at?: string;
+                            detail?: {
+                                [key: string]: unknown;
+                            };
+                            item_id?: string;
+                            /** @enum {string} */
+                            kind?: "human_result" | "artifact_review" | "change_set" | "step_retry";
+                            project_id?: string;
+                            resolved_at?: string | null;
+                            /** @enum {string} */
+                            status?: "open" | "claimed" | "resolved";
+                            summary?: string;
+                            target_id?: string;
+                            team_id?: string;
+                        } & {
+                            [key: string]: unknown;
+                        })[];
+                    };
+                };
+            };
+        };
+    };
+    humanInboxItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description åæ¡å¾åï¼å½¢ç¶å humanInboxList.items åç´ ï¼ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        item?: {
+                            [key: string]: unknown;
+                        };
+                    } & {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description å¾åä¸å­å¨ */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    humanInboxClaim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    user: string;
+                };
+            };
+        };
+        responses: {
+            /** @description é¢åæåï¼åäººéå¤é¢åå¹ç­è¿åï¼{item} */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description user ä¸ºç©º */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description å¾åä¸å­å¨ */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description å·²è¢«å¶ä»ç¨æ·é¢åï¼åä¸å¾åä»åè®¸ä¸ä¸ªç¨æ·å¤çï¼ */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    humanInboxRelease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    user: string;
+                };
+            };
+        };
+        responses: {
+            /** @description éæ¾æåï¼ä»é¢åèå¯éæ¾ï¼{item} */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description user ä¸ºç©º */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description å¾åä¸å­å¨ */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description å·²è¢«å¶ä»ç¨æ·é¢åæå½åç¶æä¸åè®¸ */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    humanInboxResolve: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description change_set
+                     * @enum {string}
+                     */
+                    action?: "accept" | "reject";
+                    comment?: string;
+                    /**
+                     * @description artifact_review
+                     * @enum {string}
+                     */
+                    decision?: "approve" | "request_changes" | "reject";
+                    expected_version?: number;
+                    note?: string;
+                    /** @description å¹ç­é®ï¼å¼å®¹å«å idempotency_keyï¼ */
+                    resolution_id?: string;
+                    /** @description human_result ç»æææ¬ */
+                    result?: string;
+                    reviewer?: string;
+                    /** @description å¤çäººï¼å®¡è®¡/é¢åæ ¡éªï¼review ç±»ç¼ºçå¼ä½ reviewerï¼ */
+                    user?: string;
+                } & {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description æ kind åæ´¾å°æ¢æé¢åè½åï¼Human ç»ææäº¤ / Artifact è¯å®¡ / ChangeSet accept/reject / Step retryï¼ä¸ç»è¿åæéä¸å¹ç­æ£æ¥ï¼åè¿å {resolved:true, replayed, item_id, kind, result}ï¼éæ¾å¹ç­ 200 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        item_id?: string;
+                        kind?: string;
+                        replayed?: boolean;
+                        resolved?: boolean;
+                        result?: {
+                            [key: string]: unknown;
+                        };
+                    } & {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description è¯·æ±ä½ä¸ kind ä¸å¹é */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description å¾åä¸å­å¨ */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description æªè¢«é¢å/å·²è¢«ä»äººé¢å/é¢åå²çªï¼å¦ artifact å·²ç»æï¼ */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8630,24 +9080,24 @@ export interface operations {
                         artifacts: ({
                             artifact_id?: string;
                             content_ref?: string;
+                            /** @description ä¸æï¼ä¸è·¯ï¼additiveï¼è¯æ®å¼ç¨ */
+                            evidence_refs?: string[];
                             kind?: string;
                             preview?: string;
                             producer?: string;
                             review_state?: string;
-                            supersedes_artifact_id?: string | null;
-                            version?: number;
-                            /** @description 七期（三路）additive：证据引用 */
-                            evidence_refs?: string[];
-                            /** @description 七期（三路）additive：内容 SHA256（hex） */
+                            /** @description ä¸æï¼ä¸è·¯ï¼additiveï¼åå®¹ SHA256ï¼hexï¼ */
                             sha256?: string;
-                            /** @description 七期（三路）additive：内容字节数 */
+                            /** @description ä¸æï¼ä¸è·¯ï¼additiveï¼åå®¹å­èæ° */
                             size_bytes?: number;
-                            /** @description 七期（三路）additive：格式校验 {format, valid, reason?} */
+                            supersedes_artifact_id?: string | null;
+                            /** @description ä¸æï¼ä¸è·¯ï¼additiveï¼æ ¼å¼æ ¡éª {format, valid, reason?} */
                             validation?: {
                                 format?: string;
                                 reason?: string | null;
                                 valid?: boolean;
                             };
+                            version?: number;
                         } & {
                             [key: string]: unknown;
                         })[];
@@ -8708,26 +9158,26 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 七期（第三路）：项目交付清单（approved 版本概览 + 内容端点相对路径 content_url，供下载/校验）；接线前 404（未注册），UI 容错读取 */
+            /** @description é¡¹ç®äº¤ä»æ¸åï¼approved çæ¬æ¦è§ + åå®¹ç«¯ç¹ç¸å¯¹è·¯å¾ content_urlï¼ä¾ä¸è½½/æ ¡éªï¼ */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        project_id: string;
                         generated_at: string;
                         manifest: {
+                            approved: boolean;
                             artifact_id: string;
-                            kind: string;
+                            /** @description åå®¹ç«¯ç¹ç¸å¯¹è·¯å¾ï¼GET /artifacts/{id}/contentï¼ */
+                            content_url: string;
                             format: string;
-                            version: number;
+                            kind: string;
                             sha256: string;
                             size_bytes: number;
-                            approved: boolean;
-                            /** @description 内容端点相对路径（GET /artifacts/{id}/content） */
-                            content_url: string;
+                            version: number;
                         }[];
+                        project_id: string;
                     };
                 };
             };
@@ -8815,6 +9265,58 @@ export interface operations {
                 content?: never;
             };
             /** @description project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    projectWorkspaceChanges: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description ä¸æï¼äºè·¯ wireï¼additiveï¼Worker ä»£ç åæ´è¿½è¸ªââchanged_files = å¨é¨è®°å½çªå£æ°å¢åæ´æä»¶ï¼å»éä¿åºï¼ï¼diff_summary = æè¿ä¸æ¡è®°å½ç git diff --stat æè¦ï¼has_violation = æ¯å¦å­å¨ç½ååè¶çè®°å½ï¼scope_violationï¼ï¼records = éæ­¥éª¤è®°å½ï¼è§è²/æ­¥éª¤/æ¶å»/åæ´æä»¶/diff ref/è¶çåå ï¼ï¼æ è®°å½ï¼åªè¯»å¢é/æªæ§è¡åè§è²ï¼è¿åç©º recordsï¼UI å¨å­æ®µå®¹éè¯»å */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        changed_files: string[];
+                        /** @description æè¿ä¸æ¡è®°å½ç git diff --stat ææ¬ï¼æ è®°å½ä¸ºç©ºä¸² */
+                        diff_summary: string;
+                        /** @description æè¿ä¸æ¡è®°å½æ¯å¦åå¾ææ git å¿«ç§ï¼æ è®°å½ä¸º false */
+                        git: boolean;
+                        has_violation: boolean;
+                        records: ({
+                            /** @description è®°å½æ¶å»ï¼Unix æ¯«ç§ï¼ */
+                            at?: number;
+                            changed_files?: string[];
+                            /** @description diff è¡¥ä¸æä»¶ç¸å¯¹ run_dir è·¯å¾ï¼é git / æ åæ´ä¸º null */
+                            diff_ref?: string | null;
+                            diff_summary?: string;
+                            git?: boolean;
+                            role?: string;
+                            step?: string;
+                            /** @description ç½ååè¶çåå ï¼scope_violationï¼ï¼null = éè¿ */
+                            violation?: string | null;
+                        } & {
+                            [key: string]: unknown;
+                        })[];
+                        team_id: string;
+                    };
+                };
+            };
+            /** @description project / team not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -10093,7 +10595,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description team + task view + audit tail; R2 additive: interrupted; 七期 additive（二/三路 wire）: worker_profiles / write_lease / changes（字段可能位于响应顶层或 team 对象内，UI 双路径容错读取） */
+            /** @description team + task view + audit tail; R2 additive: interrupted */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10105,30 +10607,23 @@ export interface operations {
                             event?: string;
                             ts?: string;
                         }[];
-                        /** @description R2ï¼ä¸­æ­æ è®°ï¼è¯·æ±æ¶ååä¸æ¬¡å¹ç­ä¸­æ­è¯å«ï¼ */
-                        interrupted: boolean;
-                        /** @description ä»»å¡è§å¾ï¼æ­¥éª¤ Ã ç¶æï¼ */
-                        tasks: Record<string, never>;
-                        /** @description TeamRun（透传）；七期 additive 字段（worker_profiles/write_lease/changes，见顶层同名属性）亦可能位于 team 对象内 */
-                        team: Record<string, never>;
-                        /** @description 七期（二路 wire）additive：文件变更列表（与既有 workspace git-status 路由可互用；diff 预览容错读 diff / diff_content 双键） */
+                        /** @description ä¸æï¼äºè·¯ wireï¼additiveï¼æä»¶åæ´åè¡¨ï¼ä¸æ¢æ workspace git-status è·¯ç±å¯äºç¨ï¼diff é¢è§å®¹éè¯» diff / diff_content åé®ï¼ */
                         changes?: {
                             added_lines?: number | null;
                             deleted_lines?: number | null;
-                            /** @description 可选：该文件的 unified diff（UI 容错读 diff / diff_content 双键） */
+                            /** @description å¯éï¼è¯¥æä»¶ç unified diffï¼UI å®¹éè¯» diff / diff_content åé®ï¼ */
                             diff?: string | null;
                             path: string;
                             /** @enum {string} */
                             state: "added" | "modified" | "deleted";
                         }[] | null;
-                        /** @description 七期（二路 wire）additive：单一写租约（null = 未持有；取消中团队状态 stopping/stopped 渲染为 正在停止/已停止） */
-                        write_lease?: {
-                            acquired_at_ms: number;
-                            holder_role: string;
-                            holder_step_id: string;
-                            released_at_ms?: number | null;
-                        } | null;
-                        /** @description 七期（二路 wire）additive：按角色 WorkerProfile（工具权限 + 调用预算）；旧记录缺失 → UI 缺省空/false/null */
+                        /** @description R2ï¼ä¸­æ­æ è®°ï¼è¯·æ±æ¶ååä¸æ¬¡å¹ç­ä¸­æ­è¯å«ï¼ */
+                        interrupted: boolean;
+                        /** @description ä»»å¡è§å¾ï¼æ­¥éª¤ Ã ç¶æï¼ */
+                        tasks: Record<string, never>;
+                        /** @description TeamRunï¼éä¼ ï¼ */
+                        team: Record<string, never>;
+                        /** @description ä¸æï¼äºè·¯ wireï¼additiveï¼æè§è² WorkerProfileï¼å·¥å·æé + è°ç¨é¢ç®ï¼ï¼æ§è®°å½ç¼ºå¤± â UI ç¼ºçç©º/false/null */
                         worker_profiles?: {
                             can_run_command: boolean;
                             can_use_browser: boolean;
@@ -10138,10 +10633,74 @@ export interface operations {
                             visible_tools: string[];
                             write_allowed_paths?: string[] | null;
                         }[] | null;
+                        /** @description ä¸æï¼äºè·¯ wireï¼additiveï¼åä¸åç§çº¦ï¼null = æªææï¼åæ¶ä¸­å¢éç¶æ stopping/stopped æ¸²æä¸º æ­£å¨åæ­¢/å·²åæ­¢ï¼ */
+                        write_lease?: {
+                            acquired_at_ms: number;
+                            holder_role: string;
+                            holder_step_id: string;
+                            released_at_ms?: number | null;
+                        } | null;
                     };
                 };
             };
             /** @description unknown team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    teamChangeSets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description å«æï¼äºè·¯ wireï¼ï¼å¢éç ChangeSet åè¡¨ââchange_set åç´ å« change_set_id/team_id/step_id/role/base_hashes/result_hashes/changed_files/diff_ref/status/decisions/created_at/resolved_atï¼status â pending_review|accepted|rejected|reverted|conflictedï¼æªæ¥å ChangeSet é»æ­è¯¥å¢éæç» approved headï¼change_set_store::approval_block_for_team é¨æ§ï¼ï¼UI å¨å­æ®µå®¹éè¯»å */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        change_sets: ({
+                            /** @description æ§è¡åæä»¶åå®¹åå¸ï¼åå®¹è¿ CASï¼ */
+                            base_hashes?: {
+                                [key: string]: unknown;
+                            };
+                            change_set_id?: string;
+                            changed_files?: string[];
+                            created_at?: string;
+                            /** @description å¹ç­å³å®è®°å½ï¼accept/reject/revert åªå¢ä¸æ¹ï¼ */
+                            decisions?: {
+                                [key: string]: unknown;
+                            }[];
+                            diff_ref?: string | null;
+                            resolved_at?: string | null;
+                            /** @description æ§è¡åæä»¶åå®¹åå¸ */
+                            result_hashes?: {
+                                [key: string]: unknown;
+                            };
+                            role?: string;
+                            /** @enum {string} */
+                            status?: "pending_review" | "accepted" | "rejected" | "reverted" | "conflicted";
+                            step_id?: string;
+                            team_id?: string;
+                        } & {
+                            [key: string]: unknown;
+                        })[];
+                        team_id: string;
+                    };
+                };
+            };
+            /** @description team not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -10897,548 +11456,6 @@ export interface operations {
         responses: {
             /** @description active rule model + candidates + per-signature samples + calibration report */
             200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    projectWorkspaceChanges: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 七期（二路 wire）additive：Worker 代码变更追踪——changed_files = 全部记录窗口新增变更文件（去重保序）；diff_summary = 最近一条记录的 git diff --stat 摘要；has_violation = 是否存在白名单越界记录（scope_violation）；records = 逐步骤记录（角色/步骤/时刻/变更文件/diff ref/越界原因）；无记录（只读团队/未执行写角色）返回空 records，UI 全字段容错读取 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        team_id: string;
-                        /** @description 最近一条记录是否取得有效 git 快照；无记录为 false */
-                        git: boolean;
-                        changed_files: string[];
-                        /** @description 最近一条记录的 git diff --stat 文本；无记录为空串 */
-                        diff_summary: string;
-                        has_violation: boolean;
-                        records: ({
-                            role?: string;
-                            step?: string;
-                            /** @description 记录时刻（Unix 毫秒） */
-                            at?: number;
-                            git?: boolean;
-                            changed_files?: string[];
-                            diff_summary?: string;
-                            /** @description diff 补丁文件相对 run_dir 路径；非 git / 无变更为 null */
-                            diff_ref?: string | null;
-                            /** @description 白名单越界原因（scope_violation）；null = 通过 */
-                            violation?: string | null;
-                        } & {
-                            [key: string]: unknown;
-                        })[];
-                    };
-                };
-            };
-            /** @description project / team not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    teamChangeSets: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 八期（二路）：团队 ChangeSet 列表（写角色执行后自动生成；未接受 ChangeSet 阻断最终 approved head） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        team_id: string;
-                        change_sets: ({
-                            change_set_id: string;
-                            team_id?: string;
-                            step_id?: string;
-                            role?: string;
-                            changed_files?: string[];
-                            diff_ref?: string | null;
-                            /** @enum {string} */
-                            status: "pending_review" | "accepted" | "rejected" | "reverted" | "conflicted";
-                            created_at?: string;
-                            resolved_at?: string | null;
-                        } & {
-                            [key: string]: unknown;
-                        })[];
-                    };
-                };
-            };
-            /** @description team not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    changeSetDetail: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 单个 ChangeSet */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        change_set_id: string;
-                        team_id?: string;
-                        step_id?: string;
-                        role?: string;
-                        changed_files?: string[];
-                        diff_ref?: string | null;
-                        /** @enum {string} */
-                        status: "pending_review" | "accepted" | "rejected" | "reverted" | "conflicted";
-                        created_at?: string;
-                        resolved_at?: string | null;
-                    } & {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description change set not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    changeSetAccept: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 接受变更（幂等重放 replayed:true 零副作用；解除 approved head 阻断） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        change_set?: {
-                            change_set_id: string;
-                            team_id?: string;
-                            step_id?: string;
-                            role?: string;
-                            changed_files?: string[];
-                            diff_ref?: string | null;
-                            /** @enum {string} */
-                            status: "pending_review" | "accepted" | "rejected" | "reverted" | "conflicted";
-                            created_at?: string;
-                            resolved_at?: string | null;
-                        } & {
-                            [key: string]: unknown;
-                        };
-                        replayed?: boolean;
-                    } & {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description change set not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description 文件被用户再次修改（status=conflicted，不覆盖用户新内容）或已终态跨动作 */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    changeSetReject: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 拒绝变更（仅恢复该 ChangeSet 修改的文件；幂等重放零副作用） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        change_set?: {
-                            change_set_id: string;
-                            team_id?: string;
-                            step_id?: string;
-                            role?: string;
-                            changed_files?: string[];
-                            diff_ref?: string | null;
-                            /** @enum {string} */
-                            status: "pending_review" | "accepted" | "rejected" | "reverted" | "conflicted";
-                            created_at?: string;
-                            resolved_at?: string | null;
-                        } & {
-                            [key: string]: unknown;
-                        };
-                        replayed?: boolean;
-                    } & {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description change set not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description 文件被用户再次修改或已终态跨动作 */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    changeSetRevert: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 安全撤销（恢复前逐文件比较当前哈希：=结果哈希→恢复、=基线哈希→跳过、否则 409 conflicted） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        change_set?: {
-                            change_set_id: string;
-                            team_id?: string;
-                            step_id?: string;
-                            role?: string;
-                            changed_files?: string[];
-                            diff_ref?: string | null;
-                            /** @enum {string} */
-                            status: "pending_review" | "accepted" | "rejected" | "reverted" | "conflicted";
-                            created_at?: string;
-                            resolved_at?: string | null;
-                        } & {
-                            [key: string]: unknown;
-                        };
-                        replayed?: boolean;
-                    } & {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description change set not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description 文件被用户再次修改或已终态跨动作 */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    humanInboxList: {
-        parameters: {
-            query?: {
-                kind?: "human_result" | "artifact_review" | "change_set" | "step_retry";
-                status?: "open" | "claimed" | "resolved";
-                team_id?: string;
-                project_id?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 统一待办列表（四类：human_result/artifact_review/change_set/step_retry；服务重启恢复、已解决不再出现） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: {
-                            [key: string]: unknown;
-                        }[];
-                        counts: {
-                            [key: string]: unknown;
-                        };
-                    };
-                };
-            };
-        };
-    };
-    humanInboxItem: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 单条待办 {item} */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        item?: {
-                            [key: string]: unknown;
-                        };
-                    } & {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description 待办不存在 */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    humanInboxClaim: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    user: string;
-                };
-            };
-        };
-        responses: {
-            /** @description 领取成功（同人重复领取幂等）{item} */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description user 为空 */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description 待办不存在 */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description 已被其他用户领取 */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    humanInboxRelease: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    user: string;
-                };
-            };
-        };
-        responses: {
-            /** @description 释放成功（仅领取者）{item} */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description user 为空 */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description 待办不存在 */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description 已被其他用户领取或状态不允许 */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    humanInboxResolve: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    /** @description 处理人（审计/领取校验；review 类缺省兼作 reviewer） */
-                    user?: string;
-                    /** @description 幂等键（兼容别名 idempotency_key） */
-                    resolution_id?: string;
-                    /**
-                     * @description artifact_review
-                     * @enum {string}
-                     */
-                    decision?: "approve" | "request_changes" | "reject";
-                    /**
-                     * @description change_set
-                     * @enum {string}
-                     */
-                    action?: "accept" | "reject";
-                    /** @description human_result 结果文本 */
-                    result?: string;
-                    reviewer?: string;
-                    comment?: string;
-                    expected_version?: number;
-                    note?: string;
-                } & {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description 按 kind 分派到既有领域能力（不绕过原权限与幂等检查）{resolved, replayed, item_id, kind, result} */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        resolved?: boolean;
-                        replayed?: boolean;
-                        item_id?: string;
-                        kind?: string;
-                        result?: {
-                            [key: string]: unknown;
-                        };
-                    } & {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description 请求体与 kind 不匹配 */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description 待办不存在 */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description 未被领取/已被他人领取/领域冲突 */
-            409: {
                 headers: {
                     [name: string]: unknown;
                 };

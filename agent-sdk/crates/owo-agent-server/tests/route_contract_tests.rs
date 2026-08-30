@@ -294,10 +294,10 @@ fn sample_body(path: &str) -> Option<&'static str> {
         "/datasets/{id}/manifest" => Some(r#"{}"#),
         "/model-candidates" => Some(r#"{"model_id":"ct-model","model_version":"0.0.1"}"#),
         "/model-candidates/{id}/promote" => Some(r#"{"ack":true,"reason":"契约测试晋升"}"#),
-        // 八期（第二路）：ChangeSet 动作——占位 id → 404（资源缺失），最小体。
-        "/change-sets/{id}/accept" => Some(r#"{}"#),
-        "/change-sets/{id}/reject" => Some(r#"{}"#),
-        "/change-sets/{id}/revert" => Some(r#"{}"#),
+        // 八期（第二路）：ChangeSet 动作——idempotency_key 必填；占位 id → 404（资源缺失）。
+        "/change-sets/{id}/accept" => Some(r#"{"idempotency_key":"contract-ct"}"#),
+        "/change-sets/{id}/reject" => Some(r#"{"idempotency_key":"contract-ct"}"#),
+        "/change-sets/{id}/revert" => Some(r#"{"idempotency_key":"contract-ct"}"#),
         // 八期（第三路）：Human Inbox 领取/释放/处理——user 必填；占位 id → 404（资源缺失）。
         "/human/inbox/{id}/claim" => Some(r#"{"user":"contract-ct"}"#),
         "/human/inbox/{id}/release" => Some(r#"{"user":"contract-ct"}"#),
