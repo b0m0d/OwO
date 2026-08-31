@@ -33,3 +33,6 @@ scratch-*/
 tmp_path_keys.txt
 # 本机个人启动变体（凭据依旧只走环境变量，永不入库）
 /agent-sdk/scripts/dev-glm.local.ps1
+
+# v1 收尾（十期一路）：统一初始化生成的构建信息（版本/commit/dirty），运行时产物不入库
+/agent-sdk/build-info.json
