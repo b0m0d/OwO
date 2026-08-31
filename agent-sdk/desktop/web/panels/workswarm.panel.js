@@ -179,6 +179,7 @@
       changesRemote: null, // 二路 changes 端点归一视图（changesRemoteView）；null=未拉取/404 容错
       // —— 八期：ChangeSet 审批闭环（二路交接；端点未上线时全部容错为空态） ——
       changeSets: null, // GET /teams/{id}/change-sets 归一列表（changeSetsView）；null=未拉取/404
+      csApprovalBlock: null, // 九期：{blocked, reason} 批准门控（blocked 时禁用 Artifact 批准）
       csBusy: {}, // key(change_set_id:action) -> true（accept/reject/revert 提交锁）
       csResults: {}, // change_set_id -> { ok, text }（动作结果行）
     };
@@ -1913,6 +1914,7 @@
             step_id: x.step_id == null ? "" : String(x.step_id),
             role: x.role == null ? "" : String(x.role),
             changed_files: Array.isArray(x.changed_files) ? x.changed_files.map(String) : [],
+            conflicts: Array.isArray(x.conflicts) ? x.conflicts.map(String) : [],
             diff_ref: x.diff_ref == null ? null : String(x.diff_ref),
             status: normCsStatus(x.status) || "pending_review",
             created_at: x.created_at == null ? "" : String(x.created_at),
@@ -1937,6 +1939,34 @@
       return '<span class="owo-ws-badge ' + cls + '">' + esc(CS_STATUS_CN[st] || st || "未知") + "</span>";
     }
 
+    // 九期：状态行明确口径（与审批门控语义一致，服务端 approval_block_reason 同源）。
+    function csStatusHint(status) {
+      var st = normCsStatus(status);
+      if (st === "pending_review") return "等待接受或拒绝";
+      if (st === "conflicted") return "存在冲突，禁止批准（处理后可重试接受/拒绝）";
+      return "";
+    }
+
+    // 九期：批准门控视图（GET /teams/{id}/change-sets 的 approval_blocked/reason）。
+    function approvalBlockView(payload) {
+      return {
+        blocked: !!(payload && payload.approval_blocked),
+        reason: String((payload && payload.approval_block_reason) || ""),
+      };
+    }
+
+    // 九期：批准门控横幅——ChangeSet 未处理（pending_review/conflicted）时，该团队
+    // 代码 Artifact 可评审但不能成为最终 approved head（批准按钮同时被禁用）。
+    function approvalBlockBanner() {
+      var b = state.csApprovalBlock;
+      if (!b || !b.blocked) return "";
+      return (
+        '<div class="hint" data-cs-approval-block="1">⚠ 批准被门控阻断：' +
+        esc(b.reason || "存在未处理的 ChangeSet（待审批/冲突）——先接受或拒绝后才能批准 Artifact") +
+        "</div>"
+      );
+    }
+
     function changeSetsHtml(list) {
       list = list || [];
       if (!list.length) {
@@ -1945,8 +1975,10 @@
       var rows = list
         .map(function (c) {
           var st = state.csResults[c.change_set_id];
+          // 九期：conflicted 同样提供动作（恢复被拒绝后人工处理完可重试决定）。
+          var actionable = c.status === "pending_review" || c.status === "conflicted";
           var actions = "";
-          if (c.status === "pending_review") {
+          if (actionable) {
             actions = [
               ["accept", "接受"],
               ["reject", "拒绝"],
@@ -1962,6 +1994,7 @@
               })
               .join("");
           }
+          var statusHint = csStatusHint(c.status);
           return (
             '<div class="owo-ws-chg-row">' +
             changeSetBadge(c.status) +
@@ -1969,10 +2002,14 @@
             '<span class="hint">' + esc(c.role || "—") + " · 步骤 " + esc(c.step_id || "—") +
             (c.created_at ? " · " + esc(String(c.created_at).replace("T", " ").slice(0, 19)) : "") +
             (c.diff_ref ? " · patch " + esc(c.diff_ref) : "") + "</span>" +
+            (statusHint ? '<span class="hint" data-cs-status-hint="' + esc(c.status) + '">（' + esc(statusHint) + "）</span>" : "") +
             "</div>" +
             (c.changed_files.length
               ? '<div class="hint">' + c.changed_files.map(esc).join("、") + "</div>"
               : '<div class="hint">（无变更文件清单）</div>') +
+            (c.status === "conflicted" && c.conflicts.length
+              ? '<div class="hint" data-cs-conflicts="' + esc(c.change_set_id) + '">⚠ 冲突文件（用户已修改，恢复未覆盖新内容）：' + c.conflicts.map(esc).join("、") + "</div>"
+              : "") +
             (actions ? '<div class="owo-ac-actions">' + actions + "</div>" : "") +
             '<div class="owo-ac-result' + (st ? (st.ok ? " ok" : " bad") : "") +
             '" data-cs-result="' + esc(c.change_set_id) + '" aria-live="polite">' +
@@ -1981,7 +2018,9 @@
           );
         })
         .join("");
-      return '<div class="owo-ws-chg-list">' + rows + "</div>";
+      // 九期：门控横幅置顶（blocked 时 Artifact 批准按钮同步禁用）。
+      var banner = approvalBlockBanner();
+      return '<div class="owo-ws-chg-list">' + banner + rows + "</div>";
     }
 
     // 重绘 + 事件委托（容器标记防重复绑定；detail 重建后容器为新元素、标记自然清零）。
@@ -2001,16 +2040,20 @@
     }
 
     // 拉取（详情打开时一次）：404/失败容错为 null（端点未上线 → 空态，不阻塞详情）。
+    // 九期：同时捕获批准门控（approval_blocked/approval_block_reason）供横幅与
+    // Artifact 批准按钮禁用使用。
     function loadChangeSets() {
       var tid = state.current;
       if (!tid) return Promise.resolve();
       return H.get("/teams/" + encodeURIComponent(tid) + "/change-sets")
         .then(function (d) {
           state.changeSets = changeSetsView(d);
+          state.csApprovalBlock = approvalBlockView(d);
           paintChangeSets();
         })
         .catch(function () {
           state.changeSets = null;
+          state.csApprovalBlock = null;
         });
     }
 
@@ -2025,8 +2068,31 @@
       }
     }
 
+    // 幂等键（九期修复）：服务端要求请求体携带 idempotency_key（缺失 → 422，
+    // 八期 UI 一直发空体属隐性缺陷）。每次点击生成新键：提交锁保证双击只发一次；
+    // 失败后再次点击是新一轮真实决定（conflicted 处理完后重试恢复正是期望行为）。
+    var csIdemSeq = 0;
+    function csIdemKey(csId, action) {
+      csIdemSeq += 1;
+      return ["workswarm-cs", String(csId || ""), String(action || ""), Date.now(), csIdemSeq].join(":");
+    }
+
+    // 九期：跨面板刷新「待我处理」（Action Center 已挂载时；未挂载/失败静默，
+    // 不阻塞本面板——accept/reject 后待办应立即从 Inbox 消失）。
+    function refreshInboxPanel() {
+      var ac = win.OwoPanels && win.OwoPanels["action-center"];
+      if (ac && typeof ac.refreshInbox === "function") {
+        try {
+          ac.refreshInbox();
+        } catch (e) {
+          /* 跨面板刷新失败不阻塞本面板 */
+        }
+      }
+    }
+
     // accept/reject/revert：幂等重放（replayed）与 409 冲突（文件被用户再次修改、
-    // 恢复被拒绝且不覆盖新内容）文案如实提示；动作完成后重拉列表。
+    // 恢复被拒绝且不覆盖新内容）文案如实提示；动作完成后同步重拉 ChangeSet 列表、
+    // 产物/评审区（门控状态变化）并跨面板刷新 Inbox。
     function startChangeSetAction(csId, action) {
       var id = String(csId || "");
       var act = String(action || "");
@@ -2035,7 +2101,9 @@
       if (state.csBusy[key]) return Promise.resolve();
       state.csBusy[key] = true;
       paintChangeSets();
-      return H.post("/change-sets/" + encodeURIComponent(id) + "/" + act, {})
+      return H.post("/change-sets/" + encodeURIComponent(id) + "/" + act, {
+        idempotency_key: csIdemKey(id, act),
+      })
         .then(function (resp) {
           var replayed = !!(resp && resp.replayed);
           var cs = resp && resp.change_set && resp.change_set.status ? normCsStatus(resp.change_set.status) : "";
@@ -2059,7 +2127,11 @@
         })
         .then(function () {
           state.csBusy[key] = false;
-          return loadChangeSets();
+          refreshInboxPanel();
+          return loadChangeSets().then(function () {
+            // 门控解除/保持都影响评审区（批准按钮可用性），一并重拉产物。
+            return loadArtifacts();
+          });
         });
     }
 
@@ -2209,14 +2281,24 @@
       }
       var formHtml = "";
       if (normReviewState(a.review_state) === "pendingreview") {
+        // 九期：ChangeSet 未处理（pending_review/conflicted）时批准被门控阻断——
+        // 仅禁用「批准」，要求修改/驳回不受影响（服务端 approve 同样拒绝并给原因）。
+        var block = state.csApprovalBlock && state.csApprovalBlock.blocked;
+        var blockReason = block ? String(state.csApprovalBlock.reason || "") : "";
         formHtml =
           '<details class="owo-ws-review"' + (busy ? ' data-busy="1"' : "") + ">" +
           '<summary>评审此版本（批准 / 要求修改 / 驳回）</summary>' +
           '<div class="owo-ws-review-form">' +
           '<input class="owo-ws-review-reviewer" placeholder="评审者：critic 或 human 用户名（生产者不能自行批准）">' +
           '<textarea class="owo-ws-review-comment" rows="2" placeholder="评语（随不可变评审记录保存）"></textarea>' +
+          (block
+            ? '<div class="hint" data-art-approve-blocked="' + esc(aid) + '">⚠ ChangeSet 未处理，批准暂不可用：' +
+              esc(blockReason || "存在待审批/冲突的 ChangeSet，先在「ChangeSet 审批」区接受或拒绝") + "</div>"
+            : "") +
           '<div class="owo-ws-review-actions">' +
-          '<button type="button" class="owo-ws-review-act ok" data-art-act="approve" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">批准</button>" +
+          '<button type="button" class="owo-ws-review-act ok" data-art-act="approve" data-art-id="' + esc(aid) + '"' +
+          (busy || block ? " disabled" : "") +
+          (block ? ' title="ChangeSet 未处理：批准被门控阻断"' : "") + ">批准</button>" +
           '<button type="button" class="owo-ws-review-act warn" data-art-act="request_changes" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">要求修改</button>" +
           '<button type="button" class="owo-ws-review-act bad" data-art-act="reject" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">驳回</button>" +
           "</div>" +
@@ -4542,6 +4624,12 @@
       changeSetsHtml: changeSetsHtml,
       loadChangeSets: loadChangeSets,
       startChangeSetAction: startChangeSetAction,
+      // 九期：状态口径 / 批准门控 / 幂等键 / 跨面板刷新
+      csStatusHint: csStatusHint,
+      approvalBlockView: approvalBlockView,
+      approvalBlockBanner: approvalBlockBanner,
+      csIdemKey: csIdemKey,
+      refreshInboxPanel: refreshInboxPanel,
       validationBadgeHtml: validationBadgeHtml,
       artifactFileName: artifactFileName,
       fmtAbsTime: fmtAbsTime,

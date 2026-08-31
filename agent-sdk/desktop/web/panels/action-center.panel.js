@@ -3,8 +3,11 @@
 //
 // 七期第四路：把四类"需要人工处理"的事项聚合为一个日常工作台。
 // 八期第四路：升级为**正式 Human Inbox 优先**（GET /human/inbox + claim/release/
-// resolve 直接处理，口径见 AGENTS-COORD 八期冻结③）；inbox 404/空/失败时回退
-// 七期客户端聚合（legacyLoad），面板永远可用。回退路径仍不新增服务端接口：
+// resolve 直接处理，口径见 AGENTS-COORD 八期冻结③）。
+// 九期第二路（回退口径修订）：**只在 /human/inbox 404（未部署）时**回退七期客户端
+// 聚合（legacyLoad）；接口在线时一律以 Inbox 为准——列表为空就是真的为空，不再
+// 偷偷切换数据源（避免"聚合口径有、正式 Inbox 无"时两个视图互相矛盾）；其余失败
+// 保留 Inbox 口径并展示错误行，面板永远可用。回退路径仍不新增服务端接口：
 //   GET  /teams                          {teams:[{team_id,status,mode,interrupted,
 //                                         active,members[],project_space_id,...}]}
 //   GET  /teams/{id}                     {team,tasks,interrupted,audit_tail,
@@ -136,7 +139,8 @@
       retryBusy: {},        // key(teamId/stepId) -> true
       retryResults: {},     // key -> { ok, text }
       lastLoadedAt: "",
-      // 八期三路：正式 Human Inbox（/human/inbox）优先；404/空/失败 → 回退客户端聚合。
+      // 八期三路：正式 Human Inbox（/human/inbox）优先；仅 404（未部署）回退
+      // 客户端聚合；在线为空/其余失败保持 Inbox 口径（九期修订）。
       inbox: [],            // HumanWorkItem 归一化列表（inbox 模式）
       inboxSource: "",      // "inbox" | "legacy" | ""（渲染分支 + 头部口径提示）
       inboxBusy: {},        // key(item_id:action) -> true
@@ -599,21 +603,23 @@
         });
     }
 
-    // Inbox 重取（动作后刷新列表口径；失败只记错误、不回退 legacy）。
+    // Inbox 重取（动作后刷新列表口径；九期：仅 404 回退 legacy，失败只记错误、
+    // 保持当前 Inbox 口径，空列表也不再切换数据源）。
     function refreshInbox() {
       return H.get("/human/inbox")
         .then(function (d) {
           state.inbox = inboxItemsOf(d);
-          if (!state.inbox.length) {
-            // Inbox 已清空 → 回退客户端聚合视图（同一份剩余工作的另一口径）。
-            state.inboxSource = "legacy";
-            return legacyLoad();
-          }
+          state.inboxSource = "inbox"; // 在线即以 Inbox 为准（空列表也是真实状态）
           state.lastLoadedAt = new Date().toLocaleTimeString();
           render();
         })
         .catch(function (e) {
-          state.errors.push("Inbox 刷新失败：" + friendly(e));
+          if (isNotFound(e)) {
+            // Inbox 未部署（404）→ 回退七期客户端聚合（面板永远可用）。
+            state.inboxSource = "legacy";
+            return legacyLoad();
+          }
+          state.errors.push("Inbox 刷新失败（保持正式 Inbox 口径）：" + friendly(e));
           render();
         });
     }
@@ -859,7 +865,13 @@
       }
     }
 
-    // 八期三路：Inbox 优先，失败/空回退客户端聚合（面板永远可用）。
+    // 404 识别（传输层把状态码嵌在 message 头部 "404: ..."）：仅 404 触发回退。
+    function isNotFound(e) {
+      return /^404/.test(String((e && e.message) || e || ""));
+    }
+
+    // 八期三路：Inbox 优先；九期修订——仅 404（未部署）回退客户端聚合，
+    // 在线为空保持 Inbox 口径，其余失败展示错误行不切数据源。
     function load() {
       if (state.loading) return Promise.resolve();
       state.loading = true;
@@ -868,19 +880,23 @@
       return H.get("/human/inbox")
         .then(function (d) {
           state.inbox = inboxItemsOf(d);
-          if (state.inbox.length) {
+          state.inboxSource = "inbox"; // 空列表也是 Inbox 的真实状态
+          state.loading = false;
+          state.loadedOnce = true;
+          state.lastLoadedAt = new Date().toLocaleTimeString();
+          render();
+        })
+        .catch(function (e) {
+          if (!isNotFound(e)) {
+            // 非 404 失败：保持 Inbox 口径 + 错误行，不偷偷切换数据源。
             state.inboxSource = "inbox";
+            state.errors.push("Inbox 加载失败（保持正式 Inbox 口径）：" + friendly(e));
             state.loading = false;
             state.loadedOnce = true;
-            state.lastLoadedAt = new Date().toLocaleTimeString();
             render();
             return;
           }
-          // Inbox 在线但为空 → 客户端聚合可能仍有可重试/租约等口径，回退补充展示。
-          return legacyLoad();
-        })
-        .catch(function () {
-          // 404 = Inbox 尚未上线；其他错误同样回退（保持面板可用）。
+          // 404 = Inbox 尚未上线 → 回退七期客户端聚合。
           state.inboxSource = "legacy";
           return legacyLoad();
         });
@@ -1039,6 +1055,9 @@
       id: ID,
       title: "待我处理",
       mount: mount,
+      // 九期：公开刷新入口——WorkSwarm 面板 ChangeSet accept/reject 后跨面板刷新
+      // 待办（未挂载时安全跳过）。
+      refreshInbox: function () { return refreshInbox(); },
       _test: TEST_API,
     };
   })();

@@ -336,6 +336,10 @@ test("load()：四类聚合落 state；404 产物静默；详情失败降级并�
   T.setTransport({
     get(path) {
       gets.push(path);
+      if (path === "/human/inbox") {
+        // 九期回退口径：仅 404 触发 legacy 聚合（本测试验证 legacy 路径本身）。
+        return Promise.reject(new Error("404: inbox offline"));
+      }
       if (path === "/teams") {
         return Promise.resolve({
           teams: [
@@ -412,6 +416,7 @@ test("load()：详情请求失败 → 降级空聚合 + detailErrors 记录，�
   resetState();
   T.setTransport({
     get(path) {
+      if (path === "/human/inbox") return Promise.reject(new Error("404: inbox offline"));
       if (path === "/teams") return Promise.resolve({ teams: [{ team_id: "t-x", status: "running" }] });
       if (path === "/teams/t-x") return Promise.reject(new Error("500: boom"));
       if (/^\/projects\//.test(path)) return Promise.resolve({ artifacts: [] });
@@ -432,7 +437,9 @@ test("load()：详情请求失败 → 降级空聚合 + detailErrors 记录，�
 test("load()：团队列表失败 → errors 记录，终态安全", async () => {
   resetState();
   T.setTransport({
-    get() {
+    get(path) {
+      // Inbox 404 → legacy；legacy 的 /teams 再失败 → errors 记录。
+      if (path === "/human/inbox") return Promise.reject(new Error("404: inbox offline"));
       return Promise.reject(new Error("Failed to fetch"));
     },
     post() {
@@ -451,6 +458,7 @@ test("submitRetry：提交锁（快速双击只发一次）+ 冻结契约 + 失�
   let getRuns = 0;
   T.setTransport({
     get(path) {
+      if (path === "/human/inbox") return Promise.reject(new Error("404: inbox offline"));
       if (path === "/teams") {
         getRuns++;
         return Promise.resolve({ teams: [{ team_id: "t-9", status: "running" }] });
@@ -618,6 +626,80 @@ test("load()：inbox 优先（不触发 /teams 客户端聚合）", async () => 
   assert.equal(T.state.inbox.length, 1);
   assert.ok(!log.some((x) => x.startsWith("GET /teams")));
   assert.ok(!log.some((x) => x.startsWith("GET /human/inbox/i1/claim")));
+});
+
+// —— 九期第二路：回退口径修订（仅 404 回退 legacy；在线为空/其余失败保持 Inbox） ——
+
+test("load()（九期）：inbox 在线但列表为空 → 保持 Inbox 口径，不偷偷切换数据源", async () => {
+  resetState();
+  const log = [];
+  T.setTransport({
+    get(path) {
+      log.push("GET " + path);
+      if (path === "/human/inbox") return Promise.resolve({ items: [] });
+      throw new Error("unexpected GET " + path);
+    },
+    post() { throw new Error("unexpected POST"); },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+  await T.load();
+  assert.equal(T.state.inboxSource, "inbox", "空列表也是 Inbox 的真实状态");
+  assert.equal(T.state.inbox.length, 0);
+  assert.ok(!log.some((x) => x.startsWith("GET /teams")), "不得回退客户端聚合");
+});
+
+test("load()（九期）：404（Inbox 未部署）→ 回退七期客户端聚合", async () => {
+  resetState();
+  T.setTransport({
+    get(path) {
+      if (path === "/human/inbox") return Promise.reject(new Error("404: not found"));
+      if (path === "/teams") return Promise.resolve({ teams: [] });
+      return Promise.reject(new Error("404: " + path));
+    },
+    post() { throw new Error("unexpected POST"); },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+  await T.load();
+  assert.equal(T.state.inboxSource, "legacy");
+});
+
+test("load()（九期）：非 404 失败 → 保持 Inbox 口径 + 错误行，不切数据源", async () => {
+  resetState();
+  const log = [];
+  T.setTransport({
+    get(path) {
+      log.push("GET " + path);
+      if (path === "/human/inbox") return Promise.reject(new Error("500: boom"));
+      throw new Error("unexpected GET " + path);
+    },
+    post() { throw new Error("unexpected POST"); },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+  await T.load();
+  assert.equal(T.state.inboxSource, "inbox", "非 404 不回退聚合");
+  assert.ok(!log.some((x) => x.startsWith("GET /teams")));
+  assert.ok(
+    T.state.errors.some((x) => /Inbox 加载失败/.test(x)),
+    "错误行如实提示（面板不静默降级）"
+  );
+});
+
+test("refreshInbox()（九期）：动作后重取为空仍保持 Inbox 口径", async () => {
+  resetState();
+  T.state.inboxSource = "inbox";
+  const log = [];
+  T.setTransport({
+    get(path) {
+      log.push("GET " + path);
+      if (path === "/human/inbox") return Promise.resolve({ items: [] });
+      throw new Error("unexpected GET " + path);
+    },
+    post() { throw new Error("unexpected POST"); },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+  await T.refreshInbox();
+  assert.equal(T.state.inboxSource, "inbox", "处理完成后空列表不再回退聚合");
+  assert.ok(!log.some((x) => x.startsWith("GET /teams")));
 });
 
 test("startInboxAction()：claim → POST /human/inbox/{id}/claim；提交锁双击一次", async () => {

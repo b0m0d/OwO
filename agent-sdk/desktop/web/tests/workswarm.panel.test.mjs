@@ -66,6 +66,11 @@ function resetState() {
   T.state.reworkResult = null;
   T.state.historyReviews = {};
   T.state.diagnostic = null;
+  // —— 八/九期 ChangeSet 字段 ——
+  T.state.changeSets = null;
+  T.state.csApprovalBlock = null;
+  T.state.csBusy = {};
+  T.state.csResults = {};
 }
 
 // 可记录属性读写的假按钮（模拟 lockBtn/unlockBtn 所需的最小接口）。
@@ -1199,10 +1204,130 @@ test("startChangeSetAction()：提交锁双击只发一次；未知动作零请�
 test("loadChangeSets()：404 容错为 null（端点未上线空态）", async () => {
   resetState();
   T.state.current = "team-a";
+  T.state.csApprovalBlock = { blocked: true, reason: "stale" };
   T.setTransport({
     get() { return Promise.reject(new Error("404: not found")); },
     post() { return Promise.reject(new Error("404: not found")); },
   });
   await T.loadChangeSets();
   assert.equal(T.state.changeSets, null);
+  assert.deepEqual(T.state.csApprovalBlock, null, "门控状态随失败清空");
+});
+
+test("loadChangeSets()（九期）：捕获 approval_blocked/approval_block_reason 门控视图", async () => {
+  resetState();
+  T.state.current = "team-a";
+  T.setTransport({
+    get() {
+      return Promise.resolve({
+        team_id: "team-a",
+        approval_blocked: true,
+        approval_block_reason: "团队存在待审批 ChangeSet：cs1",
+        change_sets: [csFixture("cs1")],
+      });
+    },
+    post() { return Promise.reject(new Error("unexpected POST")); },
+  });
+  await T.loadChangeSets();
+  assert.deepEqual(T.state.csApprovalBlock, { blocked: true, reason: "团队存在待审批 ChangeSet：cs1" });
+});
+
+// ============================================================================
+// 九期（第二路）守卫：状态口径 / 批准门控联动 / idempotency_key 请求体
+// ============================================================================
+
+test("csStatusHint / approvalBlockView：九期状态口径与门控视图归一", () => {
+  assert.equal(T.csStatusHint("pending_review"), "等待接受或拒绝");
+  assert.equal(T.csStatusHint("PendingReview"), "等待接受或拒绝", "Debug 形式容错");
+  assert.match(T.csStatusHint("conflicted"), /存在冲突，禁止批准/);
+  assert.equal(T.csStatusHint("accepted"), "");
+
+  const v = T.approvalBlockView({
+    approval_blocked: true,
+    approval_block_reason: "存在待审批 ChangeSet",
+  });
+  assert.deepEqual(v, { blocked: true, reason: "存在待审批 ChangeSet" });
+  assert.deepEqual(T.approvalBlockView(null), { blocked: false, reason: "" });
+  assert.deepEqual(T.approvalBlockView({ approval_blocked: false }), { blocked: false, reason: "" });
+});
+
+test("changeSetsHtml（九期）：conflicted 行提供可重试动作 + 冲突清单；门控横幅展示阻断原因", () => {
+  resetState();
+  T.state.csApprovalBlock = { blocked: true, reason: "团队存在待审批 ChangeSet：cs1" };
+  const html = T.changeSetsHtml([
+    csFixture("cs1", "pending_review"),
+    csFixture("cs2", "conflicted", { conflicts: ["src/user-edit.rs"] }),
+  ]);
+  // 门控横幅（Artifact 批准阻断原因置顶）
+  assert.match(html, /data-cs-approval-block="1"/);
+  assert.match(html, /批准被门控阻断/);
+  assert.match(html, /团队存在待审批 ChangeSet：cs1/);
+  // pending_review：明确「等待接受或拒绝」
+  assert.match(html, /data-cs-status-hint="pending_review"/);
+  assert.match(html, /等待接受或拒绝/);
+  // conflicted：明确「存在冲突，禁止批准」+ 冲突文件 + 仍提供可重试动作
+  assert.match(html, /data-cs-status-hint="conflicted"/);
+  assert.match(html, /存在冲突，禁止批准/);
+  assert.match(html, /data-cs-conflicts="cs2"/);
+  assert.match(html, /src\/user-edit\.rs/);
+  assert.equal(
+    (html.match(/data-cs-act="accept"/g) || []).length,
+    2,
+    "conflicted 行同样提供接受/拒绝/撤销动作"
+  );
+
+  // 无门控 → 无横幅
+  resetState();
+  const html2 = T.changeSetsHtml([csFixture("cs1", "accepted")]);
+  assert.ok(!html2.includes("data-cs-approval-block"));
+  assert.ok(!html2.includes('data-cs-act="accept"'), "已接受行无动作");
+});
+
+test("artifactRowHtml（九期）：门控阻断时批准按钮禁用并展示原因，要求修改/驳回不受影响", () => {
+  resetState();
+  T.state.csApprovalBlock = { blocked: true, reason: "存在待审批 ChangeSet" };
+  const artifact = {
+    artifact_id: "a-1", version: 2, review_state: "pending_review",
+    kind: "document", producer: "m-impl", created_at: "2026-08-30T04:00:00Z",
+  };
+  const html = T.artifactRowHtml(artifact, { items: [artifact] });
+  assert.ok(/data-art-act="approve"[^>]*disabled/.test(html), "批准按钮应禁用");
+  assert.match(html, /data-art-approve-blocked="a-1"/);
+  assert.match(html, /存在待审批 ChangeSet/);
+  assert.ok(!/data-art-act="request_changes"[^>]*disabled/.test(html), "要求修改不受门控影响");
+  assert.ok(!/data-art-act="reject"[^>]*disabled/.test(html), "驳回不受门控影响");
+
+  // 无门控 → 批准可用、无阻断提示
+  resetState();
+  const html2 = T.artifactRowHtml(artifact, { items: [artifact] });
+  assert.ok(!/data-art-act="approve"[^>]*disabled/.test(html2));
+  assert.ok(!html2.includes("data-art-approve-blocked"));
+});
+
+test("startChangeSetAction()（九期）：请求体携带 idempotency_key（修复空体 422）", async () => {
+  resetState();
+  T.state.current = "team-a";
+  const posts = [];
+  T.setTransport({
+    get(path) {
+      if (path === "/teams/team-a/change-sets") {
+        return Promise.resolve({ team_id: "team-a", change_sets: [csFixture("cs1", "accepted")] });
+      }
+      return Promise.reject(new Error("404: " + path));
+    },
+    post(path, body) {
+      posts.push({ path, body });
+      return Promise.resolve({ change_set: csFixture("cs1", "accepted"), replayed: false });
+    },
+  });
+  await T.startChangeSetAction("cs1", "reject");
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].path, "/change-sets/cs1/reject");
+  assert.ok(
+    posts[0].body && typeof posts[0].body.idempotency_key === "string" &&
+      posts[0].body.idempotency_key.length > 0,
+    "必须携带 idempotency_key（服务端缺键 422）"
+  );
+  // 每次点击新键：提交锁保证单次发送；失败后重试是新一轮真实决定。
+  assert.notEqual(T.csIdemKey("cs1", "reject"), T.csIdemKey("cs1", "reject"));
 });
