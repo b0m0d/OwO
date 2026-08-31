@@ -50,14 +50,15 @@ Write-Host ("V1 acceptance - root: {0}  out: {1}" -f $sdkRoot, $OutRoot) -Foregr
 
 # 预构建二进制复用：并行路线的 WIP 编辑可能让 cargo run 在启动瞬间碰到中段编译错误；
 # 传入 -Exe <path> 后全部 CLI 调用走固定二进制，批量全程不受并行编辑影响（版本 = 冻结时刻）。
+# 注意：函数只执行不返回值（原生 stdout 会污染返回值）；退出码一律由调用方读 $LASTEXITCODE。
 function Invoke-EvalCli {
-    param([string[]]$CliArgs)
+    param([string]$Verb, [string[]]$RestArgs)
+    $cli = @("product-eval", $Verb) + @($RestArgs)
     if ($Exe) {
-        & $Exe @CliArgs
+        & $Exe @cli
     } else {
-        cargo run -q -p owo-agent-cli -- @CliArgs
+        cargo run -q -p owo-agent-cli -- @cli
     }
-    return $LASTEXITCODE
 }
 
 # ---------------------------------------------------------------------------
@@ -108,7 +109,9 @@ function Invoke-EvalRun {
     param([string]$Label, [string[]]$RunArgs)
     Write-Host ""
     Write-Host ("== [acceptance] {0} ==" -f $Label) -ForegroundColor Cyan
-    $rc = Invoke-EvalCli @("product-eval", "run") @suiteArgs @modelArgs @RunArgs
+    $allArgs = @($suiteArgs) + @($modelArgs) + @($RunArgs)
+    Invoke-EvalCli "run" $allArgs
+    $rc = $LASTEXITCODE
     if ($rc -ne 0) {
         Write-Host ("    run FAILED (exit={0}): {1}" -f $rc, $Label) -ForegroundColor Red
         $script:failedRuns++
@@ -122,7 +125,9 @@ function Invoke-EvalRun {
 # ---------------------------------------------------------------------------
 Write-Host "== [acceptance] preflight gate ==" -ForegroundColor Cyan
 $preflightOut = Join-Path $sdkRoot $OutRoot
-$preRc = Invoke-EvalCli @("product-eval", "preflight") @suiteArgs @("--out", $preflightOut)
+$preArgs = @($suiteArgs) + @("--out", $preflightOut)
+Invoke-EvalCli "preflight" $preArgs
+$preRc = $LASTEXITCODE
 if ($preRc -ne 0) {
     Write-Host "PREFLIGHT BLOCKED (exit=$preRc): acceptance NOT executed." -ForegroundColor Red
     exit 2
@@ -138,7 +143,9 @@ if (-not $Smoke -and -not $EstimateOnly) {
         exit 2
     }
     Write-Host "== [acceptance] freeze gate ==" -ForegroundColor Cyan
-    $frRc = Invoke-EvalCli @("product-eval", "validate") @suiteArgs @("--freeze", $freezePath)
+    $frArgs = @($suiteArgs) + @("--freeze", $freezePath)
+    Invoke-EvalCli "validate" $frArgs
+    $frRc = $LASTEXITCODE
     if ($frRc -ne 0) {
         Write-Host "FREEZE GATE BLOCKED: suite drifted from freeze.json. Regenerate freeze (new batch) or fix drift." -ForegroundColor Red
         exit 2
@@ -203,7 +210,7 @@ if ($EstimateOnly) {
         }
         Write-Host ("Projected single-agent formal batch (200 cells): calls ~{0}  tokens ~{1}  (per-run calls {2:N1})" -f $projCalls, $projTokens, $perRun) -ForegroundColor Yellow
         if ($estInput -and $estOutput) {
-            Write-Host ("Est. cost (single 200): input {0:N4} + output {1:N4} = {2:N4} USD" -f $estInput, $estOutput, ($estInput + $estOutput)) -ForegroundColor Yellow
+            Write-Host ("Est. cost (single 200): input {0:N4} + output {1:N4} = {2:N4} (按 OWO_EVAL_PRICE_* 单价 0.4/0.8 元/MTok 计)" -f $estInput, $estOutput, ($estInput + $estOutput)) -ForegroundColor Yellow
         } else {
             Write-Host "Est. cost: set -PriceInPerMTok/-PriceOutPerMTok to get USD estimate (tokens are recorded regardless)." -ForegroundColor Yellow
         }
@@ -251,9 +258,8 @@ $multiReport  = Join-Path $multiOut "report.json"
 $pairedOut    = Join-Path $batchRoot "paired.json"
 if ((Test-Path $singleReport) -and (Test-Path $multiReport) -and -not $SkipSingle -and -not $SkipMulti) {
     Write-Host "== [formal] generate paired report ==" -ForegroundColor Cyan
-    $pairRc = Invoke-EvalCli @("product-eval", "paired", $singleReport, $multiReport, `
-        "--out", $pairedOut, "--strategy-version", $StrategyVersion)
-    if ($pairRc -ne 0) {
+    Invoke-EvalCli "paired" @($singleReport, $multiReport, "--out", $pairedOut, "--strategy-version", $StrategyVersion)
+    if ($LASTEXITCODE -ne 0) {
         Write-Host "PAIRED REPORT generation FAILED." -ForegroundColor Red
         $script:failedRuns++
     }
@@ -293,7 +299,7 @@ if (Test-Path $pairedOut) { Write-Host ("paired     : {0}" -f $pairedOut) }
 Write-Host ("evidence   : {0}" -f $resultsDir)
 if (Test-Path $singleReport) {
     Write-Host "---- single-agent ----"
-    $ignore = Invoke-EvalCli @("product-eval", "compare", $singleReport, $singleReport)
+    Invoke-EvalCli "compare" @($singleReport, $singleReport)
     $data = Get-Content $singleReport -Raw | ConvertFrom-Json
     Write-Host ("    success {0}/{1} ({2}%) tokens={3} cost={4}" -f `
         $data.metrics.passed, $data.metrics.runs_total, [Math]::Round($data.metrics.success_rate * 100, 1), `
