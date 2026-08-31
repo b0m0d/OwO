@@ -29,7 +29,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 /// 工具结果文本上限（与 agent.rs 的 MAX_TOOL_RESULT_CHARS 口径一致）。
@@ -147,7 +146,6 @@ struct RunState {
     denials: Vec<String>,
     tool_errors: Vec<String>,
     final_text: Option<String>,
-    budget_exceeded: bool,
 }
 
 /// 工具内层共享的调用轨迹（工具名 + 实参摘要 + 结果）。
@@ -726,9 +724,11 @@ impl CaseExecutor for SingleAgentExecutor {
 
         let registry = scope_registry(Arc::clone(&scope), Arc::clone(&tool_log));
         let policy = Policy::new(ctx.sandbox);
-        // 回合数随模型调用预算走：每回合至多一次模型调用（工具回合除外）。
+        // 回合上限 = 模型调用预算：预算内完成即产出总结；预算耗尽（无总结）按 Error 计。
+        // compaction 会额外调用模型且不计入 ModelCall 事件，评测全程关闭以防预算失真。
         let config = AgentConfig {
-            max_turns: (max_model_calls as usize + 2).clamp(4, 24),
+            max_turns: (max_model_calls as usize).max(1),
+            compaction_enabled: false,
             ..AgentConfig::default()
         };
         let agent = Agent::new(self.provider.clone(), registry, policy, config);
@@ -741,19 +741,13 @@ impl CaseExecutor for SingleAgentExecutor {
         );
         let prompt = build_user_prompt(ctx.case);
 
-        // TurnEvent 遥测：预算超限即置取消——run_turn 在下一检查点停止（不再调用模型/工具）。
+        // TurnEvent 遥测：预算计数器只记账不中止——回合上限已由 max_turns 收口，
+        // 预算耗尽绝不触碰共享取消令牌（防止一次超限毒化整个矩阵的后续单元格）。
         let state_for_events = Arc::clone(&state);
-        let abort_for_events = Arc::clone(&abort);
         let mut on_event = |event: &TurnEvent| {
             let mut state = state_for_events.lock().expect("遥测锁中毒");
             match event {
-                TurnEvent::ModelCall => {
-                    state.model_calls += 1;
-                    if state.model_calls > max_model_calls {
-                        state.budget_exceeded = true;
-                        abort_for_events.store(true, Ordering::Relaxed);
-                    }
-                }
+                TurnEvent::ModelCall => state.model_calls += 1,
                 TurnEvent::ToolStart { .. } => state.tool_calls += 1,
                 TurnEvent::ToolResult {
                     tool, ok, error, ..
@@ -806,9 +800,14 @@ impl CaseExecutor for SingleAgentExecutor {
         for tool_error in &snapshot_state.tool_errors {
             ctx.record_failed_step(format!("tool_error:{tool_error}"));
         }
-        if snapshot_state.budget_exceeded {
+        // 预算耗尽判定：调用数达到上限且未产出总结（run_turn 会以"达到最大回合数"失败）。
+        let budget_exhausted = snapshot_state.model_calls >= max_model_calls
+            && snapshot_state.final_text.is_none()
+            && !ctx.cancelled();
+        if budget_exhausted {
             ctx.record_failed_step(format!(
-                "budget:模型调用预算耗尽（max_model_calls={max_model_calls}）"
+                "budget:模型调用预算耗尽（max_model_calls={max_model_calls}，实际 {} 次，未在预算内产出总结）",
+                snapshot_state.model_calls
             ));
         }
 
@@ -861,19 +860,30 @@ impl CaseExecutor for SingleAgentExecutor {
         };
         match result {
             Err(AgentError::Aborted) => {
-                outcome.aborted = true;
+                // 只有外部取消（Ctrl-C 经共享令牌注入）计入 cancelled；
+                // 其余 Aborted 一律按错误报（评测内不应出现无来源中止）。
+                if !ctx.cancelled() {
+                    outcome.error = Some("agent turn 中止（非外部取消源）".to_string());
+                }
+                outcome.aborted = ctx.cancelled();
             }
             Err(other) => {
                 outcome.error = Some(format!("agent turn 失败：{other}"));
             }
             Ok(_) => {}
         }
-        // 预算超限（或取消信号在回合收尾前命中）：本单元格一律按中止计，
-        // 不进入检查器判定——即使产物恰好齐备也不能算预算内通过。
-        if snapshot_state.budget_exceeded || ctx.cancelled() {
+        // 预算耗尽：明确归为 Error（保留 budget 失败步骤），绝不冒充 cancelled 或通过；
+        // 外部取消优先于预算（真实取消按 cancelled 统计）。
+        if budget_exhausted {
+            outcome.error = Some(format!(
+                "budget:模型调用预算耗尽（max_model_calls={max_model_calls}，实际 {} 次，未在预算内产出总结）",
+                snapshot_state.model_calls
+            ));
+        }
+        if ctx.cancelled() {
             outcome.aborted = true;
         }
-        if !missing.is_empty() && !outcome.aborted {
+        if !missing.is_empty() && !outcome.aborted && !budget_exhausted {
             outcome.error = Some(format!("预期产物缺失：{}", missing.join("、")));
         }
 
@@ -887,7 +897,7 @@ impl CaseExecutor for SingleAgentExecutor {
             final_text: snapshot_state.final_text,
             duration_ms: started.elapsed().as_millis() as u64,
             aborted: outcome.aborted,
-            budget_exceeded: snapshot_state.budget_exceeded,
+            budget_exceeded: budget_exhausted,
         };
         if let Ok(mut guard) = self.last_telemetry.lock() {
             *guard = Some(telemetry);

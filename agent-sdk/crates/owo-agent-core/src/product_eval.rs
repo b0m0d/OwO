@@ -178,6 +178,42 @@ pub enum ArtifactChecker {
         field: String,
         expected: serde_json::Value,
     },
+    /// JSON 顶层字段必须**恰好**为该集合（顺序无关）：多余字段或缺失字段均失败。
+    /// 用于「只输出一个 JSON 对象，不得包含额外字段」这类硬约束。
+    JsonKeysExact { path: String, keys: Vec<String> },
+    /// 行为检查：在沙盒内以 `cmd /C <command>` 执行命令（cwd 相对沙盒根），
+    /// 断言退出码与 stdout。用于「代码任务检查真实行为和产物」而非只查关键词。
+    ///
+    /// 执行语义：
+    /// - 仅在**真实沙盒目录**评估时执行（内存快照/validate 自检静默跳过，静态校验命令形态）；
+    /// - 命令是任务作者声明的固定命令（非 Agent 输入），白名单式无 shell 链式元字符；
+    /// - 自带超时与输出截断，失败即该检查器失败。
+    CommandCheck {
+        command: String,
+        /// 相对沙盒根的执行目录（None = 沙盒根）。
+        #[serde(default)]
+        cwd: Option<String>,
+        /// 期望退出码；缺省 Some(0)（None = 不校验退出码）。
+        #[serde(default = "default_expect_zero")]
+        expect_exit: Option<i32>,
+        /// stdout 必须包含的片段。
+        #[serde(default)]
+        stdout_contains: Vec<String>,
+        /// stdout 不得包含的片段。
+        #[serde(default)]
+        stdout_not_contains: Vec<String>,
+        /// 命令超时（秒），缺省 30。
+        #[serde(default = "default_command_timeout_secs")]
+        timeout_secs: u32,
+    },
+}
+
+fn default_expect_zero() -> Option<i32> {
+    Some(0)
+}
+
+fn default_command_timeout_secs() -> u32 {
+    30
 }
 
 impl ArtifactChecker {
@@ -201,6 +237,12 @@ impl ArtifactChecker {
                 field,
                 expected,
             } => format!("json_field({path}.{field} == {expected})"),
+            ArtifactChecker::JsonKeysExact { path, keys } => {
+                format!("json_keys_exact({path}, {{{}}})", keys.join(","))
+            }
+            ArtifactChecker::CommandCheck { command, .. } => {
+                format!("command_check({})", truncate_for_log(command, 60))
+            }
         }
     }
 
@@ -213,10 +255,14 @@ impl ArtifactChecker {
             | ArtifactChecker::NotContains { path, .. }
             | ArtifactChecker::Regex { path, .. }
             | ArtifactChecker::LineCountMin { path, .. }
-            | ArtifactChecker::JsonFieldEquals { path, .. } => path.clone(),
+            | ArtifactChecker::JsonFieldEquals { path, .. }
+            | ArtifactChecker::JsonKeysExact { path, .. } => Some(path.clone()),
+            ArtifactChecker::CommandCheck { .. } => None,
         };
-        if let Err(err) = sanitize_rel_path(&path) {
-            issues.push(format!("检查器路径非法「{path}」：{err}"));
+        if let Some(path) = path {
+            if let Err(err) = sanitize_rel_path(&path) {
+                issues.push(format!("检查器路径非法「{path}」：{err}"));
+            }
         }
         match self {
             ArtifactChecker::Exists { .. } => {}
@@ -240,9 +286,57 @@ impl ArtifactChecker {
                     issues.push("json_field 断言缺少 field 名".to_string());
                 }
             }
+            ArtifactChecker::JsonKeysExact { keys, .. } => {
+                if keys.is_empty() {
+                    issues.push("json_keys_exact 的 keys 为空：至少声明一个字段".to_string());
+                }
+                for key in keys {
+                    if key.trim().is_empty() {
+                        issues.push("json_keys_exact 的 keys 存在空字段名".to_string());
+                    }
+                }
+            }
+            ArtifactChecker::CommandCheck {
+                command,
+                cwd,
+                timeout_secs,
+                ..
+            } => {
+                let command = command.trim();
+                if command.is_empty() {
+                    issues.push("command_check 的 command 为空".to_string());
+                } else if command_has_chain_metachars(command) {
+                    issues.push(format!(
+                        "command_check 的命令「{command}」含链式/重定向元字符（检查命令按单命令收口）"
+                    ));
+                } else if command.contains("  ") {
+                    issues.push(format!(
+                        "command_check 的命令「{command}」含连续空格（命令须为单条简单调用）"
+                    ));
+                }
+                if let Some(cwd) = cwd {
+                    if let Err(err) = sanitize_rel_path(cwd) {
+                        issues.push(format!("command_check 的 cwd 非法：{err}"));
+                    }
+                }
+                if !(1..=120).contains(timeout_secs) {
+                    issues.push(format!(
+                        "command_check 的 timeout_secs={timeout_secs} 超出 [1,120]"
+                    ));
+                }
+            }
         }
         issues
     }
+}
+
+/// 命令链式/重定向元字符检测（与 [`single_agent::command_has_shell_metachars`] 同口径，
+/// 供 command_check 静态校验使用：检查命令必须是单条简单调用）。
+pub fn command_has_chain_metachars(command: &str) -> bool {
+    command
+        .chars()
+        .any(|c| matches!(c, '&' | '|' | ';' | '<' | '>' | '`' | '\n' | '\r'))
+        || command.contains("$(")
 }
 
 /// 一个固定产品评测任务（tasks/*.json 的顶层结构）。
@@ -416,6 +510,14 @@ pub struct ProductEvalRun {
     /// 真实工具调用轨迹（单 Agent 执行器填写：工具 + 实参摘要 + 结果；旧记录缺省为空）。
     #[serde(default)]
     pub tool_log: Vec<String>,
+    /// 通过/总检查器数（质量分 = passed/total；0/0 = 无质量维度）。
+    #[serde(default)]
+    pub checker_passed: u32,
+    #[serde(default)]
+    pub checker_total: u32,
+    /// 沙盒/失败留档目录相对 out 根的位置（成功运行会即时清理，故为 None）。
+    #[serde(default)]
+    pub sandbox_rel: Option<String>,
     pub model: Option<String>,
     pub started_at: String,
     pub finished_at: String,
@@ -451,6 +553,9 @@ pub struct CaseModeMetrics {
     pub mean_wall_ms: f64,
     pub mean_model_calls: f64,
     pub total_tokens: Option<u64>,
+    /// 检查器通过率均值（质量代理；无检查器计数的旧记录缺省为 None）。
+    #[serde(default)]
+    pub quality: Option<f64>,
 }
 
 /// 完整报告：聚合**全部** journal 记录（含失败）+ 未完成单元格清单。
@@ -461,6 +566,12 @@ pub struct ProductEvalReport {
     pub suite_hash: String,
     pub execution: String,
     pub model: Option<String>,
+    /// 批次标签（正式验收批次隔离用，同目录只允许同一批次）。
+    #[serde(default)]
+    pub batch_label: Option<String>,
+    /// 附加标签（CLI --tag 可重复；进报告供溯源）。
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub generated_at: String,
     pub runs: Vec<ProductEvalRun>,
     /// 计划中但尚未完成的矩阵单元格（中断续跑的目标集）。
@@ -476,6 +587,10 @@ struct RunDirMeta {
     suite_name: String,
     suite_hash: String,
     model: Option<String>,
+    #[serde(default)]
+    batch_label: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
     created_at: String,
 }
 
@@ -726,7 +841,127 @@ pub(crate) fn evaluate_checker<S: FileSource>(
             }
             None => Err(format!("产物不存在：{path}")),
         },
+        ArtifactChecker::JsonKeysExact { path, keys } => match source.read_text(path) {
+            Some(content) => {
+                let value: serde_json::Value = serde_json::from_str(&content)
+                    .map_err(|e| format!("{path} 不是合法 JSON：{e}"))?;
+                let object = value
+                    .as_object()
+                    .ok_or_else(|| format!("{path} 顶层必须是 JSON 对象"))?;
+                let actual_keys: Vec<&String> = object.keys().collect();
+                let mut want: Vec<&String> = keys.iter().collect();
+                want.sort();
+                let mut actual: Vec<&String> = actual_keys.iter().copied().collect();
+                actual.sort();
+                if want == actual {
+                    Ok(())
+                } else {
+                    let missing: Vec<&String> = want
+                        .iter()
+                        .filter(|key| !actual.contains(key))
+                        .copied()
+                        .collect();
+                    let extra: Vec<&String> = actual
+                        .iter()
+                        .filter(|key| !want.contains(key))
+                        .copied()
+                        .collect();
+                    Err(format!(
+                        "{path} 顶层字段集合不符：缺失 {{{}}} 多余 {{{}}}",
+                        missing
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        extra
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }
+            }
+            None => Err(format!("产物不存在：{path}")),
+        },
+        // 行为检查不在文件快照上评估：runner 在真实沙盒上经 [`evaluate_command_check`] 执行。
+        ArtifactChecker::CommandCheck { .. } => Ok(()),
     }
+}
+
+/// 在真实沙盒目录上执行 command_check（`cmd /C <command>` 单命令收口，自带超时）。
+/// 仅对 [`ArtifactChecker::CommandCheck`] 有意义；对其他检查器返回 Err。
+pub async fn evaluate_command_check(
+    checker: &ArtifactChecker,
+    sandbox: &Path,
+) -> Result<(), String> {
+    let ArtifactChecker::CommandCheck {
+        command,
+        cwd,
+        expect_exit,
+        stdout_contains,
+        stdout_not_contains,
+        timeout_secs,
+    } = checker
+    else {
+        return Err("evaluate_command_check 仅支持 CommandCheck".to_string());
+    };
+    let base = match cwd {
+        Some(raw) => {
+            let rel = sanitize_rel_path(raw)?;
+            if rel.is_empty() {
+                sandbox.to_path_buf()
+            } else {
+                sandbox.join(rel)
+            }
+        }
+        None => sandbox.to_path_buf(),
+    };
+    let command = command.trim().to_string();
+    if command.is_empty() {
+        return Err("command_check 的 command 为空".to_string());
+    }
+    let command_for_spawn = command.clone();
+    let base_for_spawn = base.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("cmd")
+            .args(["/C", command_for_spawn.as_str()])
+            .current_dir(&base_for_spawn)
+            .output()
+    });
+    let output = tokio::time::timeout(Duration::from_secs((*timeout_secs) as u64), handle)
+        .await
+        .map_err(|_| format!("command_check 超时（{timeout_secs}s）：{command}"))?
+        .map_err(|e| format!("command_check 任务失败：{e}"))?
+        .map_err(|e| format!("command_check 执行失败（cwd={}）：{e}", base.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let exit_code = output.status.code();
+    // 期望退出码：None = 不校验；Some(0) 为缺省。
+    if let Some(expected) = expect_exit {
+        if exit_code != Some(*expected) {
+            return Err(format!(
+                "command_check 退出码 {} != 期望 {}（命令：{command}）",
+                exit_code.unwrap_or(-1),
+                expected
+            ));
+        }
+    }
+    for needle in stdout_contains {
+        if !stdout.contains(needle.as_str()) {
+            return Err(format!(
+                "command_check stdout 缺少片段 {:?}（命令：{command}）",
+                truncate_for_log(needle, 40)
+            ));
+        }
+    }
+    for banned in stdout_not_contains {
+        if stdout.contains(banned.as_str()) {
+            return Err(format!(
+                "command_check stdout 出现禁止片段 {:?}（命令：{command}）",
+                truncate_for_log(banned, 40)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn evaluate_all<S: FileSource>(checkers: &[ArtifactChecker], source: &S) -> (bool, Vec<String>) {
@@ -737,6 +972,28 @@ fn evaluate_all<S: FileSource>(checkers: &[ArtifactChecker], source: &S) -> (boo
         }
     }
     (failed.is_empty(), failed)
+}
+
+/// 在真实沙盒上评估全部检查器（command_check 在此真正执行；其余与快照语义一致）。
+/// 返回 (通过数, 总数, 失败描述)，供 runner 判定与质量分计算。
+pub async fn evaluate_all_on_dir(
+    checkers: &[ArtifactChecker],
+    sandbox: &Path,
+) -> (u32, u32, Vec<String>) {
+    let mut failed = Vec::new();
+    let mut passed = 0u32;
+    let total = checkers.len() as u32;
+    for checker in checkers {
+        let result = match checker {
+            ArtifactChecker::CommandCheck { .. } => evaluate_command_check(checker, sandbox).await,
+            _ => evaluate_checker(checker, &FsSource(sandbox)),
+        };
+        match result {
+            Ok(()) => passed += 1,
+            Err(reason) => failed.push(format!("{} ⇒ {}", checker.describe(), reason)),
+        }
+    }
+    (passed, total, failed)
 }
 
 /// 在内存快照上求值单个检查器（公开入口，供校验/测试复用）。
@@ -916,6 +1173,20 @@ pub fn validate_case(
     if case.checkers.is_empty() {
         issues.push("checkers 为空：至少需要一个自动检查器".to_string());
     }
+    // 检查器目标可达性：预期产物、输入 fixture 或参考输出均可（行为/内容检查可指向
+    // 修复后的源文件——如代码任务验证 src/ 的修改结果）。
+    let mut known_files: std::collections::BTreeSet<String> =
+        normalized_artifacts.iter().cloned().collect();
+    for fixture in &case.inputs {
+        if let Ok(norm) = sanitize_rel_path(&fixture.path) {
+            known_files.insert(norm);
+        }
+    }
+    for key in case.reference_outputs.keys() {
+        if let Ok(norm) = sanitize_rel_path(key) {
+            known_files.insert(norm);
+        }
+    }
     for checker in &case.checkers {
         issues.extend(checker.static_issues());
         let path = match checker {
@@ -924,11 +1195,17 @@ pub fn validate_case(
             | ArtifactChecker::NotContains { path, .. }
             | ArtifactChecker::Regex { path, .. }
             | ArtifactChecker::LineCountMin { path, .. }
-            | ArtifactChecker::JsonFieldEquals { path, .. } => path.clone(),
+            | ArtifactChecker::JsonFieldEquals { path, .. }
+            | ArtifactChecker::JsonKeysExact { path, .. } => Some(path.clone()),
+            ArtifactChecker::CommandCheck { .. } => None,
         };
-        if let Ok(norm) = sanitize_rel_path(&path) {
-            if !normalized_artifacts.contains(&norm) {
-                issues.push(format!("检查器目标「{path}」不在 expected_artifacts 中"));
+        if let Some(path) = path {
+            if let Ok(norm) = sanitize_rel_path(&path) {
+                if !known_files.contains(&norm) {
+                    issues.push(format!(
+                        "检查器目标「{path}」不在 expected_artifacts / 输入 fixture / 参考输出 中"
+                    ));
+                }
             }
         }
     }
@@ -942,7 +1219,8 @@ pub fn validate_case(
     let mut refs = case.reference_outputs.clone();
     for fixture in &case.inputs {
         if let Ok(norm) = sanitize_rel_path(&fixture.path) {
-            refs.insert(norm, fixture.content.clone());
+            // 参考输出优先（代表"修复后/完成后"状态）；fixture 只在参考未覆盖时补位。
+            refs.entry(norm).or_insert_with(|| fixture.content.clone());
         }
     }
     let source = MapSource(&refs);
@@ -1163,20 +1441,21 @@ pub struct ReferenceDryExecutor;
 impl CaseExecutor for ReferenceDryExecutor {
     async fn execute<'ctx>(&self, ctx: &mut ExecContext<'ctx>) -> RawExecOutcome {
         let mut outcome = RawExecOutcome::default();
+        // 回放**全部**参考输出（不只预期产物）：代码任务的"修复后源文件"也在其中，
+        // 行为 command_check 才能对参考状态真正执行（dry = 完整 harness 自检）。
+        for (path, content) in &ctx.case.reference_outputs {
+            if let Err(write_err) = ctx.write_file(path, content) {
+                outcome.error = Some(format!("dry 回放写入失败：{write_err}"));
+                return outcome;
+            }
+        }
+        // 参考输出必须覆盖全部预期产物（否则检查器无可判定对象）。
         for artifact in &ctx.case.expected_artifacts {
-            match ctx.case.reference_outputs.get(artifact) {
-                Some(content) => {
-                    if let Err(write_err) = ctx.write_file(artifact, content) {
-                        outcome.error = Some(format!("dry 回放写入失败：{write_err}"));
-                        return outcome;
-                    }
-                }
-                None => {
-                    outcome.error = Some(format!(
-                        "dry 回放缺少参考输出：{artifact}（harness 自检失败）"
-                    ));
-                    return outcome;
-                }
+            if !ctx.case.reference_outputs.contains_key(artifact) {
+                outcome.error = Some(format!(
+                    "dry 回放缺少参考输出：{artifact}（harness 自检失败）"
+                ));
+                return outcome;
             }
         }
         outcome
@@ -1565,6 +1844,10 @@ pub struct RunOptions {
     pub category: Option<EvalCategory>,
     /// 清空 out 目录重跑（唯一允许"重算"的入口；journal 归零）。
     pub fresh: bool,
+    /// 批次标签（写入 meta/报告；同目录批次不一致拒绝续跑）。
+    pub batch_label: Option<String>,
+    /// 附加标签（溯源用）。
+    pub tags: Vec<String>,
 }
 
 impl Default for RunOptions {
@@ -1575,6 +1858,8 @@ impl Default for RunOptions {
             only: None,
             category: None,
             fresh: false,
+            batch_label: None,
+            tags: Vec::new(),
         }
     }
 }
@@ -1644,9 +1929,10 @@ impl MatrixRunner {
     fn init_or_verify_out_dir(
         &self,
         model: Option<&str>,
-        fresh: bool,
+        opts: &RunOptions,
     ) -> Result<(), ProductEvalError> {
         let hash = suite_hash(&self.bundle);
+        let fresh = opts.fresh;
         if fresh && self.out_dir.exists() {
             std::fs::remove_dir_all(&self.out_dir).map_err(|e| {
                 ProductEvalError(format!("清空 {} 失败：{e}", self.out_dir.display()))
@@ -1669,6 +1955,17 @@ impl MatrixRunner {
                     self.out_dir.display()
                 ));
             }
+            // 批次一致性：同一批次的续跑必须沿用同一 batch_label（防跨批次混算）。
+            if let Some(label) = &opts.batch_label {
+                match &meta.batch_label {
+                    Some(existing) if existing != label => {
+                        return err(format!(
+                            "out 目录已有批次「{existing}」，与本次「{label}」不一致：换 --out 或加 --fresh（修复后重测必须建立新批次，不得覆盖旧失败记录）"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
         } else {
             if self.journal_path().exists() {
                 return err(format!(
@@ -1681,6 +1978,8 @@ impl MatrixRunner {
                 suite_name: self.bundle.suite.name.clone(),
                 suite_hash: hash,
                 model: model.map(str::to_string),
+                batch_label: opts.batch_label.clone(),
+                tags: opts.tags.clone(),
                 created_at: now_rfc3339(),
             };
             let text = serde_json::to_string_pretty(&meta)
@@ -1752,7 +2051,7 @@ impl MatrixRunner {
         if cases.is_empty() {
             return err("过滤条件下没有可执行的任务");
         }
-        self.init_or_verify_out_dir(model.as_deref(), opts.fresh)?;
+        self.init_or_verify_out_dir(model.as_deref(), opts)?;
         let mut runs = self.load_runs()?;
         let completed: std::collections::BTreeSet<MatrixKey> =
             runs.iter().map(|run| run.key.clone()).collect();
@@ -1808,13 +2107,15 @@ impl MatrixRunner {
 
             let started_at = now_rfc3339();
             let cell_started = Instant::now();
-            let (status, failed_steps, artifact_refs, outcome) =
+            let (status, failed_steps, artifact_refs, outcome, checker_passed, checker_total) =
                 if let Some(setup_error) = setup_error {
                     (
                         RunStatus::Error,
                         vec![format!("setup:{setup_error}")],
                         Vec::new(),
                         RawExecOutcome::default(),
+                        0,
+                        0,
                     )
                 } else {
                     let mut ctx = ExecContext::new(
@@ -1832,22 +2133,31 @@ impl MatrixRunner {
                             if outcome.aborted {
                                 steps.push("cancelled:收到取消信号".to_string());
                             }
-                            let (status, checker_steps) = if outcome.aborted {
-                                (RunStatus::Cancelled, Vec::new())
-                            } else if let Some(error) = &outcome.error {
-                                steps.push(format!("executor:{error}"));
-                                (RunStatus::Error, Vec::new())
-                            } else {
-                                let source = FsSource(&sandbox);
-                                let (passed, failed) = evaluate_all(&case.checkers, &source);
-                                if passed {
-                                    (RunStatus::Passed, Vec::new())
+                            let (status, checker_steps, checker_passed, checker_total) =
+                                if outcome.aborted {
+                                    (RunStatus::Cancelled, Vec::new(), 0, 0)
+                                } else if let Some(error) = &outcome.error {
+                                    steps.push(format!("executor:{error}"));
+                                    (RunStatus::Error, Vec::new(), 0, 0)
                                 } else {
-                                    (RunStatus::Failed, failed)
-                                }
-                            };
+                                    // 检查器判定：静态检查器 + 行为 command_check 在真实沙盒执行。
+                                    let (passed, total, failed) =
+                                        evaluate_all_on_dir(&case.checkers, &sandbox).await;
+                                    if failed.is_empty() {
+                                        (RunStatus::Passed, Vec::new(), passed, total)
+                                    } else {
+                                        (RunStatus::Failed, failed, passed, total)
+                                    }
+                                };
                             steps.extend(checker_steps);
-                            (status, steps, artifacts, outcome)
+                            (
+                                status,
+                                steps,
+                                artifacts,
+                                outcome,
+                                checker_passed,
+                                checker_total,
+                            )
                         }
                         Err(_) => {
                             let (artifacts, mut steps) = ctx.take_records();
@@ -1857,20 +2167,29 @@ impl MatrixRunner {
                                 steps,
                                 artifacts,
                                 RawExecOutcome::default(),
+                                0,
+                                0,
                             )
                         }
                     }
                 };
             let wall_ms = cell_started.elapsed().as_millis() as u64;
 
-            // 失败沙盒留档（供事后排查）；成功沙盒即时清理。
-            if matches!(status, RunStatus::Passed) {
+            // 失败沙盒留档（供事后排查，路径随记录落盘）；成功沙盒即时清理。
+            let sandbox_rel = if matches!(status, RunStatus::Passed) {
                 let _ = std::fs::remove_dir_all(&sandbox);
+                None
             } else {
                 let keep = self.failures_dir().join(key.slug().replace('#', "__"));
                 let _ = std::fs::remove_dir_all(&keep);
                 let _ = std::fs::rename(&sandbox, &keep);
-            }
+                Some(
+                    keep.strip_prefix(&self.out_dir)
+                        .unwrap_or(&keep)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                )
+            };
 
             let cost_usd = if outcome.usage_known {
                 estimate_cost_from_env(&outcome.usage)
@@ -1894,6 +2213,9 @@ impl MatrixRunner {
                 cancellations: if outcome.aborted { 1 } else { 0 },
                 artifact_refs,
                 tool_log: outcome.tool_log,
+                checker_passed,
+                checker_total,
+                sandbox_rel,
                 model: model.clone(),
                 started_at,
                 finished_at: now_rfc3339(),
@@ -1936,6 +2258,8 @@ impl MatrixRunner {
             suite_hash: suite_hash(&self.bundle),
             execution: execution.to_string(),
             model: model.clone(),
+            batch_label: opts.batch_label.clone(),
+            tags: opts.tags.clone(),
             generated_at: now_rfc3339(),
             runs: runs.to_vec(),
             pending,
@@ -1965,6 +2289,24 @@ fn estimate_cost_from_env(usage: &TokenUsage) -> Option<f64> {
         .parse::<f64>()
         .ok()?;
     Some(usage.cost_estimate_usd(input, output))
+}
+
+/// 运行检查器质量分（0..1）：通过检查器数 / 总检查器数的均值。
+/// 无任何带检查器计数的运行（如旧 journal）时返回 None。
+pub fn quality_of(runs: &[ProductEvalRun]) -> Option<f64> {
+    let mut sum = 0.0;
+    let mut counted = 0usize;
+    for run in runs {
+        if run.checker_total > 0 {
+            sum += run.checker_passed as f64 / run.checker_total as f64;
+            counted += 1;
+        }
+    }
+    if counted == 0 {
+        None
+    } else {
+        Some(sum / counted as f64)
+    }
 }
 
 /// 聚合指标：全部已尝试运行一律计入分母。
@@ -2056,6 +2398,7 @@ pub fn aggregate_per_case(runs: &[ProductEvalRun]) -> Vec<CaseModeMetrics> {
                 mean_wall_ms: metrics.mean_wall_ms,
                 mean_model_calls: mean_calls,
                 total_tokens: metrics.total_tokens,
+                quality: quality_of(&owned),
             }
         })
         .collect()
@@ -2086,6 +2429,12 @@ pub fn format_report_summary(report: &ProductEvalReport) -> String {
         report.execution,
         report.model.as_deref().unwrap_or("-")
     ));
+    if let Some(label) = &report.batch_label {
+        out.push_str(&format!("批次：{label}\n"));
+    }
+    if !report.tags.is_empty() {
+        out.push_str(&format!("标签：{}\n", report.tags.join("、")));
+    }
     out.push_str(&format!(
         "运行 {}/{}（passed={} failed={} error={} timeout={} cancelled={}）成功率 {:.1}%\n",
         m.runs_total,
@@ -2109,14 +2458,17 @@ pub fn format_report_summary(report: &ProductEvalReport) -> String {
     }
     for row in &report.per_case {
         out.push_str(&format!(
-            "  {:<34} {:<7} {:>2}/{}（{:.0}%）mean_wall={:.0}ms mean_calls={:.1}\n",
+            "  {:<34} {:<7} {:>2}/{}（{:.0}%）mean_wall={:.0}ms mean_calls={:.1} quality={}\n",
             row.case_id,
             row.agent_mode.as_str(),
             row.passed,
             row.runs_total,
             row.success_rate * 100.0,
             row.mean_wall_ms,
-            row.mean_model_calls
+            row.mean_model_calls,
+            row.quality
+                .map(|q| format!("{:.2}", q))
+                .unwrap_or_else(|| "-".to_string())
         ));
     }
     out
@@ -2328,6 +2680,9 @@ pub struct ModeStats {
     pub mean_model_calls: f64,
     pub total_tokens: Option<u64>,
     pub total_cost_usd: Option<f64>,
+    /// 检查器通过率均值（质量代理；无检查器计数的旧记录缺省为 None）。
+    #[serde(default)]
+    pub quality: Option<f64>,
     /// 样本量是否达到可判定阈值（n ≥ 30）。
     pub sample_sufficient: bool,
 }
@@ -2367,6 +2722,8 @@ pub fn mode_statistics(runs: &[ProductEvalRun], mode: AgentMode) -> ModeStats {
     } else {
         None
     };
+    let owned: Vec<ProductEvalRun> = group.iter().map(|run| (*run).clone()).collect();
+    let quality = quality_of(&owned);
     ModeStats {
         mode: mode.as_str().to_string(),
         runs_total: total,
@@ -2384,6 +2741,7 @@ pub fn mode_statistics(runs: &[ProductEvalRun], mode: AgentMode) -> ModeStats {
         mean_model_calls: mean_calls,
         total_tokens: tokens,
         total_cost_usd: cost,
+        quality,
         sample_sufficient: total >= SUFFICIENT_SAMPLE_SIZE,
     }
 }
@@ -2528,4 +2886,368 @@ pub fn format_mode_comparison(comparison: &ModeComparison) -> String {
         out.push_str("  ⚠️ 样本不足（n<30）：以上对照结论仅具方向性参考\n");
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// 配对对照报告（第二路交付第三路：PairedStats 兼容 JSON）
+// ---------------------------------------------------------------------------
+
+/// 配对对照报告 schema 版本（对齐 team_benefit 的读取契约）。
+pub const PAIRED_REPORT_SCHEMA_VERSION: u32 = 1;
+
+/// 配对报告绑定参数：四元组（model/template/task_set/strategy_version）。
+/// strategy_version 由三路冻结；本路负责如实记录。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PairedReportOptions {
+    pub model: Option<String>,
+    pub template: Option<String>,
+    pub task_set: Option<String>,
+    pub strategy_version: String,
+}
+
+/// 单侧快照 JSON（字段对齐 `team_benefit::ModeStatSnapshot` + quality）。
+fn paired_snapshot_json(mode: AgentMode, runs: &[&ProductEvalRun]) -> serde_json::Value {
+    let total = runs.len();
+    let passed = runs
+        .iter()
+        .filter(|run| run.status == RunStatus::Passed)
+        .count();
+    let (low, high) = wilson_interval(passed, total, CI95_Z);
+    let walls: Vec<u64> = runs.iter().map(|run| run.wall_ms).collect();
+    let mean_wall = if total == 0 {
+        0.0
+    } else {
+        walls.iter().sum::<u64>() as f64 / total as f64
+    };
+    let mean_calls = if total == 0 {
+        0.0
+    } else {
+        runs.iter().map(|r| r.model_calls as f64).sum::<f64>() / total as f64
+    };
+    let tokens_known = runs.iter().any(|r| r.total_tokens.is_some());
+    let tokens = if tokens_known {
+        Some(runs.iter().filter_map(|r| r.total_tokens).sum::<u64>())
+    } else {
+        None
+    };
+    let cost_known = runs.iter().any(|r| r.cost_usd.is_some());
+    let cost = if cost_known {
+        Some(runs.iter().filter_map(|r| r.cost_usd).sum::<f64>())
+    } else {
+        None
+    };
+    let owned: Vec<ProductEvalRun> = runs.iter().map(|r| (*r).clone()).collect();
+    serde_json::json!({
+        "mode": mode.as_str(),
+        "runs_total": total,
+        "passed": passed,
+        "success_rate": if total == 0 { 0.0 } else { passed as f64 / total as f64 },
+        "ci95_low": low,
+        "ci95_high": high,
+        "mean_wall_ms": mean_wall,
+        "mean_model_calls": mean_calls,
+        "total_tokens": tokens,
+        "total_cost_usd": cost,
+        "quality": quality_of(&owned),
+        "sample_sufficient": total >= SUFFICIENT_SAMPLE_SIZE,
+    })
+}
+
+/// 生成三路可直接读取的配对对照报告 JSON（一个包里含全部任务组）。
+///
+/// 分组：`overall` / 分类 `code|research|document` / 每 `case_id`；
+/// 每组含 single/multi 快照（样本数、成功率、质量、耗时）与绑定四元组，
+/// 同时保留两侧报告摘要（suite_hash/批次/生成时间）供三路追溯。
+pub fn build_paired_report_json(
+    single: &ProductEvalReport,
+    multi: &ProductEvalReport,
+    opts: &PairedReportOptions,
+    generated_at: Option<&str>,
+) -> serde_json::Value {
+    use std::collections::BTreeSet;
+
+    let generated_at = generated_at.unwrap_or(&now_rfc3339()).to_string();
+    let bindings = serde_json::json!({
+        "model": opts.model.clone(),
+        "template": opts.template.clone(),
+        "task_set": opts.task_set.clone(),
+        "strategy_version": opts.strategy_version,
+    });
+    let mut pairs: Vec<serde_json::Value> = Vec::new();
+
+    let mut categories: BTreeSet<String> = BTreeSet::new();
+    let mut case_ids: BTreeSet<String> = BTreeSet::new();
+    for run in single.runs.iter().chain(multi.runs.iter()) {
+        categories.insert(run.category.as_str().to_string());
+        case_ids.insert(run.key.case_id.clone());
+    }
+
+    let mut push_group = |label: &str, filter: &dyn Fn(&ProductEvalRun) -> bool| {
+        let single_runs: Vec<&ProductEvalRun> = single
+            .runs
+            .iter()
+            .filter(|r| r.key.agent_mode == AgentMode::Single && filter(r))
+            .collect();
+        let multi_runs: Vec<&ProductEvalRun> = multi
+            .runs
+            .iter()
+            .filter(|r| r.key.agent_mode == AgentMode::Multi && filter(r))
+            .collect();
+        if single_runs.is_empty() && multi_runs.is_empty() {
+            return;
+        }
+        pairs.push(serde_json::json!({
+            "task_group": label,
+            "single": paired_snapshot_json(AgentMode::Single, &single_runs),
+            "multi": paired_snapshot_json(AgentMode::Multi, &multi_runs),
+            "bindings": bindings.clone(),
+            "generated_at": generated_at,
+        }));
+    };
+
+    push_group("overall", &|_| true);
+    for category in &categories {
+        let wanted = category.clone();
+        push_group(category, &move |r| r.category.as_str() == wanted);
+    }
+    for case_id in &case_ids {
+        let wanted = case_id.clone();
+        push_group(case_id, &move |r| r.key.case_id == wanted);
+    }
+
+    serde_json::json!({
+        "schema_version": PAIRED_REPORT_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "bindings": bindings,
+        "single_report": {
+            "suite_name": single.suite_name,
+            "suite_hash": single.suite_hash,
+            "execution": single.execution,
+            "batch_label": single.batch_label,
+            "generated_at": single.generated_at,
+            "metrics": single.metrics,
+        },
+        "multi_report": {
+            "suite_name": multi.suite_name,
+            "suite_hash": multi.suite_hash,
+            "execution": multi.execution,
+            "batch_label": multi.batch_label,
+            "generated_at": multi.generated_at,
+            "metrics": multi.metrics,
+        },
+        "pairs": pairs,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// freeze.json：任务输入 / 检查器 / 权限 / 预算 / 模型配置 / 版本哈希冻结
+// ---------------------------------------------------------------------------
+
+/// freeze.json schema 版本。
+pub const FREEZE_SCHEMA_VERSION: u32 = 1;
+
+/// 计算单任务权限哈希：allow_read/allow_write/allow_commands 的规范序列化摘要。
+pub fn permissions_hash(case: &ProductEvalCase) -> String {
+    let mut hasher = Sha256::new();
+    let payload = serde_json::json!({
+        "allow_read": case.allow_read,
+        "allow_write": case.allow_write,
+        "allow_commands": case.allow_commands,
+    });
+    if let Ok(text) = serde_json::to_vec(&payload) {
+        hasher.update(&text);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// 生成 freeze.json 内容（任务文件级 sha256 + 生效预算 + 权限哈希 + 模型/版本）。
+/// `task_rel_paths` 为 suite.tasks 的相对路径（与 tasks 文件一一对应）。
+pub fn build_freeze_json(
+    bundle: &SuiteBundle,
+    model: Option<&str>,
+    base_url: Option<&str>,
+    git_commit: Option<&str>,
+    git_dirty: Option<bool>,
+    frozen_at: Option<&str>,
+) -> Result<serde_json::Value, ProductEvalError> {
+    let defaults = &bundle.suite.defaults;
+    let mut tasks = Vec::new();
+    for (case, rel) in bundle.cases.iter().zip(bundle.suite.tasks.iter()) {
+        let file_path = bundle.dir.join(rel);
+        let text = std::fs::read_to_string(&file_path)
+            .map_err(|e| ProductEvalError(format!("读取任务 {rel} 失败：{e}")))?;
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        let file_sha = format!("{:x}", hasher.finalize());
+        tasks.push(serde_json::json!({
+            "id": case.id,
+            "file": rel,
+            "sha256": file_sha,
+            "category": case.category.as_str(),
+            "repetitions": case.effective_repetitions(defaults, None),
+            "timeout_secs": case.effective_timeout_secs(defaults),
+            "max_model_calls": case.effective_max_model_calls(defaults),
+            "permissions_sha256": permissions_hash(case),
+        }));
+    }
+    let total_cells = tasks
+        .iter()
+        .filter_map(|t| t.get("repetitions").and_then(serde_json::Value::as_u64))
+        .sum::<u64>() as usize;
+    Ok(serde_json::json!({
+        "schema_version": FREEZE_SCHEMA_VERSION,
+        "suite": {
+            "name": bundle.suite.name,
+            "revision_sha256": suite_hash(bundle),
+        },
+        "defaults": {
+            "repetitions": defaults.repetitions,
+            "timeout_secs": defaults.timeout_secs,
+            "max_model_calls": defaults.max_model_calls,
+        },
+        "tasks": tasks,
+        "permissions": { "policy": "default deny; allow_read/allow_write/allow_commands 逐调用强制，见 tasks[*].permissions_sha256" },
+        "budget": {
+            "single_cells": total_cells,
+            "multi_cells": total_cells,
+            "shared": "单/多 Agent 同任务同输入同权限同预算同检查器",
+        },
+        "model": {
+            "id": model,
+            "base_url": base_url,
+        },
+        "version": {
+            "git_commit": git_commit,
+            "git_dirty": git_dirty,
+        },
+        "frozen_at": frozen_at.unwrap_or(&now_rfc3339()),
+        "frozen_by": "lane2-product-eval",
+    }))
+}
+
+/// 校验当前套件是否与 freeze.json 一致（输入/检查器/权限/预算/版本哈希）。
+/// 返回问题清单；空 = 冻结未被破坏。
+pub fn verify_freeze(
+    bundle: &SuiteBundle,
+    freeze: &serde_json::Value,
+    current_model: Option<&str>,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+    let Some(schema) = freeze
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        issues.push("freeze.json 缺少 schema_version".to_string());
+        return issues;
+    };
+    if schema != FREEZE_SCHEMA_VERSION as u64 {
+        issues.push(format!(
+            "freeze.json schema_version={schema} 不兼容（期望 {FREEZE_SCHEMA_VERSION}）"
+        ));
+        return issues;
+    }
+    let freeze_suite = freeze.get("suite");
+    let freeze_name = freeze_suite
+        .and_then(|s| s.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if freeze_name != bundle.suite.name {
+        issues.push(format!(
+            "freeze 套件名「{freeze_name}」与当前「{}」不一致",
+            bundle.suite.name
+        ));
+    }
+    let freeze_revision = freeze_suite
+        .and_then(|s| s.get("revision_sha256"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let current_revision = suite_hash(bundle);
+    if freeze_revision != current_revision {
+        issues.push(format!(
+            "套件修订哈希不一致：freeze={freeze_revision} 当前={current_revision}（任务输入/检查器/权限/预算已漂移；须重新生成 freeze.json 后建立新批次）"
+        ));
+    }
+    // 任务级文件哈希核对（防同修订下的文件级漂移；正常应被 revision 覆盖）。
+    let freeze_tasks = freeze
+        .get("tasks")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let task_by_rel: std::collections::BTreeMap<String, &ProductEvalCase> = bundle
+        .cases
+        .iter()
+        .zip(bundle.suite.tasks.iter())
+        .map(|(case, rel)| (rel.clone(), case))
+        .collect();
+    for entry in &freeze_tasks {
+        let Some(rel) = entry.get("file").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let file_path = bundle.dir.join(rel);
+        let current_sha = std::fs::read_to_string(&file_path).ok().map(|text| {
+            let mut hasher = Sha256::new();
+            hasher.update(text.as_bytes());
+            format!("{:x}", hasher.finalize())
+        });
+        let freeze_sha = entry.get("sha256").and_then(serde_json::Value::as_str);
+        if let (Some(freeze_sha), Some(current_sha)) = (freeze_sha, &current_sha) {
+            if freeze_sha != current_sha {
+                issues.push(format!(
+                    "任务文件 {rel} 哈希漂移：freeze={freeze_sha} 当前={current_sha}"
+                ));
+            }
+        } else {
+            issues.push(format!("freeze 中任务 {rel} 缺少 sha256 或文件缺失"));
+        }
+        // 权限哈希。
+        if let Some(case) = task_by_rel.get(rel) {
+            if let (Some(frozen_perm), Some(id)) = (
+                entry
+                    .get("permissions_sha256")
+                    .and_then(serde_json::Value::as_str),
+                entry.get("id").and_then(serde_json::Value::as_str),
+            ) {
+                let current_perm = permissions_hash(case);
+                if frozen_perm != current_perm {
+                    issues.push(format!(
+                        "任务 {id}（{rel}）权限哈希漂移：freeze={frozen_perm} 当前={current_perm}（allow_read/allow_write/allow_commands 已变更）"
+                    ));
+                }
+            }
+        }
+    }
+    // 数量核对。
+    if freeze_tasks.len() != bundle.cases.len() {
+        issues.push(format!(
+            "freeze 任务数 {} 与当前套件 {} 不一致",
+            freeze_tasks.len(),
+            bundle.cases.len()
+        ));
+    }
+    // 模型配置冻结核对（环境变量为当前配置来源）。
+    if let Some(model_id) = freeze
+        .get("model")
+        .and_then(|m| m.get("id"))
+        .and_then(serde_json::Value::as_str)
+    {
+        match current_model {
+            Some(current) if current != model_id => {
+                issues.push(format!(
+                    "模型配置已漂移：freeze={model_id} 当前={current}（成绩只对冻结模型有效）"
+                ));
+            }
+            Some(_) => {}
+            None => issues.push(format!(
+                "freeze 冻结模型 {model_id}，但当前未解析出模型（环境配置缺失）"
+            )),
+        }
+    }
+    issues
+}
+
+/// 从 freeze.json 文本解析（校验 schema 版本）。
+pub fn parse_freeze(text: &str) -> Result<serde_json::Value, ProductEvalError> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| ProductEvalError(format!("freeze.json 解析失败：{e}")))?;
+    Ok(value)
 }

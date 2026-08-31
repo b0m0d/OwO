@@ -117,6 +117,9 @@ fn dummy_run(key: MatrixKey, status: RunStatus) -> ProductEvalRun {
         cancellations: 0,
         artifact_refs: vec![],
         tool_log: vec![],
+        checker_passed: 0,
+        checker_total: 0,
+        sandbox_rel: None,
         model: None,
         started_at: "2026-01-01T00:00:00Z".to_string(),
         finished_at: "2026-01-01T00:00:01Z".to_string(),
@@ -835,6 +838,8 @@ fn compare_reports_flags_regressions_and_mismatched_execution() {
         suite_hash: "h1".into(),
         execution: "dry-reference".into(),
         model: None,
+        batch_label: None,
+        tags: vec![],
         generated_at: "t1".into(),
         runs: vec![],
         pending: vec![],
@@ -849,6 +854,7 @@ fn compare_reports_flags_regressions_and_mismatched_execution() {
             mean_wall_ms: 10.0,
             mean_model_calls: 1.0,
             total_tokens: None,
+            quality: None,
         }],
     };
     let mut report_b = report_a.clone();
@@ -886,6 +892,377 @@ fn parse_file_blocks_handles_fences_and_reports_residuals() {
     assert_eq!(b.1.trim(), "内容乙");
     assert!(!blocks.iter().any(|(p, _)| p == "c.md"), "残块必须被丢弃");
     assert!(warnings.iter().any(|w| w.contains("嵌套")), "{warnings:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 12) 十期二路新增能力：json_keys_exact / command_check / 质量分 / 配对报告 / freeze
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_keys_exact_enforces_exact_top_level_schema() {
+    let checker = ArtifactChecker::JsonKeysExact {
+        path: "out/data.json".to_string(),
+        keys: vec!["owner".into(), "deadline".into(), "budget".into()],
+    };
+    let good = BTreeMap::from([(
+        "out/data.json".to_string(),
+        r#"{"owner":"张三","deadline":"2026-09-05","budget":42000}"#.to_string(),
+    )]);
+    assert!(evaluate_checker_on_map(&checker, &good).is_ok());
+    // 多余字段拒绝。
+    let extra = BTreeMap::from([(
+        "out/data.json".to_string(),
+        r#"{"owner":"张三","deadline":"2026-09-05","budget":1,"note":"多出"}"#.to_string(),
+    )]);
+    let err = evaluate_checker_on_map(&checker, &extra).expect_err("多余字段必须失败");
+    assert!(err.contains("多余"), "{err}");
+    // 缺失字段拒绝。
+    let missing = BTreeMap::from([(
+        "out/data.json".to_string(),
+        r#"{"owner":"张三","budget":1}"#.to_string(),
+    )]);
+    let err = evaluate_checker_on_map(&checker, &missing).expect_err("缺失字段必须失败");
+    assert!(err.contains("缺失"), "{err}");
+    // 非 JSON 对象拒绝。
+    let not_object = BTreeMap::from([("out/data.json".to_string(), "[1,2,3]".to_string())]);
+    assert!(evaluate_checker_on_map(&checker, &not_object).is_err());
+    // 静态校验：空 keys 报问题。
+    let empty_keys = ArtifactChecker::JsonKeysExact {
+        path: "out/data.json".to_string(),
+        keys: vec![],
+    };
+    assert!(empty_keys
+        .static_issues()
+        .iter()
+        .any(|issue| issue.contains("keys 为空")));
+}
+
+#[tokio::test]
+async fn command_check_runs_in_sandbox_and_skips_on_memory_snapshot() {
+    let sandbox = temp_out("cmdcheck");
+    std::fs::write(sandbox.join("out.txt"), "report-v1: PASS\nline2\n").unwrap();
+    // 命令必须是单条简单调用（无内嵌引号，避免 cmd /C 二次解析）。
+    std::fs::write(
+        sandbox.join("ping.py"),
+        "print('CHECK-OK')\nprint('OTHER')\n",
+    )
+    .unwrap();
+    std::fs::write(sandbox.join("fail.py"), "import sys\nsys.exit(3)\n").unwrap();
+    let checker = ArtifactChecker::CommandCheck {
+        command: "python ping.py".to_string(),
+        cwd: None,
+        expect_exit: Some(0),
+        stdout_contains: vec!["CHECK-OK".to_string()],
+        stdout_not_contains: vec!["FAIL".to_string()],
+        timeout_secs: 30,
+    };
+    // 内存快照上静默跳过（不执行，不失败）。
+    let snapshot = BTreeMap::new();
+    assert!(evaluate_checker_on_map(&checker, &snapshot).is_ok());
+    // 真实沙盒上执行并断言 stdout。
+    assert!(evaluate_command_check(&checker, &sandbox).await.is_ok());
+    // 期望片段缺失 → 失败。
+    let bad = ArtifactChecker::CommandCheck {
+        command: "python ping.py".to_string(),
+        cwd: None,
+        expect_exit: Some(0),
+        stdout_contains: vec!["NEVER-PRINTED".to_string()],
+        stdout_not_contains: vec![],
+        timeout_secs: 30,
+    };
+    let err = evaluate_command_check(&bad, &sandbox)
+        .await
+        .expect_err("stdout 缺少期望片段必须失败");
+    assert!(err.contains("缺少片段"), "{err}");
+    // 退出码不符 → 失败。
+    let exit_bad = ArtifactChecker::CommandCheck {
+        command: "python fail.py".to_string(),
+        cwd: None,
+        expect_exit: Some(0),
+        stdout_contains: vec![],
+        stdout_not_contains: vec![],
+        timeout_secs: 30,
+    };
+    let err = evaluate_command_check(&exit_bad, &sandbox)
+        .await
+        .expect_err("退出码不符必须失败");
+    assert!(err.contains("退出码"), "{err}");
+    // 静态校验：shell 链式元字符 / cwd 越界拒绝。
+    let meta = ArtifactChecker::CommandCheck {
+        command: "python a.py; rm -rf /".to_string(),
+        cwd: None,
+        expect_exit: None,
+        stdout_contains: vec![],
+        stdout_not_contains: vec![],
+        timeout_secs: 30,
+    };
+    assert!(meta
+        .static_issues()
+        .iter()
+        .any(|issue| issue.contains("元字符")));
+    let _ = std::fs::remove_dir_all(&sandbox);
+}
+
+#[test]
+fn checker_quality_metrics_and_mode_statistics() {
+    let mut passed = dummy_run(
+        MatrixKey::new(String::from("c"), AgentMode::Single, 0),
+        RunStatus::Passed,
+    );
+    passed.checker_passed = 5;
+    passed.checker_total = 6;
+    let mut partial = dummy_run(
+        MatrixKey::new(String::from("c"), AgentMode::Single, 1),
+        RunStatus::Failed,
+    );
+    partial.checker_passed = 3;
+    partial.checker_total = 6;
+    let mut no_counts = dummy_run(
+        MatrixKey::new(String::from("c"), AgentMode::Single, 2),
+        RunStatus::Passed,
+    );
+    no_counts.checker_total = 0;
+    assert_eq!(quality_of(&[passed.clone()]), Some(5.0 / 6.0));
+    assert_eq!(
+        quality_of(&[passed, partial]),
+        Some((5.0 / 6.0 + 3.0 / 6.0) / 2.0)
+    );
+    assert_eq!(quality_of(&[no_counts]), None);
+    // CaseModeMetrics 与模式统计带 quality。
+    let runs = vec![
+        dummy_run(
+            MatrixKey::new(String::from("c"), AgentMode::Single, 0),
+            RunStatus::Passed,
+        ),
+        dummy_run(
+            MatrixKey::new(String::from("c"), AgentMode::Multi, 0),
+            RunStatus::Passed,
+        ),
+    ];
+    let per = aggregate_per_case(&runs);
+    assert_eq!(per.len(), 2);
+}
+
+#[test]
+fn paired_report_json_matches_route3_paired_stats_contract() {
+    let a = dummy_run(
+        MatrixKey::new(String::from("code-one"), AgentMode::Single, 0),
+        RunStatus::Passed,
+    );
+    let b = dummy_run(
+        MatrixKey::new(String::from("code-one"), AgentMode::Multi, 0),
+        RunStatus::Passed,
+    );
+    let single = ProductEvalReport {
+        schema_version: 1,
+        suite_name: "s".into(),
+        suite_hash: "h".into(),
+        execution: "live-agent".into(),
+        model: Some("glm-5.3-flash".into()),
+        batch_label: Some("b1".into()),
+        tags: vec!["tag1".into()],
+        generated_at: "t1".into(),
+        runs: vec![a.clone()],
+        pending: vec![],
+        metrics: aggregate_metrics(&[a.clone()]),
+        per_case: aggregate_per_case(&[a.clone()]),
+    };
+    let multi = ProductEvalReport {
+        schema_version: 1,
+        suite_name: "s".into(),
+        suite_hash: "h".into(),
+        execution: "live-workswarm".into(),
+        model: Some("glm-5.3-flash".into()),
+        batch_label: Some("b1".into()),
+        tags: vec!["tag1".into()],
+        generated_at: "t2".into(),
+        runs: vec![b.clone()],
+        pending: vec![],
+        metrics: aggregate_metrics(&[b.clone()]),
+        per_case: aggregate_per_case(&[b.clone()]),
+    };
+    let opts = PairedReportOptions {
+        model: Some("glm-5.3-flash".into()),
+        template: Some("default".into()),
+        task_set: Some("v1-r1-product-suite".into()),
+        strategy_version: "ten-3-default".into(),
+    };
+    let paired = build_paired_report_json(&single, &multi, &opts, Some("t3"));
+    let pairs = paired.get("pairs").unwrap().as_array().unwrap();
+    let overall = pairs
+        .iter()
+        .find(|p| p.get("task_group").unwrap() == "overall")
+        .expect("必须包含 overall 组");
+    let s = overall.get("single").unwrap();
+    assert_eq!(s.get("mode").unwrap(), "single");
+    assert_eq!(s.get("runs_total").unwrap(), 1);
+    assert_eq!(s.get("success_rate").unwrap(), 1.0);
+    assert_eq!(s.get("mean_wall_ms").unwrap(), 10.0);
+    assert_eq!(s.get("sample_sufficient").unwrap(), false);
+    assert_eq!(
+        s.get("quality").unwrap(),
+        &serde_json::Value::Null,
+        "无检查器计数 → quality=null"
+    );
+    let m = overall.get("multi").unwrap();
+    assert_eq!(m.get("mode").unwrap(), "multi");
+    assert_eq!(overall.get("generated_at").unwrap(), "t3");
+    let bindings = overall.get("bindings").unwrap();
+    assert_eq!(bindings.get("model").unwrap(), "glm-5.3-flash");
+    assert_eq!(bindings.get("template").unwrap(), "default");
+    assert_eq!(bindings.get("task_set").unwrap(), "v1-r1-product-suite");
+    assert_eq!(bindings.get("strategy_version").unwrap(), "ten-3-default");
+    // 每 case 一组。
+    assert!(pairs
+        .iter()
+        .any(|p| p.get("task_group").unwrap() == "code-one"));
+    // 元信息保留。
+    assert_eq!(
+        paired
+            .get("single_report")
+            .unwrap()
+            .get("suite_hash")
+            .unwrap(),
+        "h"
+    );
+}
+
+#[test]
+fn freeze_build_verify_and_drift_detection() {
+    // 用真实 v1 套件构造冻结记录（文件级哈希 + 权限哈希 + 版本身份）。
+    let suite_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/v1/suite.json");
+    let bundle = load_suite(&suite_path).expect("加载真实 v1 套件失败");
+    let freeze = build_freeze_json(
+        &bundle,
+        Some("glm-5.3-flash"),
+        Some("https://open.bigmodel.cn/api/paas/v4"),
+        Some("abc123def"),
+        Some(false),
+        Some("2026-09-01T00:00:00Z"),
+    )
+    .expect("生成 freeze 失败");
+    assert_eq!(freeze.get("schema_version").unwrap(), 1);
+    let tasks = freeze.get("tasks").unwrap().as_array().unwrap();
+    assert_eq!(tasks.len(), 10, "v1 套件应为 10 个任务");
+    // 冻结预算：默认 20 reps。
+    assert_eq!(
+        freeze.get("budget").unwrap().get("single_cells").unwrap(),
+        200
+    );
+    assert_eq!(
+        freeze.get("budget").unwrap().get("multi_cells").unwrap(),
+        200
+    );
+    // 与自身一致（同一 git 提交/模型）。
+    let issues = verify_freeze(&bundle, &freeze, Some("glm-5.3-flash"));
+    assert!(issues.is_empty(), "{issues:?}");
+    // 模型漂移检出。
+    let issues = verify_freeze(&bundle, &freeze, Some("glm-4.5"));
+    assert!(
+        issues.iter().any(|issue| issue.contains("模型配置已漂移")),
+        "{issues:?}"
+    );
+    // 任务文件哈希漂移检出：篡改冻结记录中的单个任务 sha256。
+    let mut tampered = freeze.clone();
+    let tasks = tampered.get_mut("tasks").unwrap().as_array_mut().unwrap();
+    tasks[0]["sha256"] = serde_json::Value::String("tampered".to_string());
+    let issues = verify_freeze(&bundle, &tampered, Some("glm-5.3-flash"));
+    assert!(
+        issues.iter().any(|issue| issue.contains("哈希漂移")),
+        "{issues:?}"
+    );
+    // 权限哈希漂移检出。
+    let mut tampered_perm = freeze.clone();
+    let tasks = tampered_perm
+        .get_mut("tasks")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+    tasks[0]["permissions_sha256"] = serde_json::Value::String("tampered".to_string());
+    let issues = verify_freeze(&bundle, &tampered_perm, Some("glm-5.3-flash"));
+    assert!(
+        issues.iter().any(|issue| issue.contains("权限哈希漂移")),
+        "{issues:?}"
+    );
+    // 序列化往返可解析。
+    let text = serde_json::to_string(&freeze).unwrap();
+    let parsed = parse_freeze(&text).expect("freeze.json 解析失败");
+    assert_eq!(parsed.get("schema_version").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn batch_label_enforced_and_tags_recorded() {
+    use owo_agent_core::product_eval::SuiteDefaults;
+    let mut defaults = SuiteDefaults::default();
+    defaults.repetitions = 1;
+    let b = SuiteBundle {
+        dir: std::env::temp_dir(),
+        suite: ProductEvalSuite {
+            schema_version: PRODUCT_EVAL_SCHEMA_VERSION,
+            name: "test-suite".to_string(),
+            description: String::new(),
+            defaults,
+            tasks: vec!["tasks/x.json".to_string()],
+        },
+        cases: vec![make_case("x", EvalCategory::Code)],
+    };
+    let out = temp_out("batch-label");
+    let runner = MatrixRunner::new(b, &out);
+    let opts = RunOptions {
+        modes: vec![AgentMode::Single],
+        reps_override: Some(1),
+        only: None,
+        category: None,
+        fresh: false,
+        batch_label: Some("acceptance-01".into()),
+        tags: vec!["formal".into(), "b1".into()],
+    };
+    let report = run_matrix(
+        &runner,
+        ScriptedExecutor::passing(),
+        "dry-reference",
+        &opts,
+        no_cancel(),
+    )
+    .await;
+    assert_eq!(report.batch_label.as_deref(), Some("acceptance-01"));
+    assert_eq!(report.tags, vec!["formal", "b1"]);
+    // 同目录换批次 → 拒绝续跑（修复后重测必须建立新批次）。
+    let opts2 = RunOptions {
+        modes: vec![AgentMode::Single],
+        reps_override: Some(1),
+        only: None,
+        category: None,
+        fresh: false,
+        batch_label: Some("acceptance-02".into()),
+        tags: vec![],
+    };
+    let result = runner
+        .run(
+            ScriptedExecutor::passing(),
+            "dry-reference",
+            None,
+            &opts2,
+            no_cancel(),
+        )
+        .await;
+    let err = result.expect_err("批次不一致必须拒绝续跑");
+    assert!(err.0.contains("批次"), "{err}");
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn freeze_permissions_hash_is_stable_and_case_sensitive() {
+    let mut case = make_case("perm", EvalCategory::Code);
+    case.allow_read = vec!["src/**".to_string()];
+    case.allow_write = vec!["out/**".to_string()];
+    case.allow_commands = vec!["python src/calc.py".to_string()];
+    let h1 = permissions_hash(&case);
+    case.allow_commands.push("python src/check.py".to_string());
+    let h2 = permissions_hash(&case);
+    assert_ne!(h1, h2, "权限范围变更必须改变权限哈希");
+    let h3 = permissions_hash(&case);
+    assert_eq!(h2, h3, "同一权限范围哈希必须稳定");
 }
 
 // ---------------------------------------------------------------------------

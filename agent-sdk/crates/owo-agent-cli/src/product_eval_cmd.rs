@@ -10,9 +10,11 @@
 
 use clap::{Args, Subcommand};
 use owo_agent_core::product_eval::{
-    build_live_provider, compare_reports, format_mode_statistics, format_report_summary,
-    format_validation, load_report, load_suite, resolve_suite_input, AgentMode, EvalCategory,
-    GenerativeExecutor, MatrixRunner, ReferenceDryExecutor, RunOptions, SingleAgentExecutor,
+    build_freeze_json, build_live_provider, build_paired_report_json, compare_reports,
+    format_mode_statistics, format_report_summary, format_validation, load_report, load_suite,
+    resolve_suite_input, verify_freeze, AgentMode, ArtifactChecker, EvalCategory,
+    GenerativeExecutor, MatrixRunner, PairedReportOptions, ReferenceDryExecutor, RunOptions,
+    SingleAgentExecutor,
 };
 use owo_agent_core::product_eval_workswarm::WorkSwarmExecutor;
 use std::path::{Path, PathBuf};
@@ -35,6 +37,18 @@ pub enum ProductEvalAction {
         /// suite.json 路径（缺省向上查找 agent-sdk/evals/v1/suite.json）
         #[arg(long)]
         suite: Option<PathBuf>,
+        /// 同时校验与 freeze.json 的冻结一致性（任务输入/检查器/权限/预算/模型/版本哈希）
+        #[arg(long)]
+        freeze: Option<PathBuf>,
+    },
+    /// 冻结当前套件为 freeze.json（正式验收前必须冻结；版本哈希取自 git）
+    Freeze {
+        /// suite.json 路径（缺省向上查找 agent-sdk/evals/v1/suite.json）
+        #[arg(long)]
+        suite: Option<PathBuf>,
+        /// 输出路径（缺省 <suite 目录>/freeze.json）
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// 执行评测矩阵（断点续跑；--exec dry 为本地确定性回放）
     Run {
@@ -66,6 +80,12 @@ pub enum ProductEvalAction {
         /// 组队模式（仅 exec=workswarm 生效）：single|team|auto，缺省 auto
         #[arg(long)]
         team_mode: Option<String>,
+        /// 批次标签：写入 meta/报告；同一 out 目录只允许同一批次（防跨批次混算）
+        #[arg(long)]
+        label: Option<String>,
+        /// 附加溯源标签（可重复出现多次）
+        #[arg(long)]
+        tag: Vec<String>,
         /// 清空输出目录重跑（唯一允许的归零入口）
         #[arg(long)]
         fresh: bool,
@@ -87,12 +107,35 @@ pub enum ProductEvalAction {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// 由单/多两份报告生成「配对对照报告」（三路收益判定可直接读取的 PairedStats JSON）
+    Paired {
+        /// 单 Agent 报告 report.json
+        single: PathBuf,
+        /// 多 Agent 报告 report.json
+        multi: PathBuf,
+        /// 输出 paired JSON 路径
+        #[arg(long)]
+        out: PathBuf,
+        /// 模型绑定（缺省取 single 报告的 model）
+        #[arg(long)]
+        model: Option<String>,
+        /// 模板绑定（多 Agent 实际组队模板；由三路冻结）
+        #[arg(long)]
+        template: Option<String>,
+        /// 任务集绑定（缺省取 single 报告的 suite_name）
+        #[arg(long)]
+        task_set: Option<String>,
+        /// 策略版本（与 team-policy.json 的 strategy_version 一致，由三路冻结）
+        #[arg(long, default_value = "ten-3-default")]
+        strategy_version: String,
+    },
 }
 
 /// 入口（由 main.rs 的 Commands::ProductEval 分发）。
 pub async fn run(args: ProductEvalArgs) -> Result<(), Box<dyn std::error::Error>> {
     match args.action {
-        ProductEvalAction::Validate { suite } => run_validate(suite),
+        ProductEvalAction::Validate { suite, freeze } => run_validate(suite, freeze),
+        ProductEvalAction::Freeze { suite, out } => run_freeze(suite, out),
         ProductEvalAction::Preflight { suite, out } => run_preflight(suite, out),
         ProductEvalAction::Run {
             suite,
@@ -104,6 +147,8 @@ pub async fn run(args: ProductEvalArgs) -> Result<(), Box<dyn std::error::Error>
             out,
             model,
             team_mode,
+            label,
+            tag,
             fresh,
         } => {
             let selection = match team_mode.as_deref() {
@@ -111,7 +156,7 @@ pub async fn run(args: ProductEvalArgs) -> Result<(), Box<dyn std::error::Error>
                 Some(raw) => owo_agent_core::team_strategy::TeamSelectionMode::parse(raw)?,
             };
             run_matrix_cmd(
-                suite, exec, agents, reps, only, category, out, model, selection, fresh,
+                suite, exec, agents, reps, only, category, out, model, selection, label, tag, fresh,
             )
             .await
         }
@@ -120,18 +165,188 @@ pub async fn run(args: ProductEvalArgs) -> Result<(), Box<dyn std::error::Error>
             report_b,
             format,
         } => run_compare(report_a, report_b, format),
+        ProductEvalAction::Paired {
+            single,
+            multi,
+            out,
+            model,
+            template,
+            task_set,
+            strategy_version,
+        } => run_paired(
+            single,
+            multi,
+            out,
+            model,
+            template,
+            task_set,
+            strategy_version,
+        ),
     }
 }
 
-fn run_validate(suite: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_validate(
+    suite: Option<PathBuf>,
+    freeze: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let suite_path = resolve_suite_input(suite.as_deref())?;
     let bundle = load_suite(&suite_path)?;
     println!("套件：{}（{}）", bundle.suite.name, suite_path.display());
     let validation = owo_agent_core::product_eval::validate_suite(&bundle);
     print!("{}", format_validation(&validation));
-    if !validation.all_ok {
+    let mut all_ok = validation.all_ok;
+    // 冻结一致性校验：正式验收前必须通过（任务输入/检查器/权限/预算/模型/版本哈希未漂移）。
+    if let Some(freeze_path) = &freeze {
+        let text = match std::fs::read_to_string(freeze_path) {
+            Ok(text) => text,
+            Err(error) => {
+                println!("读取 freeze.json {} 失败：{error}", freeze_path.display());
+                std::process::exit(1);
+            }
+        };
+        let freeze_json = owo_agent_core::product_eval::parse_freeze(&text)?;
+        let default_model = crate::resolve_model(None, None);
+        let issues = verify_freeze(&bundle, &freeze_json, Some(&default_model));
+        if issues.is_empty() {
+            println!("freeze 一致性：通过（{}）", freeze_path.display());
+        } else {
+            all_ok = false;
+            println!("freeze 一致性：失败（冻结被破坏或版本漂移）");
+            for issue in &issues {
+                println!("    - {issue}");
+            }
+        }
+    }
+    if !all_ok {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+/// 冻结：写出 freeze.json（任务文件哈希 + 生效预算 + 权限哈希 + 模型配置 + git 版本）。
+fn run_freeze(
+    suite: Option<PathBuf>,
+    out: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let suite_path = resolve_suite_input(suite.as_deref())?;
+    let bundle = load_suite(&suite_path)?;
+    let validation = owo_agent_core::product_eval::validate_suite(&bundle);
+    if !validation.all_ok {
+        print!("{}", format_validation(&validation));
+        return Err("套件校验未通过：禁止冻结存在问题的任务集".into());
+    }
+    let model = crate::resolve_model(None, None);
+    let base_url = std::env::var("OPENAI_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| owo_agent_core::gateway::DEFAULT_MODEL_BASE_URL.to_string());
+    // git 版本哈希（从套件目录向上找仓库根）。
+    let git_dir = repo_root_of(&suite_path).unwrap_or_else(|| suite_path.to_path_buf());
+    let git_commit = run_git(&git_dir, &["rev-parse", "HEAD"]).ok();
+    let git_dirty = run_git(&git_dir, &["status", "--porcelain"])
+        .map(|output| !output.trim().is_empty())
+        .unwrap_or(true);
+    let freeze_json = build_freeze_json(
+        &bundle,
+        Some(&model),
+        Some(&base_url),
+        git_commit.as_deref(),
+        Some(git_dirty),
+        None,
+    )?;
+    let out_path = match out {
+        Some(path) => path,
+        None => suite_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("freeze.json"),
+    };
+    let text = serde_json::to_string_pretty(&freeze_json)
+        .map_err(|e| format!("序列化 freeze.json 失败：{e}"))?;
+    std::fs::write(&out_path, text + "\n")
+        .map_err(|e| format!("写入 {} 失败：{e}", out_path.display()))?;
+    println!(
+        "已冻结：{}（{} 任务；模型 {model}；git={} dirty={git_dirty}）",
+        out_path.display(),
+        bundle.cases.len(),
+        git_commit.as_deref().unwrap_or("未知")
+    );
+    println!("请复核 freeze.json 后提交；正式验收前用 `product-eval validate --freeze <路径>` 校验一致性。");
+    Ok(())
+}
+
+fn repo_root_of(path: &Path) -> Option<PathBuf> {
+    let mut current = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    for _ in 0..10 {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("git 无法执行：{e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} 失败（stderr: {}）",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// 生成配对对照报告（三路收益判定入口；PairedStats 兼容形状）。
+fn run_paired(
+    single: PathBuf,
+    multi: PathBuf,
+    out: PathBuf,
+    model: Option<String>,
+    template: Option<String>,
+    task_set: Option<String>,
+    strategy_version: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let single_report = load_report(&single)?;
+    let multi_report = load_report(&multi)?;
+    let model = model.or_else(|| single_report.model.clone());
+    let task_set = task_set.or_else(|| Some(single_report.suite_name.clone()));
+    if single_report.suite_hash != multi_report.suite_hash {
+        println!(
+            "⚠️ 两份报告 suite_hash 不一致（{} vs {}）：任务定义已变更，配对对照仅具参考意义",
+            single_report.suite_hash, multi_report.suite_hash
+        );
+    }
+    let opts = PairedReportOptions {
+        model,
+        template,
+        task_set,
+        strategy_version,
+    };
+    let paired = build_paired_report_json(&single_report, &multi_report, &opts, None);
+    let text =
+        serde_json::to_string_pretty(&paired).map_err(|e| format!("序列化配对报告失败：{e}"))?;
+    std::fs::write(&out, text + "\n").map_err(|e| format!("写入 {} 失败：{e}", out.display()))?;
+    println!("配对对照报告：{}", out.display());
+    println!(
+        "包含 {} 个任务组（overall/分类/每 case）；请三路按 PairedStats 契约读取。",
+        paired
+            .get("pairs")
+            .and_then(|p| p.as_array())
+            .map(|p| p.len())
+            .unwrap_or(0)
+    );
     Ok(())
 }
 
@@ -238,31 +453,51 @@ fn run_preflight(
     }
 
     // 3) suite 与任务定义。
-    match resolve_suite_input(suite.as_deref()) {
-        Ok(suite_path) => match load_suite(&suite_path) {
-            Ok(bundle) => {
-                let validation = owo_agent_core::product_eval::validate_suite(&bundle);
-                println!(
-                    "④ 套件：已加载（{}，{} 任务，校验 {}）",
-                    bundle.suite.name,
-                    bundle.cases.len(),
-                    if validation.all_ok {
-                        "全部通过"
-                    } else {
-                        "存在问题"
-                    }
-                );
-                if !validation.all_ok {
-                    blocked += 1;
-                }
-            }
-            Err(error) => {
-                println!("④ 套件：加载失败（{error}）");
+    let suite_loaded = resolve_suite_input(suite.as_deref())
+        .and_then(|suite_path| load_suite(&suite_path).map(|bundle| (suite_path, bundle)));
+    let mut needs_command_check = false;
+    match &suite_loaded {
+        Ok((suite_path, bundle)) => {
+            let validation = owo_agent_core::product_eval::validate_suite(bundle);
+            println!(
+                "④ 套件：已加载（{}，{} 任务，校验 {}；{}）",
+                bundle.suite.name,
+                bundle.cases.len(),
+                if validation.all_ok {
+                    "全部通过"
+                } else {
+                    "存在问题"
+                },
+                suite_path.display()
+            );
+            if !validation.all_ok {
                 blocked += 1;
             }
-        },
+            needs_command_check = bundle.cases.iter().any(|case| {
+                case.checkers
+                    .iter()
+                    .any(|checker| matches!(checker, ArtifactChecker::CommandCheck { .. }))
+            });
+        }
         Err(error) => {
-            println!("④ 套件：定位失败（{error}）");
+            println!("④ 套件：加载失败（{error}；如为 suite 定位失败请用 --suite 指定）");
+            blocked += 1;
+        }
+    }
+
+    // 3.5) 行为检查器依赖：command_check 需要可执行的 python 运行时。
+    if needs_command_check {
+        let python_ok = std::process::Command::new("python")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if python_ok {
+            println!("⑥ 行为检查器依赖：python 运行时可用（command_check 可执行）");
+        } else {
+            println!(
+                "⑥ 行为检查器依赖：python 运行时不可用 → command_check 类任务阻塞（agent 模式需 python 解释器）"
+            );
             blocked += 1;
         }
     }
@@ -309,17 +544,17 @@ fn run_preflight(
         Ok(value) if !value.trim().is_empty() => {
             let exists = Path::new(value.trim()).join("onnxruntime.lib").exists();
             println!(
-                "⑥ ORT_LIB_PATH：已配置（{}）",
+                "⑦ ORT_LIB_PATH：已配置（{}）",
                 if exists { "目录含 onnxruntime.lib" } else { "⚠️ 目录中未见 onnxruntime.lib" }
             );
         }
         _ => match probe_ort_lib_dir() {
             Some(found) => println!(
-                "⑥ ORT_LIB_PATH：未设置（仓库缓存自动探测可用：{}；跑 check-v1-r0.ps1 会自动注入当前进程）",
+                "⑦ ORT_LIB_PATH：未设置（仓库缓存自动探测可用：{}；跑 check-v1-r0.ps1 会自动注入当前进程）",
                 found.display()
             ),
             None => {
-                println!("⑥ ORT_LIB_PATH：未设置且仓库缓存中未找到 onnxruntime.lib → Rust 测试链接可能失败");
+                println!("⑦ ORT_LIB_PATH：未设置且仓库缓存中未找到 onnxruntime.lib → Rust 测试链接可能失败");
                 blocked += 1;
             }
         },
@@ -345,6 +580,8 @@ async fn run_matrix_cmd(
     out: Option<PathBuf>,
     model: Option<String>,
     selection: owo_agent_core::team_strategy::TeamSelectionMode,
+    label: Option<String>,
+    tag: Vec<String>,
     fresh: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let suite_path = resolve_suite_input(suite.as_deref())?;
@@ -427,6 +664,8 @@ async fn run_matrix_cmd(
         only,
         category,
         fresh,
+        batch_label: label,
+        tags: tag,
     };
     let cancel = Arc::new(AtomicBool::new(false));
 

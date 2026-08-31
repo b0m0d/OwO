@@ -2,24 +2,29 @@
   "schema_version": 1,
   "id": "code-bug-fix",
   "category": "code",
-  "title": "定位并解释求均值函数的边界 Bug",
-  "instruction": "src/calc.py 的 average() 返回值总是偏小。请定位根因，产出修复报告 out/fix-report.md：说明问题出在循环边界，给出修复后的正确写法（应使用 range(len(nums)) 完整遍历），并解释边界条件为何导致漏加最后一个元素。",
+  "title": "修复求均值函数的边界 Bug（真实改码 + 行为验证）",
+  "instruction": "src/calc.py 的 average() 返回值总是偏小。请直接在 src/calc.py 中修复该函数（不要改动函数语义与返回类型），并产出修复报告 out/fix-report.md：说明根因（问题出在哪一行、为什么会漏掉元素）、你采用的修复写法，以及边界条件的分析。修复后程序自带的示例输出必须与注释中的期望一致。",
   "inputs": [
     {
       "path": "src/calc.py",
-      "content": "def average(nums):\n    \"\"\"返回平均值。当前实现有 Bug：结果总是偏小。\"\"\"\n    total = 0\n    for i in range(len(nums) - 1):\n        total += nums[i]\n    return total / len(nums)\n\nif __name__ == \"__main__\":\n    print(average([2, 4, 6]))  # 期望 4.0，实际输出 2.0\n"
+      "content": "def average(nums):\n    \"\"\"返回平均值。当前实现有 Bug：结果总是偏小。\"\"\"\n    total = 0\n    for i in range(len(nums) - 1):\n        total += nums[i]\n    return total / len(nums)\n\nif __name__ == \"__main__\":\n    print(average([2, 4, 6]))  # 期望 4.0\n"
     }
   ],
   "allow_read": ["src/**"],
-  "allow_write": ["out/**"],
+  "allow_write": ["src/**", "out/**"],
+  "allow_commands": ["python src/calc.py"],
   "expected_artifacts": ["out/fix-report.md"],
   "checkers": [
-    { "type": "contains", "path": "out/fix-report.md", "text": "range(len(nums))" },
+    { "type": "command_check", "command": "python src/calc.py", "cwd": null, "expect_exit": 0, "stdout_contains": ["4.0"], "stdout_not_contains": [], "timeout_secs": 30 },
     { "type": "contains", "path": "out/fix-report.md", "text": "边界" },
     { "type": "not_contains", "path": "out/fix-report.md", "text": "TODO" },
+    { "type": "regex", "path": "out/fix-report.md", "pattern": "^# " },
     { "type": "line_count_min", "path": "out/fix-report.md", "min_lines": 5 }
   ],
+  "timeout_secs": 240,
+  "max_model_calls": 8,
   "reference_outputs": {
+    "src/calc.py": "def average(nums):\n    \"\"\"返回平均值。修复后：完整遍历全部元素。\"\"\"\n    total = 0\n    for i in range(len(nums)):\n        total += nums[i]\n    return total / len(nums)\n\nif __name__ == \"__main__\":\n    print(average([2, 4, 6]))  # 期望 4.0\n",
     "out/fix-report.md": "# 修复报告：average() 边界 Bug\n\n## 根因\n\n循环写成了 range(len(nums) - 1)，索引只到 len-2，最后一个元素被漏加；这是典型的差一边界（off-by-one）错误。\n\n## 修复写法\n\n```python\ndef average(nums):\n    total = 0\n    for i in range(len(nums)):\n        total += nums[i]\n    return total / len(nums)\n```\n\n## 边界说明\n\nrange(len(nums)) 的右开边界恰好覆盖最后一个下标 len-1；减 1 后遍历区间收缩，导致总和缺少末元素，均值随之偏小。\n"
   }
 }

@@ -2,20 +2,21 @@
   "schema_version": 1,
   "id": "research-technical-brief",
   "category": "research",
-  "title": "RAG 与评测技术简报",
-  "instruction": "综合 sources/llm_note.md 与 sources/eval_note.md，写给工程负责人的技术简报 out/brief.md：必须包含「## 背景」「## 要点」「## 风险」三节；要点中须覆盖检索增强与命中率两个关键词；全文不得出现占位符 TBD。",
+  "title": "RAG 与评测技术简报（跨来源综合）",
+  "instruction": "综合 sources/ 下的两份材料（llm_note.md 与 eval_note.md），写给工程负责人的技术简报 out/brief.md：必须包含「## 背景」「## 要点」「## 风险」三节；「要点」必须分别覆盖两份材料各自的核心概念（以材料原文术语为准），不得只复述单份材料；「风险」须基于两份材料中提到的局限或注意事项展开；全文不得出现占位符 TBD。",
   "inputs": [
     {
       "path": "sources/llm_note.md",
-      "content": "# RAG 摘录\n\n- 检索增强（RAG）：先检索私有知识再生成，可显著降低幻觉。\n- 关键件：切分、向量库、重排。\n"
+      "content": "# RAG 摘录\n\n- 检索增强（RAG）：先检索私有知识再生成，可显著降低幻觉。\n- 关键件：切分、向量库、重排。\n- 局限：切分不当会直接拉低召回质量。\n"
     },
     {
       "path": "sources/eval_note.md",
-      "content": "# 评测摘录\n\n- 命中率：检索召回是否包含金标片段，是 RAG 第一指标。\n- 校准误差：模型置信度与实际正确率之差。\n"
+      "content": "# 评测摘录\n\n- 命中率：检索召回是否包含金标片段，是 RAG 第一指标。\n- 校准误差：模型置信度与实际正确率之差。\n- 局限：评测集过小时结论不稳定。\n"
     }
   ],
   "allow_read": ["sources/**"],
   "allow_write": ["out/**"],
+  "allow_commands": [],
   "expected_artifacts": ["out/brief.md"],
   "checkers": [
     { "type": "regex", "path": "out/brief.md", "pattern": "^## 背景" },
@@ -23,9 +24,12 @@
     { "type": "regex", "path": "out/brief.md", "pattern": "^## 风险" },
     { "type": "contains", "path": "out/brief.md", "text": "检索增强" },
     { "type": "contains", "path": "out/brief.md", "text": "命中率" },
+    { "type": "contains", "path": "out/brief.md", "text": "校准误差" },
     { "type": "not_contains", "path": "out/brief.md", "text": "TBD" },
     { "type": "line_count_min", "path": "out/brief.md", "min_lines": 8 }
   ],
+  "timeout_secs": 180,
+  "max_model_calls": 6,
   "reference_outputs": {
     "out/brief.md": "# 技术简报：检索增强与评测\n\n## 背景\n\n团队要在私有知识库上落地问答能力，需要先明确检索增强（RAG）方案与配套评测口径。\n\n## 要点\n\n1. 检索增强：先检索私有知识再生成，显著降低幻觉；关键件是切分、向量库与重排。\n2. 命中率：检索结果是否包含金标片段，应作为 RAG 第一评测指标。\n3. 校准误差：关注模型置信度与实际正确率的偏差。\n\n## 风险\n\n- 语料切分不当会直接拉低命中率。\n- 评测集若过小，结论不稳定。\n"
   }

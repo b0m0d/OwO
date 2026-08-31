@@ -34,8 +34,14 @@ Set-Location $sdkRoot
 Write-Host ("R1 live baseline - root: {0}  out: {1}" -f $sdkRoot, $OutRoot) -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
-# ORT auto-probe (same policy as check-v1-r0.ps1: process env only, no persist)
+# Env init: prefer Lane 1 unified entry (scripts/init-dev-env.ps1); fallback to
+# the internal ORT auto-probe (process env only, no persist).
 # ---------------------------------------------------------------------------
+$initScript = Join-Path $PSScriptRoot "init-dev-env.ps1"
+if (Test-Path $initScript) {
+    Write-Host "[init] dot-sourcing scripts/init-dev-env.ps1 (Lane 1 unified init)" -ForegroundColor Cyan
+    . $initScript
+}
 if (-not $env:ORT_LIB_PATH) {
     $probeRoot = Join-Path $sdkRoot "target\sherpa-onnx-prebuilt"
     $hit = $null
@@ -118,13 +124,17 @@ foreach ($task in $smokeTasks) {
 # Phase C: expansion to all 10 tasks (journal resume: finished cells skipped)
 # ---------------------------------------------------------------------------
 if ($Full) {
+    $liveLabel = "live-" + (Get-Date -Format "yyyyMMdd-HHmmss")
     Invoke-EvalRun "agent single - ALL 10 tasks x 3 reps" @(
         "--exec", "agent", "--agents", "single", "--reps", "3",
+        "--label", $liveLabel, "--tag", "live-baseline",
         "--out", (Join-Path $OutRoot "agent-single")
     ) | Out-Null
     $wsReps = if ($FullWorkswarm) { "3" } else { "1" }
     Invoke-EvalRun ("workswarm single - ALL 10 tasks x {0} rep(s)" -f $wsReps) @(
         "--exec", "workswarm", "--agents", "single", "--reps", $wsReps,
+        "--team-mode", "auto",
+        "--label", $liveLabel, "--tag", "live-baseline",
         "--out", (Join-Path $OutRoot "workswarm-single")
     ) | Out-Null
 }

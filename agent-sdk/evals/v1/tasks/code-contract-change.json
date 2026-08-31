@@ -2,12 +2,16 @@
   "schema_version": 1,
   "id": "code-contract-change",
   "category": "code",
-  "title": "API 契约重命名变更单",
-  "instruction": "产品契约变更：公开函数 get_user_name 更名为 fetch_user_display_name，且 user_id 参数类型显式标注为 str。请产出变更单 out/contract-change.md：列出受影响文件（src/api_old.py 与 docs/contract.md）、旧签名、新签名（必须逐字包含 def fetch_user_display_name(user_id: str) -> str），并写明迁移说明 get_user_name → fetch_user_display_name。",
+  "title": "API 契约重命名变更（真实改文件 + 导入/签名验证）",
+  "instruction": "产品契约变更：公开函数 get_user_name 更名为 fetch_user_display_name，且 user_id 参数需要显式标注为 str 类型。请在 src/api_old.py 中实际实施重命名与类型标注（保留函数注释与返回行为），更新 docs/contract.md 中的公开契约登记条目，并产出变更单 out/contract-change.md：列出受影响文件、旧签名、新签名与迁移说明（get_user_name → fetch_user_display_name）。变更后 src/import_check.py 必须能通过其内置断言。",
   "inputs": [
     {
       "path": "src/api_old.py",
-      "content": "def get_user_name(user_id):\n    \"\"\"按用户 ID 返回显示名（公开 API，外部插件在用）。\"\"\"\n    return _lookup(user_id).display_name\n"
+      "content": "def get_user_name(user_id):\n    \"\"\"按用户 ID 返回显示名（公开 API，外部插件在用）。\"\"\"\n    return _lookup(user_id).display_name\n\ndef _lookup(user_id):\n    return type(\"U\", (), {\"display_name\": \"示例名\"})()\n"
+    },
+    {
+      "path": "src/import_check.py",
+      "content": "import inspect\nfrom api_old import fetch_user_display_name\n\nsig = inspect.signature(fetch_user_display_name)\nassert list(sig.parameters) == [\"user_id\"], f\"参数必须为 user_id，实际 {list(sig.parameters)}\"\nassert sig.parameters[\"user_id\"].annotation is str, f\"user_id 必须显式标注为 str，实际 {sig.parameters['user_id'].annotation}\"\nassert fetch_user_display_name(\"u-1\") == \"示例名\", \"返回行为被破坏\"\nprint(\"OK\")\n"
     },
     {
       "path": "docs/contract.md",
@@ -15,16 +19,23 @@
     }
   ],
   "allow_read": ["src/**", "docs/**"],
-  "allow_write": ["out/**"],
+  "allow_write": ["src/**", "docs/**", "out/**"],
+  "allow_commands": ["python src/import_check.py"],
   "expected_artifacts": ["out/contract-change.md"],
   "checkers": [
-    { "type": "contains", "path": "out/contract-change.md", "text": "def fetch_user_display_name(user_id: str) -> str" },
+    { "type": "command_check", "command": "python src/import_check.py", "cwd": null, "expect_exit": 0, "stdout_contains": ["OK"], "stdout_not_contains": [], "timeout_secs": 30 },
+    { "type": "contains", "path": "docs/contract.md", "text": "fetch_user_display_name" },
     { "type": "contains", "path": "out/contract-change.md", "text": "src/api_old.py" },
     { "type": "contains", "path": "out/contract-change.md", "text": "docs/contract.md" },
     { "type": "contains", "path": "out/contract-change.md", "text": "get_user_name → fetch_user_display_name" },
+    { "type": "regex", "path": "out/contract-change.md", "pattern": "^# " },
     { "type": "line_count_min", "path": "out/contract-change.md", "min_lines": 6 }
   ],
+  "timeout_secs": 240,
+  "max_model_calls": 8,
   "reference_outputs": {
-    "out/contract-change.md": "# 契约变更单：用户名 API 重命名\n\n## 变更内容\n\n- 旧签名：get_user_name(user_id)（docs/contract.md 已登记）\n- 新签名：def fetch_user_display_name(user_id: str) -> str\n\n## 受影响文件\n\n1. src/api_old.py：函数定义与实现。\n2. docs/contract.md：公开契约登记条目。\n\n## 迁移说明\n\n映射关系：get_user_name → fetch_user_display_name；旧名保留一个版本的 DeprecationWarning 后移除。\n"
+    "src/api_old.py": "def fetch_user_display_name(user_id: str) -> str:\n    \"\"\"按用户 ID 返回显示名（公开 API，外部插件在用）。\"\"\"\n    return _lookup(user_id).display_name\n\ndef _lookup(user_id):\n    return type(\"U\", (), {\"display_name\": \"示例名\"})()\n",
+    "docs/contract.md": "# 公开 API 契约\n\n- fetch_user_display_name(user_id: str) → str：返回显示名（原 get_user_name 更名）。\n- 兼容承诺：签名变更须提前一个版本公告。\n",
+    "out/contract-change.md": "# 契约变更单：用户名 API 重命名\n\n## 受影响文件\n\n1. src/api_old.py：函数定义与实现。\n2. docs/contract.md：公开契约登记条目。\n\n## 旧签名\n\ndef get_user_name(user_id) -> str\n\n## 新签名\n\ndef fetch_user_display_name(user_id: str) -> str\n\n## 迁移说明\n\n映射关系：get_user_name → fetch_user_display_name；旧名保留一个版本的 DeprecationWarning 后移除。\n"
   }
 }

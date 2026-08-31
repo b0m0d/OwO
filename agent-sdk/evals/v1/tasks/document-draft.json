@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "document-draft",
   "category": "document",
-  "title": "产品发布公告起草",
-  "instruction": "根据 briefs/launch-points.md 的要点，起草对外发布公告 out/draft.md：一级标题 + 正文；必须写明发布日期 9 月 1 日，并覆盖端到端加密、全新同步引擎、免费版限 3 台设备三个亮点；语气正式，全文不得出现占位符 XXX。",
+  "title": "产品发布公告起草（要点完整性）",
+  "instruction": "根据 briefs/launch-points.md 的要点，起草一篇对外发布公告 out/draft.md：一级标题 + 正文；必须准确传达发布要点中的日期信息，并覆盖输入材料列出的全部发布亮点（不得遗漏，也不得自行编造输入材料之外的新功能）；语气正式，符合公开发布语境；全文不得出现占位符 XXX。",
   "inputs": [
     {
       "path": "briefs/launch-points.md",
@@ -12,6 +12,7 @@
   ],
   "allow_read": ["briefs/**"],
   "allow_write": ["out/**"],
+  "allow_commands": [],
   "expected_artifacts": ["out/draft.md"],
   "checkers": [
     { "type": "contains", "path": "out/draft.md", "text": "9 月 1 日" },
@@ -22,6 +23,8 @@
     { "type": "not_contains", "path": "out/draft.md", "text": "XXX" },
     { "type": "line_count_min", "path": "out/draft.md", "min_lines": 6 }
   ],
+  "timeout_secs": 180,
+  "max_model_calls": 6,
   "reference_outputs": {
     "out/draft.md": "# 云笔记正式版发布公告\n\n我们很高兴地宣布，云笔记正式版将于 9 月 1 日发布。\n\n本次版本带来三大亮点：\n\n1. 全新同步引擎：增量同步，秒级到达。\n2. 端到端加密：仅您本人可解密内容。\n3. 免费版限 3 台设备，付费版不限。\n\n感谢所有内测用户的反馈。\n"
   }

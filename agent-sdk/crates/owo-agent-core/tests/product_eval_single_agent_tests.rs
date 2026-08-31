@@ -158,6 +158,8 @@ async fn run_matrix(
         only: None,
         category: None,
         fresh: true,
+        batch_label: None,
+        tags: Vec::new(),
     };
     let report = runner
         .run(
@@ -648,7 +650,7 @@ async fn mid_run_cancel_stops_model_and_tool_calls() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn budget_exceeded_stops_further_model_calls() {
+async fn budget_exceeded_is_error_not_cancel_and_does_not_poison_matrix() {
     let mut case = agent_case("sa-budget", EvalCategory::Code);
     case.max_model_calls = Some(1);
     let provider = ScriptedProvider::new(vec![
@@ -658,17 +660,19 @@ async fn budget_exceeded_stops_further_model_calls() {
         )]),
         ModelOutput::Text("第一次总结".to_string()),
         ModelOutput::Text("第二次总结（不应发生）".to_string()),
-        ModelOutput::Text("第三次总结（不应发生）".to_string()),
     ]);
     let executor: Arc<SingleAgentExecutor> =
         Arc::new(SingleAgentExecutor::new(provider.clone(), "stub-model"));
 
     let (report, out) = run_matrix(executor.clone(), vec![case], no_cancel()).await;
     let run = &report.runs[0];
-    assert_eq!(run.status, RunStatus::Cancelled, "{run:?}");
+    // 预算耗尽 = Error（保留 budget 失败步骤），不得冒充 cancelled；
+    // 回合上限 = 预算是精确收口，绝不触碰共享取消令牌毒化后续单元格。
+    assert_eq!(run.status, RunStatus::Error, "{run:?}");
+    assert_eq!(run.cancellations, 0, "{run:?}");
     assert!(
-        provider.calls() <= 2,
-        "预算超限后不得继续调用模型（实际 {} 次）",
+        provider.calls() <= 1,
+        "预算后不得继续调用模型（实际 {} 次）",
         provider.calls()
     );
     assert!(
@@ -680,7 +684,7 @@ async fn budget_exceeded_stops_further_model_calls() {
     );
     let telemetry = executor.take_last_telemetry().expect("遥测快照缺失");
     assert!(telemetry.budget_exceeded);
-    assert!(telemetry.aborted);
+    assert!(!telemetry.aborted, "预算不等于取消：aborted 必须为 false");
 
     let _ = std::fs::remove_dir_all(&out);
 }
@@ -710,6 +714,8 @@ async fn all_ten_tasks_pass_dry_reference_self_check() {
         only: None,
         category: None,
         fresh: true,
+        batch_label: None,
+        tags: Vec::new(),
     };
     let report = runner
         .run(

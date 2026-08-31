@@ -170,6 +170,8 @@ impl ProductEvalHub {
             only: params.only.clone(),
             category: params.category,
             fresh: false,
+            batch_label: None,
+            tags: Vec::new(),
         };
         let cases = product_eval::filter_cases(&bundle, &opts);
         if cases.is_empty() {
@@ -361,6 +363,8 @@ async fn run_job(
         only: params.only.clone(),
         category: params.category,
         fresh: false,
+        batch_label: None,
+        tags: Vec::new(),
     };
     let model = handle
         .record

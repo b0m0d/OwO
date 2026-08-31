@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "code-repo-audit",
   "category": "code",
-  "title": "小型代码仓库风险审计",
-  "instruction": "审计沙盒中的 Python 仓库（src/ 与 config/），找出所有工程风险，重点检查并发安全。产出审计报告 out/audit.md：必须包含「## 发现问题」「## 风险等级」「## 修复建议」三个二级标题；报告必须点名 src/order_service.py 并说明其中存在的竞态问题；每条问题给出修复建议。",
+  "title": "小型代码仓库风险审计（真实代码分析）",
+  "instruction": "审计沙盒中的 Python 仓库（src/ 与 config/），识别仓库存在的工程风险，重点检查并发安全与共享状态的读写。产出审计报告 out/audit.md：必须包含「## 发现问题」「## 风险等级」「## 修复建议」三个二级标题；每条发现必须点名受影响的具体文件，并给出对应的修复建议，风险要分等级列出。报告中的判断必须来自对仓库实际代码的分析，不要泛泛而谈。",
   "inputs": [
     {
       "path": "src/order_service.py",
@@ -20,16 +20,20 @@
   ],
   "allow_read": ["src/**", "config/**"],
   "allow_write": ["out/**"],
+  "allow_commands": [],
   "expected_artifacts": ["out/audit.md"],
   "checkers": [
-    { "type": "contains", "path": "out/audit.md", "text": "src/order_service.py" },
+    { "type": "contains", "path": "out/audit.md", "text": "order_service" },
     { "type": "contains", "path": "out/audit.md", "text": "竞态" },
+    { "type": "contains", "path": "out/audit.md", "text": "threading" },
     { "type": "regex", "path": "out/audit.md", "pattern": "^## 发现问题" },
     { "type": "regex", "path": "out/audit.md", "pattern": "^## 风险等级" },
     { "type": "regex", "path": "out/audit.md", "pattern": "^## 修复建议" },
-    { "type": "line_count_min", "path": "out/audit.md", "min_lines": 6 }
+    { "type": "line_count_min", "path": "out/audit.md", "min_lines": 8 }
   ],
+  "timeout_secs": 180,
+  "max_model_calls": 6,
   "reference_outputs": {
-    "out/audit.md": "# 仓库审计报告\n\n## 发现问题\n\n1. src/order_service.py 的 OrderService 在 8 worker 并发下存在竞态：next_id 读改写非原子，orders 字典并发写可能丢更新。\n2. src/order_service.py 未对 self.orders 做任何锁保护。\n\n## 风险等级\n\n| 问题 | 等级 |\n| --- | --- |\n| 自增 ID 竞态 | 高 |\n| 共享字典并发写 | 中 |\n\n## 修复建议\n\n1. 用 threading.Lock 保护 create_order 的整段读改写。\n2. 或改用 itertools.count / 队列串行化写入。\n"
+    "out/audit.md": "# 仓库审计报告\n\n## 发现问题\n\n1. src/order_service.py 的 OrderService 在 8 worker 并发下存在竞态：next_id 读改写非原子，orders 字典并发写可能丢更新；代码虽 import threading 却未使用任何锁。\n2. src/order_service.py 未对 self.orders 做任何锁保护，total() 与 create_order 并发读写同一字典。\n\n## 风险等级\n\n| 问题 | 等级 |\n| --- | --- |\n| 自增 ID 竞态 | 高 |\n| 共享字典并发写 | 中 |\n\n## 修复建议\n\n1. 用 threading.Lock 保护 create_order 的整段读改写。\n2. 或改用 itertools.count / 队列串行化写入。\n3. total() 读操作同样在锁内执行或返回快照。\n"
   }
 }
