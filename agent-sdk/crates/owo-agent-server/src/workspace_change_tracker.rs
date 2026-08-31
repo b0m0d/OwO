@@ -32,7 +32,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// porcelain 状态行数上限（防超大仓库膨胀快照体）。
 const STATUS_LINE_CAP: usize = 500;
 
-/// diff 补丁限定路径数上限：超过则退回全树 `git diff HEAD`（避免命令行超长）。
+/// diff 补丁限定路径数上限：超过则**不回退为全仓 `git diff HEAD`**（十期·四路硬性
+/// 规则：禁止超过 100 个文件就退回全仓 diff），而是交给调用方落退化差异摘要——
+/// 该摘要逐文件、以执行前 CAS 内容为基线、行级截断，天然有界且不混入用户改动。
+/// 本常量只用于「限定路径的 git 补丁」这一路径数的上限判定。
 const DIFF_PATH_ARG_CAP: usize = 100;
 
 /// 工作区 git 快照。
@@ -361,15 +364,98 @@ impl Tracker {
         self.run_dir.join(format!("{}-changes", self.team_id))
     }
 
-    /// 本次实际变更文件的 git 补丁（staged + unstaged 相对 HEAD；限定到 changed
-    /// 路径——不再落全仓 diff，执行前已有的无关脏文件不会混进本步骤补丁）。
-    async fn git_diff_patch(&self, changed: &[String]) -> Option<String> {
-        if changed.len() > DIFF_PATH_ARG_CAP {
-            return git_output(&self.root, &["diff", "HEAD"]).await;
+    /// 本次实际变更文件的补丁（十期 · 四路重做基线）：逐文件以**执行前 CAS 基线
+    /// 内容**为基线生成 unified diff（`git diff --no-index`，临时基线文件 × 工作区
+    /// 当前文件），而不是 `git diff HEAD`——执行前已脏文件的既有用户改动不会混入
+    /// 本步骤补丁；新建文件 = 空基线（全量新增）、删除文件 = 空当前（全量删除）。
+    ///
+    /// 硬性约束（十期 · 四路 R1）：
+    /// - `changed` 超过 [`DIFF_PATH_ARG_CAP`] → 返回 None，**绝不回退为全仓
+    ///   `git diff HEAD`**；调用方落退化差异摘要（逐文件、CAS 基线、行级截断，
+    ///   有界且不混入用户改动）；
+    /// - 非 git 工作区（`post.git=false`）→ None（退化摘要同样以 CAS 基线为准）；
+    /// - git 不可用 / 任一文件基线不可恢复（超限/不可读）→ None（退化摘要兜底）。
+    async fn git_diff_patch(
+        &self,
+        changed: &[String],
+        post_git: bool,
+        base: Option<&owo_agent_core::change_set::WorkspaceBaseSnapshot>,
+    ) -> Option<String> {
+        if !post_git || changed.len() > DIFF_PATH_ARG_CAP {
+            return None;
         }
-        let mut args: Vec<&str> = vec!["diff", "HEAD", "--"];
-        args.extend(changed.iter().map(String::as_str));
-        git_output(&self.root, &args).await
+        let default_base = owo_agent_core::change_set::WorkspaceBaseSnapshot::default();
+        let base = base.unwrap_or(&default_base);
+        // 临时目录：逐文件把「基线内容」物化为文件供 git diff --no-index 使用。
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "owo-cas-diff-{}-{}",
+            self.team_id,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        if std::fs::create_dir_all(&tmp_dir).is_err() {
+            return None;
+        }
+        let result = self.git_diff_patch_inner(changed, base, &tmp_dir).await;
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        result
+    }
+
+    /// [`Self::git_diff_patch`] 的逐文件主体（临时目录生命周期由外层管理）。
+    async fn git_diff_patch_inner(
+        &self,
+        changed: &[String],
+        base: &owo_agent_core::change_set::WorkspaceBaseSnapshot,
+        tmp_dir: &Path,
+    ) -> Option<String> {
+        let base_file = tmp_dir.join("baseline");
+        let cur_file = tmp_dir.join("current");
+        let mut parts: Vec<String> = Vec::new();
+        for relative in changed {
+            // 基线内容（新建文件无条目 → 空基线）。
+            let baseline_bytes: Vec<u8> = match base.entries.get(relative) {
+                Some(hash) => self.cas.get(hash)?, // 基线不可恢复 → 退化摘要兜底
+                None => Vec::new(),
+            };
+            // 当前内容（删除文件读取失败 → 空当前）。
+            let current_bytes = std::fs::read(self.root.join(relative)).unwrap_or_default();
+            if baseline_bytes == current_bytes {
+                continue; // 内容未变（理论上不出现在 changed 中）
+            }
+            std::fs::write(&base_file, &baseline_bytes).ok()?;
+            std::fs::write(&cur_file, &current_bytes).ok()?;
+            let label_a = format!("a/{relative}");
+            let label_b = format!("b/{relative}");
+            let base_str = base_file.to_string_lossy().into_owned();
+            let cur_str = cur_file.to_string_lossy().into_owned();
+            let output = tokio::process::Command::new("git")
+                .args([
+                    "diff",
+                    "--no-index",
+                    "--label",
+                    &label_a,
+                    "--label",
+                    &label_b,
+                ])
+                .arg(&base_str)
+                .arg(&cur_str)
+                .output()
+                .await
+                .ok()?;
+            // 退出码 1 = 有差异（正常）；0 = 无差异；>1 = 错误。
+            let code = output.status.code().unwrap_or(1);
+            if code > 1 {
+                return None;
+            }
+            if code == 1 {
+                parts.push(String::from_utf8_lossy(&output.stdout).into_owned());
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
     }
 
     /// 落盘：best-effort 保存本次实际变更的差异 + 追加变更记录。
@@ -391,7 +477,7 @@ impl Tracker {
         let mut diff_ref = None;
         if !changed.is_empty() {
             let git_patch = self
-                .git_diff_patch(changed)
+                .git_diff_patch(changed, post.git, base)
                 .await
                 .filter(|patch| !patch.trim().is_empty());
             let (content, extension) = match git_patch {
@@ -751,8 +837,10 @@ mod tests {
         assert!(record.diff_ref.is_none());
         // 非空变更 + git 不可用：退化摘要。
         std::fs::write(root.join("out.md"), b"# report\n").unwrap();
-        let mut base = owo_agent_core::change_set::WorkspaceBaseSnapshot::default();
-        base.complete = true;
+        let base = owo_agent_core::change_set::WorkspaceBaseSnapshot {
+            complete: true,
+            ..Default::default()
+        };
         let record = tracker
             .record("s2", &post, &["out.md".to_string()], None, Some(&base))
             .await

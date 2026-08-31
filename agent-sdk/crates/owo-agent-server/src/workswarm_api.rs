@@ -405,6 +405,9 @@ impl Worker for TrackedRoleWorker {
             return self.inner.run(input).await;
         };
         // 单写租约：写角色串行化（等待发生在前快照之前——窗口只覆盖本步骤）。
+        // 十期·四路 R1：租约覆盖「前快照 → 执行 → 后快照 → 变更登记」全程——
+        // 变更登记（record + ChangeSet upsert）完成前不释放：并发写步骤若在
+        // 本步骤后快照前插窗口，会把本步骤的变更误算进它的前基线，反之亦然。
         let _lease = match &self.lease {
             Some(lease) => Some(lease.lock().await),
             None => None,
@@ -432,19 +435,35 @@ impl Worker for TrackedRoleWorker {
                 pre_dirty_hashes.insert(path, hash);
             }
         }
+        // 执行（成败、超时、取消都以 result 承接——变更收尾对四种结局一视同仁）。
         let result = self.inner.run(input).await;
-        // 租约在前快照窗口结束后即可释放（后续只是 git 子进程与落盘，不占写窗口）。
-        drop(_lease);
-        let output = result?;
+        // ---- 变更收尾：成功/失败/超时/取消都必须完成 ----
         let post = workspace_change_tracker::GitSnapshot::snapshot(&tracking.root).await;
-        // 九期（一路）：合并检测（窗口差集 ∪ 重命名 old 侧 ∪ 内容哈希差集）——
-        // 「执行前已脏、执行后仍脏但内容变化」的文件不再漏检。
-        let changed = workspace_change_tracker::merge_changed_files(
-            &pre,
-            &post,
-            &pre_dirty_hashes,
-            &tracking.root,
-        );
+        // 十期·四路 R1：非 git 目录（含 git 快照不可用）改用内容哈希检测——
+        // 执行后对同一组允许路径再采内容快照，与执行前 CAS 基线逐文件比哈希
+        // （新增/修改/删除），不依赖 git。
+        let (changed, detection) = if pre.git && post.git {
+            (
+                workspace_change_tracker::merge_changed_files(
+                    &pre,
+                    &post,
+                    &pre_dirty_hashes,
+                    &tracking.root,
+                ),
+                "git 窗口+内容哈希",
+            )
+        } else {
+            let post_base = owo_agent_core::change_set::snapshot_allowed_paths(
+                &tracking.root,
+                &tracking.allowed,
+                &tracking.cas,
+            )
+            .await;
+            (
+                owo_agent_core::change_set::merge_content_snapshots(&base, &post_base),
+                "内容哈希（非 git）",
+            )
+        };
         let violation =
             workspace_change_tracker::check_whitelist(&changed, &tracking.root, &tracking.allowed)
                 .err();
@@ -470,6 +489,9 @@ impl Worker for TrackedRoleWorker {
             }
         };
         if let Some(violation) = violation {
+            // 越界：变更已留痕（record 含 violation 字段）但步骤失败——引擎按失败
+            // 处理，不登记成功 Artifact；不生成可审批 ChangeSet（越界写入不可审查
+            // 为合法工作区改动，恢复基线只会制造更大的不可控面）。
             return Err(violation);
         }
         // 九期（一路）：无实际变更 → 不创建空 pending ChangeSet（此前会生成
@@ -482,15 +504,20 @@ impl Worker for TrackedRoleWorker {
                         "change_set.no_change",
                         Some(format!("workswarm/{}", tracking.team_id)),
                         Some(true),
-                        format!("步骤 {} 无实际工作区变更，跳过 ChangeSet 生成", step),
+                        format!(
+                            "步骤 {} 无实际工作区变更（检测：{detection}），跳过 ChangeSet 生成",
+                            step
+                        ),
                     );
                 }
             }
-            return Ok(output);
+            return result;
         }
-        // 八期（二路）：成功路径生成 ChangeSet（pending_review，等人工 accept/
-        // reject/revert；未接受时该团队代码 Artifact 不得成为最终 approved head）。
-        // 记录/落盘失败不回滚步骤（变更本身已被 git 追踪），留 error 审计与日志。
+        // 十期·四路 R1：无论步骤成败都生成 ChangeSet（pending_review，等人工
+        // accept/reject/revert）——「写入后失败」「写入中取消」留下的残留修改
+        // 同样可审查、可恢复；未接受时该团队代码 Artifact 不得成为最终 approved
+        // head。记录/落盘失败不回滚步骤（变更本身已在工作区/内容快照中），留
+        // error 审计与日志。
         let change_set = owo_agent_core::change_set::build_change_set(
             &tracking.team_id,
             &step,
@@ -511,7 +538,7 @@ impl Worker for TrackedRoleWorker {
                             Some(format!("workswarm/{}", tracking.team_id)),
                             Some(true),
                             format!(
-                                "{} 生成（步骤 {}，文件：{}）",
+                                "{} 生成（步骤 {}，检测：{detection}，文件：{}）",
                                 change_set.change_set_id,
                                 step,
                                 changed.join(", ")
@@ -525,11 +552,13 @@ impl Worker for TrackedRoleWorker {
                     team_id = %tracking.team_id,
                     role = %tracking.role,
                     error = %error,
-                    "ChangeSet 落盘失败（变更已在 git 追踪中，但审批闭环缺失）"
+                    "ChangeSet 落盘失败（变更已在工作区追踪中，但审批闭环缺失）"
                 );
             }
         }
-        Ok(output)
+        // 变更收尾完成（租约在此作用域末尾释放）。返回执行原结果：成功回成功，
+        // 失败/超时/取消回原错误——步骤状态由引擎依结果判定，变更记录独立留存。
+        result
     }
 }
 
@@ -1966,6 +1995,314 @@ mod tracked_worker_tests {
             record.changed_files
         );
         assert!(record.diff_ref.is_none(), "无变更不得产生 diff 引用");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // 十期 · 四路 R1：ChangeSet 异常闭环——成功/失败/超时/取消都必须完成
+    // 变更收尾（前快照→执行→后快照→变更登记），任何结局都不得丢变更、留
+    // 不可解释的修改或孤儿记录。
+    // -----------------------------------------------------------------------
+
+    /// 按 `input.ops` 顺序执行文件操作的测试 worker（写角色落盘的等效模拟）：
+    /// - {"action":"write","path":…,"content":…} → 写/覆写文件；
+    /// - {"action":"delete","path":…} → 删除文件；
+    /// - {"action":"sleep","ms":…} → 延展窗口（扩大与并发方交叉的概率）；
+    /// - {"action":"fail","message":…} → 执行失败（模拟失败/取消结局）。
+    struct FileOpsWorker;
+
+    #[async_trait]
+    impl Worker for FileOpsWorker {
+        fn name(&self) -> &str {
+            "fileops"
+        }
+        async fn run(&self, input: &Value) -> Result<String, String> {
+            let root = input
+                .get("root")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "fileops 缺 root".to_string())?;
+            let ops = input
+                .get("ops")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for op in &ops {
+                let action = op.get("action").and_then(Value::as_str).unwrap_or("");
+                match action {
+                    "write" | "delete" => {
+                        let path = op
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "fileops 缺 path".to_string())?;
+                        let target = Path::new(root).join(path);
+                        if action == "write" {
+                            if let Some(parent) = target.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let content = op.get("content").and_then(Value::as_str).unwrap_or("");
+                            std::fs::write(&target, content)
+                                .map_err(|e| format!("写 {path} 失败：{e}"))?;
+                        } else {
+                            std::fs::remove_file(&target)
+                                .map_err(|e| format!("删 {path} 失败：{e}"))?;
+                        }
+                    }
+                    "sleep" => {
+                        let ms = op.get("ms").and_then(Value::as_u64).unwrap_or(0);
+                        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    }
+                    "fail" => {
+                        return Err(op
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("fileops 注入失败")
+                            .to_string());
+                    }
+                    other => return Err(format!("未知文件操作：{other:?}")),
+                }
+            }
+            Ok("done".to_string())
+        }
+    }
+
+    /// fileops 专用输入（root + ops；root 供 worker 解析相对路径）。
+    fn fileops_input(root: &Path, ops: Value, step_id: &str) -> Value {
+        json!({
+            "root": root.to_str().unwrap(),
+            "prompt": "p",
+            "ops": ops,
+            "_workswarm": { "step_id": step_id },
+        })
+    }
+
+    /// 场景 1（写入后失败）：Worker 已真实落盘后步骤失败——仍生成 ChangeSet
+    /// （残留修改可审查、可恢复），记录与审计齐全；不生成空壳 ChangeSet 也不丢记录。
+    #[tokio::test]
+    async fn write_then_fail_still_generates_change_set() {
+        let dir = unique_dir("wfail");
+        let (root, _head, pre_agent) = git_repo_with_pre_dirty_file("wfail");
+        let worker = TrackedRoleWorker {
+            inner: Arc::new(FileOpsWorker) as Arc<dyn Worker>,
+            lease: None,
+            tracking: Some(tracking_for(&root, &dir)),
+        };
+        let input = fileops_input(
+            &root,
+            json!([
+                { "action": "write", "path": "src/a.rs",
+                  "content": "fn a() { /* agent fix */ }\n" },
+                { "action": "fail", "message": "写后失败（注入）" },
+            ]),
+            "s-impl",
+        );
+        let output = worker.run(&input).await;
+        assert!(output.is_err(), "步骤应失败：{output:?}");
+        // 变更收尾必须完成：ChangeSet 已生成且基底 = 执行前内容（不是 HEAD）。
+        let store = owo_agent_core::change_set_store::ChangeSetStore::new(&dir.join("run"));
+        let sets = store.list_for_team("t1").unwrap();
+        assert_eq!(sets.len(), 1, "写后失败仍应恰好生成一个 ChangeSet");
+        let set = &sets[0];
+        assert!(
+            set.changed_files.contains(&"src/a.rs".to_string()),
+            "{:?}",
+            set.changed_files
+        );
+        assert_eq!(
+            set.status,
+            owo_agent_protocol::ChangeSetStatus::PendingReview
+        );
+        let base_hash = set
+            .base_hashes
+            .iter()
+            .find(|h| h.path == "src/a.rs")
+            .expect("基底含该文件");
+        assert_eq!(
+            base_hash.sha256.as_deref(),
+            Some(owo_agent_core::cas_store::CasStore::hash_of(pre_agent.as_bytes()).as_str()),
+            "失败路径基底仍必须是执行前内容，不混入用户已有修改"
+        );
+        // 变更记录同样落盘（diff 摘要面）。
+        let records = workspace_change_tracker::load_records(&dir.join("run"), "t1")
+            .await
+            .unwrap();
+        let record = records.last().expect("应有变更记录");
+        assert!(record.changed_files.contains(&"src/a.rs".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 场景 2（写入中取消）：Worker 写入后被取消（协作中断返回已取消）——
+    /// 残留修改同样完成变更收尾：ChangeSet 生成、可恢复。
+    #[tokio::test]
+    async fn cancelled_during_write_still_closes_out() {
+        let dir = unique_dir("wcancel");
+        let (root, _head, _pre_agent) = git_repo_with_pre_dirty_file("wcancel");
+        let worker = TrackedRoleWorker {
+            inner: Arc::new(FileOpsWorker) as Arc<dyn Worker>,
+            lease: None,
+            tracking: Some(tracking_for(&root, &dir)),
+        };
+        let input = fileops_input(
+            &root,
+            json!([
+                { "action": "write", "path": "src/cancel.txt", "content": "half\n" },
+                { "action": "fail", "message": "已取消" },
+            ]),
+            "s-impl",
+        );
+        let output = worker.run(&input).await;
+        assert!(output.is_err(), "取消路径应返回原错误：{output:?}");
+        let store = owo_agent_core::change_set_store::ChangeSetStore::new(&dir.join("run"));
+        let sets = store.list_for_team("t1").unwrap();
+        assert_eq!(sets.len(), 1, "取消也应完成收尾生成 ChangeSet");
+        assert!(
+            sets[0]
+                .changed_files
+                .contains(&"src/cancel.txt".to_string()),
+            "{:?}",
+            sets[0].changed_files
+        );
+        // 新建文件基线 = 执行前不存在（恢复即删除）：sha256 为 None 且 content_available。
+        let base_hash = sets[0]
+            .base_hashes
+            .iter()
+            .find(|h| h.path == "src/cancel.txt")
+            .expect("基底含该文件");
+        assert!(
+            base_hash.sha256.is_none() && base_hash.content_available,
+            "新建文件基线应为「执行前不存在」：{base_hash:?}"
+        );
+        // 同时确认取消路径的窗口隔离：已有脏文件 a.rs 本轮未触碰 → 不进入变更窗口
+        // （窗口 = 执行前后差集，用户已有修改与取消残留区分开）。
+        assert!(
+            !sets[0].changed_files.iter().any(|p| p == "src/a.rs"),
+            "窗口外文件不得进入变更集：{:?}",
+            sets[0].changed_files
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 场景 3（非 Git 目录）：内容哈希检测增/改/删——不依赖 git 也能识别
+    /// 新建、修改、删除三类变更并生成 ChangeSet（diff 走退化摘要）。
+    #[tokio::test]
+    async fn non_git_dir_content_hash_detects_new_modify_delete() {
+        let dir = unique_dir("nongit");
+        let root = dir.join("ws");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/mod.txt"), b"v0\n").unwrap();
+        std::fs::write(root.join("src/del.txt"), b"x\n").unwrap();
+        let tracking = tracking_for(&root, &dir);
+        let worker = TrackedRoleWorker {
+            inner: Arc::new(FileOpsWorker) as Arc<dyn Worker>,
+            lease: None,
+            tracking: Some(tracking),
+        };
+        let input = fileops_input(
+            &root,
+            json!([
+                { "action": "write", "path": "src/new.txt", "content": "new\n" },
+                { "action": "write", "path": "src/mod.txt", "content": "v1\n" },
+                { "action": "delete", "path": "src/del.txt" },
+            ]),
+            "s-impl",
+        );
+        let output = worker.run(&input).await;
+        assert!(output.is_ok(), "{output:?}");
+        let records = workspace_change_tracker::load_records(&dir.join("run"), "t1")
+            .await
+            .unwrap();
+        let record = records.last().expect("应有变更记录");
+        for expected in ["src/new.txt", "src/mod.txt", "src/del.txt"] {
+            assert!(
+                record.changed_files.contains(&expected.to_string()),
+                "非 git 内容哈希应检出 {expected}（实际 {:#?}）",
+                record.changed_files
+            );
+        }
+        let store = owo_agent_core::change_set_store::ChangeSetStore::new(&dir.join("run"));
+        let sets = store.list_for_team("t1").unwrap();
+        assert_eq!(sets.len(), 1);
+        for expected in ["src/new.txt", "src/mod.txt", "src/del.txt"] {
+            assert!(
+                sets[0].changed_files.contains(&expected.to_string()),
+                "{:?}",
+                sets[0].changed_files
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 场景 4（连续两个写 Worker 共享同一租约）：租约覆盖「前快照→执行→后快照→
+    /// 变更登记」全程——后一个写步骤的前基线不得混入前一个步骤的变更（各自 ChangeSet
+    /// 只含自己的文件），且两个步骤的收尾都完整落盘。
+    #[tokio::test]
+    async fn two_write_workers_sharing_lease_keep_change_sets_isolated() {
+        let dir = unique_dir("wlease");
+        let (root, _head, _pre) = git_repo_with_pre_dirty_file("wlease");
+        let lease = Arc::new(tokio::sync::Mutex::new(()));
+        let mk = |role: &str, dir: &Path| -> TrackedRoleWorker {
+            TrackedRoleWorker {
+                inner: Arc::new(FileOpsWorker) as Arc<dyn Worker>,
+                lease: Some(Arc::clone(&lease)),
+                tracking: Some(workspace_change_tracker::Tracker {
+                    root: root.clone(),
+                    run_dir: dir.join("run"),
+                    team_id: "t1".to_string(),
+                    role: role.to_string(),
+                    allowed: Vec::new(),
+                    cas: owo_agent_core::cas_store::CasStore::new(dir.join("cas")).unwrap(),
+                    audit: None,
+                }),
+            }
+        };
+        // 并发执行：若租约未覆盖收尾，第二个的前快照会误捕第一个的写入。
+        let w1 = mk("w1", &dir);
+        let w2 = mk("w2", &dir);
+        let input1 = fileops_input(
+            &root,
+            json!([
+                { "action": "write", "path": "src/one.txt", "content": "one\n" },
+                { "action": "sleep", "ms": 60 },
+            ]),
+            "s-one",
+        );
+        let input2 = fileops_input(
+            &root,
+            json!([
+                { "action": "write", "path": "src/two.txt", "content": "two\n" },
+                { "action": "sleep", "ms": 60 },
+            ]),
+            "s-two",
+        );
+        let (r1, r2) = tokio::join!(w1.run(&input1), w2.run(&input2));
+        assert!(r1.is_ok(), "{r1:?}");
+        assert!(r2.is_ok(), "{r2:?}");
+
+        let store = owo_agent_core::change_set_store::ChangeSetStore::new(&dir.join("run"));
+        let sets = store.list_for_team("t1").unwrap();
+        assert_eq!(
+            sets.len(),
+            2,
+            "两个写步骤各应生成自己的 ChangeSet：{sets:#?}"
+        );
+        let one = sets.iter().find(|s| s.step_id == "s-one").expect("s-one");
+        let two = sets.iter().find(|s| s.step_id == "s-two").expect("s-two");
+        assert_eq!(
+            one.changed_files,
+            vec!["src/one.txt".to_string()],
+            "{:?}",
+            one.changed_files
+        );
+        assert_eq!(
+            two.changed_files,
+            vec!["src/two.txt".to_string()],
+            "{:?}",
+            two.changed_files
+        );
+        // 变更记录同样两笔、各自窗口独立。
+        let records = workspace_change_tracker::load_records(&dir.join("run"), "t1")
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 2, "两笔收尾记录：{records:#?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

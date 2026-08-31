@@ -264,6 +264,17 @@ pub struct RunnerConfig {
     pub bindings: Vec<WorkerBinding>,
 }
 
+/// 取消/早退时的有界清理窗口（十期 · 四路 R2）：置位 abort 标志后**不直接丢弃
+/// 在飞 worker Future**——先给协作式 worker（`TrackedRoleWorker` 等）一个回合边界，
+/// 让其完成后快照、变更登记等收尾；超过本窗口仍未退出的任务才被强制终止
+/// （进程树由沙箱 Job kill-on-close 兜底）。
+pub const CANCELLATION_CLEANUP_GRACE: Duration = Duration::from_secs(30);
+
+/// 阶段级取消的整体清理上限（十期 · 四路 R2）：run_phase 收到 cancel 后等待
+/// run 在所有在飞步骤的协作清理下自然退出；整体超时才强制丢弃 run Future。
+/// 取值为单步清理窗口宽松倍数（并行步骤可同时清理，故无需按步累加）。
+pub const PHASE_CANCELLATION_CLEANUP_GRACE: Duration = Duration::from_secs(90);
+
 impl Default for RunnerConfig {
     fn default() -> Self {
         Self {
@@ -396,6 +407,23 @@ impl GoalRunner {
             .expect("步骤记录必须存在")
     }
 
+    /// abort 已请求？（state.aborted 与标志任意一个为真——十期·四路 R4：
+    /// 协调器置位标志后，运行循环必须在回合边界协作退出，而非被外部丢弃。）
+    fn is_aborting(&self) -> bool {
+        self.state.aborted || self.aborted_flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 进入 Aborted 终态（状态 + 未完成步骤 + 落盘），幂等。
+    fn enter_aborted(&mut self) {
+        if !self.state.aborted {
+            self.state.aborted = true;
+        }
+        self.mark_remaining(StepStatus::Aborted);
+        self.state.goal.transition(GoalStatus::Aborted);
+        self.persist_if_needed();
+        self.log("goal.abort", "协调器取消：协作退出并保留已完成产物");
+    }
+
     /// 取消执行：abort 标志置位，未完成步骤标记 Aborted 保留现场。
     pub fn abort(&mut self) {
         self.state.aborted = true;
@@ -405,6 +433,11 @@ impl GoalRunner {
         self.log("goal.abort", "调度器收到 abort 请求");
         self.state.goal.transition(GoalStatus::Aborted);
         self.persist_if_needed();
+    }
+
+    /// 暴露只读 abort 标志（供协调器取消链置位，不必强占运行 Future 的 &mut 借用）。
+    pub fn abort_signal(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.aborted_flag)
     }
 
     /// 执行计划（恢复时已完成步骤自动跳过）。返回目标终态。
@@ -439,7 +472,8 @@ impl GoalRunner {
         if self.state.goal.status.is_terminal() {
             return Ok(self.state.goal.status);
         }
-        if self.state.aborted {
+        if self.is_aborting() {
+            self.enter_aborted();
             return Ok(GoalStatus::Aborted);
         }
         self.state.goal.transition(GoalStatus::Running);
@@ -473,10 +507,11 @@ impl GoalRunner {
         };
 
         loop {
-            if self.state.aborted {
-                self.mark_remaining(StepStatus::Aborted);
-                self.state.goal.transition(GoalStatus::Aborted);
-                self.persist_if_needed();
+            // 十期·四路 R2/R4：协调器置位 abort 标志或状态标记为 aborted 时，
+            // 在回合边界协作退出——不在此处丢弃在飞步骤 Future（有界清理见
+            // 主循环早退路径与 [`run_worker_cancellable`]）。
+            if self.is_aborting() {
+                self.enter_aborted();
                 return Ok(GoalStatus::Aborted);
             }
             // 时长预算熔断。
@@ -569,8 +604,27 @@ impl GoalRunner {
                     }
                 }
             }
-            // 早退路径（abort/预算熔断/目标拒绝）：先终止在飞步骤任务，避免孤儿任务继续运行，
-            // 并把在飞的远端派发任务统一 cancel（防 transport 残留 pending）。
+            // 早退路径（abort/预算熔断/目标拒绝）：先置位 abort 标志（通知在飞
+            // 步骤在其回合边界协作退出并完成变更收尾），再做**有界清理**——绝不
+            // 直接 `abort_all` 丢弃 Future 跳过变更收尾。清理窗口内 join 完的在飞
+            // 步骤正常合并（其内部 TrackedRoleWorker 已完成后快照/变更登记）；
+            // 超过清理时限才强制终止剩余任务（进程树由沙箱 Job kill-on-close
+            // 兜底），并把在飞的远端派发任务统一 cancel（防 transport 残留 pending）。
+            if !set.is_empty() {
+                self.aborted_flag
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let deadline = tokio::time::Instant::now() + CANCELLATION_CLEANUP_GRACE;
+                while !set.is_empty() && tokio::time::Instant::now() < deadline {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let joined = match tokio::time::timeout(remaining, set.join_next()).await {
+                        Ok(Some(joined)) => joined,
+                        Ok(None) | Err(_) => break,
+                    };
+                    // join 到已送达的结果照常合并（Retried/Ok 均进入状态；
+                    // 步骤内部已在 Future 中完成自己的收尾）。
+                    let _ = self.merge_step_outcome(Some(joined), &mut failed);
+                }
+            }
             set.abort_all();
             while set.join_next().await.is_some() {}
             rt.cancels.cancel_all().await;
@@ -584,10 +638,8 @@ impl GoalRunner {
                 None => {}
             }
 
-            if self.state.aborted {
-                self.mark_remaining(StepStatus::Aborted);
-                self.state.goal.transition(GoalStatus::Aborted);
-                self.persist_if_needed();
+            if self.is_aborting() {
+                self.enter_aborted();
                 return Ok(GoalStatus::Aborted);
             }
 
@@ -1352,23 +1404,43 @@ async fn run_step_attempts(
     }
 }
 
-/// 执行 worker 且响应 abort 传播：abort 标志置位时立即终止等待，
-/// 池路径经 `cancel_all` 把取消传播到子进程（submit 以 Cancelled 立即可见）。
+/// 执行 worker 且响应 abort 传播：abort 标志置位时**先通知停止，再做有界清理**，
+/// 不直接丢弃 worker Future 而跳过其变更收尾（十期·四路 R2）：
+///
+/// 1. 池路径经 `cancel_all` 把取消传播到子进程（submit 以 Cancelled 立即可见）；
+/// 2. 远端派发统一 cancel（防 transport 残留 pending）；
+/// 3. 协作式 worker（`TrackedRoleWorker` 等）在回合边界检查取消后快速返回——
+///    其 Future 内部已完成 后快照/变更登记/ChangeSet 收尾；
+/// 4. 超过 [`CANCELLATION_CLEANUP_GRACE`] 仍未返回的任务才被强制终止（本函数
+///    返回 Err 丢弃 Future；进程树由沙箱 Job kill-on-close / 子进程终止兜底）。
 async fn run_worker_cancellable(
     worker: &Arc<dyn Worker>,
     input: &serde_json::Value,
     rt: &StepRuntime,
 ) -> Result<String, String> {
     let aborted = Arc::clone(&rt.aborted);
+    let run = worker.run(input);
+    tokio::pin!(run);
     tokio::select! {
-        out = worker.run(input) => out,
+        out = &mut run => out,
         _ = wait_aborted(aborted) => {
             if let Some(pool) = &rt.worker_pool {
                 let _ = pool.cancel_all().await;
             }
             // A2：abort 即时取消在飞的远端派发任务（防残留 pending）。
             rt.cancels.cancel_all().await;
-            Err("调度器已 abort".to_string())
+            tracing::debug!(rt.run_id, "调度器已 abort：等待 worker 有界清理（含变更收尾）");
+            match tokio::time::timeout(CANCELLATION_CLEANUP_GRACE, &mut run).await {
+                Ok(out) => out,
+                Err(_) => {
+                    tracing::warn!(
+                        rt.run_id,
+                        "worker 清理超时（{}s），强制终止（进程树由沙箱终止）",
+                        CANCELLATION_CLEANUP_GRACE.as_secs()
+                    );
+                    Err("调度器已 abort（清理超时，强制终止）".to_string())
+                }
+            }
         }
     }
 }

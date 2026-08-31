@@ -164,6 +164,61 @@ fn sanitize_step(step: &str) -> String {
         .collect()
 }
 
+/// 非 Git 工作区的内容哈希变更检测（十期 · 四路）：以「执行前 CAS 基线快照 ×
+/// 执行后内容快照」逐文件比较内容哈希，识别 新增/修改/删除。
+///
+/// - `pre` = 执行前 `snapshot_allowed_paths` 基线（content 已进 CAS）；
+/// - `post` = 执行后对**同一组允许路径**再采内容快照（十期四路新增用法：
+///   非 Git 目录下 TrackedRoleWorker 后采一次，复用同一快照函数）；
+/// - 判据（全程哈希比对，不依赖 git）：
+///   - 新增：`post.entries`/`post.scanned` 有而 `pre` 无（且 `pre.complete`——快照
+///     完整时才能可靠区分「新建」与「基线未知」）；
+///   - 修改：两侧都有内容哈希且不相同；
+///   - 删除：`pre.scanned` 有而 `post.scanned`/`post.entries` 无（且 `post.complete`）。
+/// - 保守原则与 `degenerated_diff_summary` 同口径：快照不完整时不把「未扫到」误判为
+///   「删除/新建」，宁可漏报也不伪造；返回的相对路径集合与 `check_whitelist`/变更登记
+///   直接兼容。
+///
+/// 返回相对路径（`\` → `/`，与 git porcelain / 变更追踪口径一致）。
+pub fn merge_content_snapshots(
+    pre: &WorkspaceBaseSnapshot,
+    post: &WorkspaceBaseSnapshot,
+) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut changed: Vec<String> = Vec::new();
+    let push =
+        |changed: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, path: &str| {
+            if seen.insert(path.to_string()) {
+                changed.push(path.to_string());
+            }
+        };
+    // 修改：两侧都有内容哈希且不同。
+    for (path, pre_hash) in &pre.entries {
+        if let Some(post_hash) = post.entries.get(path) {
+            if post_hash != pre_hash {
+                push(&mut changed, &mut seen, path);
+            }
+        }
+    }
+    // 新增：post 有而 pre 无（仅当 pre 快照完整）。
+    if pre.complete {
+        for path in post.scanned.iter().chain(post.entries.keys()) {
+            if !pre.scanned.contains(path) && !pre.entries.contains_key(path) {
+                push(&mut changed, &mut seen, path);
+            }
+        }
+    }
+    // 删除：pre 有而 post 无（仅当 post 快照完整）。
+    if post.complete {
+        for path in pre.scanned.iter().chain(pre.entries.keys()) {
+            if !post.scanned.contains(path) && !post.entries.contains_key(path) {
+                push(&mut changed, &mut seen, path);
+            }
+        }
+    }
+    changed
+}
+
 // ---------------------------------------------------------------------------
 // 退化差异摘要（九期 · 一路）
 // ---------------------------------------------------------------------------
@@ -750,8 +805,10 @@ mod tests {
         let cas = test_cas(&dir);
         std::fs::write(root.join("mod.rs"), "line1\nline2\n").unwrap();
         std::fs::write(root.join("del.rs"), "gone\n").unwrap();
-        let mut base = WorkspaceBaseSnapshot::default();
-        base.complete = true;
+        let mut base = WorkspaceBaseSnapshot {
+            complete: true,
+            ..Default::default()
+        };
         let mod_hash = cas.put(b"line1\nline2\n").unwrap();
         let del_hash = cas.put(b"gone\n").unwrap();
         base.entries.insert("mod.rs".to_string(), mod_hash);

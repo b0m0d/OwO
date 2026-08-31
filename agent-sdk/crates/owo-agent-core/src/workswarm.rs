@@ -100,6 +100,155 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 十期·四路：把三路冻结的收益策略 gate 接入真实运行入口（create_team_run）。
+///
+/// - 策略加载：`OWO_TEAM_POLICY` 环境变量指向的 JSON；缺省尝试
+///   `evals/v1/team-policy.json`（工作区根/当前目录向上探测）；再缺省用
+///   [`crate::team_benefit::TeamPolicy::embedded_defaults`]（与 evals/v1 语义一致，
+///   测试与无配置文件时使用）。解析失败一律回退内嵌默认并留 warning——绝不因
+///   策略文件损坏阻断团队创建。
+/// - 证据加载：`OWO_TEAM_PAIRED_REPORT` 指向二路生成的配对对照报告（可选）。
+///   报告解析/组匹配失败 → 视为无证据（保守 single，附可展示理由）。
+/// - 判定：`gate_auto(policy, task_group, verdict, bindings, now)`；无证据/不达标/
+///   样本不足/过期/绑定不匹配/非预选组 → `allow_team=false`（默认 single）。
+/// - 任务组推断：模板 id 优先（code-change-v1→code、research-brief-v1→research、
+///   document-delivery-v1→document、structured-extract-v1→document）；无模板时按
+///   目标关键词启发式；兜底 "code"（与三路 policy_group_for 前缀解析同口径）。
+fn benefit_gate_for_runtime(
+    template_id: Option<&str>,
+    objective: &str,
+    run_dir: &Path,
+) -> (
+    crate::team_benefit::PolicyGate,
+    Option<crate::team_benefit::BenefitVerdict>,
+    String,
+) {
+    let policy = load_team_policy_for_runtime(run_dir);
+    let task_group = infer_benefit_task_group(template_id, objective);
+    let verdict = load_benefit_verdict_for_runtime(&policy, &task_group);
+    let current = crate::team_benefit::BenefitBindings {
+        model: std::env::var("OPENAI_MODEL").ok(),
+        template: template_id.map(str::to_string),
+        task_set: None,
+        strategy_version: policy.strategy_version.clone(),
+    };
+    let gate = crate::team_benefit::gate_auto(
+        &policy,
+        &task_group,
+        verdict.as_ref(),
+        Some(&current),
+        &now_ts(),
+    );
+    let evidence = if verdict.is_some() {
+        "有配对报告证据".to_string()
+    } else {
+        "无配对报告证据（默认 single，等二路验收报告）".to_string()
+    };
+    (gate, verdict, evidence)
+}
+
+/// 运行时策略加载（见 [`benefit_gate_for_runtime`] 说明）。
+fn load_team_policy_for_runtime(run_dir: &Path) -> crate::team_benefit::TeamPolicy {
+    use crate::team_benefit::TeamPolicy;
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(path) = std::env::var("OWO_TEAM_POLICY") {
+        candidates.push(std::path::PathBuf::from(path));
+    }
+    // 工作区探测：run_dir 向上找 agent-sdk/evals/v1/team-policy.json；
+    // 再加 cwd 相对路径两种写法。
+    for probe in [
+        "evals/v1/team-policy.json",
+        "agent-sdk/evals/v1/team-policy.json",
+    ] {
+        candidates.push(std::path::PathBuf::from(probe));
+        if let Some(ancestor) = run_dir.ancestors().find(|a| a.join(probe).is_file()) {
+            candidates.push(ancestor.join(probe));
+        }
+    }
+    for candidate in candidates {
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            match TeamPolicy::from_json(&text) {
+                Ok(policy) => return policy,
+                Err(error) => {
+                    tracing::warn!(candidate = %candidate.display(), %error, "team-policy.json 解析失败，回退内嵌默认");
+                }
+            }
+        }
+    }
+    TeamPolicy::embedded_defaults()
+}
+
+/// 运行时证据加载：`OWO_TEAM_PAIRED_REPORT` → 二路配对对照报告 → 命中任务组 →
+/// 收益判定（失败/缺文件/组未命中 → None，保守 single）。
+fn load_benefit_verdict_for_runtime(
+    policy: &crate::team_benefit::TeamPolicy,
+    task_group: &str,
+) -> Option<crate::team_benefit::BenefitVerdict> {
+    use crate::team_benefit::PairedReport;
+    let path = std::env::var("OWO_TEAM_PAIRED_REPORT").ok()?;
+    let report = match PairedReport::from_file(std::path::Path::new(&path)) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(path = %path, %error, "配对报告不可用，按无证据处理");
+            return None;
+        }
+    };
+    let pair = report.pairs.iter().find(|pair| {
+        report.policy_group_for(policy, &pair.task_group) == Some(task_group.to_string())
+    })?;
+    let verdict = crate::team_benefit::evaluate(pair, &policy.thresholds);
+    if verdict.eligible {
+        Some(verdict)
+    } else {
+        None
+    }
+}
+
+/// 任务组推断（模板 id 优先，见 [`benefit_gate_for_runtime`] 说明）。
+fn infer_benefit_task_group(template_id: Option<&str>, objective: &str) -> String {
+    if let Some(template_id) = template_id {
+        if template_id.contains("code") {
+            return "code".to_string();
+        }
+        if template_id.contains("research") {
+            return "research".to_string();
+        }
+        if template_id.contains("document") || template_id.contains("extract") {
+            return "document".to_string();
+        }
+    }
+    let lower = objective.to_ascii_lowercase();
+    let keywords: &[&str] = &[
+        "代码",
+        "修复",
+        "bug",
+        "实现",
+        "函数",
+        "接口",
+        "重构",
+        "编译",
+        "测试用例",
+    ];
+    let research_hints: &[&str] = &["研究", "调研", "对比", "综述", "分析", "research", "survey"];
+    let document_hints: &[&str] = &["文档", "说明书", "报告", "document", "guide", "手册"];
+    for kw in keywords {
+        if lower.contains(kw) {
+            return "code".to_string();
+        }
+    }
+    for kw in research_hints {
+        if lower.contains(kw) {
+            return "research".to_string();
+        }
+    }
+    for kw in document_hints {
+        if lower.contains(kw) {
+            return "document".to_string();
+        }
+    }
+    "code".to_string()
+}
+
 /// 文本预览（交接摘要/活动流用）。
 fn preview(text: &str, max: usize) -> String {
     let t = text.trim();
@@ -771,6 +920,15 @@ impl TeamCoordinator {
             .clone()
     }
 
+    /// 重新武装取消令牌（R2/R3）：显式恢复（continue/retry）前调用——
+    /// 历史取消不得粘滞到下一轮执行（否则 continue 重启循环的瞬间又被旧取消打断，
+    /// 团队永远停在 cancelled，取消链不可收敛）。原子替换：在飞阶段持有的旧 Arc
+    /// 不受影响，仅新阶段取到全新令牌。
+    pub fn reset_cancel_token(&self, team_id: &str) {
+        let mut map = self.cancels.lock().unwrap_or_else(|e| e.into_inner());
+        map.insert(team_id.to_string(), Arc::new(CancelToken::new()));
+    }
+
     fn set_run_active(&self, team_id: &str, active: bool) {
         self.run_flag(team_id).store(active, Ordering::SeqCst);
     }
@@ -1223,7 +1381,25 @@ impl TeamCoordinator {
             expects_json: objective.to_ascii_lowercase().ends_with(".json"),
         };
         let selection = req.strategy.unwrap_or_default();
-        let mut strategy_plan = engine.decide(selection, &profile);
+        // 十期·四路：接入三路冻结的收益策略 gate——auto 判定先过
+        // `gate_auto`（无证据/不达标/样本不足/过期/绑定不匹配/非预选组 → 默认
+        // single，附理由）；显式 single/team 不被 gate 降级（decide_with_policy
+        // 内部保证）。gate 理由随 strategy_decision 暴露给 UI。
+        let (gate, gate_verdict, gate_evidence) =
+            benefit_gate_for_runtime(template_id.as_deref(), objective, &self.run_dir);
+        let mut strategy_plan = engine.decide_with_policy(selection, &profile, Some(&gate));
+        let gate_reason = if gate.allow_team {
+            format!("收益 gate 放行组队：{gate_evidence}")
+        } else {
+            format!("收益 gate 默认 single（{gate_evidence}）")
+        };
+        if !strategy_plan
+            .reasons
+            .iter()
+            .any(|r| r.contains("收益 gate"))
+        {
+            strategy_plan.reasons.push(gate_reason.clone());
+        }
         // 裁剪口径：显式 single 强制单角色；auto 判定 single 仅在「未显式给角色
         // 且未命中模板」时裁剪——用户显式编排与已采纳模板（复用编排）始终尊重。
         let trim_to_single = strategy_plan.is_single()
@@ -1321,6 +1497,26 @@ impl TeamCoordinator {
                     "runtime_skipped": [],
                     "events": [],
                     "early_exit": Value::Null,
+                }),
+            );
+            // 十期·四路：收益策略 gate 判定随 strategy_decision 暴露（UI/审计可追溯
+            // 为什么 auto 走了 single——无证据/不达标等逐条理由）。
+            obj.insert(
+                "benefit_gate".to_string(),
+                json!({
+                    "allow_team": gate.allow_team,
+                    "mandatory_review": gate.mandatory_review,
+                    "reasons": gate.reasons,
+                    "evidence": gate_verdict.as_ref().map(|v| json!({
+                        "task_group": v.task_group,
+                        "eligible": v.eligible,
+                        "sample_sufficient": v.sample_sufficient,
+                        "single_n": v.single_n,
+                        "multi_n": v.multi_n,
+                        "generated_at": v.generated_at,
+                        "bindings": v.bindings,
+                    })),
+                    "note": gate_reason,
                 }),
             );
         }
@@ -1807,11 +2003,31 @@ impl TeamCoordinator {
             runner.attach_audit(Arc::clone(audit));
         }
         let cancel = self.cancel_token(team_id);
-        let result = tokio::select! {
-            r = runner.run(registry) => r,
-            _ = wait_cancel(&cancel) => {
-                runner.abort();
-                Ok(GoalStatus::Aborted)
+        // 十期·四路 R2：取消链「先通知停止、再有界清理」。不直接丢弃 run Future——
+        // 丢弃会跳过在飞 worker 的变更收尾（TrackedRoleWorker 的后快照/变更登记
+        // 在其 Future 内）。取消时置位 abort 标志（协作式 worker 在回合边界快速
+        // 返回并完成收尾），再等 run 以 [`GoalRunner::run`] 的协作退出路径自然收束。
+        // 内层作用域：run_fut 借用 runner 到 select 结束即释放，便于阶段 C 读取状态。
+        let result = {
+            let abort_signal = runner.abort_signal();
+            let run_fut = runner.run(registry);
+            tokio::pin!(run_fut);
+            tokio::select! {
+                r = &mut run_fut => r,
+                _ = wait_cancel(&cancel) => {
+                    abort_signal.store(true, std::sync::atomic::Ordering::SeqCst);
+                    // 有界清理：run 收到 abort 后协作退出；超时才强制终止
+                    //（进程树由沙箱 Job kill-on-close 兜底）。
+                    match tokio::time::timeout(
+                        crate::goal::PHASE_CANCELLATION_CLEANUP_GRACE,
+                        &mut run_fut,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => Ok(GoalStatus::Aborted),
+                    }
+                }
             }
         };
 
@@ -2259,7 +2475,20 @@ impl TeamCoordinator {
             &format!("team.cancelled：{reason}（已完成产物保留）"),
         )
         .await?;
-        self.audit(team_id, "team.cancelled", format!("取消：{reason}"));
+        // 十期·四路 R5：取消审计明确写入 Provider 计费限制——客户端取消（置位
+        // 取消令牌/abort 标志、断开流、终止子进程）只能停止**我方发起**的后续
+        // 请求与执行；对云端 Provider 的**已在途请求**，我方无法证明其对账侧
+        // 已停止计费（不同 Provider 的结算粒度/停账语义各异），因此**不得宣称**
+        // 「继续计费为 0」。可证明为零的只有由本进程全程掌控计数的离线/脚本化
+        // Provider（详见 eval 执行器）。此限制同样适用于 gateway 的流式响应丢弃。
+        self.audit(
+            team_id,
+            "team.cancelled",
+            format!(
+                "取消：{reason}（完成后快照/变更登记已在协作收尾中完成；\
+                 Provider 在途请求计费停止无法由客户端证明，不以「继续计费为 0」宣称）"
+            ),
+        );
         // 终态落定：过期中断标记不再有意义。
         self.clear_interrupted_marker(team_id);
         Ok(())
@@ -3310,6 +3539,10 @@ impl TeamCoordinator {
                 // （幂等；不满足条件时是空操作）。恢复仍必须显式发起——这里只是把
                 // 中断遗留的 Running 步骤转成可恢复状态并落识别标记。
                 if matches!(cmd, SteerCommand::Continue | SteerCommand::Retry { .. }) {
+                    // R2/R3：显式恢复先重新武装取消令牌——历史取消不得粘滞到下一轮
+                    // （否则 continue 重启循环的瞬间又被旧取消打断，取消链不可收敛；
+                    // 此时已确认无活动运行，在飞旧阶段不存在，重置安全且原子）。
+                    self.reset_cancel_token(team_id);
                     self.mark_interrupted_if_applicable(team_id).await?;
                     let (mut team, mut state) = {
                         let (t, _s, st) = self.load_bundle(team_id).await?;

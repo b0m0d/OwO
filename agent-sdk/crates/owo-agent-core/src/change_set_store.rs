@@ -78,6 +78,21 @@ pub struct ChangeSetStore {
     run_dir: PathBuf,
 }
 
+/// 进程内团队级串行化锁（十期 · 四路 R3）：并发/重复请求对同一团队 sidecar 的
+/// 读-改-写（upsert/apply_decision/mark_conflicted）必须串行，避免丢失更新与
+/// 写撕裂；跨进程由原子落盘（tmp + rename）+ 崩溃语义兜底。
+fn team_mutex(team_id: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("团队锁表 poisoned");
+    guard
+        .entry(team_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 impl ChangeSetStore {
     pub fn new(run_dir: &Path) -> Self {
         Self {
@@ -109,6 +124,9 @@ impl ChangeSetStore {
         })
     }
 
+    /// 原子落盘（十期 · 四路 R3）：先写同目录 `<file>.tmp` 再 rename 覆盖——
+    /// 崩溃任一点都只会有「旧完整文件」或「新完整文件」，绝不出现截断/半写
+    /// 的 sidecar（避免崩溃后状态不可信、重复副作用无法判定）。
     fn save_team(&self, team_id: &str, records: &[ChangeSet]) -> Result<(), ChangeSetStoreError> {
         if let Some(parent) = self.run_dir.parent().or(Some(self.run_dir.as_path())) {
             let _ = std::fs::create_dir_all(parent);
@@ -117,21 +135,55 @@ impl ChangeSetStore {
         let bytes = serde_json::to_vec_pretty(records).map_err(|error| {
             ChangeSetStoreError::Storage(format!("ChangeSet 序列化失败：{error}"))
         })?;
-        std::fs::write(self.team_path(team_id), bytes)
-            .map_err(|error| ChangeSetStoreError::Storage(format!("ChangeSet 落盘失败：{error}")))
+        let path = self.team_path(team_id);
+        let tmp = self.run_dir.join(format!(
+            "{team_id}-change-sets.json.tmp-{}",
+            std::process::id()
+        ));
+        std::fs::write(&tmp, &bytes).map_err(|error| {
+            ChangeSetStoreError::Storage(format!("ChangeSet 临时落盘失败：{error}"))
+        })?;
+        std::fs::rename(&tmp, &path).map_err(|error| {
+            let _ = std::fs::remove_file(&tmp);
+            ChangeSetStoreError::Storage(format!(
+                "ChangeSet 原子覆盖失败（{} → {}）：{error}",
+                tmp.display(),
+                path.display()
+            ))
+        })
+    }
+
+    /// 团队级读-改-写串行执行体：持团队锁完成「load → mutate → atomic save」，
+    /// 避免并发请求的丢失更新；突变闭包可返回自己的业务错误（NotFound/Conflict），
+    /// 该错误原样透传且**不落盘**（零副作用）。
+    fn with_team_mut<R>(
+        &self,
+        team_id: &str,
+        mutate: impl FnOnce(&mut Vec<ChangeSet>) -> Result<R, ChangeSetStoreError>,
+    ) -> Result<R, ChangeSetStoreError> {
+        let team_mutex = team_mutex(team_id);
+        let _guard = team_mutex
+            .lock()
+            .map_err(|_| ChangeSetStoreError::Storage("团队锁 poisoned".to_string()))?;
+        let mut records = self.load_team(team_id)?;
+        let result = mutate(&mut records)?;
+        self.save_team(team_id, &records)?;
+        Ok(result)
     }
 
     /// 按 id upsert（存在同 id → 原位替换；否则追加）。
     pub fn save_upsert(&self, change_set: &ChangeSet) -> Result<(), ChangeSetStoreError> {
-        let mut records = self.load_team(&change_set.team_id)?;
-        match records
-            .iter_mut()
-            .find(|record| record.change_set_id == change_set.change_set_id)
-        {
-            Some(existing) => *existing = change_set.clone(),
-            None => records.push(change_set.clone()),
-        }
-        self.save_team(&change_set.team_id, &records)
+        let change_set = change_set.clone();
+        self.with_team_mut(&change_set.team_id, |records| {
+            match records
+                .iter_mut()
+                .find(|record| record.change_set_id == change_set.change_set_id)
+            {
+                Some(existing) => *existing = change_set.clone(),
+                None => records.push(change_set.clone()),
+            }
+            Ok(())
+        })
     }
 
     /// 团队全部 ChangeSet（缺失 → 空数组）。
@@ -173,42 +225,38 @@ impl ChangeSetStore {
         Err(ChangeSetStoreError::NotFound)
     }
 
-    /// 把记录原位写回其所属团队的 sidecar（存在同 id → 原位替换；否则追加）。
-    fn save_back(&self, team_id: &str, updated: ChangeSet) -> Result<(), ChangeSetStoreError> {
-        let mut records = self.load_team(team_id)?;
-        match records
-            .iter_mut()
-            .find(|record| record.change_set_id == updated.change_set_id)
-        {
-            Some(slot) => *slot = updated.clone(),
-            None => records.push(updated.clone()),
-        }
-        self.save_team(team_id, &records)
-    }
-
     /// 标记冲突（revert/reject 检测到用户改动时调用；已决定 → Conflict）。
     pub fn mark_conflicted(
         &self,
         change_set_id: &str,
         conflicts: &[String],
     ) -> Result<ChangeSet, ChangeSetStoreError> {
-        let (team_id, mut record) = self.locate(change_set_id)?;
-        if record.decision.is_some() {
-            return Err(ChangeSetStoreError::Conflict(format!(
-                "ChangeSet {change_set_id} 已决定（{}），不能再标记冲突",
-                record.status_label()
-            )));
-        }
-        record.status = ChangeSetStatus::Conflicted;
-        record.conflicts = conflicts.to_vec();
-        self.save_back(&team_id, record.clone())?;
-        Ok(record)
+        let (team_id, _) = self.locate(change_set_id)?;
+        let conflicts = conflicts.to_vec();
+        self.with_team_mut(&team_id, |records| {
+            let record = records
+                .iter_mut()
+                .find(|record| record.change_set_id == change_set_id)
+                .ok_or(ChangeSetStoreError::NotFound)?;
+            if record.decision.is_some() {
+                return Err(ChangeSetStoreError::Conflict(format!(
+                    "ChangeSet {change_set_id} 已决定（{}），不能再标记冲突",
+                    record.status_label()
+                )));
+            }
+            record.status = ChangeSetStatus::Conflicted;
+            record.conflicts = conflicts.clone();
+            Ok(record.clone())
+        })
     }
 
     /// 落决定（accept/reject/revert 共用；幂等键 + 终态校验在此内聚）。
     /// 九期修复：只读写目标团队自己的 sidecar——旧实现把 `list_all()` 的跨团队
     /// 全量列表写回单团队文件，会把其他团队的 ChangeSet 错误搬进本团队 sidecar
     /// 并产生同 id 重复记录（多团队交替决定时 GET 可能读到旧状态）。
+    /// 十期·四路 R3：`locate` 定位团队后，**判定与落盘全部在团队锁内**执行——
+    /// 并发重复请求对同一 ChangeSet 只允许一个执行者落决定，另一个重放/冲突，
+    /// 绝不双写。
     pub fn apply_decision(
         &self,
         change_set_id: &str,
@@ -216,45 +264,50 @@ impl ChangeSetStore {
         idempotency_key: &str,
         note: Option<&str>,
     ) -> Result<DecisionOutcome, ChangeSetStoreError> {
-        let (team_id, mut record) = self.locate(change_set_id)?;
-        // 幂等重放先判：同动作 → 零副作用返回现状。
-        if let Some(existing) = &record.decision {
-            if existing.action == action.as_str() {
-                return Ok(DecisionOutcome {
-                    change_set: record,
-                    replayed: true,
-                });
+        let (team_id, _) = self.locate(change_set_id)?;
+        self.with_team_mut(&team_id, |records| {
+            let record = records
+                .iter_mut()
+                .find(|record| record.change_set_id == change_set_id)
+                .ok_or(ChangeSetStoreError::NotFound)?;
+            // 幂等重放先判：同动作 → 零副作用返回现状。
+            if let Some(existing) = &record.decision {
+                if existing.action == action.as_str() {
+                    return Ok(DecisionOutcome {
+                        change_set: record.clone(),
+                        replayed: true,
+                    });
+                }
+                return Err(ChangeSetStoreError::Conflict(format!(
+                    "ChangeSet {change_set_id} 已 {}，不能再 {}",
+                    existing.action,
+                    action.as_str()
+                )));
             }
-            return Err(ChangeSetStoreError::Conflict(format!(
-                "ChangeSet {change_set_id} 已 {}，不能再 {}",
-                existing.action,
-                action.as_str()
-            )));
-        }
-        if !matches!(
-            record.status,
-            ChangeSetStatus::PendingReview | ChangeSetStatus::Conflicted
-        ) {
-            return Err(ChangeSetStoreError::Conflict(format!(
-                "ChangeSet {change_set_id} 状态为 {}，不接受 {}",
-                record.status_label(),
-                action.as_str()
-            )));
-        }
-        record.status = action.status();
-        record.decision = Some(ChangeSetDecision {
-            action: action.as_str().to_string(),
-            idempotency_key: idempotency_key.to_string(),
-            decided_at: chrono::Utc::now().to_rfc3339(),
-            note: note
-                .filter(|note| !note.trim().is_empty())
-                .map(str::to_string),
-        });
-        record.conflicts.clear();
-        self.save_back(&team_id, record.clone())?;
-        Ok(DecisionOutcome {
-            change_set: record,
-            replayed: false,
+            if !matches!(
+                record.status,
+                ChangeSetStatus::PendingReview | ChangeSetStatus::Conflicted
+            ) {
+                return Err(ChangeSetStoreError::Conflict(format!(
+                    "ChangeSet {change_set_id} 状态为 {}，不接受 {}",
+                    record.status_label(),
+                    action.as_str()
+                )));
+            }
+            record.status = action.status();
+            record.decision = Some(ChangeSetDecision {
+                action: action.as_str().to_string(),
+                idempotency_key: idempotency_key.to_string(),
+                decided_at: chrono::Utc::now().to_rfc3339(),
+                note: note
+                    .filter(|note| !note.trim().is_empty())
+                    .map(str::to_string),
+            });
+            record.conflicts.clear();
+            Ok(DecisionOutcome {
+                change_set: record.clone(),
+                replayed: false,
+            })
         })
     }
 
