@@ -1314,6 +1314,7 @@ async fn health_contract_version_and_optional_build() {
 
     // ① /health 响应面。
     let response = app
+        .clone()
         .oneshot(request(&state, "GET", "/health", None))
         .await
         .unwrap();
@@ -1339,6 +1340,7 @@ async fn health_contract_version_and_optional_build() {
 
     // ② /openapi.json 契约面：200 引用 HealthResponse，组件登记两个 schema。
     let response = app
+        .clone()
         .oneshot(request(&state, "GET", "/openapi.json", None))
         .await
         .unwrap();
