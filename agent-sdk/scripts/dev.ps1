@@ -112,10 +112,16 @@ function Get-OwoTsVersion {
 function Assert-OwoVersionConsistency {
     $wsVersion = (Get-Content (Join-Path $sdkRoot "Cargo.toml") | Select-String -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
     $tsVersion = Get-OwoTsVersion
-    if ($wsVersion -ne $tsVersion) {
-        throw "Version mismatch: workspace=$wsVersion but clients/ts/package.json=$tsVersion. Keep them in sync (single source: workspace)."
+    $tauriConfVersion = (Get-Content (Join-Path $sdkRoot "desktop\tauri\src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json).version
+    $deskCargoVersion = (Get-Content (Join-Path $sdkRoot "desktop\tauri\src-tauri\Cargo.toml") | Select-String -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+    $mismatch = @()
+    if ($wsVersion -ne $tsVersion) { $mismatch += "clients/ts/package.json=$tsVersion" }
+    if ($wsVersion -ne $tauriConfVersion) { $mismatch += "desktop/tauri/src-tauri/tauri.conf.json=$tauriConfVersion" }
+    if ($wsVersion -ne $deskCargoVersion) { $mismatch += "desktop/tauri/src-tauri/Cargo.toml=$deskCargoVersion" }
+    if ($mismatch.Count -gt 0) {
+        throw "Version mismatch: workspace=$wsVersion vs $($mismatch -join ', '). Keep them in sync (single source: workspace version)."
     }
-    Write-Host "[dev] version consistent: $wsVersion (workspace == TS client)" -ForegroundColor Green
+    Write-Host "[dev] version consistent: $wsVersion (workspace == TS client == desktop tauri)" -ForegroundColor Green
 }
 
 # ---------------------------------------------------------------------------
