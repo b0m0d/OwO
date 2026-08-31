@@ -17,6 +17,7 @@ Usage:
   powershell -ExecutionPolicy Bypass -File scripts\dev.ps1 <Command> [args...]
   Examples:
     .\scripts\dev.ps1 build
+    .\scripts\dev.ps1 check -p owo-agent-protocol
     .\scripts\dev.ps1 test -p owo-agent-core --lib change_set
     .\scripts\dev.ps1 check
     .\scripts\dev.ps1 clippy
@@ -24,6 +25,11 @@ Usage:
     .\scripts\dev.ps1 info
     .\scripts\dev.ps1 serve -Port 4101
     .\scripts\dev.ps1 eval -Full
+
+PowerShell 5.1 binding note: a bare `-p <value>` pair is silently dropped by
+the binder when only ValueFromRemainingArguments is declared, so -p is a
+declared alias (Package) here and is re-emitted to cargo verbatim. Valueless
+flags (-q/--lib/...) flow through RemainingArgs untouched.
 #>
 
 [CmdletBinding()]
@@ -31,6 +37,10 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('build', 'check', 'test', 'clippy', 'fmt', 'eval', 'serve', 'info')]
     [string]$Command = 'info',
+
+    # Cargo package selector (alias p): special-cased, see the note above.
+    [Alias('p')]
+    [string]$Package,
 
     # Extra arguments forwarded to the underlying command (cargo / pnpm / scripts).
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -69,6 +79,14 @@ if (-not $SkipInit) {
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+function Get-CargoTargetArgs {
+    # -p <pkg>（显式绑定，见文件头说明）+ 其余透传参数。
+    $a = @()
+    if ($Package) { $a += @('-p', $Package) }
+    if ($RemainingArgs) { $a += @($RemainingArgs) }
+    return $a
+}
+
 function Invoke-CargoStep {
     param([string]$Step, [string[]]$CargoArgs)
     Write-Host ""
@@ -118,20 +136,24 @@ switch ($Command) {
     }
     'build' {
         Assert-OwoVersionConsistency
-        Invoke-CargoStep 'build' (@('build') + $RemainingArgs)
+        Invoke-CargoStep 'build' (@('build') + (Get-CargoTargetArgs))
     }
     'check' {
         Assert-OwoVersionConsistency
-        Invoke-CargoStep 'check' (@('check') + $RemainingArgs)
+        Invoke-CargoStep 'check' (@('check') + (Get-CargoTargetArgs))
     }
     'test' {
-        Invoke-CargoStep 'test' (@('test') + $RemainingArgs)
+        Invoke-CargoStep 'test' (@('test') + (Get-CargoTargetArgs))
     }
     'clippy' {
-        Invoke-CargoStep 'clippy' (@('clippy', '--workspace', '--all-targets') + $RemainingArgs)
+        if ($Package) {
+            Invoke-CargoStep 'clippy' (@('clippy', '-p', $Package, '--all-targets') + @($RemainingArgs))
+        } else {
+            Invoke-CargoStep 'clippy' (@('clippy', '--workspace', '--all-targets') + @($RemainingArgs))
+        }
     }
     'fmt' {
-        Invoke-CargoStep 'fmt-check' (@('fmt', '--all', '--', '--check') + $RemainingArgs)
+        Invoke-CargoStep 'fmt-check' (@('fmt', '--all', '--', '--check') + @($RemainingArgs))
     }
     'eval' {
         Write-Host ""
@@ -152,8 +174,8 @@ switch ($Command) {
         Write-Host ""
         Write-Host "===== dev.ps1: serve (owo-agent-cli serve) =====" -ForegroundColor Cyan
         $serverArgs = @('run', '-q', '-p', 'owo-agent-cli', '--', 'serve', '--workspace', $sdkRoot)
-        $portIndex = [Array]::IndexOf($RemainingArgs, '-Port')
-        if ($portIndex -ge 0 -and $RemainingArgs.Count -gt $portIndex + 1) {
+        $portIndex = [Array]::IndexOf(@($RemainingArgs), '-Port')
+        if ($portIndex -ge 0 -and @($RemainingArgs).Count -gt $portIndex + 1) {
             $serverArgs += '--port'
             $serverArgs += [string]$RemainingArgs[$portIndex + 1]
         }
