@@ -29,6 +29,7 @@ param(
     [string]$Suite,
     [string]$OutRoot = "scratch-eval-runs\v1-acceptance",
     [string]$Batch,
+    [string]$Exe,
     [switch]$Smoke,
     [switch]$EstimateOnly,
     [int]$Reps = 20,
@@ -46,6 +47,18 @@ $ErrorActionPreference = "Continue"
 $sdkRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $sdkRoot
 Write-Host ("V1 acceptance - root: {0}  out: {1}" -f $sdkRoot, $OutRoot) -ForegroundColor Cyan
+
+# 预构建二进制复用：并行路线的 WIP 编辑可能让 cargo run 在启动瞬间碰到中段编译错误；
+# 传入 -Exe <path> 后全部 CLI 调用走固定二进制，批量全程不受并行编辑影响（版本 = 冻结时刻）。
+function Invoke-EvalCli {
+    param([string[]]$CliArgs)
+    if ($Exe) {
+        & $Exe @CliArgs
+    } else {
+        cargo run -q -p owo-agent-cli -- @CliArgs
+    }
+    return $LASTEXITCODE
+}
 
 # ---------------------------------------------------------------------------
 # 0) Env init: prefer Lane 1 unified entry; fallback internal probe + credentials
@@ -95,9 +108,9 @@ function Invoke-EvalRun {
     param([string]$Label, [string[]]$RunArgs)
     Write-Host ""
     Write-Host ("== [acceptance] {0} ==" -f $Label) -ForegroundColor Cyan
-    cargo run -q -p owo-agent-cli -- product-eval run @suiteArgs @modelArgs @RunArgs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host ("    run FAILED (exit={0}): {1}" -f $LASTEXITCODE, $Label) -ForegroundColor Red
+    $rc = Invoke-EvalCli @("product-eval", "run") @suiteArgs @modelArgs @RunArgs
+    if ($rc -ne 0) {
+        Write-Host ("    run FAILED (exit={0}): {1}" -f $rc, $Label) -ForegroundColor Red
         $script:failedRuns++
         return $false
     }
@@ -109,9 +122,9 @@ function Invoke-EvalRun {
 # ---------------------------------------------------------------------------
 Write-Host "== [acceptance] preflight gate ==" -ForegroundColor Cyan
 $preflightOut = Join-Path $sdkRoot $OutRoot
-cargo run -q -p owo-agent-cli -- product-eval preflight @suiteArgs --out $preflightOut
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "PREFLIGHT BLOCKED (exit=$LASTEXITCODE): acceptance NOT executed." -ForegroundColor Red
+$preRc = Invoke-EvalCli @("product-eval", "preflight") @suiteArgs @("--out", $preflightOut)
+if ($preRc -ne 0) {
+    Write-Host "PREFLIGHT BLOCKED (exit=$preRc): acceptance NOT executed." -ForegroundColor Red
     exit 2
 }
 
@@ -125,8 +138,8 @@ if (-not $Smoke -and -not $EstimateOnly) {
         exit 2
     }
     Write-Host "== [acceptance] freeze gate ==" -ForegroundColor Cyan
-    cargo run -q -p owo-agent-cli -- product-eval validate @suiteArgs --freeze $freezePath
-    if ($LASTEXITCODE -ne 0) {
+    $frRc = Invoke-EvalCli @("product-eval", "validate") @suiteArgs @("--freeze", $freezePath)
+    if ($frRc -ne 0) {
         Write-Host "FREEZE GATE BLOCKED: suite drifted from freeze.json. Regenerate freeze (new batch) or fix drift." -ForegroundColor Red
         exit 2
     }
@@ -238,9 +251,9 @@ $multiReport  = Join-Path $multiOut "report.json"
 $pairedOut    = Join-Path $batchRoot "paired.json"
 if ((Test-Path $singleReport) -and (Test-Path $multiReport) -and -not $SkipSingle -and -not $SkipMulti) {
     Write-Host "== [formal] generate paired report ==" -ForegroundColor Cyan
-    cargo run -q -p owo-agent-cli -- product-eval paired $singleReport $multiReport `
-        --out $pairedOut --strategy-version $StrategyVersion
-    if ($LASTEXITCODE -ne 0) {
+    $pairRc = Invoke-EvalCli @("product-eval", "paired", $singleReport, $multiReport, `
+        "--out", $pairedOut, "--strategy-version", $StrategyVersion)
+    if ($pairRc -ne 0) {
         Write-Host "PAIRED REPORT generation FAILED." -ForegroundColor Red
         $script:failedRuns++
     }
@@ -280,7 +293,7 @@ if (Test-Path $pairedOut) { Write-Host ("paired     : {0}" -f $pairedOut) }
 Write-Host ("evidence   : {0}" -f $resultsDir)
 if (Test-Path $singleReport) {
     Write-Host "---- single-agent ----"
-    cargo run -q -p owo-agent-cli -- product-eval compare $singleReport $singleReport 2>$null | Out-Null
+    $ignore = Invoke-EvalCli @("product-eval", "compare", $singleReport, $singleReport)
     $data = Get-Content $singleReport -Raw | ConvertFrom-Json
     Write-Host ("    success {0}/{1} ({2}%) tokens={3} cost={4}" -f `
         $data.metrics.passed, $data.metrics.runs_total, [Math]::Round($data.metrics.success_rate * 100, 1), `
