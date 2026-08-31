@@ -2635,10 +2635,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** è¯æµè¿è¡åè¡¨ï¼created_at ååºï¼ */
+        /** 评测运行列表（created_at 倒序） */
         get: operations["listProductEvalRuns"];
         put?: never;
-        /** åçä¸æ¬¡äº§åè¯æµç©éµï¼å¼æ­¥æ§è¡ï¼ */
+        /** 受理一次产品评测矩阵（异步执行） */
         post: operations["createProductEvalRun"];
         delete?: never;
         options?: never;
@@ -2653,7 +2653,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** è¯æµè¿è¡è¯¦æï¼è¿åº¦ + è¿è¡åæ° + å®æ´æ¥åï¼èåææ /æ¯ case å¯¹æ¯/å¤±è´¥æ­¥éª¤/Artifact refsï¼ */
+        /** 评测运行详情：进度 + 运行参数 + 完整报告（聚合指标/每 case 对比/失败步骤/Artifact refs） */
         get: operations["getProductEvalRun"];
         put?: never;
         post?: never;
@@ -2672,7 +2672,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** åæ¶è¯æµè¿è¡ï¼å¹ç­ï¼ç½®åä½ä»¤çå¹¶ç«å³ cancelledï¼éå¤/ç»æååæ¶é¶å¯ä½ç¨ï¼ */
+        /** 取消评测运行（幂等：置协作令牌并立即 cancelled；重复/终态后取消零副作用） */
         post: operations["cancelProductEvalRun"];
         delete?: never;
         options?: never;
@@ -4172,24 +4172,30 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @description ä¸å¯åè¯å®¡è®°å½ï¼V1 åæç¬¬ä¸è·¯ï¼åªå¢ä¸æ¹ï¼append-onlyï¼ */
+        /** @description 不可变评审记录（V1 四期第三路；只增不改，append-only） */
         ArtifactReviewRecord: {
             artifact_id: string;
-            /** @description è¢«è¯å®¡çäº§ç©çæ¬ */
+            /** @description 被评审的产物版本 */
             artifact_version: number;
             comment?: string;
-            /** @description è¯å®¡æ¶çäº§ç©åå®¹å¼ç¨ï¼åè¯éç¹ï¼ */
+            /** @description 评审时的产物内容引用（取证锚点） */
             content_ref?: string;
             created_at: string;
             /** @enum {string} */
             decision: "approve" | "request_changes" | "reject";
-            /** @description å¯ä¸çº¦æï¼åé®éæ¾é¶å¯ä½ç¨ */
+            /** @description 唯一约束；同键重放零副作用 */
             idempotency_key: string;
             review_id: string;
             reviewer: string;
             team_id: string;
         };
-        /** @description é¢æµæ ¡åæ¥åï¼WM0 èåï¼å½ä¸­ãè¯¯å·®ä¸ä¸ç¡®å®åº¦åæ¡¶ï¼ */
+        /** @description 构建信息（由统一构建入口生成 build-info.json 提供） */
+        BuildInfo: {
+            built_at: string;
+            commit: string;
+            dirty: boolean;
+        };
+        /** @description 预测校准报告（WM0 聚合：命中、误差与不确定度分桶） */
         CalibrationReport: {
             mean_calibration_error: number;
             mean_delta_jaccard: number;
@@ -4203,11 +4209,11 @@ export interface components {
                 samples: number;
             }[];
         };
-        /** @description åé provider èº«ä»½ï¼Â§5.12.4 æ²»çï¼å£°æâ æ¥çº¿ï¼ï¼external éè¿ç¨åçå®æ¥çº¿åæç§¯ç´¯å½±å­æ ·æ¬ï¼metadata_only é¶æ ·æ¬ä¸ä¸å¯æå */
+        /** @description 候选 provider 身份（§5.12.4 治理，声明≠接线）：external 需进程内真实接线后才积累影子样本；metadata_only 零样本且不可晋升 */
         CandidateProviderRef: {
-            /** @description provider ç±»åæ è¯ï¼å¦ wm1-httpãlocal-onnxï¼ */
+            /** @description provider 类型标识（如 wm1-http、local-onnx） */
             kind: string;
-            /** @description å®ä½ä¸²ï¼ç«¯ç¹æèµæºæ è¯ï¼ */
+            /** @description 定位串（端点或资源标识） */
             locator: string;
             /** @enum {string} */
             type: "external";
@@ -4215,7 +4221,7 @@ export interface components {
             /** @enum {string} */
             type: "metadata_only";
         };
-        /** @description æ (case_id, mode) åç»çç»åç»è®¡ï¼å Agent vs WorkSwarm å¯¹ç§åï¼ */
+        /** @description 按 (case_id, mode) 分组的细分统计（单 Agent vs WorkSwarm 对照列） */
         CaseModeMetrics: {
             /** @enum {string} */
             agent_mode: "single" | "multi";
@@ -4241,16 +4247,23 @@ export interface components {
         EvalRunRequest: {
             suite_id: string;
         };
-        /** @description ç©éµååæ ¼ï¼(case_id, agent_mode, repetition)ï¼agent_mode ä¸ºæ ¸å¿å°åè¯ï¼workswarm ææåºååä¸º multiï¼ */
+        /** @description /health 响应（十期一路：build 为 additive 字段） */
+        HealthResponse: {
+            auto_approve: boolean;
+            build?: components["schemas"]["BuildInfo"];
+            healthy: boolean;
+            version: string;
+        };
+        /** @description 矩阵单元格：(case_id, agent_mode, repetition)；agent_mode 为核心小写词（workswarm 拓扑序列化为 multi） */
         MatrixKey: {
             /** @enum {string} */
             agent_mode: "single" | "multi";
             case_id: string;
             repetition: number;
         };
-        /** @description ä¸çæ¨¡ååéï¼æ°åéæ shadow èµ·æ­¥ï¼è¾¾æ åæ¾å¼äººå·¥æåï¼Option å­æ®µç¼ºçåºååä¸º nullï¼ */
+        /** @description 世界模型候选（新候选恒 shadow 起步，达标后显式人工晋升；Option 字段缺省序列化为 null） */
         ModelCandidate: {
-            /** @description æåæ¶å»çæ ¡åæè¦å¿«ç§ï¼ä»æªæåè¿ä¸º nullï¼ */
+            /** @description 晋升时刻的校准摘要快照（从未晋升过为 null） */
             calibration_summary: components["schemas"]["CalibrationReport"] | null;
             candidate_id: string;
             /** @description RFC3339 */
@@ -4259,13 +4272,13 @@ export interface components {
             model_version: string;
             promote_reason: string | null;
             promoted_at: string | null;
-            /** @description provider èº«ä»½æ²»çï¼ååº wire å­æ®µåä¸º providerï¼æ³¨åè¯·æ±ä¾§å­æ®µåä¸º provider_refï¼ */
+            /** @description provider 身份治理（响应 wire 字段名为 provider；注册请求侧字段名为 provider_ref） */
             provider: components["schemas"]["CandidateProviderRef"];
             source: string;
             /** @enum {string} */
             status: "shadow" | "active" | "rejected";
         };
-        /** @description èåææ ï¼æåçåæ¯ä¸ºå¨é¨å·²å°è¯è¿è¡ï¼å¤±è´¥/éè¯¯/è¶æ¶ä¸å¾è®¡å¥ï¼ç¦æ­¢åé¤éç®ï¼ */
+        /** @description 聚合指标：成功率分母为全部已尝试运行（失败/错误/超时一律计入，禁止剔除重算） */
         ProductEvalMetrics: {
             cancelled: number;
             errors: number;
@@ -4281,7 +4294,7 @@ export interface components {
             /** Format: int64 */
             total_tokens: ((number | null) | null) | null;
         };
-        /** @description ProductEvalReport åæ ·ï¼core åºååï¼èåå¨é¨ journal è®°å½å«å¤±è´¥ + æªå®æååæ ¼æ¸åï¼ */
+        /** @description ProductEvalReport 原样（core 序列化；聚合全部 journal 记录含失败 + 未完成单元格清单） */
         ProductEvalReport: {
             /** @enum {string} */
             execution: "reference" | "live";
@@ -4295,9 +4308,9 @@ export interface components {
             suite_hash: string;
             suite_name: string;
         };
-        /** @description ä¸æ¬¡è¿è¡çå®æ´è®°å½ï¼journal æå°ååï¼å¤±è´¥è®°å½åæ ·ä¿çï¼Option å­æ®µç¼ºæ°æ®æ¶åºååä¸º nullï¼ */
+        /** @description 一次运行的完整记录（journal 最小单元；失败记录同样保留；Option 字段缺数据时序列化为 null） */
         ProductEvalRun: {
-            /** @description æç» Artifact å¼ç¨ï¼æ²çåç¸å¯¹è·¯å¾ï¼ */
+            /** @description 最终 Artifact 引用（沙盒内相对路径） */
             artifact_refs: string[];
             cancellations: number;
             /** @enum {string} */
@@ -4306,7 +4319,7 @@ export interface components {
             completion_tokens: ((number | null) | null) | null;
             cost_usd: ((number | null) | null) | null;
             error: ((string | null) | null) | null;
-            /** @description å¤±è´¥æ­¥éª¤ï¼æ£æ¥å¨æè¿°/æ§è¡å¨é¶æ®µåï¼ */
+            /** @description 失败步骤（检查器描述/执行器阶段名） */
             failed_steps: string[];
             finished_at: string;
             key: components["schemas"]["MatrixKey"];
@@ -4317,18 +4330,18 @@ export interface components {
             retries: number;
             started_at: string;
             /**
-             * @description ååæ ¼çº§ç¶æï¼æ ¸å¿ RunStatus å°åè¯ï¼
+             * @description 单元格级状态（核心 RunStatus 小写词）
              * @enum {string}
              */
             status: "passed" | "failed" | "error" | "timeout" | "cancelled";
-            /** @description çå®å·¥å·è°ç¨è½¨è¿¹ï¼å Agent æ§è¡å¨å¡«åï¼å·¥å·+å®åæè¦+ç»æï¼æ§è®°å½ç¼ºçä¸ºç©ºæ°ç»ï¼ */
+            /** @description 真实工具调用轨迹（单 Agent 执行器填写：工具+实参摘要+结果；旧记录缺省为空数组） */
             tool_log: string[];
             /** Format: int64 */
             total_tokens: ((number | null) | null) | null;
             /** Format: int64 */
             wall_ms: number;
         };
-        /** @description ProductEval è¿è¡æè¦ï¼åè¡¨åç´ ä¸è¯¦æåºåºï¼å­æï¼queued/running/cancelled/completed/failed/interruptedï¼ */
+        /** @description ProductEval 运行摘要（列表元素与详情基底；六态：queued/running/cancelled/completed/failed/interrupted） */
         ProductEvalRunSummary: {
             /** @enum {string|null} */
             category?: "code" | "research" | "document" | null;
@@ -4340,10 +4353,10 @@ export interface components {
             model?: string | null;
             modes: ("single" | "workswarm")[];
             only?: string | null;
-            /** @description è®¡åååæ ¼æ»æ°ï¼modes Ã cases Ã repetitionsï¼ */
+            /** @description 计划单元格总数（modes × cases × repetitions） */
             planned_total: number;
             progress: {
-                /** @description å·²å®æååæ ¼ï¼journal è¡æ°ï¼ */
+                /** @description 已完成单元格（journal 行数） */
                 done: number;
                 /** @description = planned_total */
                 total: number;
@@ -4371,19 +4384,6 @@ export interface components {
             attachments?: string[];
             prompt: string;
         };
-        /** @description /health 响应（十期一路：build 为 additive 字段） */
-        HealthResponse: {
-            healthy: boolean;
-            version: string;
-            auto_approve: boolean;
-            build?: components["schemas"]["BuildInfo"];
-        };
-        /** @description 构建信息（由统一构建入口生成 build-info.json 提供） */
-        BuildInfo: {
-            commit: string;
-            dirty: boolean;
-            built_at: string;
-        };
     };
     responses: never;
     parameters: never;
@@ -4404,7 +4404,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Artifact ä¸è½½/é¢è§è½½è·ï¼content = åå§ææ¬ï¼é JSON ç¼ç ï¼ */
+            /** @description Artifact 下载/预览载荷（content = 原始文本，非 JSON 编码） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4447,7 +4447,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": {
-                        /** @description (project, kind) çå½å approved head Artifactï¼æåçå®å­å¨ä¸å·²æ¹åçæ¬ï¼å¦å nullï¼ */
+                        /** @description (project, kind) 的当前 approved head Artifact（指向真实存在且已批准版本；否则 null） */
                         approved_head: {
                             [key: string]: unknown;
                         } | null;
@@ -4483,7 +4483,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Artifact åæ°æ®ï¼æ ¼å¼æ ¡éªç»æ + SHA256 + è¯æ®å¼ç¨ï¼handoff å¯éï¼ä½äºæ¢æ handoff é®ä¸ï¼ */
+            /** @description Artifact 元数据：格式校验结果 + SHA256 + 证据引用（handoff 可选，位于既有 handoff 键下） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4494,7 +4494,7 @@ export interface operations {
                         evidence_refs: string[];
                         /** @enum {string} */
                         format: "json" | "csv" | "research" | "markdown";
-                        /** @description å¯éï¼WorkerOutputV1 handoff è®°å½ï¼è°å®æ/éçé®é¢/ä¸ä¸æ­¥å»ºè®®ï¼ */
+                        /** @description 可选：WorkerOutputV1 handoff 记录（谁完成/遗留问题/下一步建议） */
                         handoff?: {
                             [key: string]: unknown;
                         } | null;
@@ -4534,37 +4534,37 @@ export interface operations {
                 "application/json": {
                     comment?: string;
                     /**
-                     * @description è¯å®¡å³å®ï¼snake_caseï¼
+                     * @description 评审决定（snake_case）
                      * @enum {string}
                      */
                     decision: "approve" | "request_changes" | "reject";
-                    /** @description ä¹è§å¹¶åç®æ çæ¬ï¼ç¼ºçè·³è¿çæ¬æ ¡éªï¼ä¸ç¬¦ â 409 */
+                    /** @description 乐观并发目标版本；缺省跳过版本校验；不符 → 409 */
                     expected_version?: number;
-                    /** @description å¹ç­é®ï¼åé®éæ¾é¶å¯ä½ç¨è¿åæ¢æè®°å½ */
+                    /** @description 幂等键；同键重放零副作用返回既有记录 */
                     idempotency_key: string;
-                    /** @description è¯å®¡èï¼member_id / user_id / è§è²åï¼ */
+                    /** @description 评审者（member_id / user_id / 角色名） */
                     reviewer: string;
                     team_id: string;
                 };
             };
         };
         responses: {
-            /** @description idempotent replayï¼åå¹ç­é®éæ¾ï¼é¶å¯ä½ç¨ï¼replayed: trueï¼ */
+            /** @description idempotent replay（同幂等键重放，零副作用；replayed: true） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        /** @description decision=approve æ¶ç (project, kind) approved head Artifact */
+                        /** @description decision=approve 时的 (project, kind) approved head Artifact */
                         approved_head?: {
                             [key: string]: unknown;
                         } | null;
-                        /** @description è¯å®¡åç Artifactï¼å½åç¶æï¼ */
+                        /** @description 评审后的 Artifact（当前状态） */
                         artifact: {
                             [key: string]: unknown;
                         };
-                        /** @description æä¸º trueï¼åæ¾æ¢æè®°å½ï¼ */
+                        /** @description 恒为 true（回放既有记录） */
                         replayed: boolean;
                         review: components["schemas"]["ArtifactReviewRecord"];
                     };
@@ -4577,11 +4577,11 @@ export interface operations {
                 };
                 content: {
                     "application/json": {
-                        /** @description decision=approve æ¶ç (project, kind) approved head Artifact */
+                        /** @description decision=approve 时的 (project, kind) approved head Artifact */
                         approved_head?: {
                             [key: string]: unknown;
                         } | null;
-                        /** @description è¯å®¡åç Artifactï¼review_state å·²è¿ç§»ï¼ */
+                        /** @description 评审后的 Artifact（review_state 已迁移） */
                         artifact: {
                             [key: string]: unknown;
                         };
@@ -4590,14 +4590,14 @@ export interface operations {
                     };
                 };
             };
-            /** @description validation failedï¼æªç¥ decisionï¼ç¼ºå¿å¡«å­æ®µä¸º Json extractor 422ï¼ */
+            /** @description validation failed（未知 decision；缺必填字段为 Json extractor 422） */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description producer self-approve without human policy authorizationï¼é self_review_allowedï¼ */
+            /** @description producer self-approve without human policy authorization（需 self_review_allowed） */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4611,14 +4611,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description expected_version staleï¼æ§é¡µé¢æäº¤ï¼/ artifact superseded / idempotency key reused on other artifact */
+            /** @description expected_version stale（旧页面提交）/ artifact superseded / idempotency key reused on other artifact */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description missing required fieldï¼team_id/decision/reviewer/idempotency_keyï¼ */
+            /** @description missing required field（team_id/decision/reviewer/idempotency_key） */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4639,25 +4639,25 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
-                    /** @description å¹ç­é®ï¼åé®/åè¯å®¡éå¤è¯·æ±å¹ç­è¿ååä»»å¡ */
+                    /** @description 幂等键；同键/同评审重复请求幂等返回原任务 */
                     idempotency_key?: string;
-                    /** @description è¿å·¥æä»¤ï¼æ³¨å¥éè·æ­¥éª¤è¾å¥ rework.instructionï¼ */
+                    /** @description 返工指令（注入重跑步骤输入 rework.instruction） */
                     instruction: string;
-                    /** @description è¦æ±ä¿®æ¹ï¼request_changesï¼è¯å®¡è®°å½ idï¼åä¸è¯å®¡ä»åè®¸ä¸ä¸ªè¿å·¥ä»»å¡ */
+                    /** @description 要求修改（request_changes）评审记录 id；同一评审仅允许一个返工任务 */
                     review_id: string;
                     team_id: string;
                 };
             };
         };
         responses: {
-            /** @description idempotent replayï¼åè¯å®¡/åå¹ç­é®éå¤è¯·æ±ï¼è¿ååè¿å·¥ä»»å¡ï¼ */
+            /** @description idempotent replay（同评审/同幂等键重复请求，返回原返工任务） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description rework task createdï¼éç½®åæ­¥éª¤åæªå®æä¸æ¸¸ï¼éè·åç»è®° v2 å¹¶æ  v1 Supersededï¼approved head ä¸åç´è³ v2 æ¹åï¼ */
+            /** @description rework task created（重置原步骤及未完成下游，重跑后登记 v2 并标 v1 Superseded；approved head 不变直至 v2 批准） */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -4671,7 +4671,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description è¯¥è¯å®¡å·²åå»ºè¿è¿å·¥ä»»å¡ï¼å¹ç­å²çªï¼æå¢éç¶æä¸åè®¸ */
+            /** @description 该评审已创建过返工任务（幂等冲突）或团队状态不允许 */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4841,7 +4841,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description åä¸ª ChangeSetï¼å½¢ç¶å teamChangeSets.change_sets åç´ ï¼ */
+            /** @description 单个 ChangeSet（形状同 teamChangeSets.change_sets 元素） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4884,13 +4884,13 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
-                    /** @description å¹ç­é®ï¼åé®éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ */
+                    /** @description 幂等键：同键重放返回 replayed:true 且零副作用 */
                     idempotency_key: string;
                 };
             };
         };
         responses: {
-            /** @description æ¥ååæ´ï¼å¹ç­éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ï¼ï¼accept ä¿çä¿®æ¹å¹¶è§£é¤è¯¥ ChangeSet å¯¹æç» approved head çé»æ­ */
+            /** @description 接受变更（幂等重放返回 replayed:true 且零副作用）；accept 保留修改并解除该 ChangeSet 对最终 approved head 的阻断 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4913,7 +4913,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description å·²ç»æï¼è·¨å¨ä½ï¼ææä»¶è¢«ç¨æ·åæ¬¡ä¿®æ¹ï¼status=conflictedï¼ä¸è¦çç¨æ·æ°åå®¹ï¼ */
+            /** @description 已终态（跨动作）或文件被用户再次修改（status=conflicted，不覆盖用户新内容） */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4934,13 +4934,13 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
-                    /** @description å¹ç­é®ï¼åé®éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ */
+                    /** @description 幂等键：同键重放返回 replayed:true 且零副作用 */
                     idempotency_key: string;
                 };
             };
         };
         responses: {
-            /** @description æç»åæ´ï¼å¹ç­éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ï¼ï¼reject ä»æ¢å¤è¯¥ ChangeSet ä¿®æ¹çæä»¶ï¼æ°å»ºæä»¶=å é¤æ¢å¤ï¼ï¼æ¢å¤åéæä»¶æ¯å¯¹å½ååå¸ */
+            /** @description 拒绝变更（幂等重放返回 replayed:true 且零副作用）；reject 仅恢复该 ChangeSet 修改的文件（新建文件=删除恢复），恢复前逐文件比对当前哈希 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4963,7 +4963,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description æä»¶è¢«ç¨æ·åæ¬¡ä¿®æ¹ï¼status=conflictedï¼ä¸è¦çç¨æ·æ°åå®¹ï¼æå·²ç»æè·¨å¨ä½ */
+            /** @description 文件被用户再次修改（status=conflicted，不覆盖用户新内容）或已终态跨动作 */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4984,13 +4984,13 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
-                    /** @description å¹ç­é®ï¼åé®éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ */
+                    /** @description 幂等键：同键重放返回 replayed:true 且零副作用 */
                     idempotency_key: string;
                 };
             };
         };
         responses: {
-            /** @description å®å¨æ¤éï¼å¹ç­éæ¾è¿å replayed:true ä¸é¶å¯ä½ç¨ï¼ï¼ä»æ¢å¤è¯¥ ChangeSet ä¿®æ¹çæä»¶ï¼æ¢å¤åæ¯è¾å½åæä»¶åå¸ï¼=ç»æåå¸âæ¢å¤ã=åºçº¿åå¸âå·²æ¢å¤è·³è¿ãå¦å 409 + status=conflicted */
+            /** @description 安全撤销（幂等重放返回 replayed:true 且零副作用）；仅恢复该 ChangeSet 修改的文件，恢复前比较当前文件哈希：=结果哈希→恢复、=基线哈希→已恢复跳过、否则 409 + status=conflicted */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5013,7 +5013,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description æä»¶è¢«ç¨æ·åæ¬¡ä¿®æ¹ï¼status=conflictedï¼ä¸è¦çç¨æ·æ°åå®¹ï¼æå·²ç»æè·¨å¨ä½ */
+            /** @description 文件被用户再次修改（status=conflicted，不覆盖用户新内容）或已终态跨动作 */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -6577,25 +6577,25 @@ export interface operations {
             content: {
                 "application/json": {
                     allow_replan?: boolean;
-                    /** @description æ§è¡è·¯å¾éæ©ï¼ç¼ºç processãmode=worker_pool å¿é¡»æä¾éç©º workers */
+                    /** @description 执行路径选择；缺省 process。mode=worker_pool 必须提供非空 workers */
                     execution?: {
                         /** @enum {string} */
                         mode?: "process" | "worker_pool";
-                        /** @description A2 æ¾å¼æ§è¡ç®æ ç»å®ï¼æ worker ä¸ä¸ªç®æ ï¼æ¾å¼ç»å®ä¸å¯ç¨å³ç­å¾/è¯¢é®/æç»ï¼ä¸éé»æ¹æ´¾ï¼ */
+                        /** @description A2 显式执行目标绑定（按 worker 一个目标；显式绑定不可用即等待/询问/拒绝，不静默改派） */
                         targets?: {
                             budget?: {
-                                /** @description å¯¹ plan æ­¥éª¤ retries å min */
+                                /** @description 对 plan 步骤 retries 取 min */
                                 max_attempts?: number;
-                                /** @description æ´¾åç­å¾/æ± é¢ç®æ´¾çä¸éï¼0=ä¸éï¼ */
+                                /** @description 派发等待/池预算派生上限（0=不限） */
                                 max_duration_secs?: number;
                             };
                             capabilities?: string[];
-                            /** @description ç¼ºçæ´¾ç <goal_id>/<run_id>/<worker> */
+                            /** @description 缺省派生 <goal_id>/<run_id>/<worker> */
                             correlation_id?: string;
                             input_cas_ref?: string;
-                            /** @description fleet_node å¿å¡«ï¼ä¸åè®¸éå¼éèç¹ */
+                            /** @description fleet_node 必填；不允许隐式选节点 */
                             node_id?: string;
-                            /** @description é»è®¤ denyï¼æªååºçè½åä¸å¾ä¸æäºï¼deny ä¼åäº allow */
+                            /** @description 默认 deny：未列出的能力一律不授予；deny 优先于 allow */
                             permission_scope?: {
                                 allow?: string[];
                                 deny?: string[];
@@ -6604,10 +6604,10 @@ export interface operations {
                             };
                             /** @enum {string} */
                             target: "in_process" | "local_process" | "fleet_node";
-                            /** @description ç»å®é®ï¼è®¡åæ­¥éª¤ id ææ­¥éª¤å£°æç worker åï¼agent åªåè®¸ in_processï¼ */
+                            /** @description 绑定键：计划步骤 id 或步骤声明的 worker 名（agent 只允许 in_process） */
                             worker: string;
                         }[];
-                        /** @description worker_pool åæ§å­è¿ç¨éç½®ï¼å½ä»¤ä»éå½åå¯æ§è¡æä»¶ï¼env ç½ååæå­æ®é®ï¼ */
+                        /** @description worker_pool 受控子进程配置（命令仅限当前可执行文件；env 白名单拒凭据键） */
                         workers?: {
                             args?: string[];
                             base_backoff_secs?: number;
@@ -6626,7 +6626,7 @@ export interface operations {
                             name: string;
                         }[];
                     };
-                    /** @description wave åå¹¶åæ§è¡æ­¥æ°ä¸é */
+                    /** @description wave 内并发执行步数上限 */
                     parallelism?: number;
                 };
             };
@@ -6639,7 +6639,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description éæ³ execution/targets éç½®ï¼ç¼º workersãçç¾ç»å®ãfleet_node ç¼º node_id ç­ï¼ */
+            /** @description 非法 execution/targets 配置（缺 workers、矛盾绑定、fleet_node 缺 node_id 等） */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -6736,7 +6736,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description ç»ä¸å¾ååè¡¨ï¼items åç´ å« item_id/kind/status/assignee/team_id/project_id/target_id/summary/created_at/claimed_at/resolved_at/detailï¼detail ä¸ºæ kind çé¢åä¸ä¸æï¼å¼æ¾å¯¹è±¡ï¼ï¼counts = æ kind è®¡æ°ï¼æå¡éå¯åæªå¤çäºé¡¹æ¢å¤ï¼å·²è§£å³äºé¡¹ä¸ååºç° */
+            /** @description 统一待办列表：items 元素含 item_id/kind/status/assignee/team_id/project_id/target_id/summary/created_at/claimed_at/resolved_at/detail（detail 为按 kind 的领域上下文，开放对象）；counts = 按 kind 计数；服务重启后未处理事项恢复，已解决事项不再出现 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6782,7 +6782,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description åæ¡å¾åï¼å½¢ç¶å humanInboxList.items åç´ ï¼ */
+            /** @description 单条待办（形状同 humanInboxList.items 元素） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6797,7 +6797,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description å¾åä¸å­å¨ */
+            /** @description 待办不存在 */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -6823,28 +6823,28 @@ export interface operations {
             };
         };
         responses: {
-            /** @description é¢åæåï¼åäººéå¤é¢åå¹ç­è¿åï¼{item} */
+            /** @description 领取成功（同人重复领取幂等返回）{item} */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description user ä¸ºç©º */
+            /** @description user 为空 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description å¾åä¸å­å¨ */
+            /** @description 待办不存在 */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description å·²è¢«å¶ä»ç¨æ·é¢åï¼åä¸å¾åä»åè®¸ä¸ä¸ªç¨æ·å¤çï¼ */
+            /** @description 已被其他用户领取（同一待办仅允许一个用户处理） */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -6870,28 +6870,28 @@ export interface operations {
             };
         };
         responses: {
-            /** @description éæ¾æåï¼ä»é¢åèå¯éæ¾ï¼{item} */
+            /** @description 释放成功（仅领取者可释放）{item} */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description user ä¸ºç©º */
+            /** @description user 为空 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description å¾åä¸å­å¨ */
+            /** @description 待办不存在 */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description å·²è¢«å¶ä»ç¨æ·é¢åæå½åç¶æä¸åè®¸ */
+            /** @description 已被其他用户领取或当前状态不允许 */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -6925,12 +6925,12 @@ export interface operations {
                     decision?: "approve" | "request_changes" | "reject";
                     expected_version?: number;
                     note?: string;
-                    /** @description å¹ç­é®ï¼å¼å®¹å«å idempotency_keyï¼ */
+                    /** @description 幂等键（兼容别名 idempotency_key） */
                     resolution_id?: string;
-                    /** @description human_result ç»æææ¬ */
+                    /** @description human_result 结果文本 */
                     result?: string;
                     reviewer?: string;
-                    /** @description å¤çäººï¼å®¡è®¡/é¢åæ ¡éªï¼review ç±»ç¼ºçå¼ä½ reviewerï¼ */
+                    /** @description 处理人（审计/领取校验；review 类缺省兼作 reviewer） */
                     user?: string;
                 } & {
                     [key: string]: unknown;
@@ -6938,7 +6938,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description æ kind åæ´¾å°æ¢æé¢åè½åï¼Human ç»ææäº¤ / Artifact è¯å®¡ / ChangeSet accept/reject / Step retryï¼ä¸ç»è¿åæéä¸å¹ç­æ£æ¥ï¼åè¿å {resolved:true, replayed, item_id, kind, result}ï¼éæ¾å¹ç­ 200 */
+            /** @description 按 kind 分派到既有领域能力（Human 结果提交 / Artifact 评审 / ChangeSet accept/reject / Step retry；不绕过原权限与幂等检查）后返回 {resolved:true, replayed, item_id, kind, result}；重放幂等 200 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6957,21 +6957,21 @@ export interface operations {
                     };
                 };
             };
-            /** @description è¯·æ±ä½ä¸ kind ä¸å¹é */
+            /** @description 请求体与 kind 不匹配 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description å¾åä¸å­å¨ */
+            /** @description 待办不存在 */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description æªè¢«é¢å/å·²è¢«ä»äººé¢å/é¢åå²çªï¼å¦ artifact å·²ç»æï¼ */
+            /** @description 未被领取/已被他人领取/领域冲突（如 artifact 已终态） */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -7784,13 +7784,13 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
-                    /** @description ç¼ºçèªå¨çæ model_id-model_version-<uuid8> */
+                    /** @description 缺省自动生成 model_id-model_version-<uuid8> */
                     candidate_id?: string;
                     model_id: string;
                     model_version: string;
-                    /** @description å¯æ§è¡ provider èº«ä»½å£°æï¼ç¼ºç metadata_onlyï¼å£°æâ æ¥çº¿ï¼è¿éè¿ç¨åçå®æ¥çº¿æç§¯ç´¯å½±å­æ ·æ¬ï¼ */
+                    /** @description 可执行 provider 身份声明（缺省 metadata_only；声明≠接线，还需进程内真实接线才积累影子样本） */
                     provider_ref?: components["schemas"]["CandidateProviderRef"];
-                    /** @description æ¥æºè¯´æï¼ç¼ºçï¼æå¨æ³¨å shadow èµ·æ­¥ï¼ */
+                    /** @description 来源说明（缺省：手动注册 shadow 起步） */
                     source?: string;
                 };
             };
@@ -7841,7 +7841,7 @@ export interface operations {
                     "application/json": {
                         active: string;
                         candidate: components["schemas"]["ModelCandidate"];
-                        /** @description æåé¨æ§æç»å¿«ç§ï¼å®¡è®¡å£å¾ï¼ */
+                        /** @description 晋升门控明细快照（审计口径） */
                         gates: {
                             calibration_summary: components["schemas"]["CalibrationReport"];
                             /** Format: int64 */
@@ -7850,7 +7850,7 @@ export interface operations {
                                 kind: string;
                                 locator: string;
                             };
-                            /** @description ç¸å¯¹ä¸ä¸ä»» active çéåæ£æ¥ï¼æ åä»»æåä»»æ æ ·æ¬æ¶ä¸º nullï¼ */
+                            /** @description 相对上一任 active 的退化检查（无前任或前任无样本时为 null） */
                             regression_check?: {
                                 hit_rate_delta?: number;
                                 max_regression_delta?: number;
@@ -7865,7 +7865,7 @@ export interface operations {
                         previous_active: string | null;
                         /**
                          * Format: int64
-                         * @description çå®å½±å­æ ·æ¬æ°
+                         * @description 真实影子样本数
                          */
                         samples: number;
                     };
@@ -7885,7 +7885,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description governance gate refusedï¼metadata_only / æªæ¥çº¿ / æ ·æ¬ä¸è¶³ / ç¸å¯¹åä»»éåè¶éå¼ï¼ */
+            /** @description governance gate refused（metadata_only / 未接线 / 样本不足 / 相对前任退化超阈值） */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8868,23 +8868,23 @@ export interface operations {
             content: {
                 "application/json": {
                     /**
-                     * @description åªè·æå®åç±»
+                     * @description 只跑指定分类
                      * @enum {string|null}
                      */
                     category?: "code" | "research" | "document" | null;
                     /**
-                     * @description reference=åæ¨¡ååèåæ¾+æ£æ¥å¨ï¼live=çå®æ§è¡å¨ï¼singleâSingleAgentExecutorï¼workswarmâWorkSwarmExecutorï¼
+                     * @description reference=免模型参考回放+检查器；live=真实执行器（single→SingleAgentExecutor，workswarm→WorkSwarmExecutor）
                      * @enum {string}
                      */
                     execution: "reference" | "live";
-                    /** @description å¯¹ç§ææå­éï¼ç»ææ¥å wire ä¸­ agent_mode ä¸ºæ ¸å¿å°åè¯ single/multiï¼workswarm â¡ multiï¼ */
+                    /** @description 对照拓扑子集；结果报告 wire 中 agent_mode 为核心小写词 single/multi（workswarm ≡ multi） */
                     modes: ("single" | "workswarm")[];
-                    /** @description åªè· id åå«è¯¥å­ä¸²çä»»å¡ */
+                    /** @description 只跑 id 包含该子串的任务 */
                     only?: string | null;
-                    /** @description éå¤æ¬¡æ°ï¼è¦ç suite é»è®¤ï¼ */
+                    /** @description 重复次数（覆盖 suite 默认） */
                     repetitions: number;
                     /**
-                     * @description ä»åè®¸æ³¨åå v1ï¼å®¢æ·ç«¯æ¬å°è·¯å¾ä¸å¾æç»
+                     * @description 仅允许注册名 v1；客户端本地路径一律拒绝
                      * @enum {string}
                      */
                     suite: "v1";
@@ -8892,21 +8892,21 @@ export interface operations {
             };
         };
         responses: {
-            /** @description åç */
+            /** @description 受理 */
             202: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        /** @description eval-â¦ */
+                        /** @description eval-… */
                         run_id: string;
                         /** @enum {string} */
                         status: "queued";
                     };
                 };
             };
-            /** @description è¯­ä¹æ ¡éªå¤±è´¥ï¼æªç¥ suite/execution/modeãrepetitions è¶çãsuite å è½½å¤±è´¥ãè¿æ»¤åæ ä»»å¡ï¼ */
+            /** @description 语义校验失败（未知 suite/execution/mode、repetitions 越界、suite 加载失败、过滤后无任务） */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -8915,7 +8915,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description ç»ææ ¡éªå¤±è´¥ï¼ç¼ºå­æ®µ/ç±»åéï¼ */
+            /** @description 结构校验失败（缺字段/类型错） */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8948,7 +8948,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description è¿è¡ä¸å­å¨ */
+            /** @description 运行不存在 */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -8970,7 +8970,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description åæ¶åçæåç¶æ */
+            /** @description 取消受理或原状态 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -8983,7 +8983,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description è¿è¡ä¸å­å¨ */
+            /** @description 运行不存在 */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -9085,7 +9085,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description versioned shared artifacts (content via CAS ref)ï¼äºæ additiveï¼æ¯é¡¹å« supersedes_artifact_idï¼è¿å·¥éè·ç»è®°æ¶æååçï¼åç«¯ææ­¤åå¹¶çæ¬æ¶é´çº¿/v1v2 å·®å¼ï¼null = é¦çï¼ */
+            /** @description versioned shared artifacts (content via CAS ref)；五期 additive：每项含 supersedes_artifact_id（返工重跑登记时指向前版，前端按此合并版本时间线/v1v2 差异；null = 首版） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9095,18 +9095,18 @@ export interface operations {
                         artifacts: ({
                             artifact_id?: string;
                             content_ref?: string;
-                            /** @description ä¸æï¼ä¸è·¯ï¼additiveï¼è¯æ®å¼ç¨ */
+                            /** @description 七期（三路）additive：证据引用 */
                             evidence_refs?: string[];
                             kind?: string;
                             preview?: string;
                             producer?: string;
                             review_state?: string;
-                            /** @description ä¸æï¼ä¸è·¯ï¼additiveï¼åå®¹ SHA256ï¼hexï¼ */
+                            /** @description 七期（三路）additive：内容 SHA256（hex） */
                             sha256?: string;
-                            /** @description ä¸æï¼ä¸è·¯ï¼additiveï¼åå®¹å­èæ° */
+                            /** @description 七期（三路）additive：内容字节数 */
                             size_bytes?: number;
                             supersedes_artifact_id?: string | null;
-                            /** @description ä¸æï¼ä¸è·¯ï¼additiveï¼æ ¼å¼æ ¡éª {format, valid, reason?} */
+                            /** @description 七期（三路）additive：格式校验 {format, valid, reason?} */
                             validation?: {
                                 format?: string;
                                 reason?: string | null;
@@ -9133,7 +9133,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description æç»äº¤ä»ç©è§å¾ï¼approved = å kind å½åå·²æ¹åçæ¬ï¼ä¾ä¸è½½/ç»§ç»­ä½¿ç¨ï¼ï¼pending = å¾è¯å®¡ï¼rejected_or_superseded = è¢«é©³å/è¢«åä»£çæ¬ï¼åå²ä¿çï¼ */
+            /** @description 最终交付物视图：approved = 各 kind 当前已批准版本（供下载/继续使用）；pending = 待评审；rejected_or_superseded = 被驳回/被取代版本（历史保留） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9173,7 +9173,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description é¡¹ç®äº¤ä»æ¸åï¼approved çæ¬æ¦è§ + åå®¹ç«¯ç¹ç¸å¯¹è·¯å¾ content_urlï¼ä¾ä¸è½½/æ ¡éªï¼ */
+            /** @description 项目交付清单（approved 版本概览 + 内容端点相对路径 content_url，供下载/校验） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9184,7 +9184,7 @@ export interface operations {
                         manifest: {
                             approved: boolean;
                             artifact_id: string;
-                            /** @description åå®¹ç«¯ç¹ç¸å¯¹è·¯å¾ï¼GET /artifacts/{id}/contentï¼ */
+                            /** @description 内容端点相对路径（GET /artifacts/{id}/content） */
                             content_url: string;
                             format: string;
                             kind: string;
@@ -9216,7 +9216,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description å½åå·¥ä½åºç»å®ï¼body = {workspace:{project_id/root/read_only/write_allowed_paths/tree_depth/created_at/root_canonical/write_allowed_canonical}}ï¼UI å®¹éåæ¶æ¥åé¡¶å±å½¢ç¶ï¼ */
+            /** @description 当前工作区绑定，body = {workspace:{project_id/root/read_only/write_allowed_paths/tree_depth/created_at/root_canonical/write_allowed_canonical}}（UI 容错同时接受顶层形状） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9265,14 +9265,14 @@ export interface operations {
             };
         };
         responses: {
-            /** @description å·¥ä½åºç»å®å·²åå¥ï¼body = ç»å®åæ¾ï¼project_id/root/read_only/write_allowed_paths/tree_depth/bound_atï¼ */
+            /** @description 工作区绑定已写入（body = 绑定回显：project_id/root/read_only/write_allowed_paths/tree_depth/bound_at） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description root ä¸å­å¨/éæ³æè¶çè·¯å¾ */
+            /** @description root 不存在/非法或越界路径 */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -9299,7 +9299,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description ä¸æï¼äºè·¯ wireï¼additiveï¼Worker ä»£ç åæ´è¿½è¸ªââchanged_files = å¨é¨è®°å½çªå£æ°å¢åæ´æä»¶ï¼å»éä¿åºï¼ï¼diff_summary = æè¿ä¸æ¡è®°å½ç git diff --stat æè¦ï¼has_violation = æ¯å¦å­å¨ç½ååè¶çè®°å½ï¼scope_violationï¼ï¼records = éæ­¥éª¤è®°å½ï¼è§è²/æ­¥éª¤/æ¶å»/åæ´æä»¶/diff ref/è¶çåå ï¼ï¼æ è®°å½ï¼åªè¯»å¢é/æªæ§è¡åè§è²ï¼è¿åç©º recordsï¼UI å¨å­æ®µå®¹éè¯»å */
+            /** @description 七期（二路 wire）additive：Worker 代码变更追踪——changed_files = 全部记录窗口新增变更文件（去重保序）；diff_summary = 最近一条记录的 git diff --stat 摘要；has_violation = 是否存在白名单越界记录（scope_violation）；records = 逐步骤记录（角色/步骤/时刻/变更文件/diff ref/越界原因）；无记录（只读团队/未执行写角色）返回空 records，UI 全字段容错读取 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9307,22 +9307,22 @@ export interface operations {
                 content: {
                     "application/json": {
                         changed_files: string[];
-                        /** @description æè¿ä¸æ¡è®°å½ç git diff --stat ææ¬ï¼æ è®°å½ä¸ºç©ºä¸² */
+                        /** @description 最近一条记录的 git diff --stat 文本；无记录为空串 */
                         diff_summary: string;
-                        /** @description æè¿ä¸æ¡è®°å½æ¯å¦åå¾ææ git å¿«ç§ï¼æ è®°å½ä¸º false */
+                        /** @description 最近一条记录是否取得有效 git 快照；无记录为 false */
                         git: boolean;
                         has_violation: boolean;
                         records: ({
-                            /** @description è®°å½æ¶å»ï¼Unix æ¯«ç§ï¼ */
+                            /** @description 记录时刻（Unix 毫秒） */
                             at?: number;
                             changed_files?: string[];
-                            /** @description diff è¡¥ä¸æä»¶ç¸å¯¹ run_dir è·¯å¾ï¼é git / æ åæ´ä¸º null */
+                            /** @description diff 补丁文件相对 run_dir 路径；非 git / 无变更为 null */
                             diff_ref?: string | null;
                             diff_summary?: string;
                             git?: boolean;
                             role?: string;
                             step?: string;
-                            /** @description ç½ååè¶çåå ï¼scope_violationï¼ï¼null = éè¿ */
+                            /** @description 白名单越界原因（scope_violation）；null = 通过 */
                             violation?: string | null;
                         } & {
                             [key: string]: unknown;
@@ -9351,7 +9351,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Git å·¥ä½åºç¶æï¼entries = git status --porcelain è¡å­ç¬¦ä¸²æ°ç»ï¼å¦ " M path"/"?? path"ï¼ï¼å¦æ root/gitï¼å¸å°ï¼æ¯å¦ Git ä»åºï¼/porcelainï¼åæï¼ï¼é Git ä»åº entries ä¸ºç©ºæ°ç»ï¼ä¸æ¥é */
+            /** @description Git 工作区状态：entries = git status --porcelain 行字符串数组（如 " M path"/"?? path"），另有 root/git（布尔：是否 Git 仓库）/porcelain（原文）；非 Git 仓库 entries 为空数组，不报错 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9387,7 +9387,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description æå¹³ç®å½æ ï¼entries:[{path,type:dir|file,size?}]ï¼root/truncated éå ï¼UI æè·¯å¾å±çº§ç¼©è¿æ¸²æï¼ï¼å·¥ä½åºæªç»å®/ä¸å­å¨ â 404 */
+            /** @description 扁平目录树（entries:[{path,type:dir|file,size?}]；root/truncated 附加；UI 按路径层级缩进渲染）；工作区未绑定/不存在 → 404 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9426,7 +9426,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description JSON Schema çæ¬ååå¸ç´¢å¼ï¼plugin-manifest/owskill/owflowï¼ */
+            /** @description JSON Schema 版本化发布索引（plugin-manifest/owskill/owflow） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10384,7 +10384,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description team run list; items = TeamRun + è¿ç¨åè¿è¡æ å¿ï¼R2 additiveï¼ */
+            /** @description team run list; items = TeamRun + 进程内运行标志（R2 additive） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10392,9 +10392,9 @@ export interface operations {
                 content: {
                     "application/json": {
                         teams: {
-                            /** @description è¿è¡å¾ªç¯æ­£å¨æ§è¡é¶æ®µï¼äººèç¹ç­å¾çªå£ / ç»æä¸º falseï¼ */
+                            /** @description 运行循环正在执行阶段（人节点等待窗口 / 终态为 false） */
                             active?: boolean;
-                            /** @description R2ï¼ç£ç Running ä½æ æ´»å¨è¿è¡ â å·²è¯å«ä¸ºä¸­æ­ï¼ç­å¾æ¾å¼ continue/retry æ¢å¤ */
+                            /** @description R2：磁盘 Running 但无活动运行 → 已识别为中断，等待显式 continue/retry 恢复 */
                             interrupted?: boolean;
                         }[];
                     };
@@ -10420,27 +10420,27 @@ export interface operations {
                     objective: string;
                     roles?: Record<string, never>[];
                     /**
-                     * @description äºæç»éç­ç¥ï¼ç¼ºç autoï¼æä»»å¡ç»åå¤å®ï¼ä¸åç²ç®å¯ç¨å¤ Agentï¼ï¼æªç¥å¼ 400
+                     * @description 五期组队策略（缺省 auto：按任务画像判定，不再盲目启用多 Agent）；未知值 400
                      * @enum {string}
                      */
                     strategy?: "auto" | "single" | "team";
                     template_id?: string;
-                    /** @description å­æï¼å¯éï¼ï¼ç»å®çå®é¡¹ç®å·¥ä½åºï¼ç¼ºç = æå¡ç«¯é»è®¤å·¥ä½åº */
+                    /** @description 六期（可选）：绑定真实项目工作区；缺省 = 服务端默认工作区 */
                     workspace?: {
-                        /** @description ç¼ºç trueï¼åªè¯»ï¼ï¼åå¥éåè®¸è·¯å¾+æéå®¡æ¹ */
+                        /** @description 缺省 true（只读）；写入需允许路径+权限审批 */
                         read_only?: boolean;
-                        /** @description é¡¹ç®ç®å½ï¼ç»å¯¹è·¯å¾ï¼ */
+                        /** @description 项目目录（绝对路径） */
                         root: string;
-                        /** @description ç®å½æ å±ç¤ºæ·±åº¦ï¼1-8ï¼ */
+                        /** @description 目录树展示深度（1-8） */
                         tree_depth?: number;
-                        /** @description ç¸å¯¹ root çåè®¸åå¥è·¯å¾ */
+                        /** @description 相对 root 的允许写入路径 */
                         write_allowed_paths?: string[];
                     };
                 };
             };
         };
         responses: {
-            /** @description team run created; background run loop drives phasesï¼body å« strategy_decisionï¼ç»éå³ç­ï¼mode/roles/parallelism/budget_calls_total/reasonsï¼ä¾ UI æ¸²æç»éçç±ä¸è°ç¨é¢ç®ï¼ä¸ workspaceï¼å­æç»å®åæ¾ï¼ */
+            /** @description team run created; background run loop drives phases；body 含 strategy_decision（组队决策：mode/roles/parallelism/budget_calls_total/reasons，供 UI 渲染组队理由与调用预算）与 workspace（六期绑定回显） */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -10476,7 +10476,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description åç½®æ¨¡æ¿ç®å½ï¼åéåºï¼ï¼æ¯é¡¹å« installed ä¸ template å¯¹è±¡ï¼template_id/name/mode/roles[{role,depends_on,handoff_contract}]ï¼+ budget_calls_per_role[]/completion_criteria[]/tool_scope/artifact_kinds[]/auto_match_keywordsï¼å®è£ç» POST /teams/templates/catalog/{id}/install å installed=true å¹¶åä¸èªå¨å¹é */
+            /** @description 内置模板目录（候选区）：每项含 installed 与 template 对象（template_id/name/mode/roles[{role,depends_on,handoff_contract}]）+ budget_calls_per_role[]/completion_criteria[]/tool_scope/artifact_kinds[]/auto_match_keywords；安装经 POST /teams/templates/catalog/{id}/install 后 installed=true 并参与自动匹配 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10511,7 +10511,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description é¦æ¬¡å®è£ {installed:true, already_installed:false, template, auto_match, budget_hint}ï¼å¹ç­éæ¾ {installed:false, already_installed:true, note}ï¼ä¸è¦çæ¢æååæ¨¡æ¿ï¼ãå®è£åæ¨¡æ¿è¿å¥æ³¨åè¡¨å¹¶åä¸èªå¨å¹éï¼find_matchï¼ï¼ä¸èªå¨æ©å¤§æä»¶/å½ä»¤/ç½ç»æé */
+            /** @description 首次安装 {installed:true, already_installed:false, template, auto_match, budget_hint}；幂等重放 {installed:false, already_installed:true, note}（不覆盖既有同名模板）。安装后模板进入注册表并参与自动匹配（find_match），不自动扩大文件/命令/网络权限 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10622,23 +10622,23 @@ export interface operations {
                             event?: string;
                             ts?: string;
                         }[];
-                        /** @description ä¸æï¼äºè·¯ wireï¼additiveï¼æä»¶åæ´åè¡¨ï¼ä¸æ¢æ workspace git-status è·¯ç±å¯äºç¨ï¼diff é¢è§å®¹éè¯» diff / diff_content åé®ï¼ */
+                        /** @description 七期（二路 wire）additive：文件变更列表（与既有 workspace git-status 路由可互用；diff 预览容错读 diff / diff_content 双键） */
                         changes?: {
                             added_lines?: number | null;
                             deleted_lines?: number | null;
-                            /** @description å¯éï¼è¯¥æä»¶ç unified diffï¼UI å®¹éè¯» diff / diff_content åé®ï¼ */
+                            /** @description 可选：该文件的 unified diff（UI 容错读 diff / diff_content 双键） */
                             diff?: string | null;
                             path: string;
                             /** @enum {string} */
                             state: "added" | "modified" | "deleted";
                         }[] | null;
-                        /** @description R2ï¼ä¸­æ­æ è®°ï¼è¯·æ±æ¶ååä¸æ¬¡å¹ç­ä¸­æ­è¯å«ï¼ */
+                        /** @description R2：中断标记（请求时先做一次幂等中断识别） */
                         interrupted: boolean;
-                        /** @description ä»»å¡è§å¾ï¼æ­¥éª¤ Ã ç¶æï¼ */
+                        /** @description 任务视图（步骤 × 状态） */
                         tasks: Record<string, never>;
-                        /** @description TeamRunï¼éä¼ ï¼ */
+                        /** @description TeamRun（透传） */
                         team: Record<string, never>;
-                        /** @description ä¸æï¼äºè·¯ wireï¼additiveï¼æè§è² WorkerProfileï¼å·¥å·æé + è°ç¨é¢ç®ï¼ï¼æ§è®°å½ç¼ºå¤± â UI ç¼ºçç©º/false/null */
+                        /** @description 七期（二路 wire）additive：按角色 WorkerProfile（工具权限 + 调用预算）；旧记录缺失 → UI 缺省空/false/null */
                         worker_profiles?: {
                             can_run_command: boolean;
                             can_use_browser: boolean;
@@ -10648,7 +10648,7 @@ export interface operations {
                             visible_tools: string[];
                             write_allowed_paths?: string[] | null;
                         }[] | null;
-                        /** @description ä¸æï¼äºè·¯ wireï¼additiveï¼åä¸åç§çº¦ï¼null = æªææï¼åæ¶ä¸­å¢éç¶æ stopping/stopped æ¸²æä¸º æ­£å¨åæ­¢/å·²åæ­¢ï¼ */
+                        /** @description 七期（二路 wire）additive：单一写租约（null = 未持有；取消中团队状态 stopping/stopped 渲染为 正在停止/已停止） */
                         write_lease?: {
                             acquired_at_ms: number;
                             holder_role: string;
@@ -10678,7 +10678,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description å«æï¼äºè·¯ wireï¼ï¼å¢éç ChangeSet åè¡¨ââchange_set åç´ å« change_set_id/team_id/step_id/role/base_hashes/result_hashes/changed_files/diff_ref/status/decisions/created_at/resolved_atï¼status â pending_review|accepted|rejected|reverted|conflictedï¼æªæ¥å ChangeSet é»æ­è¯¥å¢éæç» approved headï¼change_set_store::approval_block_for_team é¨æ§ï¼ï¼UI å¨å­æ®µå®¹éè¯»å */
+            /** @description 八期（二路 wire）：团队的 ChangeSet 列表——change_set 元素含 change_set_id/team_id/step_id/role/base_hashes/result_hashes/changed_files/diff_ref/status/decisions/created_at/resolved_at；status ∈ pending_review|accepted|rejected|reverted|conflicted；未接受 ChangeSet 阻断该团队最终 approved head（change_set_store::approval_block_for_team 门控），UI 全字段容错读取 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10686,20 +10686,20 @@ export interface operations {
                 content: {
                     "application/json": {
                         change_sets: ({
-                            /** @description æ§è¡åæä»¶åå®¹åå¸ï¼åå®¹è¿ CASï¼ */
+                            /** @description 执行前文件内容哈希（内容进 CAS） */
                             base_hashes?: {
                                 [key: string]: unknown;
                             };
                             change_set_id?: string;
                             changed_files?: string[];
                             created_at?: string;
-                            /** @description å¹ç­å³å®è®°å½ï¼accept/reject/revert åªå¢ä¸æ¹ï¼ */
+                            /** @description 幂等决定记录（accept/reject/revert 只增不改） */
                             decisions?: {
                                 [key: string]: unknown;
                             }[];
                             diff_ref?: string | null;
                             resolved_at?: string | null;
-                            /** @description æ§è¡åæä»¶åå®¹åå¸ */
+                            /** @description 执行后文件内容哈希 */
                             result_hashes?: {
                                 [key: string]: unknown;
                             };
@@ -10735,7 +10735,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description è±æè¯æ­å¯¼åºï¼TeamRun/ä»»å¡ç¶æ/Artifact ä¸è¯å®¡è®°å½/Handoff/ææ /å®¡è®¡å°¾è¿¹ï¼å­æ®ãAuthorizationãå®æ´ææè¾å¥å·²è±æï¼ */
+            /** @description 脱敏诊断导出（TeamRun/任务状态/Artifact 与评审记录/Handoff/指标/审计尾迹；凭据、Authorization、完整敏感输入已脱敏） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10768,7 +10768,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description SSE team event stream (audit replay frames {type:audit,ts,event,detail} + state frames {type:state,status,active,interrupted}; ends at terminal); ?format=json è¿åä¸æ¬¡æ§å¿«ç§ï¼è§ content schemaï¼R2 additive: interruptedï¼ */
+            /** @description SSE team event stream (audit replay frames {type:audit,ts,event,detail} + state frames {type:state,status,active,interrupted}; ends at terminal); ?format=json 返回一次性快照（见 content schema，R2 additive: interrupted） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10781,9 +10781,9 @@ export interface operations {
                             event?: string;
                             ts?: string;
                         }[];
-                        /** @description R2ï¼ä¸­æ­æ è®°ï¼ç£ç Running ä½æ æ´»å¨è¿è¡ï¼ */
+                        /** @description R2：中断标记（磁盘 Running 但无活动运行） */
                         interrupted: boolean;
-                        /** @description Debug æ ¼å¼å¢éç¶æï¼å¦ Running / Created / Completedï¼ */
+                        /** @description Debug 格式团队状态（如 Running / Created / Completed） */
                         status: string;
                         team_id: string;
                     };
@@ -10809,7 +10809,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description è§è²ææ ï¼workers[]ï¼èµ·æ­¢/èæ¶/æ¨¡åè°ç¨/token/ä¼°ç®è´¹ç¨/å°è¯/ç»æ/å¤±è´¥åå /è¾åº Artifactï¼+ summaryï¼æ»å¢é/æ»è°ç¨/æ»è´¹ç¨/ææ¢ Worker/å¤±è´¥/è¿å·¥/äº§ç©çæ¬æ°/é¢ç®èå°½åå ï¼ï¼JSONL æä¹åï¼éå¯å¯è¯» */
+            /** @description 角色指标：workers[]（起止/耗时/模型调用/token/估算费用/尝试/终态/失败原因/输出 Artifact）+ summary（总墙钟/总调用/总费用/最慢 Worker/失败/返工/产物版本数/预算耗尽原因）；JSONL 持久化，重启可读 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10848,21 +10848,21 @@ export interface operations {
             content: {
                 "application/json": {
                     /**
-                     * @description R2 å»ç»å¥çº¦ï¼retry å±é¨éè¯ = { command: retry, step_id, note }ï¼ä»åè®¸æå®ä¸ä¸ª Failed/Aborted/ä¸­æ­ä¸­çæ­¥éª¤
+                     * @description R2 冻结契约：retry 局部重试 = { command: retry, step_id, note }，仅允许指定一个 Failed/Aborted/中断中的步骤
                      * @enum {string}
                      */
                     command: "continue" | "retry" | "steer" | "replace" | "cancel";
-                    /** @description steer ä¸ç¨ï¼åå¹¶è¿æ­¥éª¤è¾å¥ */
+                    /** @description steer 专用：合并进步骤输入 */
                     new_input?: Record<string, never>;
-                    /** @description replace ä¸ç¨ï¼äººèç¹æ°ç¨æ· ID */
+                    /** @description replace 专用：人节点新用户 ID */
                     new_user_id?: string;
-                    /** @description replace ä¸ç¨ï¼agent èç¹æ° worker */
+                    /** @description replace 专用：agent 节点新 worker */
                     new_worker?: string;
-                    /** @description retry/steer/replace çåæ´çç±ï¼è¿å¥ DecisionRecordï¼ */
+                    /** @description retry/steer/replace 的变更理由（进入 DecisionRecord） */
                     note?: string;
-                    /** @description replace ä¸ç¨ï¼ç®æ è§è² */
+                    /** @description replace 专用：目标角色 */
                     role?: string;
-                    /** @description retry å¿å¡«ï¼ç¼ºå¤±/ç©º â 400ï¼ï¼steer å¯éï¼ç©º = å¨é¨æªå®æèç¹ï¼ */
+                    /** @description retry 必填（缺失/空 → 400）；steer 可选（空 = 全部未完成节点） */
                     step_id?: string;
                 };
             };
@@ -10875,15 +10875,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": {
-                        /** @description R2ï¼ä¸­æ­æ è®°ï¼continue/retry æåæ¢å¤åä¸º falseï¼ */
+                        /** @description R2：中断标记（continue/retry 成功恢复后为 false） */
                         interrupted: boolean;
-                        /** @description Debug æ ¼å¼å¢éç¶æ */
+                        /** @description Debug 格式团队状态 */
                         status: string;
                         team_id: string;
                     };
                 };
             };
-            /** @description validation failedï¼retry ç¼º step_id / æªç¥ commandï¼ */
+            /** @description validation failed（retry 缺 step_id / 未知 command） */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -10897,7 +10897,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description run is activeï¼retry ç®æ å·²æååæ · 409ï¼éå¤åéæ é¢å¤å¯ä½ç¨ï¼ */
+            /** @description run is active（retry 目标已成功同样 409，重复发送无额外副作用） */
             409: {
                 headers: {
                     [name: string]: unknown;
