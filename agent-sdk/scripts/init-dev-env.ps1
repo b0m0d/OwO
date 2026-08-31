@@ -227,7 +227,9 @@ function Write-OwoBuildInfo {
         rust_target  = $script:OwoRequiredTarget
         onnx_runtime = "$($script:OwoSherpaAsset) sha256:$($script:OwoSherpaSha256)"
     }
-    $info | ConvertTo-Json | Set-Content -Path $script:OwoBuildInfoPath -Encoding UTF8
+    # BOM-less UTF-8：PS 5.1 的 Set-Content -Encoding UTF8 会带 BOM，
+    # serde_json 读取时会在第 1 列报 expected value（BOM 不是空白）。
+    [IO.File]::WriteAllText($script:OwoBuildInfoPath, ($info | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
     Write-Host "[init] build-info.json written: v$($info.app_version) @$($info.git_commit) dirty=$($info.git_dirty)" -ForegroundColor Green
     return $info
 }

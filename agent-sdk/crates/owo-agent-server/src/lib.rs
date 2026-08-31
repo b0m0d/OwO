@@ -1359,8 +1359,28 @@ fn load_build_info() -> &'static Option<BuildInfo> {
         let path = std::env::var("OWO_BUILD_INFO")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("build-info.json"));
-        let text = std::fs::read_to_string(path).ok()?;
-        let v: Value = serde_json::from_str(&text).ok()?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    "build-info.json 读取失败（path={}，error={e}）；/health.build 将缺省（旧行为）",
+                    path.display()
+                );
+                return None;
+            }
+        };
+        // 容忍 UTF-8 BOM（部分 Windows 工具写 JSON 会带 BOM；serde_json 不视其为空白）。
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
+        let v: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "build-info.json 解析失败（path={}，error={e}）；/health.build 将缺省（旧行为）",
+                    path.display()
+                );
+                return None;
+            }
+        };
         Some(BuildInfo {
             commit: v["git_commit"].as_str().unwrap_or("unknown").to_string(),
             dirty: v["git_dirty"].as_bool().unwrap_or(false),
