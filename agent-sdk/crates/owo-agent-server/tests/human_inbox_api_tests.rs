@@ -1,14 +1,20 @@
-//! Human Inbox 集成测试（八期 · 第三路：统一 Human Inbox 后端与直接处理）。
+//! Human Inbox 集成测试（八期 · 第三路：统一 Human Inbox 后端与直接处理；
+//! 九期 · 第二路：主键升级 + ChangeSet 扫描拆分实弹覆盖）。
 //!
 //! 覆盖（全部使用 IdleProvider + 直接播种 store/run_dir，不依赖模型凭据）：
 //! 1. 四类待办统一列表：human_result（人节点）/ step_retry（失败步骤）/
 //!    artifact_review（PendingReview 产物）三类实弹源进同一列表；
-//!    change_set 为八期二路 seam（当前 count=0，resolve 返回结构化 409）；
+//!    change_set 为八期二路 ChangeSet（直读 store sidecar，九期起独立于团队扫描）；
 //! 2. claim 互斥：双用户竞争仅一人成功；同人重复领取幂等；release 仅领取者；
 //! 3. resolve step_retry：真实分派 steer retry（步骤重置）+ 同参重放零副作用 + 异键 409；
 //! 4. resolve artifact_review：真实产生评审记录（approve → Approved）+ 重放幂等；
 //! 5. resolve human_result：真实录入人节点结果（步骤 Succeeded + Artifact 落盘）；
-//! 6. 已解决待办不再出现在列表；resolve 后 last_error 不残留。
+//! 6. 已解决待办不再出现在列表；resolve 后 last_error 不残留；
+//! 7. 九期 ChangeSet 扫描拆分：succeeded 团队 / 超 24 团队上限 / run state 损坏
+//!    均不吞 pending ChangeSet；同 step_id 跨团队出独立待办；
+//! 8. 九期发生版本：重试轮次分配新 occurrence（不被旧 resolved 项吞掉）；
+//! 9. resolve change_set：真实分派 accept（保留文件）/ reject（恢复删除新建文件）+
+//!    幂等重放。
 //!
 //! 存储层持久化/CAS 语义的单元测试在 `human_inbox_store.rs` 内 `#[cfg(test)]`。
 
@@ -20,8 +26,9 @@ use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::workswarm::{RoleSpec, RunMeta};
 use owo_agent_core::{Agent, Goal, GoalRunState};
 use owo_agent_protocol::{
-    Artifact, ArtifactClassification, MemberHealth, ProjectSpace, ProjectSpaceStatus, ReviewState,
-    RuntimeBinding, TeamMember, TeamMode, TeamRun, TeamRunStatus,
+    Artifact, ArtifactClassification, ChangeSet, ChangeSetFileHash, ChangeSetStatus, MemberHealth,
+    ProjectSpace, ProjectSpaceStatus, ReviewState, RuntimeBinding, TeamMember, TeamMode, TeamRun,
+    TeamRunStatus,
 };
 use owo_agent_server::build_router;
 use serde_json::{json, Value};
@@ -180,7 +187,7 @@ fn seed_run_state(
     records: &[(&str, StepStatus, u32, Option<&str>)],
 ) {
     let coordinator = state.workswarm.coordinator().unwrap();
-    let mut plan = Plan::new(&format!("plan-{team_id}"), team_id);
+    let mut plan = Plan::new(format!("plan-{team_id}"), team_id);
     for (step_id, worker) in steps {
         plan.add_step(StepSpec::new(*step_id, *worker));
     }
@@ -198,7 +205,7 @@ fn seed_run_state(
             },
         );
     }
-    run_state.persist(&coordinator.run_dir()).unwrap();
+    run_state.persist(coordinator.run_dir()).unwrap();
 }
 
 /// 播种 RunMeta 侧车（人节点分派依赖 roles[worker] → assignee=human）。
@@ -269,6 +276,7 @@ fn make_artifact(
 /// - team-a（Running）：s-1 Failed（agent 成员）→ step_retry；
 /// - team-b（AwaitingHuman）：s-9 Running（human 成员）→ human_result；
 /// - ps-review：a-1 PendingReview → artifact_review。
+///
 /// 播种项目空间（record_human_result/apply_steer 的 load_bundle 依赖其存在）。
 async fn seed_project_space(state: &owo_agent_server::AppState, project_id: &str) {
     let coordinator = state.workswarm.coordinator().unwrap();
@@ -364,7 +372,7 @@ async fn inbox_lists_all_live_sources() {
     let (status, body) = call(&state, &app, "GET", "/human/inbox", None).await;
     assert_eq!(status, 200, "{body}");
 
-    let retry = item_of(&body, "step_retry:s-1").expect("step_retry 条目缺失");
+    let retry = item_of(&body, "step_retry:team-a:s-1:1").expect("step_retry 条目缺失");
     assert_eq!(retry["kind"], "step_retry");
     assert_eq!(retry["status"], "open");
     assert_eq!(retry["team_id"], "team-a");
@@ -372,12 +380,12 @@ async fn inbox_lists_all_live_sources() {
     assert_eq!(retry["detail"]["attempts"], 1);
     assert_eq!(retry["detail"]["error"], "boom");
 
-    let human = item_of(&body, "human_result:s-9").expect("human_result 条目缺失");
+    let human = item_of(&body, "human_result:team-b:s-9:1").expect("human_result 条目缺失");
     assert_eq!(human["kind"], "human_result");
     assert_eq!(human["team_id"], "team-b");
     assert_eq!(human["detail"]["step_status"], "Running");
 
-    let review = item_of(&body, "artifact_review:a-1").expect("artifact_review 条目缺失");
+    let review = item_of(&body, "artifact_review:team-a:a-1:1").expect("artifact_review 条目缺失");
     assert_eq!(review["kind"], "artifact_review");
     assert_eq!(review["project_id"], "ps-a");
     assert_eq!(review["detail"]["review_state"], "PendingReview");
@@ -397,7 +405,7 @@ async fn claim_is_exclusive_and_release_requires_claimer() {
     let (state, _temp) = test_state().await;
     seed_all_sources(&state).await;
     let app = build_router(Arc::clone(&state));
-    let path = "/human/inbox/step_retry:s-1/claim";
+    let path = "/human/inbox/step_retry:team-a:s-1:1/claim";
 
     let (status, body) = call(&state, &app, "POST", path, Some(r#"{ "user": "alice" }"#)).await;
     assert_eq!(status, 200, "{body}");
@@ -420,7 +428,7 @@ async fn claim_is_exclusive_and_release_requires_claimer() {
         &state,
         &app,
         "POST",
-        "/human/inbox/step_retry:s-1/release",
+        "/human/inbox/step_retry:team-a:s-1:1/release",
         Some(r#"{ "user": "bob" }"#),
     )
     .await;
@@ -431,7 +439,7 @@ async fn claim_is_exclusive_and_release_requires_claimer() {
         &state,
         &app,
         "POST",
-        "/human/inbox/step_retry:s-1/release",
+        "/human/inbox/step_retry:team-a:s-1:1/release",
         Some(r#"{ "user": "alice" }"#),
     )
     .await;
@@ -456,7 +464,7 @@ async fn resolve_step_retry_resets_step_and_is_idempotent() {
         &state,
         &app,
         "POST",
-        "/human/inbox/step_retry:s-1/resolve",
+        "/human/inbox/step_retry:team-a:s-1:1/resolve",
         Some(&body),
     )
     .await;
@@ -479,7 +487,7 @@ async fn resolve_step_retry_resets_step_and_is_idempotent() {
         &state,
         &app,
         "POST",
-        "/human/inbox/step_retry:s-1/resolve",
+        "/human/inbox/step_retry:team-a:s-1:1/resolve",
         Some(&json!({ "user": "alice", "note": "收口重试" }).to_string()),
     )
     .await;
@@ -491,7 +499,7 @@ async fn resolve_step_retry_resets_step_and_is_idempotent() {
         &state,
         &app,
         "POST",
-        "/human/inbox/step_retry:s-1/resolve",
+        "/human/inbox/step_retry:team-a:s-1:1/resolve",
         Some(
             &json!({ "user": "alice", "idempotency_key": "other-key", "note": "另一把钥匙" })
                 .to_string(),
@@ -502,7 +510,10 @@ async fn resolve_step_retry_resets_step_and_is_idempotent() {
 
     // 已解决待办不再出现在统一列表。
     let (_, list) = call(&state, &app, "GET", "/human/inbox", None).await;
-    assert!(item_of(&list, "step_retry:s-1").is_none(), "{list}");
+    assert!(
+        item_of(&list, "step_retry:team-a:s-1:1").is_none(),
+        "{list}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -527,7 +538,7 @@ async fn resolve_artifact_review_creates_review_record() {
         &state,
         &app,
         "POST",
-        "/human/inbox/artifact_review:a-1/resolve",
+        "/human/inbox/artifact_review:team-a:a-1:1/resolve",
         Some(&body),
     )
     .await;
@@ -545,7 +556,7 @@ async fn resolve_artifact_review_creates_review_record() {
         &state,
         &app,
         "POST",
-        "/human/inbox/artifact_review:a-1/resolve",
+        "/human/inbox/artifact_review:team-a:a-1:1/resolve",
         Some(
             &json!({
                 "user": "alice",
@@ -562,7 +573,10 @@ async fn resolve_artifact_review_creates_review_record() {
 
     // 列表中不再出现。
     let (_, list) = call(&state, &app, "GET", "/human/inbox", None).await;
-    assert!(item_of(&list, "artifact_review:a-1").is_none(), "{list}");
+    assert!(
+        item_of(&list, "artifact_review:team-a:a-1:1").is_none(),
+        "{list}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -581,7 +595,7 @@ async fn resolve_human_result_records_artifact() {
         &state,
         &app,
         "POST",
-        "/human/inbox/human_result:s-9/resolve",
+        "/human/inbox/human_result:team-b:s-9:1/resolve",
         Some(&body),
     )
     .await;
@@ -603,7 +617,10 @@ async fn resolve_human_result_records_artifact() {
 
     // 列表中不再出现。
     let (_, list) = call(&state, &app, "GET", "/human/inbox", None).await;
-    assert!(item_of(&list, "human_result:s-9").is_none(), "{list}");
+    assert!(
+        item_of(&list, "human_result:team-b:s-9:1").is_none(),
+        "{list}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -637,12 +654,18 @@ async fn inbox_edges_404_change_set_seam_and_validation() {
     assert_eq!(status, 404);
 
     // GET 单条：不存在 404；存在（claim 后）返回记录。
-    let (status, _) = call(&state, &app, "GET", "/human/inbox/step_retry:s-1", None).await;
+    let (status, _) = call(
+        &state,
+        &app,
+        "GET",
+        "/human/inbox/step_retry:team-a:s-1:1",
+        None,
+    )
+    .await;
     assert_eq!(status, 200);
 
-    // change_set 分派 seam：二路未接线前 resolve 返回结构化 409。
-    // （该 kind 的条目仅能由二路创建路径登记；此处直接用 store 层不可达，
-    //   以契约级断言锁定：列表 change_set 计数为 0，不误报可用。）
+    // change_set：无 sidecar 时计数为 0（不误报）；有 pending ChangeSet 必出待办
+    // 的实弹覆盖见下方九期新增测试（succeeded 团队 / 超上限 / 损坏 run state）。
     let (_, list) = call(&state, &app, "GET", "/human/inbox", None).await;
     assert_eq!(list["counts"]["change_set"], 0);
 
@@ -651,7 +674,7 @@ async fn inbox_edges_404_change_set_seam_and_validation() {
         &state,
         &app,
         "POST",
-        "/human/inbox/step_retry:s-1/claim",
+        "/human/inbox/step_retry:team-a:s-1:1/claim",
         Some(r#"{ "user": "  " }"#),
     )
     .await;
@@ -662,12 +685,320 @@ async fn inbox_edges_404_change_set_seam_and_validation() {
         &state,
         &app,
         "POST",
-        "/human/inbox/human_result:s-9/resolve",
+        "/human/inbox/human_result:team-b:s-9:1/resolve",
         Some(r#"{ "user": "u-seed" }"#),
     )
     .await;
     assert_eq!(status, 400, "{body}");
     let (_, list) = call(&state, &app, "GET", "/human/inbox", None).await;
-    let item = item_of(&list, "human_result:s-9").expect("分派失败应回滚为可重试");
+    let item = item_of(&list, "human_result:team-b:s-9:1").expect("分派失败应回滚为可重试");
     assert_eq!(item["status"], "open", "{item}");
+}
+
+// ---------------------------------------------------------------------------
+// 7) 九期（二路）：ChangeSet 扫描拆分 + 发生版本 + Inbox 实弹 accept/reject
+// ---------------------------------------------------------------------------
+
+/// 播种 ChangeSet sidecar（`<run_dir>/<team_id>-change-sets.json`，八期二路存储）。
+fn seed_change_sets(state: &owo_agent_server::AppState, team_id: &str, records: &[ChangeSet]) {
+    let coordinator = state.workswarm.coordinator().unwrap();
+    std::fs::create_dir_all(coordinator.run_dir()).unwrap();
+    std::fs::write(
+        coordinator
+            .run_dir()
+            .join(format!("{team_id}-change-sets.json")),
+        serde_json::to_string_pretty(records).unwrap(),
+    )
+    .unwrap();
+}
+
+/// 构造「新建文件」型 ChangeSet：执行前文件不存在（base sha=None，可恢复），
+/// 执行后落盘 content（result sha 用真实 CAS 哈希，保证 reject 恢复可比对）。
+fn created_file_change_set(team_id: &str, cs_id: &str, rel: &str, content: &[u8]) -> ChangeSet {
+    ChangeSet {
+        change_set_id: cs_id.to_string(),
+        team_id: team_id.to_string(),
+        step_id: "s-impl".to_string(),
+        role: "implementer".to_string(),
+        base_hashes: vec![ChangeSetFileHash {
+            path: rel.to_string(),
+            sha256: None,
+            content_available: true,
+        }],
+        result_hashes: vec![ChangeSetFileHash {
+            path: rel.to_string(),
+            sha256: Some(owo_agent_core::cas_store::CasStore::hash_of(content)),
+            content_available: false,
+        }],
+        changed_files: vec![rel.to_string()],
+        diff_ref: None,
+        status: ChangeSetStatus::PendingReview,
+        created_at: now(),
+        decision: None,
+        conflicts: vec![],
+    }
+}
+
+/// succeeded 团队的 pending ChangeSet 仍必须出现在 /human/inbox（九期拆分核心要求）。
+#[tokio::test]
+async fn succeeded_team_pending_change_set_still_in_inbox() {
+    let (state, _temp) = test_state().await;
+    seed_team_run(
+        &state,
+        "team-succ",
+        "ps-succ",
+        TeamRunStatus::Succeeded,
+        vec![],
+    )
+    .await;
+    let ws = state.workspace.clone();
+    std::fs::create_dir_all(ws.join("out")).unwrap();
+    std::fs::write(ws.join("out/fix.md"), b"generated").unwrap();
+    seed_change_sets(
+        &state,
+        "team-succ",
+        &[created_file_change_set(
+            "team-succ",
+            "cs-team-succ-s-impl-1",
+            "out/fix.md",
+            b"generated",
+        )],
+    );
+    let app = build_router(Arc::clone(&state));
+
+    let (status, body) = call(&state, &app, "GET", "/human/inbox", None).await;
+    assert_eq!(status, 200, "{body}");
+    let item = item_of(&body, "change_set:team-succ:cs-team-succ-s-impl-1:1")
+        .expect("succeeded 团队的 pending ChangeSet 必须出现在待办");
+    assert_eq!(item["kind"], "change_set");
+    assert_eq!(item["team_id"], "team-succ");
+    assert_eq!(item["detail"]["status"], "PendingReview");
+    assert_eq!(body["counts"]["change_set"], 1, "{body}");
+}
+
+/// 超 24 团队扫描上限 / run state 损坏 / succeeded 团队——三种旧扫描会吞掉
+/// pending ChangeSet 的场景，拆分后全部照常出待办（26 个团队全量断言）。
+#[tokio::test]
+async fn change_set_scan_ignores_team_cap_and_broken_run_state() {
+    let (state, _temp) = test_state().await;
+    let coordinator = state.workswarm.coordinator().unwrap();
+    for i in 1..=26 {
+        let team_id = format!("team-cap-{i:02}");
+        // 全部团队不播 run state（团队扫描 load 失败 → 全部跳过）；
+        // team-cap-01 为 succeeded（旧扫描直接 continue）。
+        let status = if i == 1 {
+            TeamRunStatus::Succeeded
+        } else {
+            TeamRunStatus::Running
+        };
+        seed_team_run(&state, &team_id, &format!("ps-cap-{i:02}"), status, vec![]).await;
+        seed_change_sets(
+            &state,
+            &team_id,
+            &[created_file_change_set(
+                &team_id,
+                &format!("cs-{team_id}-1"),
+                "out/x.md",
+                format!("content-{i}").as_bytes(),
+            )],
+        );
+    }
+    // team-cap-02 的 run state 文件损坏（加载失败路径）。
+    std::fs::write(coordinator.run_dir().join("team-cap-02.json"), "{ not json").unwrap();
+
+    let app = build_router(Arc::clone(&state));
+    let (_, body) = call(&state, &app, "GET", "/human/inbox", None).await;
+    assert_eq!(
+        body["counts"]["change_set"], 26,
+        "pending ChangeSet 不因 24 团队上限 / run state 损坏 / succeeded 丢失：{body}"
+    );
+    for i in [1usize, 2, 13, 24, 25, 26] {
+        let team_id = format!("team-cap-{i:02}");
+        assert!(
+            item_of(&body, &format!("change_set:{team_id}:cs-{team_id}-1:1")).is_some(),
+            "{team_id} 的待办缺失"
+        );
+    }
+    assert_eq!(
+        body["counts"]["step_retry"], 0,
+        "无 run state → 无团队类待办"
+    );
+}
+
+/// 两个团队使用相同 step_id → 两个独立待办（九期主键含 team_id）。
+#[tokio::test]
+async fn same_step_id_across_teams_gets_distinct_items() {
+    let (state, _temp) = test_state().await;
+    seed_all_sources(&state).await; // team-a s-1 Failed attempts=1
+    seed_project_space(&state, "ps-c").await;
+    seed_team_run(
+        &state,
+        "team-c",
+        "ps-c",
+        TeamRunStatus::Running,
+        vec![agent_member("m-impl-c", "implementer")],
+    )
+    .await;
+    seed_run_state(
+        &state,
+        "team-c",
+        &[("s-1", "m-impl-c")],
+        &[("s-1", StepStatus::Failed, 1, Some("boom-c"))],
+    );
+    let app = build_router(Arc::clone(&state));
+
+    let (_, body) = call(&state, &app, "GET", "/human/inbox", None).await;
+    assert!(
+        item_of(&body, "step_retry:team-a:s-1:1").is_some(),
+        "{body}"
+    );
+    assert!(
+        item_of(&body, "step_retry:team-c:s-1:1").is_some(),
+        "{body}"
+    );
+    assert_eq!(body["counts"]["step_retry"], 2, "{body}");
+}
+
+/// 发生版本推进：重试重置 attempts=0 后再次失败（attempts=1）→ 分配 :2，
+/// 不被旧 resolved 项永久吞掉（八期缺陷的回归守卫）。
+#[tokio::test]
+async fn step_retry_occurrence_advances_after_resolve() {
+    let (state, _temp) = test_state().await;
+    seed_all_sources(&state).await;
+    let app = build_router(Arc::clone(&state));
+
+    // 第一轮失败（attempts=1）→ occurrence 1。
+    let (_, list) = call(&state, &app, "GET", "/human/inbox", None).await;
+    assert!(
+        item_of(&list, "step_retry:team-a:s-1:1").is_some(),
+        "{list}"
+    );
+
+    // Inbox resolve → 真实 retry 分派（步骤重置，attempts 归零）。
+    let (status, body) = call(
+        &state,
+        &app,
+        "POST",
+        "/human/inbox/step_retry:team-a:s-1:1/resolve",
+        Some(r#"{ "user": "alice", "note": "重试一次" }"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    // 第二轮再次失败：attempts 仍为 1 → 分配 occurrence 2。
+    seed_run_state(
+        &state,
+        "team-a",
+        &[("s-1", "m-impl")],
+        &[("s-1", StepStatus::Failed, 1, Some("boom again"))],
+    );
+    let (_, list) = call(&state, &app, "GET", "/human/inbox", None).await;
+    assert!(
+        item_of(&list, "step_retry:team-a:s-1:2").is_some(),
+        "{list}"
+    );
+    assert!(
+        item_of(&list, "step_retry:team-a:s-1:1").is_none(),
+        "旧 resolved 项不再出现：{list}"
+    );
+    assert_eq!(list["counts"]["step_retry"], 1, "{list}");
+}
+
+/// resolve change_set 实弹：accept 保留文件现状；reject 恢复该 ChangeSet 修改的
+/// 文件（新建文件 → 删除）；重复 resolve 幂等重放；处理完成后待办消失。
+#[tokio::test]
+async fn resolve_change_set_accept_reject_and_replay() {
+    let (state, _temp) = test_state().await;
+    let ws = state.workspace.clone();
+    std::fs::create_dir_all(ws.join("out")).unwrap();
+    std::fs::write(ws.join("out/a.txt"), b"generated-a").unwrap();
+    std::fs::write(ws.join("out/b.txt"), b"generated-b").unwrap();
+    seed_change_sets(
+        &state,
+        "team-cs-a",
+        &[created_file_change_set(
+            "team-cs-a",
+            "cs-team-cs-a-1",
+            "out/a.txt",
+            b"generated-a",
+        )],
+    );
+    seed_change_sets(
+        &state,
+        "team-cs-b",
+        &[created_file_change_set(
+            "team-cs-b",
+            "cs-team-cs-b-1",
+            "out/b.txt",
+            b"generated-b",
+        )],
+    );
+    let app = build_router(Arc::clone(&state));
+
+    // accept：保留文件现状 + ChangeSet 落定 accepted。
+    let accept_body = r#"{ "user": "alice", "action": "accept" }"#;
+    let (status, body) = call(
+        &state,
+        &app,
+        "POST",
+        "/human/inbox/change_set:team-cs-a:cs-team-cs-a-1:1/resolve",
+        Some(accept_body),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["resolved"], true);
+    assert_eq!(body["replayed"], false);
+    assert_eq!(body["result"]["action"], "change_set_accept");
+    assert_eq!(body["result"]["outcome"]["replayed"], false, "{body}");
+    assert_eq!(
+        std::fs::read(ws.join("out/a.txt")).unwrap(),
+        b"generated-a",
+        "accept 保留修改"
+    );
+    let (status, cs) = call(&state, &app, "GET", "/change-sets/cs-team-cs-a-1", None).await;
+    assert_eq!(status, 200, "{cs}");
+    assert_eq!(cs["change_set"]["status"], "accepted");
+
+    // 同参重放 → inbox 层幂等（缓存结果，不再分派）。
+    let (status, body) = call(
+        &state,
+        &app,
+        "POST",
+        "/human/inbox/change_set:team-cs-a:cs-team-cs-a-1:1/resolve",
+        Some(accept_body),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["replayed"], true, "{body}");
+
+    // reject：恢复该 ChangeSet 修改的文件（新建文件 → 删除）。
+    let (status, body) = call(
+        &state,
+        &app,
+        "POST",
+        "/human/inbox/change_set:team-cs-b:cs-team-cs-b-1:1/resolve",
+        Some(r#"{ "user": "bob", "action": "reject" }"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["action"], "change_set_reject");
+    assert!(
+        !ws.join("out/b.txt").exists(),
+        "reject 应删除该 ChangeSet 新建的文件"
+    );
+    let (status, cs) = call(&state, &app, "GET", "/change-sets/cs-team-cs-b-1", None).await;
+    assert_eq!(status, 200, "{cs}");
+    assert_eq!(cs["change_set"]["status"], "rejected");
+
+    // 处理完成后待办消失。
+    let (_, list) = call(&state, &app, "GET", "/human/inbox", None).await;
+    assert!(
+        item_of(&list, "change_set:team-cs-a:cs-team-cs-a-1:1").is_none(),
+        "{list}"
+    );
+    assert!(
+        item_of(&list, "change_set:team-cs-b:cs-team-cs-b-1:1").is_none(),
+        "{list}"
+    );
+    assert_eq!(list["counts"]["change_set"], 0, "{list}");
 }

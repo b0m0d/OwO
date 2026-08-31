@@ -21,9 +21,14 @@
 //!   Failed/Aborted 步骤且团队非 succeeded/cancelled → step_retry）；
 //! - 项目扫描：`get_project_space().artifacts` 中 `review_state == PendingReview`
 //!   → artifact_review；
-//! - ChangeSet：八期二路 `change_set` 落地后由其创建路径调用
-//!   [`human_inbox_store::HumanInboxStore::ensure_item`] 登记（本模块 resolve
-//!   分派点已预留，当前返回结构化 409）。
+//! - ChangeSet 扫描（九期 · 二路拆分）：直读 `ChangeSetStore::list_all()` 跨团队
+//!   全量，**不依赖团队运行状态/数量上限/run state 可读性**——succeeded、cancelled、
+//!   状态文件损坏的团队，只要有未处理 ChangeSet（pending_review/conflicted）照样
+//!   出现在待办中；
+//! - 主键（九期）：`kind:team_id:target_id:occurrence`——team 入键修复跨团队
+//!   step_id 碰撞；occurrence 为发生版本（step_retry/human_result 首选 attempts，
+//!   resolved 占用后自动分配下一空闲版本；artifact_review/change_set 恒 "1"），
+//!   修复重试轮次被旧 resolved 记录永久吞掉。
 
 use axum::extract::{Path as AxumPath, Query as AxumQuery, State};
 use axum::http::StatusCode;
@@ -35,7 +40,9 @@ use owo_agent_core::project_space_store::{
 };
 use owo_agent_core::workswarm::SteerCommand;
 use owo_agent_core::{StepStatus, WorkSwarmError};
-use owo_agent_protocol::{ArtifactReviewDecision, ReviewState, RuntimeBinding, TeamRunStatus};
+use owo_agent_protocol::{
+    ArtifactReviewDecision, ReviewState, RuntimeBinding, TeamRun, TeamRunStatus,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -106,15 +113,13 @@ fn task_views<'a>(state: &'a owo_agent_core::GoalRunState) -> Vec<TaskView<'a>> 
 }
 
 /// 团队扫描：人节点待录入（human_result）+ 失败步骤待重试（step_retry）。
+/// 九期：团队清单由 [`collect_drafts`] 统一拉取传入；occurrence = 当前 attempts。
 async fn scan_team_drafts(
     coordinator: &Arc<owo_agent_core::TeamCoordinator>,
+    runs: &[TeamRun],
     drafts: &mut Vec<(InboxItemDraft, Value)>,
 ) {
-    let runs = match coordinator.list_team_runs().await {
-        Ok(runs) => runs,
-        Err(_) => return, // 存储不可用 → 其余来源仍可工作（列表降级为空）
-    };
-    for team in runs.into_iter().take(MAX_SCAN_TEAMS) {
+    for team in runs.iter().take(MAX_SCAN_TEAMS) {
         let team_id = team.team_id.clone();
         let status: TeamRunStatus = team.status;
         // 重试类：failed 团队保留（正是 retry 的合法场景）；succeeded/cancelled 排除。
@@ -149,6 +154,7 @@ async fn scan_team_drafts(
                         team_id: team_id.clone(),
                         project_id: team.project_space_id.clone(),
                         target_id: t.step_id.to_string(),
+                        occurrence: t.attempts.to_string(),
                         summary: format!(
                             "人节点结果待录入：{}（状态 {}）",
                             t.role,
@@ -170,6 +176,7 @@ async fn scan_team_drafts(
                         team_id: team_id.clone(),
                         project_id: team.project_space_id.clone(),
                         target_id: t.step_id.to_string(),
+                        occurrence: t.attempts.to_string(),
                         summary: format!(
                             "失败步骤待重试：{}（第 {} 次尝试{}）",
                             t.role,
@@ -192,52 +199,19 @@ async fn scan_team_drafts(
                 ));
             }
         }
-        // 八期（二路）：ChangeSet 待接受/拒绝（pending_review）→ change_set 待办。
-        let cs_store = ChangeSetStore::new(coordinator.run_dir());
-        if let Ok(change_sets) = cs_store.list_for_team(&team_id) {
-            for cs in change_sets
-                .iter()
-                .filter(|c| c.status == ChangeSetStatus::PendingReview)
-            {
-                drafts.push((
-                    InboxItemDraft {
-                        kind: KIND_CHANGE_SET.to_string(),
-                        team_id: team_id.clone(),
-                        project_id: team.project_space_id.clone(),
-                        target_id: cs.change_set_id.clone(),
-                        summary: format!(
-                            "ChangeSet 待审批：{}（步骤 {}，{} 个文件）",
-                            cs.role,
-                            cs.step_id,
-                            cs.changed_files.len()
-                        ),
-                    },
-                    json!({
-                        "change_set_id": cs.change_set_id,
-                        "step_id": cs.step_id,
-                        "role": cs.role,
-                        "changed_files": cs.changed_files,
-                        "diff_ref": cs.diff_ref,
-                        "status": format!("{:?}", cs.status),
-                    }),
-                ));
-            }
-        } // 变更存储不可用 → 该团队 ChangeSet 待办降级为空
     }
 }
 
-/// 项目扫描：PendingReview 产物（artifact_review）。
+/// 项目扫描：PendingReview 产物（artifact_review）。occurrence 恒 "1"
+/// （artifact_id 全局唯一且含 team 前缀与版本号）。
 async fn scan_review_drafts(
     coordinator: &Arc<owo_agent_core::TeamCoordinator>,
+    runs: &[TeamRun],
     drafts: &mut Vec<(InboxItemDraft, Value)>,
 ) {
-    let runs = match coordinator.list_team_runs().await {
-        Ok(runs) => runs,
-        Err(_) => return,
-    };
     let mut project_to_team: BTreeMap<&str, &str> = BTreeMap::new();
     let mut projects: Vec<&str> = Vec::new();
-    for team in &runs {
+    for team in runs {
         if let Some(pid) = team.project_space_id.as_deref() {
             if !projects.contains(&pid) {
                 projects.push(pid);
@@ -269,6 +243,7 @@ async fn scan_review_drafts(
                     team_id,
                     project_id: Some(pid.to_string()),
                     target_id: artifact.artifact_id.clone(),
+                    occurrence: "1".to_string(),
                     summary: format!("待评审：{} v{}（{}）", artifact.kind, artifact.version, pid),
                 },
                 json!({
@@ -283,12 +258,78 @@ async fn scan_review_drafts(
     }
 }
 
+/// ChangeSet 扫描（九期 · 二路拆分）：直读 `ChangeSetStore::list_all()` 跨团队
+/// 全量，与团队运行状态扫描完全解耦——不受 TeamRun succeeded/cancelled、
+/// 24 团队扫描上限、run state 加载失败、团队非运行态影响；只要有未处理
+/// ChangeSet（pending_review/conflicted）就出现在「待我处理」。occurrence 恒 "1"
+/// （change_set_id 全局唯一，含 team/步骤/毫秒；conflicted 仅由未决定 ChangeSet
+/// 进入，故同一 ChangeSet 恒对应同一待办）。
+fn scan_change_set_drafts(
+    coordinator: &Arc<owo_agent_core::TeamCoordinator>,
+    project_by_team: &BTreeMap<String, Option<String>>,
+    drafts: &mut Vec<(InboxItemDraft, Value)>,
+) {
+    let cs_store = ChangeSetStore::new(coordinator.run_dir());
+    let Ok(records) = cs_store.list_all() else {
+        return; // 变更存储不可用 → 该来源降级为空（其余来源不受影响）
+    };
+    for cs in records.iter().filter(|c| {
+        matches!(
+            c.status,
+            ChangeSetStatus::PendingReview | ChangeSetStatus::Conflicted
+        )
+    }) {
+        let summary = if cs.status == ChangeSetStatus::Conflicted {
+            format!(
+                "ChangeSet 存在冲突：{}（步骤 {}，{} 个文件；处理后可重试接受/拒绝）",
+                cs.role,
+                cs.step_id,
+                cs.changed_files.len()
+            )
+        } else {
+            format!(
+                "ChangeSet 待审批：{}（步骤 {}，{} 个文件）",
+                cs.role,
+                cs.step_id,
+                cs.changed_files.len()
+            )
+        };
+        drafts.push((
+            InboxItemDraft {
+                kind: KIND_CHANGE_SET.to_string(),
+                team_id: cs.team_id.clone(),
+                project_id: project_by_team.get(&cs.team_id).cloned().flatten(),
+                target_id: cs.change_set_id.clone(),
+                occurrence: "1".to_string(),
+                summary,
+            },
+            json!({
+                "change_set_id": cs.change_set_id,
+                "step_id": cs.step_id,
+                "role": cs.role,
+                "changed_files": cs.changed_files,
+                "diff_ref": cs.diff_ref,
+                "status": format!("{:?}", cs.status),
+                "conflicts": cs.conflicts,
+            }),
+        ));
+    }
+}
+
 /// 全量扫描：四类来源合一（团队任务/失败步骤 + ChangeSet + 产物评审）。
+/// 团队清单只拉取一次（best-effort）：列表失败 → 团队/产物扫描降级为空，
+/// ChangeSet 扫描仍独立工作（九期拆分的核心目标）。
 async fn collect_drafts(state: &AppState) -> Vec<(InboxItemDraft, Value)> {
     let mut drafts: Vec<(InboxItemDraft, Value)> = Vec::new();
     if let Ok(coordinator) = state.workswarm.coordinator() {
-        scan_team_drafts(&coordinator, &mut drafts).await;
-        scan_review_drafts(&coordinator, &mut drafts).await;
+        let runs = coordinator.list_team_runs().await.unwrap_or_default();
+        let project_by_team: BTreeMap<String, Option<String>> = runs
+            .iter()
+            .map(|t| (t.team_id.clone(), t.project_space_id.clone()))
+            .collect();
+        scan_team_drafts(&coordinator, &runs, &mut drafts).await;
+        scan_review_drafts(&coordinator, &runs, &mut drafts).await;
+        scan_change_set_drafts(&coordinator, &project_by_team, &mut drafts);
     }
     drafts
 }
@@ -357,13 +398,18 @@ fn wire_status(item: &HumanWorkItem) -> &str {
     }
 }
 
-/// GET /human/inbox：四类待办统一列表。
+/// GET /human/inbox：四类待办统一列表（单次扫描：登记 + 合成）。
 async fn list_inbox(
     State(state): State<Arc<AppState>>,
     AxumQuery(query): AxumQuery<InboxQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let store = ensure_all_items(&state).await;
     let drafts = collect_drafts(&state).await;
+    let store = inbox_store(&state);
+    for (draft, _) in &drafts {
+        if is_valid_kind(&draft.kind) {
+            store.ensure_item(draft);
+        }
+    }
     let mut items = Vec::new();
     let mut counts: BTreeMap<String, u64> = BTreeMap::from([
         (KIND_HUMAN_RESULT.to_string(), 0),
@@ -375,11 +421,9 @@ async fn list_inbox(
         if !is_valid_kind(&draft.kind) {
             continue;
         }
-        let item_id = draft.item_id();
-        let item = match store.get(&item_id) {
-            Some(i) => i,
-            None => continue,
-        };
+        // 九期：以 ensure_item 返回的条目为准——首选发生版本被 resolved 占用时，
+        // 实际登记键是分配出的新 occurrence（draft.item_id() 只是首选键）。
+        let item = store.ensure_item(&draft);
         if item.status == super::human_inbox_store::STATUS_RESOLVED {
             continue; // 已解决待办不再出现
         }
