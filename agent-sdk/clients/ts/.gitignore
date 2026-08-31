@@ -1,4 +1,5 @@
 node_modules/
 dist/
 dist-tests/
-openapi.json
+# openapi.json 自十期一路起作为权威契约快照入库（route_contract_tests 以 include_str 依赖它，
+# 新终端 / 新克隆必须能拿到该文件才能编译契约测试）；generate:local 可随时基于运行中的服务重取。

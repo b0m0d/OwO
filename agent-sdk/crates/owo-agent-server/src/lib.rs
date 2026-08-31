@@ -87,7 +87,7 @@ use owo_agent_core::whitelist::{Whitelist, WhitelistEntry};
 use owo_agent_core::Agent;
 use owo_agent_core::SceneElement;
 use owo_agent_protocol::{
-    CreateSessionRequest, EvalRunRequest, FileDiff, ForkRequest, HealthResponse,
+    BuildInfo, CreateSessionRequest, EvalRunRequest, FileDiff, ForkRequest, HealthResponse,
     PermissionResponse, RewindRequest, SessionInfo, SseEvent, TurnRequest,
 };
 use serde_json::{json, Value};
@@ -95,7 +95,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
@@ -623,7 +623,7 @@ async fn openapi_spec() -> Json<Value> {
         "x-owo-api-version": OWO_API_VERSION,
         "servers": [{ "url": "http://127.0.0.1:4096" }],
         "paths": {
-            "/health": { "get": { "operationId": "health", "responses": { "200": { "description": "ok" } } } },
+            "/health": { "get": { "operationId": "health", "responses": { "200": { "description": "service health + build info", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } } } } } } },
             "/usage": { "get": { "operationId": "usageSummary", "responses": { "200": { "description": "model token usage snapshot and budget config" } } } },
             "/audit": { "get": { "operationId": "auditList", "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "recent audit entries" } } } },
             "/session": { "post": {
@@ -1262,6 +1262,27 @@ async fn openapi_spec() -> Json<Value> {
                         "calibration_summary": { "allOf": [{ "$ref": "#/components/schemas/CalibrationReport" }], "nullable": true, "description": "晋升时刻的校准摘要快照（从未晋升过为 null）" }
                     },
                     "required": ["candidate_id", "model_id", "model_version", "source", "status", "created_at", "promoted_at", "promote_reason", "provider", "calibration_summary"]
+                },
+                "HealthResponse": {
+                    "type": "object",
+                    "description": "/health 响应（十期一路：build 为 additive 字段）",
+                    "properties": {
+                        "healthy": { "type": "boolean" },
+                        "version": { "type": "string" },
+                        "auto_approve": { "type": "boolean" },
+                        "build": { "$ref": "#/components/schemas/BuildInfo", "nullable": true }
+                    },
+                    "required": ["healthy", "version", "auto_approve"]
+                },
+                "BuildInfo": {
+                    "type": "object",
+                    "description": "构建信息（由统一构建入口生成 build-info.json 提供）",
+                    "properties": {
+                        "commit": { "type": "string" },
+                        "dirty": { "type": "boolean" },
+                        "built_at": { "type": "string" }
+                    },
+                    "required": ["commit", "dirty", "built_at"]
                 }
             },
             "securitySchemes": {
@@ -1324,6 +1345,27 @@ async fn health() -> Json<HealthResponse> {
         healthy: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
         auto_approve: auto_approve_enabled(),
+        build: load_build_info().clone(),
+    })
+}
+
+static BUILD_INFO: OnceLock<Option<BuildInfo>> = OnceLock::new();
+
+/// 读取统一构建入口（scripts/init-dev-env.ps1）生成的构建信息 build-info.json。
+/// 路径优先级：env OWO_BUILD_INFO → 进程 cwd 下 build-info.json；缺失时 build=None
+/// （等价旧行为，仅版本号）。与 .gitignore 策略一致：该文件永不入库、每机生成。
+fn load_build_info() -> &'static Option<BuildInfo> {
+    BUILD_INFO.get_or_init(|| {
+        let path = std::env::var("OWO_BUILD_INFO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("build-info.json"));
+        let text = std::fs::read_to_string(path).ok()?;
+        let v: Value = serde_json::from_str(&text).ok()?;
+        Some(BuildInfo {
+            commit: v["git_commit"].as_str().unwrap_or("unknown").to_string(),
+            dirty: v["git_dirty"].as_bool().unwrap_or(false),
+            built_at: v["built_at"].as_str().unwrap_or_default().to_string(),
+        })
     })
 }
 

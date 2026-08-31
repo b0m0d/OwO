@@ -1303,3 +1303,71 @@ async fn artifact_review_contract_shape_is_frozen() {
         "ArtifactReviewRecord 组件应登记"
     );
 }
+
+/// 十期一路：/health 契约——healthy/version/auto_approve 必备；build 为 additive
+/// 可缺省字段（build-info.json 缺失时不序列化），在场时 commit/dirty/built_at 齐备；
+/// /openapi.json 同步登记 HealthResponse/BuildInfo 组件与 200 schema 引用。
+#[tokio::test]
+async fn health_contract_version_and_optional_build() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    // ① /health 响应面。
+    let response = app
+        .oneshot(request(&state, "GET", "/health", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["healthy"], serde_json::json!(true));
+    assert!(v["version"].is_string(), "version 必须是字符串");
+    assert!(
+        !v["version"].as_str().unwrap().is_empty(),
+        "version 不得为空"
+    );
+    assert!(v["auto_approve"].is_boolean());
+    // additive：build 可缺省（无 build-info.json 时不序列化）；在场则三字段齐备。
+    if let Some(build) = v.get("build") {
+        assert!(build.is_object(), "build 在场必须是对象");
+        assert!(build["commit"].is_string(), "build.commit 必须是字符串");
+        assert!(build["dirty"].is_boolean(), "build.dirty 必须是布尔");
+        assert!(build["built_at"].is_string(), "build.built_at 必须是字符串");
+    }
+
+    // ② /openapi.json 契约面：200 引用 HealthResponse，组件登记两个 schema。
+    let response = app
+        .oneshot(request(&state, "GET", "/openapi.json", None))
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+        .await
+        .unwrap();
+    let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        spec["paths"]["/health"]["get"]["operationId"],
+        serde_json::json!("health")
+    );
+    assert_eq!(
+        spec["paths"]["/health"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        serde_json::json!("#/components/schemas/HealthResponse")
+    );
+    let schemas = &spec["components"]["schemas"];
+    assert!(
+        schemas["HealthResponse"].is_object(),
+        "HealthResponse 组件应登记"
+    );
+    assert!(schemas["BuildInfo"].is_object(), "BuildInfo 组件应登记");
+    assert_eq!(
+        schemas["HealthResponse"]["required"],
+        serde_json::json!(["healthy", "version", "auto_approve"]),
+        "build 为 additive：不得进入 required"
+    );
+    assert_eq!(
+        schemas["BuildInfo"]["required"],
+        serde_json::json!(["commit", "dirty", "built_at"])
+    );
+}

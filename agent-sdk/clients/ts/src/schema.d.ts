@@ -4371,6 +4371,19 @@ export interface components {
             attachments?: string[];
             prompt: string;
         };
+        /** @description /health 响应（十期一路：build 为 additive 字段） */
+        HealthResponse: {
+            healthy: boolean;
+            version: string;
+            auto_approve: boolean;
+            build?: components["schemas"]["BuildInfo"];
+        };
+        /** @description 构建信息（由统一构建入口生成 build-info.json 提供） */
+        BuildInfo: {
+            commit: string;
+            dirty: boolean;
+            built_at: string;
+        };
     };
     responses: never;
     parameters: never;
@@ -6698,12 +6711,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description ok */
+            /** @description service health + build info */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["HealthResponse"];
+                };
             };
         };
     };

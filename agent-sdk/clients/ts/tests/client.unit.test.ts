@@ -941,3 +941,33 @@ test("八期契约（Human Inbox 五路由：列表/详情/claim/release/resolve
   };
   assert.equal(replay.replayed, true);
 });
+
+// ---------------------------------------------------------------------------
+// 十期冻结契约（一路）：/health additive build 字段——版本/构建信息单源。
+// 类型级断言——字段漂移先在 tsc 编译期失败。
+// ---------------------------------------------------------------------------
+
+test("十期契约（/health additive build：BuildInfo 三字段 + 旧形状仍合法）", () => {
+  type Health200 =
+    operations["health"]["responses"][200]["content"]["application/json"];
+  type Build = NonNullable<NonNullable<Health200["build"]>>;
+
+  // 新形状：build-info.json 存在时 build 三字段齐备（commit/dirty/built_at）。
+  const withBuild: Health200 = {
+    healthy: true,
+    version: "0.1.0",
+    auto_approve: false,
+    build: { commit: "8412021", dirty: true, built_at: "2026-08-30T04:00:00Z" },
+  };
+  assert.equal(withBuild.build?.commit, "8412021");
+  assert.equal(withBuild.build?.dirty, true);
+  assert.equal(typeof withBuild.build?.built_at, "string");
+
+  // 旧形状：build 缺省（skip_serializing_if）仍合法——required 未变。
+  const legacy: Health200 = { healthy: true, version: "0.1.0", auto_approve: true };
+  assert.equal(legacy.build, undefined);
+
+  // BuildInfo 形状面：dirty 必为布尔，commit/built_at 必为字符串。
+  const build: Build = { commit: "HEAD", dirty: false, built_at: "" };
+  assert.equal(build.dirty, false);
+});

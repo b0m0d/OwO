@@ -691,6 +691,17 @@ pub struct HealthResponse {
     pub healthy: bool,
     pub version: String,
     pub auto_approve: bool,
+    /// 构建信息（十期一路：统一构建入口生成 build-info.json；additive 字段，旧客户端自然忽略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildInfo>,
+}
+
+/// `/health.build` 构建信息（对应 agent-sdk/build-info.json 的 git_commit/git_dirty/built_at）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildInfo {
+    pub commit: String,
+    pub dirty: bool,
+    pub built_at: String,
 }
 
 /// SSE 事件协议版本（R10：所有 SSE 事件帧 data 统一携带 `v` 字段）。
@@ -730,4 +741,57 @@ pub enum SseEvent {
     Compaction {
         summary: String,
     },
+}
+
+#[cfg(test)]
+mod health_build_tests {
+    use super::*;
+
+    /// 十期一路：/health additive build 契约——无 build-info.json 时 build 键
+    /// 不得序列化（skip_serializing_if），旧客户端零感知。
+    #[test]
+    fn health_without_build_omits_field() {
+        let legacy = HealthResponse {
+            healthy: true,
+            version: "0.1.0".into(),
+            auto_approve: false,
+            build: None,
+        };
+        let v = serde_json::to_value(&legacy).unwrap();
+        assert!(v.get("build").is_none(), "build=None 时不得出现 build 键");
+        assert_eq!(v["healthy"], serde_json::json!(true));
+        assert_eq!(v["version"], "0.1.0");
+        assert_eq!(v["auto_approve"], serde_json::json!(false));
+    }
+
+    /// 十期一路：有构建信息时三字段齐备并可往返；旧载荷（无 build 键）反序列化兼容。
+    #[test]
+    fn health_with_build_round_trips_and_legacy_payload_compat() {
+        let full = HealthResponse {
+            healthy: true,
+            version: "0.1.0".into(),
+            auto_approve: true,
+            build: Some(BuildInfo {
+                commit: "8412021".into(),
+                dirty: true,
+                built_at: "2026-08-30T04:00:00Z".into(),
+            }),
+        };
+        let text = serde_json::to_string(&full).unwrap();
+        assert!(
+            text.contains("\"build\""),
+            "Some(build) 必须序列化 build 键"
+        );
+        let back: HealthResponse = serde_json::from_str(&text).unwrap();
+        let build = back.build.expect("build 应存在");
+        assert_eq!(build.commit, "8412021");
+        assert!(build.dirty);
+        assert_eq!(build.built_at, "2026-08-30T04:00:00Z");
+
+        // 旧载荷（无 build 键）→ #[serde(default)] 兼容。
+        let old: HealthResponse =
+            serde_json::from_str(r#"{"healthy":true,"version":"0.1.0","auto_approve":false}"#)
+                .unwrap();
+        assert!(old.build.is_none());
+    }
 }
