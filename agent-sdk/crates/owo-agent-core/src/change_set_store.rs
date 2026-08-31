@@ -162,19 +162,37 @@ impl ChangeSetStore {
             .find(|record| record.change_set_id == change_set_id))
     }
 
+    /// 按 id 定位记录及其团队（九期修复：决策写路径只允许落在该团队自己的
+    /// sidecar 上——`list_all` 是跨团队只读视图，绝不能整体写回单团队文件）。
+    fn locate(&self, change_set_id: &str) -> Result<(String, ChangeSet), ChangeSetStoreError> {
+        for record in self.list_all()? {
+            if record.change_set_id == change_set_id {
+                return Ok((record.team_id.clone(), record));
+            }
+        }
+        Err(ChangeSetStoreError::NotFound)
+    }
+
+    /// 把记录原位写回其所属团队的 sidecar（存在同 id → 原位替换；否则追加）。
+    fn save_back(&self, team_id: &str, updated: ChangeSet) -> Result<(), ChangeSetStoreError> {
+        let mut records = self.load_team(team_id)?;
+        match records
+            .iter_mut()
+            .find(|record| record.change_set_id == updated.change_set_id)
+        {
+            Some(slot) => *slot = updated.clone(),
+            None => records.push(updated.clone()),
+        }
+        self.save_team(team_id, &records)
+    }
+
     /// 标记冲突（revert/reject 检测到用户改动时调用；已决定 → Conflict）。
     pub fn mark_conflicted(
         &self,
         change_set_id: &str,
         conflicts: &[String],
     ) -> Result<ChangeSet, ChangeSetStoreError> {
-        let mut all = self.list_all()?;
-        let Some(record) = all
-            .iter_mut()
-            .find(|record| record.change_set_id == change_set_id)
-        else {
-            return Err(ChangeSetStoreError::NotFound);
-        };
+        let (team_id, mut record) = self.locate(change_set_id)?;
         if record.decision.is_some() {
             return Err(ChangeSetStoreError::Conflict(format!(
                 "ChangeSet {change_set_id} 已决定（{}），不能再标记冲突",
@@ -183,12 +201,14 @@ impl ChangeSetStore {
         }
         record.status = ChangeSetStatus::Conflicted;
         record.conflicts = conflicts.to_vec();
-        let updated = record.clone();
-        self.save_team(&updated.team_id, &all)?;
-        Ok(updated)
+        self.save_back(&team_id, record.clone())?;
+        Ok(record)
     }
 
     /// 落决定（accept/reject/revert 共用；幂等键 + 终态校验在此内聚）。
+    /// 九期修复：只读写目标团队自己的 sidecar——旧实现把 `list_all()` 的跨团队
+    /// 全量列表写回单团队文件，会把其他团队的 ChangeSet 错误搬进本团队 sidecar
+    /// 并产生同 id 重复记录（多团队交替决定时 GET 可能读到旧状态）。
     pub fn apply_decision(
         &self,
         change_set_id: &str,
@@ -196,18 +216,12 @@ impl ChangeSetStore {
         idempotency_key: &str,
         note: Option<&str>,
     ) -> Result<DecisionOutcome, ChangeSetStoreError> {
-        let mut all = self.list_all()?;
-        let Some(record) = all
-            .iter_mut()
-            .find(|record| record.change_set_id == change_set_id)
-        else {
-            return Err(ChangeSetStoreError::NotFound);
-        };
+        let (team_id, mut record) = self.locate(change_set_id)?;
         // 幂等重放先判：同动作 → 零副作用返回现状。
         if let Some(existing) = &record.decision {
             if existing.action == action.as_str() {
                 return Ok(DecisionOutcome {
-                    change_set: record.clone(),
+                    change_set: record,
                     replayed: true,
                 });
             }
@@ -237,10 +251,9 @@ impl ChangeSetStore {
                 .map(str::to_string),
         });
         record.conflicts.clear();
-        let updated = record.clone();
-        self.save_team(&updated.team_id, &all)?;
+        self.save_back(&team_id, record.clone())?;
         Ok(DecisionOutcome {
-            change_set: updated,
+            change_set: record,
             replayed: false,
         })
     }
@@ -384,6 +397,52 @@ mod tests {
             store.apply_decision("cs-team-a-s1-1", ChangeSetAction::Revert, "k4", None),
             Err(ChangeSetStoreError::Conflict(_))
         ));
+        let _ = std::fs::remove_dir_all(&run_dir);
+    }
+
+    /// 九期回归守卫：apply_decision 只写目标团队自己的 sidecar——多团队交替决定
+    /// 不得把其他团队的记录搬进本团队文件（旧实现 list_all 整体写回的腐蚀）。
+    #[test]
+    fn apply_decision_scopes_writes_to_own_team_sidecar() {
+        let run_dir = unique_run_dir("scope");
+        let store = ChangeSetStore::new(&run_dir);
+        store
+            .save_upsert(&sample_change_set("cs-team-a-s1-1", "team-a"))
+            .unwrap();
+        store
+            .save_upsert(&sample_change_set("cs-team-b-s1-1", "team-b"))
+            .unwrap();
+
+        store
+            .apply_decision("cs-team-a-s1-1", ChangeSetAction::Accept, "k1", None)
+            .unwrap();
+
+        // team-a 文件只含自己的记录；team-b 文件原样未动。
+        let a_records = store.list_for_team("team-a").unwrap();
+        assert_eq!(a_records.len(), 1, "team-a sidecar 不得混入 team-b 记录");
+        assert_eq!(a_records[0].change_set_id, "cs-team-a-s1-1");
+        assert_eq!(a_records[0].status, ChangeSetStatus::Accepted);
+
+        // 交替决定 team-b → team-a 的状态与 sidecar 仍不受影响。
+        store
+            .apply_decision("cs-team-b-s1-1", ChangeSetAction::Reject, "k2", None)
+            .unwrap();
+        assert_eq!(store.list_for_team("team-a").unwrap().len(), 1);
+        let b_records = store.list_for_team("team-b").unwrap();
+        assert_eq!(b_records.len(), 1, "team-b sidecar 不得出现同 id 重复记录");
+        assert_eq!(b_records[0].status, ChangeSetStatus::Rejected);
+
+        // 全量视图恰好两条、id 唯一；find 读到的是各自最新状态。
+        let all = store.list_all().unwrap();
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert_eq!(
+            store.find("cs-team-a-s1-1").unwrap().unwrap().status,
+            ChangeSetStatus::Accepted
+        );
+        assert_eq!(
+            store.find("cs-team-b-s1-1").unwrap().unwrap().status,
+            ChangeSetStatus::Rejected
+        );
         let _ = std::fs::remove_dir_all(&run_dir);
     }
 
