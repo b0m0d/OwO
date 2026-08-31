@@ -1,0 +1,132 @@
+{
+  "budget": {
+    "multi_cells": 200,
+    "shared": "单/多 Agent 同任务同输入同权限同预算同检查器",
+    "single_cells": 200
+  },
+  "defaults": {
+    "max_model_calls": 6,
+    "repetitions": 20,
+    "timeout_secs": 180
+  },
+  "frozen_at": "2026-08-31T06:06:24Z",
+  "frozen_by": "lane2-product-eval",
+  "model": {
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "id": "glm-5.3-flash"
+  },
+  "permissions": {
+    "policy": "default deny; allow_read/allow_write/allow_commands 逐调用强制，见 tasks[*].permissions_sha256"
+  },
+  "schema_version": 1,
+  "suite": {
+    "name": "v1-r1-product-suite",
+    "revision_sha256": "a49fe47878a0b0a947c0a577bc88e8f6e5cf8f87db98f4bb7a4a99ffb4a3c40f"
+  },
+  "tasks": [
+    {
+      "category": "code",
+      "file": "tasks/code-repo-audit.json",
+      "id": "code-repo-audit",
+      "max_model_calls": 6,
+      "permissions_sha256": "ea081e82bb295862646075986f9230503b2dadadc0226596c249b29419e0ee26",
+      "repetitions": 20,
+      "sha256": "845feff79e3e2caea2226c41d0bc7a7db2afa3e2497c22c1064386e2fd4b790a",
+      "timeout_secs": 180
+    },
+    {
+      "category": "code",
+      "file": "tasks/code-bug-fix.json",
+      "id": "code-bug-fix",
+      "max_model_calls": 8,
+      "permissions_sha256": "9ec9c530e58b1a6ae366b5b53923ce76b4f2db65ca12d2f163d8cecc1bbcf662",
+      "repetitions": 20,
+      "sha256": "dc40df8580bc77833eb63de66eb39c7a8af56aa48e48ef74e52ae06ef313b47b",
+      "timeout_secs": 240
+    },
+    {
+      "category": "code",
+      "file": "tasks/code-contract-change.json",
+      "id": "code-contract-change",
+      "max_model_calls": 8,
+      "permissions_sha256": "8f9af13ddcbf4f8f339a4f9db7fc3248aebb725c9e6410249f72eb834e3947dc",
+      "repetitions": 20,
+      "sha256": "d4f3bfd29b71f751029285e650b9e90435d32592d9fc2a985e4f07b0e2307bea",
+      "timeout_secs": 240
+    },
+    {
+      "category": "code",
+      "file": "tasks/code-refactor.json",
+      "id": "code-refactor",
+      "max_model_calls": 8,
+      "permissions_sha256": "02f57cf908331d8b84416a563c572af5f8aae814f132374a356679f0b35d7119",
+      "repetitions": 20,
+      "sha256": "6dc8563662e4e6e5d9a3ef0fc36b4008ad3e47ab62bb8765e0eeec715bd8a7c6",
+      "timeout_secs": 240
+    },
+    {
+      "category": "research",
+      "file": "tasks/research-source-compare.json",
+      "id": "research-source-compare",
+      "max_model_calls": 6,
+      "permissions_sha256": "29fda82f958378b05e0489c0ae634c5e40b6e2a9d6b2e7c45e0899e784fbec06",
+      "repetitions": 20,
+      "sha256": "39385904ab16e6971db2bc12cabfdecd4e8102582703fc6f4d50d5f770d145ef",
+      "timeout_secs": 180
+    },
+    {
+      "category": "research",
+      "file": "tasks/research-evidence-table.json",
+      "id": "research-evidence-table",
+      "max_model_calls": 6,
+      "permissions_sha256": "ab88a3e18ca711d55dc01f3f0f366f969e642f67e5b5a0e531c2915990dc95e9",
+      "repetitions": 20,
+      "sha256": "1eca497c7bac662c4ff756af903bc6e3d7fd925191399384b826b337c1238503",
+      "timeout_secs": 180
+    },
+    {
+      "category": "research",
+      "file": "tasks/research-technical-brief.json",
+      "id": "research-technical-brief",
+      "max_model_calls": 6,
+      "permissions_sha256": "29fda82f958378b05e0489c0ae634c5e40b6e2a9d6b2e7c45e0899e784fbec06",
+      "repetitions": 20,
+      "sha256": "5edd8cf0455a7da5cb65576e14238bea6119a624804f3fc77b3d41fc1d15bb70",
+      "timeout_secs": 180
+    },
+    {
+      "category": "document",
+      "file": "tasks/document-draft.json",
+      "id": "document-draft",
+      "max_model_calls": 6,
+      "permissions_sha256": "346aa5b15a6f98a94907ab6d59493546709c1c41ac5517feeb21517bf4015cc9",
+      "repetitions": 20,
+      "sha256": "b497998e04250f8063ed5b4acaae85ec31a5d286b33d41b0d849baeb74178288",
+      "timeout_secs": 180
+    },
+    {
+      "category": "document",
+      "file": "tasks/document-revise.json",
+      "id": "document-revise",
+      "max_model_calls": 6,
+      "permissions_sha256": "669f4695965059259a258cb078b4bc2de3711606d832dac849b664b1cfe2b522",
+      "repetitions": 20,
+      "sha256": "83a19c8e7054cdb468e9df62dc20f8a28721a1798f444ed432806406ec44f071",
+      "timeout_secs": 180
+    },
+    {
+      "category": "document",
+      "file": "tasks/document-structured-extract.json",
+      "id": "document-structured-extract",
+      "max_model_calls": 6,
+      "permissions_sha256": "863b3621c66ad7fb81b0e8f59bc74548a2f0b7d77e1c9cf66c6d5b8c3ffb270f",
+      "repetitions": 20,
+      "sha256": "24c10b6857af7b7c9526644b84c6511a8310360a86ab8c51dd810238569b4a84",
+      "timeout_secs": 180
+    }
+  ],
+  "version": {
+    "git_commit": "8013da4b371a11c9ff0bc99c34eb7a53c402a9c3",
+    "git_dirty": true
+  }
+}

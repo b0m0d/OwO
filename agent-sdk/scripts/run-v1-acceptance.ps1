@@ -158,12 +158,15 @@ if ($Smoke) {
 if ($EstimateOnly) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $estRoot = Join-Path $OutRoot "estimate-$stamp"
+    $calibOut = Join-Path $estRoot "calib"
     Write-Host "== [estimate] calibration: 3 tasks x 2 reps single-agent (real model) ==" -ForegroundColor Cyan
-    Invoke-EvalRun "calibration agent single x2" @(
-        "--exec", "agent", "--agents", "single", "--reps", "2",
-        "--only", ($smokeTasks -join "|"), "--out", (Join-Path $estRoot "calib")
-    ) | Out-Null
-    $report = Join-Path $estRoot "calib\report.json"
+    foreach ($task in $smokeTasks) {
+        Invoke-EvalRun ("calibration agent single x2 - {0}" -f $task) @(
+            "--exec", "agent", "--agents", "single", "--reps", "2",
+            "--only", $task, "--out", $calibOut
+        ) | Out-Null
+    }
+    $report = Join-Path $calibOut "report.json"
     if (Test-Path $report) {
         $data = Get-Content $report -Raw | ConvertFrom-Json
         $total = $data.metrics.runs_total
@@ -173,8 +176,8 @@ if ($EstimateOnly) {
         Write-Host ""
         Write-Host "=== CALIBRATION (n=$total, tokens=$tokens, calls=$calls, mean_wall_ms=$meanWs) ===" -ForegroundColor Cyan
         $perRun = if ($total -gt 0) { $calls / $total } else { 0 }
-        $lhs = $total / 2          # 3 tasks x 2 reps = 6 cells
-        $allTasksScale = 200.0 / [Math]::Max(1.0, $lhs)
+        $calibCells = 6.0            # 3 tasks x 2 reps
+        $allTasksScale = 200.0 / [Math]::Max(1.0, $calibCells)
         $projCalls = [Math]::Ceiling($calls * $allTasksScale)
         $projTokens = if ($tokens) { [Math]::Ceiling($tokens * $allTasksScale) } else { $null }
         $estInput = $null
@@ -185,9 +188,9 @@ if ($EstimateOnly) {
             $estInput = $projTokens * 0.8 * $inMtok / 1e6
             $estOutput = $projTokens * 0.2 * $outMtok / 1e6
         }
-        Write-Host ("Projected single-agent formal batch (200 cells): calls ~{0}  tokens ~{1}" -f $projCalls, $projTokens) -ForegroundColor Yellow
+        Write-Host ("Projected single-agent formal batch (200 cells): calls ~{0}  tokens ~{1}  (per-run calls {2:N1})" -f $projCalls, $projTokens, $perRun) -ForegroundColor Yellow
         if ($estInput -and $estOutput) {
-            Write-Host ("Est. cost (single 200): input ${0:N4} + output ${1:N4} = ${2:N4} USD" -f $estInput, $estOutput, ($estInput + $estOutput)) -ForegroundColor Yellow
+            Write-Host ("Est. cost (single 200): input {0:N4} + output {1:N4} = {2:N4} USD" -f $estInput, $estOutput, ($estInput + $estOutput)) -ForegroundColor Yellow
         } else {
             Write-Host "Est. cost: set -PriceInPerMTok/-PriceOutPerMTok to get USD estimate (tokens are recorded regardless)." -ForegroundColor Yellow
         }
