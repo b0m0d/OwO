@@ -6,7 +6,10 @@
 #      写后失败 / 取消中写入 / 非 Git 内容哈希 / 连续两个写 Worker 租约隔离。
 #   2) HTTP 契约恢复面 >=20 预置场景（v1_execution_safety_tests，终态+崩溃恢复+幂等），
 #      要求 >=19 通过（允许 1 个环境性抖动，门槛与十期验收一致）。
-#   3) 构建位：cargo check --all-targets 通过（并行路线的 WIP 编译错误除外——
+#   3) 取消响应性契约（workswarm_responsiveness_tests，core 集成层）：长 Worker 期间
+#      读路径 <=200ms、cancel 返回 <1s、驱动在 R2 有界清理内退出（非协作 worker
+#      自然完成即退，预算 8s << 30s 宽限）、过期阶段回传拒收只记审计、进度 seq 单调。
+#   4) 构建位：cargo check --all-targets 通过（并行路线的 WIP 编译错误除外——
 #      脚本先自行 check，若 workspace 因子 crate 中段编辑失败会给出提示而非误报测试失败）。
 #
 # Provider 计费限制（十期 R5 事实声明）：仅离线/脚本化 Provider 可证明「零继续计费」；
@@ -14,13 +17,14 @@
 # 状态终态 / 无孤儿 / 幂等重放等可观测副作用。
 #
 # Usage:
-#   pwsh -File agent-sdk\scripts\run-v1-resilience.ps1 [-Check] [-OnlyCloseout] [-OnlyHttp]
+#   pwsh -File agent-sdk\scripts\run-v1-resilience.ps1 [-Check] [-OnlyCloseout] [-OnlyHttp] [-OnlyResponsiveness]
 # Exit code: 0 = 全部通过, 1 = 有失败, 2 = 构建位被并行 WIP 阻断（重试即可）。
 
 param(
     [switch]$Check,          # 只做 cargo check --all-targets
     [switch]$OnlyCloseout,   # 只跑 ChangeSet 闭环 4 场景（工作区单元层）
-    [switch]$OnlyHttp        # 只跑 HTTP 恢复面（v1_execution_safety_tests）
+    [switch]$OnlyHttp,       # 只跑 HTTP 恢复面（v1_execution_safety_tests）
+    [switch]$OnlyResponsiveness  # 只跑取消响应性契约（workswarm_responsiveness_tests）
 )
 
 $ErrorActionPreference = "Continue"
@@ -32,7 +36,7 @@ Write-Host "== [resilience] root: $sdkRoot ==" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 # 1) 构建位（并行路线 WIP 可能让 check 临时失败；失败 = 阻断，不是测试失败）
 # ---------------------------------------------------------------------------
-if (-not $OnlyCloseout -and -not $OnlyHttp) {
+if (-not $OnlyCloseout -and -not $OnlyHttp -and -not $OnlyResponsiveness) {
     Write-Host "== [resilience] cargo check --all-targets ==" -ForegroundColor Cyan
     cargo check --workspace --all-targets 2>&1 | Tee-Object -Variable checkOut | Out-Null
     $checkLines = $checkOut | Select-String -Pattern "^error"
@@ -51,7 +55,7 @@ $totalOk = 0
 # ---------------------------------------------------------------------------
 # 2) closeout 单元 4 场景
 # ---------------------------------------------------------------------------
-if (-not $OnlyHttp) {
+if (-not $OnlyHttp -and -not $OnlyResponsiveness) {
     Write-Host "== [resilience] ChangeSet 异常闭环（workswarm_api 单元层）==" -ForegroundColor Cyan
     $unitTests = @(
         "write_then_fail_still_generates_change_set",
@@ -70,7 +74,7 @@ if (-not $OnlyHttp) {
 # ---------------------------------------------------------------------------
 # 3) HTTP 恢复面 >=20 预置场景，>=19 通过
 # ---------------------------------------------------------------------------
-if (-not $OnlyCloseout) {
+if (-not $OnlyCloseout -and -not $OnlyResponsiveness) {
     Write-Host "== [resilience] HTTP 恢复面（v1_execution_safety_tests）==" -ForegroundColor Cyan
     cargo test -p owo-agent-server --test v1_execution_safety_tests -- --test-threads 4 2>&1 |
         Tee-Object -Variable httpOut | Out-Null
@@ -101,11 +105,40 @@ if (-not $OnlyCloseout) {
 }
 
 # ---------------------------------------------------------------------------
+# 4) 取消响应性契约（core 集成层；R2 有界清理口径，十期四路）
+# ---------------------------------------------------------------------------
+if (-not $OnlyCloseout -and -not $OnlyHttp) {
+    Write-Host "== [resilience] 取消响应性契约（workswarm_responsiveness_tests）==" -ForegroundColor Cyan
+    cargo test -p owo-agent-core --test workswarm_responsiveness_tests -- --test-threads 4 2>&1 |
+        Tee-Object -Variable respOut | Out-Null
+    $respOk = 0; $respFail = 0
+    foreach ($m in ($respOut | Select-String -Pattern "^test ([\w_]+) \.\.\. (ok|FAILED)")) {
+        if ($m.Matches[0].Groups[2].Value -eq "ok") { $respOk++ } else { $respFail++ }
+    }
+    $respLine = $respOut | Select-String -Pattern "test result: (ok|FAILED)"
+    if ($respOk + $respFail -eq 0 -and $respLine.Count -gt 0) {
+        $tokens = $respLine.Line -split "[; ]+"
+        foreach ($tok in $tokens) {
+            if ($tok -match "^(\d+) passed;") { $respOk = [int]$Matches[1] }
+            if ($tok -match "^(\d+) failed;") { $respFail = [int]$Matches[1] }
+        }
+    }
+    Write-Host ("    取消响应性 : {0} passed / {1} failed" -f $respOk, $respFail) -ForegroundColor Cyan
+    if ($respFail -gt 0 -or $respOk -lt 4) {
+        $failures += "workswarm_responsiveness_tests (need 4/4, got $respOk/$($respOk+$respFail))"
+        $respOut | Select-String -Pattern "FAILED:|panicked at" | ForEach-Object {
+            Write-Host ("    " + $_.Line) -ForegroundColor Yellow
+        }
+    }
+    $totalOk += $respOk
+}
+
+# ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "==================== V1 RESILIENCE SUMMARY ====================" -ForegroundColor Cyan
-Write-Host ("closeout(4) + http(>=20) passed total : {0}" -f $totalOk)
+Write-Host ("closeout(4) + http(>=20) + responsiveness(4) passed total : {0}" -f $totalOk)
 if ($failures.Count -gt 0) {
     Write-Host "FAILED:" -ForegroundColor Red
     foreach ($f in $failures) { Write-Host ("    - " + $f) -ForegroundColor Red }

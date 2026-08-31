@@ -852,6 +852,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// R1 硬性上限：变更文件超过 [`DIFF_PATH_ARG_CAP`]（100）时**绝不退回全仓
+    /// `git diff`**——`git_diff_patch` 返回 None，`record` 落退化差异摘要
+    /// （`.diff.txt`，逐文件 CAS 基线），杜绝"超限即拉全仓 diff"的失控路径。
+    #[tokio::test]
+    async fn over_cap_files_use_degraded_summary_never_full_repo_diff() {
+        let dir = std::env::temp_dir().join(format!(
+            "owo-record-cap-{}-{}",
+            std::process::id(),
+            unique_tag_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let run_dir = dir.join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let cas = owo_agent_core::cas_store::CasStore::new(dir.join("cas")).unwrap();
+        let tracker = Tracker {
+            root: root.clone(),
+            run_dir: run_dir.clone(),
+            team_id: "t1".to_string(),
+            role: "implementer".to_string(),
+            allowed: Vec::new(),
+            cas,
+            audit: None,
+        };
+        // 伪 git 快照（git=true）：真实仓库场景里超限也必须走退化摘要。
+        let post = GitSnapshot {
+            git: true,
+            status: Vec::new(),
+            diff_stat: String::new(),
+            at: 7,
+        };
+        let changed: Vec<String> = (0..DIFF_PATH_ARG_CAP + 1)
+            .map(|i| format!("many/f{i}.txt"))
+            .collect();
+        let record = tracker
+            .record("s-over", &post, &changed, None, None)
+            .await
+            .unwrap();
+        let diff_ref = record.diff_ref.expect("有变更必须落差异引用");
+        assert!(
+            diff_ref.ends_with(".diff.txt"),
+            "超限必须走退化差异摘要（.diff.txt），不得生成 git 补丁：{diff_ref}"
+        );
+        // 摘要内容面：逐文件列出且不出现全仓 diff 特征。
+        let body = std::fs::read_to_string(run_dir.join(&diff_ref)).unwrap();
+        assert!(body.contains("many/f0.txt"), "{body}");
+        assert!(!body.contains("diff --git a/"), "不得有 git 补丁头：{body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 测试辅助：毫秒时间戳（唯一临时目录用）。
     fn unique_tag_ms() -> u128 {
         std::time::SystemTime::now()

@@ -1,12 +1,14 @@
-//! WorkSwarm 长任务响应性契约测试（R3）。
+//! WorkSwarm 长任务响应性契约测试（R3，十期四路 R2 口径对齐）。
 //!
 //! 覆盖：
 //! 1. 长 Worker 阶段（run_phase 阶段 B 无锁）期间，详情/任务图/进度读路径 ≤200ms；
-//! 2. cancel 立即返回（<1s）并终止活动 Worker（阶段代次失效 → 旧结果丢弃）；
-//! 3. 过期阶段的产物回传被拒收：只记审计（team.phase.stale_drop），
+//!    cancel 立即返回（<1s）；不直接丢弃在飞 Future——协作式 Worker 快速收尾、
+//!    非协作 Worker 按有界清理（自然完成 ≤ CANCELLATION_CLEANUP_GRACE）后再
+//!    退出驱动循环；超限强制终止由进程树/沙箱兜底（十期·四路 R2）；
+//! 2. 过期阶段的产物回传被拒收：只记审计（team.phase.stale_drop），
 //!    不创建 Artifact、不改终态；legacy 入口（None）保持兼容；
-//! 4. progress seq 单调递增，终态计数正确、current_steps 清空；
-//! 5. 并发读不产生死锁、重复 Artifact 或状态回退。
+//! 3. progress seq 单调递增，终态计数正确、current_steps 清空；
+//! 4. 并发读不产生死锁、重复 Artifact 或状态回退。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -250,10 +252,16 @@ async fn detail_reads_stay_fast_during_long_worker_and_cancel_returns_fast() {
         "cancel 耗时 {cancel_elapsed:?}（要求 <1s）"
     );
 
-    // 驱动循环应在 cancel 后很快终止（阶段 B select 立即感知）。
-    let outcome = tokio::time::timeout(Duration::from_secs(3), driver)
+    // 驱动循环应在 cancel 后有界退出（十期·四路 R2 口径）：取消不再直接丢弃
+    // 在飞 Future（丢弃会跳过 TrackedRoleWorker 的变更收尾），而是置位 abort 后
+    // 等段内有界清理自然收束（≤ CANCELLATION_CLEANUP_GRACE）。本套件内层
+    // SlowEchoWorker 为普通 sleep（非协作），4000ms 睡眠执行完即退——预算 8s
+    // 既显著小于 30s 清理宽限（证明取消确实促成了阶段结束而非挂死），又能容纳
+    // 非协作 worker 的自然完成；协作式 worker（生产 TrackedRoleWorker 在步骤
+    // 边界观察 abort）会在毫秒级返回，远快于此预算。
+    let outcome = tokio::time::timeout(Duration::from_secs(8), driver)
         .await
-        .expect("驱动循环未在取消后退出")
+        .expect("驱动循环未在取消后有界退出")
         .expect("驱动任务 panic");
     assert!(
         matches!(outcome, PhaseOutcome::Aborted),
