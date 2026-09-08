@@ -104,6 +104,49 @@ test("§5.5 审批卡：脱敏展示 + 原始 JSON 收进开发者详情 + scope
   assert.match(css, /\.approval-actions/, "审批选项样式存在");
 });
 
+test("§12-13 自由文本改约束控件：自动化三态 / MCP 传输切换 / CSV chips / 白名单候选", () => {
+  const index = read("../index.html");
+  const app = read("../app.js");
+  // 自动化：不再有 60 / 09:00 / RFC3339 混合自由文本框。
+  assert.ok(!index.includes('id="autoValue"'), "旧的自由文本 autoValue 必须移除");
+  for (const id of ["autoIntervalSecs", "autoDailyTime", "autoOnceAt"]) {
+    assert.match(index, new RegExp(`id="${id}"`), `自动化三态表单缺少 ${id}`);
+  }
+  assert.match(index, /<div id="autoIntervalGroup" class="auto-group"/, "间隔表单分组");
+  assert.match(index, /<div id="autoDailyGroup" class="auto-group"/, "每日表单分组");
+  assert.match(index, /<div id="autoOnceGroup" class="auto-group"/, "指定时间表单分组");
+  assert.match(app, /function syncAutomationFields\(\)/, "自动化表单必须按触发方式切换显隐");
+  assert.match(app, /new Date\(local\)\.getTimezoneOffset/, "指定时间必须转本地显式时区 RFC3339");
+  assert.match(index, /<div id="mcpCommandGroup" class="auto-group"/, "MCP 命令分组");
+  assert.match(index, /<div id="mcpUrlGroup" class="auto-group"/, "MCP URL 分组");
+  assert.match(app, /function syncMcpFields\(\)/, "MCP 传输切换必须同步字段显隐");
+  // CSV → chips。
+  assert.ok(!index.includes('id="cuActions"'), "cuActions 自由文本必须移除");
+  assert.ok(!index.includes('id="sinkApps"'), "sinkApps 自由文本必须移除");
+  assert.match(index, /id="cuActionsChips"/, "Computer-use 动作必须用 chips 多选");
+  assert.match(index, /id="sinkAppsChips"/, "技能应用必须用 chips 多选");
+  assert.match(app, /function renderChipGroup\(hostId, catalogKey/, "必须提供 chips 渲染工具");
+  assert.match(app, /function getSelectedChips\(hostId\)/, "必须提供 chips 取值工具");
+  assert.match(app, /chipOptionsCatalog\(\)/, "chips 候选必须来自能力注册表目录");
+  // 白名单：可搜索 datalist 候选。
+  assert.match(index, /id="wlAppId"[^>]*list="wlAppCandidates"/, "白名单 app id 必须接 datalist");
+  assert.match(index, /<datalist id="wlAppCandidates">/, "白名单 datalist 候选容器");
+  assert.match(app, /const datalist = \$\(\"wlAppCandidates\"\)/, "白名单刷新必须回填候选");
+  assert.match(app, /function initConstrainedControls\(\)/, "约束控件必须一次性初始化");
+  // 工作区路径：最近项目 datalist（普通模式不要求手写完整路径）。
+  assert.match(index, /id="workspace"[^>]*list="workspaceCandidates"/, "工作区输入必须接最近项目 datalist");
+  assert.match(index, /<datalist id="workspaceCandidates">/, "最近项目 datalist 容器");
+  assert.match(app, /localStorage\.getItem\("owo\.recent-workspaces"\)/, "最近项目必须本地记忆");
+  assert.match(app, /function rememberWorkspace\(path\)/, "选择工作区必须记录到最近项目");
+  assert.match(app, /function refreshWorkspaceCandidates\(\)/, "最近项目候选必须可刷新");
+  // settings 原始 JSON 编辑保持 json-fallback 兜底（普通模式不裸露）。
+  assert.match(index, /id="settingsEditor" class="json-fallback"/, "原始 JSON 编辑器必须保持在无 JS 兜底层");
+  const css = read("../style.css");
+  assert.match(css, /\.chip-group/, "chips 容器样式");
+  assert.match(css, /\.chip\.selected/, "chips 选中态样式");
+  assert.match(css, /\.auto-group\[hidden\]/, "受控表单隐藏规则");
+});
+
 test("§12-12 工具与高级系统移入路由化设置页 + 开发者模式门控", () => {
   const index = read("../index.html");
   // 工具分区包进可路由容器；开发者分区单独标记（默认隐藏）。

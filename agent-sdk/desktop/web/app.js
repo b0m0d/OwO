@@ -393,9 +393,68 @@ async function learnControl(action) {
   }
 }
 
+// §12-13 约束控件：chips 多选（替代动作/应用 CSV 自由文本）。
+// hostId 为容器元素 id；选项在 renderChipGroup 时注入。选中值由
+// data-chip 值汇总，读取处经 getSelectedChips 取回。
+function chipOptionsCatalog() {
+  return {
+    // Computer-use 允许动作（能力注册表固定候选）。
+    actions: [
+      { value: "click", label: "点击" },
+      { value: "type", label: "键入" },
+      { value: "scroll", label: "滚动" },
+      { value: "drag", label: "拖拽" },
+      { value: "open", label: "打开应用" },
+      { value: "close", label: "关闭应用" },
+    ],
+    // 技能沉淀常见目标应用（能力注册表候选）。
+    apps: [
+      { value: "qq", label: "QQ" },
+      { value: "wechat", label: "微信" },
+      { value: "feishu", label: "飞书" },
+      { value: "dingtalk", label: "钉钉" },
+      { value: "chrome", label: "Chrome" },
+      { value: "edge", label: "Edge" },
+      { value: "explorer", label: "文件资源管理器" },
+    ],
+  };
+}
+function renderChipGroup(hostId, catalogKey, selected = []) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  host.innerHTML = "";
+  for (const option of chipOptionsCatalog()[catalogKey] || []) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip" + (selected.includes(option.value) ? " selected" : "");
+    chip.dataset.chip = option.value;
+    chip.textContent = option.label;
+    chip.setAttribute("aria-pressed", String(selected.includes(option.value)));
+    chip.addEventListener("click", () => {
+      chip.classList.toggle("selected");
+      chip.setAttribute("aria-pressed", String(chip.classList.contains("selected")));
+    });
+    host.appendChild(chip);
+  }
+}
+function getSelectedChips(hostId) {
+  const host = document.getElementById(hostId);
+  if (!host) return [];
+  return Array.from(host.querySelectorAll(".chip.selected")).map((chip) => chip.dataset.chip);
+}
+function setSelectedChips(hostId, values) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  for (const chip of host.querySelectorAll(".chip")) {
+    const on = values.includes(chip.dataset.chip);
+    chip.classList.toggle("selected", on);
+    chip.setAttribute("aria-pressed", String(on));
+  }
+}
+
 async function sinkSkill() {
   const name = $("sinkName").value.trim();
-  const apps = $("sinkApps").value.split(",").map((item) => item.trim()).filter(Boolean);
+  const apps = getSelectedChips("sinkAppsChips");
   const sensitivity = $("sinkSensitivity").value;
   const description = $("sinkDesc").value.trim();
   if (!name || !apps.length) return;
@@ -406,6 +465,7 @@ async function sinkSkill() {
     });
     $("sinkName").value = "";
     $("sinkDesc").value = "";
+    setSelectedChips("sinkAppsChips", []);
     addMessage("system", `已沉淀技能包 ${result.name}（变量：${result.variables.join(", ") || "无"}）`);
     await refreshPackages();
   } catch (error) {
@@ -578,33 +638,64 @@ async function refreshAutomations() {
   }
 }
 
+// §12-13 约束控件：自动化按触发方式切换三种受控表单（间隔/每日/指定时间），
+// 不再要求用户手写 60 / 09:00 / RFC3339 混合字符串。
+const AUTO_SCHEDULE_FIELDS = {
+  interval: "autoIntervalSecs",
+  daily: "autoDailyTime",
+  oneshot: "autoOnceAt",
+};
+function syncAutomationFields() {
+  const kind = $("autoKind") ? $("autoKind").value : "interval";
+  $("autoIntervalGroup").hidden = kind !== "interval";
+  $("autoDailyGroup").hidden = kind !== "daily";
+  $("autoOnceGroup").hidden = kind !== "oneshot";
+}
+if (document.getElementById("autoKind")) {
+  $("autoKind").addEventListener("change", syncAutomationFields);
+}
+
 async function createAutomation() {
   const name = $("autoName").value.trim();
   const kind = $("autoKind").value;
-  const value = $("autoValue").value.trim();
   const reminder = $("autoReminder").value.trim();
-  if (!name || !value || !reminder) return;
   let schedule;
   if (kind === "interval") {
-    const everySecs = parseInt(value, 10);
+    const everySecs = parseInt($("autoIntervalSecs").value, 10);
     if (!Number.isFinite(everySecs) || everySecs <= 0) {
       addMessage("error", "间隔需为正整数（秒）");
       return;
     }
     schedule = { kind: "interval", every_secs: everySecs };
   } else if (kind === "daily") {
-    schedule = { kind: "daily", time: value };
+    const time = $("autoDailyTime").value;
+    if (!/^\d{2}:\d{2}$/.test(time)) {
+      addMessage("error", "请选择每日触发时刻");
+      return;
+    }
+    schedule = { kind: "daily", time };
   } else {
-    schedule = { kind: "oneshot", at: value };
+    const local = $("autoOnceAt").value;
+    if (!local) {
+      addMessage("error", "请选择触发时间");
+      return;
+    }
+    // datetime-local → RFC3339（本地时区显式化，避免服务端按 UTC 误判当日）。
+    const offsetMinutes = -new Date(local).getTimezoneOffset();
+    const sign = offsetMinutes >= 0 ? "+" : "-";
+    const abs = Math.abs(offsetMinutes);
+    const tz = `${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+    schedule = { kind: "oneshot", at: `${local}:00${tz}` };
   }
+  if (!name || !reminder) return;
   try {
     await api("/automations", {
       method: "POST",
       body: JSON.stringify({ name, schedule, reminder }),
     });
     $("autoName").value = "";
-    $("autoValue").value = "";
     $("autoReminder").value = "";
+    syncAutomationFields();
     await refreshAutomations();
   } catch (error) {
     addMessage("error", `创建自动化失败：${error.message}`);
@@ -1778,6 +1869,28 @@ async function refreshWhitelist() {
     const entries = await api("/whitelist");
     const list = $("whitelistList");
     list.innerHTML = "";
+    // §12-13 约束控件：datalist 候选来自当前白名单 + 能力注册表，可搜索选择。
+    const datalist = $("wlAppCandidates");
+    if (datalist) {
+      datalist.innerHTML = "";
+      const seen = new Set();
+      for (const entry of entries) {
+        if (!seen.has(entry.app_id)) {
+          seen.add(entry.app_id);
+          const option = document.createElement("option");
+          option.value = entry.app_id;
+          datalist.appendChild(option);
+        }
+      }
+      for (const app of chipOptionsCatalog().apps) {
+        if (!seen.has(app.value)) {
+          seen.add(app.value);
+          const option = document.createElement("option");
+          option.value = app.value;
+          datalist.appendChild(option);
+        }
+      }
+    }
     for (const entry of entries) {
       const li = document.createElement("li");
       li.innerHTML = `<strong>${esc(entry.name)}</strong><span class="sub">${esc(entry.app_id)} ｜ ${esc(entry.tier)} ｜ 操作:${entry.auto_ops_allowed ? "开" : "关"}</span>`;
@@ -1901,7 +2014,7 @@ async function createComputerTask() {
     return;
   }
   const maxDurationMs = (parseInt($("cuMaxDur").value, 10) || 120) * 1000;
-  const allowedActions = $("cuActions").value.split(",").map((s) => s.trim()).filter(Boolean);
+  const allowedActions = getSelectedChips("cuActionsChips");
   try {
     const result = await api("/computer-use/task", {
       method: "POST",
@@ -1916,7 +2029,7 @@ async function createComputerTask() {
     $("cuApp").value = "";
     $("cuDesc").value = "";
     $("cuMaxDur").value = "";
-    $("cuActions").value = "";
+    setSelectedChips("cuActionsChips", []);
     await refreshComputerTasks();
   } catch (error) {
     addMessage("error", `创建失败：${friendlyError(error)}`);
@@ -2000,6 +2113,38 @@ function initPanels() {
 }
 
 // ---------- 事件绑定 ----------
+
+// §12-13 约束控件：工作区路径收敛为「最近项目」datalist（本地记忆最近 6 个），
+// 普通模式不再要求手填完整路径；选中后显示目录别名。
+function workspaceRecentList() {
+  const raw = localStorage.getItem("owo.recent-workspaces");
+  try {
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list.filter((item) => typeof item === "string") : [];
+  } catch (_) {
+    return [];
+  }
+}
+function rememberWorkspace(path) {
+  const list = workspaceRecentList().filter((item) => item !== path);
+  list.unshift(path);
+  localStorage.setItem("owo.recent-workspaces", JSON.stringify(list.slice(0, 6)));
+}
+function refreshWorkspaceCandidates() {
+  const datalist = $("workspaceCandidates");
+  if (!datalist) return;
+  datalist.innerHTML = "";
+  for (const path of workspaceRecentList()) {
+    const option = document.createElement("option");
+    option.value = window.OwoWorkspaceDisplay
+      ? window.OwoWorkspaceDisplay.alias(path) : path;
+    option.dataset.path = path;
+    datalist.appendChild(option);
+  }
+}
+if (document.getElementById("workspaceCandidates")) {
+  $("workspace").addEventListener("focus", refreshWorkspaceCandidates);
+}
 
 const savedWorkspace = localStorage.getItem("owo.workspace");
 if (savedWorkspace) {
@@ -2208,6 +2353,7 @@ $("workspace").addEventListener("change", () => {
   if (/[\\/]|^[A-Za-z]:/.test(workspace)) {
     state.workspaceRoot = workspace;
     localStorage.setItem("owo.workspace", workspace);
+    rememberWorkspace(workspace);
     $("workspace").value = window.OwoWorkspaceDisplay
       ? window.OwoWorkspaceDisplay.alias(workspace) : "本地项目";
     $("workspace").title = "当前项目：" + $("workspace").value;
@@ -2318,6 +2464,15 @@ $("mcpForm").addEventListener("submit", (event) => {
   event.preventDefault();
   addMcpServer();
 });
+// §12-13 MCP 按传输切换字段（本地命令 vs HTTP 服务），避免两字段同时裸露。
+function syncMcpFields() {
+  const transport = $("mcpTransport") ? $("mcpTransport").value : "stdio";
+  $("mcpCommandGroup").hidden = transport !== "stdio";
+  $("mcpUrlGroup").hidden = transport !== "http";
+}
+if (document.getElementById("mcpTransport")) {
+  $("mcpTransport").addEventListener("change", syncMcpFields);
+}
 $("computerTaskForm").addEventListener("submit", (event) => {
   event.preventDefault();
   createComputerTask();
@@ -2496,10 +2651,19 @@ async function recover() {
   }
 }
 
+// §12-13 约束控件：自动化三态、MCP 传输切换、动作/应用 chips 一次初始化。
+function initConstrainedControls() {
+  if (document.getElementById("autoKind")) syncAutomationFields();
+  if (document.getElementById("mcpTransport")) syncMcpFields();
+  renderChipGroup("cuActionsChips", "actions");
+  renderChipGroup("sinkAppsChips", "apps");
+}
+
 async function boot() {
   initSpeech();
   initPanels();
   initDeveloperMode();
+  initConstrainedControls();
   syncOpenApiLink();
   if (await needsSetup()) {
     renderSetupGuide();

@@ -38,7 +38,8 @@
   <aside id="sidebar">
     <section>
       <h2>工作区</h2>
-      <input id="workspace" placeholder="当前项目工作区（新建会话时填写）" aria-label="当前项目工作区">
+      <input id="workspace" placeholder="当前项目工作区（新建会话时填写）" aria-label="当前项目工作区" list="workspaceCandidates">
+      <datalist id="workspaceCandidates"></datalist>
     </section>
     <section>
       <h2>任务</h2>
@@ -97,12 +98,19 @@
       <ul id="mcpList" class="list"></ul>
       <form id="mcpForm" class="stack">
         <input id="mcpName" placeholder="名称（如 my-files）" required>
+        <label for="mcpTransport">连接方式</label>
         <select id="mcpTransport">
-          <option value="stdio">stdio</option>
-          <option value="http">http</option>
+          <option value="stdio">本地命令（stdio）</option>
+          <option value="http">远程服务（http）</option>
         </select>
-        <input id="mcpCommand" placeholder="命令（stdio，如 npx -y @modelcontextprotocol/server-filesystem）">
-        <input id="mcpUrl" placeholder="URL（http 传输）">
+        <div id="mcpCommandGroup" class="auto-group">
+          <label for="mcpCommand">启动命令（如 npx -y …）</label>
+          <input id="mcpCommand" placeholder="npx -y @modelcontextprotocol/server-filesystem">
+        </div>
+        <div id="mcpUrlGroup" class="auto-group" hidden>
+          <label for="mcpUrl">服务地址</label>
+          <input id="mcpUrl" placeholder="https://example.com/mcp">
+        </div>
         <button type="submit">添加并连接</button>
       </form>
     </section>
@@ -115,10 +123,9 @@
       <form id="computerTaskForm" class="stack">
         <input id="cuApp" placeholder="目标应用（如 qq）" required>
         <input id="cuDesc" placeholder="任务描述" required>
-        <div class="inline">
-          <input id="cuMaxDur" placeholder="最长时长（秒，默认 120）" inputmode="numeric">
-          <input id="cuActions" placeholder="允许动作（click/type/scroll，逗号分隔）">
-        </div>
+        <label for="cuActions">允许动作</label>
+        <div id="cuActionsChips" class="chip-group" role="group" aria-label="允许动作多选"></div>
+        <input id="cuMaxDur" placeholder="最长时长（秒，默认 120）" inputmode="numeric">
         <button type="submit">创建任务（需任务级审批）</button>
       </form>
       <ul id="computerTaskList" class="list"></ul>
@@ -134,7 +141,8 @@
       <button id="learnClear" style="margin-top:6px">清空样本</button>
       <form id="sinkForm" class="stack">
         <input id="sinkName" placeholder="技能名（如 send-file）" required>
-        <input id="sinkApps" placeholder="目标应用，逗号分隔（如 qq）" required>
+        <label for="sinkApps">目标应用</label>
+        <div id="sinkAppsChips" class="chip-group" role="group" aria-label="目标应用多选"></div>
         <select id="sinkSensitivity">
           <option value="low">低敏感</option>
           <option value="medium">中敏感</option>
@@ -154,12 +162,24 @@
       <h2>自动化</h2>
       <form id="automationForm" class="stack">
         <input id="autoName" placeholder="任务名（如 每小时提醒）" required>
+        <label for="autoKind">触发方式</label>
         <select id="autoKind">
-          <option value="interval">间隔（秒）</option>
-          <option value="daily">每天（HH:MM）</option>
-          <option value="oneshot">单次（RFC3339）</option>
+          <option value="interval">固定间隔</option>
+          <option value="daily">每天固定时刻</option>
+          <option value="oneshot">指定日期时刻</option>
         </select>
-        <input id="autoValue" placeholder="60 / 09:00 / 2026-08-12T12:00:00Z" required>
+        <div id="autoIntervalGroup" class="auto-group">
+          <label for="autoIntervalSecs">间隔（秒）</label>
+          <input id="autoIntervalSecs" type="number" min="1" step="1" placeholder="如 3600（每秒）" inputmode="numeric">
+        </div>
+        <div id="autoDailyGroup" class="auto-group" hidden>
+          <label for="autoDailyTime">触发时刻</label>
+          <input id="autoDailyTime" type="time">
+        </div>
+        <div id="autoOnceGroup" class="auto-group" hidden>
+          <label for="autoOnceAt">触发时间</label>
+          <input id="autoOnceAt" type="datetime-local">
+        </div>
         <input id="autoReminder" placeholder="提醒内容" required>
         <button type="submit">创建任务</button>
       </form>
@@ -173,9 +193,11 @@
       <h2>应用白名单</h2>
       <ul id="whitelistList" class="list"></ul>
       <form id="whitelistForm" class="inline">
-        <input id="wlAppId" placeholder="app_id" required>
+        <input id="wlAppId" placeholder="应用标识（可从列表选择或输入新值）" required list="wlAppCandidates">
+        <datalist id="wlAppCandidates"></datalist>
         <button type="submit">添加 P0</button>
       </form>
+      <p class="hint">候选来自技能沉淀的能力注册表；不在列表中的标识输入后按新应用添加。</p>
     </section>
     <section data-dev>
       <h2>扩展面板</h2>

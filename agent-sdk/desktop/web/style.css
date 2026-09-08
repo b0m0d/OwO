@@ -389,6 +389,27 @@ button[disabled] { opacity: 0.5; cursor: not-allowed; transform: none !important
 .inline input { min-width: 0; flex: 1; }
 .inline label { white-space: nowrap; }
 .stack { display: flex; flex-direction: column; gap: 7px; margin-top: 7px; }
+/* §12-13 约束控件：受控表单分组（自动化三态 / MCP 传输切换） */
+.auto-group { display: flex; flex-direction: column; gap: 4px; }
+.auto-group label { font-size: 11px; color: var(--faint); }
+.auto-group[hidden] { display: none !important; }
+/* §12-13 约束控件：chips 多选（替代 CSV 自由文本） */
+.chip-group { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.chip.selected {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
 
 /* ---------- 7. 列表 ---------- */
 .list { margin: 0; padding: 0; list-style: none; }
