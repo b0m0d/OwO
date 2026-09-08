@@ -2563,11 +2563,12 @@ $("micBtn").addEventListener("click", async () => {
 
 // ---------- 启动 ----------
 
-// §6.1 首屏请求收敛：健康检查先行，业务面板按 ≤5 并发水合，
-// 避免 21 个请求同时打爆本地核心（拖慢首屏、放大 SSE/静态资源竞争）。
-const BOOT_HYDRATE_TASKS = [
-  refreshSessions,
-  refreshSkills,
+// §12-14 首屏请求收敛：总请求 ≤5（健康检查先行 1 个 + 4 个无定时兜底的水合任务）。
+// 其余面板刷新器（plugins/packages/suggestions/automations/reminders/settings/
+// usage/serverStatus/audit/perception/learn/observations/skillHealth/mcp/traces/
+// computerTasks）一律由 REFRESH_PLANS 定时器按路由可见性兜底，不再占用首屏窗口；
+// 这些函数必须出现在下面的 BOOT_LAZY_TASKS 中，防止从两处同时遗漏。
+const BOOT_LAZY_TASKS = [
   refreshPlugins,
   refreshPackages,
   refreshSuggestions,
@@ -2577,15 +2578,20 @@ const BOOT_HYDRATE_TASKS = [
   refreshUsage,
   refreshServerStatus,
   refreshAudit,
-  refreshWhitelist,
   refreshPerception,
   refreshLearn,
   refreshObservations,
   refreshSkillHealth,
-  refreshProjectRules,
   refreshMcp,
   refreshTraces,
   refreshComputerTasks,
+];
+const BOOT_HYDRATE_TASKS = [
+  // 首屏必需且 REFRESH_PLANS 没有兜底的 4 项：会话、技能、白名单、项目规则。
+  refreshSessions,
+  refreshSkills,
+  refreshWhitelist,
+  refreshProjectRules,
 ];
 
 async function hydrateShell() {
