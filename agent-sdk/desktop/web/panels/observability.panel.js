@@ -15,10 +15,7 @@ window.OwoPanels.observability = (function () {
   function defaultHelpers() {
     var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || "http://127.0.0.1:4098";
     function get(path) {
-      return fetch(baseUrl + path).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
-      });
+      return window.OwoApi.get(path);
     }
     function esc(s) {
       return String(s == null ? "" : s)

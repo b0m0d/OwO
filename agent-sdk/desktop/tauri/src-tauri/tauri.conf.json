@@ -19,7 +19,14 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'unsafe-inline'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob:",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:*"
+      }
     }
   },
   "plugins": {
@@ -37,7 +44,7 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.png", "icons/icon.ico"],
-    "externalBin": ["binaries/owo-agent.exe"],
+    "externalBin": ["binaries/owo-agent"],
     "windows": {
       "nsis": {
         "languages": ["SimpChinese", "English"],

@@ -40,16 +40,8 @@
       root.innerHTML = this.nav();
       this.helpers = helpers || {};
       this.baseUrl = this.helpers.baseUrl || window.OwoPanels.baseUrl || "http://127.0.0.1:4098";
-      this.get = this.helpers.get || function (path) {
-        return fetch(self.baseUrl + path).then(function (r) { return r.json(); });
-      };
-      this.post = this.helpers.post || function (path, body) {
-        return fetch(self.baseUrl + path, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body || {}),
-        }).then(function (r) { return r.json(); });
-      };
+      this.get = this.helpers.get || function (path) { return window.OwoApi.get(path); };
+      this.post = this.helpers.post || function (path, body) { return window.OwoApi.post(path, body || {}); };
       this.esc = this.helpers.esc || function (s) {
         return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
           return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -202,7 +194,7 @@
         if (!detail || !id) return;
         if (!window.confirm("确认删除这篇笔记？")) return;
         self.post("/notes/" + id + "/reindex", {}).catch(function () {});
-        fetch(self.baseUrl + "/notes/" + id, { method: "DELETE" })
+        window.OwoApi.delete("/notes/" + id)
           .then(function () {
             detail.hidden = true;
             self.refresh();
@@ -214,11 +206,7 @@
         if (!detail || !detail.dataset || !detail.dataset.id) return;
         var title = prompt("新标题：", detail.querySelector(".owo-notes-detail-title").textContent);
         if (!title) return;
-        fetch(self.baseUrl + "/notes/" + detail.dataset.id, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ title: title }),
-        })
+        window.OwoApi.put("/notes/" + detail.dataset.id, { title: title })
           .then(function () { self.refresh(); self.get("/notes/" + detail.dataset.id).then(function (d) { self.renderDetail(d); }); })
           .catch(function (err) { self.alert("改标题失败：" + self.friendlyError(err)); });
       });

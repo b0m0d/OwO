@@ -27,9 +27,10 @@
   </header>
 
   <nav id="appRail" aria-label="工作台导航">
-    <button class="rail-button active" type="button" title="会话" data-rail-target="sessions"><span>☰</span>会话</button>
-    <button class="rail-button" type="button" title="项目" data-rail-target="workspace"><span>⌘</span>项目</button>
-    <button class="rail-button" type="button" title="工具中心" data-rail-target="tools"><span>◈</span>工具</button>
+    <button class="rail-button active" type="button" title="任务" data-rail-target="chat"><span>☰</span>任务</button>
+    <button class="rail-button" type="button" title="项目" data-rail-target="projects"><span>⌘</span>项目</button>
+    <button class="rail-button" type="button" title="WorkSwarm 团队" data-rail-target="workswarm"><span>◎</span>团队</button>
+    <button class="rail-button" type="button" title="产物与待办" data-rail-target="artifacts"><span>◇</span>产物</button>
     <span class="rail-spacer"></span>
     <button class="rail-button" type="button" title="设置" data-rail-target="settings"><span>⚙</span>设置</button>
   </nav>
@@ -37,7 +38,7 @@
   <aside id="sidebar">
     <section>
       <h2>工作区</h2>
-      <input id="workspace" placeholder="工作区绝对路径（新建会话时填写）">
+      <input id="workspace" placeholder="当前项目工作区（新建会话时填写）" aria-label="当前项目工作区">
     </section>
     <section>
       <h2>任务</h2>
@@ -177,7 +178,7 @@
       <div id="panelNav" class="inline"></div>
       <div id="panelRoot"></div>
     </section>
-    <section>
+    <section id="settingsSection">
       <h2>设置与诊断</h2>
       <div class="settings-page-title">
         <div><strong>模型与连接</strong><span>管理当前工作区的模型与运行偏好</span></div>
@@ -186,17 +187,11 @@
       <div class="settings-grid">
         <label class="field-label">模型
           <select id="settingsModel">
-            <option value="qwen3.8-max">qwen3.8-max</option>
-            <option value="qwen3.7-plus">qwen3.7-plus</option>
-            <option value="qwen3.7-max">qwen3.7-max</option>
-            <option value="qwen3.6-flash">qwen3.6-flash</option>
-            <option value="deepseek-v4-pro-0813">deepseek-v4-pro-0813</option>
-            <option value="deepseek-v4-flash-0731">deepseek-v4-flash-0731</option>
-            <option value="glm-5.2">glm-5.2</option>
+            <option value="">读取实际运行模型…</option>
           </select>
         </label>
-        <div class="settings-card"><span>提供商</span><strong>千问 Token Plan</strong><small>OpenAI 兼容接口</small></div>
-        <div class="settings-card"><span>密钥</span><strong>系统环境变量</strong><small>不写入工作区或设置文件</small></div>
+        <div class="settings-card"><span>提供商</span><strong id="runtimeProvider">读取中…</strong><small id="runtimeEndpoint">OpenAI 兼容接口</small></div>
+        <div class="settings-card"><span>凭据来源</span><strong id="runtimeCredential">读取中…</strong><small>密钥不写入工作区或设置文件</small></div>
       </div>
       <div class="inline">
         <span>云端模型（数据出境）</span>
@@ -219,13 +214,17 @@
       <div class="inline">
         <button id="storageClearBtn" class="danger" title="二次确认后清空会话/审计/笔记/记忆/自动化">一键清空数据…</button>
       </div>
-      <a href="openapi.json" target="_blank" rel="noopener">OpenAPI 3.1</a>
+      <a id="openapiLink" href="openapi.json" target="_blank" rel="noopener" title="由本地核心服务提供（按当前连接构造绝对地址）">OpenAPI 3.1</a>
       <a href="privacy.md" target="_blank" rel="noopener">隐私声明（数据字典/一键关闭/保留期）</a>
     </section>
   </aside>
   <div id="sidebarResize" class="resize-handle" role="separator" aria-label="调整会话栏宽度"></div>
 
   <main>
+    <div id="routeView" hidden>
+      <div id="routeHeader" class="route-header"></div>
+      <div id="routeContent"></div>
+    </div>
     <div id="contextBar" class="hidden" title="会话上下文状态">
       <span id="contextLabel"></span>
       <div id="contextMeter"><div id="contextFill"></div></div>
@@ -292,9 +291,23 @@
   </aside>
 
   <script>
-    // Tauri 壳内加载时指向常驻核心服务；经核心服务同源托管时保持同源。
-    window.OWO_API_BASE = window.OWO_API_BASE || (window.__TAURI_INTERNALS__ ? "http://127.0.0.1:4096" : "");
+    // Tauri 壳与静态调试页都直连常驻核心服务；仅当页面本身由核心服务
+    // 4096 同源托管时才保留空基址。否则 /health 会被误发给静态文件服务器。
+    (function () {
+      var localCore = "http://127.0.0.1:4096";
+      var sameCoreOrigin = /^https?:$/.test(window.location.protocol)
+        && window.location.hostname === "127.0.0.1"
+        && window.location.port === "4096";
+      window.OWO_API_BASE = window.OWO_API_BASE
+        || (window.__TAURI_INTERNALS__ || !sameCoreOrigin ? localCore : "");
+    })();
   </script>
+  <script src="core/api-client.js"></script>
+  <script src="core/router.js"></script>
+  <script src="core/service-readiness.js"></script>
+  <script src="core/recovery.js"></script>
+  <script src="core/workspace-display.js"></script>
+  <script src="views/service-error.view.js"></script>
   <script src="panels/action-center.panel.js"></script>
   <script src="panels/project-history.panel.js"></script>
   <script src="panels/notes.panel.js"></script>
@@ -307,6 +320,9 @@
   <script src="panels/memory.panel.js"></script>
   <script src="panels/command.panel.js"></script>
   <script src="panels/fleet.panel.js"></script>
+  <script src="panels/workswarm/domain.js"></script>
+  <script src="panels/workswarm/format.js"></script>
+  <script src="panels/workswarm/render.js"></script>
   <script src="panels/workswarm.panel.js"></script>
 <script src="panels/project-launcher.panel.js"></script>
   <script src="app.js"></script>

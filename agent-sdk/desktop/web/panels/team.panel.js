@@ -213,29 +213,11 @@
     // ---- helpers 缺省实现 ----
 
     _get: function (path) {
-      return fetch(this.baseUrl + path).then(function (response) {
-        if (!response.ok) {
-          return response.text().then(function (body) {
-            throw new Error(response.status + ": " + body);
-          });
-        }
-        return response.status === 204 ? null : response.json();
-      });
+      return window.OwoApi.get(path);
     },
 
     _post: function (path, body) {
-      return fetch(this.baseUrl + path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {}),
-      }).then(function (response) {
-        if (!response.ok) {
-          return response.text().then(function (text) {
-            throw new Error(response.status + ": " + text);
-          });
-        }
-        return response.json();
-      });
+      return window.OwoApi.post(path, body || {});
     },
 
     _esc: function (text) {

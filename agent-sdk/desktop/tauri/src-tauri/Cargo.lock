@@ -2268,6 +2268,8 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-updater",
+ "uuid",
+ "windows-sys 0.61.2",
  "winreg",
 ]
 

@@ -38,55 +38,12 @@
     // ---------- helpers（优先 app.js 注入，缺失时自建回退，与 workswarm 面板同款） ----------
     var H = {};
     var rootEl = null;
-    var tokenPromise = null;
-
-    function defaultToken() {
-      if (!tokenPromise) {
-        tokenPromise = fetch(H.baseUrl + "/auth/token").then(function (r) {
-          if (!r.ok) throw new Error("token 引导失败（HTTP " + r.status + "）");
-          return r.json().then(function (d) {
-            var t = d && d.token;
-            if (!t) throw new Error("token 引导响应缺少 token");
-            return t;
-          });
-        }).catch(function (e) {
-          tokenPromise = null;
-          throw e;
-        });
-      }
-      return tokenPromise;
-    }
-
-    function httpFinish(r) {
-      if (!r.ok) {
-        return r.text().then(function (b) {
-          throw new Error(r.status + ": " + b);
-        });
-      }
-      if (r.status === 204) return null;
-      return r.json();
-    }
-
     function defaultGet(path) {
-      return defaultToken().then(function (tok) {
-        return fetch(H.baseUrl + path, {
-          headers: { "Authorization": "Bearer " + tok, "Accept": "application/json" },
-        }).then(httpFinish);
-      });
+      return window.OwoApi.get(path);
     }
 
     function defaultPost(path, body) {
-      return defaultToken().then(function (tok) {
-        return fetch(H.baseUrl + path, {
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + tok,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-          },
-          body: JSON.stringify(body || {}),
-        }).then(httpFinish);
-      });
+      return window.OwoApi.post(path, body || {});
     }
 
     function defaultEsc(s) {
@@ -449,7 +406,7 @@
       // 元素不存在（Node 测试/未挂载）时保留当前 state，不清空。
       var e;
       if ((e = el("#pl-objective"))) state.objective = e.value || "";
-      if ((e = el("#pl-root"))) state.root = e.value || "";
+      if ((e = el("#pl-root")) && (/[\\/]|^[A-Za-z]:/.test(e.value.trim()) || !state.root)) state.root = e.value || "";
       if ((e = el("#pl-readonly"))) state.readOnly = !!e.checked;
       if ((e = el("#pl-writepaths"))) state.writePathsRaw = e.value || "";
       if ((e = el("#pl-depth"))) {
@@ -583,14 +540,19 @@
         '<p class="hint">七步流程：目标 → 绑定项目目录 → 读写范围 → 组队模式 → 已安装模板 → 预览 → 创建。创建后自动进入团队详情查看执行进度与最终交付物。</p>' +
         '<div class="owo-pl-step"><label class="owo-pl-label">① 任务目标</label>' +
         '<textarea id="pl-objective" rows="3" placeholder="例如：修复登录超时问题并补充回归测试（结构化/文档/研究任务均可）">' + esc(state.objective) + "</textarea></div>" +
-        '<div class="owo-pl-step"><label class="owo-pl-label">② 绑定项目目录 <span class="hint">TeamRun 的 Agent Worker 将以该目录为工作区</span></label>' +
-        '<input id="pl-root" size="60" placeholder="例如 T:\\我的项目\\demo（真实存在的目录）" value="' + esc(state.root) + '"></div>' +
+        '<div class="owo-pl-step"><label class="owo-pl-label">② 绑定项目目录 <span class="hint">Agent 将以该目录为工作区</span></label>' +
+        '<input id="pl-root" size="60" placeholder="例如 T:\\我的项目\\demo（真实存在的目录）" value="' + esc(win.OwoWorkspaceDisplay ? win.OwoWorkspaceDisplay.alias(state.root) : state.root) + '"><span class="hint">日常显示项目别名，完整位置仅在详情中查看</span></div>' +
         '<div class="owo-pl-step"><label class="owo-pl-label">③ 读写范围</label>' +
         '<div class="owo-ws-inline"><label><input type="checkbox" id="pl-readonly"' + (state.readOnly ? " checked" : "") + "> 只读（默认；取消勾选进入受控写入）</label></div>" +
         '<div id="pl-writebox"' + (state.readOnly ? ' hidden' : "") + ">" +
         '<label class="owo-pl-label">允许写入路径（相对 root，逗号或换行分隔；留空 = 拒绝一切写入）</label>' +
         '<textarea id="pl-writepaths" rows="2" placeholder="例如：src/，tests/">' + esc(state.writePathsRaw) + "</textarea>" +
-        '<label class="owo-pl-label">目录树深度 <input id="pl-depth" type="number" min="1" max="8" value="' + esc(String(state.treeDepth)) + '" size="3"></label>' +
+        "</div>" +
+        '<div class="owo-ws-inline" id="pl-depth-group" role="group" aria-label="目录树深度（扫描范围）">' +
+        '<button type="button" class="owo-ws-mini' + (Number(state.treeDepth) <= 2 ? " primary" : "") + '" data-pl-depth="2">快速 · 2 层</button>' +
+        '<button type="button" class="owo-ws-mini' + (Number(state.treeDepth) > 2 && Number(state.treeDepth) <= 4 ? " primary" : "") + '" data-pl-depth="4">标准 · 4 层</button>' +
+        '<button type="button" class="owo-ws-mini' + (Number(state.treeDepth) > 4 ? " primary" : "") + '" data-pl-depth="8">深入 · 8 层</button>' +
+        '<details class="owo-pl-advanced"><summary>自定义深度（1–8）</summary><input id="pl-depth" type="number" min="1" max="8" value="' + esc(String(state.treeDepth)) + '" size="3"></details>' +
         "</div></div>" +
         '<div class="owo-pl-step"><label class="owo-pl-label">④ 组队模式</label>' +
         '<select id="pl-strategy">' +
@@ -619,7 +581,10 @@
       var obj = el("#pl-objective");
       if (obj) obj.addEventListener("input", repaintPreview);
       var rootI = el("#pl-root");
-      if (rootI) rootI.addEventListener("input", repaintPreview);
+      if (rootI) rootI.addEventListener("input", function () {
+        if (/[\\/]|^[A-Za-z]:/.test(rootI.value.trim())) rootI.dataset.workspaceRoot = rootI.value.trim();
+        repaintPreview();
+      });
       var ro = el("#pl-readonly");
       if (ro)
         ro.addEventListener("change", function () {
@@ -631,6 +596,19 @@
       if (wp) wp.addEventListener("input", repaintPreview);
       var dep = el("#pl-depth");
       if (dep) dep.addEventListener("change", repaintPreview);
+      var depthGroup = el("#pl-depth-group");
+      if (depthGroup) depthGroup.addEventListener("click", function (ev) {
+        var t = ev.target;
+        var v = t && t.getAttribute && t.getAttribute("data-pl-depth");
+        if (!v) return;
+        var dep2 = el("#pl-depth");
+        if (dep2) dep2.value = v;
+        var chips = depthGroup.querySelectorAll("[data-pl-depth]");
+        for (var i = 0; i < chips.length; i++) {
+          if (chips[i].classList) chips[i].classList.toggle("primary", chips[i] === t);
+        }
+        repaintPreview();
+      });
       var st = el("#pl-strategy");
       if (st) st.addEventListener("change", repaintPreview);
       var sel = el("#pl-template");
@@ -668,6 +646,7 @@
     function mount(root, helpers) {
       rootEl = root;
       H = helpers || {};
+      if (!state.root && typeof localStorage !== "undefined") state.root = localStorage.getItem("owo.workspace") || "";
       if (!H.get) H.get = defaultGet;
       if (!H.post) H.post = defaultPost;
       if (!H.esc) H.esc = defaultEsc;

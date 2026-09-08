@@ -30,23 +30,13 @@
   function get(path) {
     var h = getHelpers();
     if (h && h.get) { return h.get(path); }
-    return fetch(BASE + path).then(function (r) {
-      if (!r.ok) { return r.json().then(function (j) { throw j; }); }
-      return r.json();
-    });
+    return window.OwoApi.get(path);
   }
 
   function post(path, body) {
     var h = getHelpers();
     if (h && h.post) { return h.post(path, body); }
-    return fetch(BASE + path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body == null ? {} : body),
-    }).then(function (r) {
-      if (!r.ok) { return r.json().then(function (j) { throw j; }); }
-      return r.json();
-    });
+    return window.OwoApi.post(path, body == null ? {} : body);
   }
 
   function style() {

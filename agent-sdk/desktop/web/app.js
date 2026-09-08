@@ -3,6 +3,7 @@
 
 const state = {
   sessionId: null,
+  workspaceRoot: "",
   pendingApproval: null,
   reading: false,
   attachments: [],
@@ -99,16 +100,12 @@ async function startLocalRecording() {
   return true;
 }
 
-// ---------- R7 X03：本地 API bearer token（/auth/token 公开引导配对） ----------
+// ---------- 统一本地 API 边界 ----------
 
-let apiToken = null;
-let apiTokenRequest = null;
-let connectionUnavailableUntil = 0;
+const apiClient = window.OwoApi || new window.OwoApiClient(API_BASE);
+window.OwoApi = apiClient;
 
 function markConnectionUnavailable() {
-  // 启动中的桌面壳会在同一时刻加载二十多个面板。短暂断连时只允许
-  // 一次探测，避免每个面板都向 /auth/token 发请求并刷满控制台。
-  connectionUnavailableUntil = Date.now() + 5000;
   const health = $("health");
   if (health) {
     health.textContent = "本地服务未连接";
@@ -119,9 +116,8 @@ function markConnectionUnavailable() {
 }
 
 function markConnectionReady() {
-  connectionUnavailableUntil = 0;
   const health = $("health");
-  if (health && health.textContent === "本地服务未连接") {
+  if (health) {
     health.textContent = "本地服务已连接";
     health.style.color = "var(--green)";
   }
@@ -129,62 +125,13 @@ function markConnectionReady() {
   if (summary) summary.textContent = "服务已连接";
 }
 
-async function ensureApiToken() {
-  if (apiToken) return apiToken;
-  if (Date.now() < connectionUnavailableUntil) {
-    throw new Error("本地服务尚未就绪，请稍候重试");
-  }
-  if (apiTokenRequest) return apiTokenRequest;
-  apiTokenRequest = (async () => {
-    try {
-      const response = await fetch(API_BASE + "/auth/token");
-      if (!response.ok) throw new Error(`token 引导失败（HTTP ${response.status}）`);
-      const data = await response.json();
-      apiToken = data && data.token ? data.token : null;
-      if (!apiToken) throw new Error("token 引导响应缺少 token");
-      connectionUnavailableUntil = 0;
-      return apiToken;
-    } catch (error) {
-      markConnectionUnavailable();
-      throw error;
-    } finally {
-      apiTokenRequest = null;
-    }
-  })();
-  return apiTokenRequest;
-}
+window.addEventListener("owo:connection", (event) => {
+  if (event.detail && event.detail.ready) markConnectionReady();
+  else markConnectionUnavailable();
+});
 
 async function api(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (options.body != null && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  let response = await fetchWithToken(path, options, headers);
-  if (response.ok) markConnectionReady();
-  // 401：token 过期/服务重启 → 重新引导一次后重试。
-  if (response.status === 401) {
-    apiToken = null;
-    await ensureApiToken().catch(() => {});
-    response = await fetchWithToken(path, options, headers);
-  }
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`${response.status}: ${body}`);
-  }
-  return response.status === 204 ? null : response.json();
-}
-
-async function fetchWithToken(path, options, headers) {
-  if (!headers.has("Authorization")) {
-    const token = apiToken || (await ensureApiToken().catch(() => null));
-    if (token) headers.set("Authorization", `Bearer ${token}`);
-  }
-  try {
-    return await fetch(API_BASE + path, { ...options, headers });
-  } catch (error) {
-    markConnectionUnavailable();
-    throw error;
-  }
+  return apiClient.request(path, options);
 }
 
 // 统一友好错误：404/405/5xx 提示"服务接口不可用"，其余透传原错误。
@@ -402,12 +349,15 @@ function renderMarkdown(text) {
 
 async function refreshHealth() {
   try {
-    const health = await api("/health");
-    $("health").textContent = `API 就绪 ${health.version}`;
+    const health = await apiClient.get("/health", { public: true });
+    const commit = health.build && health.build.commit && health.build.commit !== "unknown"
+      ? ` · ${health.build.commit.slice(0, 8)}` : "";
+    $("health").textContent = `API 就绪 ${health.version}${commit}`;
     $("health").style.color = "var(--green)";
+    return health;
   } catch (error) {
-    $("health").textContent = "本地服务未连接";
-    $("health").style.color = "var(--yellow)";
+    markConnectionUnavailable();
+    throw error;
   }
 }
 
@@ -573,9 +523,7 @@ async function refreshPackages() {
 
 async function exportPackage(name) {
   try {
-    const response = await fetch(`${API_BASE}/learn/export/${encodeURIComponent(name)}`);
-    if (!response.ok) throw new Error(await response.text());
-    const blob = await response.blob();
+    const blob = await apiClient.download(`/learn/export/${encodeURIComponent(name)}`);
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -589,13 +537,7 @@ async function exportPackage(name) {
 
 async function importPackage(file) {
   try {
-    const response = await fetch(`${API_BASE}/learn/import`, {
-      method: "POST",
-      headers: { "Content-Type": "application/zip" },
-      body: file,
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || response.statusText);
+    const result = await apiClient.upload("/learn/import", file, "application/zip");
     addMessage("system", `已导入技能包 ${result.name}`);
     await refreshPackages();
   } catch (error) {
@@ -623,7 +565,7 @@ async function refreshAutomations() {
       deleteBtn.textContent = "删除";
       deleteBtn.addEventListener("click", async (event) => {
         event.stopPropagation();
-        await fetch(`${API_BASE}/automations/${task.id}`, { method: "DELETE" });
+        await api(`/automations/${task.id}`, { method: "DELETE" });
         await refreshAutomations();
       });
       li.appendChild(toggleBtn);
@@ -688,17 +630,23 @@ async function refreshReminders() {
 async function refreshSettings() {
   try {
     const settings = await api("/settings");
-    const cloudEnabled = settings.egress && settings.egress.cloud_enabled;
+    const runtime = settings.runtime || {};
+    const cloudEnabled = runtime.cloud_enabled != null
+      ? runtime.cloud_enabled : settings.egress && settings.egress.cloud_enabled;
     const button = $("egressToggle");
     button.textContent = cloudEnabled ? "开" : "关";
     button.dataset.enabled = String(cloudEnabled);
-    const model = settings.model || "qwen3.8-max";
-    if ($("settingsModel").querySelector(`option[value="${CSS.escape(model)}"]`)) {
-      $("settingsModel").value = model;
-    }
-    $("connectionSummary").textContent = cloudEnabled ? "云端模型已启用" : "云端模型已关闭";
+    const model = runtime.model || settings.model || "";
+    const modelSelect = $("settingsModel");
+    modelSelect.replaceChildren(new Option(model || "未配置", model));
+    modelSelect.value = model;
+    $("runtimeProvider").textContent = runtime.provider || "未知提供商";
+    $("runtimeEndpoint").textContent = `${runtime.endpoint_kind === "local" ? "本地兼容接口" : "云端兼容接口"} · ${runtime.credential_source || "未知凭据来源"}`;
+    $("runtimeCredential").textContent = runtime.credential_source === "environment" ? "系统环境变量" : (runtime.credential_source || "未配置");
+    $("connectionSummary").textContent = `${runtime.provider || "未知提供商"} / ${model || "未配置模型"} · ${cloudEnabled ? "云端已启用" : "云端已关闭"}`;
     $("settingsPreview").textContent = JSON.stringify(
       {
+        runtime,
         model: settings.model,
         stt: settings.stt,
         proactive: settings.proactive,
@@ -1105,11 +1053,12 @@ async function refreshSessionContext(sessionId) {
 }
 
 async function newSession() {
-  const workspace = $("workspace").value.trim();
+  const workspace = state.workspaceRoot || localStorage.getItem("owo.workspace") || "";
   if (!workspace) {
-    alert("请先填写工作区绝对路径");
+    alert("请先在项目页选择工作区");
     return;
   }
+  state.workspaceRoot = workspace;
   localStorage.setItem("owo.workspace", workspace);
   const session = await api("/session", {
     method: "POST",
@@ -1153,18 +1102,12 @@ async function sendPrompt() {
   state.abortController = new AbortController();
   $("abortBtn").disabled = false;
   try {
-    const headers = { "Content-Type": "application/json" };
-    const token = await ensureApiToken().catch(() => null);
-    if (token) headers.Authorization = `Bearer ${token}`;
-    const response = await fetch(`${API_BASE}/session/${state.sessionId}/turn`, {
+    const response = await apiClient.stream(`/session/${state.sessionId}/turn`, {
       method: "POST",
-      headers,
-      body: JSON.stringify({ prompt, attachments }),
+      json: { prompt, attachments },
       signal: state.abortController.signal,
     });
-    if (!response.ok || !response.body) {
-      throw new Error(await response.text());
-    }
+    if (!response.body) throw new Error("服务未返回流式响应");
     reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -1620,12 +1563,7 @@ async function showTrace(index) {
 async function exportSession(format) {
   if (!state.sessionId) return;
   try {
-    const response = await fetch(
-      `${API_BASE}/session/${state.sessionId}/export/${format}`,
-      { method: "GET" }
-    );
-    if (!response.ok) throw new Error(await response.text());
-    const blob = await response.blob();
+    const blob = await apiClient.download(`/session/${state.sessionId}/export/${format}`);
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -1950,14 +1888,24 @@ const PANEL_ORDER = [
   "project-history",
 ];
 
-function panelHelpers() {
+function panelHelpers(root = $("panelRoot")) {
   return {
     baseUrl: API_BASE,
+    root,
     get(path) {
       return api(path);
     },
     post(path, body) {
       return api(path, { method: "POST", body: JSON.stringify(body || {}) });
+    },
+    put(path, body) {
+      return api(path, { method: "PUT", body: JSON.stringify(body || {}) });
+    },
+    delete(path) {
+      return api(path, { method: "DELETE" });
+    },
+    stream(path, options = {}) {
+      return apiClient.stream(path, options);
     },
     esc,
     friendlyError,
@@ -1965,17 +1913,15 @@ function panelHelpers() {
   };
 }
 
-let currentPanel = null;
+let serviceReady = false;
 
-function mountPanel(id) {
+function mountPanel(id, targetRoot = $("panelRoot")) {
   const panel = window.OwoPanels && window.OwoPanels[id];
-  const root = $("panelRoot");
-  if (!panel || !root) return;
-  currentPanel = id;
+  if (!panel || !targetRoot) return;
   for (const button of document.querySelectorAll("#panelNav button")) {
     button.classList.toggle("active", button.dataset.panel === id);
   }
-  panel.mount(root, panelHelpers());
+  panel.mount(targetRoot, panelHelpers(targetRoot));
 }
 
 function initPanels() {
@@ -1993,14 +1939,19 @@ function initPanels() {
     button.addEventListener("click", () => mountPanel(id));
     nav.appendChild(button);
   }
-  const first = PANEL_ORDER.find((id) => window.OwoPanels[id]);
-  if (first) mountPanel(first);
+  // 首屏只准备工具导航，不在服务就绪前隐式挂载面板。
+  // 具体面板由工具抽屉或一级路由按需挂载，避免启动阶段并发触发请求。
 }
 
 // ---------- 事件绑定 ----------
 
 const savedWorkspace = localStorage.getItem("owo.workspace");
-if (savedWorkspace) $("workspace").value = savedWorkspace;
+if (savedWorkspace) {
+  state.workspaceRoot = savedWorkspace;
+  $("workspace").value = window.OwoWorkspaceDisplay
+    ? window.OwoWorkspaceDisplay.alias(savedWorkspace) : "本地项目";
+  $("workspace").title = "当前项目：" + $("workspace").value;
+}
 function applyTheme(theme) {
   const dark = theme === "dark";
   document.body.classList.toggle("dark-theme", dark);
@@ -2046,43 +1997,107 @@ enableResize("sidebarResize", "--session-width", 220, 460);
 enableResize("rightResize", "--inspect-width", 260, 520, true);
 function setToolsVisible(visible) {
   document.body.classList.toggle("show-tools", visible);
-  document.body.classList.toggle("tools-open", visible);
-  if (visible) document.body.classList.remove("settings-open");
   $("toggleTools").setAttribute("aria-expanded", String(visible));
   $("toggleTools").textContent = visible ? "收起工具与设置" : "显示工具与设置";
-}
-function setSettingsPageVisible(visible) {
-  document.body.classList.toggle("settings-open", visible);
-  if (visible) document.body.classList.remove("tools-open");
-  if (visible) {
-    setToolsVisible(true);
-    document.querySelector("#sidebar section:last-child")?.scrollIntoView({ block: "start" });
-  }
 }
 $("toggleTools").addEventListener("click", () => {
   setToolsVisible(!document.body.classList.contains("show-tools"));
 });
-for (const button of document.querySelectorAll("[data-rail-target]")) {
-  button.addEventListener("click", () => {
-    const target = button.dataset.railTarget;
-    document.querySelectorAll(".rail-button").forEach((item) => item.classList.remove("active"));
-    button.classList.add("active");
-    if (target === "tools") {
-      setToolsVisible(true);
-      $("toggleTools").scrollIntoView({ block: "nearest" });
-    } else if (target === "workspace") {
-      $("workspace").focus();
-    } else if (target === "settings") {
-      setSettingsPageVisible(true);
-    } else {
-      setSettingsPageVisible(false);
-      $("sessionList").scrollIntoView({ block: "start" });
-    }
+
+const ROUTE_META = {
+  chat: { title: "任务", description: "与单 Agent 对话，查看会话、审批和变更。" },
+  projects: { title: "项目", description: "选择工作区、查看项目历史，并预览权限范围。" },
+  workswarm: { title: "WorkSwarm", description: "把复杂任务拆给 Coordinator 与 Worker，集中查看进度与产物。" },
+  artifacts: { title: "产物与待办", description: "处理 Human、Artifact 评审和 ChangeSet，再交付最终结果。" },
+  settings: { title: "设置", description: "查看实际生效的模型连接、权限、用量和存储状态。" },
+};
+
+function setSettingsLocation(inRoute) {
+  const settings = $("settingsSection");
+  if (!settings) return;
+  const sidebar = $("sidebar");
+  const target = inRoute ? $("routeContent") : sidebar;
+  if (target && settings.parentElement !== target) target.appendChild(settings);
+}
+
+function navigate(route) {
+  if (window.owoRouter) return window.owoRouter.go(route);
+  renderRoute(route);
+}
+
+function renderRoute(route) {
+  const meta = ROUTE_META[route] || ROUTE_META.chat;
+  const isChat = route === "chat";
+  document.body.classList.toggle("route-chat", isChat);
+  document.body.classList.remove("tools-open", "settings-open");
+  document.querySelectorAll("[data-rail-target]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.railTarget === route);
   });
+  const view = $("routeView");
+  const content = $("routeContent");
+  if (!view || !content) return;
+  view.hidden = isChat;
+  if (isChat) {
+    if (window.OwoPanels && window.OwoPanels.workswarm && window.OwoPanels.workswarm.dispose) {
+      window.OwoPanels.workswarm.dispose();
+    }
+    setSettingsLocation(false);
+    setToolsVisible(false);
+    content.replaceChildren();
+    return;
+  }
+  if (window.OwoPanels && window.OwoPanels.workswarm && window.OwoPanels.workswarm.dispose) {
+    window.OwoPanels.workswarm.dispose();
+  }
+  // Preserve the movable settings section before resetting the route body.
+  // This matters when navigating settings -> any other first-level page.
+  setSettingsLocation(false);
+  content.replaceChildren();
+  setSettingsLocation(route === "settings");
+  $("routeHeader").innerHTML = `<div><h2>${esc(meta.title)}</h2><p>${esc(meta.description)}</p></div>`;
+  if (route === "settings") {
+    content.appendChild($("settingsSection"));
+    if (!serviceReady) return;
+    refreshSettings();
+    refreshUsage();
+    refreshServerStatus();
+    return;
+  }
+  const intro = document.createElement("div");
+  intro.className = "route-intro-card";
+  intro.innerHTML = `<strong>${esc(meta.title)}</strong><span>${esc(meta.description)}</span>`;
+  content.appendChild(intro);
+  const root = document.createElement("div");
+  root.id = "routePanelRoot";
+  content.appendChild(root);
+  if (!serviceReady) {
+    root.className = "";
+    // §5.1.6：断连时所有路由复用同一 ServiceUnavailable 卡片（含重试/日志/设置出口）。
+    window.renderOwoServiceError(root, new Error("核心服务未就绪"), () => recover());
+    return;
+  }
+  if (route === "projects") mountPanel("project-launcher", root);
+  if (route === "workswarm") mountPanel("workswarm", root);
+  if (route === "artifacts") mountPanel("action-center", root);
+}
+
+window.owoRouter = window.OwoRouter
+  ? new window.OwoRouter(ROUTE_META, renderRoute)
+  : null;
+for (const button of document.querySelectorAll("[data-rail-target]")) {
+  button.addEventListener("click", () => navigate(button.dataset.railTarget));
 }
 $("workspace").addEventListener("change", () => {
   const workspace = $("workspace").value.trim();
-  if (workspace) localStorage.setItem("owo.workspace", workspace);
+  if (!workspace) return;
+  // 兼容旧版直接粘贴绝对路径；日常显示收敛为目录别名。
+  if (/[\\/]|^[A-Za-z]:/.test(workspace)) {
+    state.workspaceRoot = workspace;
+    localStorage.setItem("owo.workspace", workspace);
+    $("workspace").value = window.OwoWorkspaceDisplay
+      ? window.OwoWorkspaceDisplay.alias(workspace) : "本地项目";
+    $("workspace").title = "当前项目：" + $("workspace").value;
+  }
 });
 $("newSession").addEventListener("click", () => {
   newSession().catch((error) => addMessage("error", `创建会话失败：${error.message || error}`));
@@ -2236,13 +2251,7 @@ $("micBtn").addEventListener("click", async () => {
         return;
       }
       try {
-        const response = await fetch(`${API_BASE}/stt/transcribe`, {
-          method: "POST",
-          headers: { "Content-Type": "audio/wav" },
-          body: blob,
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || response.statusText);
+        const result = await apiClient.upload("/stt/transcribe", blob, "audio/wav");
         const prompt = $("prompt");
         prompt.value = (prompt.value ? prompt.value + " " : "") + result.text;
       } catch (error) {
@@ -2284,48 +2293,163 @@ $("micBtn").addEventListener("click", async () => {
 
 // ---------- 启动 ----------
 
+// §6.1 首屏请求收敛：健康检查先行，业务面板按 ≤5 并发水合，
+// 避免 21 个请求同时打爆本地核心（拖慢首屏、放大 SSE/静态资源竞争）。
+const BOOT_HYDRATE_TASKS = [
+  refreshSessions,
+  refreshSkills,
+  refreshPlugins,
+  refreshPackages,
+  refreshSuggestions,
+  refreshAutomations,
+  refreshReminders,
+  refreshSettings,
+  refreshUsage,
+  refreshServerStatus,
+  refreshAudit,
+  refreshWhitelist,
+  refreshPerception,
+  refreshLearn,
+  refreshObservations,
+  refreshSkillHealth,
+  refreshProjectRules,
+  refreshMcp,
+  refreshTraces,
+  refreshComputerTasks,
+];
+
+async function hydrateShell() {
+  await refreshHealth();
+  return window.OwoRecovery.runWithConcurrency(BOOT_HYDRATE_TASKS, 5);
+}
+
+// 单飞恢复控制器（boot 失败路径创建；recover() 复用同一实例合并触发）。
+let activeRecovery = null;
+
+// §5.1.8：OpenAPI 链接必须由 API base 构造绝对地址；Tauri 静态资源下相对
+// openapi.json 会指向壳内不存在的路径。
+function syncOpenApiLink() {
+  const link = $("openapiLink");
+  if (link) link.href = apiClient.baseUrl + "/openapi.json";
+}
+
+async function recover() {
+  if (activeRecovery) return activeRecovery.trigger();
+  const readiness = new window.OwoServiceReadiness(apiClient);
+  try {
+    await readiness.wait(10000);
+    await hydrateShell();
+    serviceReady = true;
+    if (window.owoRouter) window.owoRouter.start();
+    startRefreshTimers();
+  } catch (error) {
+    const routeContent = $("routeContent");
+    if (routeContent && window.renderOwoServiceError) renderOwoServiceError(routeContent, error, recover);
+  }
+}
+
 async function boot() {
   initSpeech();
   initPanels();
-  await refreshHealth();
-  await Promise.all([
-    refreshSessions(),
-    refreshSkills(),
-    refreshPlugins(),
-    refreshPackages(),
-    refreshSuggestions(),
-    refreshAutomations(),
-    refreshReminders(),
-    refreshSettings(),
-    refreshUsage(),
-    refreshServerStatus(),
-    refreshAudit(),
-    refreshWhitelist(),
-    refreshPerception(),
-    refreshLearn(),
-    refreshObservations(),
-    refreshSkillHealth(),
-    refreshProjectRules(),
-    refreshMcp(),
-    refreshTraces(),
-    refreshComputerTasks(),
-  ]);
-  setInterval(refreshPerception, 3000);
-  setInterval(refreshLearn, 5000);
-  setInterval(refreshPlugins, 15000);
-  setInterval(refreshPackages, 10000);
-  setInterval(refreshSuggestions, 10000);
-  setInterval(refreshAudit, 5000);
-  setInterval(refreshAutomations, 10000);
-  setInterval(refreshReminders, 5000);
-  setInterval(refreshSettings, 15000);
-  setInterval(refreshUsage, 10000);
-  setInterval(refreshHealth, 30000);
-  setInterval(refreshSkillHealth, 15000);
-  setInterval(refreshObservations, 30000);
-  setInterval(refreshMcp, 20000);
-  setInterval(refreshTraces, 15000);
-  setInterval(refreshComputerTasks, 15000);
+  syncOpenApiLink();
+  const readiness = new window.OwoServiceReadiness(apiClient);
+  try {
+    await readiness.wait(10000);
+    await hydrateShell();
+    serviceReady = true;
+    if (window.owoRouter) window.owoRouter.start();
+  } catch (error) {
+    document.body.classList.remove("route-chat");
+    $("routeView").hidden = false;
+    $("routeHeader").innerHTML = "<div><h2>服务连接</h2><p>正在等待本地核心服务恢复。</p></div>";
+    const routeContent = $("routeContent");
+    if (routeContent && window.renderOwoServiceError) {
+      renderOwoServiceError(routeContent, error, () => recover());
+    }
+    // §6.1 单飞恢复：定时驱动、错误卡重试、owoRecoverService 并发触发时
+    // 合并为同一次恢复；失败按 [0,500,1000,2000,5000] 退避，成功后重置。
+    const recovery = window.OwoRecovery.createRecoveryController(async () => {
+      if (window.OwoApi && window.OwoApi.resetCoreConnection) window.OwoApi.resetCoreConnection();
+      await readiness.wait(2500);
+      await hydrateShell();
+      serviceReady = true;
+      if (window.owoRouter) window.owoRouter.start();
+      startRefreshTimers();
+      syncOpenApiLink();
+      window.owoRecoverService = null;
+      activeRecovery = null;
+    });
+    activeRecovery = recovery;
+    const recoveryDriver = setInterval(() => {
+      if (serviceReady) {
+        clearInterval(recoveryDriver);
+        return;
+      }
+      recovery.trigger().catch(() => {}).then(() => {
+        if (serviceReady) clearInterval(recoveryDriver);
+      });
+    }, 2500);
+    window.owoRecoverService = () => recovery.trigger();
+    return;
+  }
+  startRefreshTimers();
+}
+
+let refreshTimersStarted = false;
+
+// §6.1：后台刷新带「路由可见性」标注——侧栏刷新器只在任务页跑，
+// 设置区刷新器只在路由页跑；页面隐藏（最小化/切走）时整体暂停。
+const REFRESH_PLANS = [
+  { refresh: refreshHealth, intervalMs: 30000, routes: "*" },
+  { refresh: refreshPerception, intervalMs: 3000, routes: "chat" },
+  { refresh: refreshLearn, intervalMs: 5000, routes: "chat" },
+  { refresh: refreshPlugins, intervalMs: 15000, routes: "chat" },
+  { refresh: refreshPackages, intervalMs: 10000, routes: "chat" },
+  { refresh: refreshSuggestions, intervalMs: 10000, routes: "chat" },
+  { refresh: refreshAudit, intervalMs: 5000, routes: "chat" },
+  { refresh: refreshAutomations, intervalMs: 10000, routes: "chat" },
+  { refresh: refreshReminders, intervalMs: 5000, routes: "chat" },
+  { refresh: refreshObservations, intervalMs: 30000, routes: "chat" },
+  { refresh: refreshSkillHealth, intervalMs: 15000, routes: "chat" },
+  { refresh: refreshMcp, intervalMs: 20000, routes: "chat" },
+  { refresh: refreshTraces, intervalMs: 15000, routes: "chat" },
+  { refresh: refreshComputerTasks, intervalMs: 15000, routes: "chat" },
+  { refresh: refreshSettings, intervalMs: 15000, routes: "notChat" },
+  { refresh: refreshUsage, intervalMs: 10000, routes: "notChat" },
+  { refresh: refreshServerStatus, intervalMs: 30000, routes: "notChat" },
+];
+
+function routeActive(routes) {
+  if (routes === "*") return true;
+  const current = window.owoRouter && window.owoRouter.current ? window.owoRouter.current : "chat";
+  if (routes === "notChat") return current !== "chat";
+  if (Array.isArray(routes)) return routes.includes(current);
+  return current === routes;
+}
+
+function scheduleRefresh(refresh, intervalMs, routes) {
+  let running = false; // 防重入：上一轮未完成时不叠加下一轮
+  setInterval(() => {
+    if (running || document.visibilityState === "hidden") return;
+    if (!routeActive(routes)) return;
+    running = true;
+    Promise.resolve()
+      .then(refresh)
+      .catch(() => {
+        // API 客户端已负责更新连接状态；后台刷新失败不应制造未处理拒绝。
+      })
+      .finally(() => {
+        running = false;
+      });
+  }, intervalMs);
+}
+
+function startRefreshTimers() {
+  if (refreshTimersStarted) return;
+  refreshTimersStarted = true;
+  for (const plan of REFRESH_PLANS) {
+    scheduleRefresh(plan.refresh, plan.intervalMs, plan.routes);
+  }
 }
 
 boot();

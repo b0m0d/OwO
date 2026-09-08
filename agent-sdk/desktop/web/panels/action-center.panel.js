@@ -46,55 +46,12 @@
     // ---------- helpers（优先 app.js 注入，缺失时自建回退，与 workswarm/launcher 同款） ----------
     var H = {};
     var rootEl = null;
-    var tokenPromise = null;
-
-    function defaultToken() {
-      if (!tokenPromise) {
-        tokenPromise = fetch(H.baseUrl + "/auth/token").then(function (r) {
-          if (!r.ok) throw new Error("token 引导失败（HTTP " + r.status + "）");
-          return r.json().then(function (d) {
-            var t = d && d.token;
-            if (!t) throw new Error("token 引导响应缺少 token");
-            return t;
-          });
-        }).catch(function (e) {
-          tokenPromise = null;
-          throw e;
-        });
-      }
-      return tokenPromise;
-    }
-
-    function httpFinish(r) {
-      if (!r.ok) {
-        return r.text().then(function (b) {
-          throw new Error(r.status + ": " + b);
-        });
-      }
-      if (r.status === 204) return null;
-      return r.json();
-    }
-
     function defaultGet(path) {
-      return defaultToken().then(function (tok) {
-        return fetch(H.baseUrl + path, {
-          headers: { "Authorization": "Bearer " + tok, "Accept": "application/json" },
-        }).then(httpFinish);
-      });
+      return window.OwoApi.get(path);
     }
 
     function defaultPost(path, body) {
-      return defaultToken().then(function (tok) {
-        return fetch(H.baseUrl + path, {
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + tok,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-          },
-          body: JSON.stringify(body || {}),
-        }).then(httpFinish);
-      });
+      return window.OwoApi.post(path, body || {});
     }
 
     function defaultEsc(s) {
@@ -524,7 +481,7 @@
           '<section class="owo-ac-sec" data-ic-sec="' + esc(kind) + '">' +
           "<h3>" + esc(INBOX_KIND_CN[kind]) +
           ' <span class="owo-ac-count' + (list.length ? " has" : "") + '">' + list.length + "</span>" +
-          ' <span class="hint">正式 Inbox（/human/inbox）</span></h3>' +
+          ' <span class="hint">待你处理的人工事项</span></h3>' +
           '<div class="owo-ac-items">' + body + "</div>" +
           "</section>"
         );
@@ -637,8 +594,8 @@
 
     var SEC_DEFS = [
       { key: "human", no: "①", title: "等待 Human 结果", hint: "团队 awaiting_human / 人节点任务未完成", empty: "暂无等待人工结果的任务" },
-      { key: "review", no: "②", title: "待评审产物", hint: "pending_review + 校验未通过（GET /projects/{pid}/artifacts）", empty: "暂无待评审产物" },
-      { key: "failed", no: "③", title: "失败步骤（可重试）", hint: "Failed/Aborted · POST /teams/{id}/steer retry", empty: "暂无可重试的失败步骤" },
+      { key: "review", no: "②", title: "待评审产物", hint: "pending_review + 校验未通过", empty: "暂无待评审产物" },
+      { key: "failed", no: "③", title: "失败步骤（可重试）", hint: "Failed/Aborted · 可一键重试失败节点", empty: "暂无可重试的失败步骤" },
       { key: "lease", no: "④", title: "写租约持有", hint: "write_lease 未释放（单写租约）", empty: "当前无团队持有写租约" },
     ];
 
@@ -661,7 +618,7 @@
             : "") +
           '<div class="owo-ac-actions">' +
           '<button type="button" class="owo-ac-mini primary" data-ac-goto="' + esc(item.team_id) + '">进入团队提交结果</button>' +
-          '<span class="hint">在团队详情「人节点结果」提交（POST /tasks/{id}/human-result）</span>' +
+          '<span class="hint">在团队详情「人节点结果」区提交结果</span>' +
           "</div></div>"
         );
       }

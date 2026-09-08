@@ -56,6 +56,18 @@
   // Node 测试环境兼容：window 未定义时回退 globalThis（浏览器行为不变）。
   // 文件末尾按需导出 module.exports，供 tests/workswarm.panel.test.mjs 使用。
   var win = typeof window !== "undefined" ? window : globalThis;
+  // 领域规则与状态归一化独立于 DOM，便于复用和单测；Node 直接 require 本模块时
+  // 主动加载同目录模块，浏览器则由 index.html 预加载全局对象。
+  var domain = win.OwoWorkswarmDomain;
+  if (!domain && typeof require !== "undefined") domain = require("./workswarm/domain.js");
+  var fmt = win.OwoWorkswarmFormat;
+  if (!fmt && typeof require !== "undefined") fmt = require("./workswarm/format.js");
+  var render = win.OwoWorkswarmRender;
+  if (!render && typeof require !== "undefined") render = require("./workswarm/render.js");
+  if (!render) throw new Error("WorkSwarm render helpers 未加载");
+  if (!fmt) throw new Error("WorkSwarm format helpers 未加载");
+
+  if (!domain) throw new Error("WorkSwarm domain helpers 未加载");
 
   win.OwoPanels = win.OwoPanels || {};
 
@@ -65,55 +77,12 @@
     // ---------- helpers（优先 app.js 注入，缺失时自建回退） ----------
     var H = {};
     var rootEl = null;
-    var tokenPromise = null;
-
-    function defaultToken() {
-      if (!tokenPromise) {
-        tokenPromise = fetch(H.baseUrl + "/auth/token").then(function (r) {
-          if (!r.ok) throw new Error("token 引导失败（HTTP " + r.status + "）");
-          return r.json().then(function (d) {
-            var t = d && d.token;
-            if (!t) throw new Error("token 引导响应缺少 token");
-            return t;
-          });
-        }).catch(function (e) {
-          tokenPromise = null;
-          throw e;
-        });
-      }
-      return tokenPromise;
-    }
-
-    function httpFinish(r) {
-      if (!r.ok) {
-        return r.text().then(function (b) {
-          throw new Error(r.status + ": " + b);
-        });
-      }
-      if (r.status === 204) return null;
-      return r.json();
-    }
-
     function defaultGet(path) {
-      return defaultToken().then(function (tok) {
-        return fetch(H.baseUrl + path, {
-          headers: { "Authorization": "Bearer " + tok, "Accept": "application/json" },
-        }).then(httpFinish);
-      });
+      return window.OwoApi.get(path);
     }
 
     function defaultPost(path, body) {
-      return defaultToken().then(function (tok) {
-        return fetch(H.baseUrl + path, {
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + tok,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-          },
-          body: JSON.stringify(body || {}),
-        }).then(httpFinish);
-      });
+      return window.OwoApi.post(path, body || {});
     }
 
     function defaultEsc(s) {
@@ -184,157 +153,78 @@
       csResults: {}, // change_set_id -> { ok, text }（动作结果行）
     };
 
-    // ---------- 常量与工具 ----------
-    var TEAM_STATUS_CN = {
-      created: "已创建",
-      running: "运行中",
-      awaiting_human: "等待人节点",
-      succeeded: "已成功",
-      failed: "失败",
-      cancelled: "已取消",
-      // 七期：cancel 接入 Worker 取消令牌后的过渡/停止状态（服务端下发才出现；UI 容错）
-      stopping: "正在停止",
-      stopped: "已停止",
-    };
-    var STEP_STATUS_CN = {
-      pending: "等待",
-      ready: "就绪",
-      running: "运行中",
-      succeeded: "完成",
-      failed: "失败",
-      aborted: "中止",
-    };
-    var MODE_CN = { single: "单节点", team: "接力（默认）", swarmflow: "DAG 流程" };
-    var HEALTH_CN = { active: "正常", degraded: "降级", offline: "离线", fused: "熔断" };
-    var PROPOSAL_STATUS_CN = { proposed: "待采纳", adopted: "已采纳", rejected: "已拒绝" };
-    var TERMINAL = { succeeded: true, failed: true, cancelled: true };
-    var STEP_TERMINAL = { succeeded: true, failed: true, aborted: true };
-    // "死上游"= 失败/中止（下游不会再被运行）。历史版本错用含 succeeded 的
-    // STEP_TERMINAL 判定，导致"上游刚完成、下游等待运行"的任务被误标为
-    // 已阻塞、依赖边被误涂红。
-    var STEP_DEAD = { failed: true, aborted: true };
+    // ---------- 常量与领域规则（见 panels/workswarm/domain.js） ----------
+    var TEAM_STATUS_CN = domain.TEAM_STATUS_CN;
+    var STEP_STATUS_CN = domain.STEP_STATUS_CN;
+    var MODE_CN = domain.MODE_CN;
+    var HEALTH_CN = domain.HEALTH_CN;
+    var PROPOSAL_STATUS_CN = domain.PROPOSAL_STATUS_CN;
+    var STEP_TERMINAL = domain.STEP_TERMINAL;
+    var isDeadStatus = domain.isDeadStatus;
+    var taskBlocked = domain.taskBlocked;
+    var normStatus = domain.normStatus;
+    var isTerminalTeam = domain.isTerminalTeam;
+    var isRetryableStep = domain.isRetryableStep;
+    var retryableTasks = domain.retryableTasks;
+    var shouldShowRetry = domain.shouldShowRetry;
+    var buildRetryBody = domain.buildRetryBody;
+    var computeRunSummary = domain.computeRunSummary;
 
-    function isDeadStatus(s) {
-      return !!STEP_DEAD[normStatus(s)];
-    }
+    // ---------- view-model 纯函数簇（见 panels/workswarm/format.js） ----------
+    var normReviewState = fmt.normReviewState;
+    var groupArtifactChain = fmt.groupArtifactChain;
+    var strategyDecisionOf = fmt.strategyDecisionOf;
+    var pickNum = fmt.pickNum;
+    var pickStr = fmt.pickStr;
+    var metricsFromPayload = fmt.metricsFromPayload;
+    var fmtMs = fmt.fmtMs;
+    var fmtElapsed = fmt.fmtElapsed;
+    var diffLines = fmt.diffLines;
+    var deliverablesFromPayload = fmt.deliverablesFromPayload;
+    var workspaceFromTeam = fmt.workspaceFromTeam;
+    var failureCodeLabel = fmt.failureCodeLabel;
+    var artifactFileName = fmt.artifactFileName;
+    var fmtAbsTime = fmt.fmtAbsTime;
+    var normCsStatus = fmt.normCsStatus;
+    var changeSetsView = fmt.changeSetsView;
+    var csStatusHint = fmt.csStatusHint;
+    var approvalBlockView = fmt.approvalBlockView;
+    var roleOfProducer = fmt.roleOfProducer;
+    var csIdemKey = fmt.csIdemKey;
+    var aidemKey = fmt.aidemKey;
 
-    function taskBlocked(t, byId) {
-      if (!t) return false;
-      var st = normStatus(t.status);
-      if (STEP_TERMINAL[st]) return false;
-      return (t.depends_on || []).some(function (d) {
-        return byId[d] && isDeadStatus(byId[d].status);
-      });
-    }
+    // ---------- 详情渲染 HTML 簇（见 panels/workswarm/render.js） ----------
+    var reviewBadgeHtml = render.reviewBadgeHtml;
+    var strategyBoxHtml = render.strategyBoxHtml;
+    var metricsCardsHtml = render.metricsCardsHtml;
+    var diffHtml = render.diffHtml;
+    var artifactTimelineHtml = render.artifactTimelineHtml;
+    var deliverablesBoxHtml = render.deliverablesBoxHtml;
+    var workspaceBoxHtml = render.workspaceBoxHtml;
+    var workspaceTreeHtml = render.workspaceTreeHtml;
+    var gitStatusHtml = render.gitStatusHtml;
+    var templateBoxHtml = render.templateBoxHtml;
+    var failureBadgeHtml = render.failureBadgeHtml;
+    var failureSummaryHtml = render.failureSummaryHtml;
+    var validationBadgeHtml = render.validationBadgeHtml;
+    var workerProfilesTable = render.workerProfilesTable;
+    var writeLeaseBox = render.writeLeaseBox;
+    var changeStateBadge = render.changeStateBadge;
+    var changesListHtml = render.changesListHtml;
+    var changesRemoteView = render.changesRemoteView;
+    var changeRecordsHtml = render.changeRecordsHtml;
+    var changesRuntimeHtml = render.changesRuntimeHtml;
+    var changeSetBadge = render.changeSetBadge;
+    var deliveryManifestText = render.deliveryManifestText;
+    var artifactHistoryHtml = render.artifactHistoryHtml;
+    // 注入 esc / short：浏览器走 H.esc（DOM 实现），Node 测试回退 defaultEsc
+    render.bindEsc(esc);
+    render.bindShort(short);
+    var dagSvg = render.dagSvg;
+    var progressCountChip = render.progressCountChip;
+    var renderProgress = render.renderProgress;
 
-    // 团队状态在 TeamRun 里是 snake_case（serde），创建响应/SSE state 帧是
-    // Debug 形式（Created/Running/AwaitingHuman/...）——统一小写归一化。
-    function normStatus(s) {
-      var x = String(s || "").toLowerCase();
-      if (x === "awaitinghuman") return "awaiting_human";
-      return x;
-    }
 
-    function isTerminalTeam(s) {
-      return !!TERMINAL[normStatus(s)];
-    }
-
-    // ---------- 二轮纯逻辑层（Node 测试挂钩覆盖） ----------
-    // 可重试步骤：与核心 steer_retry 的目标闸门一致——仅 Failed / Aborted
-    // （中断识别会把遗留 Running 转 Aborted，因此天然落在同一集合）。
-    var STEP_RETRYABLE = { failed: true, aborted: true };
-
-    function isRetryableStep(t) {
-      return !!t && !!STEP_RETRYABLE[normStatus(t.status)];
-    }
-
-    function retryableTasks(tasks) {
-      return (tasks || []).filter(isRetryableStep);
-    }
-
-    // 重试入口是否可见：团队 succeeded/cancelled 一律不提供（终态无效操作）；
-    // 其余状态只要存在 Failed/Aborted 节点即提供（运行中节点级 409 由服务端把关，
-    // 前端不隐藏——否则中断/暂停窗口下的合法恢复会被误藏）。
-    function shouldShowRetry(tasks, teamStatus) {
-      var st = normStatus(teamStatus);
-      if (st === "succeeded" || st === "cancelled") return false;
-      return retryableTasks(tasks).length > 0;
-    }
-
-    // 第三路冻结契约：POST /teams/{id}/steer {"command":"retry","step_id":"...","note":"..."}
-    // note 可省略（服务端缺省 "retry"）；这里给确定性中文缺省，便于审计可读。
-    function buildRetryBody(stepId, note) {
-      var sid = String(stepId == null ? "" : stepId).trim();
-      var n = note == null ? "" : String(note).trim();
-      return {
-        command: "retry",
-        step_id: sid,
-        note: n || ("重试此节点：" + sid),
-      };
-    }
-
-    // 运行摘要（纯函数）：状态/阶段、任务计数、失败步骤、累计尝试、产物数、重试可见性。
-    // 输入 {team, tasks, artifactCount, interrupted, active}，输出展示模型。
-    function computeRunSummary(input) {
-      var team = (input && input.team) || {};
-      var tasks = (input && input.tasks) || [];
-      var byId = {};
-      tasks.forEach(function (t) {
-        byId[t.task_id] = t;
-      });
-      var counts = { total: tasks.length, succeeded: 0, failed: 0, waiting: 0, running: 0, blocked: 0 };
-      var totalAttempts = 0;
-      var failedStep = null;
-      var runningStep = null;
-      tasks.forEach(function (t) {
-        var st = normStatus(t.status);
-        var at = Number(t.attempts || 0);
-        totalAttempts += at;
-        if (st === "succeeded") counts.succeeded++;
-        else if (st === "failed" || st === "aborted") {
-          counts.failed++;
-          if (!failedStep)
-            failedStep = {
-              task_id: t.task_id,
-              role: t.role || t.worker || t.task_id,
-              attempts: at,
-              error: t.error || "",
-            };
-        } else if (st === "running") {
-          counts.running++;
-          if (!runningStep) runningStep = t;
-        } else counts.waiting++; // pending / ready / 未知
-        if (taskBlocked(t, byId)) counts.blocked++;
-      });
-      var interrupted = !!(input && input.interrupted);
-      var rawStatus = team.status != null ? String(team.status) : "";
-      var st = normStatus(rawStatus);
-      var terminal = isTerminalTeam(st);
-      var interruptedView = interrupted && !terminal;
-      var phase;
-      if (interruptedView) phase = "已中断，可恢复";
-      else if (st === "awaiting_human") phase = "等待人节点结果";
-      else if (runningStep) phase = "执行：" + (runningStep.role || runningStep.worker || runningStep.task_id);
-      else if (st === "succeeded") phase = "全部步骤已完成";
-      else if (counts.failed > 0) phase = "已停止：存在失败步骤";
-      else if (st === "running") phase = counts.total ? "调度中" : "等待任务图生成";
-      else if (st === "created") phase = counts.total ? "准备启动" : "尚未开始";
-      else if (st === "cancelled") phase = "已取消";
-      else if (st === "stopping") phase = "正在停止（Worker 退出中）";
-      else if (st === "stopped") phase = "已停止";
-      else if (st === "failed") phase = "已失败";
-      else phase = "—";
-      return {
-        statusKey: interruptedView ? "interrupted" : st,
-        statusLabel: interruptedView ? "已中断（可恢复）" : TEAM_STATUS_CN[st] || rawStatus || "未知",
-        phase: phase,
-        counts: counts,
-        totalAttempts: totalAttempts,
-        failedStep: failedStep,
-        artifactCount: input && input.artifactCount != null ? input.artifactCount : null,
-        canRetry: shouldShowRetry(tasks, st),
-      };
-    }
 
     // ---------- 三态（加载/空/失败）、提交锁、终态门控、重试委托 ----------
     // 生成统一的加载中 / 失败状态片段；retryKind 注册到重试委托。
@@ -762,16 +652,6 @@
       return true;
     }
 
-    function fmtElapsed(ms) {
-      if (!isFinite(ms) || ms == null || ms < 0) return "—";
-      var s = Math.floor(ms / 1000);
-      if (s < 60) return s + "s";
-      var m = Math.floor(s / 60);
-      var rs = s % 60;
-      if (m < 60) return m + "m" + (rs ? rs + "s" : "");
-      var h = Math.floor(m / 60);
-      return h + "h" + (m % 60) + "m";
-    }
 
     // 进度视图模型（纯函数）：耗时基于 started_at 与 nowMs；rows 只收有 step_id 的步骤。
     // 无 progress 快照但用户已点取消：仍返回最小视图，让"取消中"徽标立即可见。
@@ -806,41 +686,9 @@
       };
     }
 
-    function progressCountChip(label, n, cls) {
-      return '<span class="owo-ws-prog-count' + (cls ? " " + cls : "") + '">' + esc(label) + " <b>" + esc(n) + "</b></span>";
-    }
+    // 进度计数片段（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
-    function renderProgress(vm) {
-      if (!vm) return '<div class="hint owo-ws-prog-empty">暂无实时进度事件（等待 progress 推送…）</div>';
-      var c = vm.counts || {};
-      var html =
-        '<div class="owo-ws-prog-head">' +
-        (vm.seq != null ? '<span class="owo-ws-prog-seq" title="最新 progress 事件序号（单调递增，断线恢复依据）">seq #' + esc(vm.seq) + "</span>" : "") +
-        progressCountChip("等待", c.pending || 0, "off") +
-        progressCountChip("运行", c.running || 0, "run") +
-        progressCountChip("完成", c.succeeded || 0, "ok") +
-        progressCountChip("失败", c.failed || 0, "bad") +
-        (vm.cancelling ? '<span class="owo-ws-badge st-interrupted owo-ws-prog-cancelling">取消中…（已下发，等待执行器停止）</span>' : "") +
-        "</div>";
-      if (!vm.rows.length) {
-        return html + '<div class="hint">当前无活动步骤</div>';
-      }
-      html += '<div class="owo-ws-prog-steps">';
-      for (var i = 0; i < vm.rows.length; i++) {
-        var r = vm.rows[i];
-        html +=
-          '<div class="owo-ws-prog-step' + (r.running ? " run" : "") + '">' +
-          '<span class="owo-ws-mono owo-ws-ellip" title="' + esc(r.step_id) + '">' + esc(r.worker || r.step_id) + "</span>" +
-          '<span class="owo-ws-badge">' + esc(r.statusCn) + "</span>" +
-          '<span class="hint">第 ' + esc(r.attempts) + " 次尝试</span>" +
-          '<span class="owo-ws-prog-elapsed" title="自 started_at 起的已运行时间">' +
-          (r.running ? "已运行 " : "耗时 ") + esc(r.elapsedMs == null ? "—" : fmtElapsed(r.elapsedMs)) +
-          "</span>" +
-          "</div>";
-      }
-      html += "</div>";
-      return html;
-    }
+    // 实时进度视图（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     function paintProgress() {
       var box = el("#ws-d-progress");
@@ -874,20 +722,13 @@
     // 评审接口（协作计划冻结）：
     //   POST /artifacts/{id}/review  body {team_id, decision, reviewer, comment, expected_version, idempotency_key}
     //   GET  /artifacts/{id}/history → 不可变 ArtifactReviewRecord 列表
-    var REVIEW_CN = { draft: "草稿（返工中）", pendingreview: "待评审", approved: "已批准", changesrequested: "要求修改", rejected: "已驳回", superseded: "已被取代" };
-    var REVIEW_CLS = { draft: "off", pendingreview: "warn", approved: "ok", changesrequested: "warn", rejected: "bad", superseded: "off" };
+    // 评审状态文案常量（随渲染簇迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
+    // 评审状态配色常量（随渲染簇迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
     var REVIEW_DECISIONS = ["approve", "request_changes", "reject"];
     var DECISION_CN = { approve: "批准", request_changes: "要求修改", reject: "驳回" };
 
-    function normReviewState(s) {
-      return String(s == null ? "" : s).toLowerCase().replace(/[_\s-]/g, "");
-    }
 
-    function reviewBadgeHtml(st) {
-      var k = normReviewState(st);
-      var cls = REVIEW_CLS[k] || "off";
-      return '<span class="owo-ws-badge rv-' + cls + '" data-art-state="' + esc(k || "unknown") + '">' + esc(REVIEW_CN[k] || String(st || "—")) + "</span>";
-    }
+    // 评审状态徽标（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     function isReviewable(a) {
       return !!a && normReviewState(a.review_state) === "pendingreview" && !state.reviewBusy[String(a.artifact_id)];
@@ -895,43 +736,6 @@
 
     // 版本链分组（纯函数）：supersedes_artifact_id 指向链内既有产物则续链；
     // 链内按 version 升序；链头（items 末位）为最新版本。
-    function groupArtifactChain(arts) {
-      var list = (arts || []).filter(function (a) {
-        return a && a.artifact_id != null;
-      });
-      var byId = {};
-      list.forEach(function (a) {
-        byId[String(a.artifact_id)] = a;
-      });
-      list.sort(function (x, y) {
-        return String(x.created_at).localeCompare(String(y.created_at));
-      });
-      var chains = [];
-      var chainOf = {};
-      list.forEach(function (a) {
-        var id = String(a.artifact_id);
-        var sup = a.supersedes_artifact_id == null ? "" : String(a.supersedes_artifact_id);
-        if (sup && byId[sup] && chainOf[sup] != null) {
-          var c = chains[chainOf[sup]];
-          c.items.push(a);
-          chainOf[id] = chainOf[sup];
-        } else {
-          chainOf[id] = chains.length;
-          chains.push({ items: [a] });
-        }
-      });
-      chains.forEach(function (c) {
-        c.items.sort(function (x, y) {
-          return (Number(x.version) || 0) - (Number(y.version) || 0) || String(x.created_at).localeCompare(String(y.created_at));
-        });
-        var approved = null;
-        c.items.forEach(function (a) {
-          if (normReviewState(a.review_state) === "approved") approved = a; // 取最高版本（链已升序）
-        });
-        c.approvedHead = approved;
-      });
-      return chains;
-    }
 
     // 评审请求体（纯函数）：expected_version 乐观并发控制 + 幂等键；生产者禁止自行批准。
     function buildReviewBody(input) {
@@ -959,11 +763,6 @@
 
     // 幂等键：不同意图的提交生成新键（时间戳 + 进程内序号，同毫秒两次提交也互异）；
     // 同键重复提交由服务端保证零副作用。
-    var aidemSeq = 0;
-    function aidemKey(a, decision, reviewer) {
-      aidemSeq += 1;
-      return [String((a && a.artifact_id) || ""), (a && a.version) || 0, decision, reviewer, Date.now(), aidemSeq].join(":");
-    }
 
     // 评审错误文案：409/403 用计划规定的可操作提示，其余退回 explainError。
     // 传输层把状态码嵌在 message 头部（"409: {...}"），此处一并识别。
@@ -1026,226 +825,20 @@
     // ---------- 五期：组队策略判定展示 ----------
     // 容错读取团队详情里的策略判定（第一路 TeamStrategyEngine 落地前后均可工作）。
     // 接受 detail.strategy_decision 或 detail.strategy；reasons 兼容 reason/reasons/why。
-    function strategyDecisionOf(detail) {
-      if (!detail || typeof detail !== "object") return null;
-      var raw = detail.strategy_decision || detail.strategy;
-      if (!raw || typeof raw !== "object") return null;
-      var mode = String(raw.mode || raw.decision || "").toLowerCase();
-      if (mode !== "single" && mode !== "team") return null;
-      var reasons = raw.reasons || raw.reason || raw.why || [];
-      if (typeof reasons === "string") reasons = [reasons];
-      if (!Array.isArray(reasons)) reasons = [];
-      var roles = raw.roles || [];
-      if (!Array.isArray(roles)) roles = [];
-      var budget = Number(raw.budget_per_role);
-      return {
-        mode: mode,
-        roles: roles.map(function (r) {
-          if (typeof r === "string") return { role: r, duty: "" };
-          return { role: String((r && r.role) || ""), duty: String((r && r.duty) || (r && r.responsibility) || "") };
-        }).filter(function (r) { return r.role; }),
-        parallelism: raw.parallelism == null ? null : Number(raw.parallelism),
-        budgetPerRole: isFinite(budget) && budget > 0 ? budget : null,
-        reasons: reasons.map(String).filter(Boolean),
-      };
-    }
 
-    function strategyBoxHtml(dec) {
-      if (!dec) return '<div class="hint owo-ws-strategy-empty">策略判定将由「自动选择」模式在创建时给出（单 Agent / 组队 + 角色与预算 + 理由）。</div>';
-      var html =
-        '<div class="owo-ws-strategy" data-strategy-mode="' + esc(dec.mode) + '">' +
-        '<span class="owo-ws-badge ' + (dec.mode === "single" ? "rv-off" : "rv-warn") + '">' +
-        (dec.mode === "single" ? "单 Agent" : "多 Agent 团队") + "</span>";
-      if (dec.roles.length) {
-        html += '<span class="hint">角色：' + esc(dec.roles.map(function (r) { return r.role; }).join(" → ")) + "</span>";
-      }
-      if (dec.parallelism != null) html += '<span class="hint">并行度 ' + esc(dec.parallelism) + "</span>";
-      if (dec.budgetPerRole != null) html += '<span class="hint">每角色调用预算 ' + esc(dec.budgetPerRole) + "</span>";
-      if (dec.reasons.length) {
-        html += "<ul>" + dec.reasons.map(function (r) { return "<li>" + esc(r) + "</li>"; }).join("") + "</ul>";
-      }
-      return html + "</div>";
-    }
+    // 自适应组队策略盒（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // ---------- 五期：角色指标（GET /teams/{id}/metrics 容错归一） ----------
-    function pickNum(o, keys) {
-      for (var i = 0; i < keys.length; i++) {
-        var v = o && o[keys[i]];
-        if (v != null && isFinite(Number(v))) return Number(v);
-      }
-      return null;
-    }
-    function pickStr(o, keys) {
-      for (var i = 0; i < keys.length; i++) {
-        var v = o && o[keys[i]];
-        if (v != null && v !== "") return String(v);
-      }
-      return "";
-    }
-    function metricsFromPayload(d) {
-      if (!d || typeof d !== "object") return null;
-      var rawWorkers = d.workers || d.roles || d.items || [];
-      if (!Array.isArray(rawWorkers)) rawWorkers = [];
-      var workers = rawWorkers.map(function (w) {
-        var arts = (w && (w.artifact_ids || w.artifacts || w.output_artifacts)) || [];
-        if (!Array.isArray(arts)) arts = [];
-        // 服务端 worker 行可为 {artifact:{artifact_id,...}} 单对象（五期实弹形状）。
-        var one = (w && w.artifact) || null;
-        if (one && typeof one === "object") {
-          var oid = one.artifact_id || one.id;
-          if (oid) arts.push(oid);
-        } else if (one) {
-          arts.push(one);
-        }
-        return {
-          worker: pickStr(w, ["worker", "worker_id", "member_id", "name", "role"]),
-          role: pickStr(w, ["role", "worker_role"]),
-          startedAt: pickStr(w, ["started_at", "startedAt", "start"]),
-          endedAt: pickStr(w, ["ended_at", "endedAt", "end", "finished_at"]),
-          durationMs: pickNum(w, ["duration_ms", "durationMs", "wall_ms", "wall_ms_sum", "elapsed_ms"]),
-          modelCalls: pickNum(w, ["model_calls", "calls", "model_call_count"]),
-          tokensIn: pickNum(w, ["tokens_in", "input_tokens", "prompt_tokens"]),
-          tokensOut: pickNum(w, ["tokens_out", "output_tokens", "completion_tokens"]),
-          estCost: pickNum(w, ["est_cost", "cost_usd", "cost"]),
-          attempts: pickNum(w, ["attempts", "try_count", "attempt", "spans"]),
-          terminal: pickStr(w, ["terminal", "outcome", "status", "final_status"]),
-          failureReason: pickStr(w, ["failure_reason", "error", "fail_reason"]),
-          artifactIds: arts.map(function (x) { return typeof x === "string" ? x : String(x && (x.artifact_id || x.id) || ""); }).filter(Boolean),
-        };
-      });
-      var s = d.summary || d.totals || {};
-      // 五期实弹：slowest_worker 可为 {role,span_id,step_id} 对象——提取 role。
-      var slowest = s.slowest_worker;
-      if (slowest && typeof slowest === "object") slowest = slowest.role || slowest.worker || slowest.span_id || "";
-      var budget = (d && d.budget) || {};
-      var summary = {
-        wallClockMs: pickNum(s, ["wall_clock_ms", "wallClockMs", "wall_window_ms", "wall_ms", "total_wall_ms"]),
-        totalModelCalls: pickNum(s, ["total_model_calls", "total_calls", "model_calls"]),
-        totalTokensIn: pickNum(s, ["total_tokens_in", "tokens_in", "prompt_tokens"]),
-        totalTokensOut: pickNum(s, ["total_tokens_out", "tokens_out", "completion_tokens"]),
-        totalEstCost: pickNum(s, ["total_est_cost", "total_cost_usd", "total_cost", "cost_usd", "est_cost"]),
-        slowestWorker: typeof slowest === "string" ? slowest : pickStr(s, ["slowest_worker", "slowest"]),
-        failures: pickNum(s, ["failures", "failed_spans", "failure_count"]),
-        reworks: pickNum(s, ["reworks", "rework_count"]),
-        artifactVersions: pickNum(s, ["artifact_versions", "artifact_count"]),
-        budgetExhausted: !!(s.budget_exhausted || s.budgetExhausted || budget.exceeded),
-        budgetReason: (function () {
-          var r = pickStr(s, ["budget_reason", "budget_exhausted_reason"]);
-          if (r) return r;
-          var br = budget.reason;
-          return typeof br === "string" ? br : "";
-        })(),
-      };
-      if (!workers.length && summary.wallClockMs == null && summary.totalModelCalls == null) return null;
-      return { workers: workers, summary: summary };
-    }
 
-    function fmtMs(ms) {
-      if (ms == null || !isFinite(ms)) return "—";
-      if (ms < 1000) return Math.round(ms) + "ms";
-      var s = ms / 1000;
-      if (s < 60) return s.toFixed(1) + "s";
-      var m = Math.floor(s / 60);
-      return m + "m" + Math.round(s - m * 60) + "s";
-    }
 
-    function metricsCardsHtml(vm, budgetPerRole) {
-      if (!vm) return '<div class="hint owo-ws-metrics-empty">暂无角色指标（指标由角色 Worker 执行时采集；服务端未提供时此区保持空态）。</div>';
-      var s = vm.summary;
-      var chips =
-        '<div class="owo-ws-metrics-sum">' +
-        '<span>总墙钟 <b>' + fmtMs(s.wallClockMs) + "</b></span>" +
-        '<span>总调用 <b>' + (s.totalModelCalls == null ? "—" : s.totalModelCalls) + "</b></span>" +
-        (s.totalTokensIn != null || s.totalTokensOut != null
-          ? "<span>token <b>" + (s.totalTokensIn == null ? "—" : s.totalTokensIn) + " / " + (s.totalTokensOut == null ? "—" : s.totalTokensOut) + "</b></span>"
-          : "") +
-        (s.totalEstCost != null ? '<span>估算费用 <b>$' + s.totalEstCost.toFixed(4) + "</b></span>" : "") +
-        (s.slowestWorker ? '<span>最慢 <b>' + esc(s.slowestWorker) + "</b></span>" : "") +
-        (s.failures != null ? '<span>失败 <b class="' + (s.failures > 0 ? "bad" : "") + '">' + s.failures + "</b></span>" : "") +
-        (s.reworks != null ? "<span>返工 <b>" + s.reworks + "</b></span>" : "") +
-        (s.artifactVersions != null ? "<span>产物版本 <b>" + s.artifactVersions + "</b></span>" : "") +
-        (s.budgetExhausted ? '<span class="owo-ws-budget-exhausted bad">预算耗尽' + (s.budgetReason ? "：" + esc(s.budgetReason) : "") + "</span>" : "") +
-        "</div>";
-      if (!vm.workers.length) return chips;
-      var cards = vm.workers
-        .map(function (w) {
-          var remain = budgetPerRole != null && w.modelCalls != null ? budgetPerRole - w.modelCalls : null;
-          return (
-            '<div class="owo-ws-mcard' + (w.failureReason ? " bad" : "") + '">' +
-            "<div><b>" + esc(w.role || w.worker) + "</b>" +
-            (w.worker && w.role && w.worker !== w.role ? '<span class="hint">（' + esc(w.worker) + "）</span>" : "") +
-            (w.terminal ? '<span class="owo-ws-badge ' + (w.failureReason || /fail|abort|cancel/i.test(String(w.terminal)) ? "rv-bad" : "rv-ok") + '">' + esc(w.terminal) + "</span>" : "") +
-            "</div>" +
-            '<div class="hint">' +
-            "耗时 " + fmtMs(w.durationMs) +
-            " · 调用 " + (w.modelCalls == null ? "—" : w.modelCalls) +
-            (remain != null ? "（余 " + remain + "" : "") + (remain != null ? "）" : "") +
-            (w.tokensIn != null || w.tokensOut != null ? " · token " + (w.tokensIn == null ? "—" : w.tokensIn) + "/" + (w.tokensOut == null ? "—" : w.tokensOut) : "") +
-            (w.estCost != null ? " · $" + w.estCost.toFixed(4) : "") +
-            (w.attempts != null ? " · 尝试 " + w.attempts : "") +
-            "</div>" +
-            (w.failureReason ? '<div class="bad hint">失败：' + esc(short(w.failureReason, 120)) + "</div>" : "") +
-            (w.artifactIds.length ? '<div class="hint">产物：' + esc(w.artifactIds.join("、")) + "</div>" : "") +
-            "</div>"
-          );
-        })
-        .join("");
-      return chips + '<div class="owo-ws-mgrid">' + cards + "</div>";
-    }
+    // 角色指标卡片（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // ---------- 五期：版本时间线与 v1/v2 差异 ----------
     // 简单 LCS 行差异（预览文本短，O(n·m) 可接受；超长截断保护）。
-    function diffLines(aText, bText) {
-      var a = String(aText == null ? "" : aText).split("\n").slice(0, 400);
-      var b = String(bText == null ? "" : bText).split("\n").slice(0, 400);
-      var n = a.length, m = b.length;
-      var dp = [];
-      for (var i = 0; i <= n; i++) { dp.push(new Array(m + 1).fill(0)); }
-      for (i = n - 1; i >= 0; i--) {
-        for (var j = m - 1; j >= 0; j--) {
-          dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-        }
-      }
-      var out = [];
-      i = 0; j = 0;
-      while (i < n && j < m) {
-        if (a[i] === b[j]) { out.push({ t: " ", s: a[i] }); i++; j++; }
-        else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: "-", s: a[i] }); i++; }
-        else { out.push({ t: "+", s: b[j] }); j++; }
-      }
-      while (i < n) { out.push({ t: "-", s: a[i] }); i++; }
-      while (j < m) { out.push({ t: "+", s: b[j] }); j++; }
-      return out;
-    }
 
-    function diffHtml(aText, bText, labelA, labelB) {
-      var rows = diffLines(aText, bText)
-        .map(function (r) {
-          if (r.t === " ") return '<span class="dl-ctx">  ' + esc(r.s) + "\n</span>";
-          if (r.t === "-") return '<span class="dl-del">- ' + esc(r.s) + "\n</span>";
-          return '<span class="dl-add">+ ' + esc(r.s) + "\n</span>";
-        })
-        .join("");
-      return (
-        '<pre class="owo-ws-diff" data-diff-a="' + esc(labelA || "vA") + '" data-diff-b="' + esc(labelB || "vB") + '">' +
-        '<span class="hint">差异 ' + esc(labelA || "vA") + " → " + esc(labelB || "vB") + "（- 删行 / + 增行）</span>\n" + rows + "</pre>"
-      );
-    }
+    // 行级 diff 视图（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
-    function artifactTimelineHtml(chain) {
-      if (!chain || !chain.length) return "";
-      var nodes = chain
-        .map(function (a) {
-          var st = normReviewState(a.review_state);
-          return (
-            '<span class="owo-ws-tl-node" data-tl-state="' + esc(st) + '" title="' + esc(a.artifact_id) + '">' +
-            "v" + (a.version == null ? "?" : a.version) +
-            '<i class="owo-ws-badge ' + (REVIEW_CLS[st] || "rv-off") + '">' + (REVIEW_CN[st] || st || "—") + "</i></span>"
-          );
-        })
-        .join('<span class="owo-ws-tl-arrow">→</span>');
-      return '<div class="owo-ws-timeline" data-timeline-len="' + chain.length + '">' + nodes + "</div>";
-    }
+    // 产物版本链时间线（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // ---------- 五期：根据评审意见返工（POST /artifacts/{id}/rework） ----------
     function buildReworkBody(input) {
@@ -1309,223 +902,31 @@
     }
 
     // ---------- 五期：最终交付物（GET /projects/{id}/deliverables 容错三桶） ----------
-    function deliverablesFromPayload(d) {
-      if (!d || typeof d !== "object") return null;
-      var all = d.approved || d.deliverables || d.items || d.artifacts || [];
-      // 服务端实弹键为 pending_review；契约草案为 pending——两者皆容错。
-      var pending = d.pending || d.pending_review || [];
-      var other = d.rejected_or_superseded || d.rejected || d.superseded || [];
-      var isArr = Array.isArray(all);
-      if (!isArr && typeof all === "object" && all != null) all = [];
-      if (!Array.isArray(pending)) pending = [];
-      if (!Array.isArray(other)) other = []; // 实弹可为 null
-      var norm = function (x) {
-        return {
-          artifactId: String((x && x.artifact_id) || ""),
-          kind: String((x && x.kind) || ""),
-          version: x && x.version != null ? x.version : null,
-          producer: String((x && x.producer) || ""),
-          reviewState: normReviewState(x && x.review_state),
-        };
-      };
-      var approved, pendingOut, otherOut;
-      if (d.approved || d.deliverables) {
-        approved = (isArr ? all : []).map(norm);
-        pendingOut = pending.map(norm);
-        otherOut = other.map(norm);
-      } else {
-        // 单列表形状：按 review_state 分桶
-        var src = (d.items || d.artifacts || []);
-        approved = []; pendingOut = []; otherOut = [];
-        src.map(norm).forEach(function (x) {
-          if (x.reviewState === "approved") approved.push(x);
-          else if (x.reviewState === "pendingreview") pendingOut.push(x);
-          else otherOut.push(x);
-        });
-      }
-      // manifest/complete/rework 概览（实弹字段；缺省无害）
-      var manifestRef = typeof d.delivery_manifest_ref === "string" ? d.delivery_manifest_ref : "";
-      return {
-        approved: approved,
-        pending: pendingOut,
-        other: otherOut,
-        complete: !!d.complete,
-        manifestRef: manifestRef,
-        reworkCount: Array.isArray(d.rework_tasks) ? d.rework_tasks.length : null,
-      };
-    }
 
-    function deliverablesBoxHtml(dl) {
-      if (!dl) return '<div class="hint">交付物数据为空。</div>';
-      var html = "";
-      if (!dl.approved.length && !dl.pending.length && !dl.other.length) {
-        return '<div class="hint">项目暂无交付物（尚未有产物通过评审或进入评审）。</div>';
-      }
-      html += '<div class="owo-ws-dlv-counts"><span class="owo-ws-badge rv-ok">已批准 ' + dl.approved.length + "</span>" +
-        '<span class="owo-ws-badge rv-warn">待评审 ' + dl.pending.length + "</span>" +
-        '<span class="owo-ws-badge rv-off">驳回/取代 ' + dl.other.length + "</span>" +
-        (dl.complete ? '<span class="owo-ws-badge rv-ok">交付完成</span>' : "") +
-        (dl.reworkCount != null && dl.reworkCount > 0 ? '<span class="owo-ws-badge rv-warn">返工中 ' + dl.reworkCount + "</span>" : "") +
-        "</div>";
-      if (dl.manifestRef) {
-        html += '<div class="hint">交付清单：' + esc(dl.manifestRef) + "</div>";
-      }
-      if (dl.approved.length) {
-        html +=
-          '<div class="owo-ws-dlv-list">' +
-          dl.approved
-            .map(function (x) {
-              return (
-                '<div class="owo-ws-dlv-item" data-dlv-art="' + esc(x.artifactId) + '">' +
-                '<span class="owo-ws-badge rv-ok">交付</span> <b>' + esc(x.kind || "artifact") + "</b> v" + (x.version == null ? "?" : x.version) +
-                '<span class="hint">' + esc(x.artifactId) + " · " + esc(x.producer || "—") + "</span></div>"
-              );
-            })
-            .join("") +
-          "</div>";
-      } else {
-        html += '<div class="hint">尚无已批准版本：approved head 建立后将在此列出最终交付物。</div>';
-      }
-      return html;
-    }
+    // 交付物清单盒（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // ---------- 六期：工作区绑定 / 模板信息 / 输出契约失败原因 ----------
     /// TeamRun.workspace（六期冻结契约）容错归一：字段缺失/旧记录均安全。
-    function workspaceFromTeam(team) {
-      var ws = team && typeof team === "object" ? team.workspace : null;
-      if (!ws || typeof ws !== "object") return null;
-      var root = typeof ws.root === "string" ? ws.root : "";
-      if (!root) return null; // 未绑定工作区的旧团队
-      var paths = Array.isArray(ws.write_allowed_paths) ? ws.write_allowed_paths.map(String) : [];
-      var readOnly = ws.read_only != null ? !!ws.read_only : true;
-      var depth = ws.tree_depth != null ? Number(ws.tree_depth) : null;
-      return {
-        root: root,
-        readOnly: readOnly,
-        writePaths: paths,
-        treeDepth: isFinite(depth) ? depth : null,
-      };
-    }
 
     /// 工作区框 HTML（root/读写模式/允许范围/深度 + 目录树与 Git 状态按钮）。
-    function workspaceBoxHtml(ws, view, viewKind, busy) {
-      if (!ws) {
-        return '<div class="hint">未绑定项目工作区（该团队使用服务端默认工作区）。新建项目任务面板可绑定真实目录。</div>';
-      }
-      var html = '<div class="owo-pl-wsbox">';
-      html += "<div><b>工作区</b> <code>" + esc(ws.root) + "</code></div>";
-      html += "<div><b>模式</b> " + (ws.readOnly ? "只读（默认）" : "受控写入") +
-        (ws.writePaths && ws.writePaths.length ? '<span class="hint">（允许路径：' + esc(ws.writePaths.join("、")) + "）</span>" : ws.readOnly ? "" : '<span class="hint">（未列允许路径：写入将被拒绝）</span>') + "</div>";
-      if (ws.treeDepth != null) html += "<div><b>目录树深度</b> " + esc(String(ws.treeDepth)) + "</div>";
-      html += '<div class="owo-ws-inline">' +
-        '<button class="owo-ws-mini" id="ws-ws-tree"' + (busy ? " disabled" : "") + ">目录树</button>" +
-        '<button class="owo-ws-mini" id="ws-ws-git"' + (busy ? " disabled" : "") + ">Git 状态</button>" +
-        "</div>";
-      if (view && viewKind === "tree") html += workspaceTreeHtml(view);
-      if (view && viewKind === "git") html += gitStatusHtml(view);
-      html += "</div>";
-      return html;
-    }
+    // 项目工作区盒（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     /// 目录树载荷 HTML（扁平列表按层级缩进渲染）。
-    function workspaceTreeHtml(payload) {
-      if (!payload || typeof payload !== "object") return "";
-      var entries = Array.isArray(payload.entries) ? payload.entries : [];
-      if (!entries.length) return '<div class="hint">目录为空（或深度内无条目）。</div>';
-      var rows = entries.map(function (e) {
-        var path = String((e && e.path) || "");
-        var isDir = (e && e.type) === "dir";
-        var depth = path.split(/[\\/]/).length - 1;
-        var pad = depth > 0 ? ' style="padding-left:' + Math.min(depth, 8) * 14 + 'px"' : "";
-        return '<div' + pad + ">" + (isDir ? "📁" : "📄") + " " + esc(path.split(/[\\/]/).pop() || path) +
-          (isDir ? '<span class="hint">/</span>' : (e && e.size != null ? '<span class="hint"> ' + esc(String(e.size)) + "B</span>" : "")) + "</div>";
-      }).join("");
-      return '<div class="owo-pl-tree">' + rows + "</div>";
-    }
+    // 工作区目录树（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     /// Git 状态载荷 HTML（双形状：porcelain 行字符串数组 / 冻结契约对象数组）。
-    function gitStatusHtml(payload) {
-      if (!payload || typeof payload !== "object") return "";
-      if (payload.is_git_repo === false || payload.git === false)
-        return '<div class="hint">该目录不是 Git 仓库。</div>';
-      var rawEntries = Array.isArray(payload.entries) ? payload.entries : [];
-      var rows = [];
-      var count = 0;
-      rawEntries.slice(0, 50).forEach(function (e) {
-        var path, state;
-        if (typeof e === "string") {
-          // porcelain 行：" M path" / "?? path" / "MM path"
-          var m = e.match(/^(\S+)\s+(.*)$/);
-          state = m ? m[1] : "";
-          path = m ? m[2] : e;
-        } else {
-          path = String((e && e.path) || "");
-          state = String((e && e.state) || "");
-        }
-        if (!path) return;
-        count++;
-        rows.push('<div><code>' + esc(path) + '</code> <span class="owo-pl-badge">' + esc(state || "?") + "</span></div>");
-      });
-      var more = rawEntries.length > 50 ? '<div class="hint">…其余 ' + (rawEntries.length - 50) + " 项略</div>" : "";
-      var branch = payload.branch ? "<div><b>分支</b> " + esc(String(payload.branch)) + "</div>" : "";
-      return '<div class="owo-pl-tree">' + branch +
-        "<div><b>状态</b> " + (count === 0 ? "干净（无未提交变更）" : "有变更 " + count + " 项") + "</div>" + rows.join("") + more + "</div>";
-    }
+    // 工作区 Git 状态（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     /// 模板信息框（使用的模板及版本；版本经目录懒加载解析）。
-    function templateBoxHtml(team, templateInfo) {
-      var tid = team && typeof team === "object" ? String(team.template_id || "") : "";
-      if (!tid) {
-        return '<div class="hint">动态组队（未使用模板）——角色由组队策略判定，理由见下方策略区。</div>';
-      }
-      var v = templateInfo && templateInfo.template_id === tid && templateInfo.version != null
-        ? " v" + esc(String(templateInfo.version))
-        : "";
-      var title = templateInfo && templateInfo.template_id === tid && templateInfo.title
-        ? esc(String(templateInfo.title)) + "（" + esc(tid) + "）"
-        : esc(tid);
-      return '<div><b>模板</b> ' + title + v + '<span class="hint">（固定角色/DAG/预算，保证可复现编队）</span></div>';
-    }
+    // 模板信息盒（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     /// 失败原因代码 → 中文标签（六期输出契约失败原因）。
-    function failureCodeLabel(code) {
-      var map = {
-        output_contract_invalid: "输出契约无效",
-        artifact_missing: "缺少交付物",
-        scope_violation: "越权访问",
-      };
-      return map[String(code || "")] || "";
-    }
 
     /// 单个失败任务的失败原因徽章（failure_code 优先，error 前缀兜底）。
-    function failureBadgeHtml(task) {
-      if (!task) return "";
-      var st = String(task.status || "");
-      if (st !== "Failed" && st !== "Aborted") return "";
-      var code = String(task.failure_code || "");
-      var label = failureCodeLabel(code);
-      if (!label) {
-        var err = String(task.error || "");
-        if (/output_contract_invalid/i.test(err)) code = "output_contract_invalid";
-        else if (/artifact_missing/i.test(err)) code = "artifact_missing";
-        else if (/scope_violation/i.test(err)) code = "scope_violation";
-        label = failureCodeLabel(code);
-      }
-      return label ? '<span class="owo-pl-badge bad" title="失败原因代码：' + esc(code) + '">' + esc(label) + "</span>" : "";
-    }
+    // 失败状态徽标（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     /// 详情失败原因汇总（所有失败步骤的代码列表；无失败 → 空串）。
-    function failureSummaryHtml(tasks) {
-      var list = (Array.isArray(tasks) ? tasks : []).filter(function (t) {
-        return t && (t.status === "Failed" || t.status === "Aborted");
-      });
-      if (!list.length) return "";
-      var rows = list.map(function (t) {
-        return "<div>" + esc(String(t.task_id || "")) + " " + failureBadgeHtml(t) +
-          (t.error ? '<span class="hint"> ' + esc(String(t.error).slice(0, 120)) + "</span>" : "") + "</div>";
-      }).join("");
-      return '<div class="owo-pl-failures"><b>失败原因</b>' + rows + "</div>";
-    }
+    // 失败摘要（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     /// 拉取工作区绑定（/projects/{pid}/workspace；路由未接线时静默降级）。
     function loadWorkspace() {
@@ -1648,210 +1049,41 @@
     }
 
     // ---------- 七期：Worker 能力 / 写租约 / 文件变更 / 产物校验与下载交付 ----------
-    var FORMAT_EXT = { json: "json", csv: "csv", markdown: "md", research: "md" };
 
     // 下载文件名：artifact_id + 按格式推断的扩展名（未知格式回退原串/txt）。
-    function artifactFileName(a) {
-      var fmt = String((a && a.format) || "").toLowerCase();
-      var ext = FORMAT_EXT[fmt] || (fmt || "txt");
-      return String((a && a.artifact_id) || "artifact") + "." + ext;
-    }
 
     // 绝对时间格式化（fmtMs 是时长格式化器，写租约时间戳另用）。
-    function fmtAbsTime(ms) {
-      var n = Number(ms);
-      if (!isFinite(n) || n <= 0) return "";
-      try {
-        return new Date(n).toLocaleString();
-      } catch (e) {
-        return String(ms);
-      }
-    }
 
     // 产物格式校验徽标：validation 为七期可选字段——缺失/未校验时不渲染（旧产物兼容）。
-    function validationBadgeHtml(validation) {
-      var v = validation && typeof validation === "object" ? validation : null;
-      if (!v || v.valid == null) return "";
-      if (v.valid) return '<span class="owo-ws-badge rv-ok" title="格式校验通过">校验通过</span>';
-      return '<span class="owo-ws-badge rv-bad" title="' + esc(String(v.reason || "格式校验未通过")) + '">校验未通过</span>';
-    }
+    // 产物校验徽标（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // WorkerProfile 表：角色 × 实际工具权限 × 调用预算（max_turns）。全字段容错。
-    function workerProfilesTable(profiles) {
-      var list = (profiles || []).filter(function (p) {
-        return p && typeof p === "object";
-      });
-      if (!list.length) {
-        return '<div class="hint">暂无 WorkerProfile（权限/预算字段未下发或团队尚未生成角色配置）。</div>';
-      }
-      var rows = list
-        .map(function (p) {
-          var tools = Array.isArray(p.visible_tools) && p.visible_tools.length ? p.visible_tools.join("、") : "—";
-          var paths = Array.isArray(p.write_allowed_paths) && p.write_allowed_paths.length
-            ? p.write_allowed_paths.join("、")
-            : p.read_only
-              ? "—"
-              : "未声明（写入将被拒绝）";
-          return (
-            "<tr>" +
-            "<td><b>" + esc(p.role || "—") + "</b></td>" +
-            "<td>" + (p.read_only ? "只读" : "可写") + "</td>" +
-            '<td class="hint">' + esc(tools) + "</td>" +
-            "<td>" + (p.can_run_command ? "✓" : "✗") + "</td>" +
-            "<td>" + (p.can_use_browser ? "✓" : "✗") + "</td>" +
-            "<td>" + esc(p.max_turns == null ? "—" : String(p.max_turns)) + "</td>" +
-            '<td class="hint">' + esc(paths) + "</td>" +
-            "</tr>"
-          );
-        })
-        .join("");
-      return (
-        '<table class="owo-ws-table"><tr><th>角色</th><th>读写</th><th>可见工具</th><th>命令</th><th>浏览器</th><th>最大轮次（预算）</th><th>允许写路径</th></tr>' +
-        rows +
-        "</table>"
-      );
-    }
+    // Worker 能力表（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // 单写租约状态盒：write_lease 归一后传入（null=未持有；released_at_ms 非空=已释放）。
-    function writeLeaseBox(lease) {
-      if (!lease || typeof lease !== "object") {
-        return '<div class="hint">当前无角色持有写租约（同一工作区同时只允许一个写角色）。</div>';
-      }
-      var head =
-        '<span class="owo-ws-badge st-running">写租约持有中</span>' +
-        "<b>" + esc(lease.holder_role || "—") + "</b>" +
-        '<span class="hint">步骤 ' + esc(lease.holder_step_id || "—") + "</span>";
-      if (lease.released_at_ms != null) {
-        return '<div class="owo-ws-lease">' + head + '<span class="hint">已于 ' + esc(fmtAbsTime(lease.released_at_ms)) + " 释放</span></div>";
-      }
-      return (
-        '<div class="owo-ws-lease">' +
-        head +
-        (lease.acquired_at_ms != null ? '<span class="hint">自 ' + esc(fmtAbsTime(lease.acquired_at_ms)) + " 起持有</span>" : "") +
-        "</div>"
-      );
-    }
+    // 单写租约状态盒（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // 文件变更列表 + diff 预览（changes[].state: added|modified|deleted；白名单外变更
     // 服务端会判 scope_violation，不会出现在成功登记的变更集中）。
-    var CHG_STATE_CN = { added: "新增", modified: "修改", deleted: "删除" };
-    var CHG_STATE_CLS = { added: "st-running", modified: "st-awaiting_human", deleted: "st-failed" };
+    // 文件变更状态文案（随渲染簇迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
+    // 文件变更状态配色（随渲染簇迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
-    function changeStateBadge(stateKey) {
-      var k = String(stateKey || "").toLowerCase();
-      return '<span class="owo-ws-badge ' + (CHG_STATE_CLS[k] || "") + '">' + esc(CHG_STATE_CN[k] || k || "—") + "</span>";
-    }
+    // 文件变更状态徽标（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
-    function changesListHtml(changes) {
-      var list = (changes || []).filter(function (c) {
-        return c && typeof c === "object";
-      });
-      if (!list.length) {
-        return '<div class="hint">暂无文件变更（可写 Worker 执行前后采集 Git status/diff；只读任务无变更）。</div>';
-      }
-      var head = '<div class="hint">共 ' + list.length + " 个文件变更</div>";
-      var rows = list
-        .map(function (c) {
-          var delta =
-            c.added_lines == null && c.deleted_lines == null
-              ? ""
-              : '<span class="hint">+' + esc(String(c.added_lines == null ? 0 : c.added_lines)) + " / -" + esc(String(c.deleted_lines == null ? 0 : c.deleted_lines)) + "</span>";
-          var diff =
-            c.diff == null || c.diff === ""
-              ? ""
-              : '<details class="owo-ws-chg-diff"><summary>diff 预览</summary><pre class="owo-ws-diff">' + esc(String(c.diff)) + "</pre></details>";
-          return (
-            '<div class="owo-ws-chg-row">' +
-            changeStateBadge(c.state) +
-            "<b>" + esc(c.path || "—") + "</b>" +
-            delta +
-            "</div>" +
-            diff
-          );
-        })
-        .join("");
-      return head + '<div class="owo-ws-chg-list">' + rows + "</div>";
-    }
+    // 文件变更列表（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // 七期（二路交接）：GET /projects/{pid}/workspace/changes 归一视图。
     // 响应 {team_id, git, changed_files[], diff_summary, has_violation, records[]}；
     // 记录元素 {role, step, at, git, changed_files[], diff_summary, diff_ref?, violation?}。
     // 全字段容错：非对象/缺键 → 缺省（空串/空数组/false/null）。
-    function changesRemoteView(payload) {
-      var p = payload && typeof payload === "object" ? payload : {};
-      var records = (Array.isArray(p.records) ? p.records : []).map(function (r) {
-        var rec = r && typeof r === "object" ? r : {};
-        return {
-          role: String(rec.role || "—"),
-          step: String(rec.step || "unknown"),
-          at: rec.at == null ? null : Number(rec.at),
-          git: !!rec.git,
-          changed_files: Array.isArray(rec.changed_files) ? rec.changed_files.map(String) : [],
-          diff_summary: String(rec.diff_summary || ""),
-          diff_ref: rec.diff_ref == null ? null : String(rec.diff_ref),
-          violation: rec.violation == null ? null : String(rec.violation),
-        };
-      });
-      return {
-        team_id: p.team_id == null ? "" : String(p.team_id),
-        git: !!p.git,
-        changed_files: Array.isArray(p.changed_files) ? p.changed_files.map(String) : [],
-        diff_summary: String(p.diff_summary || ""),
-        has_violation: !!p.has_violation,
-        records: records,
-      };
-    }
+    // 远程 changes 归一视图（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // 逐步骤变更记录行：越界红徽标 / 通过静默；diff_summary 以差异容器呈现。
-    function changeRecordsHtml(records) {
-      var list = records || [];
-      if (!list.length) return "";
-      var rows = list
-        .map(function (r) {
-          var badge = r.violation
-            ? '<span class="owo-ws-badge rv-bad" title="' + esc(r.violation) + '">越界</span>'
-            : '<span class="owo-ws-badge rv-ok">通过</span>';
-          var files = r.changed_files.length
-            ? '<div class="hint">' + r.changed_files.map(esc).join("、") + "</div>"
-            : '<div class="hint">（本窗口无新增变更文件）</div>';
-          var diff = r.diff_summary
-            ? '<pre class="owo-ws-diff">' + esc(r.diff_summary) + "</pre>"
-            : "";
-          return (
-            '<div class="owo-ws-chg-row">' +
-            badge +
-            "<b>" + esc(r.role) + "</b>" +
-            '<span class="hint">步骤 ' + esc(r.step) + (r.at ? " · " + esc(fmtAbsTime(r.at)) : "") + (r.diff_ref ? " · patch " + esc(r.diff_ref) : "") + "</span>" +
-            "</div>" +
-            files +
-            diff
-          );
-        })
-        .join("");
-      return '<div class="owo-ws-chg-list">' + rows + "</div>";
-    }
+    // 写越界记录列表（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // 变更区组装：二路端点数据（越界警示 + diff 摘要 + 逐步骤记录）优先；
     // 详情 changes[] 文件清单补充在后；两者皆空 → 既有空态文案。
-    function changesRuntimeHtml(remote, detailChanges) {
-      var parts = [];
-      var r = remote && typeof remote === "object" ? remote : null;
-      if (r && (r.records.length || r.has_violation || r.diff_summary)) {
-        if (r.has_violation) {
-          parts.push(
-            '<div class="owo-pl-failures"><div class="hint err">⚠ 存在白名单越界写记录（scope_violation）：越界变更不会被登记为成功产物，请核对写角色行为。</div></div>'
-          );
-        }
-        if (r.diff_summary) {
-          parts.push('<div class="hint">最近 diff 摘要（git diff --stat）：</div><pre class="owo-ws-diff">' + esc(r.diff_summary) + "</pre>");
-        }
-        parts.push(changeRecordsHtml(r.records));
-      }
-      var files = detailChanges || [];
-      if (files.length) parts.push(changesListHtml(files));
-      if (!parts.length) return changesListHtml([]);
-      return parts.join("");
-    }
+    // 文件变更运行时视图（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // 七期详情区一次性重绘（容器仅在详情视图存在；缺容器时静默）。
     function paintSevenRuntime() {
@@ -1888,139 +1120,31 @@
     //   conflicted, decisions?[], created_at, resolved_at?}（全字段容错）。
     // ===========================================================================
 
-    var CS_STATUS_CN = {
-      pending_review: "待审批",
-      accepted: "已接受",
-      rejected: "已拒绝",
-      reverted: "已撤销",
-      conflicted: "冲突",
-    };
+    // 变更集状态文案（随渲染簇迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
     var CS_ACTION_CN = { accept: "接受", reject: "拒绝", revert: "撤销" };
 
-    function normCsStatus(s) {
-      return String(s == null ? "" : s)
-        .replace(/([a-z0-9])([A-Z])/g, "$1_$2") // camelCase → snake（serde Debug 形式容错）
-        .toLowerCase()
-        .replace(/[\s-]+/g, "_");
-    }
 
-    function changeSetsView(payload) {
-      return ((payload && Array.isArray(payload.change_sets) ? payload.change_sets : []) || [])
-        .map(function (c) {
-          var x = c && typeof c === "object" ? c : {};
-          return {
-            change_set_id: String(x.change_set_id || ""),
-            team_id: x.team_id == null ? "" : String(x.team_id),
-            step_id: x.step_id == null ? "" : String(x.step_id),
-            role: x.role == null ? "" : String(x.role),
-            changed_files: Array.isArray(x.changed_files) ? x.changed_files.map(String) : [],
-            conflicts: Array.isArray(x.conflicts) ? x.conflicts.map(String) : [],
-            diff_ref: x.diff_ref == null ? null : String(x.diff_ref),
-            status: normCsStatus(x.status) || "pending_review",
-            created_at: x.created_at == null ? "" : String(x.created_at),
-            resolved_at: x.resolved_at == null ? "" : String(x.resolved_at),
-          };
-        })
-        .filter(function (x) {
-          return !!x.change_set_id;
-        });
-    }
 
-    function changeSetBadge(status) {
-      var st = normCsStatus(status);
-      var cls =
-        st === "accepted"
-          ? "rv-ok"
-          : st === "conflicted"
-            ? "rv-bad"
-            : st === "pending_review"
-              ? "rv-warn"
-              : "";
-      return '<span class="owo-ws-badge ' + cls + '">' + esc(CS_STATUS_CN[st] || st || "未知") + "</span>";
-    }
+    // 变更集状态徽标（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // 九期：状态行明确口径（与审批门控语义一致，服务端 approval_block_reason 同源）。
-    function csStatusHint(status) {
-      var st = normCsStatus(status);
-      if (st === "pending_review") return "等待接受或拒绝";
-      if (st === "conflicted") return "存在冲突，禁止批准（处理后可重试接受/拒绝）";
-      return "";
-    }
 
     // 九期：批准门控视图（GET /teams/{id}/change-sets 的 approval_blocked/reason）。
-    function approvalBlockView(payload) {
-      return {
-        blocked: !!(payload && payload.approval_blocked),
-        reason: String((payload && payload.approval_block_reason) || ""),
-      };
-    }
 
     // 九期：批准门控横幅——ChangeSet 未处理（pending_review/conflicted）时，该团队
     // 代码 Artifact 可评审但不能成为最终 approved head（批准按钮同时被禁用）。
+    // 门控横幅（视图模型化四迁）：纯逻辑在 render.js，本层只切片 state。
+    // 批准被门控阻断：ChangeSet 未处理（待审批/冲突）时先接受/拒绝才能批准 Artifact。
     function approvalBlockBanner() {
-      var b = state.csApprovalBlock;
-      if (!b || !b.blocked) return "";
-      return (
-        '<div class="hint" data-cs-approval-block="1">⚠ 批准被门控阻断：' +
-        esc(b.reason || "存在未处理的 ChangeSet（待审批/冲突）——先接受或拒绝后才能批准 Artifact") +
-        "</div>"
-      );
+      return render.approvalBlockBanner(state.csApprovalBlock);
     }
 
     function changeSetsHtml(list) {
-      list = list || [];
-      if (!list.length) {
-        return '<div class="hint">暂无 ChangeSet（写角色执行后自动生成；端点未上线时本区保持空态）。</div>';
-      }
-      var rows = list
-        .map(function (c) {
-          var st = state.csResults[c.change_set_id];
-          // 九期：conflicted 同样提供动作（恢复被拒绝后人工处理完可重试决定）。
-          var actionable = c.status === "pending_review" || c.status === "conflicted";
-          var actions = "";
-          if (actionable) {
-            actions = [
-              ["accept", "接受"],
-              ["reject", "拒绝"],
-              ["revert", "撤销"],
-            ]
-              .map(function (pair) {
-                var busy = state.csBusy[c.change_set_id + ":" + pair[0]];
-                return (
-                  '<button type="button" class="owo-ws-mini" data-cs-act="' + pair[0] +
-                  '" data-cs-id="' + esc(c.change_set_id) + '"' + (busy ? " disabled" : "") +
-                  ">" + pair[1] + "</button>"
-                );
-              })
-              .join("");
-          }
-          var statusHint = csStatusHint(c.status);
-          return (
-            '<div class="owo-ws-chg-row">' +
-            changeSetBadge(c.status) +
-            "<b><code>" + esc(c.change_set_id) + "</code></b>" +
-            '<span class="hint">' + esc(c.role || "—") + " · 步骤 " + esc(c.step_id || "—") +
-            (c.created_at ? " · " + esc(String(c.created_at).replace("T", " ").slice(0, 19)) : "") +
-            (c.diff_ref ? " · patch " + esc(c.diff_ref) : "") + "</span>" +
-            (statusHint ? '<span class="hint" data-cs-status-hint="' + esc(c.status) + '">（' + esc(statusHint) + "）</span>" : "") +
-            "</div>" +
-            (c.changed_files.length
-              ? '<div class="hint">' + c.changed_files.map(esc).join("、") + "</div>"
-              : '<div class="hint">（无变更文件清单）</div>') +
-            (c.status === "conflicted" && c.conflicts.length
-              ? '<div class="hint" data-cs-conflicts="' + esc(c.change_set_id) + '">⚠ 冲突文件（用户已修改，恢复未覆盖新内容）：' + c.conflicts.map(esc).join("、") + "</div>"
-              : "") +
-            (actions ? '<div class="owo-ac-actions">' + actions + "</div>" : "") +
-            '<div class="owo-ac-result' + (st ? (st.ok ? " ok" : " bad") : "") +
-            '" data-cs-result="' + esc(c.change_set_id) + '" aria-live="polite">' +
-            (st ? esc(st.text) : "") +
-            "</div>"
-          );
-        })
-        .join("");
-      // 九期：门控横幅置顶（blocked 时 Artifact 批准按钮同步禁用）。
-      var banner = approvalBlockBanner();
-      return '<div class="owo-ws-chg-list">' + banner + rows + "</div>";
+      return render.changeSetsHtml(list, {
+        results: state.csResults,
+        busy: state.csBusy,
+        approvalBlock: state.csApprovalBlock,
+      });
     }
 
     // 重绘 + 事件委托（容器标记防重复绑定；detail 重建后容器为新元素、标记自然清零）。
@@ -2071,11 +1195,6 @@
     // 幂等键（九期修复）：服务端要求请求体携带 idempotency_key（缺失 → 422，
     // 八期 UI 一直发空体属隐性缺陷）。每次点击生成新键：提交锁保证双击只发一次；
     // 失败后再次点击是新一轮真实决定（conflicted 处理完后重试恢复正是期望行为）。
-    var csIdemSeq = 0;
-    function csIdemKey(csId, action) {
-      csIdemSeq += 1;
-      return ["workswarm-cs", String(csId || ""), String(action || ""), Date.now(), csIdemSeq].join(":");
-    }
 
     // 九期：跨面板刷新「待我处理」（Action Center 已挂载时；未挂载/失败静默，
     // 不阻塞本面板——accept/reject 后待办应立即从 Inbox 消失）。
@@ -2172,31 +1291,7 @@
     }
 
     // 交付清单文本化（容错缺字段）：project/generated_at/逐项 版本·哈希·大小·批准态·content_url。
-    function deliveryManifestText(d) {
-      var payload = d && typeof d === "object" ? d : {};
-      var all = Array.isArray(payload.manifest) ? payload.manifest : [];
-      var items = all.filter(function (m) {
-        return m && typeof m === "object";
-      });
-      var lines = [
-        "project_id: " + String(payload.project_id || "—"),
-        "generated_at: " + String(payload.generated_at || "—"),
-        "artifacts: " + items.length,
-        "",
-      ];
-      items.forEach(function (m) {
-        lines.push(
-          "- " + String(m.artifact_id || "?") +
-            "  " + String(m.kind || "?") + "/" + String(m.format || "?") +
-            "  v" + String(m.version == null ? "?" : m.version) +
-            "  sha256:" + String(m.sha256 || "—") +
-            "  " + String(m.size_bytes == null ? "?" : m.size_bytes) + "B" +
-            "  " + (m.approved ? "已批准" : "未批准") +
-            "  " + String(m.content_url || "")
-        );
-      });
-      return lines.join("\n");
-    }
+    // 交付清单文本（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     // 交付清单下载（GET /projects/{pid}/delivery-manifest；路由未上线 → ws-act-result 提示）。
     function downloadDeliveryManifest() {
@@ -2215,24 +1310,7 @@
     }
 
     // 评审历史（懒加载）：GET /artifacts/{id}/history → 不可变记录列表。
-    function artifactHistoryHtml(records) {
-      if (!records || !records.length) return '<div class="hint">暂无评审记录</div>';
-      return records
-        .map(function (r) {
-          var dec = String((r && r.decision) || "");
-          var cn = { approve: "批准", request_changes: "要求修改", reject: "驳回" }[dec] || dec;
-          var rid = r && (r.review_id || r.id) ? String(r.review_id || r.id) : "";
-          return (
-            '<div class="owo-ws-review-rec"' + (rid ? ' data-review-id="' + esc(rid) + '" data-review-decision="' + esc(dec) + '"' : "") + ">" +
-            reviewBadgeHtml(dec === "approve" ? "approved" : dec === "request_changes" ? "changes_requested" : "rejected") +
-            "<b>" + esc(r.reviewer || "—") + "</b>" +
-            '<span class="owo-ws-ellip" title="' + esc(r.comment || "") + '">' + esc(r.comment || "（无评语）") + "</span>" +
-            '<span class="hint">' + esc(r.created_at || "") + "</span>" +
-            "</div>"
-          );
-        })
-        .join("");
-    }
+    // 评审历史记录（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
 
     function loadArtifactHistory(aid) {
       var box = el("#ws-d-artifacts");
@@ -2268,98 +1346,17 @@
     }
 
     // 产物行（链内）：版本徽标 + 评审状态 + 产出者 + 取代关系 + 预览 + 评审表单 + 历史。
+    // 视图模型化五迁：纯 HTML 在 render.js（vm = {reviewBusy, reworkBusy, reviewFlash, approvalBlock}），
+    // 本层只把 state 切片传入，保证 TEST_API 签名（a, chain）不变。
     function artifactRowHtml(a, chain) {
-      var aid = String(a.artifact_id == null ? "" : a.artifact_id);
-      var busy = !!state.reviewBusy[aid];
-      var isHead = chain && chain.items[chain.items.length - 1] === a;
-      var sup = a.supersedes_artifact_id == null ? "" : String(a.supersedes_artifact_id);
-      var supVer = "";
-      if (sup) {
-        for (var i = 0; i < (chain ? chain.items : []).length; i++) {
-          if (String(chain.items[i].artifact_id) === sup) supVer = "v" + chain.items[i].version;
-        }
-      }
-      var formHtml = "";
-      if (normReviewState(a.review_state) === "pendingreview") {
-        // 九期：ChangeSet 未处理（pending_review/conflicted）时批准被门控阻断——
-        // 仅禁用「批准」，要求修改/驳回不受影响（服务端 approve 同样拒绝并给原因）。
-        var block = state.csApprovalBlock && state.csApprovalBlock.blocked;
-        var blockReason = block ? String(state.csApprovalBlock.reason || "") : "";
-        formHtml =
-          '<details class="owo-ws-review"' + (busy ? ' data-busy="1"' : "") + ">" +
-          '<summary>评审此版本（批准 / 要求修改 / 驳回）</summary>' +
-          '<div class="owo-ws-review-form">' +
-          '<input class="owo-ws-review-reviewer" placeholder="评审者：critic 或 human 用户名（生产者不能自行批准）">' +
-          '<textarea class="owo-ws-review-comment" rows="2" placeholder="评语（随不可变评审记录保存）"></textarea>' +
-          (block
-            ? '<div class="hint" data-art-approve-blocked="' + esc(aid) + '">⚠ ChangeSet 未处理，批准暂不可用：' +
-              esc(blockReason || "存在待审批/冲突的 ChangeSet，先在「ChangeSet 审批」区接受或拒绝") + "</div>"
-            : "") +
-          '<div class="owo-ws-review-actions">' +
-          '<button type="button" class="owo-ws-review-act ok" data-art-act="approve" data-art-id="' + esc(aid) + '"' +
-          (busy || block ? " disabled" : "") +
-          (block ? ' title="ChangeSet 未处理：批准被门控阻断"' : "") + ">批准</button>" +
-          '<button type="button" class="owo-ws-review-act warn" data-art-act="request_changes" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">要求修改</button>" +
-          '<button type="button" class="owo-ws-review-act bad" data-art-act="reject" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">驳回</button>" +
-          "</div>" +
-          "</div></details>";
-      }
-      // 五期：返工表单——链内最新版本且状态为 Draft（被要求修改后）或 Rejected 时提供
-      // 「根据评审意见返工」；展开时懒加载评审历史预填 review_id 与指令。
-      var reworkHtml = "";
-      var rowState = normReviewState(a.review_state);
-      if (isHead && (rowState === "draft" || rowState === "rejected")) {
-        var rbusy = !!state.reworkBusy[aid];
-        reworkHtml =
-          '<details class="owo-ws-rework"' + (rbusy ? ' data-busy="1"' : "") + ">" +
-          '<summary>根据评审意见返工（生成 v2 取代本版本）</summary>' +
-          '<div class="owo-ws-rework-form" data-rework-form="' + esc(aid) + '">' +
-          '<textarea class="owo-ws-rework-instruction" rows="2" placeholder="返工指令（展开时自动从最近一次「要求修改」评审意见预填，可修改）"></textarea>' +
-          '<div class="owo-ws-inline"><button type="button" class="owo-ws-rework-go primary" data-rework-go="' + esc(aid) + '"' + (rbusy ? " disabled" : "") + ">发起返工</button>" +
-          '<span class="hint">POST /artifacts/{id}/rework —— 同一评审仅创建一个返工任务（重复提交幂等返回原任务）</span></div>' +
-          "</div></details>";
-      }
-      // 评审结果行（行级，独立于表单）：状态迁移后表单可能消失，但 flash 提示仍在。
-      var flash = state.reviewFlash && String(state.reviewFlash.artifactId) === aid ? state.reviewFlash : null;
-      var resultHtml =
-        '<div class="owo-ws-review-result sub' + (flash && !flash.ok ? " bad" : flash ? " ok" : "") + '" data-art-result="' + esc(aid) + '" aria-live="polite">' +
-        (flash ? esc(flash.text) : "") +
-        "</div>";
-      return (
-        '<div class="owo-ws-art-row' + (isHead ? " head" : "") + '" data-art-row="' + esc(aid) + '">' +
-        '<div class="owo-ws-art-line">' +
-        '<span class="owo-ws-mono">v' + esc(a.version) + (isHead ? "（最新）" : "") + "</span>" +
-        reviewBadgeHtml(a.review_state) +
-        validationBadgeHtml(a.validation) +
-        '<span class="hint">产出者 ' + esc(roleOfProducer(a.producer)) + "</span>" +
-        (supVer ? '<span class="hint">取代 ' + esc(supVer) + "</span>" : "") +
-        (a.evidence_refs && a.evidence_refs.length
-          ? '<span class="hint" title="证据引用：' + esc(a.evidence_refs.join("，")) + '">证据 ' + esc(String(a.evidence_refs.length)) + " 条</span>"
-          : "") +
-        (a.handoff ? '<span class="hint" title="该产物携带 Handoff 交接记录">含 Handoff</span>' : "") +
-        (a.sha256
-          ? '<span class="hint owo-ws-ellip" title="sha256: ' + esc(String(a.sha256)) + '">sha256 ' + esc(String(a.sha256).slice(0, 10)) + "…</span>"
-          : "") +
-        '<span class="hint owo-ws-ellip" title="' + esc(a.created_at || "") + '">' + esc(a.created_at || "") + "</span>" +
-        "</div>" +
-        (a.preview != null
-          ? '<details class="owo-ws-art-preview"><summary>预览</summary><pre>' + esc(a.preview || "（空）") + "</pre></details>"
-          : "") +
-        formHtml +
-        reworkHtml +
-        resultHtml +
-        '<div class="owo-ws-art-histline">' +
-        '<button type="button" class="owo-ws-mini" data-art-dl="' + esc(aid) + '" title="GET /artifacts/{id}/content —— 以推断扩展名保存正文">下载</button>' +
-        '<button type="button" class="owo-ws-mini" data-art-history="' + esc(aid) + '">评审历史</button>' +
-        '<span class="owo-ws-art-history" data-art-history-box="' + esc(aid) + '"></span>' +
-        "</div>" +
-        "</div>"
-      );
+      return render.artifactRowHtml(a, chain, {
+        reviewBusy: state.reviewBusy,
+        reworkBusy: state.reworkBusy,
+        reviewFlash: state.reviewFlash,
+        approvalBlock: state.csApprovalBlock,
+      });
     }
 
-    function roleOfProducer(p) {
-      return String(p || "").replace(/^m-/, "");
-    }
 
     function renderArtifactsChains(chains) {
       if (!chains || !chains.length) return "";
@@ -2462,102 +1459,7 @@
 
     // 任务 DAG：按依赖层级分列，SVG + foreignObject 渲染节点。
     // teamStatus 用于节点级「重试此节点」按钮的可见性（succeeded/cancelled 终态不出按钮）。
-    function dagSvg(tasks, teamStatus) {
-      var showRetry = shouldShowRetry(tasks, teamStatus || "");
-      var byId = {};
-      tasks.forEach(function (t) {
-        byId[t.task_id] = t;
-      });
-      var levelCache = {};
-      function level(id) {
-        if (levelCache[id] != null) return levelCache[id];
-        var t = byId[id];
-        if (!t) return 0;
-        levelCache[id] = 0; // 环保护
-        var lv = 0;
-        var deps = t.depends_on || [];
-        for (var i = 0; i < deps.length; i++) {
-          if (byId[deps[i]]) {
-            var d = level(deps[i]) + 1;
-            if (d > lv) lv = d;
-          }
-        }
-        levelCache[id] = lv;
-        return lv;
-      }
-      var maxL = 0;
-      tasks.forEach(function (t) {
-        var l = level(t.task_id);
-        if (l > maxL) maxL = l;
-      });
-      var cols = {};
-      tasks.forEach(function (t) {
-        var l = level(t.task_id);
-        (cols[l] = cols[l] || []).push(t);
-      });
-      var NW = 210;
-      var NH = 100;
-      var GX = 60;
-      var GY = 40;
-      var PAD = 12;
-      var rows = 0;
-      for (var l = 0; l <= maxL; l++) rows = Math.max(rows, (cols[l] || []).length);
-      var W = PAD * 2 + (maxL + 1) * NW + maxL * GX;
-      var Hh = PAD * 2 + Math.max(rows, 1) * NH + Math.max(rows - 1, 0) * GY;
-      var pos = {};
-      for (var l2 = 0; l2 <= maxL; l2++) {
-        (cols[l2] || []).forEach(function (t, i) {
-          pos[t.task_id] = { x: PAD + l2 * (NW + GX), y: PAD + i * (NH + GY) };
-        });
-      }
-      var edges = "";
-      tasks.forEach(function (t) {
-        (t.depends_on || []).forEach(function (dep) {
-          if (!byId[dep] || !pos[dep] || !pos[t.task_id]) return;
-          var dead = isDeadStatus(byId[dep].status);
-          var s = pos[dep];
-          var e2 = pos[t.task_id];
-          edges +=
-            '<line x1="' + s.x + NW + '" y1="' + (s.y + NH / 2) + '" x2="' + (e2.x - 5) + '" y2="' + (e2.y + NH / 2) + '" marker-end="url(#ws-arrow' + (dead ? "-dead" : "") + ')"' + (dead ? ' class="dead"' : "") + "></line>";
-        });
-      });
-      var nodes = "";
-      tasks.forEach(function (t) {
-        var p = pos[t.task_id];
-        if (!p) return;
-        var st = normStatus(t.status);
-        var blocked = taskBlocked(t, byId);
-        var inner =
-          '<div class="owo-ws-node st-' + st + (blocked ? " blocked" : "") + '">' +
-          '<div class="owo-ws-node-line"><b>' + esc(t.role || t.worker || t.task_id) + "</b>" +
-          '<span class="chip">' + (STEP_STATUS_CN[st] || esc(t.status)) + (blocked ? " · 已阻塞" : "") + "</span></div>" +
-          '<div class="hint">worker ' + esc(t.worker || "—") + (t.attempts ? " · 第 " + t.attempts + " 次" : "") + "</div>" +
-          (t.error
-            ? '<div class="owo-ws-node-err" title="' + esc(t.error) + '">' + esc(short(t.error, 70)) + "</div>"
-            : '<div class="hint">&nbsp;</div>') +
-          // R2 冻结契约入口：仅 Failed/Aborted 节点给出「重试此节点」；
-          // 提交体由 buildRetryBody 构造，提交锁/去重在 handleRetryClick。
-          (showRetry && isRetryableStep(t)
-            ? '<div class="owo-ws-node-act"><button type="button" class="owo-ws-mini owo-ws-retry" data-ws-retry="' +
-              esc(t.task_id) +
-              '" aria-label="重试此节点 ' + esc(t.role || t.worker || t.task_id) + '">↻ 重试此节点</button></div>'
-            : "") +
-          "</div>";
-        nodes +=
-          '<foreignObject x="' + p.x + '" y="' + p.y + '" width="' + NW + '" height="' + NH + '">' + inner + "</foreignObject>";
-      });
-      return (
-        '<svg class="owo-ws-dag" width="' + W + '" height="' + Hh + '">' +
-        "<defs>" +
-        '<marker id="ws-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8899aa"></path></marker>' +
-        '<marker id="ws-arrow-dead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#e05555"></path></marker>' +
-        "</defs>" +
-        "<g>" + edges + "</g>" +
-        nodes +
-        "</svg>"
-      );
-    }
-
+    // DAG SVG 构建（迁入 render.js）（模块化拆分后不再内联，见 panels/workswarm/render.js）
     function paintDag() {
       var box = el("ws-d-dag");
       if (!box) return;
@@ -2611,6 +1513,7 @@
           "</table></div>";
       }
     }
+
 
     // 中断态显示：服务端 interrupted 标记（磁盘 Running 但无活动运行）。
     // 需求红线——中断的团队不得继续显示为正常执行中。
@@ -2701,7 +1604,17 @@
       }
       var act = el("#ws-d-active");
       if (act) {
-        act.textContent = iv ? "◦ 已中断" : state.active ? "● 执行中" : "○ 未执行";
+        act.textContent = iv
+          ? "◦ 意外中断，可恢复"
+          : state.active
+            ? "● 运行中"
+            : st === "succeeded"
+              ? "✓ 已完成"
+              : st === "created"
+                ? "○ 等待启动"
+                : st === "awaiting_human"
+                  ? "◷ 等待你处理"
+                  : "○ 已暂停";
         act.className = "owo-ws-active" + (iv ? " interrupted" : state.active ? " on" : "");
       }
       var meta = el("#ws-d-meta");
@@ -3335,13 +2248,12 @@
     function connectFetchSse(teamId, note) {
       var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
       state.es = ctrl;
-      defaultToken()
-        .then(function (tok) {
+      window.OwoApi.stream("/teams/" + encodeURIComponent(teamId) + "/events", {
+        headers: { "Accept": "text/event-stream" },
+        signal: ctrl ? ctrl.signal : undefined,
+      })
+        .then(function (resp) {
           if (state.es !== ctrl) return null; // 已被取代
-          return fetch(H.baseUrl + "/teams/" + encodeURIComponent(teamId) + "/events", {
-            headers: { "Authorization": "Bearer " + tok, "Accept": "text/event-stream" },
-            signal: ctrl ? ctrl.signal : undefined,
-          }).then(function (resp) {
             if (!resp.ok || !resp.body || typeof resp.body.getReader !== "function") {
               throw new Error("SSE HTTP " + resp.status);
             }
@@ -3380,7 +2292,6 @@
               });
             }
             return pump();
-          });
         })
         .catch(function (e) {
           if (state.es !== ctrl) return; // 已被新连接/停流取代
@@ -3400,48 +2311,7 @@
         connectFetchSse(teamId, "SSE 已连接（fetch 流式，实时推送）");
         return;
       }
-      if (typeof EventSource === "undefined") {
-        startPolling("浏览器不支持 EventSource，使用 2.5s 轮询");
-        return;
-      }
-      state.liveMode = "sse";
-      state.streamNote = "正在连接 SSE…";
-      paintStreamNote();
-      var es;
-      try {
-        es = new EventSource(H.baseUrl + "/teams/" + encodeURIComponent(teamId) + "/events");
-      } catch (e) {
-        startPolling("EventSource 创建失败，使用 2.5s 轮询");
-        return;
-      }
-      state.es = es;
-      var got = false;
-      es.onopen = function () {
-        if (state.es !== es) return;
-        got = true;
-        state.streamNote = "SSE 已连接（实时推送）";
-        paintStreamNote();
-      };
-      es.onmessage = function (ev) {
-        if (state.es !== es) return;
-        var f;
-        try {
-          f = JSON.parse(ev.data);
-        } catch (e) {
-          return;
-        }
-        handleEventFrame(f);
-      };
-      es.onerror = function () {
-        if (state.es !== es) return;
-        // /teams/* 需 Bearer 头，EventSource 无法携带（401 → 连接失败），
-        // 或连接中断：统一降级为可鉴权的 2.5s 轮询，审计自动去重。
-        startPolling(
-          got
-            ? "SSE 中断，已切换 2.5s 轮询"
-            : "SSE 不可用（受保护路由需 Bearer 令牌，浏览器 EventSource 无法携带），已切换 2.5s 轮询"
-        );
-      };
+      startPolling("当前环境不支持带鉴权的 SSE，已切换 2.5s 轮询");
     }
 
     // ---------- 视图：创建团队 ----------
@@ -3584,7 +2454,7 @@
     function renderCreate() {
       return (
         '<div class="owo-ws-sec">' +
-        '<h3>创建团队 <span class="hint">POST /teams —— 创建后立即 spawn 运行（HTTP 202）</span></h3>' +
+        '<h3>创建团队 <span class="hint">创建后立即启动运行</span></h3>' +
         '<label class="hint">目标 objective（必填，不能为空）</label>' +
         '<textarea id="ws-obj" rows="3" spellcheck="false" placeholder="例如：设计并实现一个文本 diff 的 CLI 工具，并给出单元测试"></textarea>' +
         '<div class="owo-ws-inline">' +
@@ -3701,14 +2571,14 @@
         })
         .catch(function (e) {
           var b2 = el("#ws-list-body");
-          if (b2) b2.innerHTML = stateBox("error", explainError(e, "团队列表 GET /teams"), "teams");
+          if (b2) b2.innerHTML = stateBox("error", explainError(e, "团队列表"), "teams");
         });
     }
 
     function renderList() {
       return (
         '<div class="owo-ws-sec">' +
-        '<h3>团队列表 <span class="hint">GET /teams</span> <button class="owo-ws-mini" id="ws-list-refresh">刷新</button></h3>' +
+        '<h3>团队列表 <span class="hint">来自本地核心服务</span> <button class="owo-ws-mini" id="ws-list-refresh">刷新</button></h3>' +
         '<div id="ws-list-body">' + stateBox("loading", "正在加载团队列表…") + "</div>" +
         "</div>"
       );
@@ -3846,7 +2716,7 @@
         })
         .catch(function (e) {
           var b2 = el("#ws-tpl-list");
-          if (b2) b2.innerHTML = stateBox("error", explainError(e, "模板列表 GET /teams/templates"), "templates");
+          if (b2) b2.innerHTML = stateBox("error", explainError(e, "模板列表"), "templates");
         });
     }
 
@@ -3862,7 +2732,7 @@
         })
         .catch(function (e) {
           var b2 = el("#ws-prop-list");
-          if (b2) b2.innerHTML = stateBox("error", explainError(e, "提案列表 GET /teams/templates/proposals"), "proposals");
+          if (b2) b2.innerHTML = stateBox("error", explainError(e, "提案列表"), "proposals");
         });
     }
 
@@ -3906,11 +2776,11 @@
     function renderTemplates() {
       return (
         '<div class="owo-ws-sec">' +
-        '<h3>已采纳模板 <span class="hint">GET /teams/templates —— 采纳后可在创建团队时选用</span> <button class="owo-ws-mini" id="ws-tpl-refresh">刷新</button></h3>' +
+        '<h3>已采纳模板 <span class="hint">采纳后可在创建团队时选用</span> <button class="owo-ws-mini" id="ws-tpl-refresh">刷新</button></h3>' +
         '<div class="owo-ws-tpl-grid" id="ws-tpl-list">' + stateBox("loading", "正在加载已采纳模板…") + "</div>" +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>模板提案 <span class="hint">GET /teams/templates/proposals —— 只提案不自动启用，需人工采纳/拒绝</span> <button class="owo-ws-mini" id="ws-prop-refresh">刷新</button></h3>' +
+        '<h3>模板提案 <span class="hint">只提案不自动启用，需人工采纳/拒绝</span> <button class="owo-ws-mini" id="ws-prop-refresh">刷新</button></h3>' +
         '<div class="owo-ws-tpl-grid" id="ws-prop-list">' + stateBox("loading", "正在加载模板提案…") + "</div>" +
         "</div>"
       );
@@ -4106,7 +2976,7 @@
         '<span class="owo-ws-int-detail">检测到上次进程未正常收尾遗留的运行态：任务进度已保留，未自动重放任何写操作。可用「继续（continue）」恢复运行，或对失败/被中断节点点「重试此节点」。</span></div>' +
         '<div class="owo-ws-gate" id="ws-d-gate">⛔ 团队已进入终态：运行操作与人节点结果提交已停用（仍可查看任务、产物与审计）。</div>' +
         '<div class="owo-ws-sec">' +
-        '<h3>运行操作 <span class="hint">POST /teams/{id}/steer —— continue / retry（失败节点按钮）/ steer / replace / cancel</span></h3>' +
+        '<h3>运行操作 <span class="hint">继续 / 重试失败节点 / 转向 / 更换成员 / 取消</span></h3>' +
         '<div class="owo-ws-inline">' +
         '<button id="ws-act-continue" class="owo-ws-mini">继续（continue）</button>' +
         '<button id="ws-act-steer-toggle" class="owo-ws-mini">转向（steer）▾</button>' +
@@ -4131,7 +3001,7 @@
         '<pre class="owo-ws-result sub" id="ws-act-result">—</pre>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>成员与职责 <span class="hint">GET /teams/{id} · members / runtime_binding / handoff_contract</span></h3>' +
+        '<h3>成员与职责 <span class="hint">成员 / 运行绑定 / 交接契约</span></h3>' +
         '<div class="owo-ws-member-grid" id="ws-d-members">' + stateBox("loading", "正在加载成员与职责…") + "</div>" +
         "</div>" +
         '<div class="owo-ws-sec">' +
@@ -4139,7 +3009,7 @@
         '<div id="ws-d-dag">' + stateBox("loading", "正在加载任务…") + "</div>" +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>人节点结果 <span class="hint">POST /tasks/{id}/human-result —— 团队处于"等待人节点"时由人工提交结果，下游任务自动继续</span></h3>' +
+        '<h3>人节点结果 <span class="hint">团队处于"等待人节点"时由人工提交结果，下游任务自动继续</span></h3>' +
         '<div class="owo-ws-inline">' +
         "<label>人节点任务</label><select id=\"ws-h-task\"></select>" +
         "</div>" +
@@ -4149,7 +3019,7 @@
         '<pre class="owo-ws-result sub" id="ws-h-result">—</pre>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>任务交接 <span class="hint">POST /tasks/{id}/handoff —— 记录"谁完成了什么、留下什么问题、下一步建议"</span></h3>' +
+        '<h3>任务交接 <span class="hint">记录"谁完成了什么、留下什么问题、下一步建议"</span></h3>' +
         '<div class="owo-ws-inline">' +
         "<label>任务</label><select id=\"ws-x-task\"></select>" +
         "<label>from_member</label><select id=\"ws-x-from\"></select>" +
@@ -4186,21 +3056,21 @@
         '<div id="ws-d-csets"></div>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>组队策略与角色指标 <span class="hint">auto 判定理由 / GET /teams/{id}/metrics —— 耗时·调用·token·费用·预算余量</span>' +
+        '<h3>组队策略与角色指标 <span class="hint">auto 判定理由 —— 耗时·调用·token·费用·预算余量</span>' +
         '<button class="owo-ws-mini" id="ws-metrics-refresh">刷新指标</button></h3>' +
         '<div id="ws-d-strategy" class="owo-ws-strategybox">' + strategyBoxHtml(state.strategyDecision) + "</div>" +
         '<div id="ws-d-metrics">' + metricsCardsHtml(state.metrics, state.strategyDecision && state.strategyDecision.budgetPerRole) + "</div>" +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>产物 <span class="hint">GET /projects/{pid}/artifacts —— CAS 引用，版本链 + 评审闭环</span>' +
+        '<h3>产物 <span class="hint">CAS 引用，版本链 + 评审闭环</span>' +
         '<button class="owo-ws-mini" id="ws-art-refresh">刷新产物</button>' +
         '<button class="owo-ws-mini" id="ws-dlv-toggle">最终交付物</button>' +
-        '<button class="owo-ws-mini" id="ws-dlv-dl" title="GET /projects/{pid}/delivery-manifest —— 版本/哈希/校验/证据汇总文本">下载交付清单</button></h3>' +
+        '<button class="owo-ws-mini" id="ws-dlv-dl" title="版本/哈希/校验/证据汇总文本">下载交付清单</button></h3>' +
         '<div id="ws-dlv-box" hidden></div>' +
         '<div id="ws-d-artifacts">' + stateBox("loading", "正在加载产物…") + "</div>" +
         "</div>" +
         '<div class="owo-ws-sec">' +
-        '<h3>审计事件（实时） <span class="hint">GET /teams/{id}/events</span> <span class="owo-ws-live off" id="ws-d-stream"></span></h3>' +
+        '<h3>审计事件（实时） <span class="hint">团队事件流</span> <span class="owo-ws-live off" id="ws-d-stream"></span></h3>' +
         '<div class="owo-ws-audit" id="ws-d-audit" role="log" aria-label="审计事件流（可聚焦后用方向键滚动）" tabindex="0">' + stateBox("loading", "正在连接审计通道…") + "</div>" +
         "</div>" +
         "</div>"
@@ -4659,6 +3529,7 @@
       nav: nav,
       mount: mount,
       refresh: refresh,
+      dispose: function () { stopLive("已离开团队页面"); rootEl = null; },
       open: openTeam, // 六期：Project Launcher 创建成功后直达团队详情
       _test: TEST_API,
     };

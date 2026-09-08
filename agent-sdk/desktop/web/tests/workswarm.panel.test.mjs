@@ -189,7 +189,7 @@ test("renderDetail 骨架：运行摘要 / 中断横幅 / 审计键盘焦点 / r
   assert.match(html, /id="ws-d-interrupted" role="alert"/);
   assert.match(html, /运行已中断，可恢复/);
   assert.match(html, /id="ws-d-audit"[^>]*tabindex="0"/);
-  assert.match(html, /continue \/ retry（失败节点按钮）/);
+  assert.match(html, /继续 \/ 重试失败节点 \/ 转向 \/ 更换成员 \/ 取消/, "运行操作提示必须用产品语言，不得出现 API 路径");
   assert.match(html, /id="ws-act-continue"/);
   assert.match(html, /id="ws-act-cancel"/);
   assert.ok(!html.includes("##"));
@@ -290,16 +290,20 @@ test("style.css 第 16 节守卫：inline 换行/中断徽标/重试按钮/表�
 
 // ==================== 四期：实时进度（progress 事件） ====================
 
+// 纯函数测试固定参考时钟：fixture 与断言共用同一时刻，禁止读取系统时钟
+// （重构方案 3.2：消除耗时/退避/TTL 类断言对真实时钟的依赖，避免慢 CI 偶发失败）。
+const FIXED_NOW = Date.parse("2026-01-01T00:00:00.000Z");
+
 const PROGRESS_EVT = {
   seq: 18,
   team_id: "team-1",
   status: "Running",
   active: true,
   current_steps: [
-    { step_id: "builder", worker: "builder", status: "Running", attempts: 1, started_at: new Date(Date.now() - 90_000).toISOString() },
+    { step_id: "builder", worker: "builder", status: "Running", attempts: 1, started_at: new Date(FIXED_NOW - 90_000).toISOString() },
   ],
   counts: { pending: 2, running: 1, succeeded: 1, failed: 0 },
-  updated_at: new Date().toISOString(),
+  updated_at: new Date(FIXED_NOW).toISOString(),
 };
 
 test("applyProgress：合法事件入状态并同步 teamStatus/active", () => {
@@ -337,23 +341,22 @@ test("applyProgress：current_steps 缺 step_id 的行被剔除、缺失字段�
 test("computeProgressView：耗时基于 started_at，running 标记与状态中文", () => {
   resetState();
   T.applyProgress(PROGRESS_EVT);
-  const now = Date.now();
-  const vm = T.computeProgressView(now);
+  const vm = T.computeProgressView(FIXED_NOW);
   assert.equal(vm.seq, 18);
   assert.deepEqual(vm.counts, { pending: 2, running: 1, succeeded: 1, failed: 0 });
   assert.equal(vm.rows.length, 1);
   assert.equal(vm.rows[0].step_id, "builder");
   assert.equal(vm.rows[0].running, true);
   assert.equal(vm.rows[0].statusCn, "运行中");
-  assert.ok(vm.rows[0].elapsedMs >= 89_000 && vm.rows[0].elapsedMs <= 91_500, "耗时约 90s（±容差）");
+  assert.equal(vm.rows[0].elapsedMs, 90_000, "固定时钟下耗时精确等于 started_at 至 FIXED_NOW 的间隔");
   assert.equal(vm.cancelling, false);
 });
 
 test("computeProgressView：无 progress → null；started_at 非法 → elapsed null", () => {
   resetState();
-  assert.equal(T.computeProgressView(Date.now()), null);
+  assert.equal(T.computeProgressView(FIXED_NOW), null);
   T.applyProgress({ seq: 2, current_steps: [{ step_id: "s", worker: "w", status: "Succeeded", attempts: 2, started_at: "not-a-date" }] });
-  const vm = T.computeProgressView(Date.now());
+  const vm = T.computeProgressView(FIXED_NOW);
   assert.equal(vm.rows[0].elapsedMs, null);
   assert.equal(vm.rows[0].running, false);
 });
@@ -362,7 +365,7 @@ test("computeProgressView：取消中标志进入视图", () => {
   resetState();
   T.applyProgress({ seq: 3, current_steps: [], counts: {} });
   T.state.cancelling = true;
-  assert.equal(T.computeProgressView(Date.now()).cancelling, true);
+  assert.equal(T.computeProgressView(FIXED_NOW).cancelling, true);
 });
 
 test("renderProgress：空态/计数徽标/取消中/步骤行（worker·状态·尝试·耗时）", () => {
@@ -370,7 +373,7 @@ test("renderProgress：空态/计数徽标/取消中/步骤行（worker·状态�
   assert.match(T.renderProgress(null), /暂无实时进度事件/);
   T.applyProgress(PROGRESS_EVT);
   T.state.cancelling = true;
-  const html = T.renderProgress(T.computeProgressView(Date.now()));
+  const html = T.renderProgress(T.computeProgressView(FIXED_NOW));
   assert.match(html, /seq #18/);
   assert.match(html, /等待 <b>2<\/b>/);
   assert.match(html, /运行 <b>1<\/b>/);

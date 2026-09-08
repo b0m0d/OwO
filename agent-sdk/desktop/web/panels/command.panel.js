@@ -11,24 +11,10 @@ window.OwoPanels.command = (function () {
   function defaultHelpers() {
     var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || "http://127.0.0.1:4098";
     function get(path) {
-      return fetch(baseUrl + path).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
-      });
+      return window.OwoApi.get(path);
     }
     function post(path, body) {
-      return fetch(baseUrl + path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {}),
-      }).then(function (r) {
-        if (!r.ok) {
-          return r.json().then(function (j) {
-            throw new Error((j && j.error) || "HTTP " + r.status);
-          });
-        }
-        return r.json();
-      });
+      return window.OwoApi.post(path, body || {});
     }
     function esc(s) {
       return String(s == null ? "" : s)

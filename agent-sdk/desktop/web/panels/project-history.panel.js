@@ -35,55 +35,12 @@
     // ---------- helpers（优先 app.js 注入，缺失时自建回退，与 action-center 同款） ----------
     var H = {};
     var rootEl = null;
-    var tokenPromise = null;
-
-    function defaultToken() {
-      if (!tokenPromise) {
-        tokenPromise = fetch(H.baseUrl + "/auth/token").then(function (r) {
-          if (!r.ok) throw new Error("token 引导失败（HTTP " + r.status + "）");
-          return r.json().then(function (d) {
-            var t = d && d.token;
-            if (!t) throw new Error("token 引导响应缺少 token");
-            return t;
-          });
-        }).catch(function (e) {
-          tokenPromise = null;
-          throw e;
-        });
-      }
-      return tokenPromise;
-    }
-
-    function httpFinish(r) {
-      if (!r.ok) {
-        return r.text().then(function (b) {
-          throw new Error(r.status + ": " + b);
-        });
-      }
-      if (r.status === 204) return null;
-      return r.json();
-    }
-
     function defaultGet(path) {
-      return defaultToken().then(function (tok) {
-        return fetch(H.baseUrl + path, {
-          headers: { "Authorization": "Bearer " + tok, "Accept": "application/json" },
-        }).then(httpFinish);
-      });
+      return window.OwoApi.get(path);
     }
 
     function defaultPost(path, body) {
-      return defaultToken().then(function (tok) {
-        return fetch(H.baseUrl + path, {
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + tok,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-          },
-          body: JSON.stringify(body || {}),
-        }).then(httpFinish);
-      });
+      return window.OwoApi.post(path, body || {});
     }
 
     function defaultEsc(s) {

@@ -1,103 +1,87 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! OwO Agent 桌面主客户端（v0.4 P1）：Tauri 2 窗口壳 + 常驻核心服务 + 全局快捷键 + 托盘。
+//! OwO Agent 桌面主客户端：Tauri 2 窗口壳 + 自有核心运行时 + 全局快捷键 + 托盘。
 //!
-//! 壳本身无状态：加载 `desktop/web` 工作台，通过本机 HTTP 访问
-//! `owo-agent serve` 常驻核心服务；退出时自动结束核心服务子进程。
+//! §4.2 重构后本文件只保留 Tauri builder 与事件接线：
+//! - 核心生命周期全部归 `core_runtime::CoreRuntime`（动态端口 + 实例握手 +
+//!   受控重启 + 日志捕获 + 优雅关闭），壳是核心进程的唯一 owner；
+//! - 单实例锁（`single_instance`）：第二次启动直接退出，不另起 core；
+//! - WebView 经 `commands`（get_core_connection 等）取得端口与实例身份，
+//!   不再硬编码 4096，也不自行猜服务地址。
 
-use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, RunEvent};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
 
-const CORE_PORT: u16 = 4096;
+mod commands;
+mod core_runtime;
+mod core_supervisor;
+mod single_instance;
 
-struct CoreServer(Mutex<Option<Child>>);
-struct AutostartState(Mutex<bool>);
+use core_runtime::{CoreRuntime, CORE_API_VERSION};
+use single_instance::{AcquireOutcome, InstanceLock};
 
-/// 开发环境定位核心服务：`<repo>/agent-sdk/target/debug/owo-agent.exe`。
-fn core_server_path() -> PathBuf {
-    // 便携发布：核心服务与桌面壳同级。
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let bundled = dir.join("owo-agent-x64.exe");
-            if bundled.exists() {
-                return bundled;
-            }
-            let sibling = dir.join("owo-agent.exe");
-            if sibling.exists() {
-                return sibling;
-            }
-        }
-    }
-    // 开发环境：<repo>/agent-sdk/target/debug/owo-agent.exe。
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // desktop/tauri/src-tauri
-    manifest
-        .parent() // desktop/tauri
-        .and_then(|parent| parent.parent()) // desktop
-        .and_then(|parent| parent.parent()) // agent-sdk
-        .map(|root| root.join("target").join("debug").join("owo-agent.exe"))
-        .unwrap_or_else(|| PathBuf::from("owo-agent.exe"))
-}
+/// 构建期内嵌 tauri.conf.json：用于判断 updater 是否仍指向占位源（§10.2）。
+const TAURI_CONF: &str = include_str!("../tauri.conf.json");
 
-fn spawn_core_server() -> Option<Child> {
-    let exe = core_server_path();
-    if !exe.exists() {
-        eprintln!("[owo-desktop] 核心服务不存在：{}", exe.display());
-        return None;
-    }
-    let portable = exe
-        .file_name()
-        .map(|name| name.to_string_lossy().contains("-x64"))
+/// 占位更新源检测：缺少真实签名源时，「检查更新」不得作为可用功能暴露。
+fn updater_endpoint_is_placeholder() -> bool {
+    serde_json::from_str::<serde_json::Value>(TAURI_CONF)
+        .ok()
+        .and_then(|value| {
+            value["plugins"]["updater"]["endpoints"][0]
+                .as_str()
+                .map(|endpoint| endpoint.contains("example.com"))
+        })
         .unwrap_or(false)
-        || exe
-            .parent()
-            .map(|dir| dir.join("owo-agent-desktop.exe").exists())
-            .unwrap_or(false);
-    let workspace = if portable {
-        exe.parent()?.to_path_buf() // 便携发布：应用目录
-    } else {
-        exe.parent()?.parent()?.parent()?.to_path_buf() // 开发：agent-sdk
-    };
-    let port = CORE_PORT.to_string();
-    let mut command = Command::new(exe);
-    command
-        .args(["serve", "--port"])
-        .arg(&port)
-        .arg("--workspace")
-        .arg(workspace);
-
-    // 桌面壳必须能先把本地服务拉起。没有云端凭据时，核心服务会接受
-    // OpenAI 兼容的本地端点；这避免了 UI 已打开、后端却因缺少 API key
-    // 立即退出，从而把所有面板都变成 connection refused。
-    if std::env::var_os("OPENAI_API_KEY").is_none() && std::env::var_os("OPENAI_BASE_URL").is_none()
-    {
-        if let Some(token_plan_key) = std::env::var_os("DASHSCOPE_API_KEY") {
-            // 千问 Token Plan 专属密钥必须配套使用该端点；不把密钥写入
-            // settings.json，子进程仅从用户环境变量继承它。
-            command.env("OPENAI_API_KEY", token_plan_key).env(
-                "OPENAI_BASE_URL",
-                "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-            );
-        } else {
-            command
-                .env("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1")
-                .env("OPENAI_MODEL", "local");
-        }
-    }
-
-    command.spawn().ok()
 }
 
+/// §4.1 唤回窗口：显示、取消最小化、聚焦，并把窗口移回当前可见显示器
+/// （连续双击、被遮挡、最小化、关闭到托盘四种场景都必须把同一窗口带回前台）。
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.set_focus();
+        move_onto_visible_monitor(&window);
+    }
+}
+
+/// 窗口越出所有可见显示器（例如显示拓扑变化后）时，移回主显示器工作区中央。
+fn move_onto_visible_monitor(window: &tauri::WebviewWindow) {
+    let Ok(outer_position) = window.outer_position() else {
+        return;
+    };
+    let Ok(outer_size) = window.outer_size() else {
+        return;
+    };
+    let right = outer_position.x + outer_size.width as i32;
+    let bottom = outer_position.y + outer_size.height as i32;
+    let Ok(monitors) = window.available_monitors() else {
+        return;
+    };
+    let on_visible = monitors.iter().any(|monitor| {
+        let area = monitor.work_area();
+        let left = area.position.x;
+        let top = area.position.y;
+        let area_right = left + area.size.width as i32;
+        let area_bottom = top + area.size.height as i32;
+        // 与任一显示器工作区有相交即视为可见。
+        right > left && left < area_right && bottom > top && top < area_bottom
+    });
+    if on_visible {
+        return;
+    }
+    if let Ok(Some(primary)) = window.primary_monitor() {
+        let area = primary.work_area();
+        let x = area.position.x + (area.size.width as i32 - outer_size.width as i32) / 2;
+        let y = area.position.y + (area.size.height as i32 - outer_size.height as i32) / 2;
+        let _ = window.set_position(tauri::PhysicalPosition::new(x.max(0), y.max(0)));
     }
 }
 
@@ -133,12 +117,39 @@ fn set_autostart(enabled: bool) -> std::io::Result<()> {
 }
 
 fn main() {
+    // §4.1 单实例：主实例持有锁；第二实例已向主实例发唤回消息，本进程立即退出；
+    // 权限/系统错误显示原生错误框并写桌面日志后再退出（拒绝静默哑死）。
+    let mut instance_lock = match InstanceLock::acquire() {
+        AcquireOutcome::Primary(lock) => lock,
+        AcquireOutcome::WokeExisting => {
+            eprintln!("[owo-desktop] 已有 OwO Agent 桌面实例在运行，本次启动退出");
+            return;
+        }
+        AcquireOutcome::PermissionDenied(message) | AcquireOutcome::Unexpected(message) => {
+            InstanceLock::report_fatal(&message);
+            return;
+        }
+    };
+
+    // §4.2：壳每次启动生成新的配对证明与实例身份，并注入给自己的核心子进程；
+    // 任何不属于该身份的服务（旧核心/占用者）都会被握手拒绝，而不是静默复用。
+    let pairing = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let instance_id = uuid::Uuid::new_v4().simple().to_string();
+    let runtime = Arc::new(CoreRuntime::new(pairing, instance_id));
+    runtime.start();
+
+    let runtime_for_exit = Arc::clone(&runtime);
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .setup(|app| {
-            let child = spawn_core_server();
-            app.manage(CoreServer(Mutex::new(child)));
-            app.manage(AutostartState(Mutex::new(autostart_enabled())));
+        .manage(Arc::clone(&runtime))
+        .setup(move |app| {
+            // §4.1 唤回通道：第二实例/托盘/快捷键命中时，把同一窗口带回前台。
+            let wake_handle = app.handle().clone();
+            instance_lock.start_wake_listener(move || show_main_window(&wake_handle));
 
             // 全局快捷键：Ctrl+Alt+Shift+O 唤起工作台（避免常见冲突）。
             let shortcut = Shortcut::new(
@@ -156,7 +167,7 @@ fn main() {
                 eprintln!("[owo-desktop] 全局快捷键注册失败（继续运行）：{error}");
             }
 
-            // 托盘：显示 / 退出。
+            // 托盘：显示 / 自启 / 更新（占位源时禁用）/ 退出。
             let show = MenuItem::with_id(app, "show", "显示工作台", true, None::<&str>)?;
             let autostart_label = if autostart_enabled() {
                 "开机自启：开"
@@ -165,8 +176,19 @@ fn main() {
             };
             let autostart =
                 MenuItem::with_id(app, "autostart", autostart_label, true, None::<&str>)?;
-            let check_update =
-                MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
+            let placeholder = updater_endpoint_is_placeholder();
+            let update_label = if placeholder {
+                "检查更新（未配置更新源）"
+            } else {
+                "检查更新"
+            };
+            let check_update = MenuItem::with_id(
+                app,
+                "check-update",
+                update_label,
+                !placeholder,
+                None::<&str>,
+            )?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &autostart, &check_update, &quit])?;
             let icon = app.default_window_icon().cloned().ok_or("缺少应用图标")?;
@@ -200,6 +222,10 @@ fn main() {
                         }
                     }
                     "check-update" => {
+                        // 仅当构建配置携带真实更新源时才实际检查（§10.2）。
+                        if updater_endpoint_is_placeholder() {
+                            return;
+                        }
                         let handle = app.clone();
                         tauri::async_runtime::spawn(async move {
                             let result = match handle.updater() {
@@ -213,22 +239,10 @@ fn main() {
                                         update.version,
                                         update.body.unwrap_or_default()
                                     );
-                                    if let Some(menu) = handle.menu() {
-                                        if let Some(item) = menu.get("check-update") {
-                                            if let Some(menuitem) = item.as_menuitem() {
-                                                let _ = menuitem.set_text("检查更新（有新版本）");
-                                            }
-                                        }
-                                    }
+                                    set_menu_text(&handle, "check-update", "检查更新（有新版本）");
                                 }
                                 Ok(None) => {
-                                    if let Some(menu) = handle.menu() {
-                                        if let Some(item) = menu.get("check-update") {
-                                            if let Some(menuitem) = item.as_menuitem() {
-                                                let _ = menuitem.set_text("检查更新（已是最新）");
-                                            }
-                                        }
-                                    }
+                                    set_menu_text(&handle, "check-update", "检查更新（已是最新）");
                                 }
                                 Err(error) => {
                                     eprintln!("[owo-desktop] 检查更新失败：{error}");
@@ -240,19 +254,75 @@ fn main() {
                     _ => {}
                 })
                 .build(app)?;
+            app.manage(AutostartState(std::sync::Mutex::new(autostart_enabled())));
             Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::get_core_state,
+            commands::get_core_connection,
+            commands::retry_core_start,
+            commands::open_core_logs,
+            desktop_pairing
+        ])
+        // §4.2 关闭到托盘协议：主窗口关闭请求一律拦截为隐藏到托盘，
+        // 只有托盘「退出」才真正关闭核心与进程；首次隐藏发一次性后台提示。
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    emit_background_notice_once(window.app_handle());
+                }
+            }
         })
         .build(tauri::generate_context!())
         .expect("构建 OwO Agent 桌面应用失败")
-        .run(|app_handle, event| {
+        .run(move |_app_handle, event| {
             if let RunEvent::Exit = event {
-                if let Some(state) = app_handle.try_state::<CoreServer>() {
-                    if let Ok(mut guard) = state.0.lock() {
-                        if let Some(mut child) = guard.take() {
-                            let _ = child.kill();
-                        }
-                    }
-                }
+                runtime_for_exit.shutdown();
             }
         });
+}
+
+/// 关闭到托盘后的一次性后台提示（同会话只提示一次，避免骚扰）。
+fn emit_background_notice_once(app: &tauri::AppHandle) {
+    static NOTICED: AtomicBool = AtomicBool::new(false);
+    if NOTICED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    for window in app.webview_windows().values() {
+        let _ = window.emit(
+            "owo:background",
+            serde_json::json!({ "message": "OwO Agent 仍在后台运行，点击托盘图标可再次打开工作台。" }),
+        );
+    }
+}
+
+fn set_menu_text(app: &tauri::AppHandle, id: &str, text: &str) {
+    if let Some(menu) = app.menu() {
+        if let Some(item) = menu.get(id) {
+            if let Some(menuitem) = item.as_menuitem() {
+                let _ = menuitem.set_text(text);
+            }
+        }
+    }
+}
+
+struct AutostartState(std::sync::Mutex<bool>);
+
+/// 兼容保留：WebView 引导仍以 Tauri IPC 取配对证明（api-client.js 的
+/// desktop_pairing 命令）；发布构建下引导还需实例身份头（get_core_connection）。
+#[tauri::command]
+fn desktop_pairing(runtime: tauri::State<'_, Arc<CoreRuntime>>) -> String {
+    runtime.pairing().to_string()
+}
+
+// CORE_API_VERSION 供后续 get_core_connection 比对；当前经 commands 返回
+// ready.apiVersion（来自 /health 实测值），此处引用避免 unused 警告。
+const _: () = {
+    // 编译期占位：保证常量仍被编译进二进制单一源。
+};
+#[allow(dead_code)]
+fn _assert_core_api_version_in_scope() -> &'static str {
+    CORE_API_VERSION
 }

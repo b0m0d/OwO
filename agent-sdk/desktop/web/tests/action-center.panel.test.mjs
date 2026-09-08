@@ -299,7 +299,8 @@ test("sectionsHtml：四类目节骨架 + 计数 + 重试按钮 data 属性 + �
   // ① 人节点：团队徽标 + 任务清单 + 深链
   assert.ok(html.includes("团队 awaiting_human"), "awaiting_team 徽标行");
   assert.ok(html.includes('data-ac-goto="t-1"'));
-  assert.ok(html.includes("POST /tasks/{id}/human-result"), "人节点结果提交指引");
+  assert.ok(html.includes("在团队详情「人节点结果」区提交结果"), "人节点结果提交指引（不得出现 API 路径）");
+  assert.ok(!/POST \//.test(html.match(/<span class="hint">[^<]*<\/span>/g)?.join("") || ""), "hint 文案不得包含 API 动词路径");
 
   // ② 评审：待评审 / 校验未通过双徽标
   assert.ok(html.includes("待评审"));
@@ -604,7 +605,8 @@ test("inboxSectionsHtml：四节骨架 + 计数徽标 + 动作按钮 data 属性
   assert.match(html, /data-ic-act="request_changes"/);
   assert.match(html, /data-ic-act="accept"/);
   assert.match(html, /data-ic-act="claim"/);
-  assert.match(html, /正式 Inbox（\/human\/inbox）/);
+  assert.match(html, /待你处理的人工事项/);
+  assert.ok(!/\/human\/inbox/.test(html.match(/<h3>[\s\S]*?<\/h3>/g).join("")), "分区标题不得出现 API 路径");
 });
 
 test("load()：inbox 优先（不触发 /teams 客户端聚合）", async () => {

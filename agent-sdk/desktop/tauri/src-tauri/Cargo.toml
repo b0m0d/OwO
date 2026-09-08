@@ -16,7 +16,20 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
 winreg = "0.55"
+
+# §4.1 单实例命名管道（OwO-Agent-Desktop）：Windows 专属；0.61 与锁文件现有
+# windows-sys 传递依赖同版本，离线可复用缓存，不引入新 crate。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.dev]
 incremental = true

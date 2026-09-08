@@ -9,18 +9,10 @@
     var H = {};
 
     function defaultGet(path) {
-      return fetch((H.baseUrl || "") + path).then(function (r) {
-        return r.json();
-      });
+      return window.OwoApi.get(path);
     }
     function defaultPost(path, body) {
-      return fetch((H.baseUrl || "") + path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {}),
-      }).then(function (r) {
-        return r.json();
-      });
+      return window.OwoApi.post(path, body || {});
     }
     function defaultEsc(s) {
       return String(s == null ? "" : s)
