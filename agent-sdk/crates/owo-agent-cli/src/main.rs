@@ -309,6 +309,7 @@ struct TurnArgs {
 
 #[derive(Args)]
 struct ServeArgs {
+    /// 监听端口（0 = 由系统分配临时端口；实际端口经 stdout 的 core_ready 行上报）
     #[arg(long, default_value_t = 4096)]
     port: u16,
     #[arg(long, default_value = ".")]
@@ -1140,10 +1141,13 @@ fn attach_auto_review(agent: &mut Agent, model: &str) {
 async fn connect_mcp_clients(
     configs: &[McpServerConfig],
 ) -> Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)> {
+    // 服务端必须先进入可用状态；外部 MCP 的不可达/握手卡住不能无限阻塞
+    // 本地 HTTP 监听和桌面壳健康检查。失败的可选 MCP 保持降级，后续重启可重试。
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
     let mut clients = Vec::new();
     for config in configs {
-        match McpClient::connect(config).await {
-            Ok(client) => {
+        match tokio::time::timeout(CONNECT_TIMEOUT, McpClient::connect(config)).await {
+            Ok(Ok(client)) => {
                 println!(
                     "{} MCP {}（工具 {} 个）",
                     "已连接".green(),
@@ -1155,7 +1159,13 @@ async fn connect_mcp_clients(
                     Arc::new(tokio::sync::Mutex::new(client)),
                 ));
             }
-            Err(error) => println!("{} MCP {} 连接失败：{error}", "✘".red(), config.name),
+            Ok(Err(error)) => println!("{} MCP {} 连接失败：{error}", "✘".red(), config.name),
+            Err(_) => println!(
+                "{} MCP {} 在 {} 秒内未完成连接，已跳过（不阻塞本地服务启动）",
+                "✘".red(),
+                config.name,
+                CONNECT_TIMEOUT.as_secs()
+            ),
         }
     }
     clients
@@ -1351,7 +1361,27 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let app = owo_agent_server::build_router(Arc::clone(&state));
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("owo-agent server listening on http://{addr}");
+    let bound = listener.local_addr()?;
+    tracing::info!("owo-agent server listening on http://{bound}");
+    // §4.2 实例握手：路由/数据库/凭据初始化完成且端口已绑定后，向 stdout 打印
+    // 恰好一行 core_ready JSON。桌面壳以该行（而非"TCP 能连"）判定服务就绪，
+    // 并据此取得实际端口（--port 0 时由系统分配）。stdout 其他内容不受影响。
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "core_ready",
+            "pid": std::process::id(),
+            "port": bound.port(),
+            "api_version": owo_agent_server::OWO_API_VERSION,
+            "build_id": resolve_build_id(),
+            "instance_id": std::env::var("OWO_DESKTOP_INSTANCE_ID")
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        })
+    );
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
     let result = axum::serve(listener, app).await;
     // 服务退出：终止全部 MCP stdio 子进程，不留孤儿进程。
     let shutdown_errors = state.agent.shutdown_all_mcp().await;
@@ -1360,6 +1390,25 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     result?;
     Ok(())
+}
+
+/// §4.2：core_ready 行的 build_id 解析——优先 OWO_BUILD_INFO 指定的
+/// build-info.json 的 git_commit，其次 cwd 下 build-info.json；均缺失时 "unknown"。
+fn resolve_build_id() -> String {
+    let path = std::env::var("OWO_BUILD_INFO")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("build-info.json"));
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| {
+            value["git_commit"]
+                .as_str()
+                .filter(|commit| !commit.is_empty())
+                .map(|commit| commit.to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn merge_plugin_mcp(

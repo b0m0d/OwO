@@ -5,8 +5,8 @@
 //! - Windows 下用 `icacls` 把文件 ACL 收紧为仅当前用户（`/inheritance:r /grant:r`）；
 //!   ACL 应用失败时优雅降级（返回 `acl_warning`），服务仍可运行，由审计记录提示。
 //! - 校验为恒定时间比较（长度不匹配同样消耗相同指令量，不提前返回）。
-//! - 前端引导：`GET /auth/token` 由 build_router 暴露为公开引导端点（同源可读，
-//!   CORS 白名单阻止跨源读取；等价于同用户可读 token 文件本身）。
+//! - 前端引导：开发/浏览器调试时 `GET /auth/token` 仍可公开读取；发布桌面壳会
+//!   注入一次进程配对证明，核心仅接受带正确证明的引导请求。
 //!
 //! 本模块不引用 `crate::`/`super::`（AppState 全限定），可被测试以
 //! `#[path] mod` 独立编译。
@@ -32,16 +32,86 @@ pub const TOKEN_FILE_NAME: &str = "token";
 pub const AUTH_HEADER: &str = "authorization";
 /// Bearer 前缀。
 pub const BEARER_PREFIX: &str = "Bearer ";
+/// 桌面壳与其核心子进程之间的一次进程配对证明头。
+pub const DESKTOP_PAIRING_HEADER: &str = "x-owo-desktop-pairing";
+/// 发布桌面壳传给核心子进程的配对证明环境变量。
+pub const DESKTOP_PAIRING_ENV: &str = "OWO_DESKTOP_PAIRING_SECRET";
+/// 桌面壳注入的实例身份头（§4.2：壳只认自己启动的核心实例）。
+pub const DESKTOP_INSTANCE_HEADER: &str = "x-owo-desktop-instance";
+/// 发布桌面壳传给核心子进程的实例身份环境变量。
+pub const DESKTOP_INSTANCE_ENV: &str = "OWO_DESKTOP_INSTANCE_ID";
 
 /// 无需鉴权的公开端点（健康/OpenAPI/引导）。
 pub fn is_public_path(path: &str) -> bool {
     matches!(path, "/health" | "/openapi.json" | "/auth/token")
 }
 
-/// SSE 资源型路径（EventSource API 无法携带 Authorization 头，凭 token 引导已
-/// 经完成配对；内容为只读进度遥测，无写能力）。此类路径免鉴权。
+/// 发布桌面子进程是否要求 `/auth/token` 附带进程配对证明。
+///
+/// 仅在壳显式注入非空随机证明时收紧：开发时直接运行 `owo-agent serve`
+/// 仍可进行浏览器调试，也不会因为旧客户端没有该头而误锁本地服务。
+pub fn desktop_pairing_secret() -> Option<String> {
+    std::env::var(DESKTOP_PAIRING_ENV)
+        .ok()
+        .map(|secret| secret.trim().to_string())
+        .filter(|secret| secret.len() >= 32)
+}
+
+/// 使用恒定时间比较验证桌面壳注入的配对证明。
+pub fn verify_desktop_pairing(value: Option<&HeaderValue>, expected: &str) -> bool {
+    value
+        .and_then(|header| header.to_str().ok())
+        .map(|provided| constant_time_eq(expected.as_bytes(), provided.as_bytes()))
+        .unwrap_or(false)
+}
+
+/// 引导门控判定（纯函数，供测试直接验证全矩阵）：
+/// - 无配对证明（开发模式）→ 放行（浏览器调试兼容）；
+/// - 有配对证明 → 请求头必须恒定时间精确匹配，否则拒绝。
+pub fn pairing_gate_allows(expected_secret: Option<&str>, provided: Option<&HeaderValue>) -> bool {
+    match expected_secret {
+        None => true,
+        Some(secret) => verify_desktop_pairing(provided, secret),
+    }
+}
+
+/// 桌面壳注入的实例身份（trim 后非空才采纳；未注入 = 开发模式）。
+pub fn desktop_instance_id() -> Option<String> {
+    std::env::var(DESKTOP_INSTANCE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 使用恒定时间比较验证实例身份头。
+pub fn verify_desktop_instance(value: Option<&HeaderValue>, expected: &str) -> bool {
+    value
+        .and_then(|header| header.to_str().ok())
+        .map(|provided| constant_time_eq(expected.as_bytes(), provided.as_bytes()))
+        .unwrap_or(false)
+}
+
+/// 实例身份门控判定（纯函数，与 pairing_gate_allows 同构）：
+/// - 未注入实例身份（开发模式）→ 放行；
+/// - 已注入 → 请求头必须恒定时间精确匹配，否则拒绝。
+///
+/// 用于 `/auth/token` 引导与 `/server/shutdown` 关闭请求：任何不属于当前
+/// 桌面实例的调用方都不得引导取 token，更不得关闭服务。
+pub fn instance_gate_allows(expected: Option<&str>, provided: Option<&HeaderValue>) -> bool {
+    match expected {
+        None => true,
+        Some(instance) => verify_desktop_instance(provided, instance),
+    }
+}
+
+/// 仅列出实际存在的只读 SSE 路由；不能用“任意 /events 后缀”放大豁免面。
+/// 带鉴权的 fetch-stream 客户端仍会携带 Bearer，公开 EventSource 仅用于兼容旧客户端。
 pub fn is_sse_path(path: &str) -> bool {
-    path.ends_with("/events") || path == "/events/stream"
+    path == "/events/stream"
+        || (path.starts_with("/cloud/tasks/") && path.ends_with("/events"))
+        || (path.starts_with("/workflow/run/") && path.ends_with("/events"))
+        || (path.starts_with("/teams/") && path.ends_with("/events"))
+        || (path.starts_with("/fleet/tasks/") && path.ends_with("/events"))
 }
 
 /// 本地 API bearer token。
@@ -208,8 +278,41 @@ pub async fn require_auth(
     }
 }
 
-/// 公开引导端点：`GET /auth/token` → `{ token }`。
-/// 同源前端（桌面工作台）用它完成配对；CORS 白名单阻止跨源读取。
-pub async fn auth_token_bootstrap(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(json!({ "token": state.auth_token.token() }))
+/// 引导端点：`GET /auth/token` → `{ token }`。
+///
+/// 开发服务保持本地浏览器可调试；发布桌面子进程存在配对证明时，只有桌面
+/// WebView 通过 Tauri IPC 取得的证明才能读取 bearer token。
+pub async fn auth_token_bootstrap(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !pairing_gate_allows(
+        desktop_pairing_secret().as_deref(),
+        headers.get(DESKTOP_PAIRING_HEADER),
+    ) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "桌面进程配对证明缺失或无效",
+                "code": "auth/pairing_required/not_retryable",
+            })),
+        )
+            .into_response();
+    }
+    // §4.2 实例身份门控：注入了实例身份时，只有同一桌面实例的引导请求可取 token，
+    // 防"旧核心仍在 + 新壳新密钥"组合下的静默 403 空壳。
+    if !instance_gate_allows(
+        desktop_instance_id().as_deref(),
+        headers.get(DESKTOP_INSTANCE_HEADER),
+    ) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "桌面实例身份不匹配：该核心服务属于另一个桌面实例",
+                "code": "auth/instance_mismatch/not_retryable",
+            })),
+        )
+            .into_response();
+    }
+    Json(json!({ "token": state.auth_token.token() })).into_response()
 }

@@ -79,7 +79,11 @@ const CASE_CODE_BROKEN: &str = r##"{
 
 struct TestEnv {
     app: App,
+    /// 持有所有权保活（Router/HUB 生命周期与 tempdir 绑定），测试体不读取。
+    #[allow(dead_code)]
     hub: Arc<ProductEvalHub>,
+    /// 同上：保活 runs_root 目录句柄语义（tempdir drop 顺序依赖）。
+    #[allow(dead_code)]
     runs_root: PathBuf,
 }
 

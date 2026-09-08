@@ -2,17 +2,27 @@
 //!
 //! 与生成式执行器的本质区别：`multi` 不再用"规划→生成→评审"三段 Prompt 模拟协作，
 //! 而是为每个评测任务建立**真实 TeamRun**（`TeamCoordinator` + ProjectSpace + CAS +
-//! Handoff），由 `GoalRunner` 按 DAG 驱动 ≤3 个真实 Agent Worker：
+//! Handoff），由 `GoalRunner` 按 DAG 驱动真实 Agent Worker。
 //!
-//! - producer（builder/researcher/writer，按任务分类）→ 产出主交付物；
-//! - critic（只读）→ 结构化评审；
-//! - leader → 最终裁决并产出最终交付物；
-//! - "Coordinator" 职责由 TeamCoordinator 承担：拆分任务（角色 DAG + 交接契约）与控制预算。
+//! **十期 · 三路（评测=产品执行路径）**：
+//! - team 形态一律经**产品同款内置模板**建队（`template_for_category`：code →
+//!   code-change-v1 / research → research-brief-v1 / document → document-delivery-v1），
+//!   角色 / DAG / 交接契约 / 每角色预算 / `plan_adaptive_roles` 自适应裁剪全部由
+//!   `create_team_run` 按模板执行——评测不再自造固定 producer→critic→leader 链，
+//!   也不存在「评测一套裁剪、产品另一套」的口径分叉；
+//! - 每个角色的权限画像（工具面 / 只读 / 回合上限）由 [`WorkerProfile`] 装配
+//!   （产品 `build_run_registry` 同口径：注册表面即权限边界；写角色限本单元格工作区）；
+//! - Prompt 由 coordinator 的 `TeamPromptCompiler` 按模板段编译（字节预算 + 截断
+//!   记录随自适应指标落盘），系统提示与产品 `ProfileSubagentRunner` 同构；
+//! - 中间结果一律通过**版本化 Artifact ref + Handoff** 传递（内容落 CAS）；
+//!   最终 Artifact 从 ProjectSpace/CAS 复制进评测沙盒后，用与单 Agent **完全相同**
+//!   的检查器判定；
+//! - **强制 team 对照完整性守卫**：ForceTeam 请求下实际 agent 角色数 ≤1 =
+//!   静默退化为 single → 该单元格按 `multi_integrity` 失败处理，不得计入
+//!   多 Agent 成绩（防止"偷偷退化成 single 后统计为多 Agent 成绩"）。
 //!
-//! 中间结果一律通过**版本化 Artifact ref + Handoff** 传递（内容落 CAS）；
-//! 最终 Artifact 从 ProjectSpace/CAS 复制进评测沙盒后，用与单 Agent **完全相同**的
-//! 检查器判定。采集 TeamRun 总耗时、各 Worker 模型调用/耗时、retry/Handoff/Artifact
-//! 版本、失败 Worker 与失败步骤、token/费用汇总。取消令牌贯通 TeamRun 与所有 Worker。
+//! 采集 TeamRun 总耗时、各 Worker 模型调用/耗时、retry/Handoff/Artifact 版本、
+//! 失败 Worker 与失败步骤、token/费用汇总。取消令牌贯通 TeamRun 与所有 Worker。
 
 use crate::agent::{Agent, AgentConfig, TurnEvent};
 use crate::cas_store::CasStore;
@@ -20,11 +30,11 @@ use crate::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage};
 use crate::goal::{Worker, WorkerRegistry};
 use crate::permissions::{AutoApprover, Policy};
 use crate::plan::StepStatus;
-use crate::product_eval::{AgentMode, CaseExecutor, ExecContext, RawExecOutcome};
+use crate::product_eval::{AgentMode, CaseExecutor, EvalCategory, ExecContext, RawExecOutcome};
 use crate::project_space_store::{ProjectSpaceStoreBackend, SqliteProjectSpaceStore};
 use crate::session::Session;
 use crate::team_strategy::{TaskProfile, TeamPlan, TeamSelectionMode, TeamStrategyEngine};
-use crate::tools::ToolRegistry;
+use crate::worker_profile::{WorkerProfile, PROFILE_MAX_TURNS_CAP};
 use crate::workswarm::{
     CreateTeamRequest, PhaseOutcome, RoleSpec, RoleWorker, SteerCommand, TeamCoordinator,
 };
@@ -75,10 +85,21 @@ pub struct ArtifactObservation {
 pub struct StrategyObservation {
     pub mode: String,
     pub requested: String,
+    /// 实际执行角色（模板角色经自适应裁剪后的 DAG；与 run meta 一致）。
     pub roles: Vec<String>,
+    /// 策略引擎判定的计划角色（十期 · 三路取证：计划 vs 实际）。
+    #[serde(default)]
+    pub planned_roles: Vec<String>,
+    /// 模板 id（十期 · 三路：multi 评测经内置模板建队；None = 动态组队/single）。
+    #[serde(default)]
+    pub template_id: Option<String>,
     pub budget_calls_total: usize,
     pub json_repair: bool,
     pub reasons: Vec<String>,
+    /// 强制 team 对照完整性守卫：true = ForceTeam 请求下实际 agent 角色数 ≤1
+    ///（静默退化为 single）。该单元格必须按完整性违规处理，不得计入多 Agent 成绩。
+    #[serde(default)]
+    pub degraded_to_single: bool,
 }
 
 /// 一次 WorkSwarm TeamRun 的完整观测。
@@ -219,17 +240,46 @@ impl WorkerStats {
     }
 }
 
-/// 内层 Agent worker：`build_enriched_input` 的 agent 路径注入 `prompt` + `read_only`，
-/// 本 worker 用**独立 Session + 只读工具集 + 只读策略**执行一轮 `Agent::run_turn`，
-/// 产出文本经 RoleWorker 登记为版本化 Artifact + Handoff（内容落 CAS）。
+/// 内层 Agent worker（十期 · 三路对齐产品执行路径）：
+///
+/// 与产品 `AgentSubagentWorker` → `ProfileSubagentRunner`（七期 · 二路口径）逐字同构：
+/// - 工具注册表由 [`WorkerProfile::build_registry`] 按角色画像装配（注册表面即权限
+///   边界：分析/审查/校验族只读文件面、实现族读写+受控命令、研究族只读+浏览器）；
+/// - 回合上限取画像值（模板 `budget_calls_per_role`，硬上限 [`PROFILE_MAX_TURNS_CAP`]）；
+/// - 只读三层叠加的评测子集：步骤输入 `read_only`（coordinator 按 critic 角色注入）
+///   ∨ 角色画像只读（评测无团队绑定层）；
+/// - 系统提示 = 角色基线提示（critic/写角色/通用）+ 回合预算纪律 + 契约系统提示，
+///   与 `ProfileSubagentRunner::run` 同一段文案；
+/// - Prompt 本体来自 coordinator 的 `TeamPromptCompiler` 编译结果（模板段 + 字节
+///   预算 + 截断记录），评测不另造一套提示。
+///
+/// 与产品的差异（评测沙盒语义，逐条声明）：
+/// - 审批器恒为 `AutoApprover { allow: true }`——产品绑定工作区的
+///   `WorkspaceScopeApprover` 是 server 侧类型，评测以「注册表面即权限边界」+
+///   写白名单工具闸达到同等约束（写角色只能写 `write_allowed` 内路径）；
+/// - 每次调用统计经 `TurnEvent` 计入 [`WorkerStats`]（产品走 MeasuredRoleWorker）。
 struct EvalAgentWorker {
     provider: Arc<dyn ModelProvider>,
     model: String,
     workspace: PathBuf,
-    max_turns: usize,
+    /// 角色名（观测/tracing；同 RunMeta.roles 的角色键）。
+    role: String,
+    /// 角色画像（十期 · 三路）：工具面 / 只读 / 回合上限 / 浏览器 / 命令。
+    profile: WorkerProfile,
+    /// critic 角色代理（产品同口径：`role == "critic"` 字面量；决定契约与评审文案）。
+    is_critic: bool,
+    /// 最终写白名单（评测 = 单元格工作区根；角色 ∩ 绑定交集的产品等价物）。
+    write_allowed: Vec<PathBuf>,
     /// ProductEval 取消令牌（贯通到 Agent 回合循环）。
     cancel: Arc<AtomicBool>,
     stats: Arc<WorkerStats>,
+}
+
+impl EvalAgentWorker {
+    /// 观测用角色名（tracing 探针）。
+    fn role_for_tracing(&self) -> &str {
+        &self.role
+    }
 }
 
 #[async_trait]
@@ -239,6 +289,10 @@ impl Worker for EvalAgentWorker {
     }
 
     async fn run(&self, input: &serde_json::Value) -> Result<String, String> {
+        tracing::info!(
+            role = %self.role_for_tracing(),
+            "eval worker 开始执行"
+        );
         if self.cancel.load(Ordering::Relaxed) {
             return Err("已取消（进入前检测）".to_string());
         }
@@ -248,32 +302,52 @@ impl Worker for EvalAgentWorker {
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .ok_or_else(|| "agent 步骤缺少 prompt 参数".to_string())?;
-        let read_only = input
+        let input_read_only = input
             .get("read_only")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+        // 只读叠加（产品三层叠加的评测子集）：步骤输入 ∨ 角色画像。
+        let read_only = input_read_only || self.profile.read_only;
 
-        // 评测 Worker 不继承真实仓库宽权限：工具集恒为只读，
-        // 策略根 = 本团队独立工作区（写入类工具根本不在注册表内）。
         let policy = if read_only {
             Policy::read_only(self.workspace.clone())
         } else {
             Policy::new(self.workspace.clone())
         };
-        let registry = ToolRegistry::read_only();
+        // 注册表面即权限边界：写角色只注册白名单写工具（write_allowed 内），
+        // 读角色的注册表里根本没有写/执行工具。
+        let registry = self.profile.build_registry(self.write_allowed.clone());
         let config = AgentConfig {
-            max_turns: self.max_turns,
+            max_turns: self.profile.max_turns.min(PROFILE_MAX_TURNS_CAP),
             ..AgentConfig::default()
         };
         let agent = Agent::new(Arc::clone(&self.provider), registry, policy, config);
-        // 输出契约（V1）：Worker 必须返回 WorkerOutputV1 结构化 JSON
-        //（producer 带 artifact；critic 只给评审结论）。
-        let system = format!(
-            "你是 WorkSwarm 团队中的角色成员。严格依据交接契约处理上游上下文；不要输出与交付物无关的过程解释。\n{}",
-            crate::workswarm_output::contract_system_prompt(read_only)
+        // 基线提示词与产品 ProfileSubagentRunner 同构：critic 探索口径 / 写角色
+        // 「必须真实落盘」/ 通用；回合预算纪律（末回合禁工具只出契约 JSON）；
+        // 输出契约（V1）system 条款。
+        let base_prompt = if self.is_critic {
+            "你是只读探索子代理：只能读取/搜索工作区文件，禁止写入或执行命令；调查完成后用简洁中文汇报发现。\n"
+        } else if self.profile.is_writer() {
+            "你是写角色子代理：凡涉及代码/文件变更，必须用 write_file 把最终内容真实写入工作区文件（仅限允许路径内的文件，工具面之外没有其他写入手段）；artifact.content 只写变更说明、影响面与验证方式，不要把完整变更只放在 artifact 里而不落盘。回合预算有限：先做必要读取，随后直接完成写入，最后一个回合只输出契约 JSON——不要重复读取同一文件或执行验证命令。工具调用仍需审批，完成后汇报结果。\n"
+        } else {
+            "你是通用子代理：独立完成委派任务，工具调用仍需审批，完成后汇报结果。\n"
+        };
+        let budget_note = format!(
+            "你的回合预算为 {} 回合：前 {} 回合完成必要的工具调用，最后一个回合必须直接输出最终 JSON（不要再调用任何工具）。尽量少花回合。\n",
+            self.profile.max_turns,
+            self.profile.max_turns.saturating_sub(1)
         );
-        let mut session = Session::new(&self.workspace, &self.model, Some(system));
+        let system_prompt = format!(
+            "{base_prompt}{budget_note}{}",
+            crate::workswarm_output::contract_system_prompt(self.is_critic)
+        );
+        let mut session = Session::new(&self.workspace, &self.model, Some(system_prompt));
         let started = Instant::now();
+        tracing::info!(
+            role = %self.role_for_tracing(),
+            max_turns = self.profile.max_turns.min(PROFILE_MAX_TURNS_CAP),
+            "eval worker 进入 run_turn"
+        );
         let outcome = agent
             .run_turn(
                 &mut session,
@@ -283,6 +357,12 @@ impl Worker for EvalAgentWorker {
                 &mut |event| self.stats.observe_turn(event),
             )
             .await;
+        tracing::info!(
+            role = %self.role_for_tracing(),
+            ok = outcome.is_ok(),
+            wall_ms = started.elapsed().as_millis() as u64,
+            "eval worker run_turn 返回"
+        );
         let wall_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok(turn) => {
@@ -293,7 +373,7 @@ impl Worker for EvalAgentWorker {
                 match crate::contract_worker::enforce_worker_output_contract(
                     &self.provider,
                     &text,
-                    read_only,
+                    self.is_critic,
                 )
                 .await
                 {
@@ -390,7 +470,22 @@ impl WorkSwarmExecutor {
         }
     }
 
-    /// 组队计划 → 角色 DAG（producer → [critic] → [leader]，按计划裁剪）。
+    /// 任务分类 → 产品内置模板（十期 · 三路）：multi 评测与产品走同一条模板路径。
+    /// v1 套件无 structured 分类；`structured-extract-v1` 保留给显式模板请求。
+    fn template_for_category(category: EvalCategory) -> Option<&'static str> {
+        match category {
+            EvalCategory::Code => Some(crate::builtin_team_templates::CODE_CHANGE_V1),
+            EvalCategory::Research => Some(crate::builtin_team_templates::RESEARCH_BRIEF_V1),
+            EvalCategory::Document => Some(crate::builtin_team_templates::DOCUMENT_DELIVERY_V1),
+        }
+    }
+
+    /// 策略计划 → 动态角色 DAG（producer → [critic] → [leader]）。
+    ///
+    /// 十期 · 三路起仅用于 **single 形态**（显式单 producer，与策略计划一致）；
+    /// team 形态一律走内置模板（`template_for_category` → create_team_run 按模板
+    /// 展开 + 自适应裁剪），不再经此函数自造固定三角色链。保留本函数作为
+    /// single/动态组队的产品合法路径（显式 roles 请求）。
     fn roles_from_plan(
         case: &crate::product_eval::ProductEvalCase,
         plan: &TeamPlan,
@@ -497,6 +592,27 @@ impl WorkSwarmExecutor {
         let templates = Arc::new(crate::workswarm::TeamTemplateRegistry::new(
             root.join("templates"),
         ));
+        // —— 自适应组队：策略引擎判定 single/team + 角色 DAG + 每角色调用预算 ——
+        //（十期 · 三路）multi 评测不再自造固定 producer→critic→leader 链：team 形态
+        // 一律走**产品同款内置模板**——角色 / DAG / 交接契约 / 每角色预算 /
+        // plan_adaptive_roles 自适应裁剪全部由 create_team_run 按模板执行，与产品
+        // UI「安装模板 → 模板建队」是同一条代码路径（Prompt 编译也取模板段）。
+        let strategy = TeamStrategyEngine::default();
+        let plan = strategy.decide(self.config.selection, &Self::profile_of(case));
+        let template_id = if plan.is_single() {
+            None
+        } else {
+            Self::template_for_category(case.category)
+        };
+        if let Some(id) = template_id {
+            // 安装内置模板进本单元格注册表（幂等落盘；与产品 catalog install 同一
+            // 语义——未安装模板不参与匹配，必须先装再用）。
+            let descriptor = crate::builtin_team_templates::descriptor(id)
+                .ok_or_else(|| ProductEvalError(format!("内置模板 {id} 缺失")))?;
+            templates
+                .save_template(&descriptor.template)
+                .map_err(|e| ProductEvalError(format!("内置模板 {id} 安装失败：{e}")))?;
+        }
         let coordinator = Arc::new(TeamCoordinator::new(
             Arc::clone(&store) as Arc<dyn ProjectSpaceStoreBackend>,
             templates,
@@ -520,18 +636,19 @@ impl WorkSwarmExecutor {
             let _ = std::fs::write(&target, &input.content);
         }
 
-        // —— 自适应组队：策略引擎判定 single/team + 角色 DAG + 每角色调用预算 ——
-        let strategy = TeamStrategyEngine::default();
-        let plan = strategy.decide(self.config.selection, &Self::profile_of(case));
         tracing::info!(
             case = %case.id,
             mode = %plan.mode,
-            roles = plan.roles.iter().map(|r| r.role.as_str()).collect::<Vec<_>>().join("+"),
+            template = template_id.unwrap_or("-"),
+            planned_roles = plan.roles.iter().map(|r| r.role.as_str()).collect::<Vec<_>>().join("+"),
             budget = plan.budget_calls_total,
             "自适应组队判定"
         );
 
-        // —— 组队：角色 DAG + 预算（timeout/预算映射 GoalBudget）——
+        // —— 组队：single = 显式单 producer（与策略计划一致）；team = 模板角色
+        //（roles 留空 → create_team_run 按模板展开 + 自适应裁剪）。预算包络对齐
+        // 产品 UI 路径（数字总预算 → parse_goal_budget 落 GoalBudget::default），
+        // 仅注入评测超时作为 max_duration_secs。
         let mut request = CreateTeamRequest::new(
             Self::objective_of(case),
             if plan.is_single() {
@@ -540,15 +657,13 @@ impl WorkSwarmExecutor {
                 TeamMode::Team
             },
         );
-        request.roles = Self::roles_from_plan(case, &plan);
+        if plan.is_single() {
+            request.roles = Self::roles_from_plan(case, &plan);
+        } else {
+            request.template_id = template_id.map(str::to_string);
+        }
+        request.strategy = Some(self.config.selection);
         request.budget = serde_json::json!({
-            "max_steps": 64,
-            "max_retries_per_step": 1,
-            // GoalRunner 把每个步骤的 attempts 计入 total_retries（≥角色数），
-            // 因此该值必须 ≥ 步骤尝试总数；真正的重试上限由执行器层的
-            // max_retries_on_failure（SteerCommand::Retry）控制。
-            "max_total_retries": 64,
-            "max_replans": 0,
             "max_duration_secs": ctx.timeout_secs,
         });
         let team = coordinator
@@ -562,16 +677,29 @@ impl WorkSwarmExecutor {
             .unwrap_or_default();
 
         // —— worker 注册表：每成员独立 EvalAgentWorker + 独立统计 ——
+        //（十期 · 三路）每个角色的预算/画像/写面与产品 build_run_registry 同口径。
         let meta = coordinator
             .load_run_meta(&team_id)
             .map_err(|e| ProductEvalError(format!("运行元数据缺失：{e}")))?;
+        // 实际执行角色（模板展开 + 自适应裁剪后；全部为 agent 角色）。
+        let actual_roles: Vec<String> = meta.roles.iter().map(|s| s.role.clone()).collect();
         let registry = WorkerRegistry::new();
         let mut stats_by_member: BTreeMap<String, (String, Arc<WorkerStats>)> = BTreeMap::new();
         for spec in &meta.roles {
             let member_id = format!("m-{}", spec.role);
             let stats = WorkerStats::new();
-            // 每角色调用预算来自策略计划（未知角色退回 producer 缺省 4）。
-            let role_budget = plan.budget_for(&spec.role);
+            // 每角色调用预算：模板角色取 RunMeta.budgets（模板 budget_calls_per_role），
+            // 动态/single 角色退回策略计划（未知角色缺省 4）。
+            let role_budget = meta
+                .budgets
+                .get(&spec.role)
+                .copied()
+                .filter(|budget| *budget > 0)
+                .unwrap_or_else(|| plan.budget_for(&spec.role));
+            // 角色画像（工具面/只读/回合上限）与 critic 代理（产品同口径：
+            // role == "critic" 字面量；reviewer 等内置评审角色是只读 producer）。
+            let profile = WorkerProfile::for_role(&spec.role, role_budget);
+            let is_critic = spec.role == "critic";
             registry.register(Arc::new(RoleWorker::new(
                 Arc::clone(&coordinator),
                 team_id.clone(),
@@ -581,7 +709,12 @@ impl WorkSwarmExecutor {
                     provider: Arc::clone(&self.provider),
                     model: self.model.clone(),
                     workspace: ws_dir.clone(),
-                    max_turns: role_budget,
+                    role: spec.role.clone(),
+                    profile,
+                    is_critic,
+                    // 评测无团队绑定 → 最终写白名单 = 单元格工作区根
+                    //（白名单写工具闸把写角色的落盘限制在本单元格内）。
+                    write_allowed: vec![ws_dir.clone()],
                     cancel: Arc::clone(&ctx.cancel),
                     stats: Arc::clone(&stats),
                 }),
@@ -614,7 +747,25 @@ impl WorkSwarmExecutor {
             if ctx.cancelled() {
                 team_cancel.cancel();
             }
-            match coordinator.run_phase(&team_id, &registry).await {
+            tracing::info!(team_id = %team_id, "phase 循环：进入 run_phase");
+            let phase_result = coordinator.run_phase(&team_id, &registry).await;
+            match &phase_result {
+                Ok(outcome) => {
+                    let label = match outcome {
+                        PhaseOutcome::MoreReady => "MoreReady",
+                        PhaseOutcome::Done => "Done",
+                        PhaseOutcome::Failed => "Failed",
+                        PhaseOutcome::Aborted => "Aborted",
+                        PhaseOutcome::Finished => "Finished",
+                        PhaseOutcome::AwaitingHuman { .. } => "AwaitingHuman",
+                    };
+                    tracing::info!(team_id = %team_id, outcome = label, "phase 循环：run_phase 返回");
+                }
+                Err(error) => {
+                    tracing::warn!(team_id = %team_id, error = %error, "phase 循环：run_phase 出错");
+                }
+            }
+            match phase_result {
                 Ok(PhaseOutcome::MoreReady) => {
                     continue;
                 }
@@ -752,10 +903,16 @@ impl WorkSwarmExecutor {
             strategy: Some(StrategyObservation {
                 mode: plan.mode.clone(),
                 requested: plan.requested.clone(),
-                roles: plan.roles.iter().map(|r| r.role.clone()).collect(),
+                roles: actual_roles.clone(),
+                planned_roles: plan.roles.iter().map(|r| r.role.clone()).collect(),
+                template_id: template_id.map(str::to_string),
                 budget_calls_total: plan.budget_calls_total,
                 json_repair: plan.json_repair,
                 reasons: plan.reasons.clone(),
+                // 强制 team 对照完整性守卫：ForceTeam 下实际 agent 角色数 ≤1 =
+                // 静默退化为 single（十期 · 三路红线：不得计入多 Agent 成绩）。
+                degraded_to_single: self.config.selection == TeamSelectionMode::ForceTeam
+                    && actual_roles.len() <= 1,
             }),
         };
 
@@ -813,6 +970,22 @@ impl WorkSwarmExecutor {
             }));
             return Ok((outcome, observation));
         };
+        // —— 强制 team 对照完整性守卫（十期 · 三路红线）：ForceTeam 请求下实际
+        // agent 角色数 ≤1 = 多 Agent 对照静默退化成 single——响亮失败，该单元格
+        // 不得计入多 Agent 成绩（而非悄悄混入统计）。
+        if observation
+            .strategy
+            .as_ref()
+            .is_some_and(|strategy| strategy.degraded_to_single)
+        {
+            outcome.error = Some(
+                "multi_integrity:强制 team 对照实际执行角色 ≤1（静默退化 single），\
+                 该结果不得计入多 Agent 成绩"
+                    .to_string(),
+            );
+            persist_observation(&root, &observation);
+            return Ok((outcome, observation));
+        }
         let content = coordinator
             .resolve_content_text(&final_ref.content_ref)
             .ok_or_else(|| {
@@ -919,15 +1092,26 @@ fn persist_observation(root: &std::path::Path, observation: &TeamRunObservation)
 }
 
 /// 最终交付选择（R4 输出契约）：只从 **producer 版本链**挑选——
-/// 排除 critic 评审产物（kind=review / producer=m-critic，评审无权成为交付物）；
-/// 优先 review_state=Approved 的最高版本（approved head），否则取最高版本；
-/// 同版本时 leader 综合产物（kind=final）优先于草稿。空链返回 None
-///（上游记 `artifact_missing`）。
+/// 排除评审产物：kind=review，或 producer 为评审角色（critic 动态角色 / 模板
+/// reviewer·content_reviewer——契约路径的 Artifact.kind 取角色链 kind，模板评审
+/// 角色的 kind 是角色名而非 "review"，必须按 producer 角色排除，评审无权成为
+/// 交付物）；优先 review_state=Approved 的最高版本（approved head），否则取最高
+/// 版本；同版本时 leader/finalizer 综合产物（kind=final 或含 final/leader 角色）
+/// 优先于草稿/分析。空链返回 None（上游记 `artifact_missing`）。
 fn pick_final_artifact(artifacts: &[ArtifactObservation]) -> Option<ArtifactObservation> {
+    // 评审/分析角色（producer 侧）永不入选：动态 critic + 模板评审角色
+    //（reviewer / content_reviewer）。模板契约路径登记 kind=角色名
+    //（role_kind 兜底），kind 过滤对模板角色失效 → 以 producer 角色判定为准。
+    let is_review_producer = |a: &ArtifactObservation| {
+        matches!(
+            a.producer_role(),
+            Some("critic") | Some("reviewer") | Some("content_reviewer")
+        )
+    };
     let chain: Vec<&ArtifactObservation> = artifacts
         .iter()
         .filter(|a| a.kind != "review")
-        .filter(|a| a.producer_role() != Some("critic"))
+        .filter(|a| !is_review_producer(a))
         .collect();
     if chain.is_empty() {
         return None;
@@ -939,7 +1123,15 @@ fn pick_final_artifact(artifacts: &[ArtifactObservation]) -> Option<ArtifactObse
             approved(a)
                 .cmp(&approved(b))
                 .then(a.version.cmp(&b.version))
-                .then_with(|| (a.kind == "final").cmp(&(b.kind == "final")))
+                .then_with(|| {
+                    // 交付收口角色（动态 leader kind=final；模板 finalizer 同义）
+                    // 优先于草稿/分析产物。
+                    let finality = |a: &ArtifactObservation| {
+                        a.kind == "final"
+                            || matches!(a.producer_role(), Some("leader") | Some("finalizer"))
+                    };
+                    finality(a).cmp(&finality(b))
+                })
         })
         .cloned()
 }
@@ -1075,9 +1267,12 @@ mod tests {
 
     // —— WorkerOutputV1 契约信封（六期一路：worker 必须返回结构化 JSON，正文在
     //    artifact.content；与 tests/product_eval_workswarm_tests.rs 同款写法）——
-    const BUILDER_CONTRACT: &str = r###"{"status":"done","summary":"交付完成","artifact":{"kind":"document","format":"markdown","content":"## 草稿\n关键结论 A 的初稿，结构完整，待评审。"},"evidence":[],"open_issues":[]}"###;
-    const CRITIC_CONTRACT: &str = r###"{"status":"done","summary":"{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\",\"证据充分\"]}","evidence":[],"open_issues":[]}"###;
-    const LEADER_CONTRACT: &str = r###"{"status":"done","summary":"最终交付","artifact":{"kind":"final","format":"markdown","content":"# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。"},"evidence":[],"open_issues":[]}"###;
+    // 十期 · 三路：Document 分类 multi 评测走 document-delivery-v1 模板
+    //（drafter → content_reviewer → finalizer）；脚本化输出按模板角色的契约语义
+    // 构造：评审结论 artifact.kind="review"（合法登记、不参与最终交付选择）。
+    const DRAFTER_CONTRACT: &str = r###"{"status":"done","summary":"初稿完成","artifact":{"kind":"draft","format":"markdown","content":"## 草稿\n关键结论 A 的初稿，结构完整，待评审。"},"evidence":[],"open_issues":[]}"###;
+    const CONTENT_REVIEWER_CONTRACT: &str = r###"{"status":"done","summary":"评审通过","artifact":{"kind":"review","format":"markdown","content":"{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\",\"证据充分\"]}"},"evidence":[],"open_issues":[]}"###;
+    const FINALIZER_CONTRACT: &str = r###"{"status":"done","summary":"最终交付","artifact":{"kind":"final","format":"markdown","content":"# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。"},"evidence":[],"open_issues":[]}"###;
 
     fn scripted_executor(provider: Arc<ScriptedProvider>, root: &Path) -> WorkSwarmExecutor {
         let mut executor = WorkSwarmExecutor::new(
@@ -1085,8 +1280,8 @@ mod tests {
             "scripted-model",
             root.join("teams"),
         );
-        // 本文件脚本化的是完整三角色流水线（producer → critic → leader）：
-        // 显式 ForceTeam 保持既有语义（auto 模式的自适应裁剪见 team_strategy_tests）。
+        // 本文件脚本化的是 document-delivery-v1 模板链（drafter → content_reviewer →
+        // finalizer）：显式 ForceTeam 经模板建队（十期 · 三路评测=产品执行路径）。
         executor.config = WorkSwarmExecutorConfig {
             max_turns_per_worker: 6,
             max_retries_on_failure: 1,
@@ -1120,8 +1315,14 @@ mod tests {
     #[tokio::test]
     async fn real_teamrun_yields_workers_artifacts_handoffs_and_final_from_cas() {
         let root = fresh_root("happy");
-        let provider =
-            ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT], 0);
+        let provider = ScriptedProvider::new(
+            &[
+                DRAFTER_CONTRACT,
+                CONTENT_REVIEWER_CONTRACT,
+                FINALIZER_CONTRACT,
+            ],
+            0,
+        );
         let case = eval_case("ws-happy", EvalCategory::Document);
         let executor = scripted_executor(provider, &root);
 
@@ -1144,6 +1345,22 @@ mod tests {
         assert_eq!(observation.retries_used, 0);
         assert!(observation.failed_steps.is_empty());
 
+        // 十期 · 三路：multi 评测经产品内置模板建队（评测=产品执行路径）。
+        let strategy = observation.strategy.as_ref().expect("必须有策略观测");
+        assert_eq!(
+            strategy.template_id.as_deref(),
+            Some(crate::builtin_team_templates::DOCUMENT_DELIVERY_V1),
+            "strategy = {strategy:?}"
+        );
+        assert_eq!(
+            strategy.roles,
+            vec!["drafter", "content_reviewer", "finalizer"]
+        );
+        assert!(
+            !strategy.degraded_to_single,
+            "ForceTeam 模板团队不得退化 single"
+        );
+
         // 结构化 Handoff + 版本化 Artifact。
         assert!(
             observation.handoff_count >= 2,
@@ -1165,9 +1382,21 @@ mod tests {
             .iter()
             .find(|artifact| artifact.artifact_id == final_id)
             .expect("最终 Artifact 必须在产物清单中");
-        assert_eq!(final_observation.kind, "final");
+        // 契约路径登记 kind=角色链 kind（模板 finalizer → "finalizer"）；
+        // 最终交付必须来自收口角色（finalizer/leader），不是草稿或评审。
+        assert_eq!(
+            final_observation.producer_role(),
+            Some("finalizer"),
+            "final = {final_observation:?}"
+        );
+        assert_eq!(final_observation.kind, "finalizer");
+        // 评审产物不得成为最终交付（模板评审角色按 producer 角色排除）。
+        assert!(observation
+            .artifacts
+            .iter()
+            .any(|a| a.producer_role() == Some("content_reviewer") && a.artifact_id != final_id));
 
-        // 最终结果来自 CAS 的版本化 Artifact（内容 = leader 交付文本），而非内存中的最后回复。
+        // 最终结果来自 CAS 的版本化 Artifact（内容 = finalizer 交付文本），而非内存中的最后回复。
         let written = std::fs::read_to_string(sandbox.join("out/report.md")).unwrap();
         assert_eq!(written, LEADER_FINAL);
 
@@ -1177,8 +1406,14 @@ mod tests {
     #[tokio::test]
     async fn cancel_before_start_keeps_zero_calls_and_zero_team_activity() {
         let root = fresh_root("pre-cancel");
-        let provider =
-            ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT], 0);
+        let provider = ScriptedProvider::new(
+            &[
+                DRAFTER_CONTRACT,
+                CONTENT_REVIEWER_CONTRACT,
+                FINALIZER_CONTRACT,
+            ],
+            0,
+        );
         let case = eval_case("ws-pre-cancel", EvalCategory::Document);
         let executor = scripted_executor(Arc::clone(&provider), &root);
         let cancel = Arc::new(AtomicBool::new(true));
@@ -1195,8 +1430,14 @@ mod tests {
     #[tokio::test]
     async fn cancel_mid_flight_freezes_provider_calls_and_marks_steps_aborted() {
         let root = fresh_root("mid-cancel");
-        let provider =
-            ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT], 250);
+        let provider = ScriptedProvider::new(
+            &[
+                DRAFTER_CONTRACT,
+                CONTENT_REVIEWER_CONTRACT,
+                FINALIZER_CONTRACT,
+            ],
+            250,
+        );
         let case = eval_case("ws-mid-cancel", EvalCategory::Document);
         let executor = scripted_executor(provider.clone(), &root);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1232,9 +1473,16 @@ mod tests {
     async fn failed_producer_reuses_local_retry_without_rerunning_successful_workers() {
         let root = fresh_root("retry");
         // 第一次产出为空（verify non_empty 失败 → 局部 Retry 只重置 producer 及其下游），
-        // 随后 producer 契约信封成功、critic/leader 各一次：全程 4 次模型调用。
-        let provider =
-            ScriptedProvider::new(&["", BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT], 0);
+        // 随后 producer 契约信封成功、content_reviewer/finalizer 各一次：全程 4 次模型调用。
+        let provider = ScriptedProvider::new(
+            &[
+                "",
+                DRAFTER_CONTRACT,
+                CONTENT_REVIEWER_CONTRACT,
+                FINALIZER_CONTRACT,
+            ],
+            0,
+        );
         let case = eval_case("ws-retry", EvalCategory::Document);
         let executor = scripted_executor(provider, &root);
 
@@ -1245,14 +1493,14 @@ mod tests {
             observation.status, "Succeeded",
             "observation = {observation:?}"
         );
-        // 六期一路：空输出 = 契约无效 → 恰好一次定向修复（writer model_calls=2、
+        // 六期一路：空输出 = 契约无效 → 恰好一次定向修复（drafter model_calls=2、
         // output_repairs=1、attempts=1）；修复在 worker 内部消化，不触发步骤级 Retry。
         assert_eq!(observation.retries_used, 0, "workers = {observation:?}");
         let writer = observation
             .workers
             .iter()
-            .find(|w| w.role == "writer")
-            .expect("必须有 producer（writer）记录");
+            .find(|w| w.role == "drafter")
+            .expect("必须有 producer（drafter）记录");
         assert_eq!(writer.output_repairs, 1, "空输出必须触发恰好一次定向修复");
         assert_eq!(writer.attempts, 1, "定向修复不算新尝试");
         assert_eq!(writer.model_calls, 2, "首次空输出 + 一次修复");
@@ -1270,7 +1518,11 @@ mod tests {
             .iter()
             .find(|artifact| artifact.artifact_id == final_id)
             .expect("最终 Artifact 必须在产物清单中");
-        assert_eq!(final_observation.kind, "final");
+        assert_eq!(
+            final_observation.producer_role(),
+            Some("finalizer"),
+            "最终交付必须来自收口角色（kind 取角色链 kind）：{final_observation:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1308,13 +1560,14 @@ mod tests {
 
     #[test]
     fn role_dag_keeps_at_most_three_agent_workers_per_category() {
+        // roles_from_plan 是 single/显式动态组队路径（十期 · 三路起 team 形态走
+        // 内置模板）；此处锁定该合法路径的 producer → critic → leader 结构。
         for category in [
             EvalCategory::Code,
             EvalCategory::Research,
             EvalCategory::Document,
         ] {
             let case = eval_case("ws-roles", category);
-            // 五期自适应组队：显式 team 强制完整流水线（producer → critic → leader）。
             let engine = crate::team_strategy::TeamStrategyEngine::default();
             let plan = engine.decide(
                 crate::team_strategy::TeamSelectionMode::ForceTeam,
@@ -1334,6 +1587,30 @@ mod tests {
             let leader = roles.iter().find(|role| role.role == "leader").unwrap();
             assert_eq!(critic.depends_on.len(), 1);
             assert_eq!(leader.depends_on, vec!["critic".to_string()]);
+        }
+    }
+
+    #[test]
+    fn multi_mode_maps_categories_to_product_templates() {
+        // 十期 · 三路：multi 评测与产品同一条模板路径（模板 = 任务分类的固定映射）。
+        assert_eq!(
+            WorkSwarmExecutor::template_for_category(EvalCategory::Code),
+            Some(crate::builtin_team_templates::CODE_CHANGE_V1)
+        );
+        assert_eq!(
+            WorkSwarmExecutor::template_for_category(EvalCategory::Research),
+            Some(crate::builtin_team_templates::RESEARCH_BRIEF_V1)
+        );
+        assert_eq!(
+            WorkSwarmExecutor::template_for_category(EvalCategory::Document),
+            Some(crate::builtin_team_templates::DOCUMENT_DELIVERY_V1)
+        );
+        // 模板角色 DAG 完整性（产品 create_team_run 展开的输入必须合法）。
+        for id in crate::builtin_team_templates::CATALOG_IDS {
+            let d = crate::builtin_team_templates::descriptor(id)
+                .unwrap_or_else(|| panic!("内置模板 {id} 缺失"));
+            assert!(!d.template.roles.is_empty());
+            assert_eq!(d.template.mode, owo_agent_protocol::TeamMode::Team);
         }
     }
 }

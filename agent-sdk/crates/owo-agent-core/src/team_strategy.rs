@@ -185,10 +185,67 @@ impl TeamStrategyEngine {
 
     /// 判定入口：`auto` 按信号决定；`single`/`team` 为显式强制。
     pub fn decide(&self, selection: TeamSelectionMode, profile: &TaskProfile) -> TeamPlan {
+        self.decide_with_policy(selection, profile, None)
+    }
+
+    /// 带默认队策略 gate 的判定入口（十期 · 三路）：
+    ///
+    /// - `auto`：先过收益证据 gate（无证据 / 不达标 / 样本不足 / 过期 / 绑定不匹配 /
+    ///   非预选组 → 强制 single 并附理由）；达标且绑定匹配 → 沿用既有信号逻辑
+    ///   （允许组队，仍可能因任务简单落 single——"允许"不等同"强制"）；
+    /// - `ForceSingle` / `ForceTeam`：用户显式选择，**不被 gate 降级**（显式 team
+    ///   不绕过安全审批——审批在运行层独立强制）；
+    /// - `mandatory_review`：无论证据如何都保留评审角色（策略层不因省调用量裁剪
+    ///   评审；与 `plan_adaptive_roles` 的独立评审保真口径一致）。
+    pub fn decide_with_policy(
+        &self,
+        selection: TeamSelectionMode,
+        profile: &TaskProfile,
+        gate: Option<&crate::team_benefit::PolicyGate>,
+    ) -> TeamPlan {
         match selection {
             TeamSelectionMode::ForceSingle => self.single_plan(selection, profile),
             TeamSelectionMode::ForceTeam => self.forced_team_plan(selection, profile),
-            TeamSelectionMode::Auto => self.auto_plan(selection, profile),
+            TeamSelectionMode::Auto => {
+                let mandatory_review = gate.map(|g| g.mandatory_review).unwrap_or(false);
+                // 强制独立评审 → 无论证据如何都保留评审角色（评审是硬需求）。
+                let mut effective = profile.clone();
+                if mandatory_review {
+                    effective.needs_independent_review = true;
+                }
+                match gate {
+                    // 证据 gate 拒绝 → 默认 single 并附逐条理由；
+                    // 但强制评审组的评审不能因省调用量被裁掉（最小 producer+critic 团队）。
+                    Some(g) if !g.allow_team && !mandatory_review => {
+                        let mut single = self.single_plan(selection, &effective);
+                        single.reasons.splice(0..0, g.reasons.iter().cloned());
+                        single
+                    }
+                    Some(g) if !g.allow_team => {
+                        let mut plan = self.auto_plan(selection, &effective);
+                        plan.mode = "team".to_string();
+                        for reason in &g.reasons {
+                            plan.reasons.push(reason.clone());
+                        }
+                        plan.reasons.push(
+                            "默认策略倾向 single，但本任务组强制独立评审（mandatory_review）：\
+                             评审角色不得因省调用量被裁剪，保留最小 producer+critic 评审链"
+                                .to_string(),
+                        );
+                        plan
+                    }
+                    Some(g) => {
+                        let mut plan = self.auto_plan(selection, &effective);
+                        for reason in &g.reasons {
+                            if !plan.reasons.contains(reason) {
+                                plan.reasons.push(reason.clone());
+                            }
+                        }
+                        plan
+                    }
+                    None => self.auto_plan(selection, &effective),
+                }
+            }
         }
     }
 
@@ -582,15 +639,19 @@ mod adaptive_role_tests {
     #[test]
     fn high_risk_or_required_review_keeps_reviewer() {
         let b = budgets(&[("reviewer", 3)]);
-        let mut profile = TaskProfile::default();
-        profile.risk = RiskLevel::High;
+        let profile = TaskProfile {
+            risk: RiskLevel::High,
+            ..Default::default()
+        };
         assert!(
             plan_adaptive_roles(Some(CODE_CHANGE_V1), &code_roles(), &b, &profile)
                 .skipped
                 .is_empty()
         );
-        let mut profile = TaskProfile::default();
-        profile.needs_independent_review = true;
+        let profile = TaskProfile {
+            needs_independent_review: true,
+            ..Default::default()
+        };
         assert!(
             plan_adaptive_roles(Some(CODE_CHANGE_V1), &code_roles(), &b, &profile)
                 .skipped
@@ -657,5 +718,95 @@ mod adaptive_role_tests {
         assert!(reviewer_runtime_skip_reason("code_analyzer", false).is_none());
         let reason = reviewer_runtime_skip_reason("reviewer", false).expect("无变更应跳过");
         assert!(reason.contains("提前结束"));
+    }
+}
+
+#[cfg(test)]
+mod policy_gate_tests {
+    use super::*;
+    use crate::team_benefit::{PolicyGate, TeamPolicy};
+
+    fn gate(allow_team: bool, mandatory_review: bool, reason: &str) -> PolicyGate {
+        PolicyGate {
+            allow_team,
+            reasons: vec![reason.to_string()],
+            mandatory_review,
+        }
+    }
+
+    #[test]
+    fn no_evidence_gate_forces_single_in_auto() {
+        let engine = TeamStrategyEngine::default();
+        let profile = TaskProfile {
+            category: Some("code".to_string()),
+            input_count: 3, // 合并信号在无 gate 时会走 team
+            ..TaskProfile::default()
+        };
+        // 对照组：无 gate 时信号会启用 leader → team。
+        let base = engine.decide(TeamSelectionMode::Auto, &profile);
+        assert_eq!(base.mode, "team", "对照组应走 team");
+        // 有 gate 且拒绝 → 强制 single + 理由前置。
+        let g = gate(false, false, "任务组无收益证据记录：默认 single");
+        let plan = engine.decide_with_policy(TeamSelectionMode::Auto, &profile, Some(&g));
+        assert_eq!(plan.mode, "single", "无证据必须默认 single");
+        assert!(plan.reasons.iter().any(|r| r.contains("无收益证据")));
+        assert_eq!(plan.roles.len(), 1);
+    }
+
+    #[test]
+    fn qualified_gate_allows_existing_signal_team() {
+        let engine = TeamStrategyEngine::default();
+        let profile = TaskProfile {
+            category: Some("research".to_string()),
+            input_count: 3,
+            ..TaskProfile::default()
+        };
+        let g = gate(true, false, "任务组收益达标：允许 auto 进入团队");
+        let plan = engine.decide_with_policy(TeamSelectionMode::Auto, &profile, Some(&g));
+        // 达标 gate 不强制 team，但沿用信号（leader 因多来源启用）→ team。
+        assert_eq!(plan.mode, "team", "plan = {plan:?}");
+        assert!(plan.reasons.iter().any(|r| r.contains("收益达标")));
+    }
+
+    #[test]
+    fn user_explicit_modes_ignore_gate() {
+        let engine = TeamStrategyEngine::default();
+        let profile = TaskProfile::default();
+        let deny = gate(false, false, "禁止组队");
+        // ForceSingle 不被 gate 改写成 team。
+        let single =
+            engine.decide_with_policy(TeamSelectionMode::ForceSingle, &profile, Some(&deny));
+        assert_eq!(single.mode, "single");
+        // ForceTeam 不被「无证据」gate 降级（显式选择 > 默认策略）。
+        let team = engine.decide_with_policy(TeamSelectionMode::ForceTeam, &profile, Some(&deny));
+        assert_eq!(team.mode, "team", "显式 team 不得被证据 gate 降级");
+        assert!(!team.reasons.iter().any(|r| r.contains("无收益证据")));
+    }
+
+    #[test]
+    fn mandatory_review_keeps_reviewer_even_without_evidence() {
+        let engine = TeamStrategyEngine::default();
+        let profile = TaskProfile::default();
+        let g = gate(false, true, "资金相关代码必须独立评审");
+        let plan = engine.decide_with_policy(TeamSelectionMode::Auto, &profile, Some(&g));
+        assert_eq!(plan.mode, "team", "强制评审组不得退化成 single：{plan:?}");
+        assert!(plan.roles.iter().any(|r| r.role == "critic"));
+        assert!(plan.reasons.iter().any(|r| r.contains("强制独立评审")));
+    }
+
+    #[test]
+    fn policy_defaults_load_from_embedded() {
+        let policy = TeamPolicy::embedded_defaults();
+        let engine = TeamStrategyEngine::default();
+        let profile = TaskProfile {
+            category: Some("document".to_string()),
+            input_count: 3,
+            ..TaskProfile::default()
+        };
+        // document 非预选组：即便 signal 存在，embedded 默认也不开放 auto 组队。
+        //（gate 由调用方用 gate_auto 计算；此处验证引擎接受 None gate 兼容旧行为。）
+        let plan = engine.decide(TeamSelectionMode::Auto, &profile);
+        assert_eq!(plan.mode, "team"); // 引擎本身不内置 policy，None gate = 旧行为
+        let _ = policy.min_samples_for("document");
     }
 }

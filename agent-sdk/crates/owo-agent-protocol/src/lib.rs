@@ -690,10 +690,25 @@ pub struct FileDiff {
 pub struct HealthResponse {
     pub healthy: bool,
     pub version: String,
+    /// HTTP 契约版本。桌面壳用它拒绝连接到只占用同一端口、但 API 面不兼容的旧核心。
+    #[serde(default)]
+    pub api_version: String,
     pub auto_approve: bool,
     /// 构建信息（十期一路：统一构建入口生成 build-info.json；additive 字段，旧客户端自然忽略）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildInfo>,
+    /// 桌面壳注入的实例身份（§4.2 实例握手；未注入 = 开发模式，不序列化）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// 服务进程 pid（非秘密；桌面壳用于核对"这个服务是我启动的子进程"）。
+    #[serde(default)]
+    pub pid: u32,
+    /// 启动阶段（当前恒为 "ready"；为 §4.3 分阶段启动诊断预留）。
+    #[serde(default)]
+    pub stage: String,
+    /// 构建标识（build-info.json 的 git_commit；缺失时 "unknown"）。
+    #[serde(default)]
+    pub build_id: String,
 }
 
 /// `/health.build` 构建信息（对应 agent-sdk/build-info.json 的 git_commit/git_dirty/built_at）。
@@ -754,13 +769,23 @@ mod health_build_tests {
         let legacy = HealthResponse {
             healthy: true,
             version: "0.1.0".into(),
+            api_version: "0.7".into(),
             auto_approve: false,
             build: None,
+            instance_id: None,
+            pid: 0,
+            stage: String::new(),
+            build_id: String::new(),
         };
         let v = serde_json::to_value(&legacy).unwrap();
         assert!(v.get("build").is_none(), "build=None 时不得出现 build 键");
+        assert!(
+            v.get("instance_id").is_none(),
+            "instance_id=None 时不得出现 instance_id 键（开发模式不泄漏字段）"
+        );
         assert_eq!(v["healthy"], serde_json::json!(true));
         assert_eq!(v["version"], "0.1.0");
+        assert_eq!(v["api_version"], "0.7");
         assert_eq!(v["auto_approve"], serde_json::json!(false));
     }
 
@@ -770,12 +795,17 @@ mod health_build_tests {
         let full = HealthResponse {
             healthy: true,
             version: "0.1.0".into(),
+            api_version: "0.7".into(),
             auto_approve: true,
             build: Some(BuildInfo {
                 commit: "8412021".into(),
                 dirty: true,
                 built_at: "2026-08-30T04:00:00Z".into(),
             }),
+            instance_id: Some("a1b2c3d4e5f60718293a4b5c6d7e8f90".into()),
+            pid: 4242,
+            stage: "ready".into(),
+            build_id: "8412021".into(),
         };
         let text = serde_json::to_string(&full).unwrap();
         assert!(
@@ -787,11 +817,23 @@ mod health_build_tests {
         assert_eq!(build.commit, "8412021");
         assert!(build.dirty);
         assert_eq!(build.built_at, "2026-08-30T04:00:00Z");
+        // §4.2 实例握手字段往返。
+        assert_eq!(
+            back.instance_id.as_deref(),
+            Some("a1b2c3d4e5f60718293a4b5c6d7e8f90")
+        );
+        assert_eq!(back.pid, 4242);
+        assert_eq!(back.stage, "ready");
+        assert_eq!(back.build_id, "8412021");
 
         // 旧载荷（无 build 键）→ #[serde(default)] 兼容。
         let old: HealthResponse =
             serde_json::from_str(r#"{"healthy":true,"version":"0.1.0","auto_approve":false}"#)
                 .unwrap();
         assert!(old.build.is_none());
+        assert!(
+            old.api_version.is_empty(),
+            "旧载荷保持可解析，但不会通过桌面版本握手"
+        );
     }
 }

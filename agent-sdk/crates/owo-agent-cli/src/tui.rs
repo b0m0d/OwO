@@ -1603,13 +1603,12 @@ mod tests {
     #[test]
     fn permission_request_queues_approval_and_responds() {
         let mut app = test_app();
-        let request = PermissionRequest {
-            request_id: "req-1".to_string(),
-            tool: "write_file".to_string(),
-            args: serde_json::json!({ "path": "a.txt" }),
-            level: owo_agent_core::permissions::Level::Write,
-            reason: "测试".to_string(),
-        };
+        let request = PermissionRequest::new(
+            "write_file",
+            serde_json::json!({ "path": "a.txt" }),
+            owo_agent_core::permissions::Level::Write,
+            "测试",
+        );
         let (tx, rx) = mpsc::channel();
         app.pending
             .lock()

@@ -105,6 +105,8 @@ pub struct McpTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// §7.2：MCP annotations 原文（readOnlyHint/destructiveHint 等）；未声明为 None。
+    pub annotations: Option<Value>,
 }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
@@ -319,6 +321,10 @@ impl McpClient {
                                 .unwrap_or_default()
                                 .to_string(),
                             input_schema: tool.get("inputSchema").cloned().unwrap_or(Value::Null),
+                            annotations: tool
+                                .get("annotations")
+                                .cloned()
+                                .filter(|value| value.is_object()),
                         })
                     })
                     .collect()

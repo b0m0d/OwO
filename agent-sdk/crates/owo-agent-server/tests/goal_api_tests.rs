@@ -548,7 +548,7 @@ async fn r5_status_steps_shape_complete() {
 // ==================== P1：WorkerPool 运行模式（子进程执行） ====================
 
 /// 子进程协议入口：父进程用 `--exact owo_worker_child_entry --nocapture --quiet`
-/// + `OWO_WORKER_CHILD=1` 拉起本测试二进制作为受控 worker。
+/// 配合 `OWO_WORKER_CHILD=1` 拉起本测试二进制作为受控 worker。
 /// 行为：`{"ms":N}` → 睡 N 毫秒返回 "slept Nms"；`{"sleep_ms":N}` → 睡 N 毫秒；
 /// `{"crash":true}` → 直接退出（崩溃）；其余回显 "out-{text}"。
 #[test]
@@ -1076,7 +1076,8 @@ async fn a2_fleet_node_registered_node_completes_step_via_real_protocol() {
     assert_eq!(status, 202, "{run}");
     // 节点侧轮询可领取任务 → correlation ID 必须是 HTTP 层派生值 <goal>/<run>/<键>。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut task_id = String::new();
+    // 延迟初始化：循环内要么赋值后 break，要么 deadline 断言 panic。
+    let task_id;
     loop {
         let (_, tasks) = call(&app, "GET", "/fleet/nodes/capw/tasks", None).await;
         let list = tasks["tasks"].as_array().cloned().unwrap_or_default();

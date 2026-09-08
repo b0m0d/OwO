@@ -6,6 +6,7 @@
 //! 3. tree：受限深度目录树（文件/目录）；
 //! 4. git-status：真实 `git status --porcelain`；
 //! 5. POST /teams 可选 workspace 直接绑定；cancel 后绑定保留（生命周期独立）。
+//!
 //! （审批器/Spec 缺省语义单元测试在 `project_workspace_api.rs` 模块内 `#[cfg(test)]`。）
 
 use owo_agent_core::gateway::ModelProvider;
@@ -244,15 +245,9 @@ async fn workspace_bind_tree_git_status_roundtrip() {
     .await;
     let entries = tree["entries"].as_array().unwrap();
     let paths: Vec<&str> = entries.iter().filter_map(|e| e["path"].as_str()).collect();
-    assert!(
-        paths.iter().any(|p| *p == "tracked.txt"),
-        "顶层文件应在树中：{tree}"
-    );
-    assert!(paths.iter().any(|p| *p == "docs"), "目录应在树中：{tree}");
-    assert!(
-        paths.iter().any(|p| *p == "docs/ok.txt"),
-        "深度内文件应在树中：{tree}"
-    );
+    assert!(paths.contains(&"tracked.txt"), "顶层文件应在树中：{tree}");
+    assert!(paths.contains(&"docs"), "目录应在树中：{tree}");
+    assert!(paths.contains(&"docs/ok.txt"), "深度内文件应在树中：{tree}");
     assert!(
         !paths.iter().any(|p| p.contains("deep/z.txt")),
         "超过 tree_depth 的文件不得出现：{tree}"

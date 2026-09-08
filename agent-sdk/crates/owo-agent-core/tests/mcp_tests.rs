@@ -434,6 +434,7 @@ async fn mcp_large_schema_is_compacted_and_full_schema_available() {
         name: "big_tool".into(),
         description: "大 schema 工具".into(),
         input_schema: big_schema,
+        annotations: None,
     }];
     registry.register_mcp_tools("big-server", Arc::clone(&client), tools);
     let visible = registry
@@ -472,6 +473,7 @@ async fn mcp_small_schema_kept_as_is_and_no_full_copy() {
             name: "small_tool".into(),
             description: "小 schema".into(),
             input_schema: small.clone(),
+            annotations: None,
         }],
     );
     let visible = registry
@@ -513,6 +515,7 @@ async fn mcp_compacted_tool_still_callable() {
             name: "echo".into(),
             description: "回显".into(),
             input_schema: big_schema,
+            annotations: None,
         }],
     );
     let workspace = std::env::temp_dir().join(format!("owo-mcp-compact-{}", uuid::Uuid::new_v4()));

@@ -113,13 +113,12 @@ impl Blackboard {
     /// 门控读：Level::Read 恒允许；KeyNotFound 返回错误。
     pub async fn read(&self, key: &str) -> Result<serde_json::Value, BlackboardError> {
         let inner = self.inner.read().await;
-        let req = PermissionRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            tool: "blackboard.read".to_string(),
-            args: serde_json::json!({ "key": key }),
-            level: Level::Read,
-            reason: format!("blackboard 读取 {key}"),
-        };
+        let req = PermissionRequest::new(
+            "blackboard.read",
+            serde_json::json!({ "key": key }),
+            Level::Read,
+            format!("blackboard 读取 {key}"),
+        );
         if inner.policy.decision(&req) != Decision::Allow {
             return Err(BlackboardError::PolicyDenied(format!(
                 "blackboard 读取 {key} 被策略拒绝"

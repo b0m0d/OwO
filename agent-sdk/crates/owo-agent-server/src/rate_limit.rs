@@ -232,7 +232,10 @@ pub fn session_id_from_path(path: &str) -> Option<String> {
 /// 公开端点/SSE 路径不参与限流（与 auth_token 的豁免集合一致）。
 pub fn exempt_path(path: &str) -> bool {
     matches!(path, "/health" | "/openapi.json" | "/auth/token")
-        || path.ends_with("/events")
+        || (path.starts_with("/cloud/tasks/") && path.ends_with("/events"))
+        || (path.starts_with("/workflow/run/") && path.ends_with("/events"))
+        || (path.starts_with("/teams/") && path.ends_with("/events"))
+        || (path.starts_with("/fleet/tasks/") && path.ends_with("/events"))
         || path == "/events/stream"
 }
 

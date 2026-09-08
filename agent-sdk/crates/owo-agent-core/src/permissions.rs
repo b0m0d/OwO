@@ -39,6 +39,36 @@ pub struct PermissionRequest {
     pub args: Value,
     pub level: Level,
     pub reason: String,
+    /// §7.2/§7.4：风险说明（审批卡展示）。工具未声明风险信息时给出统一提示；
+    /// 已知内置工具无额外说明时省略该字段（保持既有 JSON 契约形状）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_note: Option<String>,
+}
+
+impl PermissionRequest {
+    /// 统一构造入口：业务模块必须经此创建权限请求，禁止直接拼装 request_id。
+    /// request_id 由构造函数生成，保证全局唯一，业务调用点无需关心。
+    pub fn new(
+        tool: impl Into<String>,
+        args: Value,
+        level: Level,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            tool: tool.into(),
+            args,
+            level,
+            reason: reason.into(),
+            risk_note: None,
+        }
+    }
+
+    /// 串联风险说明；`None` 表示省略该字段（保持既有 JSON 契约形状）。
+    pub fn with_risk_note(mut self, note: Option<String>) -> Self {
+        self.risk_note = note;
+        self
+    }
 }
 
 #[async_trait]
@@ -203,30 +233,9 @@ impl Policy {
         .collect()
     }
 
+    /// §7.2：工具 → 权限级别由 ToolEffect 元数据驱动（注册表 → 内置矩阵 → Execute 兜底）。
     pub fn level_for(tool: &str) -> Level {
-        match tool {
-            "read_file" | "list_dir" | "search_files" => Level::Read,
-            "write_file" => Level::Write,
-            "run_command" => Level::Execute,
-            "text.inject" | "clipboard" => Level::Inject,
-            "screen_ocr"
-            | "desktop_window_ocr"
-            | "ocr_region"
-            | "desktop_foreground"
-            | "desktop_window_list"
-            | "desktop_wait"
-            | "desktop_wait_until"
-            | "browser_snapshot"
-            | "screen_vision"
-            | "vision_verify"
-            | "vision_ground" => Level::Read,
-            "desktop_click" | "desktop_type" | "desktop_key" | "desktop_shortcut"
-            | "desktop_activate" | "desktop_launch" | "desktop_scroll" => Level::Inject,
-            "browser_navigate" | "browser_search" | "browser_click" | "browser_type"
-            | "browser_press" | "browser_close" => Level::Execute,
-            "browser_screenshot" | "browser_download_image" => Level::Write,
-            _ => Level::Execute,
-        }
+        crate::tool_effects::effect_class_for(tool).into()
     }
 
     /// 解析并校验路径位于 workspace 内（文件可尚不存在，校验父级）。
@@ -235,7 +244,6 @@ impl Policy {
     }
 
     pub fn evaluate(&self, tool: &str, args: &Value) -> PermissionRequest {
-        let request_id = uuid::Uuid::new_v4().to_string();
         let level = Self::level_for(tool);
         let reason = match tool {
             "read_file" | "write_file" => {
@@ -264,13 +272,11 @@ impl Policy {
             }
             _ => format!("工具 {tool} 需要审批"),
         };
-        PermissionRequest {
-            request_id,
-            tool: tool.to_string(),
-            args: args.clone(),
-            level,
-            reason,
-        }
+        let risk_note = match crate::tool_effects::effect_for(tool) {
+            Some(effect) => effect.risk_note,
+            None => Some(crate::tool_effects::UNDECLARED_RISK_NOTE.to_string()),
+        };
+        PermissionRequest::new(tool, args.clone(), level, reason).with_risk_note(risk_note)
     }
 
     /// 工具执行前的最终判定（拒绝原因通过 request.reason 表达）。

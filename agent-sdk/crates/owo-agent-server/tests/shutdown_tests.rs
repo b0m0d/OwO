@@ -104,6 +104,19 @@ fn pid_file_cleans_on_drop_and_recovers_stale() {
         .is_none());
 }
 
+#[cfg(windows)]
+#[test]
+fn process_liveness_distinguishes_current_and_impossible_pid() {
+    assert!(
+        owo_agent_server::shutdown::process_alive(std::process::id()),
+        "当前测试进程必须被识别为存活"
+    );
+    assert!(
+        !owo_agent_server::shutdown::process_alive(u32::MAX),
+        "不可能的 pid 不应阻塞陈旧 pid 文件恢复"
+    );
+}
+
 // ---------- 路由面：/server/status + /server/shutdown ----------
 
 struct IdleProvider;

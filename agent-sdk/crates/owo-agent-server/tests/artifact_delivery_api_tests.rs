@@ -163,7 +163,7 @@ fn make_artifact(
         media_type: media_type_of(format).to_string(),
         file_name: file_name_of(kind, format),
         sha256: hash,
-        size_bytes: content.as_bytes().len() as u64,
+        size_bytes: content.len() as u64,
         evidence_refs: vec![],
         open_issues: vec![],
         validation: None,

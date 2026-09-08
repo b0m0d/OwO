@@ -76,10 +76,13 @@ const LEADER_FINAL: &str =
 // —— WorkerOutputV1 契约信封（R4：worker 必须返回结构化 JSON，正文在 artifact.content）——
 // 手写 const JSON（r###：正文含 `"##` 序列，需三重 # 终止）；content 内 \n 为
 // JSON 转义 = 真实换行，与 LEADER_FINAL 字面一致。
+// 十期 · 三路：Document 分类 multi 评测走 document-delivery-v1 模板
+//（drafter → content_reviewer → finalizer）；评审结论经 artifact 携带（登记 kind
+// 取角色链 kind=角色名），最终交付按 producer 收口角色挑选，评审角色永不入选。
 
-const BUILDER_CONTRACT: &str = r###"{"status":"done","summary":"交付完成","artifact":{"kind":"document","format":"markdown","content":"## 草稿\n关键结论 A 的初稿，结构完整，待评审。"},"evidence":[],"open_issues":[]}"###;
-const CRITIC_CONTRACT: &str = r###"{"status":"done","summary":"{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\"]}","evidence":[],"open_issues":[]}"###;
-const LEADER_CONTRACT: &str = r###"{"status":"done","summary":"最终交付","artifact":{"kind":"final","format":"markdown","content":"# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。"},"evidence":[],"open_issues":[]}"###;
+const DRAFTER_CONTRACT: &str = r###"{"status":"done","summary":"初稿完成","artifact":{"kind":"draft","format":"markdown","content":"## 草稿\n关键结论 A 的初稿，结构完整，待评审。"},"evidence":[],"open_issues":[]}"###;
+const CONTENT_REVIEWER_CONTRACT: &str = r###"{"status":"done","summary":"评审通过","artifact":{"kind":"review","format":"markdown","content":"{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\"]}"},"evidence":[],"open_issues":[]}"###;
+const FINALIZER_CONTRACT: &str = r###"{"status":"done","summary":"最终交付","artifact":{"kind":"final","format":"markdown","content":"# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。"},"evidence":[],"open_issues":[]}"###;
 
 fn ws_case(id: &str) -> ProductEvalCase {
     ProductEvalCase {
@@ -192,7 +195,11 @@ fn run_report(report: &owo_agent_core::product_eval::ProductEvalReport) {
 #[tokio::test]
 async fn multi_mode_matrix_cell_passes_with_workswarm_semantics() {
     let root = fresh_out("multi-pass");
-    let provider = ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT]);
+    let provider = ScriptedProvider::new(&[
+        DRAFTER_CONTRACT,
+        CONTENT_REVIEWER_CONTRACT,
+        FINALIZER_CONTRACT,
+    ]);
     let case = ws_case("ws-multi-pass");
     let runner = MatrixRunner::new(bundle_with(case, &root), root.join("out"));
     let report = runner
@@ -216,7 +223,10 @@ async fn multi_mode_matrix_cell_passes_with_workswarm_semantics() {
     assert_eq!(run.key.agent_mode, AgentMode::Multi);
     assert_eq!(run.status, RunStatus::Passed, "run = {run:?}");
     assert_eq!(run.artifact_refs, vec![ARTIFACT.to_string()]);
-    assert_eq!(run.model_calls, 3, "builder+critic+leader 各一次");
+    assert_eq!(
+        run.model_calls, 3,
+        "drafter+content_reviewer+finalizer 各一次"
+    );
     assert_eq!(run.retries, 0);
     assert_eq!(run.cancellations, 0);
     assert!(run.error.is_none());
@@ -247,7 +257,11 @@ async fn same_runner_parity_between_dry_single_and_workswarm_multi() {
         .await
         .unwrap();
 
-    let provider = ScriptedProvider::new(&[BUILDER_CONTRACT, CRITIC_CONTRACT, LEADER_CONTRACT]);
+    let provider = ScriptedProvider::new(&[
+        DRAFTER_CONTRACT,
+        CONTENT_REVIEWER_CONTRACT,
+        FINALIZER_CONTRACT,
+    ]);
     let ws_runner = MatrixRunner::new(bundle_with(case, &root), root.join("out-ws"));
     let ws_report = ws_runner
         .run(
@@ -317,10 +331,10 @@ async fn retry_semantics_are_persisted_in_journal_run_record() {
         // 修复输出仍是自由文本 → 仍不合规 → output_contract_invalid（worker Err，2 次调用）。
         "{\"status\":\"done\",\"summary\":\"x\",\"artifact\":{\"kind\":\"document\",\"format\":\"markdown\",\"content\":\"\"}}",
         "自由文本修复失败样例",
-        // 局部 retry 重跑本步骤：3 次契约调用成功（producer + critic + leader）。
-        BUILDER_CONTRACT,
-        CRITIC_CONTRACT,
-        LEADER_CONTRACT,
+        // 局部 retry 重跑本步骤：3 次契约调用成功（drafter + content_reviewer + finalizer）。
+        DRAFTER_CONTRACT,
+        CONTENT_REVIEWER_CONTRACT,
+        FINALIZER_CONTRACT,
     ]);
     let case = ws_case("ws-journal-retry");
     let runner = MatrixRunner::new(bundle_with(case, &root), root.join("out"));

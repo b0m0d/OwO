@@ -15,7 +15,7 @@
 //! （记忆图谱）+ intent_api（统一命令入口）。
 //!
 //! 第七轮（R7）：本地 API 安全边界（X03）——bearer token 鉴权（auth_token.rs，token 文件
-//! 用户级 ACL + /auth/token 公开引导）、CORS 显式 origin 白名单（webview + localhost）、
+//! 用户级 ACL + 发布桌面 `/auth/token` 进程配对引导）、CORS 显式 origin 白名单（webview + localhost）、
 //! 全局/每会话/敏感端点双令牌桶限流（rate_limit.rs，429 + Retry-After + 审计）；SSE
 //! 资源型路径（/…/events）因 EventSource 无法携带自定义头而豁免鉴权（只读遥测）。
 //!
@@ -301,7 +301,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         let data = serde_json::to_string(event).unwrap_or_default();
         event_stream::hub().publish_alert(data, trace_id);
     }));
-    // 公开面：健康检查 / OpenAPI / token 引导（静态桌面工作台 fallback 挂最终合并面）。
+    // 公开面：健康检查 / OpenAPI / token 引导（发布桌面模式下 token handler 额外验证配对证明）。
     let public = Router::new()
         .route("/health", get(health))
         .route("/openapi.json", get(openapi_spec))
@@ -315,7 +315,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}", get(get_session))
         .route("/session/{id}/turn", post(turn))
         .route("/session/{id}/attachments", get(attachments_list))
-        .route("/session/{id}/attachments", post(attachment_upload))
+        .route(
+            "/session/{id}/attachments",
+            post(attachment_upload).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route(
             "/session/{id}/permission/{request_id}",
             post(respond_permission),
@@ -400,12 +403,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/learn/sink", post(learn_sink))
         .route("/learn/execute-package", post(learn_execute_package))
         .route("/learn/export/{name}", get(learn_export))
-        .route("/learn/import", post(learn_import))
+        .route(
+            "/learn/import",
+            post(learn_import).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
         .route("/skill/verify", post(skill_verify))
         .route("/proactive/observe", post(proactive_observe))
         .route("/proactive/decide", post(proactive_decide))
         .route("/proactive/suggestions", get(proactive_suggestions))
-        .route("/stt/transcribe", post(stt_transcribe))
+        .route(
+            "/stt/transcribe",
+            post(stt_transcribe).layer(DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/automations", get(automations_list))
         .route("/automations", post(automations_create))
         .route("/automations/{id}/toggle", post(automations_toggle))
@@ -505,7 +514,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(fleet_api::router(state.clone()))
         // R6（Wave 1，Agent 4 交付）：可靠事件流 /events/stream（SSE 续传 + 背压）。
         .merge(event_stream::router(state.clone()))
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        // 默认 JSON 请求只允许 1 MiB；音频、附件、技能包在各自路由上单独放宽。
+        .layer(DefaultBodyLimit::max(1024 * 1024))
         // 鉴权在最外层：未授权请求不进入限流，也不消耗令牌。
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -571,7 +581,7 @@ async fn trace_id_middleware(
     response
 }
 
-/// CORS：permissive → 显式 origin 白名单（webview 协议 + localhost/127.0.0.1 任意端口）。
+/// CORS：发布桌面版只接受 Tauri origin；开发模式额外允许 loopback 调试页。
 /// 跨源预检由浏览器强制；服务器侧仍以 bearer token 鉴权为准。
 fn cors_layer() -> CorsLayer {
     use axum::http::Method;
@@ -591,19 +601,37 @@ fn cors_layer() -> CorsLayer {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
+            axum::http::HeaderName::from_static(auth_token::DESKTOP_PAIRING_HEADER),
         ])
         .max_age(std::time::Duration::from_secs(600))
 }
 
-/// origin 白名单判定：localhost/127.0.0.1 任意端口、Tauri webview
-/// （tauri://localhost、http(s)://tauri.localhost）。
+/// `OWO_DESKTOP_RELEASE=1` 由 Tauri 子进程注入，避免发布版继承开发浏览器边界。
 fn origin_allowed(origin: &[u8]) -> bool {
     let Ok(origin) = std::str::from_utf8(origin) else {
         return false;
     };
-    let host_port = origin.split("://").nth(1).unwrap_or(origin);
+    let mut parts = origin.split("://");
+    let Some(scheme) = parts.next() else {
+        return false;
+    };
+    let Some(host_port) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
     let host = host_port.split(':').next().unwrap_or(host_port);
-    host == "localhost" || host == "127.0.0.1" || host == "tauri.localhost"
+    let desktop_release = std::env::var("OWO_DESKTOP_RELEASE")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if desktop_release {
+        return (scheme == "tauri" && host == "localhost")
+            || ((scheme == "http" || scheme == "https") && host == "tauri.localhost");
+    }
+    ((scheme == "http" || scheme == "https") && (host == "localhost" || host == "127.0.0.1"))
+        || (scheme == "tauri" && host == "localhost")
+        || ((scheme == "http" || scheme == "https") && host == "tauri.localhost")
 }
 
 /// 开发环境下的桌面工作台静态目录：`<repo>/agent-sdk/desktop/web`。
@@ -1001,7 +1029,7 @@ async fn openapi_spec() -> Json<Value> {
             "/metrics/slo/alerts": { "get": { "operationId": "metricsSloAlerts", "responses": { "200": { "description": "SLO alert rules and structured alert events" } } } },
             "/metrics/slo/report": { "get": { "operationId": "metricsSloReport", "parameters": [{ "name": "days", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "SLO period report (JSON)" } } } },
             "/metrics/prometheus": { "get": { "operationId": "metricsPrometheus", "responses": { "200": { "description": "Prometheus text exposition format" } } } },
-            "/auth/token": { "get": { "operationId": "authTokenBootstrap", "security": [], "responses": { "200": { "description": "public bootstrap token (same-origin pairing; CORS whitelist blocks cross-origin reads)" } } } },
+            "/auth/token": { "get": { "operationId": "authTokenBootstrap", "security": [], "responses": { "200": { "description": "development bootstrap token; desktop release requires an ephemeral process-pairing proof header" }, "403": { "description": "desktop process pairing proof missing or invalid" } } } },
             "/storage/backup": { "post": { "operationId": "storageBackup", "responses": { "200": { "description": "zip backup (b64 + saved path)" } } } },
             "/storage/restore": { "post": { "operationId": "storageRestore", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "archive_b64": { "type": "string" } }, "required": ["archive_b64"] } } } }, "responses": { "200": { "description": "restore result with pre-backup" } } } },
             "/storage/export": { "post": { "operationId": "storageExport", "responses": { "200": { "description": "full standard JSON export" } } } },
@@ -1265,14 +1293,19 @@ async fn openapi_spec() -> Json<Value> {
                 },
                 "HealthResponse": {
                     "type": "object",
-                    "description": "/health 响应（十期一路：build 为 additive 字段）",
+                    "description": "/health 响应（十期一路：build 为 additive 字段；§4.2 实例握手字段 additive）",
                     "properties": {
                         "healthy": { "type": "boolean" },
                         "version": { "type": "string" },
+                        "api_version": { "type": "string", "description": "桌面壳与核心服务兼容性握手版本" },
                         "auto_approve": { "type": "boolean" },
-                        "build": { "$ref": "#/components/schemas/BuildInfo", "nullable": true }
+                        "build": { "$ref": "#/components/schemas/BuildInfo", "nullable": true },
+                        "instance_id": { "type": "string", "nullable": true, "description": "桌面壳注入的实例身份（开发模式不序列化）" },
+                        "pid": { "type": "integer", "description": "服务进程 pid" },
+                        "stage": { "type": "string", "description": "启动阶段（当前恒为 ready）" },
+                        "build_id": { "type": "string", "description": "构建标识（git_commit，缺失 unknown）" }
                     },
-                    "required": ["healthy", "version", "auto_approve"]
+                    "required": ["healthy", "version", "api_version", "auto_approve"]
                 },
                 "BuildInfo": {
                     "type": "object",
@@ -1344,8 +1377,18 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         healthy: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        api_version: OWO_API_VERSION.to_string(),
         auto_approve: auto_approve_enabled(),
         build: load_build_info().clone(),
+        // §4.2 实例握手：非秘密身份字段。桌面壳凭 instance_id/pid 核对
+        // "这个服务是我启动的子进程"，不再盲复用同端口旧服务。
+        instance_id: auth_token::desktop_instance_id(),
+        pid: std::process::id(),
+        stage: "ready".to_string(),
+        build_id: load_build_info()
+            .as_ref()
+            .map(|info| info.commit.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
     })
 }
 
@@ -1464,14 +1507,32 @@ struct ShutdownRequest {
 }
 
 /// R8：优雅关闭入口（需二次确认；CLI serve 侧接线完成「停止接收→完成在途→flush→退出」）。
+/// §4.2 实例握手：注入实例身份时，只有同一桌面实例可关闭服务——
+/// 防止旧壳残留或外来进程关掉新实例（对应审计「关闭时先带实例证明调用 /server/shutdown」）。
 async fn server_shutdown(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ShutdownRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !auth_token::instance_gate_allows(
+        auth_token::desktop_instance_id().as_deref(),
+        headers.get(auth_token::DESKTOP_INSTANCE_HEADER),
+    ) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "桌面实例身份不匹配：该核心服务属于另一个桌面实例",
+                "code": "auth/instance_mismatch/not_retryable",
+            })),
+        ));
+    }
     if request.confirm != Some(true) {
         return Err((
             StatusCode::BAD_REQUEST,
-            "需要二次确认：{\"confirm\":true}".to_string(),
+            Json(json!({
+                "error": "需要二次确认：{\"confirm\":true}",
+                "code": "validation/invalid_input/not_retryable",
+            })),
         ));
     }
     let active = state.shutdown_gate.request_shutdown();
@@ -4033,9 +4094,50 @@ async fn settings_get(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let settings = owo_agent_core::Settings::load(&state.workspace);
-    serde_json::to_value(&settings)
-        .map(Json)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+    let mut value = serde_json::to_value(&settings)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("runtime".to_string(), effective_runtime_config(&settings));
+    }
+    Ok(Json(value))
+}
+
+/// 只读有效运行配置：前端不得用历史表单默认值冒充当前 provider/model。
+/// 凭据只暴露来源，不暴露内容。
+fn effective_runtime_config(settings: &owo_agent_core::Settings) -> Value {
+    let base_url = std::env::var("OPENAI_BASE_URL")
+        .unwrap_or_else(|_| "https://open.bigmodel.cn/api/paas/v4".to_string());
+    let model = std::env::var("OPENAI_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| settings.model.clone())
+        .unwrap_or_else(|| "glm-5.3-flash".to_string());
+    let lower = base_url.to_ascii_lowercase();
+    let provider = if lower.contains("bigmodel") || lower.contains("zhipu") {
+        "bigmodel"
+    } else if lower.contains("aliyuncs") || lower.contains("dashscope") {
+        "qwen"
+    } else if lower.contains("deepseek") {
+        "deepseek"
+    } else if lower.contains("ollama") || lower.contains("127.0.0.1") || lower.contains("localhost")
+    {
+        "ollama"
+    } else {
+        "openai-compatible"
+    };
+    let local = provider == "ollama";
+    let cloud_enabled = std::env::var("OWO_CLOUD_ENABLED")
+        .ok()
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(settings.egress.cloud_enabled);
+    json!({
+        "provider": provider,
+        "model": model,
+        "endpoint_kind": if local { "local" } else { "cloud" },
+        "credential_source": if local { "not_required" } else if std::env::var_os("OPENAI_API_KEY").is_some() { "environment" } else { "missing" },
+        "cloud_enabled": cloud_enabled,
+        "available_models": [model],
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -4121,6 +4223,7 @@ async fn settings_update(
     Ok(Json(json!({
         "ok": true,
         "note": "已写入 settings.json 并应用运行时设置（模型对新回合即时生效）",
+        "runtime": effective_runtime_config(&settings),
     })))
 }
 

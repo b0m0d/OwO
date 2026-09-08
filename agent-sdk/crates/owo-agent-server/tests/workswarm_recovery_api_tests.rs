@@ -8,6 +8,7 @@
 //! - 活跃运行中 retry → 409；
 //! - 重启遗留：磁盘 Running + 无活动循环 → GET /teams/{id} 返回 `interrupted: true`，
 //!   continue 显式恢复后归零（绝不静默重放）。
+//!
 //! 全部使用内置 echo/sleep/fail worker（不依赖模型凭据）。
 
 use owo_agent_core::gateway::ModelProvider;

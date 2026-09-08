@@ -91,6 +91,40 @@ fn verify_header_parses_bearer_prefix() {
 }
 
 #[test]
+fn desktop_pairing_proof_requires_exact_header_value() {
+    use axum::http::HeaderValue;
+
+    let expected = "0123456789abcdef0123456789abcdef";
+    let valid = HeaderValue::from_static("0123456789abcdef0123456789abcdef");
+    let wrong = HeaderValue::from_static("0123456789abcdef0123456789abcdee");
+    assert!(auth_token::verify_desktop_pairing(Some(&valid), expected));
+    assert!(!auth_token::verify_desktop_pairing(Some(&wrong), expected));
+    assert!(!auth_token::verify_desktop_pairing(None, expected));
+}
+
+/// R8 一次性引导证明全矩阵（纯函数）：无证明（开发模式）放行；有证明时
+/// 头必须恒定时间精确匹配；缺失/错误/长度不同均拒绝——不可用“任意值”绕过。
+#[test]
+fn pairing_gate_full_matrix() {
+    use axum::http::HeaderValue;
+
+    let secret = "0123456789abcdef0123456789abcdef";
+    let valid = HeaderValue::from_static("0123456789abcdef0123456789abcdef");
+    let wrong = HeaderValue::from_static("0123456789abcdef0123456789abcdee");
+    let short = HeaderValue::from_static("short");
+
+    // 开发模式（无配对证明）：缺头也放行（浏览器调试兼容）。
+    assert!(auth_token::pairing_gate_allows(None, None));
+    assert!(auth_token::pairing_gate_allows(None, Some(&valid)));
+
+    // 发布模式（有配对证明）：只有精确匹配放行。
+    assert!(auth_token::pairing_gate_allows(Some(secret), Some(&valid)));
+    assert!(!auth_token::pairing_gate_allows(Some(secret), None));
+    assert!(!auth_token::pairing_gate_allows(Some(secret), Some(&wrong)));
+    assert!(!auth_token::pairing_gate_allows(Some(secret), Some(&short)));
+}
+
+#[test]
 fn public_and_sse_path_classification() {
     assert!(auth_token::is_public_path("/health"));
     assert!(auth_token::is_public_path("/openapi.json"));

@@ -9,6 +9,10 @@ use std::sync::Mutex;
 static USAGE_GLOBAL_LOCK: Mutex<()> = Mutex::new(());
 
 #[path = "../src/usage.rs"]
+// #[path] 整模块挂载：本测试只覆盖 UsageStore/预算熔断子集；路由/HTTP 处理器
+// （usage_router、usage_summary、usage_records、usage_report 等）在主 crate
+// lib.rs build_router 内接线（.merge(usage::usage_router(...))），此处并非死区。
+#[allow(dead_code)]
 mod usage;
 
 use usage::{UsageDimension, UsageStore};

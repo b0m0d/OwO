@@ -568,13 +568,7 @@ mod tests {
         std::fs::create_dir_all(root.join("docs")).unwrap();
 
         fn req_of(level: Level, path: &str) -> PermissionRequest {
-            PermissionRequest {
-                request_id: "r".to_string(),
-                tool: "write_file".to_string(),
-                args: json!({ "path": path }),
-                level,
-                reason: "test".to_string(),
-            }
+            PermissionRequest::new("write_file", json!({ "path": path }), level, "test")
         }
 
         // 只读：写/执行一律 Deny，读恒 Allow。

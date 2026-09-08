@@ -152,8 +152,10 @@ fn store_is_idempotent_and_replays_from_jsonl() {
     assert_eq!(store.len(), 1);
 
     // 追加第二条与崩溃重放。
-    let mut spec2 = TraceSpec::default();
-    spec2.transition_id = "t-2".into();
+    let spec2 = TraceSpec {
+        transition_id: "t-2".into(),
+        ..Default::default()
+    };
     store.append(make_trace(&spec2)).expect("append 2");
 
     let reloaded = TransitionStore::load(&path).expect("reload");
@@ -198,16 +200,18 @@ fn episode_trace_target(
     target: &str,
     success: bool,
 ) -> TransitionTraceV1 {
-    let mut spec = TraceSpec::default();
-    spec.transition_id = format!("{episode}-t{idx}");
-    spec.episode_id = episode.into();
-    spec.state_before_ref = before.into();
-    spec.state_after_ref = after.into();
-    spec.action_id = action_id.into();
-    spec.op = "click".into();
-    spec.target_id = Some(target.into());
-    spec.target_evidence = vec![format!("element:{target}")];
-    spec.success = success;
+    let spec = TraceSpec {
+        transition_id: format!("{episode}-t{idx}"),
+        episode_id: episode.into(),
+        state_before_ref: before.into(),
+        state_after_ref: after.into(),
+        action_id: action_id.into(),
+        op: "click".into(),
+        target_id: Some(target.into()),
+        target_evidence: vec![format!("element:{target}")],
+        success,
+        ..Default::default()
+    };
     make_trace(&spec)
 }
 
@@ -306,9 +310,11 @@ fn transition_experience_is_recorded_idempotently() {
     assert_eq!(transitions[0].worker, "env:env-test");
 
     // 失败轨迹带失败摘要。
-    let mut spec = TraceSpec::default();
-    spec.transition_id = "t-fail".into();
-    spec.success = false;
+    let spec = TraceSpec {
+        transition_id: "t-fail".into(),
+        success: false,
+        ..Default::default()
+    };
     let failed = make_trace(&spec);
     record_transition_experience(&store, &failed).expect("record fail");
     let failed_event = store
@@ -332,65 +338,85 @@ fn dataset_builder_applies_documented_filter_order() {
     let mut traces = Vec::new();
 
     // 合格样本 ×2（一成功一失败，保证平衡不裁剪）。
-    let mut ok_success = TraceSpec::default();
-    ok_success.transition_id = "ok-success".into();
+    let ok_success = TraceSpec {
+        transition_id: "ok-success".into(),
+        ..Default::default()
+    };
     traces.push(make_trace(&ok_success));
-    let mut ok_failure = TraceSpec::default();
-    ok_failure.transition_id = "ok-failure".into();
-    ok_failure.success = false;
-    ok_failure.verifier_pass = false;
-    ok_failure.state_before_ref = "before-f".into();
+    let ok_failure = TraceSpec {
+        transition_id: "ok-failure".into(),
+        success: false,
+        verifier_pass: false,
+        state_before_ref: "before-f".into(),
+        ..Default::default()
+    };
     traces.push(make_trace(&ok_failure));
 
     // 1) 环境版本不允许。
-    let mut bad_version = TraceSpec::default();
-    bad_version.transition_id = "bad-version".into();
-    bad_version.env_version = "S2-vm-0.9".into();
-    bad_version.state_before_ref = "before-bv".into();
+    let bad_version = TraceSpec {
+        transition_id: "bad-version".into(),
+        env_version: "S2-vm-0.9".into(),
+        state_before_ref: "before-bv".into(),
+        ..Default::default()
+    };
     traces.push(make_trace(&bad_version));
 
     // 2) 状态不完整。
-    let mut incomplete = TraceSpec::default();
-    incomplete.transition_id = "incomplete".into();
-    incomplete.state_after_ref = "".into();
+    let incomplete = TraceSpec {
+        transition_id: "incomplete".into(),
+        state_after_ref: "".into(),
+        ..Default::default()
+    };
     traces.push(make_trace(&incomplete));
 
     // 3) 目标不在证据中。
-    let mut no_evidence = TraceSpec::default();
-    no_evidence.transition_id = "no-evidence".into();
-    no_evidence.target_id = Some("chat.send".into());
-    no_evidence.target_evidence = vec!["element:other".into()];
+    let no_evidence = TraceSpec {
+        transition_id: "no-evidence".into(),
+        target_id: Some("chat.send".into()),
+        target_evidence: vec!["element:other".into()],
+        ..Default::default()
+    };
     traces.push(make_trace(&no_evidence));
 
     // 4) 坐标不在目标框。
-    let mut outside = TraceSpec::default();
-    outside.transition_id = "outside-bounds".into();
-    outside.click_point = Some((500, 500));
-    outside.target_bounds = Some((0, 0, 100, 100));
+    let outside = TraceSpec {
+        transition_id: "outside-bounds".into(),
+        click_point: Some((500, 500)),
+        target_bounds: Some((0, 0, 100, 100)),
+        ..Default::default()
+    };
     traces.push(make_trace(&outside));
 
     // 5a) 缺少 Verifier（verifier_results 为空在合成器中默认非空，这里直接改）。
-    let mut no_verifier_spec = TraceSpec::default();
-    no_verifier_spec.transition_id = "no-verifier".into();
+    let no_verifier_spec = TraceSpec {
+        transition_id: "no-verifier".into(),
+        ..Default::default()
+    };
     let mut no_verifier = make_trace(&no_verifier_spec);
     no_verifier.verifier_results.clear();
     traces.push(no_verifier);
 
     // 5b) Verifier 与终态不一致（成功终态但断言失败）。
-    let mut inconsistent_spec = TraceSpec::default();
-    inconsistent_spec.transition_id = "inconsistent".into();
-    inconsistent_spec.verifier_pass = false;
+    let inconsistent_spec = TraceSpec {
+        transition_id: "inconsistent".into(),
+        verifier_pass: false,
+        ..Default::default()
+    };
     traces.push(make_trace(&inconsistent_spec));
 
     // 6) 隐私域默认不可训练。
-    let mut private_spec = TraceSpec::default();
-    private_spec.transition_id = "private".into();
-    private_spec.scope = PrivacyScope::S3Real;
+    let private_spec = TraceSpec {
+        transition_id: "private".into(),
+        scope: PrivacyScope::S3Real,
+        ..Default::default()
+    };
     traces.push(make_trace(&private_spec));
 
     // 7) 重复（与 ok-success 同状态同动作）。
-    let mut duplicate = TraceSpec::default();
-    duplicate.transition_id = "duplicate".into();
+    let duplicate = TraceSpec {
+        transition_id: "duplicate".into(),
+        ..Default::default()
+    };
     traces.push(make_trace(&duplicate));
 
     let config = DatasetBuilderConfig {
@@ -444,16 +470,20 @@ fn dataset_builder_balances_success_failure() {
     // 5 成功 + 1 失败，比例上限 1.0 → 成功最多保留 1。
     let mut traces = Vec::new();
     for i in 0..5 {
-        let mut spec = TraceSpec::default();
-        spec.transition_id = format!("s-{i}");
-        spec.state_before_ref = format!("before-s{i}");
+        let spec = TraceSpec {
+            transition_id: format!("s-{i}"),
+            state_before_ref: format!("before-s{i}"),
+            ..Default::default()
+        };
         traces.push(make_trace(&spec));
     }
-    let mut failure = TraceSpec::default();
-    failure.transition_id = "f-0".into();
-    failure.success = false;
-    failure.verifier_pass = false;
-    failure.state_before_ref = "before-f0".into();
+    let failure = TraceSpec {
+        transition_id: "f-0".into(),
+        success: false,
+        verifier_pass: false,
+        state_before_ref: "before-f0".into(),
+        ..Default::default()
+    };
     traces.push(make_trace(&failure));
 
     let config = DatasetBuilderConfig {
@@ -476,9 +506,11 @@ fn dataset_builder_balances_success_failure() {
 
 #[test]
 fn dataset_builder_allows_real_data_only_with_explicit_flag() {
-    let mut spec = TraceSpec::default();
-    spec.transition_id = "real".into();
-    spec.scope = PrivacyScope::S3Real;
+    let spec = TraceSpec {
+        transition_id: "real".into(),
+        scope: PrivacyScope::S3Real,
+        ..Default::default()
+    };
     let traces = vec![make_trace(&spec)];
 
     let strict = build_dataset(&traces, &DatasetBuilderConfig::default());

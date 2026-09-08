@@ -908,6 +908,54 @@ async fn public_endpoints_are_token_free_and_bad_token_rejected() {
     assert_eq!(response.status().as_u16(), 401);
 }
 
+/// `/auth/token` 的发布桌面进程配对必须在 OpenAPI 与 CORS 预检中可用，
+/// 否则 WebView 会在真正发送请求前拦截带自定义证明头的请求。
+#[tokio::test]
+async fn auth_token_desktop_pairing_is_documented_and_cors_allowed() {
+    use axum::http::{header, Method, Request};
+
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    let response = app
+        .clone()
+        .oneshot(request(&state, "GET", "/openapi.json", None))
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+        .await
+        .unwrap();
+    let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        spec["paths"]["/auth/token"]["get"]["responses"]["403"].is_object(),
+        "/auth/token 的 OpenAPI 应登记发布桌面配对失败的 403 响应"
+    );
+
+    let preflight = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/auth/token")
+        .header(header::ORIGIN, "tauri://localhost")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .header(
+            header::ACCESS_CONTROL_REQUEST_HEADERS,
+            "x-owo-desktop-pairing",
+        )
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = app.oneshot(preflight).await.unwrap();
+    assert!(response.status().is_success(), "配对头预检应成功");
+    let allowed_headers = response
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(
+        allowed_headers.contains("x-owo-desktop-pairing"),
+        "CORS 必须放行桌面配对证明头，实际为 {allowed_headers:?}"
+    );
+}
+
 /// SSE 资源型路径豁免鉴权（EventSource 无法携带自定义头；只读遥测）。
 #[tokio::test]
 async fn sse_paths_are_exempt_from_auth() {
@@ -1304,7 +1352,7 @@ async fn artifact_review_contract_shape_is_frozen() {
     );
 }
 
-/// 十期一路：/health 契约——healthy/version/auto_approve 必备；build 为 additive
+/// 十期一路：/health 契约——healthy/version/api_version/auto_approve 必备；build 为 additive
 /// 可缺省字段（build-info.json 缺失时不序列化），在场时 commit/dirty/built_at 齐备；
 /// /openapi.json 同步登记 HealthResponse/BuildInfo 组件与 200 schema 引用。
 #[tokio::test]
@@ -1324,6 +1372,10 @@ async fn health_contract_version_and_optional_build() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["healthy"], serde_json::json!(true));
+    assert_eq!(
+        v["api_version"],
+        serde_json::json!(owo_agent_server::OWO_API_VERSION)
+    );
     assert!(v["version"].is_string(), "version 必须是字符串");
     assert!(
         !v["version"].as_str().unwrap().is_empty(),
@@ -1337,6 +1389,19 @@ async fn health_contract_version_and_optional_build() {
         assert!(build["dirty"].is_boolean(), "build.dirty 必须是布尔");
         assert!(build["built_at"].is_string(), "build.built_at 必须是字符串");
     }
+
+    // §4.2 实例握手字段（additive）：测试进程未注入实例身份 → instance_id 不序列化；
+    // pid/stage/build_id 恒在场（serde default 字段）。
+    assert!(
+        v.get("instance_id").is_none(),
+        "未注入 OWO_DESKTOP_INSTANCE_ID 时 /health 不得出现 instance_id 键：{v}"
+    );
+    assert!(
+        v["pid"].as_u64().unwrap_or(0) > 0,
+        "/health.pid 应为正数：{v}"
+    );
+    assert_eq!(v["stage"], "ready", "stage 恒为 ready");
+    assert!(v["build_id"].is_string(), "build_id 必须是字符串：{v}");
 
     // ② /openapi.json 契约面：200 引用 HealthResponse，组件登记两个 schema。
     let response = app
@@ -1365,7 +1430,7 @@ async fn health_contract_version_and_optional_build() {
     assert!(schemas["BuildInfo"].is_object(), "BuildInfo 组件应登记");
     assert_eq!(
         schemas["HealthResponse"]["required"],
-        serde_json::json!(["healthy", "version", "auto_approve"]),
+        serde_json::json!(["healthy", "version", "api_version", "auto_approve"]),
         "build 为 additive：不得进入 required"
     );
     assert_eq!(

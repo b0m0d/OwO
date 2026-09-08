@@ -143,7 +143,7 @@ async fn pid_file_uses_drop_cleanup_and_recover_force_kill() {
 
     // 正常生命周期：create → drop 自动清理。
     {
-        let pid = PidFile::create(temp.path()).unwrap();
+        let _pid = PidFile::create(temp.path()).unwrap();
         assert!(temp.path().join("server.pid").is_file());
     }
     assert!(

@@ -273,6 +273,12 @@ impl ToolRegistry {
             if let Some(full) = full_schema {
                 self.full_schemas.insert(full_name.clone(), full);
             }
+            // §7.2：MCP 工具副作用按 annotations 推导并注册（审批卡/只读判定消费）。
+            crate::tool_effects::register_mcp_effect(
+                server_name,
+                &tool.name,
+                tool.annotations.as_ref(),
+            );
             self.tools.push(Arc::new(McpToolAdapter {
                 full_name,
                 server_name: server_name.to_string(),
@@ -288,19 +294,20 @@ impl ToolRegistry {
         self.full_schemas.get(name).cloned()
     }
 
-    /// 移除工具时同步清理完整 schema 副本。
+    /// 移除工具时同步清理完整 schema 副本与副作用注册。
     fn remove_prefix_inner(&mut self, prefix: &str) -> usize {
         let before = self.tools.len();
         self.tools
             .retain(|tool| !tool.spec().name.starts_with(prefix));
         self.full_schemas
             .retain(|name, _| !name.starts_with(prefix));
+        crate::tool_effects::remove_prefix(prefix);
         before - self.tools.len()
     }
 }
 
 /// 工具名只允许字母数字、下划线与连字符（模型 API 约束）。
-fn sanitize_tool_name(name: &str) -> String {
+pub(crate) fn sanitize_tool_name(name: &str) -> String {
     name.chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || character == '_' || character == '-' {

@@ -1064,8 +1064,8 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         generated_at: "t1".into(),
         runs: vec![a.clone()],
         pending: vec![],
-        metrics: aggregate_metrics(&[a.clone()]),
-        per_case: aggregate_per_case(&[a.clone()]),
+        metrics: aggregate_metrics(std::slice::from_ref(&a)),
+        per_case: aggregate_per_case(std::slice::from_ref(&a)),
     };
     let multi = ProductEvalReport {
         schema_version: 1,
@@ -1078,8 +1078,8 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         generated_at: "t2".into(),
         runs: vec![b.clone()],
         pending: vec![],
-        metrics: aggregate_metrics(&[b.clone()]),
-        per_case: aggregate_per_case(&[b.clone()]),
+        metrics: aggregate_metrics(std::slice::from_ref(&b)),
+        per_case: aggregate_per_case(std::slice::from_ref(&b)),
     };
     let opts = PairedReportOptions {
         model: Some("glm-5.3-flash".into()),
@@ -1193,8 +1193,10 @@ fn freeze_build_verify_and_drift_detection() {
 #[tokio::test]
 async fn batch_label_enforced_and_tags_recorded() {
     use owo_agent_core::product_eval::SuiteDefaults;
-    let mut defaults = SuiteDefaults::default();
-    defaults.repetitions = 1;
+    let defaults = SuiteDefaults {
+        repetitions: 1,
+        ..Default::default()
+    };
     let b = SuiteBundle {
         dir: std::env::temp_dir(),
         suite: ProductEvalSuite {

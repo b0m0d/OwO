@@ -169,6 +169,9 @@ pub struct ForceKillRecovery {
 }
 
 /// 进程存活探测（Windows：OpenProcess；其他：kill(pid, 0)）。
+///
+/// Windows 的 `GetLastError` 是线程本地状态，调用 `OpenProcess` 前必须清零；
+/// 否则陈旧错误码会把已退出进程的 pid 文件误判为活跃实例，阻塞服务恢复。
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
@@ -180,14 +183,18 @@ pub fn process_alive(pid: u32) -> bool {
                 dw_process_id: u32,
             ) -> WinHandle;
             fn GetLastError() -> u32;
+            fn SetLastError(dw_err_code: u32);
             fn CloseHandle(h_object: WinHandle) -> i32;
         }
         const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-        const ERROR_INVALID_PARAMETER: u32 = 87;
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        // `OpenProcess` 成功不保证会重置 last-error，先清零才能可信地解释失败路径。
+        unsafe { SetLastError(0) };
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if handle.is_null() {
-            // pid 不存在 → ERROR_INVALID_PARAMETER；权限不足视为存活（保守）。
-            return unsafe { GetLastError() } != ERROR_INVALID_PARAMETER;
+            // 权限不足时保守地视为存活，避免破坏其他用户的运行实例；其他失败
+            // （不存在、无效参数或未设置错误码）均按陈旧 pid 恢复。
+            return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
         }
         unsafe { CloseHandle(handle) };
         true

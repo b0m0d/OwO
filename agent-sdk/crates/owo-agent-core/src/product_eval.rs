@@ -851,7 +851,7 @@ pub(crate) fn evaluate_checker<S: FileSource>(
                 let actual_keys: Vec<&String> = object.keys().collect();
                 let mut want: Vec<&String> = keys.iter().collect();
                 want.sort();
-                let mut actual: Vec<&String> = actual_keys.iter().copied().collect();
+                let mut actual: Vec<&String> = actual_keys.to_vec();
                 actual.sort();
                 if want == actual {
                     Ok(())
@@ -3250,4 +3250,68 @@ pub fn parse_freeze(text: &str) -> Result<serde_json::Value, ProductEvalError> {
     let value: serde_json::Value = serde_json::from_str(text)
         .map_err(|e| ProductEvalError(format!("freeze.json 解析失败：{e}")))?;
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// 契约变更任务的映射片段检查器必须容忍格式化差异（反引号/空格/箭头变体）。
+    /// 回归依据：2026-08-31 正式批次 code-contract-change 3 个失败均为"语义正确、
+    /// 仅字面短语被反引号/ASCII 箭头打断"（rep 2/6/7 的产物内容原样收录）。
+    #[test]
+    fn contract_change_mapping_checker_tolerates_formatting() {
+        let task_text = include_str!("../../../evals/v1/tasks/code-contract-change.json");
+        let task: serde_json::Value =
+            serde_json::from_str(task_text).expect("任务 JSON 必须可解析");
+        let mapping = task["checkers"]
+            .as_array()
+            .expect("checkers 数组")
+            .iter()
+            .find(|c| {
+                c.get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|p| p == "out/contract-change.md")
+                    && c.get("pattern")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|p| p.contains("fetch_user_display_name"))
+            })
+            .expect("必须存在映射 Regex 检查器");
+        assert_eq!(
+            mapping["type"].as_str(),
+            Some("regex"),
+            "检查器应升级为 Regex（Contains 已被证伪为脆弱字面匹配）"
+        );
+        let checker: ArtifactChecker =
+            serde_json::from_value(mapping.clone()).expect("checker 可反序列化");
+
+        // 2026-08-31 正式批次真实失败产物片段（语义正确，仅格式不同）+ 参考回放格式。
+        let positives = [
+            "## 变更概述\n\n- 公开函数 `get_user_name` 更名为 `fetch_user_display_name`，并为其 `user_id` 参数增加显式 `str` 类型标注。",
+            "## 迁移说明\n\n1. 所有调用点执行机械替换：`get_user_name` → `fetch_user_display_name`。",
+            "映射关系：get_user_name → fetch_user_display_name；旧名保留一个版本的 DeprecationWarning 后移除。",
+            "公开函数 get_user_name 更名为 fetch_user_display_name。",
+        ];
+        for (i, content) in positives.iter().enumerate() {
+            let mut map = BTreeMap::new();
+            map.insert("out/contract-change.md".to_string(), content.to_string());
+            assert!(
+                evaluate_checker_on_map(&checker, &map).is_ok(),
+                "正向样例 {i} 应通过：{content:?}"
+            );
+        }
+
+        // 反例：只并列提及新旧名、无映射关系语义 → 必须失败。
+        let mut negative = BTreeMap::new();
+        negative.insert(
+            "out/contract-change.md".to_string(),
+            "文档同时提及 get_user_name 与 fetch_user_display_name，但没有任何映射表述。"
+                .to_string(),
+        );
+        assert!(
+            evaluate_checker_on_map(&checker, &negative).is_err(),
+            "反例（无映射语义）必须失败"
+        );
+    }
 }

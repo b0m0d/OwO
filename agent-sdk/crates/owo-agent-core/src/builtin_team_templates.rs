@@ -462,9 +462,9 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
             must_not_do: vec![
                 "只读：不改写交付物、不产出代码。".to_string(),
                 "不直接重新实现（发现问题写进评审结论，不动手改）。".to_string(),
-                "禁止提交最终 Artifact（artifact 字段必须省略）：评审/审查角色只输出结论，交付物归 producer 链。".to_string(),
+                "不得提交交付物正文（变更/终稿归 producer 链）：你的 artifact.kind=\"review\"、artifact.format=\"markdown\"，artifact.content 只放评审结论。".to_string(),
             ],
-            output_format: "评审结论 JSON：{\"approved\":bool,\"score\":0-100,\"comments\":[..]}。".to_string(),
+            output_format: "契约 JSON：status=done + artifact{kind=\"review\", format=\"markdown\", content=评审结论 JSON（{\"approved\":bool,\"score\":0-100,\"comments\":[..]}）}；kind=review 的产物不会参与最终交付选择。".to_string(),
             acceptance: vec![
                 "结论覆盖「与目标一致」与「无越界修改」两个维度。".to_string(),
                 "每条意见可定位到文件/函数级。".to_string(),
@@ -551,8 +551,9 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
             ],
             must_not_do: vec![
                 "只读：不改写原文、不产出新稿。".to_string(),
+                "不得提交文档正文（终稿归 finalizer）：你的 artifact.kind=\"review\"、artifact.format=\"markdown\"，artifact.content 只放修订意见。".to_string(),
             ],
-            output_format: "修订意见列表（逐条：位置 + 问题 + 建议）。".to_string(),
+            output_format: "契约 JSON：status=done + artifact{kind=\"review\", format=\"markdown\", content=修订意见列表（逐条：位置 + 问题 + 建议）}；kind=review 的产物不会参与最终交付选择。".to_string(),
             acceptance: vec![
                 "意见覆盖结构与事实两类。".to_string(),
                 "每条意见可执行（不是泛泛评价）。".to_string(),

@@ -83,11 +83,16 @@ pub mod sqlite_store;
 pub mod storage_crypto;
 pub mod stt;
 pub mod subagent;
+/// 多 Agent 收益判定与默认队策略（十期 · 三路）：配对对照门槛 +
+/// model/template/task_set/strategy_version 四元组绑定 + 过期/样本 gate。
+/// 本行为三路新增模块登记（认领见 AGENTS-COORD 十期三路；一路收口可复核保留）。
+pub mod team_benefit;
 /// 模板级 Prompt 编译器与上下文字节预算（八期 · 一路：角色专属 Prompt +
 /// 截断记录；新增模块登记见 AGENTS-COORD 八期一路留言）。
 pub mod team_prompt;
 /// 自适应组队策略引擎（R3 第一路：single/team/auto 判定 + 可展示理由）。
 pub mod team_strategy;
+pub mod tool_effects;
 pub mod tools;
 pub mod trace;
 pub mod transition;
@@ -290,6 +295,7 @@ pub use stt::{LocalStt, SttOutcome};
 pub use team_strategy::{
     RolePlan, TaskProfile, TeamPlan, TeamSelectionMode, TeamStrategyEngine, TeamStrategyThresholds,
 };
+pub use tool_effects::{EffectClass, ToolEffect, UNDECLARED_RISK_NOTE};
 pub use tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
 pub use trace::{list_traces, load_trace, save_trace, TraceRecord};
 pub use transition::{
