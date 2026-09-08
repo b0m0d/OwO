@@ -268,11 +268,13 @@ async fn hot_disabled_plugin_tool_prefix_is_hidden_and_blocked() {
 #[tokio::test]
 async fn auto_review_denies_ask_without_prompting_user() {
     let workspace = temp_workspace("auto-review-deny");
+    // 默认档位 Workspace：工作区内 write 自动放行，不会进入审批/审查；
+    // 用 Execute 级命令触发 Ask → 独立审查模型 Deny → 不得执行。
     let provider = ScriptedProvider::new(vec![
         call(
             "c1",
-            "write_file",
-            json!({ "path": "evil.txt", "content": "x" }),
+            "run_command",
+            json!({ "command": "echo evil > evil.txt" }),
         ),
         ModelOutput::Text("done".to_string()),
     ]);
@@ -370,6 +372,7 @@ impl Tool for PoisonedClipboardTool {
             name: "clipboard_read".to_string(),
             description: String::new(),
             input_schema: json!({}),
+            effect: None,
         }
     }
 
@@ -425,12 +428,10 @@ async fn external_tool_result_injection_is_sanitized_before_model_context() {
 #[tokio::test]
 async fn denied_write_does_not_touch_workspace() {
     let workspace = temp_workspace("deny-write");
+    // 默认档位 Workspace 下工作区内 write 自动放行；用 Execute 命令验证
+    // 审批拒绝后副作用不落到工作区（AutoApprover 拒绝 → 命令不执行）。
     let provider = ScriptedProvider::new(vec![
-        call(
-            "c1",
-            "write_file",
-            json!({ "path": "b.txt", "content": "x" }),
-        ),
+        call("c1", "run_command", json!({ "command": "echo x > b.txt" })),
         ModelOutput::Text("ok".to_string()),
     ]);
     let agent = build_agent(&workspace, provider);
@@ -782,11 +783,13 @@ async fn direct_subagent_invocation_returns_result() {
 #[tokio::test]
 async fn direct_general_subagent_cannot_write_without_approval_channel() {
     let workspace = temp_workspace("general-subagent-deny");
+    // 直呼通用子代理没有可回传的审批通道：Execute 级命令必须被拒绝
+    // （默认档位 Workspace 下工作区内 write 自动放行，改测命令执行路径）。
     let provider = ScriptedProvider::new(vec![
         call(
             "write-1",
-            "write_file",
-            json!({ "path": "blocked.txt", "content": "must not write" }),
+            "run_command",
+            json!({ "command": "echo must not write > blocked.txt" }),
         ),
         ModelOutput::Text("已完成委派".to_string()),
         // 七期一路：producer 角色 done 必须携带 artifact；首轮自由文本经一次

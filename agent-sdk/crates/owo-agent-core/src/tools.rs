@@ -17,6 +17,27 @@ pub struct ToolSpec {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// §5.1 工具副作用元数据：注册表导出的 spec 携带 effect（唯一事实源）。
+    /// 内置工具由 registry 填充；MCP 工具在注册时内嵌（断开随实例消失，
+    /// 不再依赖进程级全局名字查询）。None = 未登记（approval 按高风险处理）。
+    pub effect: Option<crate::tool_effects::ToolEffect>,
+}
+
+impl ToolSpec {
+    /// 附带 effect 的构造（MCP 注册与 registry 导出填充用）。
+    pub fn with_effect(
+        name: impl Into<String>,
+        description: String,
+        input_schema: Value,
+        effect: Option<crate::tool_effects::ToolEffect>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description,
+            input_schema,
+            effect,
+        }
+    }
 }
 
 pub struct ToolContext<'a> {
@@ -259,26 +280,36 @@ impl ToolRegistry {
                 let full = tool.input_schema.clone();
                 (compact_schema(&tool.input_schema), Some(full))
             } else {
-                (tool.input_schema, None)
+                (tool.input_schema.clone(), None)
             };
             let mut description = tool.description;
             if full_schema.is_some() {
                 description.push_str("（schema 已压缩，完整参数见 /mcp/schema 接口）");
             }
+            // §7.2：MCP 工具副作用按 annotations 推导并注册（审批卡/只读判定消费）。
+            // §5.1：effect 内嵌进 ToolSpec——断开/卸载时随工具实例消失，不遗留全局条目。
+            // §5.2：宿主只读可信声明按「server+tool+schema hash」校验，hash 匹配才
+            // 允许 readOnlyHint 降级为 Read；否则按 Execute（deny-by-default）。
+            let host_verified_readonly = crate::tool_effects::is_trusted_readonly(
+                server_name,
+                &tool.name,
+                &crate::tool_effects::schema_fingerprint(&tool.input_schema),
+            );
+            let effect = crate::tool_effects::register_mcp_effect(
+                server_name,
+                &tool.name,
+                tool.annotations.as_ref(),
+                host_verified_readonly,
+            );
             let spec = ToolSpec {
                 name: full_name.clone(),
                 description,
                 input_schema,
+                effect: Some(effect),
             };
             if let Some(full) = full_schema {
                 self.full_schemas.insert(full_name.clone(), full);
             }
-            // §7.2：MCP 工具副作用按 annotations 推导并注册（审批卡/只读判定消费）。
-            crate::tool_effects::register_mcp_effect(
-                server_name,
-                &tool.name,
-                tool.annotations.as_ref(),
-            );
             self.tools.push(Arc::new(McpToolAdapter {
                 full_name,
                 server_name: server_name.to_string(),
@@ -417,6 +448,7 @@ impl Tool for ReadFileTool {
                 "properties": { "path": { "type": "string" } },
                 "required": ["path"]
             }),
+            effect: None,
         }
     }
 
@@ -450,6 +482,7 @@ impl Tool for WriteFileTool {
                 },
                 "required": ["path", "content"]
             }),
+            effect: None,
         }
     }
 
@@ -569,6 +602,7 @@ impl Tool for WhitelistWriteFileTool {
                 },
                 "required": ["path", "content"]
             }),
+            effect: None,
         }
     }
 
@@ -592,6 +626,7 @@ impl Tool for ListDirTool {
                 "type": "object",
                 "properties": { "path": { "type": "string" } }
             }),
+            effect: None,
         }
     }
 
@@ -629,6 +664,7 @@ impl Tool for SearchFilesTool {
                 "properties": { "pattern": { "type": "string" } },
                 "required": ["pattern"]
             }),
+            effect: None,
         }
     }
 
@@ -693,6 +729,7 @@ impl Tool for RunCommandTool {
                 },
                 "required": ["command"]
             }),
+            effect: None,
         }
     }
 
@@ -805,6 +842,7 @@ impl Tool for ExploreTool {
                 "properties": { "query": { "type": "string" } },
                 "required": ["query"]
             }),
+            effect: None,
         }
     }
 
@@ -832,6 +870,7 @@ impl Tool for SubagentTool {
                 "properties": { "task": { "type": "string" } },
                 "required": ["task"]
             }),
+            effect: None,
         }
     }
 
@@ -862,6 +901,7 @@ impl Tool for UseSkillTool {
                 },
                 "required": ["name"]
             }),
+            effect: None,
         }
     }
 
@@ -929,6 +969,7 @@ mod tests {
                 name: self.name.clone(),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                effect: None,
             }
         }
 

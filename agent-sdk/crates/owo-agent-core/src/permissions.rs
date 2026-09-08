@@ -480,7 +480,21 @@ impl Policy {
     }
 
     pub fn evaluate(&self, tool: &str, args: &Value) -> PermissionRequest {
-        let level = Self::level_for(tool);
+        self.evaluate_with_effect(tool, None, args)
+    }
+
+    /// §5.1：接收调用方已从 ToolSpec 解析出的 effect（唯一事实源），
+    /// 不再回查进程级全局注册表；`effect=None` 时兜底按未登记高风险处理。
+    pub fn evaluate_with_effect(
+        &self,
+        tool: &str,
+        effect: Option<&crate::tool_effects::ToolEffect>,
+        args: &Value,
+    ) -> PermissionRequest {
+        let level: Level = effect
+            .map(|effect| effect.class)
+            .unwrap_or_else(|| crate::tool_effects::effect_class_for(tool))
+            .into();
         let reason = match tool {
             "read_file" | "write_file" => {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
@@ -508,10 +522,13 @@ impl Policy {
             }
             _ => format!("工具 {tool} 需要审批"),
         };
-        let risk_note = match crate::tool_effects::effect_for(tool) {
-            Some(effect) => effect.risk_note,
-            None => Some(crate::tool_effects::UNDECLARED_RISK_NOTE.to_string()),
-        };
+        let risk_note = effect
+            .and_then(|effect| effect.risk_note.clone())
+            .or_else(|| {
+                crate::tool_effects::effect_for(tool)
+                    .and_then(|effect| effect.risk_note)
+                    .or(Some(crate::tool_effects::UNDECLARED_RISK_NOTE.to_string()))
+            });
         PermissionRequest::new(tool, args.clone(), level, reason)
             .with_risk_note(risk_note)
             .with_redacted_args(Some(redact_args(args)))
@@ -539,15 +556,22 @@ impl Policy {
             }
         }
         match self.profile() {
-            // Workspace/AutoReview：工作区内普通写自动允许（reason 含"工作区内"），
+            // Workspace：工作区内普通写自动允许（reason 含"工作区内"），
             // 执行/注入/联网/UI 控制仍询问；越界已在 evaluate 阶段拒绝。
-            PermissionProfile::Workspace | PermissionProfile::AutoReview => {
+            PermissionProfile::Workspace => {
                 if request.level == Level::Write && request.reason.contains("工作区内") {
                     Decision::Allow
                 } else {
                     Decision::Ask
                 }
             }
+            // AutoReview：审批 Agent 可收紧或代批「可代批」操作——工作区内写
+            // 不自动放行，一律进入审批链（reviewer 代批 / 人工审批），否则收紧
+            // 无从生效；执行/注入照旧询问。
+            PermissionProfile::AutoReview => match request.level {
+                Level::Write | Level::Execute | Level::Inject => Decision::Ask,
+                Level::Read => Decision::Allow,
+            },
             // FullAccess：减少询问——Write 与 Execute 放行，Inject 仍询问
             // （注入/UI 控制不可逆，即使全权模式也不绕过确认）。
             PermissionProfile::FullAccess => match request.level {

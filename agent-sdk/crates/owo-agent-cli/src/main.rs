@@ -1150,11 +1150,23 @@ async fn connect_mcp_clients(
     for config in configs {
         match tokio::time::timeout(CONNECT_TIMEOUT, McpClient::connect(config)).await {
             Ok(Ok(client)) => {
+                let tools = client.tools();
+                // §5.2：连接成功后先按 config 声明宿主可信只读（server+tool+schema hash），
+                // 后续 register 时 hash 匹配的 readOnlyHint 才允许降级为 Read。
+                let declared =
+                    owo_agent_core::tool_effects::declare_trusted_from_config(config, &tools);
+                if declared > 0 {
+                    println!(
+                        "{} MCP {}：{declared} 个工具获宿主可信只读声明（schema hash 校验）",
+                        "✓".green(),
+                        config.name
+                    );
+                }
                 println!(
                     "{} MCP {}（工具 {} 个）",
                     "已连接".green(),
                     config.name,
-                    client.tools().len()
+                    tools.len()
                 );
                 clients.push((
                     config.name.clone(),
@@ -1915,6 +1927,47 @@ impl Repl {
                     }
                 }
             }
+            Some("trust") => {
+                let name = parts
+                    .next()
+                    .ok_or("用法：/mcp trust <名称> <工具名> [更多工具名...]")?;
+                let tool_names: Vec<String> = parts.map(|part| part.to_string()).collect();
+                if tool_names.is_empty() {
+                    return Err("未指定要声明为可信只读的工具名".into());
+                }
+                let index = self
+                    .mcp_configs
+                    .iter()
+                    .position(|config| config.name == name)
+                    .ok_or_else(|| format!("MCP 服务器不存在：{name}"))?;
+                let config = &mut self.mcp_configs[index];
+                for tool_name in &tool_names {
+                    if !config.trusted_readonly.contains(tool_name) {
+                        config.trusted_readonly.push(tool_name.clone());
+                    }
+                }
+                let config_snapshot = config.clone();
+                save_mcp_configs(&self.data_root, &self.mcp_configs);
+                // 热生效：重新声明 + 重建 Agent 让注册时校验 hash。
+                if let Some((_, client)) = self
+                    .mcp_clients
+                    .iter()
+                    .find(|(existing, _)| existing == name)
+                {
+                    let guard = client.lock().await;
+                    let tools = guard.tools();
+                    let declared = owo_agent_core::tool_effects::declare_trusted_from_config(
+                        &config_snapshot,
+                        &tools,
+                    );
+                    println!(
+                        "{} MCP {name} 声明可信只读 {declared}/{} 个工具（schema hash 匹配才生效）",
+                        "✓".green(),
+                        tool_names.len()
+                    );
+                }
+                self.rebuild_agent()?;
+            }
             Some("remove") => {
                 let name = parts.next().ok_or("用法：/mcp remove <名称>")?;
                 if let Some(position) = self
@@ -1930,8 +1983,34 @@ impl Repl {
                 self.rebuild_agent()?;
                 println!("已移除 MCP 服务器：{name}");
             }
+            Some("untrust") => {
+                let name = parts
+                    .next()
+                    .ok_or("用法：/mcp untrust <名称> <工具名> [更多工具名...]")?;
+                let tool_names: Vec<String> = parts.map(|part| part.to_string()).collect();
+                if tool_names.is_empty() {
+                    return Err("未指定要撤销可信只读声明的工具名".into());
+                }
+                let index = self
+                    .mcp_configs
+                    .iter()
+                    .position(|config| config.name == name)
+                    .ok_or_else(|| format!("MCP 服务器不存在：{name}"))?;
+                let config = &mut self.mcp_configs[index];
+                let before = config.trusted_readonly.len();
+                config.trusted_readonly.retain(|t| !tool_names.contains(t));
+                let after = config.trusted_readonly.len();
+                save_mcp_configs(&self.data_root, &self.mcp_configs);
+                println!(
+                    "{} MCP {name} 撤销可信只读声明（{} → {} 个）",
+                    "✓".green(),
+                    before,
+                    after
+                );
+                self.rebuild_agent()?;
+            }
             _ => {
-                println!("用法：/mcp add <名称> <命令> [参数...] | /mcp list | /mcp remove <名称>")
+                println!("用法：/mcp add <名称> <命令> [参数...] | /mcp list | /mcp remove <名称> | /mcp trust <名称> <工具名...> | /mcp untrust <名称> <工具名...>")
             }
         }
         Ok(())

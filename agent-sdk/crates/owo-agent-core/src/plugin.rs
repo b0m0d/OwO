@@ -1130,6 +1130,7 @@ mod tests {
                 url: None,
                 timeout_ms: None,
                 network_allowlist: Vec::new(),
+                trusted_readonly: Vec::new(),
             }),
         };
         // 相对命令按 manifest 目录解析；服务器名 = 插件 id。

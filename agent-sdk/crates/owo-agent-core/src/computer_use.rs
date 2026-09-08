@@ -881,6 +881,7 @@ impl Tool for ScreenOcrTool {
                     "max_boxes": { "type": "integer", "description": "最多返回多少词框（默认 0：不带 boxes，避免超大结果影响多轮工具调用；lines 已含坐标）" }
                 }
             }),
+            effect: None,
         }
     }
 
@@ -909,6 +910,7 @@ impl Tool for OcrRegionTool {
                 },
                 "required": ["x", "y", "width", "height"]
             }),
+            effect: None,
         }
     }
 
@@ -1002,6 +1004,7 @@ impl Tool for DesktopWindowOcrTool {
                     "title": { "type": "string" }
                 }
             }),
+            effect: None,
         }
     }
 
@@ -1075,6 +1078,7 @@ impl Tool for DesktopForegroundTool {
             name: "desktop_foreground".into(),
             description: "返回当前前台窗口的进程名、标题和屏幕矩形".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
+            effect: None,
         }
     }
 
@@ -1104,6 +1108,7 @@ impl Tool for DesktopWindowListTool {
             description:
                 "列出当前所有可见顶层窗口（进程名/标题/矩形），用于找到 QQ、浏览器等目标窗口".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
+            effect: None,
         }
     }
 
@@ -1142,6 +1147,7 @@ impl Tool for DesktopActivateTool {
                     "title": { "type": "string", "description": "窗口标题包含文本" }
                 }
             }),
+            effect: None,
         }
     }
 
@@ -1195,6 +1201,7 @@ impl Tool for DesktopClickTool {
                     "app_id": { "type": "string", "description": "element_id 所属应用标识（如 qq）" }
                 }
             }),
+            effect: None,
         }
     }
 
@@ -1253,6 +1260,7 @@ impl Tool for DesktopTypeTool {
                 "properties": { "text": { "type": "string" } },
                 "required": ["text"]
             }),
+            effect: None,
         }
     }
 
@@ -1279,6 +1287,7 @@ impl Tool for DesktopKeyTool {
                 "properties": { "key": { "type": "string" } },
                 "required": ["key"]
             }),
+            effect: None,
         }
     }
 
@@ -1307,6 +1316,7 @@ impl Tool for DesktopShortcutTool {
                 "properties": { "combo": { "type": "string" } },
                 "required": ["combo"]
             }),
+            effect: None,
         }
     }
 
@@ -1333,6 +1343,7 @@ impl Tool for DesktopLaunchTool {
                 "properties": { "target": { "type": "string" } },
                 "required": ["target"]
             }),
+            effect: None,
         }
     }
 
@@ -1359,6 +1370,7 @@ impl Tool for DesktopWaitTool {
                 "properties": { "ms": { "type": "integer" } },
                 "required": ["ms"]
             }),
+            effect: None,
         }
     }
 
@@ -1390,6 +1402,7 @@ impl Tool for DesktopScrollTool {
                 },
                 "required": ["x", "y", "delta"]
             }),
+            effect: None,
         }
     }
 
@@ -1427,6 +1440,7 @@ impl Tool for DesktopWaitUntilTool {
                 },
                 "required": ["text"]
             }),
+            effect: None,
         }
     }
 
@@ -1538,6 +1552,7 @@ impl Tool for ScreenVisionTool {
                     "scale": { "type": "integer", "description": "区域放大倍数，默认 3" }
                 }
             }),
+            effect: None,
         }
     }
 
@@ -1583,6 +1598,7 @@ impl Tool for VisionVerifyTool {
                 },
                 "required": ["question"]
             }),
+            effect: None,
         }
     }
 
@@ -1625,6 +1641,7 @@ impl Tool for VisionGroundTool {
                 },
                 "required": ["description"]
             }),
+            effect: None,
         }
     }
 
@@ -2069,6 +2086,7 @@ macro_rules! browser_tool {
                     name: $name.into(),
                     description: $description.into(),
                     input_schema: $schema,
+                    effect: None,
                 }
             }
 
@@ -2139,6 +2157,7 @@ impl Tool for BrowserScreenshotWriteTool {
                 "properties": { "path": { "type": "string" }, "full_page": { "type": "boolean" } },
                 "required": ["path"]
             }),
+            effect: None,
         }
     }
 
@@ -2166,6 +2185,7 @@ impl Tool for BrowserDownloadImageWriteTool {
                 "properties": { "url": { "type": "string" }, "src": { "type": "string" }, "path": { "type": "string" } },
                 "required": ["path"]
             }),
+            effect: None,
         }
     }
 
@@ -2189,6 +2209,7 @@ impl Tool for BrowserCloseTool {
             name: "browser_close".into(),
             description: "关闭浏览器会话（清空页面状态）".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
+            effect: None,
         }
     }
 

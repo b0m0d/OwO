@@ -62,6 +62,10 @@ pub struct ToolEffect {
     /// MCP annotations 原文（审计/诊断用；内置工具为 None）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Value>,
+    /// §5.2 宿主验证：仅当管理员按「server+tool+schema hash」显式声明可信只读时
+    /// 才为 true。MCP 自报 `readOnlyHint` 不得单独视为免审批凭据。
+    #[serde(default)]
+    pub host_verified_readonly: bool,
 }
 
 static REGISTRY: RwLock<BTreeMap<String, ToolEffect>> = RwLock::new(BTreeMap::new());
@@ -82,6 +86,7 @@ fn ensure_builtin_seeded() {
                     source: "builtin".to_string(),
                     risk_note: None,
                     annotations: None,
+                    host_verified_readonly: true,
                 },
             );
         }
@@ -96,11 +101,14 @@ fn write_effect(effect: ToolEffect) {
 }
 
 /// 注册 MCP 工具副作用：annotations 缺失/未声明只读 → `Execute` + 风险提示。
+/// `host_verified_readonly` 仅当宿主按「server+tool+schema hash」显式声明可信时
+/// 传 true——MCP 自报 `readOnlyHint` 不能单独把工具降到免审批（§5.2）。
 /// 返回注册后的元数据（供日志与测试断言）。
 pub fn register_mcp_effect(
     server_name: &str,
     tool_name: &str,
     annotations: Option<&Value>,
+    host_verified_readonly: bool,
 ) -> ToolEffect {
     ensure_builtin_seeded();
     let full_name = format!(
@@ -108,13 +116,14 @@ pub fn register_mcp_effect(
         crate::tools::sanitize_tool_name(server_name),
         crate::tools::sanitize_tool_name(tool_name)
     );
-    let (class, risk_note) = classify_mcp_annotations(annotations);
+    let (class, risk_note) = classify_mcp_annotations(annotations, host_verified_readonly);
     let effect = ToolEffect {
         tool: full_name,
         class,
         source: format!("mcp:{server_name}"),
         risk_note,
         annotations: annotations.cloned(),
+        host_verified_readonly,
     };
     write_effect(effect.clone());
     effect
@@ -122,6 +131,7 @@ pub fn register_mcp_effect(
 
 /// 按 MCP 服务器前缀移除副作用条目（工具卸载/服务器下线时调用）。
 pub fn remove_prefix(prefix: &str) -> usize {
+    revoke_trusted_readonly_prefix(prefix);
     let mut guard = REGISTRY
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -159,11 +169,101 @@ pub fn all_effects() -> Vec<ToolEffect> {
         .collect()
 }
 
+/// §5.2 宿主可信只读声明：`{server}_{tool}` → 注册时校验的 schema hash。
+/// 管理员按「server + tool + schema hash」显式声明可信只读；schema 或版本
+/// 变化（hash 不一致）后自动失效（`is_trusted_readonly` 返回 false），
+/// 退回升级执行询问。进程内持久（与 MCP 客户端同生命周期）。
+static TRUSTED_READONLY: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap::new());
+
+/// 声明某 MCP 工具为宿主验证的可信只读（并记录当时的 schema hash 指纹）。
+pub fn declare_trusted_readonly(server_name: &str, tool_name: &str, schema_hash: &str) {
+    let full_name = format!(
+        "{}_{}",
+        crate::tools::sanitize_tool_name(server_name),
+        crate::tools::sanitize_tool_name(tool_name)
+    );
+    TRUSTED_READONLY
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(full_name, schema_hash.to_string());
+}
+
+/// schema hash 指纹：`input_schema`（压缩前完整 JSON）的 sha256 十六进制。
+pub fn schema_fingerprint(input_schema: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(input_schema.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// 宿主是否已声明该工具可信只读，且声明时的 schema hash 与当前一致
+/// （schema/版本变化 → 失效）。未声明或 hash 不一致 → false。
+pub fn is_trusted_readonly(server_name: &str, tool_name: &str, schema_hash: &str) -> bool {
+    let full_name = format!(
+        "{}_{}",
+        crate::tools::sanitize_tool_name(server_name),
+        crate::tools::sanitize_tool_name(tool_name)
+    );
+    TRUSTED_READONLY
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&full_name)
+        .map(|recorded| recorded == schema_hash)
+        .unwrap_or(false)
+}
+
+/// 撤销某 MCP 服务器的可信只读声明（下线/卸载时调用；同步副作用注册清理）。
+pub fn revoke_trusted_readonly_prefix(prefix: &str) {
+    let mut guard = TRUSTED_READONLY
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.retain(|name, _| !name.starts_with(prefix));
+}
+
+/// 当前可信只读声明总数（诊断/测试用）。
+pub fn trusted_readonly_count() -> usize {
+    TRUSTED_READONLY
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .len()
+}
+
+/// §5.2 按服务器配置批量声明可信只读：config 的 `trusted_readonly` 列出工具名，
+/// 仅当服务器实际暴露同名工具时登记（并记录当前 schema hash 指纹）。
+/// 连接注册前调用；未列出的工具不受影响。
+pub fn declare_trusted_from_config(
+    config: &crate::mcp::McpServerConfig,
+    tools: &[crate::mcp::McpTool],
+) -> usize {
+    if config.trusted_readonly.is_empty() {
+        return 0;
+    }
+    let mut declared = 0;
+    for tool in tools {
+        if config.is_trusted_readonly_tool(&tool.name) {
+            declare_trusted_readonly(
+                &config.name,
+                &tool.name,
+                &schema_fingerprint(&tool.input_schema),
+            );
+            declared += 1;
+        }
+    }
+    declared
+}
+
 /// MCP annotations → 副作用等级 + 风险说明。
-/// 规则（重构方案 5.2）：`destructiveHint=true` 永远覆盖 `readOnlyHint=true`；
-/// 仅当宿主已确认只读且无破坏性标注时才降级为 Read，其余一律 Execute
-/// （deny-by-default；MCP annotations 是服务端提示，不是宿主验证的安全证明）。
-pub fn classify_mcp_annotations(annotations: Option<&Value>) -> (EffectClass, Option<String>) {
+/// 规则（重构方案 5.2）：
+/// - `destructiveHint=true` 永远覆盖 `readOnlyHint=true`；
+/// - `readOnlyHint=true` 仅在 `host_verified_readonly`（宿主按 server+tool+schema
+///   hash 显式声明可信）时才落到 Read；未受信的 MCP 自报只读只能提高风险说明，
+///   等级仍按 Execute（deny-by-default）——annotations 是服务端提示，不是
+///   宿主验证的安全证明；
+/// - 未声明 annotations → Execute + 统一风险提示。
+pub fn classify_mcp_annotations(
+    annotations: Option<&Value>,
+    host_verified_readonly: bool,
+) -> (EffectClass, Option<String>) {
     match annotations {
         None => (EffectClass::Execute, Some(UNDECLARED_RISK_NOTE.to_string())),
         Some(value) => {
@@ -175,9 +275,15 @@ pub fn classify_mcp_annotations(annotations: Option<&Value>) -> (EffectClass, Op
                     Some("MCP 标注 destructiveHint：可能产生不可逆副作用".to_string()),
                 ),
                 _ => match read_only {
-                    Some(true) => (
+                    Some(true) if host_verified_readonly => (
                         EffectClass::Read,
-                        Some("MCP 标注 readOnlyHint：只读工具".to_string()),
+                        Some("宿主已验证只读（server+tool+schema hash 可信声明）".to_string()),
+                    ),
+                    Some(true) => (
+                        EffectClass::Execute,
+                        Some(
+                            "MCP 声明只读但未经宿主验证，按最高风险等级（execute）处理".to_string(),
+                        ),
                     ),
                     _ => (
                         EffectClass::Execute,
@@ -287,71 +393,161 @@ mod tests {
     }
 
     #[test]
-    fn mcp_annotations_read_only_hint_maps_to_read() {
-        let (class, note) = classify_mcp_annotations(Some(&json!({
-            "title": "查天气",
-            "readOnlyHint": true
-        })));
+    fn mcp_annotations_read_only_hint_requires_host_verification() {
+        // 重构方案 5.2：未受信的 MCP 自报只读不能降到免审批。
+        let (class, note) = classify_mcp_annotations(
+            Some(&json!({
+                "title": "查天气",
+                "readOnlyHint": true
+            })),
+            false,
+        );
+        assert_eq!(
+            class,
+            EffectClass::Execute,
+            "readOnlyHint 未经宿主验证不得降级为 Read"
+        );
+        assert!(note.unwrap().contains("未经宿主验证"));
+
+        // 宿主按 server+tool+schema hash 声明可信后才落到 Read。
+        let (class, note) = classify_mcp_annotations(
+            Some(&json!({
+                "title": "查天气",
+                "readOnlyHint": true
+            })),
+            true,
+        );
         assert_eq!(class, EffectClass::Read);
-        assert!(note.unwrap().contains("readOnlyHint"));
+        assert!(note.unwrap().contains("宿主已验证"));
     }
 
     #[test]
     fn mcp_destructive_hint_maps_to_execute_with_note() {
-        let (class, note) = classify_mcp_annotations(Some(&json!({
-            "readOnlyHint": false,
-            "destructiveHint": true
-        })));
-        assert_eq!(class, EffectClass::Execute);
-        assert!(note.unwrap().contains("destructiveHint"));
+        for host_verified in [false, true] {
+            let (class, note) = classify_mcp_annotations(
+                Some(&json!({
+                    "readOnlyHint": false,
+                    "destructiveHint": true
+                })),
+                host_verified,
+            );
+            assert_eq!(
+                class,
+                EffectClass::Execute,
+                "destructiveHint 恒为 Execute，不受宿主声明影响"
+            );
+            assert!(note.unwrap().contains("destructiveHint"));
+        }
     }
 
     #[test]
     fn mcp_destructive_hint_overrides_read_only_hint() {
         // 重构方案 5.2：destructiveHint=true 永远覆盖 readOnlyHint=true。
-        let (class, _) = classify_mcp_annotations(Some(&json!({
-            "readOnlyHint": true,
-            "destructiveHint": true
-        })));
-        assert_eq!(
-            class,
-            EffectClass::Execute,
-            "同时声明时破坏性标注优先，不得降级为 Read"
-        );
+        for host_verified in [false, true] {
+            let (class, _) = classify_mcp_annotations(
+                Some(&json!({
+                    "readOnlyHint": true,
+                    "destructiveHint": true
+                })),
+                host_verified,
+            );
+            assert_eq!(
+                class,
+                EffectClass::Execute,
+                "同时声明时破坏性标注优先，不得降级为 Read"
+            );
+        }
     }
 
     #[test]
     fn mcp_without_annotations_gets_undeclared_risk_note() {
-        let (class, note) = classify_mcp_annotations(None);
+        let (class, note) = classify_mcp_annotations(None, false);
         assert_eq!(class, EffectClass::Execute);
         assert_eq!(note.as_deref(), Some(UNDECLARED_RISK_NOTE));
     }
 
     #[test]
+    fn trusted_readonly_declaration_gates_read_hint() {
+        let server = format!("tst-trust-{}", uuid::Uuid::new_v4().simple());
+        let tool = "lookup";
+        let schema = json!({ "type": "object", "properties": { "q": { "type": "string" } } });
+        let hash = schema_fingerprint(&schema);
+        assert!(!is_trusted_readonly(&server, tool, &hash), "未声明前不可信");
+
+        // 声明后：同 hash 可信。注册时 readOnlyHint 才能落到 Read。
+        declare_trusted_readonly(&server, tool, &hash);
+        assert!(is_trusted_readonly(&server, tool, &hash));
+        let effect = register_mcp_effect(
+            &server,
+            tool,
+            Some(&json!({ "readOnlyHint": true })),
+            is_trusted_readonly(&server, tool, &hash),
+        );
+        assert_eq!(effect.class, EffectClass::Read);
+        assert!(effect.host_verified_readonly);
+        assert_eq!(
+            effect_for(&format!("{}_{}", server, tool)).unwrap().class,
+            EffectClass::Read
+        );
+
+        // schema 变化（hash 不一致）→ 声明失效，退回 Execute。
+        let changed = json!({ "type": "object", "properties": { "q": { "type": "string" }, "n": { "type": "integer" } } });
+        let changed_hash = schema_fingerprint(&changed);
+        assert_ne!(hash, changed_hash);
+        assert!(!is_trusted_readonly(&server, tool, &changed_hash));
+        let effect = register_mcp_effect(
+            &server,
+            tool,
+            Some(&json!({ "readOnlyHint": true })),
+            is_trusted_readonly(&server, tool, &changed_hash),
+        );
+        assert_eq!(
+            effect.class,
+            EffectClass::Execute,
+            "schema 变化后可信失效，不得再降级 Read"
+        );
+        assert!(!effect.host_verified_readonly);
+
+        // 撤销声明（前缀）：count 归零。
+        revoke_trusted_readonly_prefix(&format!("{}_", server));
+        assert_eq!(trusted_readonly_count(), 0);
+        assert!(!is_trusted_readonly(&server, tool, &hash));
+    }
+
+    #[test]
     fn register_and_remove_prefix_roundtrip() {
         let server = format!("tst-{}", uuid::Uuid::new_v4().simple());
-        let effect = register_mcp_effect(&server, "query", Some(&json!({ "readOnlyHint": true })));
+        let effect = register_mcp_effect(
+            &server,
+            "query",
+            Some(&json!({ "readOnlyHint": true })),
+            false,
+        );
         // sanitize_tool_name 保留连字符（模型 API 允许 `-`），前缀名与注册名同源。
         let full = format!("{}_query", server);
         assert_eq!(effect.tool, full);
-        assert_eq!(effect.class, EffectClass::Read);
+        assert_eq!(effect.class, EffectClass::Execute);
         assert_eq!(effect.source, format!("mcp:{server}"));
+        assert!(!effect.host_verified_readonly);
         assert!(effect_for(&full).is_some());
         let removed = remove_prefix(&format!("{}_", server));
         assert_eq!(removed, 1);
         assert!(effect_for(&full).is_none());
+        assert_eq!(trusted_readonly_count(), 0);
     }
 
     #[test]
     fn re_register_overwrites_previous_class() {
         let server = format!("tst-{}", uuid::Uuid::new_v4().simple());
         let tool = "flip";
-        let first = register_mcp_effect(&server, tool, None);
+        let first = register_mcp_effect(&server, tool, None, false);
         assert_eq!(first.class, EffectClass::Execute);
-        let second = register_mcp_effect(&server, tool, Some(&json!({ "readOnlyHint": true })));
-        assert_eq!(second.class, EffectClass::Read);
+        // 无宿主验证：readOnlyHint 也保持 Execute（覆盖旧类）。
+        let second =
+            register_mcp_effect(&server, tool, Some(&json!({ "readOnlyHint": true })), false);
+        assert_eq!(second.class, EffectClass::Execute);
         let full = format!("{}_{}", server, tool);
-        assert_eq!(effect_for(&full).unwrap().class, EffectClass::Read);
+        assert_eq!(effect_for(&full).unwrap().class, EffectClass::Execute);
         remove_prefix(&format!("{}_", server));
     }
 

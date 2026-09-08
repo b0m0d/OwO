@@ -5037,6 +5037,7 @@ async fn mcp_add(
         url: request.url.clone(),
         timeout_ms: None,
         network_allowlist: Vec::new(),
+        trusted_readonly: Vec::new(),
     };
     let mut configs = load_mcp_configs(&state.data_root);
     if configs.iter().any(|existing| existing.name == name) {

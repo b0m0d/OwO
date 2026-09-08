@@ -41,6 +41,11 @@ pub struct McpServerConfig {
     /// 空 = 不校验，兼容既有配置）。
     #[serde(default)]
     pub network_allowlist: Vec<String>,
+    /// §5.2 宿主可信只读声明：管理员显式列出的「工具名」清单。连接注册时按
+    /// `server + tool + 当前 schema hash` 校验；schema/版本变化后自动失效
+    /// （hash 不一致即退回 Execute 询问）。空 = 无任何工具获可信只读。
+    #[serde(default)]
+    pub trusted_readonly: Vec<String>,
 }
 
 impl McpServerConfig {
@@ -53,6 +58,7 @@ impl McpServerConfig {
             url: None,
             timeout_ms: None,
             network_allowlist: Vec::new(),
+            trusted_readonly: Vec::new(),
         }
     }
 
@@ -65,7 +71,13 @@ impl McpServerConfig {
             url: Some(url.into()),
             timeout_ms: None,
             network_allowlist: Vec::new(),
+            trusted_readonly: Vec::new(),
         }
+    }
+
+    /// 是否把该工具声明为宿主可信只读（按工具名）。
+    pub fn is_trusted_readonly_tool(&self, tool_name: &str) -> bool {
+        self.trusted_readonly.iter().any(|name| name == tool_name)
     }
 }
 

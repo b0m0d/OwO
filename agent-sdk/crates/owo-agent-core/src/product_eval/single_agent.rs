@@ -184,6 +184,7 @@ impl Tool for ScopeReadFile {
                 "properties": { "path": { "type": "string" } },
                 "required": ["path"]
             }),
+            effect: None,
         }
     }
 
@@ -231,6 +232,7 @@ impl Tool for ScopeListDir {
                 "properties": { "path": { "type": "string" } },
                 "required": ["path"]
             }),
+            effect: None,
         }
     }
 
@@ -286,6 +288,7 @@ impl Tool for ScopeSearchFiles {
                 "properties": { "pattern": { "type": "string" } },
                 "required": ["pattern"]
             }),
+            effect: None,
         }
     }
 
@@ -372,6 +375,7 @@ impl Tool for ScopeWriteFile {
                 },
                 "required": ["path", "content"]
             }),
+            effect: None,
         }
     }
 
@@ -426,6 +430,7 @@ impl Tool for ScopeRunCommand {
                 },
                 "required": ["command"]
             }),
+            effect: None,
         }
     }
 
@@ -724,6 +729,10 @@ impl CaseExecutor for SingleAgentExecutor {
 
         let registry = scope_registry(Arc::clone(&scope), Arc::clone(&tool_log));
         let policy = Policy::new(ctx.sandbox);
+        // 评测白名单（allow_read/allow_write/allow_commands）是唯一授权源：
+        // 切到 AutoReview 档位，使工作区内写也不自动放行，一律经
+        // ProductEvalApprover 白名单审批，保证“未授权不落盘”可测。
+        policy.set_profile(crate::permissions::PermissionProfile::AutoReview);
         // 回合上限 = 模型调用预算：预算内完成即产出总结；预算耗尽（无总结）按 Error 计。
         // compaction 会额外调用模型且不计入 ModelCall 事件，评测全程关闭以防预算失真。
         let config = AgentConfig {

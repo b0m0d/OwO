@@ -157,6 +157,9 @@ impl Agent {
     ) -> Result<usize, String> {
         let client = crate::mcp::McpClient::connect(config).await?;
         let tools = client.tools();
+        // §5.2：先按 config 声明宿主可信只读（server+tool+schema hash），
+        // 随后 register 时 hash 匹配的 readOnlyHint 才能降级为 Read。
+        crate::tool_effects::declare_trusted_from_config(config, &tools);
         let tool_count = tools.len();
         self.register_mcp_tools(
             &config.name,
@@ -408,7 +411,19 @@ impl Agent {
                             commit_turn_messages(session, &messages);
                             return Err(AgentError::Aborted);
                         }
-                        let request = self.policy.evaluate(&call.name, &call.arguments);
+                        // §5.1：从注册表取出完整的 ToolSpec（含 effect 唯一事实源），
+                        // 交给 Policy 判定，避免全局名字再查询。
+                        let call_spec = self
+                            .registry
+                            .read()
+                            .map_err(|_| AgentError::Session("工具注册表锁中毒".into()))?
+                            .get(&call.name)
+                            .map(|tool| tool.spec());
+                        let request = self.policy.evaluate_with_effect(
+                            &call.name,
+                            call_spec.as_ref().and_then(|spec| spec.effect.as_ref()),
+                            &call.arguments,
+                        );
                         let decision = match self.policy.decision(&request) {
                             Decision::Ask => {
                                 // 独立审批模型先于打扰用户（Auto-review）。
