@@ -1,4 +1,4 @@
-# check-v1-r0.ps1 - One-click V1-R0 closeout gate (Lane 1, four-lane closeout day).
+﻿# check-v1-r0.ps1 - One-click V1-R0 closeout gate (Lane 1, four-lane closeout day).
 #
 # Runs, in order: cargo fmt check -> core/server/cli cargo check ->
 # targeted server/cli/core tests -> TS typecheck/build/unit tests -> desktop web checks.

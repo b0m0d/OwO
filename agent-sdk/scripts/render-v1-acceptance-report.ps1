@@ -1,4 +1,4 @@
-# render-v1-acceptance-report.ps1 - Render the V1 acceptance markdown report from a batch
+﻿# render-v1-acceptance-report.ps1 - Render the V1 acceptance markdown report from a batch
 # directory produced by run-v1-acceptance.ps1 (agent-single/report.json [+ workswarm-multi/report.json]).
 #
 # Output (default): <BatchDir>\acceptance-report.md
@@ -38,8 +38,8 @@ function Load-Report {
     if (-not (Test-Path $Path)) { return $null }
     $r = Get-Content $Path -Raw | ConvertFrom-Json
     Write-Host ("[load] {0}: runs={1} passed={2} failed={3} error={4} timeout={5} cancel={6}" -f `
-        $Label, $r.metrics.runs_total, $r.metrics.passed, $r.metrics.failed, $r.metrics.error, `
-        $r.metrics.timed_out, $r.metrics.cancelled)
+        $Label, $r.metrics.runs_total, $r.metrics.passed, $r.metrics.failed, $r.metrics.errors, `
+        $r.metrics.timeouts, $r.metrics.cancelled)
     return $r
 }
 
@@ -75,10 +75,12 @@ foreach ($tag in @("single", "multi")) {
         $r.metrics.success_rate, $ci[0], $ci[1])
     Row ("| 总调用量 | {0}（均值 {1:N1}/run） |" -f $r.metrics.total_model_calls, ($r.metrics.total_model_calls / $r.metrics.runs_total))
     Row ("| 总 tokens | {0} |" -f $r.metrics.total_tokens)
-    Row ("| 费用 | {0}（按 OWO_EVAL_PRICE_* 单价；null=未计费，tokens 仍真实） |" -f $r.metrics.estimated_cost_usd)
+    Row ("| 费用 | {0}（按 OWO_EVAL_PRICE_* 单价；null=未计费，tokens 仍真实） |" -f $(
+        if ($null -eq $r.metrics.estimated_cost_usd) { "未计费" } else { "{0:N4} 元" -f $r.metrics.estimated_cost_usd }
+    ))
     Row ("| 平均墙钟 | {0:N0} ms |" -f $r.metrics.mean_wall_ms)
-    Row ("| 失败分类 | failed={0} error={1} timeout={2} cancelled={3} |" -f $r.metrics.failed, $r.metrics.error, `
-        $r.metrics.timed_out, $r.metrics.cancelled)
+    Row ("| 失败分类 | failed={0} error={1} timeout={2} cancelled={3} |" -f $r.metrics.failed, $r.metrics.errors, `
+        $r.metrics.timeouts, $r.metrics.cancelled)
     Row ("| 未执行（pending） | {0} |" -f $r.pending.Count)
 
     $runsPerCase = if ($r.per_case.Count -gt 0) { $r.metrics.runs_total / $r.per_case.Count } else { 0 }
@@ -96,12 +98,16 @@ foreach ($tag in @("single", "multi")) {
     # 失败清单（含失败位置/Artifact/失败沙盒）
     $bad = @($r.runs | Where-Object { $_.status -ne "passed" })
     if ($bad.Count -gt 0) {
-        H3 "失败清单（{0} 条；修复后重测=新批次，历史失败不重算不覆盖）" -f $bad.Count
+        H3 ("失败清单（{0} 条；修复后重测=新批次，历史失败不重算不覆盖）" -f $bad.Count)
         Row ("| 单元格 | 状态 | 失败位置(failed_step) | 调用量 | 墙钟 ms | tokens | Artifact | 失败沙盒 |")
         Row ("| --- | --- | --- | --- | --- | --- | --- | --- |")
         foreach ($f in $bad) {
+            $cell = if ($f.key) {
+                "{0}#{1}({2})" -f $f.key.case_id, $f.key.repetition, $f.key.agent_mode
+            } else { $f.cell }
+            $steps = if ($f.failed_steps) { $f.failed_steps -join "; " } else { $f.failed_step }
             Row ("| {0} | {1} | {2} | {3} | {4:N0} | {5} | {6} | {7} |" -f `
-                $f.cell, $f.status, $f.failed_step, $f.model_calls, $f.wall_ms, $f.total_tokens, `
+                $cell, $f.status, $steps, $f.model_calls, $f.wall_ms, $f.total_tokens, `
                 ($f.artifact_refs -join ";"), $f.sandbox_rel)
         }
     } else {

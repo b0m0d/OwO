@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 GLM 默认联调启动器（OwO Agent SDK）。
 

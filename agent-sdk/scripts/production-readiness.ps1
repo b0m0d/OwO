@@ -1,4 +1,4 @@
-# 生产就绪冒烟测试脚本
+﻿# 生产就绪冒烟测试脚本
 # 用于验证服务在 Windows PowerShell 5.1 中的可靠性
 # 作者: AI Agent
 # 日期: $(new Date().toISOString())

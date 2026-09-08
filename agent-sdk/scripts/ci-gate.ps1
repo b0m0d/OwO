@@ -1,5 +1,5 @@
 ﻿# ci-gate.ps1 — agent-sdk CI 核心门禁（PR/Merge 工作流与本地验证共用；幂等、只读为主）
-# 步骤顺序：utf8 → fmt → clippy → test → route-contract → node → ts
+# 步骤顺序：utf8 → permission-ctor → fmt → clippy → test → route-contract → node → ts
 # 约定：块内通过退出码或 $global:LASTEXITCODE = 1 表达失败（避免 throw 吞掉已捕获输出）；
 #       前置条件缺失用 return 实现受控跳过（绿色 + SKIP 说明）。
 # 用法：
@@ -8,7 +8,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\ci-gate.ps1 -Step clippy -LogDir "$env:TEMP\ci-gate-logs"
 # 参数：
 #   -Step <词>           只运行 Id 包含该词的步骤（CI 拆分步骤与本地排查用）
-#   -SkipFmt/-SkipClippy/-SkipTest/-SkipNode/-SkipTs/-SkipRouteContract/-SkipUtf8
+#   -SkipFmt/-SkipClippy/-SkipTest/-SkipNode/-SkipTs/-SkipRouteContract/-SkipUtf8/-SkipPermissionCtor
 #   -ServerOnly          workspace 测试退化为只测 owo-agent-server 单包
 #   -LogDir <目录>       把每步输出与 summary.json 落盘（诊断 artifact）
 # 退出码：0 = 全过；1 = 存在失败步骤。
@@ -21,6 +21,7 @@ param(
     [switch]$SkipTs,
     [switch]$SkipRouteContract,
     [switch]$SkipUtf8,
+    [switch]$SkipPermissionCtor,
     [switch]$ServerOnly,
     [string]$LogDir = ""
 )
@@ -37,7 +38,7 @@ if (-not $SkipUtf8) {
         $bad = @()
         $exts = @(".rs", ".ts", ".js", ".html", ".json", ".css", ".md", ".ps1")
         $files = Get-ChildItem $root -Recurse -File |
-            Where-Object { $_.FullName -notmatch "\\target\\" -and $_.FullName -notmatch "\\node_modules\\" -and $_.FullName -notmatch "\\.git\\" } |
+            Where-Object { $_.FullName -notmatch "\\target\\" -and $_.FullName -notmatch "\\node_modules\\" -and $_.FullName -notmatch "\\.git\\" -and $_.FullName -notmatch "\\scratch-" } |
             Where-Object { $exts -contains $_.Extension }
         $strict = New-Object System.Text.UTF8Encoding($false, $true)
         foreach ($f in $files) {
@@ -58,6 +59,87 @@ if (-not $SkipUtf8) {
             foreach ($b in $badList) {
                 Write-Host ("      - {0}" -f $b) -ForegroundColor Red
                 Write-Output $b
+            }
+            $global:LASTEXITCODE = 1
+        } else {
+            $global:LASTEXITCODE = 0
+        }
+    }
+}
+
+# 0.5) PermissionRequest 构造检查（重构方案 3.1：业务模块禁止直接拼装 request_id；
+#      除 permissions.rs 与协议类型定义外一律经 PermissionRequest::new 创建））
+if (-not $SkipPermissionCtor) {
+    Invoke-CiStep -Name "构造检查（PermissionRequest { 只允许出现在 permissions.rs）" -Id "permission-ctor" -Cwd $root -LogDir $LogDir -Block {
+        # 合法出现点：permissions.rs（定义/求值）、owo-agent-protocol（协议类型定义）、
+        # `-> PermissionRequest {`（返回类型）、`SseEvent::PermissionRequest {`（模式匹配）。
+        $allowed = @(
+            (Join-Path $root "crates\owo-agent-core\src\permissions.rs"),
+            (Join-Path $root "crates\owo-agent-protocol\src\lib.rs")
+        )
+        $violations = @()
+        $rsFiles = Get-ChildItem (Join-Path $root "crates") -Recurse -Filter *.rs |
+            Where-Object { $_.FullName -notmatch "\\target\\" }
+        foreach ($f in $rsFiles) {
+            if ($allowed -contains $f.FullName) { continue }
+            $lineno = 0
+            foreach ($line in [System.IO.File]::ReadAllLines($f.FullName)) {
+                $lineno++
+                if ($line -match "PermissionRequest\s*\{") {
+                    # 返回类型与模式匹配不是字面量构造，跳过（防误报）。
+                    if ($line -match "->\s*PermissionRequest\s*\{" -or $line -match "::\s*PermissionRequest\s*\{") { continue }
+                    $violations += "$($f.FullName):$lineno"
+                }
+            }
+        }
+        Write-Host ("    [permission-ctor] scanned={0} violations={1}" -f $rsFiles.Count, $violations.Count)
+        if ($violations.Count -gt 0) {
+            Write-Host "    业务模块直接构造 PermissionRequest（应改用构造函数）：" -ForegroundColor Red
+            foreach ($v in $violations) {
+                Write-Host ("      - {0}" -f $v) -ForegroundColor Red
+                Write-Output $v
+            }
+            $global:LASTEXITCODE = 1
+        } else {
+            $global:LASTEXITCODE = 0
+        }
+    }
+}
+
+# 0.6) forbidden-files 检查（重构方案 10.6：拒绝编辑器 workspace、密钥文件、日志、
+#      临时数据库与构建缓存进入源码目录；误放文件由人工移出，本步骤防止回潮；已忽略运行产物跳过）
+if (-not $SkipPermissionCtor) {
+    Invoke-CiStep -Name "forbidden-files（.code-workspace/.log/.db+密钥/构建缓存不得进源码目录）" -Id "forbidden-files" -Cwd $root -LogDir $LogDir -Block {
+        $forbidden = @()
+        $allFiles = Get-ChildItem $root -Recurse -File |
+            Where-Object { $_.FullName -notmatch "\\target\\" -and $_.FullName -notmatch "\\node_modules\\" -and $_.FullName -notmatch "\\.git\\" -and $_.FullName -notmatch "\\scratch-" }
+        # 源码扩展名：文件名含 credentials 之类是合法模块命名，不做密钥匹配；
+        # 但 .json/.ps1/.md 等仍可能承载真实密钥（保持检查）。
+        $sourceExts = @(".rs", ".ts", ".js", ".css", ".html")
+        $skipped = 0
+        foreach ($f in $allFiles) {
+            $name = $f.Name
+            # PS 5.1 无 [IO.Path]::GetRelativePath：手动算根相对路径（大小写不敏感）。
+            $full = $f.FullName
+            $rel = $full
+            if ($full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $rel = $full.Substring($root.Length).TrimStart('\', '/')
+            }
+            # 被 git 忽略的运行产物（sim/logs、.owo-agent/、基线/门禁日志等）不在源码目录。
+            git -C $root check-ignore -q $full 2>$null
+            if ($LASTEXITCODE -eq 0) { $skipped++; continue }
+            $lower = $name.ToLowerInvariant()
+            if ($lower -match "\.code-workspace$") { $forbidden += "$rel（编辑器 workspace 误入源码）" }
+            elseif ($lower -match "\.log$" -or $lower -match "\.log\.\d+$") { $forbidden += "$rel（日志文件误入源码）" }
+            elseif ($lower -match "\.(db|sqlite|sqlite3|db-wal|db-shm)$") { $forbidden += "$rel（临时数据库误入源码）" }
+            elseif ($sourceExts -notcontains $f.Extension -and $lower -match "(api[_-]?key|secret|\.pem|\.pfx|credential|id_rsa|id_ed25519)") { $forbidden += "$rel（疑似密钥/凭据文件）" }
+        }
+        Write-Host ("    [forbidden-files] scanned={0} skipped-ignored={1} violations={2}" -f $allFiles.Count, $skipped, $forbidden.Count)
+        if ($forbidden.Count -gt 0) {
+            Write-Host "    forbidden 文件：" -ForegroundColor Red
+            foreach ($ff in $forbidden) {
+                Write-Host ("      - {0}" -f $ff) -ForegroundColor Red
+                Write-Output $ff
             }
             $global:LASTEXITCODE = 1
         } else {

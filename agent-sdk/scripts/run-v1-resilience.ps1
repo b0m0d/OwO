@@ -1,4 +1,4 @@
-# run-v1-resilience.ps1 - 十期 · 四路：执行安全、取消、幂等与崩溃恢复验收脚本
+﻿# run-v1-resilience.ps1 - 十期 · 四路：执行安全、取消、幂等与崩溃恢复验收脚本
 # (Lane 4: workswarm closeout / cancel-chain / checkpoint-recovery / idempotency).
 #
 # 验收面（无需任何模型凭据，全内置 echo/sleep/fail worker）：

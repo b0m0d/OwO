@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 init-dev-env.ps1 - Unified development environment initializer (v1 closeout, Lane 1).
 

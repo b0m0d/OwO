@@ -1,4 +1,4 @@
-# run-product-eval-live.ps1 - R1 live baseline runner (Lane 1, four-lane round).
+﻿# run-product-eval-live.ps1 - R1 live baseline runner (Lane 1, four-lane round).
 #
 # Execution order (per round plan):
 #   0) preflight gate - Provider/credential/suite/out-dir/ORT checks.

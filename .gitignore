@@ -27,6 +27,14 @@ __pycache__/
 /agent-sdk/baseline_*.log
 /agent-sdk/gate-results-*.log
 /agent-sdk/.check_err.log
+# 历史误入库的构建/门禁日志（2026-09 已从索引移除；工作区副本保留自查）
+/agent-sdk/cargo_check.log
+/agent-sdk/clippy.log
+/agent-sdk/crypto_tests.log
+/agent-sdk/fmt.log
+/agent-sdk/fmt_check.log
+/agent-sdk/fmtc.log
+/agent-sdk/full_core_tests.log
 # 并行验证草稿目录
 scratch-*/
 # 临时路径清单（门禁辅助产物）
@@ -36,3 +44,6 @@ tmp_path_keys.txt
 
 # v1 收尾（十期一路）：统一初始化生成的构建信息（版本/commit/dirty），运行时产物不入库
 /agent-sdk/build-info.json
+
+# 评测运行产物（验收/自检批次目录，非源码）
+/agent-sdk/evals/v1/results/

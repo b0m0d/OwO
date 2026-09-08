@@ -1,4 +1,4 @@
-# run-v1-acceptance.ps1 - V1-R1 formal acceptance runner (Lane 2: single-agent baseline
+﻿# run-v1-acceptance.ps1 - V1-R1 formal acceptance runner (Lane 2: single-agent baseline
 # and paired multi-agent comparison for the same frozen suite).
 #
 # Pipeline:
