@@ -44,7 +44,23 @@ test("§5.1.8 OpenAPI 链接由 API base 构造绝对地址", () => {
   assert.match(index, /id="openapiLink"/);
   const app = read("../app.js");
   assert.match(app, /function syncOpenApiLink\(\) \{\s*const link = \$\("openapiLink"\);\s*if \(link\) link\.href = apiClient\.baseUrl \+ "\/openapi\.json";/);
-  assert.match(app, /syncOpenApiLink\(\);\s*const readiness = new window\.OwoServiceReadiness/, "boot 时必须同步一次");
+  assert.match(app, /syncOpenApiLink\(\);\s*if \(await needsSetup\(\)\) \{\s*renderSetupGuide\(\);\s*return;\s*\}\s*\n\s*const readiness = new window\.OwoServiceReadiness/, "boot 时必须同步一次（§4.6 no_workspace 先分流引导）");
+});
+
+test("§4.6/§4.8 首次配置引导：NoWorkspace 分流 + 提供商选择", () => {
+  const app = read("../app.js");
+  assert.match(app, /async function needsSetup\(\)/, "必须提供 needsSetup 判定");
+  assert.match(app, /renderOwoSetupGuide\(content, global\.__owoCoreDiagnostics \|\| null, \(\) => recover\(\)\)/, "引导完成后落回 recover");
+  const guide = read("../views/setup-guide.view.js");
+  assert.match(guide, /get_workspace/, "引导读取当前工作区");
+  assert.match(guide, /set_workspace/, "引导可设置工作区");
+  assert.match(guide, /get_provider_status/, "引导读取提供商状态");
+  assert.match(guide, /set_provider/, "引导可保存提供商选择");
+  assert.ok(!guide.includes("OPENAI_API_KEY") || guide.includes("不显示内容"), "密钥内容永不回前端（仅布尔/端点/模型名）");
+  const index = read("../index.html");
+  assert.match(index, /views\/setup-guide\.view\.js/, "引导视图必须加载");
+  const css = read("../style.css");
+  assert.match(css, /\.setup-card/, "引导卡片样式必须存在");
 });
 
 test("§5.1.2 最小窗口（900×600）rail 不再越界", () => {

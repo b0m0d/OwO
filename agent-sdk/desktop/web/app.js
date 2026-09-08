@@ -2333,8 +2333,41 @@ function syncOpenApiLink() {
   if (link) link.href = apiClient.baseUrl + "/openapi.json";
 }
 
+// §4.6 首次配置判定：壳报告 no_workspace 时 core 不会启动，
+// readiness 轮询永远不成功，必须直接进入工作区/提供商引导。
+// 非 Tauri 环境（浏览器直连 4096）跳过——那里没有壳来管理工作区。
+async function needsSetup() {
+  const owner = window.OwoApiClient && window.OwoApiClient.tauriInvokeOwner(window);
+  if (!owner) return false;
+  try {
+    const connection = await apiClient.ensureCoreConnection();
+    return !!(connection && connection.state === "no_workspace");
+  } catch (_) {
+    return false;
+  }
+}
+
+// §4.6：渲染首次配置引导；完成后落在 recover()（服务恢复轮询）。
+function renderSetupGuide() {
+  document.body.classList.remove("route-chat");
+  const view = $("routeView");
+  const content = $("routeContent");
+  if (!view || !content) return;
+  view.hidden = false;
+  $("routeHeader").innerHTML =
+    "<div><h2>首次配置</h2><p>选择项目工作区与模型提供商后即可开始使用。</p></div>";
+  content.replaceChildren();
+  if (window.renderOwoSetupGuide) {
+    window.renderOwoSetupGuide(content, global.__owoCoreDiagnostics || null, () => recover());
+  }
+}
+
 async function recover() {
   if (activeRecovery) return activeRecovery.trigger();
+  if (await needsSetup()) {
+    renderSetupGuide();
+    return;
+  }
   const readiness = new window.OwoServiceReadiness(apiClient);
   try {
     await readiness.wait(10000);
@@ -2352,6 +2385,10 @@ async function boot() {
   initSpeech();
   initPanels();
   syncOpenApiLink();
+  if (await needsSetup()) {
+    renderSetupGuide();
+    return;
+  }
   const readiness = new window.OwoServiceReadiness(apiClient);
   try {
     await readiness.wait(10000);

@@ -182,10 +182,14 @@ if (-not $SkipRouteContract) {
     }
 }
 
-# 5) Node 语法检查（app.js + 全部 panel）
+# 5) Node 语法检查（app.js + core/*.js + views/*.view.js + 全部 panel）
 if (-not $SkipNode) {
-    Invoke-CiStep -Name "node --check（app.js + panels/*.panel.js）" -Id "node" -Cwd $root -LogDir $LogDir -Block {
+    Invoke-CiStep -Name "node --check（app.js + core/*.js + views/*.view.js + panels/*.panel.js）" -Id "node" -Cwd $root -LogDir $LogDir -Block {
         $jsFiles = @(Join-Path $root "desktop\web\app.js")
+        $coreJs = Get-ChildItem (Join-Path $root "desktop\web\core") -Filter *.js -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+        if ($coreJs) { $jsFiles += @($coreJs) }
+        $views = Get-ChildItem (Join-Path $root "desktop\web\views") -Filter *.view.js -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+        if ($views) { $jsFiles += @($views) }
         $panels = Get-ChildItem (Join-Path $root "desktop\web\panels") -Filter *.panel.js -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
         if ($panels) { $jsFiles += @($panels) }
         Write-Host ("    [node] files={0}" -f $jsFiles.Count)

@@ -23,6 +23,7 @@ use std::time::Duration;
 use std::os::windows::process::CommandExt as _;
 
 use crate::core_supervisor::{self, parse_ready_line};
+use crate::provider::{self, ProviderConfig};
 
 /// 由 build.rs 从核心服务的 OWO_API_VERSION 单一源码读取。
 pub const CORE_API_VERSION: &str = env!("OWO_CORE_API_VERSION");
@@ -47,6 +48,9 @@ pub enum CoreError {
     HandshakeTimeout,
     IdentityMismatch,
     ExitedUnexpectedly,
+    /// §4.6：未选择项目工作区（NoWorkspace）。正常由 `start()` 门控，
+    /// launch_once 内仅作防御性兜底。
+    NoWorkspace,
 }
 
 impl CoreError {
@@ -57,6 +61,7 @@ impl CoreError {
             CoreError::HandshakeTimeout => "core/handshake_timeout",
             CoreError::IdentityMismatch => "core/identity_mismatch",
             CoreError::ExitedUnexpectedly => "core/exited",
+            CoreError::NoWorkspace => "core/no_workspace",
         }
     }
 
@@ -67,6 +72,7 @@ impl CoreError {
             CoreError::HandshakeTimeout => "服务已启动但未完成初始化",
             CoreError::IdentityMismatch => "检测到不属于本窗口的旧服务",
             CoreError::ExitedUnexpectedly => "核心服务意外退出，多次重启未恢复",
+            CoreError::NoWorkspace => "尚未选择项目工作区",
         }
     }
 }
@@ -81,7 +87,7 @@ pub struct CoreConnection {
     pub instance_id: String,
 }
 
-/// 核心运行状态机（§4.2 CoreState）。
+/// 核心运行状态机（§4.2 CoreState；§4.6 增 NoWorkspace）。
 #[derive(Debug, Clone)]
 pub enum CoreState {
     Starting {
@@ -97,6 +103,10 @@ pub enum CoreState {
         message: String,
         log_path: PathBuf,
     },
+    /// §4.6：尚未选择项目工作区。刻意不开 core：安装目录只用于找资源、
+    /// 数据目录只用于状态持久化、项目工作区三者分离；没有工作区就不启用
+    /// 文件写入工具，Web 侧只允许诊断、设置与选择目录。
+    NoWorkspace,
     Stopped,
 }
 
@@ -110,6 +120,10 @@ pub struct CoreRuntime {
     log_path: Arc<Mutex<PathBuf>>,
     bearer: Arc<Mutex<Option<String>>>,
     child_pid: Arc<Mutex<Option<u32>>>,
+    /// §4.6：当前项目工作区（数据目录持久化的“最近项目”；None = NoWorkspace）。
+    workspace: Arc<Mutex<Option<PathBuf>>>,
+    /// §4.8：用户显式选择的模型提供商（数据目录持久化；密钥不落盘）。
+    provider_cfg: Arc<Mutex<ProviderConfig>>,
 }
 
 impl CoreRuntime {
@@ -123,6 +137,29 @@ impl CoreRuntime {
             log_path: Arc::new(Mutex::new(PathBuf::new())),
             bearer: Arc::new(Mutex::new(None)),
             child_pid: Arc::new(Mutex::new(None)),
+            workspace: Arc::new(Mutex::new(load_saved_workspace())),
+            provider_cfg: Arc::new(Mutex::new(provider::load_provider_config())),
+        }
+    }
+
+    /// 测试/注入用构造：显式指定初始工作区（None = NoWorkspace 引导态）。
+    #[cfg(test)]
+    pub fn new_with_workspace(
+        pairing: String,
+        instance_id: String,
+        workspace: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(CoreState::Starting { attempt: 0 })),
+            pairing,
+            instance_id,
+            generation: Arc::new(AtomicU64::new(0)),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            log_path: Arc::new(Mutex::new(PathBuf::new())),
+            bearer: Arc::new(Mutex::new(None)),
+            child_pid: Arc::new(Mutex::new(None)),
+            workspace: Arc::new(Mutex::new(workspace)),
+            provider_cfg: Arc::new(Mutex::new(provider::load_provider_config())),
         }
     }
 
@@ -144,15 +181,26 @@ impl CoreRuntime {
             .unwrap_or_default()
     }
 
+    /// §4.6 当前项目工作区（None = 未选择，处于 NoWorkspace）。
+    pub fn workspace(&self) -> Option<PathBuf> {
+        self.workspace.lock().ok().and_then(|guard| guard.clone())
+    }
+
     fn set_state(&self, next: CoreState) {
         if let Ok(mut state) = self.state.lock() {
             *state = next;
         }
     }
 
-    /// 启动监督线程（不阻塞调用方；ready 后状态变为 `Ready`）。
+    /// §4.6 启动监督线程（不阻塞调用方）。
+    /// 无工作区时不拉起 core，进入 `NoWorkspace`（文件写入工具不启用）；
+    /// 有工作区才监督拉起并做就绪判定（ready 后状态变为 `Ready`）。
     pub fn start(self: &Arc<Self>) {
         self.shutdown_requested.store(false, Ordering::SeqCst);
+        if self.workspace().is_none() {
+            self.set_state(CoreState::NoWorkspace);
+            return;
+        }
         let runtime = Arc::clone(self);
         let generation = self.generation.load(Ordering::SeqCst);
         std::thread::Builder::new()
@@ -165,6 +213,58 @@ impl CoreRuntime {
     pub fn retry(self: &Arc<Self>) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.start();
+    }
+
+    /// §4.6 设置项目工作区并持久化到数据目录（不在此处重启；命令层持 Arc 调用
+    /// `start`/`retry` 完成受控重启，避免 `&self` 无法创建 `&Arc<Self>`）。
+    ///
+    /// 校验：目录必须真实存在（canonicalize 失败即拒绝），防止把任意字符串
+    /// 当工作区传给 core。
+    pub fn set_workspace(&self, path: &std::path::Path) -> Result<PathBuf, String> {
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("工作区目录不可用：{error}"))?;
+        if !canonical.is_dir() {
+            return Err("所选路径不是目录".to_string());
+        }
+        save_workspace(&canonical)?;
+        {
+            let mut guard = self
+                .workspace
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = Some(canonical.clone());
+        }
+        Ok(canonical)
+    }
+
+    /// §4.6/§4.8 运行时是否已处于启动/就绪（命令层据此选择 start vs retry）。
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self.state(),
+            CoreState::Ready(_) | CoreState::Starting { .. } | CoreState::Restarting { .. }
+        )
+    }
+
+    /// §4.8 当前显式提供商配置（深拷贝供命令层读取）。
+    pub fn provider_config(&self) -> ProviderConfig {
+        self.provider_cfg
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| ProviderConfig::unset())
+    }
+
+    /// §4.8 更新提供商选择并持久化（不在此处重启；命令层持 Arc 触发）。
+    pub fn set_provider(&self, config: &ProviderConfig) -> Result<(), String> {
+        provider::save_provider_config(config)?;
+        {
+            let mut guard = self
+                .provider_cfg
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = config.clone();
+        }
+        Ok(())
     }
 
     /// 监督主循环：spawn → 就绪判定 → Ready → 等待退出 →（意外退出）退避重启。
@@ -207,6 +307,11 @@ impl CoreRuntime {
                         self.set_state(CoreState::Stopped);
                         return;
                     }
+                    if failure == CoreError::NoWorkspace {
+                        // §4.6：工作区被并发清除等竞态 → 回到 NoWorkspace 引导，不报 Failed。
+                        self.set_state(CoreState::NoWorkspace);
+                        return;
+                    }
                     self.set_state(CoreState::Failed {
                         code: failure.code(),
                         message: failure.user_message().to_string(),
@@ -228,7 +333,7 @@ impl CoreRuntime {
         if !exe.exists() {
             return Err(CoreError::BinaryMissing);
         }
-        let workspace = core_workspace(&exe);
+        let workspace = self.workspace().ok_or(CoreError::NoWorkspace)?; // start() 已保证存在；防御式返回
         let log = open_core_log().map_err(|_| CoreError::SpawnFailed)?;
         *self
             .log_path
@@ -242,7 +347,14 @@ impl CoreRuntime {
             .arg(&workspace)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        apply_core_env(&mut command, &self.pairing, &self.instance_id);
+        let provider_cfg = self.provider_config();
+        apply_core_env(
+            &mut command,
+            &self.pairing,
+            &self.instance_id,
+            &provider_cfg,
+            &log,
+        );
 
         let child: Child = command.spawn().map_err(|_| CoreError::SpawnFailed)?;
         let pid = child.id();
@@ -309,7 +421,14 @@ impl CoreRuntime {
                     .arg(&workspace)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
-                apply_core_env(&mut command, &self.pairing, &self.instance_id);
+                let provider_cfg = self.provider_config();
+                apply_core_env(
+                    &mut command,
+                    &self.pairing,
+                    &self.instance_id,
+                    &provider_cfg,
+                    &log,
+                );
                 let fallback_child: Child = command.spawn().map_err(|_| CoreError::SpawnFailed)?;
                 let fallback_pid = fallback_child.id();
                 let mut fallback_generation =
@@ -534,36 +653,53 @@ pub fn core_server_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("owo-agent.exe"))
 }
 
-/// 核心工作区：便携发布用应用目录；开发用 agent-sdk 目录。
-fn core_workspace(exe: &std::path::Path) -> PathBuf {
-    let portable = exe
-        .file_name()
-        .map(|name| name.to_string_lossy().contains("-x64"))
-        .unwrap_or(false)
-        || exe
-            .parent()
-            .map(|dir| dir.join("owo-agent-desktop.exe").exists())
-            .unwrap_or(false);
-    if portable {
-        exe.parent()
-            .map(|dir| dir.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
+/// §4.6 工作区持久化：数据目录（`%LOCALAPPDATA%\OwO\Agent\`）下的 `workspace.json`。
+/// 安装目录只用于寻找资源，数据目录只用于状态持久化，项目工作区三者分离；
+/// 不再从可执行文件所在目录推导工作区（那会让工具权限作用域错绑到程序文件）。
+fn workspace_state_path() -> Option<PathBuf> {
+    local_appdata().map(|base| base.join("OwO").join("Agent").join("workspace.json"))
+}
+
+fn load_saved_workspace() -> Option<PathBuf> {
+    let path = workspace_state_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let workspace = value.get("path")?.as_str()?;
+    let candidate = PathBuf::from(workspace);
+    if candidate.is_dir() {
+        Some(candidate)
     } else {
-        exe.parent()
-            .and_then(|path| path.parent())
-            .and_then(|path| path.parent())
-            .map(|path| path.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
+        None
     }
 }
 
-/// 注入核心子进程环境（§4.2/§4.7）：配对证明 + 实例身份在 debug/release 中
+fn save_workspace(path: &std::path::Path) -> Result<(), String> {
+    let state_path = workspace_state_path().ok_or_else(|| "无法确定数据目录".to_string())?;
+    if let Some(dir) = state_path.parent() {
+        std::fs::create_dir_all(dir).map_err(|error| format!("创建数据目录失败：{error}"))?;
+    }
+    let payload = serde_json::json!({ "path": path.to_string_lossy() });
+    let text = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("序列化工作区失败：{error}"))?;
+    std::fs::write(&state_path, text).map_err(|error| format!("保存工作区失败：{error}"))
+}
+
+/// 注入核心子进程环境（§4.2/§4.7/§4.8）：配对证明 + 实例身份在 debug/release 中
 /// 保持一致（生产协议单一）；开发便利经显式 `OWO_DESKTOP_DEV_AUTH=1` 开关启用，
 /// 默认关闭——不允许"调试版能用、安装包空壳"的双标准。
 ///
 /// `OWO_DESKTOP_RELEASE=1` 仅用于收紧浏览器 CORS 边界（发布版禁 http://localhost
 /// 直连核心），不参与配对证明协议本身。
-fn apply_core_env(command: &mut Command, pairing: &str, instance: &str) {
+///
+/// §4.8：模型提供商只按用户显式选择注入（provider.rs），禁止依据其他环境变量
+/// （如 DASHSCOPE_API_KEY）静默改写端点/模型；历史凭据仅提示不迁移。
+fn apply_core_env(
+    command: &mut Command,
+    pairing: &str,
+    instance: &str,
+    provider_cfg: &ProviderConfig,
+    log_path: &std::path::Path,
+) {
     let dev_auth = std::env::var("OWO_DESKTOP_DEV_AUTH")
         .map(|value| value == "1")
         .unwrap_or(false);
@@ -585,19 +721,7 @@ fn apply_core_env(command: &mut Command, pairing: &str, instance: &str) {
             local.join("OwO").join("Agent").join("data"),
         );
     }
-    if std::env::var_os("OPENAI_API_KEY").is_none() && std::env::var_os("OPENAI_BASE_URL").is_none()
-    {
-        if let Some(token_plan_key) = std::env::var_os("DASHSCOPE_API_KEY") {
-            command.env("OPENAI_API_KEY", token_plan_key).env(
-                "OPENAI_BASE_URL",
-                "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-            );
-        } else {
-            command
-                .env("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1")
-                .env("OPENAI_MODEL", "local");
-        }
-    }
+    crate::provider::apply_provider_env(command, provider_cfg, log_path);
 }
 
 fn local_appdata() -> Option<PathBuf> {
@@ -905,7 +1029,10 @@ fn free_port() -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{redact, CoreError, RESTART_DELAYS};
+    use super::{
+        redact, workspace_state_path, CoreError, CoreRuntime, CoreState, ProviderConfig,
+        RESTART_DELAYS,
+    };
     use std::time::Duration;
 
     #[test]
@@ -980,14 +1107,108 @@ mod tests {
         assert_eq!(CoreError::IdentityMismatch.code(), "core/identity_mismatch");
         assert_eq!(CoreError::SpawnFailed.code(), "core/spawn_failed");
         assert_eq!(CoreError::ExitedUnexpectedly.code(), "core/exited");
+        assert_eq!(CoreError::NoWorkspace.code(), "core/no_workspace");
         for error in [
             CoreError::BinaryMissing,
             CoreError::SpawnFailed,
             CoreError::HandshakeTimeout,
             CoreError::IdentityMismatch,
             CoreError::ExitedUnexpectedly,
+            CoreError::NoWorkspace,
         ] {
             assert!(!error.user_message().is_empty(), "{:?} 需要用户文案", error);
         }
+    }
+
+    // ---- §4.6 工作区 ----
+
+    /// 数据目录指向临时目录，避免污染真实 `%LOCALAPPDATA%\OwO\Agent`。
+    /// 调用方需要在此生效期间尽快完成读写（`--test-threads=1` 下无并行干扰）。
+    fn with_isolated_data_dir(block: impl FnOnce()) {
+        let temp = std::env::temp_dir().join(format!("owo-desktop-test-{}", uuid::Uuid::new_v4()));
+        let previous = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", &temp);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(block));
+        std::env::remove_var("LOCALAPPDATA");
+        if let Some(previous) = previous {
+            std::env::set_var("LOCALAPPDATA", previous);
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn no_workspace_enters_no_workspace_state_without_core() {
+        with_isolated_data_dir(|| {
+            let runtime = CoreRuntime::new_with_workspace("pairing".into(), "inst".into(), None);
+            let runtime = std::sync::Arc::new(runtime);
+            runtime.start();
+            assert!(
+                matches!(runtime.state(), CoreState::NoWorkspace),
+                "无工作区时必须停留在 NoWorkspace，不得拉起 core：{:?}",
+                runtime.state()
+            );
+            assert_eq!(runtime.workspace(), None);
+            assert!(!runtime.is_running());
+        });
+    }
+
+    #[test]
+    fn set_workspace_validates_persists_and_updates_memory() {
+        with_isolated_data_dir(|| {
+            let runtime = std::sync::Arc::new(CoreRuntime::new_with_workspace(
+                "pairing".into(),
+                "inst".into(),
+                None,
+            ));
+            // 非法：目录不存在。
+            let missing = std::env::temp_dir().join("owo-desktop-definitely-missing");
+            assert!(runtime.set_workspace(&missing).is_err());
+            assert_eq!(runtime.workspace(), None, "失败必须保持原工作区");
+            // 非法：文件而非目录。
+            let file = std::env::temp_dir().join("owo-desktop-file.txt");
+            std::fs::write(&file, "x").unwrap();
+            assert!(runtime.set_workspace(&file).is_err());
+            let _ = std::fs::remove_file(&file);
+            // 合法：真实目录 → 内存更新 + 数据目录落盘可重读。
+            let dir = std::env::temp_dir().join("owo-desktop-ws-ok");
+            std::fs::create_dir_all(&dir).unwrap();
+            let canonical = runtime.set_workspace(&dir).expect("合法目录必须成功");
+            assert_eq!(runtime.workspace(), Some(canonical.clone()));
+            let state_path = workspace_state_path().expect("数据目录可解析");
+            let text = std::fs::read_to_string(state_path).unwrap();
+            assert!(
+                text.contains("owo-desktop-ws-ok"),
+                "工作区必须持久化：{text}"
+            );
+            // 新实例（模拟重启）从数据目录恢复最近项目。
+            let reloaded = CoreRuntime::new("pairing".into(), "inst".into());
+            assert_eq!(
+                reloaded.workspace(),
+                Some(canonical),
+                "重启后必须恢复已保存的工作区"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn provider_choice_persists_and_reloads() {
+        with_isolated_data_dir(|| {
+            let runtime = std::sync::Arc::new(CoreRuntime::new("pairing".into(), "inst".into()));
+            let config = ProviderConfig {
+                mode: crate::provider::ProviderMode::Ollama,
+                base_url: None,
+                model: Some("qwen2.5".into()),
+            };
+            runtime.set_provider(&config).expect("合法配置可保存");
+            let reloaded = CoreRuntime::new("pairing".into(), "inst".into());
+            let restored = reloaded.provider_config();
+            assert_eq!(restored.mode, config.mode);
+            assert_eq!(restored.model.as_deref(), Some("qwen2.5"));
+            assert_eq!(restored.effective_base_url(), "http://127.0.0.1:11434/v1");
+        });
     }
 }

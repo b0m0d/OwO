@@ -21,6 +21,7 @@ use tauri_plugin_updater::UpdaterExt;
 mod commands;
 mod core_runtime;
 mod core_supervisor;
+mod provider;
 mod single_instance;
 
 use core_runtime::{CoreRuntime, CORE_API_VERSION};
@@ -262,6 +263,10 @@ fn main() {
             commands::get_core_connection,
             commands::retry_core_start,
             commands::open_core_logs,
+            commands::get_workspace,
+            commands::set_workspace,
+            commands::get_provider_status,
+            commands::set_provider,
             desktop_pairing
         ])
         // §4.2 关闭到托盘协议：主窗口关闭请求一律拦截为隐藏到托盘，

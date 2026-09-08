@@ -1084,6 +1084,21 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
 .service-error strong { display: block; font-size: 18px; }
 .service-error p { color: var(--muted); }
 .service-error code { display: block; margin: 12px 0; padding: 8px; overflow-wrap: anywhere; color: var(--muted); background: var(--surface); border-radius: 8px; }
+/* §4.6/§4.8 首次配置引导卡片 */
+.setup-guide { max-width: 640px; margin: 4vh auto; display: grid; gap: 16px; }
+.setup-card { padding: 20px 22px; border: 1px solid var(--accent-line); border-radius: 16px; background: var(--accent-soft); color: var(--text); }
+.setup-card h3 { margin: 0 0 8px; font-size: 16px; }
+.setup-card p { margin: 6px 0; color: var(--muted); line-height: 1.6; }
+.setup-card .sub { font-size: 12px; }
+.setup-card label { display: block; margin: 10px 0 4px; font-size: 13px; color: var(--text); }
+.setup-card input[type="text"] { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); }
+.setup-row { display: flex; gap: 8px; align-items: center; }
+.setup-row input[type="text"] { flex: 1; }
+.setup-row label { display: inline-flex; gap: 6px; align-items: center; margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: pointer; }
+.setup-row label:nth-of-type(1) { margin-top: 12px; }
+.setup-card button { margin-top: 12px; }
+.setup-message { font-size: 13px; }
+.setup-message.ok { color: var(--ok, #2e8b57); }
 body:not(.route-chat) #sidebar, body:not(.route-chat) #right, body:not(.route-chat) #sidebarResize, body:not(.route-chat) #rightResize { display: none; }
 body:not(.route-chat) main { grid-column: 2 / 7; }
 body:not(.route-chat) main > #contextBar, body:not(.route-chat) main > #approvalBar, body:not(.route-chat) main > #messages, body:not(.route-chat) main > #chatForm { display: none; }
