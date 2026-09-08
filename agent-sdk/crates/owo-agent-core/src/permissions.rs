@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,6 +32,44 @@ pub enum Decision {
     Ask,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionProfile {
+    /// 只允许宿主验证的只读操作。
+    ReadOnly,
+    /// 工作区内普通读写自动允许；执行、联网、UI 控制、越界和破坏性操作询问。
+    Workspace,
+    /// 审批 Agent 可以收紧或代批「可代批」操作，但不能突破 OS 沙箱与 deny 规则。
+    AutoReview,
+    /// 减少询问，但不绕过审计、秘密脱敏和不可恢复操作确认。
+    FullAccess,
+    /// 用户按工具、路径、主机和时效组合规则。
+    Custom,
+}
+
+impl PermissionProfile {
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionProfile::ReadOnly => "read_only",
+            PermissionProfile::Workspace => "workspace",
+            PermissionProfile::AutoReview => "auto_review",
+            PermissionProfile::FullAccess => "full_access",
+            PermissionProfile::Custom => "custom",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read_only" => Some(Self::ReadOnly),
+            "workspace" => Some(Self::Workspace),
+            "auto_review" => Some(Self::AutoReview),
+            "full_access" => Some(Self::FullAccess),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRequest {
     pub request_id: String,
@@ -43,6 +81,10 @@ pub struct PermissionRequest {
     /// 已知内置工具无额外说明时省略该字段（保持既有 JSON 契约形状）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_note: Option<String>,
+    /// §5.5：脱敏后的参数视图（秘密字段只显示类型与长度），审批卡默认展示；
+    /// 原始 args 仅在开发者详情中展开。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redacted_args: Option<Value>,
 }
 
 impl PermissionRequest {
@@ -61,6 +103,7 @@ impl PermissionRequest {
             level,
             reason: reason.into(),
             risk_note: None,
+            redacted_args: None,
         }
     }
 
@@ -69,6 +112,146 @@ impl PermissionRequest {
         self.risk_note = note;
         self
     }
+
+    /// §5.5：attach 脱敏参数视图（见 [`redact_args`]）。
+    pub fn with_redacted_args(mut self, redacted: Option<Value>) -> Self {
+        self.redacted_args = redacted;
+        self
+    }
+
+    /// 是否可能含有敏感载荷（token/cookie/header/文件内容等；用于拒绝
+    /// 「始终允许此只读动作」选项——§5.4 破坏性操作不允许）。
+    pub fn is_destructive(&self) -> bool {
+        self.level != Level::Read
+            || crate::tool_effects::effect_class_for(&self.tool)
+                == crate::tool_effects::EffectClass::Inject
+    }
+}
+
+/// §5.5 秘密字段识别词根：值为 string 且键匹配任一词根 → 只暴露类型与长度。
+const SECRET_KEY_HINTS: &[&str] = &[
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "cookie",
+    "authorization",
+    "api_key",
+    "apikey",
+    "x-api",
+    "key",
+    "credential",
+    "header",
+];
+
+/// §5.5 脱敏：递归遍历，string 值且键命中秘密词根 → `{"type":"string","length":N}`；
+/// 其余原样。命令参数不整段抹掉（审批卡需要看做了什么），但 url/command 之外的
+/// 高危键（如 file 内容、data）单独成对处理：data 只保留长度。
+pub fn redact_args(args: &Value) -> Value {
+    redact_inner(args)
+}
+
+/// 递归脱敏：string/array 值且键命中秘密词根 → 只暴露类型与长度；其余原样。
+fn redact_inner(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, child) in map {
+                let hint = SECRET_KEY_HINTS
+                    .iter()
+                    .any(|hint| key.to_lowercase().contains(hint));
+                let value = if hint {
+                    match child {
+                        Value::String(text) => {
+                            let length = text.chars().count();
+                            out.insert(
+                                key.clone(),
+                                json!({ "type": "string", "length": length, "redacted": true }),
+                            );
+                            continue;
+                        }
+                        Value::Array(items) if !items.is_empty() => {
+                            let total: usize = items
+                                .iter()
+                                .filter_map(|item| item.as_str())
+                                .map(|text| text.chars().count())
+                                .sum();
+                            out.insert(
+                                key.clone(),
+                                json!({ "type": "array", "length": total, "redacted": true }),
+                            );
+                            continue;
+                        }
+                        _ => redact_inner(child),
+                    }
+                } else {
+                    redact_inner(child)
+                };
+                out.insert(key.clone(), value);
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_inner).collect()),
+        other => other.clone(),
+    }
+}
+
+/// §5.5 可解释展示：一行为用户总结「将做什么 / 影响哪里 / 能否撤销」。
+/// 返回 { action, target, undoable }（UI 与 CLI 共用；无敏感载荷）。
+pub fn describe_request(request: &PermissionRequest) -> serde_json::Value {
+    let mut action = request.tool.clone();
+    let mut target = String::new();
+    let mut undoable = false;
+    let args = &request.args;
+    match request.tool.as_str() {
+        "read_file" | "write_file" => {
+            if let Some(path) = args.get("path").and_then(Value::as_str) {
+                target = path.to_string();
+            }
+            undoable = request.tool == "write_file";
+            action = if request.tool == "read_file" {
+                "读取文件".to_string()
+            } else {
+                "写入文件".to_string()
+            };
+        }
+        "run_command" => {
+            if let Some(command) = args.get("command").and_then(Value::as_str) {
+                let parts: Vec<&str> = command.split_whitespace().collect();
+                if let Some(program) = parts.first() {
+                    action = format!("执行命令：{program}");
+                }
+                target = parts
+                    .iter()
+                    .skip(1)
+                    .take(6)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            }
+        }
+        _ => {
+            if let Some(url) = args.get("url").and_then(Value::as_str) {
+                let domain = url
+                    .strip_prefix("https://")
+                    .or_else(|| url.strip_prefix("http://"))
+                    .and_then(|rest| rest.split(['/', '?', '#']).next())
+                    .unwrap_or(url);
+                action = format!("联网访问：{domain}");
+                target = url.to_string();
+            }
+        }
+    }
+    if !request.reason.starts_with("拒绝") {
+        // 文件写与命令执行一般可通过 diff/revert 撤销（会话快照）。注入不可逆。
+        undoable = undoable || request.tool == "run_command";
+    }
+    json!({
+        "action": action,
+        "target": target,
+        "undoable": undoable,
+        "risk": request.risk_note.clone().unwrap_or_default(),
+    })
 }
 
 #[async_trait]
@@ -92,7 +275,7 @@ impl Approver for AutoApprover {
     }
 }
 
-/// 权限策略：deny 优先，其次 allow 规则，最后 ask。
+/// 权限策略：deny 优先，其次 profile 档位与授权记忆（grant），最后 ask。
 /// 作用域：所有文件/命令路径必须位于 workspace 内。
 pub struct Policy {
     workspace: PathBuf,
@@ -100,6 +283,11 @@ pub struct Policy {
     /// 运行时追加的危险命令片段（热生效，与基础列表合并判断）。
     runtime_deny: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     read_only: Arc<AtomicBool>,
+    /// §5.3 权限档位（默认 Workspace：工作区内普通读写自动允许，
+    /// 执行/联网/UI 控制/越界/破坏性操作询问）。
+    profile: std::sync::Arc<std::sync::Mutex<PermissionProfile>>,
+    /// §5.4 有作用域、可撤销的授权记忆（用户审批选项生成；命中即放行）。
+    grants: std::sync::RwLock<Option<std::sync::Arc<crate::grant_store::GrantStore>>>,
 }
 
 impl Policy {
@@ -119,22 +307,70 @@ impl Policy {
             ],
             runtime_deny: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             read_only: Arc::new(AtomicBool::new(false)),
+            profile: std::sync::Arc::new(std::sync::Mutex::new(PermissionProfile::Workspace)),
+            grants: std::sync::RwLock::new(None),
         }
     }
 
-    /// 只读策略（Plan 模式）：写/执行/注入一律拒绝。
+    /// 只读策略（Plan 模式）：写/执行/注入一律拒绝（档位=ReadOnly）。
     pub fn read_only(workspace: impl Into<PathBuf>) -> Self {
         let policy = Self::new(workspace);
         policy.read_only.store(true, Ordering::Relaxed);
+        if let Ok(mut profile) = policy.profile.lock() {
+            *profile = PermissionProfile::ReadOnly;
+        }
         policy
+    }
+
+    /// §5.3 注入授权记忆存储（审批卡选项持久化；重复注入覆盖引用）。
+    pub fn with_grants(mut self, grants: std::sync::Arc<crate::grant_store::GrantStore>) -> Self {
+        self.grants = std::sync::RwLock::new(Some(grants));
+        self
+    }
+
+    /// §5.4 运行时注入授权记忆（Agent 已被引用共享时使用；覆盖既有引用）。
+    pub fn set_grants(&self, grants: std::sync::Arc<crate::grant_store::GrantStore>) {
+        if let Ok(mut current) = self.grants.write() {
+            *current = Some(grants);
+        }
     }
 
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only.store(read_only, Ordering::Relaxed);
+        if let Ok(mut profile) = self.profile.lock() {
+            *profile = if read_only {
+                PermissionProfile::ReadOnly
+            } else {
+                PermissionProfile::Workspace
+            };
+        }
     }
 
     pub(crate) fn set_read_only_runtime(&self, read_only: bool) {
         self.read_only.store(read_only, Ordering::Relaxed);
+        if let Ok(mut profile) = self.profile.lock() {
+            *profile = if read_only {
+                PermissionProfile::ReadOnly
+            } else {
+                PermissionProfile::Workspace
+            };
+        }
+    }
+
+    /// §5.3 运行时切换权限档位（UI/CLI/HTTP 统一入口；进程重启后由 settings 恢复）。
+    pub fn set_profile(&self, profile: PermissionProfile) {
+        if let Ok(mut current) = self.profile.lock() {
+            *current = profile;
+        }
+        self.read_only
+            .store(profile == PermissionProfile::ReadOnly, Ordering::Relaxed);
+    }
+
+    pub fn profile(&self) -> PermissionProfile {
+        self.profile
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(PermissionProfile::ReadOnly)
     }
 
     /// 追加额外危险命令片段（deny 优先；写入基础列表，构造时静态）。
@@ -276,21 +512,65 @@ impl Policy {
             Some(effect) => effect.risk_note,
             None => Some(crate::tool_effects::UNDECLARED_RISK_NOTE.to_string()),
         };
-        PermissionRequest::new(tool, args.clone(), level, reason).with_risk_note(risk_note)
+        PermissionRequest::new(tool, args.clone(), level, reason)
+            .with_risk_note(risk_note)
+            .with_redacted_args(Some(redact_args(args)))
     }
 
     /// 工具执行前的最终判定（拒绝原因通过 request.reason 表达）。
+    ///
+    /// §5.3/§5.4 判定顺序：deny 优先 → 等级档位（profile）→ 授权记忆（grant）→ ask。
+    /// grant 命中放行与 profile 档位叠加，但绝不越过 deny 规则（reason 以"拒绝"开头
+    /// 恒为 Deny，false 优先）。
     pub fn decision(&self, request: &PermissionRequest) -> Decision {
         if request.reason.starts_with("拒绝") {
             return Decision::Deny;
         }
-        if self.is_read_only() && request.level != Level::Read {
+        if request.level == Level::Read {
+            return Decision::Allow;
+        }
+        if self.is_read_only() || self.profile() == PermissionProfile::ReadOnly {
             return Decision::Deny;
         }
-        match request.level {
-            Level::Read => Decision::Allow,
-            Level::Write | Level::Execute | Level::Inject => Decision::Ask,
+        // §5.4 授权记忆命中（同一工作区 + 同一参数指纹）即放行。
+        if let Some(grants) = self.grants.read().ok().and_then(|guard| guard.clone()) {
+            if grants.consume(request, &self.workspace_id()).is_some() {
+                return Decision::Allow;
+            }
         }
+        match self.profile() {
+            // Workspace/AutoReview：工作区内普通写自动允许（reason 含"工作区内"），
+            // 执行/注入/联网/UI 控制仍询问；越界已在 evaluate 阶段拒绝。
+            PermissionProfile::Workspace | PermissionProfile::AutoReview => {
+                if request.level == Level::Write && request.reason.contains("工作区内") {
+                    Decision::Allow
+                } else {
+                    Decision::Ask
+                }
+            }
+            // FullAccess：减少询问——Write 与 Execute 放行，Inject 仍询问
+            // （注入/UI 控制不可逆，即使全权模式也不绕过确认）。
+            PermissionProfile::FullAccess => match request.level {
+                Level::Write | Level::Execute => Decision::Allow,
+                Level::Inject => Decision::Ask,
+                Level::Read => Decision::Allow,
+            },
+            PermissionProfile::Custom => match request.level {
+                Level::Write if request.reason.contains("工作区内") => Decision::Allow,
+                Level::Execute | Level::Inject => Decision::Ask,
+                Level::Read => Decision::Allow,
+                Level::Write => Decision::Ask,
+            },
+            PermissionProfile::ReadOnly => Decision::Deny, // 上方已拦截，防御性分支
+        }
+    }
+
+    /// 授权记忆匹配用的工作区标识（canonical 后字符串；不可读取时回退原始路径）。
+    pub fn workspace_id(&self) -> String {
+        self.workspace
+            .canonicalize()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| self.workspace.to_string_lossy().into_owned())
     }
 }
 
@@ -358,6 +638,78 @@ mod tests {
     }
 
     #[test]
+    fn default_workspace_profile_auto_allows_workspace_writes() {
+        // §5.3 Workspace（默认）：工作区内普通读写自动允许。
+        let policy = Policy::new(".");
+        let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
+        assert_eq!(policy.decision(&write), Decision::Allow);
+    }
+
+    #[test]
+    fn workspace_profile_asks_for_execute_and_out_of_workspace() {
+        let policy = Policy::new(".");
+        let command = policy.evaluate("run_command", &json!({ "command": "ls" }));
+        assert_eq!(policy.decision(&command), Decision::Ask, "执行始终询问");
+        let out_of_scope = policy.evaluate("write_file", &json!({ "path": "../escape.txt" }));
+        assert_eq!(
+            policy.decision(&out_of_scope),
+            Decision::Deny,
+            "越界写入在 evaluate 阶段拒绝"
+        );
+    }
+
+    #[test]
+    fn full_access_profile_reduces_questions_but_keeps_inject_ask() {
+        // §5.3 FullAccess：减少询问，但不绕过注入/不可逆操作确认。
+        let policy = Policy::new(".");
+        policy.set_profile(PermissionProfile::FullAccess);
+        let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
+        assert_eq!(policy.decision(&write), Decision::Allow);
+        let command = policy.evaluate("run_command", &json!({ "command": "ls" }));
+        assert_eq!(policy.decision(&command), Decision::Allow, "执行也减少询问");
+        let inject = policy.evaluate("desktop_type", &json!({ "text": "hello" }));
+        assert_eq!(
+            policy.decision(&inject),
+            Decision::Ask,
+            "注入/UI 控制即使全权模式也确认"
+        );
+    }
+
+    #[test]
+    fn read_only_profile_via_set_profile_denies_writes() {
+        let policy = Policy::new(".");
+        policy.set_profile(PermissionProfile::ReadOnly);
+        assert!(policy.is_read_only());
+        let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
+        assert_eq!(policy.decision(&write), Decision::Deny);
+    }
+
+    #[test]
+    fn grant_hit_allows_ask_tool_without_prompting() {
+        use crate::grant_store::{GrantScope, GrantStore};
+        let store = GrantStore::new();
+        let policy = Policy::new(".").with_grants(std::sync::Arc::new(store));
+        // 先一次授权（session）再请求：同参数指纹应直接放行。
+        let workspace_id = policy.workspace_id();
+        let probe = policy.evaluate("run_command", &json!({ "command": "ls -la" }));
+        let grants_ref = policy
+            .grants
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .expect("grants 已注入");
+        let grant = grants_ref
+            .grant_from_scope(&probe, &workspace_id, GrantScope::Session)
+            .expect("session 生成 grant");
+        grants_ref.insert(grant);
+        assert_eq!(
+            policy.decision(&probe),
+            Decision::Allow,
+            "grant 命中放行执行类工具"
+        );
+    }
+
+    #[test]
     fn custom_deny_command_fragment_is_enforced() {
         let mut policy = Policy::new(".");
         policy.add_deny_command("danger-command");
@@ -371,13 +723,14 @@ mod tests {
     #[test]
     fn runtime_policy_settings_take_effect_without_rebuilding() {
         let policy = Policy::new(".");
+        // 默认 Workspace：工作区内写自动允许。切 ReadOnly 后拒绝，切回恢复。
         let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
-        assert_eq!(policy.decision(&write), Decision::Ask);
+        assert_eq!(policy.decision(&write), Decision::Allow);
 
         policy.set_read_only_runtime(true);
         assert_eq!(policy.decision(&write), Decision::Deny);
         policy.set_read_only_runtime(false);
-        assert_eq!(policy.decision(&write), Decision::Ask);
+        assert_eq!(policy.decision(&write), Decision::Allow);
 
         policy.replace_runtime_deny(&["danger-now".to_string()]);
         let denied = policy.evaluate("run_command", &json!({ "command": "danger-now" }));
@@ -385,5 +738,60 @@ mod tests {
         policy.replace_runtime_deny(&[]);
         let allowed_to_ask = policy.evaluate("run_command", &json!({ "command": "danger-now" }));
         assert_eq!(policy.decision(&allowed_to_ask), Decision::Ask);
+    }
+
+    #[test]
+    fn redact_hides_secret_fields_but_keeps_paths() {
+        let args = json!({
+            "path": "a/b.txt",
+            "content": "秘密正文",
+            "url": "https://example.com/api",
+            "headers": { "Authorization": "Bearer sk-12345", "X-Key": "sec" },
+            "command": "run-task --flag"
+        });
+        let redacted = redact_args(&args);
+        assert_eq!(redacted["path"], json!("a/b.txt"), "路径不脱敏");
+        assert_eq!(
+            redacted["content"],
+            json!("秘密正文"),
+            "正文按原样保留（UI 看做什么）"
+        );
+        assert_eq!(
+            redacted["url"],
+            json!("https://example.com/api"),
+            "URL 保留域名便于判断"
+        );
+        assert_eq!(
+            redacted["command"],
+            json!("run-task --flag"),
+            "命令保留便于判断"
+        );
+        let header = &redacted["headers"]["Authorization"];
+        assert_eq!(header["type"], json!("string"));
+        assert_eq!(header["length"], json!(15), "Bearer sk-12345 长度");
+        assert_eq!(header["redacted"], json!(true), "秘密字段标记 redacted");
+        assert!(
+            redacted["headers"]["Authorization"].get("text").is_none(),
+            "不携带原文"
+        );
+    }
+
+    #[test]
+    fn describe_write_shows_target_and_undoable() {
+        let request = Policy::new(".").evaluate("write_file", &json!({ "path": "a.txt" }));
+        let summary = describe_request(&request);
+        assert_eq!(summary["action"], json!("写入文件"));
+        assert_eq!(summary["target"], json!("a.txt"));
+        assert_eq!(summary["undoable"], json!(true));
+    }
+
+    #[test]
+    fn inject_tool_is_destructive_and_read_file_is_not() {
+        let write = Policy::new(".").evaluate("write_file", &json!({ "path": "a.txt" }));
+        assert!(write.is_destructive(), "写操作不提供始终允许只读");
+        let read = Policy::new(".").evaluate("read_file", &json!({ "path": "a.txt" }));
+        assert!(!read.is_destructive(), "只读操作可始终允许");
+        let inject = Policy::new(".").evaluate("desktop_type", &json!({ "text": "hi" }));
+        assert!(inject.is_destructive(), "注入不可逆，不允许始终允许");
     }
 }

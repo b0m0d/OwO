@@ -102,12 +102,18 @@ use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
+/// §5.4 待审批请求：request_id → (oneshot，PermissionRequest 副本)。
+/// 副本用于响应时按 scope 生成临时授权（Grant）。
+pub type PendingApproval = (tokio::sync::oneshot::Sender<Decision>, PermissionRequest);
+
 pub struct AppState {
     pub agent: Arc<Agent>,
     pub store: Arc<dyn SessionStore>,
     pub sessions: Arc<Mutex<HashMap<String, Session>>>,
-    pub pending_approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Decision>>>>,
+    pub pending_approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
     pub pending_approval_sessions: Arc<Mutex<HashMap<String, String>>>,
+    /// §5.4 授权记忆（server 全局一份；Agent.Policy 注入同一引用）。
+    pub grants: Arc<owo_agent_core::grant_store::GrantStore>,
     pub aborts: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// 每个会话一个运行锁，避免并发回合覆盖消息、快照和审计状态。
     pub turn_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -148,6 +154,14 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// §5.4 授权记忆匹配用的工作区标识（与 Policy::workspace_id 一致）。
+    pub fn workspace_id(&self) -> String {
+        self.workspace
+            .canonicalize()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| self.workspace.to_string_lossy().into_owned())
+    }
+
     pub fn new(
         agent: Agent,
         store: impl SessionStore + 'static,
@@ -185,8 +199,19 @@ impl AppState {
             whitelist.upsert(entry);
         }
         let elements = Arc::new(Mutex::new(owo_agent_core::ElementRegistry::new()));
+        // §5.3/§5.4：授权记忆与权限档位 —— server 全局一份，Agent 的 Policy 共享引用，
+        // 审批卡选项写入的 Grant 在下一请求即命中；profile 从 settings 恢复。
+        let grants = Arc::new(owo_agent_core::grant_store::GrantStore::new());
         let mut agent = agent;
         agent.set_elements(elements.clone());
+        agent.set_grants(Arc::clone(&grants));
+        if let Some(profile) = settings
+            .permission_profile
+            .as_deref()
+            .and_then(owo_agent_core::PermissionProfile::parse)
+        {
+            agent.set_permission_profile(profile);
+        }
         // X03：本地 API bearer token（启动生成/复用 + ACL；失败降级为内存 token）。
         let auth_token = Arc::new(auth_token::AuthToken::load_or_create(&data_root));
         let rate_limiter = Arc::new(rate_limit::RateLimiter::from_env());
@@ -199,6 +224,7 @@ impl AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_approvals: Arc::new(Mutex::new(HashMap::new())),
             pending_approval_sessions: Arc::new(Mutex::new(HashMap::new())),
+            grants: Arc::clone(&grants),
             aborts: Arc::new(Mutex::new(HashMap::new())),
             turn_locks: Arc::new(Mutex::new(HashMap::new())),
             traces_dir,
@@ -429,6 +455,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/settings", get(settings_get).post(settings_update))
         .route("/settings/egress", post(settings_egress))
+        // §5.3/§5.4 权限档位与授权记忆管理（UI/CLI 统一入口）。
+        .route(
+            "/permissions",
+            get(permissions_status).post(permissions_set_profile),
+        )
+        .route("/permissions/grants", get(grants_list))
+        .route("/permissions/grants/revoke", post(grants_revoke))
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
         .route("/session/{id}/context", get(session_context))
@@ -769,6 +802,9 @@ async fn openapi_spec() -> Json<Value> {
             "/automations/reminders/clear": { "post": { "operationId": "automationsClearReminders", "responses": { "200": { "description": "ok" } } } },
             "/settings": { "get": { "operationId": "settingsGet", "responses": { "200": { "description": "workspace settings" } } }, "post": { "operationId": "settingsUpdate", "responses": { "200": { "description": "workspace settings" } } } },
             "/settings/egress": { "post": { "operationId": "settingsEgress", "responses": { "200": { "description": "cloud enabled state" } } } },
+            "/permissions": { "get": { "operationId": "permissionsStatus", "responses": { "200": { "description": "当前权限档位 + 授权记忆（脱敏）" } } }, "post": { "operationId": "permissionsSetProfile", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "profile": { "type": "string", "enum": ["read_only", "workspace", "auto_review", "full_access", "custom"] } }, "required": ["profile"] } } } }, "responses": { "200": { "description": "profile 已切换" } } } },
+            "/permissions/grants": { "get": { "operationId": "grantsList", "responses": { "200": { "description": "授权记忆列表（脱敏）" } } } },
+            "/permissions/grants/revoke": { "post": { "operationId": "grantsRevoke", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "grant_id": { "type": "string" } }, "required": ["grant_id"] } } } }, "responses": { "200": { "description": "授权记忆已撤销" } } } },
             "/whitelist": { "get": { "operationId": "whitelistList", "responses": { "200": { "description": "whitelist entries" } } } },
             "/session/{id}/context": { "get": { "operationId": "sessionContext", "parameters": [path_param("id")], "responses": { "200": { "description": "context stats: messages/tokens/budget/compaction/rules" } } } },
             "/skills/health": { "get": { "operationId": "skillsHealth", "responses": { "200": { "description": "flow skill health overview" } } } },
@@ -2134,7 +2170,7 @@ async fn respond_permission(
             format!("审批请求不存在：{request_id}"),
         ));
     }
-    let sender = state
+    let (sender, request) = state
         .pending_approvals
         .lock()
         .map_err(poison)?
@@ -2151,6 +2187,22 @@ async fn respond_permission(
         .map_err(poison)?
         .remove(&request_id);
     let decision = if response.allow {
+        // §5.4 审批选项 → 临时授权（Grant）：响应后同工作区同参数不再弹卡。
+        // 破坏性/注入请求不允许生成 grant（scope 一律忽略，仅放行本次）。
+        if let Some(scope) = response.scope.as_deref() {
+            let level_ok = request.level != owo_agent_core::permissions::Level::Inject;
+            if level_ok {
+                if let Some(scope_enum) = owo_agent_core::grant_store::GrantScope::parse(scope) {
+                    if let Some(grant) =
+                        state
+                            .grants
+                            .grant_from_scope(&request, &state.workspace_id(), scope_enum)
+                    {
+                        state.grants.insert(grant);
+                    }
+                }
+            }
+        }
         Decision::Allow
     } else {
         Decision::Deny
@@ -2158,7 +2210,7 @@ async fn respond_permission(
     sender
         .send(decision)
         .map_err(|_| (StatusCode::GONE, "审批通道已关闭".to_string()))?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "granted": response.allow })))
 }
 
 async fn abort_turn(
@@ -4177,6 +4229,136 @@ async fn settings_egress(
     })))
 }
 
+/// §5.3/§5.4 权限状态：当前档位 + 生效中的授权记忆（脱敏：不含参数原文）。
+async fn permissions_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let profile = state.agent.permission_profile();
+    let grants: Vec<Value> = state
+        .grants
+        .list()
+        .into_iter()
+        .map(|grant| {
+            json!({
+                "grant_id": grant.grant_id,
+                "tool_id": grant.tool_id,
+                "workspace_id": grant.workspace_id,
+                "path_scope": grant.path_scope.map(|path| path.to_string_lossy().into_owned()),
+                "host_scope": grant.host_scope,
+                "has_fingerprint": grant.argument_fingerprint.is_some(),
+                "created_at": grant.created_at.to_rfc3339(),
+                "expires_at": grant.expires_at.map(|at| at.to_rfc3339()),
+                "remaining_uses": grant.remaining_uses,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "profile": profile.label(),
+        "read_only": state.agent.permission_profile() == owo_agent_core::PermissionProfile::ReadOnly,
+        "grants": grants,
+        "grant_count": grants.len(),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct ProfileRequest {
+    profile: String,
+}
+
+/// §5.3 切换权限档位：写 settings.json（重启恢复）+ 运行时即时生效。
+async fn permissions_set_profile(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ProfileRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let profile = owo_agent_core::PermissionProfile::parse(&request.profile).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "未知档位：{}（可选 read_only / workspace / auto_review / full_access / custom）",
+                request.profile
+            ),
+        )
+    })?;
+    let mut settings = owo_agent_core::Settings::load(&state.workspace);
+    if profile == owo_agent_core::PermissionProfile::ReadOnly {
+        settings.read_only = true;
+    } else {
+        settings.read_only = false;
+        settings.permission_profile = Some(request.profile.clone());
+    }
+    settings
+        .save(&state.workspace)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    state.agent.set_permission_profile(profile);
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "permissions",
+            "profile",
+            None,
+            Some(true),
+            format!("权限档位切换：{}", request.profile),
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "profile": profile.label(),
+        "note": "已写入 settings.json 并即时生效",
+    })))
+}
+
+/// §5.4 授权记忆列表（与 permissions_status 同构；独立路由便于前端独立刷新）。
+async fn grants_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let grants: Vec<Value> = state
+        .grants
+        .list()
+        .into_iter()
+        .map(|grant| {
+            json!({
+                "grant_id": grant.grant_id,
+                "tool_id": grant.tool_id,
+                "path_scope": grant.path_scope.map(|path| path.to_string_lossy().into_owned()),
+                "host_scope": grant.host_scope,
+                "expires_at": grant.expires_at.map(|at| at.to_rfc3339()),
+                "remaining_uses": grant.remaining_uses,
+            })
+        })
+        .collect();
+    Ok(Json(
+        json!({ "grants": grants, "grant_count": grants.len() }),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct GrantRevokeRequest {
+    grant_id: String,
+}
+
+/// §5.4 逐条撤销授权记忆（审计记录）。
+async fn grants_revoke(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<GrantRevokeRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let removed = state.grants.revoke(&request.grant_id);
+    if !removed {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("授权记忆不存在：{}", request.grant_id),
+        ));
+    }
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "permissions",
+            "grant_revoke",
+            None,
+            Some(true),
+            format!("撤销授权记忆：{}", request.grant_id),
+        );
+    }
+    Ok(Json(json!({ "ok": true, "revoked": request.grant_id })))
+}
+
 /// 通用设置保存：写入 settings.json 并应用运行时设置（数据出境、STT、主动建议、白名单）。
 async fn settings_update(
     State(state): State<Arc<AppState>>,
@@ -4189,6 +4371,16 @@ async fn settings_update(
     state
         .agent
         .apply_policy_settings(settings.read_only, &settings.deny_commands);
+    // §5.3 档位从 settings 恢复（read_only=true 时以只读档为准）。
+    if !settings.read_only {
+        if let Some(profile) = settings
+            .permission_profile
+            .as_deref()
+            .and_then(owo_agent_core::PermissionProfile::parse)
+        {
+            state.agent.set_permission_profile(profile);
+        }
+    }
     if let Some(model) = &settings.model {
         if !model.trim().is_empty() {
             std::env::set_var("OPENAI_MODEL", model);
@@ -4309,7 +4501,7 @@ async fn whitelist_manage(
 }
 
 struct ChannelApprover {
-    pending: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Decision>>>>,
+    pending: Arc<Mutex<HashMap<String, PendingApproval>>>,
     pending_sessions: Arc<Mutex<HashMap<String, String>>>,
     session_id: String,
     abort: Arc<AtomicBool>,
@@ -4322,7 +4514,7 @@ impl ChannelApprover {
     ) -> tokio::sync::oneshot::Receiver<Decision> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if let Ok(mut pending) = self.pending.lock() {
-            pending.insert(request.request_id.clone(), tx);
+            pending.insert(request.request_id.clone(), (tx, request.clone()));
         }
         if let Ok(mut sessions) = self.pending_sessions.lock() {
             sessions.insert(request.request_id.clone(), self.session_id.clone());
@@ -4380,11 +4572,16 @@ fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {
             summary: summary.clone(),
         }),
         owo_agent_core::TurnEvent::PermissionRequest(request) => {
+            let explain = owo_agent_core::permissions::describe_request(request);
             Some(SseEvent::PermissionRequest {
                 request_id: request.request_id.clone(),
                 tool: request.tool.clone(),
                 args: request.args.clone(),
                 reason: request.reason.clone(),
+                redacted_args: request.redacted_args.clone(),
+                level: Some(request.level.label().to_string()),
+                risk_note: request.risk_note.clone(),
+                explain: Some(explain),
             })
         }
         owo_agent_core::TurnEvent::ToolStart { id, tool } => Some(SseEvent::ToolUse {

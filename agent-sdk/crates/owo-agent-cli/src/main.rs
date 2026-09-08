@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand};
 use colored::Colorize;
-use owo_agent_core::permissions::{Approver, AutoApprover, Decision, PermissionRequest, Policy};
+use owo_agent_core::permissions::{
+    Approver, AutoApprover, Decision, PermissionProfile, PermissionRequest, Policy,
+};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
@@ -1764,7 +1766,7 @@ impl Repl {
                 "learn" => self.handle_learn(command)?,
                 "proactive" => self.handle_proactive(command)?,
                 "status" => self.show_status(),
-                "permissions" => self.show_permissions(),
+                "permissions" => self.handle_permissions(command)?,
                 "audit" => self.show_audit(),
                 "init" => {
                     let target = self.workspace.join("AGENTS.md");
@@ -2300,12 +2302,61 @@ impl Repl {
     }
 
     fn show_permissions(&self) {
-        println!("{}", "权限策略：deny 优先 → allow 规则 → ask 审批".bold());
+        println!("{}", "权限档位（/permissions set <档位> 切换）：".bold());
+        println!("  当前：{}", self.agent.permission_profile().label().cyan());
+        println!("  read_only    只允许宿主验证的只读操作");
+        println!("  workspace    工作区内普通读写自动允许；执行/联网/UI/越界/破坏性询问");
+        println!("  auto_review  审批 Agent 可收紧或代批可代批操作");
+        println!("  full_access  减少询问，不绕过审计/脱敏/不可逆操作确认");
+        println!("  custom       按工具、路径、主机和时效组合规则");
+        println!(
+            "{}",
+            "规则：deny 优先 → 档位 → 授权记忆（grant）→ ask 审批".dimmed()
+        );
         println!("  read（read_file/list_dir/search_files）：作用域内自动放行");
-        println!("  write（write_file）：默认审批，工作区外拒绝，可 /undo 回滚");
+        println!(
+            "  write（write_file）：工作区内自动放行（workspace 档）；越界拒绝，可 /undo 回滚"
+        );
         println!("  execute（run_command）：默认审批，危险命令直接拒绝，60s 超时");
-        if self.read_only {
-            println!("{}", "当前 plan 模式：写/执行/注入一律拒绝".yellow());
+        if self.read_only || self.agent.permission_profile() == PermissionProfile::ReadOnly {
+            println!("{}", "当前只读：写/执行/注入一律拒绝".yellow());
+        }
+    }
+
+    fn handle_permissions(&mut self, command: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let rest = command.trim_start_matches("permissions").trim_start();
+        let mut parts = rest.split_whitespace();
+        match parts.next() {
+            Some("set") => {
+                let profile = parts.next().ok_or(
+                    "用法：/permissions set <read_only|workspace|auto_review|full_access|custom>",
+                )?;
+                let parsed = PermissionProfile::parse(profile).ok_or_else(|| {
+                    format!("未知档位：{profile}（可选 read_only / workspace / auto_review / full_access / custom）")
+                })?;
+                self.agent.set_permission_profile(parsed);
+                if parsed == PermissionProfile::ReadOnly {
+                    self.settings.read_only = true;
+                } else {
+                    self.settings.read_only = false;
+                    self.settings.permission_profile = Some(parsed.label().to_string());
+                }
+                self.settings.save(&self.workspace)?;
+                println!(
+                    "{} 已切换权限档位：{}（已写入 settings.json）",
+                    "✓".green(),
+                    parsed.label().cyan()
+                );
+                Ok(())
+            }
+            Some(other) => {
+                println!("未知子命令：{other}（用法：/permissions set <档位>）");
+                Ok(())
+            }
+            None => {
+                self.show_permissions();
+                Ok(())
+            }
         }
     }
 
@@ -2605,7 +2656,7 @@ fn print_help() {
     println!("  /diff               查看本次会话文件改动");
     println!("  /undo               回滚本次会话全部写操作");
     println!("  /status             查看工作区/模型/会话状态");
-    println!("  /permissions        查看权限策略");
+    println!("  /permissions [set <read_only|workspace|auto_review|full_access|custom>]  查看/切换权限档位");
     println!("  /audit              查看最近审计记录");
     println!("  /mcp add|list|remove  管理 MCP 服务器");
     println!("  /skills             列出已加载技能");

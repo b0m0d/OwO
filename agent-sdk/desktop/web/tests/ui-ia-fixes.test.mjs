@@ -83,3 +83,23 @@ test("§5.1.3 项目页：深度改三段选项，原始数值进高级折叠", 
   assert.ok(!panel.includes("TeamRun 的 Agent Worker 将以该目录为工作区"), "内部执行参数不得出现在任务创建流程");
   assert.match(panel, /允许写入路径/, "受控写入约束标签必须保留");
 });
+
+test("§5.5 审批卡：脱敏展示 + 原始 JSON 收进开发者详情 + scope 选项", () => {
+  const app = read("../app.js");
+  assert.match(app, /function describeApproval\(payload\)/, "审批卡必须提供可解释摘要");
+  assert.match(app, /将写入：/, "写文件显示目标路径");
+  assert.match(app, /将执行命令：/, "命令显示可执行程序与参数");
+  assert.match(app, /将联网访问：/, "联网显示域名");
+  assert.match(app, /能否撤销/, "审批卡回答能否撤销");
+  assert.match(app, /approvalRawJson/, "原始 JSON 收进开发者详情");
+  assert.match(app, /alwaysAllowBtn/, "破坏性操作隐藏始终允许按钮");
+  assert.match(app, /body\.scope = scope/, "响应携带 scope 选项");
+  const index = read("../index.html");
+  assert.match(index, /id="approvalExplain"/, "审批条含说明区");
+  assert.match(index, /id="approvalRaw"/, "审批条含开发者详情折叠");
+  assert.match(index, /data-scope="session"/, "审批卡提供「此会话」选项");
+  assert.match(index, /data-scope="one_hour"/, "审批卡提供「此项目一小时」");
+  assert.match(index, /data-scope="always_readonly"/, "审批卡提供「始终允许此只读动作」");
+  const css = read("../style.css");
+  assert.match(css, /\.approval-actions/, "审批选项样式存在");
+});

@@ -1251,25 +1251,81 @@ async function uploadAttachments(files) {
 
 function showApproval(payload) {
   state.pendingApproval = payload.request_id;
+  state.pendingTool = payload.tool;
+  state.pendingReason = payload.reason || "";
+  $("approvalExplain").textContent = describeApproval(payload);
   $("approvalText").textContent = `需要审批：${payload.tool}（${payload.reason || ""}）`;
+  // §5.5：原始 JSON 只在开发者详情中展开；破坏性操作不提供「始终允许」。
+  const rawJson = document.getElementById("approvalRawJson");
+  if (rawJson) rawJson.textContent = JSON.stringify(payload.args ?? {}, null, 2);
+  const destructive = payload.level !== "read" || ["desktop_type", "desktop_click", "desktop_key", "desktop_shortcut", "clipboard", "text.inject", "desktop_launch", "desktop_activate", "desktop_scroll"].includes(payload.tool);
+  const alwaysBtn = document.getElementById("alwaysAllowBtn");
+  if (alwaysBtn) alwaysBtn.classList.toggle("hidden", destructive || payload.tool !== "read_file" && payload.tool !== "list_dir" && payload.tool !== "search_files" && payload.tool !== "screen_ocr");
+  const rawDetails = document.getElementById("approvalRaw");
+  if (rawDetails && destructive) rawDetails.open = false;
   $("approvalBar").classList.remove("hidden");
+}
+
+// §5.5：可解释展示——“将做什么 / 影响哪里 / 能否撤销”。
+function describeApproval(payload) {
+  const tool = payload.tool || "";
+  const args = payload.args || {};
+  const redacted = payload.redactedArgs || args;
+  const path = typeof args.path === "string" ? args.path : "";
+  const command = typeof args.command === "string" ? args.command : "";
+  const url = typeof args.url === "string" ? args.url : "";
+  const parts = [];
+  if (tool === "write_file") {
+    parts.push(`将写入：${path || "?"}`);
+    parts.push("影响：目标文件；可通过 diff/回滚还原");
+    parts.push("能否撤销：可以");
+  } else if (tool === "read_file") {
+    parts.push(`将读取：${path || "?"}`);
+    parts.push("影响：只读，不修改工作区");
+    parts.push("能否撤销：无需撤销");
+  } else if (tool === "run_command") {
+    parts.push(`将执行命令：${command || "?"}`);
+    parts.push("影响：工作区内运行，可能产生改动");
+    parts.push("能否撤销：视命令而定，可用 diff/快照还原");
+  } else if (tool.startsWith("browser_") && url) {
+    parts.push(`将联网访问：${url}`);
+    parts.push("影响：向该域名发送请求（可能上传数据）");
+    parts.push("能否撤销：联网动作本身不可撤销");
+  } else {
+    const summary = JSON.stringify(redacted, null, 2);
+    parts.push(`参数：${summary}`);
+    parts.push("影响：约见工具风险说明");
+  }
+  if (payload.riskNote) parts.push(`风险：${payload.riskNote}`);
+  parts.push(`是否可撤销：${payload.undoable === false ? "否" : "视情况"}`);
+  return parts.join("\n");
 }
 
 function hideApproval() {
   state.pendingApproval = null;
+  state.pendingTool = null;
+  state.pendingReason = null;
   $("approvalBar").classList.add("hidden");
 }
 
-async function respondApproval(allow) {
+async function respondApproval(scope) {
   if (!state.pendingApproval) return;
   const requestId = state.pendingApproval;
+  const allow = scope !== "deny";
   hideApproval();
   try {
+    const body = { allow };
+    if (scope !== "once" && scope !== "deny") body.scope = scope;
     await api(`/session/${state.sessionId}/permission/${requestId}`, {
       method: "POST",
-      body: JSON.stringify({ allow }),
+      body: JSON.stringify(body),
     });
-    addMessage("system", allow ? "已允许该操作" : "已拒绝该操作");
+    if (allow) {
+      const label = { once: "本次", session: "此会话", one_hour: "此项目一小时", always_readonly: "始终允许此只读动作" }[scope] || "本次";
+      addMessage("system", scope === "once" ? "已允许该操作" : `已允许该操作（${label}）`);
+    } else {
+      addMessage("system", "已拒绝该操作");
+    }
   } catch (error) {
     addMessage("error", `审批失败：${error.message}`);
   }
@@ -2109,8 +2165,9 @@ $("chatForm").addEventListener("submit", (event) => {
   event.preventDefault();
   sendPrompt();
 });
-$("approveBtn").addEventListener("click", () => respondApproval(true));
-$("denyBtn").addEventListener("click", () => respondApproval(false));
+document.querySelectorAll("#approvalBar .approval-actions button").forEach((btn) => {
+  btn.addEventListener("click", () => respondApproval(btn.dataset.scope || "once"));
+});
 $("abortBtn").addEventListener("click", async () => {
   if (!state.reading || !state.sessionId) return;
   try {

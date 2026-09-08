@@ -45,6 +45,7 @@ pub mod fleet_node_protocol;
 pub mod fleet_transport;
 pub mod gateway;
 pub mod goal;
+pub mod grant_store;
 pub mod injection;
 pub mod learn;
 pub mod lease;
@@ -235,7 +236,7 @@ pub use perception::{
     CaptureMeta, ContentRef, ForegroundApp, PerceptionEvent, PerceptionLayer, SituationSnapshot,
     SituationStore, TaskHypothesis, UiContext,
 };
-pub use permissions::{Approver, Decision, Level, PermissionRequest, Policy};
+pub use permissions::{Approver, Decision, Level, PermissionProfile, PermissionRequest, Policy};
 pub use plan::{verify_output, Plan, StepSpec, StepStatus, VerificationSpec};
 pub use platform::{capture_screen, clipboard_sequence, poll_foreground_app};
 pub use plugin::{

@@ -190,6 +190,8 @@ fn sample_body(path: &str) -> Option<&'static str> {
     match path {
         "/session" => Some(r#"{"workspace":".","model":"idle"}"#),
         "/session/{id}/turn" => Some(r#"{"prompt":"hi"}"#),
+        "/permissions" => Some(r#"{"profile":"workspace"}"#),
+        "/permissions/grants/revoke" => Some(r#"{"grant_id":"contract-no-such"}"#),
         "/session/{id}/permission/{request_id}" => Some(r#"{"allow":true}"#),
         "/plugins/{id}/enabled" => Some(r#"{"enabled":false}"#),
         "/subagent/run" => Some(r#"{"prompt":"hi","read_only":true}"#),
@@ -435,6 +437,8 @@ fn resource_404_ok(path: &str) -> bool {
             | "/human/inbox/{id}/claim"
             | "/human/inbox/{id}/release"
             | "/human/inbox/{id}/resolve"
+            // §5.4 授权记忆撤销——占位 grant_id 指向不存在授权 → 404 非路由缺失。
+            | "/permissions/grants/revoke"
     )
 }
 

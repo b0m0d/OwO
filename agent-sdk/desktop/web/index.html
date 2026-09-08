@@ -230,9 +230,19 @@
       <div id="contextMeter"><div id="contextFill"></div></div>
     </div>
     <div id="approvalBar" class="hidden">
+      <div id="approvalExplain"></div>
       <span id="approvalText"></span>
-      <button id="approveBtn" class="allow">允许</button>
-      <button id="denyBtn" class="deny">拒绝</button>
+      <details id="approvalRaw" class="approval-raw">
+        <summary>开发者详情</summary>
+        <pre id="approvalRawJson"></pre>
+      </details>
+      <div class="approval-actions">
+        <button id="approveBtn" class="allow" data-scope="once">允许一次</button>
+        <button class="allow" data-scope="session">此会话</button>
+        <button class="allow" data-scope="one_hour">此项目一小时</button>
+        <button class="allow" id="alwaysAllowBtn" data-scope="always_readonly">始终允许此只读动作</button>
+        <button id="denyBtn" class="deny" data-scope="deny">拒绝</button>
+      </div>
     </div>
     <div id="messages"></div>
     <form id="chatForm">

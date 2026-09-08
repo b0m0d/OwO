@@ -292,6 +292,21 @@ impl Agent {
         self.policy.replace_runtime_deny(deny_commands);
     }
 
+    /// §5.4 运行时注入授权记忆（server 端与 AppState.grants 共享同一引用）。
+    pub fn set_grants(&self, grants: std::sync::Arc<crate::grant_store::GrantStore>) {
+        self.policy.set_grants(grants);
+    }
+
+    /// §5.3 运行时切换权限档位（UI/CLI/HTTP 统一入口）。
+    pub fn set_permission_profile(&self, profile: crate::permissions::PermissionProfile) {
+        self.policy.set_profile(profile);
+    }
+
+    /// 当前权限档位（诊断/设置页回显）。
+    pub fn permission_profile(&self) -> crate::permissions::PermissionProfile {
+        self.policy.profile()
+    }
+
     pub fn registry(&self) -> Arc<RwLock<ToolRegistry>> {
         Arc::clone(&self.registry)
     }

@@ -675,6 +675,10 @@ pub struct PermissionResponse {
     pub allow: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remember: Option<bool>,
+    /// §5.4 审批选项：once（默认，仅本次）/ session（此会话）/ one_hour（此项目一小时）/
+    /// always_readonly（始终允许此只读动作）。破坏性操作不允许 always_readonly。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -746,6 +750,18 @@ pub enum SseEvent {
         tool: String,
         args: Value,
         reason: String,
+        /// §5.5 脱敏参数视图（秘密字段只显示类型和长度）；审批卡默认展示。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redacted_args: Option<Value>,
+        /// §5.5 等级（read/write/execute/inject；前端据此隐藏「始终允许」）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<String>,
+        /// §5.5 风险说明（审批卡展示）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        risk_note: Option<String>,
+        /// §5.5 可解释摘要（将做什么/影响哪里/能否撤销）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explain: Option<Value>,
     },
     Final {
         text: String,

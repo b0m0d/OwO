@@ -219,6 +219,10 @@ pub struct Settings {
     /// 启动默认只读（plan）模式。
     #[serde(default)]
     pub read_only: bool,
+    /// §5.3 权限档位（read_only / workspace / auto_review / full_access / custom；
+    /// 缺省时由 Agent 默认为 workspace；read_only=true 等效 read_only 档）。
+    #[serde(default)]
+    pub permission_profile: Option<String>,
     /// 额外危险命令片段（deny 优先）。
     #[serde(default)]
     pub deny_commands: Vec<String>,

@@ -429,6 +429,49 @@ main {
 }
 #approvalText { flex: 1; }
 
+/* §5.5 审批卡：脱敏说明 + 开发者详情 + scope 选项 */
+#approvalExplain {
+  width: 100%;
+  padding: 6px 0 2px;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+#approvalRaw { width: 100%; font-size: 12px; }
+#approvalRaw summary { cursor: pointer; color: var(--muted); user-select: none; }
+#approvalRawJson {
+  max-height: 180px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0 6px;
+}
+.approval-actions button {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--raised);
+  color: var(--text);
+}
+.approval-actions button.allow { border-color: var(--green-line); color: var(--green); }
+.approval-actions button.deny { border-color: var(--red-line); color: var(--red); }
+.approval-actions button.hidden { display: none; }
+
 /* ---------- 9. 会话消息 ---------- */
 /* 滚动边缘渐隐代替顶部硬分割线（apple §12 scroll edge effects）。
    频率门槛：消息流属高频增量，不加入场动画。 */
