@@ -9,7 +9,7 @@
     "repetitions": 20,
     "timeout_secs": 180
   },
-  "frozen_at": "2026-08-31T06:06:24Z",
+  "frozen_at": "2026-08-31T09:21:59Z",
   "frozen_by": "lane2-product-eval",
   "model": {
     "base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -21,7 +21,7 @@
   "schema_version": 1,
   "suite": {
     "name": "v1-r1-product-suite",
-    "revision_sha256": "a49fe47878a0b0a947c0a577bc88e8f6e5cf8f87db98f4bb7a4a99ffb4a3c40f"
+    "revision_sha256": "743ca98d15d410ccad0d7e15a12ef201076abdd4b8ff2dd471fae8e7599fad36"
   },
   "tasks": [
     {
@@ -51,7 +51,7 @@
       "max_model_calls": 8,
       "permissions_sha256": "8f9af13ddcbf4f8f339a4f9db7fc3248aebb725c9e6410249f72eb834e3947dc",
       "repetitions": 20,
-      "sha256": "d4f3bfd29b71f751029285e650b9e90435d32592d9fc2a985e4f07b0e2307bea",
+      "sha256": "32ddf4447ed028a56bde0aa4817c455e5c1d998c4455201ff2437a9d9f01e0ef",
       "timeout_secs": 240
     },
     {
@@ -126,7 +126,7 @@
     }
   ],
   "version": {
-    "git_commit": "8013da4b371a11c9ff0bc99c34eb7a53c402a9c3",
+    "git_commit": "11c489773781d5fde8a7f0c1007c7b1d36a0749e",
     "git_dirty": true
   }
 }

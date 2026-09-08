@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "strategy_version": "ten-3-default",
+  "min_samples_default": 30,
+  "max_record_age_days": 30,
+  "thresholds": {
+    "success_rate_pp": 5.0,
+    "quality_pct": 10.0,
+    "wall_rel_save": 0.30
+  },
+  "groups": {
+    "code": {
+      "allow_auto_team": true,
+      "min_samples": 30,
+      "mandatory_review": false,
+      "note": "代码任务预选：达标且绑定匹配时允许 auto 组队（默认仍以无证据 single 起步；涉及高风险/审批的代码任务由运行侧强制评审，策略不裁剪）"
+    },
+    "research": {
+      "allow_auto_team": true,
+      "min_samples": 30,
+      "mandatory_review": false,
+      "note": "研究任务预选：并行研究/材料合并可降耗时、提证据完整度；达标放行 auto（render 证据链可并行分组后汇总）"
+    },
+    "document": {
+      "allow_auto_team": false,
+      "min_samples": 30,
+      "mandatory_review": false,
+      "note": "文档任务默认 single：单生产者收口即可，多数场景组队无额外收益；达标也不自动组队（除非用户显式 team）"
+    }
+  }
+}

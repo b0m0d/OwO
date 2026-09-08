@@ -27,7 +27,7 @@
     { "type": "contains", "path": "docs/contract.md", "text": "fetch_user_display_name" },
     { "type": "contains", "path": "out/contract-change.md", "text": "src/api_old.py" },
     { "type": "contains", "path": "out/contract-change.md", "text": "docs/contract.md" },
-    { "type": "contains", "path": "out/contract-change.md", "text": "get_user_name → fetch_user_display_name" },
+    { "type": "regex", "path": "out/contract-change.md", "pattern": "get_user_name[^a-zA-Z0-9_]{0,8}(?:更名为|→|->|=>)[^a-zA-Z0-9_]{0,8}fetch_user_display_name" },
     { "type": "regex", "path": "out/contract-change.md", "pattern": "^# " },
     { "type": "line_count_min", "path": "out/contract-change.md", "min_lines": 6 }
   ],
