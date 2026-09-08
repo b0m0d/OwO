@@ -2060,6 +2060,26 @@ $("toggleTools").addEventListener("click", () => {
   setToolsVisible(!document.body.classList.contains("show-tools"));
 });
 
+// §12-12 开发者模式：MCP 原始配置 / Trace / Eval / 插件等内部能力分区
+// 默认对普通用户隐藏，由明确开关启用并持久化（跨会话记忆）。
+function applyDeveloperMode(enabled) {
+  document.body.classList.toggle("dev-mode", enabled);
+  const toggle = $("devModeToggle");
+  if (toggle) toggle.checked = enabled;
+}
+function initDeveloperMode() {
+  const stored = localStorage.getItem("owo.dev-mode");
+  applyDeveloperMode(stored === "1");
+  const toggle = $("devModeToggle");
+  if (toggle) {
+    toggle.addEventListener("change", () => {
+      const enabled = toggle.checked;
+      applyDeveloperMode(enabled);
+      localStorage.setItem("owo.dev-mode", enabled ? "1" : "0");
+    });
+  }
+}
+
 const ROUTE_META = {
   chat: { title: "任务", description: "与单 Agent 对话，查看会话、审批和变更。" },
   projects: { title: "项目", description: "选择工作区、查看项目历史，并预览权限范围。" },
@@ -2070,10 +2090,14 @@ const ROUTE_META = {
 
 function setSettingsLocation(inRoute) {
   const settings = $("settingsSection");
+  const tools = $("toolsPanel");
   if (!settings) return;
   const sidebar = $("sidebar");
   const target = inRoute ? $("routeContent") : sidebar;
   if (target && settings.parentElement !== target) target.appendChild(settings);
+  // §12-12 工具与高级系统并入设置路由：路由内作为可展开的工具子页随设置移动，
+  // 聊天态回到侧栏折叠容器（普通用户默认只看技能/子代理/自动化/白名单）。
+  if (tools && target && tools.parentElement !== target) target.appendChild(tools);
 }
 
 function navigate(route) {
@@ -2081,11 +2105,45 @@ function navigate(route) {
   renderRoute(route);
 }
 
+// §12-12 设置路由子页：模型与数据 / 工具与自动化 / 开发者选项。
+// 工具与高级系统随设置路由挂载（setSettingsLocation 已把 toolsPanel 并入
+// routeContent），子页切换只做显示/隐藏，不销毁状态；开发者选项分区
+// 仍受 dev-mode 开关门控。
+function renderSettingsTabs(content) {
+  const nav = document.createElement("nav");
+  nav.className = "settings-tabs";
+  nav.setAttribute("aria-label", "设置子页");
+  const tabs = [
+    { key: "", label: "模型与数据", title: "模型连接、用量预算、存储与恢复" },
+    { key: "tools", label: "工具与自动化", title: "技能、子代理、自动化、白名单与工具设置" },
+    { key: "dev", label: "开发者选项", title: "MCP 原始配置、Trace、Eval 与扩展面板（需开发者模式）" },
+  ];
+  for (const tab of tabs) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = tab.label;
+    button.title = tab.title;
+    button.dataset.settingsTab = tab.key;
+    button.classList.toggle("active", !tab.key);
+    button.addEventListener("click", () => {
+      const key = button.dataset.settingsTab;
+      document.body.classList.toggle("settings-tab-tools", key === "tools");
+      document.body.classList.toggle("settings-tab-dev", key === "dev");
+      for (const sibling of nav.querySelectorAll("button")) {
+        sibling.classList.toggle("active", sibling === button);
+      }
+    });
+    nav.appendChild(button);
+  }
+  content.appendChild(nav);
+  content.appendChild($("settingsSection"));
+}
+
 function renderRoute(route) {
   const meta = ROUTE_META[route] || ROUTE_META.chat;
   const isChat = route === "chat";
   document.body.classList.toggle("route-chat", isChat);
-  document.body.classList.remove("tools-open", "settings-open");
+  document.body.classList.remove("tools-open", "settings-open", "settings-tab-tools", "settings-tab-dev");
   document.querySelectorAll("[data-rail-target]").forEach((button) => {
     button.classList.toggle("active", button.dataset.railTarget === route);
   });
@@ -2112,7 +2170,7 @@ function renderRoute(route) {
   setSettingsLocation(route === "settings");
   $("routeHeader").innerHTML = `<div><h2>${esc(meta.title)}</h2><p>${esc(meta.description)}</p></div>`;
   if (route === "settings") {
-    content.appendChild($("settingsSection"));
+    renderSettingsTabs(content);
     if (!serviceReady) return;
     refreshSettings();
     refreshUsage();
@@ -2441,6 +2499,7 @@ async function recover() {
 async function boot() {
   initSpeech();
   initPanels();
+  initDeveloperMode();
   syncOpenApiLink();
   if (await needsSetup()) {
     renderSetupGuide();

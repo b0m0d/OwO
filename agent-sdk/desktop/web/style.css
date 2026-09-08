@@ -308,8 +308,8 @@ h2 {
 h3 { font-size: 12px; color: var(--muted); margin: 14px 0 7px; }
 
 /* 工具区折叠前只展示工作区与会话 */
-#sidebar section:nth-of-type(n + 3) { display: none; }
-body.show-tools #sidebar section:nth-of-type(n + 3) { display: block; }
+#toolsPanel { display: none; }
+body.show-tools #toolsPanel { display: block; }
 .tools-toggle {
   width: 100%;
   margin: 2px 0 16px;
@@ -322,6 +322,23 @@ body.show-tools #sidebar section:nth-of-type(n + 3) { display: block; }
 }
 .tools-toggle::before { content: "⊞"; margin-right: 8px; color: var(--faint); }
 body.show-tools .tools-toggle { color: var(--text); background: var(--raised); border-color: var(--border); }
+
+/* 开发者模式：默认隐藏 MCP / Trace / Eval / 插件等内部能力分区 */
+.dev-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -6px 0 14px 8px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.dev-mode-toggle input { width: auto; }
+body:not(.dev-mode) section[data-dev] { display: none; }
+body.show-tools.dev-mode #toolsPanel section[data-dev],
+body:not(.show-tools).dev-mode #toolsPanel section[data-dev] { display: block; }
+body.dev-mode .dev-mode-toggle { color: var(--text); }
 
 /* ---------- 6. 表单控件与按钮 ---------- */
 input, textarea, select, button { font: inherit; }
@@ -705,7 +722,8 @@ body.tools-open #sidebar {
 body.tools-open #sidebar > section:first-child,
 body.tools-open #sidebar > section:nth-child(2),
 body.tools-open #sidebar .tools-toggle { display: none !important; }
-body.tools-open #sidebar > section {
+body.tools-open #toolsPanel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; grid-column: 1/-1; }
+body.tools-open #toolsPanel section {
   display: block !important;
   margin: 0;
   padding: 16px;
@@ -715,7 +733,8 @@ body.tools-open #sidebar > section {
   box-shadow: var(--shadow-sm);
   min-width: 0;
 }
-body.tools-open #sidebar > section:last-child { grid-column: 1/-1; }
+body.tools-open #toolsPanel section[data-dev] { display: none !important; }
+body.tools-open.dev-mode #toolsPanel section[data-dev] { display: block !important; }
 body.tools-open main, body.tools-open #right, body.tools-open .resize-handle { display: none; }
 body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacing: 0; text-transform: none; }
 
@@ -1147,6 +1166,42 @@ body:not(.route-chat) main { grid-column: 2 / 7; }
 body:not(.route-chat) main > #contextBar, body:not(.route-chat) main > #approvalBar, body:not(.route-chat) main > #messages, body:not(.route-chat) main > #chatForm { display: none; }
 body:not(.route-chat) #settingsSection { display: block !important; max-width: 980px; margin: 0 auto; }
 body:not(.route-chat) #settingsSection h2 { display: none; }
+/* §12-12 设置路由：工具与高级系统作为设置子页随路由挂载并展示。
+   默认（模型与数据）只显示 settingsSection；工具 tab 显示普通工具分区，
+   开发者 tab 显示 data-dev 分区（MCP/Trace/Eval 等，常人不可见）。 */
+body:not(.route-chat) #toolsPanel { display: none !important; }
+body:not(.route-chat) #toolsPanel h2 { display: block; }
+body:not(.route-chat) #toolsPanel .tools-toggle { display: none; }
+body:not(.route-chat).settings-tab-tools #toolsPanel,
+body:not(.route-chat).settings-tab-dev #toolsPanel { display: block !important; max-width: 980px; margin: 0 auto; }
+body:not(.route-chat).settings-tab-tools #toolsPanel section[data-tools] { display: block !important; }
+body:not(.route-chat).settings-tab-tools #toolsPanel section[data-dev] { display: none !important; }
+body:not(.route-chat).settings-tab-dev #toolsPanel section[data-dev] { display: block !important; }
+body:not(.route-chat).settings-tab-dev #toolsPanel section[data-tools] { display: none !important; }
+
+/* 设置子页标签：模型与数据（默认）/ 工具与自动化 / 开发者选项 */
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 auto 18px;
+  max-width: 980px;
+}
+.settings-tabs button {
+  border-radius: 999px;
+  padding: 7px 16px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.settings-tabs button.active {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+body:not(.route-chat).settings-tab-tools #settingsSection,
+body:not(.route-chat).settings-tab-dev #settingsSection { display: none !important; }
 body.route-chat #routeView { display: none; }
 body.route-chat #routeContent { display: none; }
 body.route-chat #sidebar { display: block; }

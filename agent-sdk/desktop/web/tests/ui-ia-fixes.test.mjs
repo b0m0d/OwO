@@ -103,3 +103,31 @@ test("§5.5 审批卡：脱敏展示 + 原始 JSON 收进开发者详情 + scope
   const css = read("../style.css");
   assert.match(css, /\.approval-actions/, "审批选项样式存在");
 });
+
+test("§12-12 工具与高级系统移入路由化设置页 + 开发者模式门控", () => {
+  const index = read("../index.html");
+  // 工具分区包进可路由容器；开发者分区单独标记（默认隐藏）。
+  assert.match(index, /<div id="toolsPanel" class="tools-panel">/, "工具与高级系统必须包进可路由容器");
+  assert.match(index, /id="devModeToggle"/, "必须提供开发者模式开关");
+  const toolsSections = index.match(/<section data-(tools|dev)>/g) || [];
+  assert.ok(toolsSections.length >= 10, `工具分区必须带分组标记（当前 ${toolsSections.length} 个）`);
+  assert.ok(toolsSections.some((tag) => tag.includes("data-dev")), "MCP/Trace/Eval 等必须标记为开发者分区");
+  // 开发者分区（MCP/Trace/Eval）不得出现在普通分组里。
+  const devArea = index.match(/<section data-dev>[\s\S]*?<\/section>/g) || [];
+  const devText = devArea.join("\n");
+  for (const marker of ["MCP 服务器", "Traces（回合轨迹）", "Eval 评估", "扩展面板"]) {
+    assert.ok(devText.includes(marker), `开发者分区必须收进数据机构：${marker}`);
+  }
+  const app = read("../app.js");
+  assert.match(app, /function initDeveloperMode\(\)/, "必须提供开发者模式初始化");
+  assert.match(app, /function applyDeveloperMode\(enabled\)/, "必须提供开发者模式应用函数");
+  assert.match(app, /localStorage\.getItem\("owo\.dev-mode"\)/, "开发者模式必须跨会话持久化");
+  assert.match(app, /function renderSettingsTabs\(content\)/, "设置路由必须提供子页导航");
+  assert.match(app, /"模型与数据"/, "设置子页：模型与数据");
+  assert.match(app, /"工具与自动化"/, "设置子页：工具与自动化");
+  assert.match(app, /"开发者选项"/, "设置子页：开发者选项");
+  const css = read("../style.css");
+  assert.match(css, /section\[data-dev\] \{ display: none; \}/, "普通模式必须隐藏开发者分区");
+  assert.match(css, /\.settings-tabs/, "设置子页标签样式必须存在");
+  assert.match(css, /body:not\(\.route-chat\)\.settings-tab-tools #toolsPanel/, "工具子页必须只显示普通工具分区");
+});

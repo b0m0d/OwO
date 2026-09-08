@@ -47,13 +47,17 @@
       <ul id="sessionList" class="list"></ul>
     </section>
     <button id="toggleTools" class="tools-toggle" type="button" aria-expanded="false">显示工具与设置</button>
-    <section>
+    <label class="dev-mode-toggle" title="开发者模式显示 MCP 原始配置、Trace、Eval 等内部能力">
+      <input type="checkbox" id="devModeToggle"> 开发者模式
+    </label>
+    <div id="toolsPanel" class="tools-panel">
+    <section data-tools>
       <h2>技能中心</h2>
       <ul id="skillList" class="list"></ul>
       <details><summary>技能 SKILL.md</summary><pre id="skillDetail">—</pre></details>
       <details><summary>技能健康度</summary><div id="healthList">—</div></details>
     </section>
-    <section>
+    <section data-dev>
       <h2>Eval 评估</h2>
       <div class="inline">
         <select id="evalSuite">
@@ -63,13 +67,13 @@
       </div>
       <pre id="evalReport" class="sub">—</pre>
     </section>
-    <section>
+    <section data-dev>
       <h2>Traces（回合轨迹）</h2>
       <button id="tracesRefreshBtn">刷新</button>
       <ul id="traceList" class="list"></ul>
       <details><summary>轨迹回放</summary><pre id="traceReplay" class="sub">点击上方轨迹查看</pre></details>
     </section>
-    <section>
+    <section data-tools>
       <h2>子代理（@explore / @subagent）</h2>
       <select id="subagentMode">
         <option value="read_only">只读探索（explore）</option>
@@ -79,7 +83,7 @@
       <button id="subagentRunBtn" class="primary">运行子代理</button>
       <pre id="subagentResult" class="sub">—</pre>
     </section>
-    <section>
+    <section data-tools>
       <h2>项目规则（AGENTS.md）</h2>
       <div id="projectRulesInfo" class="sub">—</div>
       <div class="inline" style="margin-bottom:6px">
@@ -88,7 +92,7 @@
       <textarea id="agentsEditor" rows="8" spellcheck="false" placeholder="# 项目规则&#10;&#10;- 工具调用必须经审批"></textarea>
       <button id="agentsSaveBtn">保存 AGENTS.md</button>
     </section>
-    <section>
+    <section data-dev>
       <h2>MCP 服务器</h2>
       <ul id="mcpList" class="list"></ul>
       <form id="mcpForm" class="stack">
@@ -102,11 +106,11 @@
         <button type="submit">添加并连接</button>
       </form>
     </section>
-    <section>
+    <section data-dev>
       <h2>插件</h2>
       <ul id="pluginList" class="list"></ul>
     </section>
-    <section>
+    <section data-dev>
       <h2>Computer-use 任务（P2）</h2>
       <form id="computerTaskForm" class="stack">
         <input id="cuApp" placeholder="目标应用（如 qq）" required>
@@ -119,7 +123,7 @@
       </form>
       <ul id="computerTaskList" class="list"></ul>
     </section>
-    <section>
+    <section data-dev>
       <h2>操作学习</h2>
       <div class="inline">
         <button id="learnStart">开始</button>
@@ -146,7 +150,7 @@
       <ul id="packageList" class="list"></ul>
       <details><summary>流程技能包详情</summary><pre id="packageDetail">—</pre></details>
     </section>
-    <section>
+    <section data-tools>
       <h2>自动化</h2>
       <form id="automationForm" class="stack">
         <input id="autoName" placeholder="任务名（如 每小时提醒）" required>
@@ -165,7 +169,7 @@
       </div>
       <ul id="reminderList" class="list"></ul>
     </section>
-    <section>
+    <section data-tools>
       <h2>应用白名单</h2>
       <ul id="whitelistList" class="list"></ul>
       <form id="whitelistForm" class="inline">
@@ -173,11 +177,12 @@
         <button type="submit">添加 P0</button>
       </form>
     </section>
-    <section>
+    <section data-dev>
       <h2>扩展面板</h2>
       <div id="panelNav" class="inline"></div>
       <div id="panelRoot"></div>
     </section>
+    </div>
     <section id="settingsSection">
       <h2>设置与诊断</h2>
       <div class="settings-page-title">
