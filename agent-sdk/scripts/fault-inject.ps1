@@ -56,11 +56,14 @@ try {
 
     # ---- 场景 1：SSE 断线重连（Last-Event-ID 语义）----
     Write-Host "[1/4] SSE 断线重连..."
+    # §3.1：事件流要求 Bearer 认证（不再匿名放行）。
+    $sseHeaders = @{}
+    if ($token) { $sseHeaders["Authorization"] = "Bearer $token" }
     $sseOk = $false
     try {
-        $first = Invoke-WebRequest -Uri "$baseUrl/events/stream?last_event_id=0" -Method GET -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+        $first = Invoke-WebRequest -Uri "$baseUrl/events/stream?last_event_id=0" -Method GET -TimeoutSec 2 -Headers $sseHeaders -UseBasicParsing -ErrorAction Stop
         $sseOk = $first.StatusCode -eq 200 -and $first.Headers["Content-Type"] -match "text/event-stream"
-        $reconnect = Invoke-WebRequest -Uri "$baseUrl/events/stream?last_event_id=5" -Method GET -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+        $reconnect = Invoke-WebRequest -Uri "$baseUrl/events/stream?last_event_id=5" -Method GET -TimeoutSec 2 -Headers $sseHeaders -UseBasicParsing -ErrorAction Stop
         $sseOk = $sseOk -and $reconnect.StatusCode -eq 200
     } catch {
         $sseOk = $false

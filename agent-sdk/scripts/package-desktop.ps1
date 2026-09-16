@@ -23,6 +23,37 @@ $cargo = if ($env:OWO_CARGO) {
 
 $root = Split-Path $PSScriptRoot -Parent
 
+# §6.1.5/§6.2：统一构建门禁——发布打包拒绝 dirty 工作树（覆盖开关：
+# OWO_ALLOW_DIRTY_RELEASE=1）；ORT 原生依赖经 init-dev-env 单一实现解析，
+# 不再依赖旧终端遗留的环境变量。
+. (Join-Path $PSScriptRoot "init-dev-env.ps1")
+Assert-OwoCleanTree
+$ortLib = Get-OwoOrtLibDir
+if (-not $ortLib) {
+    throw "ONNX Runtime not found for packaging. Run: pwsh -File scripts\init-dev-env.ps1 -EnsureOrt"
+}
+$env:SHERPA_ONNX_LIB_DIR = $ortLib
+$env:ORT_LIB_PATH = $ortLib
+$env:ORT_LIB_LOCATION = $ortLib
+Write-Host "[package] ORT resolved: $ortLib"
+
+# §6.2：构建封装——LNK4098（CRT 静态/动态混用）按发布失败处理，禁止带入安装包。
+function Invoke-OwoPackageBuild {
+    param([string]$Stage, [string]$WorkingDir, [string[]]$CargoArgs)
+    Push-Location $WorkingDir
+    try {
+        Write-Host "[package] $Stage..."
+        $log = & $cargo build @CargoArgs 2>&1 | ForEach-Object { "$_" }
+        $log | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { throw "$Stage 构建失败" }
+        if ($log -match "LNK4098") {
+            throw "检测到 LNK4098（CRT 混用）——发布构建禁止该警告（§6.2）"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
 # R10：版本号从 workspace Cargo.toml 同步（version = "x.y.z"）。
 function Get-WorkspaceVersion {
     $cargoToml = Get-Content -LiteralPath (Join-Path $root "Cargo.toml") -Encoding UTF8
@@ -46,23 +77,11 @@ if (Test-Path $dist) {
 }
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
-Push-Location $root
-try {
-    Write-Host "[package] 构建核心服务（$Configuration）..."
-    & $cargo build -p owo-agent-cli @configArgs
-    if ($LASTEXITCODE -ne 0) { throw "核心服务构建失败" }
-} finally {
-    Pop-Location
-}
+Invoke-OwoPackageBuild -Stage "构建核心服务（$Configuration）" -WorkingDir $root `
+    -CargoArgs (@("-p", "owo-agent-cli") + $configArgs)
 
-Push-Location (Join-Path $root "desktop\tauri\src-tauri")
-try {
-    Write-Host "[package] 构建桌面壳（$Configuration）..."
-    & $cargo build @configArgs
-    if ($LASTEXITCODE -ne 0) { throw "桌面壳构建失败" }
-} finally {
-    Pop-Location
-}
+Invoke-OwoPackageBuild -Stage "构建桌面壳（$Configuration）" `
+    -WorkingDir (Join-Path $root "desktop\tauri\src-tauri") -CargoArgs $configArgs
 
 $targetDir = Join-Path $root "target\$Configuration"
 $desktopTarget = Join-Path $root "desktop\tauri\src-tauri\target\$Configuration"
@@ -156,5 +175,16 @@ if (-not $SkipSbom) {
         Write-Host "[package] 生成 SBOM..."
         & $sbom -DistDir $dist -OutFile (Join-Path $root "dist\sbom.json")
     }
+}
+# 任务 5（P0）：release 产物清单（构建身份 + SHA-256）纳入 dist——
+# 与 SBOM 互补：SBOM 记录依赖/模型来源，本清单把"二进制来自当前源码"绑定成证据。
+$manifestScript = Join-Path $PSScriptRoot "release-artifact-manifest.ps1"
+if (Test-Path $manifestScript) {
+    Write-Host "[package] 生成 release 产物清单（dist\\OwO-Agent，SHA-256 + git 身份）..."
+    & $manifestScript -ArtifactsDir "dist\OwO-Agent" `
+        -Names @("owo-agent.exe", "owo-agent-desktop.exe", "onnxruntime.dll") `
+        -Out (Join-Path $root "dist\release-manifest.json")
+} else {
+    Write-Host "[package] 跳过产物清单：release-artifact-manifest.ps1 不存在"
 }
 Write-Host "[package] 全部完成"

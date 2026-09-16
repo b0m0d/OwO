@@ -58,13 +58,5 @@
     "input_price_per_mtok": 0.0,
     "output_price_per_mtok": 0.0
   },
-  "mcp_servers": [
-    {
-      "name": "files",
-      "transport": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
-      "url": null
-    }
-  ]
+  "mcp_servers": []
 }

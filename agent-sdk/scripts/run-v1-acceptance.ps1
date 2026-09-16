@@ -69,25 +69,14 @@ if (Test-Path $initScript) {
     Write-Host "[init] dot-sourcing scripts/init-dev-env.ps1 (Lane 1 unified init)" -ForegroundColor Cyan
     . $initScript
 }
-# Internal ORT probe (process scope only; no persistence).
+# ORT probe via the unified single implementation (audit 6.2; process scope only).
 if (-not $env:ORT_LIB_PATH) {
-    $probeRoot = Join-Path $sdkRoot "target\sherpa-onnx-prebuilt"
-    $hit = $null
-    if (Test-Path $probeRoot) {
-        $hit = Get-ChildItem -Path $probeRoot -Recurse -Filter "onnxruntime.lib" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    }
-    if ($null -ne $hit) {
-        $env:ORT_LIB_PATH = $hit.DirectoryName
-    }
+    $probed = Get-OwoOrtLibDir
+    if ($probed) { $env:ORT_LIB_PATH = $probed }
 }
 if (-not $env:SHERPA_ONNX_LIB_DIR) {
-    $probeRoot = Join-Path $sdkRoot "target\sherpa-onnx-prebuilt"
-    if (Test-Path $probeRoot) {
-        $libHit = Get-ChildItem -Path $probeRoot -Recurse -Filter "sherpa-onnx-c-api.lib" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($libHit) { $env:SHERPA_ONNX_LIB_DIR = $libHit.DirectoryName }
-    }
+    $probed = Get-OwoOrtLibDir
+    if ($probed) { $env:SHERPA_ONNX_LIB_DIR = $probed }
 }
 # Credential passthrough: fresh shells do not inherit user-level registry env.
 if (-not $env:OPENAI_API_KEY) {

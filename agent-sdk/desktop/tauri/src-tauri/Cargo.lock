@@ -2262,6 +2262,7 @@ dependencies = [
 name = "owo-agent-desktop"
 version = "0.1.0"
 dependencies = [
+ "owo-build-info",
  "serde",
  "serde_json",
  "tauri",
@@ -2272,6 +2273,10 @@ dependencies = [
  "windows-sys 0.61.2",
  "winreg",
 ]
+
+[[package]]
+name = "owo-build-info"
+version = "0.1.0"
 
 [[package]]
 name = "pango"

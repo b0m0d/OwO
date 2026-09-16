@@ -65,10 +65,12 @@ try {
     }
     Write-Host "✓ PID 清理验证通过"
     
-    # 验证 SSE 连接
+    # 验证 SSE 连接（§3.1：事件流要求 Bearer 认证，不再匿名放行）
     Write-Host "验证 SSE 连接..."
     try {
-        $SseResponse = Invoke-WebRequest -Uri "http://localhost:$Env:OWO_AGENT_PORT/events/stream" -TimeoutSec 5
+        $SseToken = (Invoke-RestMethod -Uri "http://localhost:$Env:OWO_AGENT_PORT/auth/token" -TimeoutSec 5).token
+        $SseHeaders = @{ Authorization = "Bearer $SseToken" }
+        $SseResponse = Invoke-WebRequest -Uri "http://localhost:$Env:OWO_AGENT_PORT/events/stream" -TimeoutSec 5 -Headers $SseHeaders -UseBasicParsing
         Write-Host "✓ SSE 连接验证通过"
     } catch {
         Write-Warning "SSE 连接验证失败，但不影响主要功能"

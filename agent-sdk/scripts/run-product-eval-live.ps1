@@ -42,16 +42,12 @@ if (Test-Path $initScript) {
     Write-Host "[init] dot-sourcing scripts/init-dev-env.ps1 (Lane 1 unified init)" -ForegroundColor Cyan
     . $initScript
 }
+# ORT probe via the unified single implementation (audit 6.2; process scope only).
 if (-not $env:ORT_LIB_PATH) {
-    $probeRoot = Join-Path $sdkRoot "target\sherpa-onnx-prebuilt"
-    $hit = $null
-    if (Test-Path $probeRoot) {
-        $hit = Get-ChildItem -Path $probeRoot -Recurse -Filter "onnxruntime.lib" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    }
-    if ($null -ne $hit) {
-        $env:ORT_LIB_PATH = $hit.DirectoryName
-        Write-Host ("[ORT] ORT_LIB_PATH auto-probed (process only): {0}" -f $env:ORT_LIB_PATH) -ForegroundColor Cyan
+    $probed = Get-OwoOrtLibDir
+    if ($probed) {
+        $env:ORT_LIB_PATH = $probed
+        Write-Host ("[ORT] ORT_LIB_PATH auto-probed (process only): {0}" -f $probed) -ForegroundColor Cyan
     }
 }
 

@@ -167,6 +167,16 @@ impl CoreRuntime {
         &self.pairing
     }
 
+    /// §4 首屏收敛：壳已引导的 core bearer token（供 get_core_connection 注入
+    /// 当前 WebView，省去浏览器模式下的 GET /auth/token 冷启动请求）。
+    /// 只经 Tauri IPC 传给本窗口，不落盘、不写日志（redact 兜底）。
+    pub fn bearer_token(&self) -> Option<String> {
+        self.bearer
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     pub fn state(&self) -> CoreState {
         self.state
             .lock()
@@ -271,10 +281,13 @@ impl CoreRuntime {
     fn supervise(self: Arc<Self>, generation: u64) {
         let mut attempt: u8 = 0;
         loop {
-            if self.generation.load(Ordering::SeqCst) != generation
-                || self.shutdown_requested.load(Ordering::SeqCst)
-            {
+            if self.shutdown_requested.load(Ordering::SeqCst) {
                 self.set_state(CoreState::Stopped);
+                return;
+            }
+            if self.generation.load(Ordering::SeqCst) != generation {
+                // §7：被新代（连点重连）取代的旧监督线程直接退出；状态归新代管，
+                // 不得把新代的 Starting/Ready 覆写成 Stopped。
                 return;
             }
             self.set_state(CoreState::Starting { attempt });
@@ -282,10 +295,12 @@ impl CoreRuntime {
                 Ok((connection, generation_handle)) => {
                     self.set_state(CoreState::Ready(connection));
                     let reason = wait_for_exit(&generation_handle, generation, &self.generation);
-                    if self.shutdown_requested.load(Ordering::SeqCst)
-                        || self.generation.load(Ordering::SeqCst) != generation
-                    {
+                    if self.shutdown_requested.load(Ordering::SeqCst) {
                         self.set_state(CoreState::Stopped);
+                        return;
+                    }
+                    if self.generation.load(Ordering::SeqCst) != generation {
+                        // §7：被新代取代 → 不覆写状态（新代已接管）。
                         return;
                     }
                     if attempt as usize >= RESTART_DELAYS.len() {
@@ -301,10 +316,12 @@ impl CoreRuntime {
                     attempt += 1;
                 }
                 Err(failure) => {
-                    if self.generation.load(Ordering::SeqCst) != generation
-                        || self.shutdown_requested.load(Ordering::SeqCst)
-                    {
+                    if self.shutdown_requested.load(Ordering::SeqCst) {
                         self.set_state(CoreState::Stopped);
+                        return;
+                    }
+                    if self.generation.load(Ordering::SeqCst) != generation {
+                        // §7：被新代取代 → 不覆写状态（新代已接管）。
                         return;
                     }
                     if failure == CoreError::NoWorkspace {
@@ -398,12 +415,25 @@ impl CoreRuntime {
                     CoreError::IdentityMismatch
                 })?;
                 self.bootstrap_bearer(port);
+                let build_id = value["build_id"].as_str().unwrap_or("unknown").to_string();
+                // §6.1.4：core_ready 上报的 build_id 与壳编译期期望（owo-build-info
+                // 烧录）不一致时只告警不失败——开发机 dirty 构建常见；发布包错配
+                // 会在日志留下可追溯证据。expectedBuildId 经 get_core_connection 下发。
+                if build_id != "unknown" && build_id != owo_build_info::COMMIT {
+                    append_log_line(
+                        &log,
+                        &format!(
+                            "[runtime] build id 与壳期望不一致：core={build_id} shell={}（版本可能错配）",
+                            owo_build_info::COMMIT
+                        ),
+                    );
+                }
                 Ok((
                     CoreConnection {
                         pid: health.pid.unwrap_or(pid),
                         port,
                         api_version: health.api_version,
-                        build_id: value["build_id"].as_str().unwrap_or("unknown").to_string(),
+                        build_id,
                         instance_id: self.instance_id.clone(),
                     },
                     generation,
@@ -600,11 +630,6 @@ fn wait_ready_line(rx: &mpsc::Receiver<Value>, generation: &ChildGeneration) -> 
         }
     }
 }
-
-/// 子进程看护线程：持句柄 wait，退出时置位本代退出标志（已迁入 ChildGeneration）。
-/// 保持空壳占位：外部历史调用点若仍引用可平滑编译，实际逻辑在 ChildGeneration::spawned。
-#[allow(dead_code)]
-fn spawn_watch_thread(_child: Child, _exit_flag: Arc<AtomicBool>) {}
 
 /// 等待本次子进程退出（或运行时被新代数取代）；返回原因描述。
 fn wait_for_exit(

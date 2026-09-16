@@ -18,6 +18,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 winreg = "0.55"
+# §6.1.2/§6.1.4：共享构建身份 crate（与 core 同一编译期烧录实现），
+# 壳据此比对 core_ready 上报的 build_id 是否与本安装包期望一致。
+owo-build-info = { path = "../../../crates/owo-build-info" }
 
 # §4.1 单实例命名管道（OwO-Agent-Desktop）：Windows 专属；0.61 与锁文件现有
 # windows-sys 传递依赖同版本，离线可复用缓存，不引入新 crate。

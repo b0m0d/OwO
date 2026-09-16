@@ -59,19 +59,29 @@ pub fn get_core_state(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Value 
 }
 
 /// 连接描述符：WebView 据此构造 API base 并随请求携带实例身份头。
-/// 秘密（pairing）只经本命令传给当前窗口，不落盘、不写日志。
+/// 秘密（pairing）与短期 bearer token 只经本命令传给当前窗口，不落盘、不写日志。
+/// §4：token 注入后，正式桌面冷启动不再需要 GET /auth/token（总请求 ≤5）。
 #[tauri::command]
 pub fn get_core_connection(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Value {
     match runtime.state() {
-        CoreState::Ready(connection) => json!({
-            "port": connection.port,
-            "instanceId": connection.instance_id,
-            "pairing": runtime.pairing(),
-            "apiVersion": connection.api_version,
-            "pid": connection.pid,
-            "buildId": connection.build_id,
-            "state": "ready",
-        }),
+        CoreState::Ready(connection) => {
+            let mut value = json!({
+                "port": connection.port,
+                "instanceId": connection.instance_id,
+                "pairing": runtime.pairing(),
+                "apiVersion": connection.api_version,
+                "pid": connection.pid,
+                "buildId": connection.build_id,
+                // §6.1.4：壳编译期期望的 build id（owo-build-info）；WebView 诊断
+                // 面板可比对 buildId != expectedBuildId 提示安装包与核心版本错配。
+                "expectedBuildId": owo_build_info::COMMIT,
+                "state": "ready",
+            });
+            if let Some(token) = runtime.bearer_token() {
+                value["token"] = json!(token);
+            }
+            value
+        }
         other => {
             let mut value = state_to_value(&other, &runtime.log_path());
             value["port"] = json!(0);

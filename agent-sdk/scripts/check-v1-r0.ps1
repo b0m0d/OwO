@@ -23,28 +23,24 @@ Set-Location $sdkRoot
 Write-Host ("R0 closeout gate - root: {0}" -f $sdkRoot) -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
-# ORT auto-probe (Lane 1, R1): rust tests statically link ONNX Runtime through
-# the `ort` crate; a fresh terminal without ORT_LIB_PATH fails at link stage.
-# Probe the repo-local cache and set the variable for THIS PROCESS ONLY
-# (never persisted to user/machine settings).
+# ORT auto-probe (audit 6.2): the single implementation lives in
+# init-dev-env.ps1 (Get-OwoOrtLibDir); this script only consumes it.
+# A fresh terminal without ORT_LIB_PATH fails at link stage; the probe sets
+# the variable for THIS PROCESS ONLY (never persisted to user/machine scope).
 # ---------------------------------------------------------------------------
-if (-not $env:ORT_LIB_PATH) {
-    $probeRoot = Join-Path $sdkRoot "target\sherpa-onnx-prebuilt"
-    $hit = $null
-    if (Test-Path $probeRoot) {
-        $hit = Get-ChildItem -Path $probeRoot -Recurse -Filter "onnxruntime.lib" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    }
-    if ($null -ne $hit) {
-        $env:ORT_LIB_PATH = $hit.DirectoryName
-        Write-Host ("[ORT] ORT_LIB_PATH auto-probed (process only): {0}" -f $env:ORT_LIB_PATH) -ForegroundColor Cyan
-    }
-    else {
-        Write-Host "[ORT] ORT_LIB_PATH not set and no onnxruntime.lib found under target\sherpa-onnx-prebuilt - linking may fail" -ForegroundColor Yellow
-    }
+. (Join-Path $PSScriptRoot "init-dev-env.ps1")
+if ($env:ORT_LIB_PATH) {
+    Write-Host ("[ORT] ORT_LIB_PATH already set: {0}" -f $env:ORT_LIB_PATH) -ForegroundColor DarkGray
 }
 else {
-    Write-Host ("[ORT] ORT_LIB_PATH already set: {0}" -f $env:ORT_LIB_PATH) -ForegroundColor DarkGray
+    $probed = Get-OwoOrtLibDir
+    if ($probed) {
+        $env:ORT_LIB_PATH = $probed
+        Write-Host ("[ORT] ORT_LIB_PATH auto-probed (process only): {0}" -f $probed) -ForegroundColor Cyan
+    }
+    else {
+        Write-Host "[ORT] ORT_LIB_PATH not set and no onnxruntime.lib found (run: pwsh -File scripts\init-dev-env.ps1 -EnsureOrt) - linking may fail" -ForegroundColor Yellow
+    }
 }
 
 $script:results = New-Object System.Collections.Generic.List[object]

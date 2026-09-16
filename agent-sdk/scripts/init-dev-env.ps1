@@ -134,28 +134,29 @@ function Save-OwoSherpaToCache {
     }
 }
 
+function Get-OwoOrtLibDir {
+    # Single non-throwing ORT probe (audit 6.2): session env -> machine cache ->
+    # legacy target cache. Returns $null when absent; callers decide whether to
+    # warn / fail / download. All other scripts MUST reuse this instead of
+    # keeping their own copies of the probe logic.
+    $envLib = if ($env:SHERPA_ONNX_LIB_DIR) { $env:SHERPA_ONNX_LIB_DIR } else { $env:ORT_LIB_PATH }
+    if (Test-OwoOnnxRuntimeLib $envLib) { return $envLib }
+    $cached = Join-Path $script:OwoRuntimeCache "$($script:OwoSherpaAsset)\lib"
+    if (Test-OwoOnnxRuntimeLib $cached) { return $cached }
+    $legacy = Join-Path $script:OwoSdkRoot "target\sherpa-onnx-prebuilt\$($script:OwoSherpaAsset)\lib"
+    if (Test-OwoOnnxRuntimeLib $legacy) { return $legacy }
+    return $null
+}
+
 function Resolve-OwoOnnxRuntimeLib {
     # Priority: session-provided -> machine cache -> legacy target cache -> download.
     param([switch]$AllowDownload)
-    # 1) A valid lib dir explicitly provided in THIS session.
-    $envLib = if ($env:SHERPA_ONNX_LIB_DIR) { $env:SHERPA_ONNX_LIB_DIR } else { $env:ORT_LIB_PATH }
-    if (Test-OwoOnnxRuntimeLib $envLib) {
-        Write-Host "[init] ONNX Runtime: reused from session env ($envLib)" -ForegroundColor Green
-        return $envLib
+    $probed = Get-OwoOrtLibDir
+    if ($probed) {
+        Write-Host "[init] ONNX Runtime: resolved ($probed)" -ForegroundColor Green
+        return $probed
     }
-    # 2) Machine cache (created by this initializer previously).
-    $cached = Join-Path $script:OwoRuntimeCache "$($script:OwoSherpaAsset)\lib"
-    if (Test-OwoOnnxRuntimeLib $cached) {
-        Write-Host "[init] ONNX Runtime: cache hit ($cached)" -ForegroundColor Green
-        return $cached
-    }
-    # 3) Legacy leftover cache (target\sherpa-onnx-prebuilt) - accepted only when intact.
-    $legacy = Join-Path $script:OwoSdkRoot "target\sherpa-onnx-prebuilt\$($script:OwoSherpaAsset)\lib"
-    if (Test-OwoOnnxRuntimeLib $legacy) {
-        Write-Host "[init] ONNX Runtime: reused legacy cache ($legacy) - will migrate to machine cache on next download" -ForegroundColor Yellow
-        return $legacy
-    }
-    # 4) Download (explicit or implied).
+    # Download (explicit or implied).
     if ($AllowDownload -or $EnsureOrt) {
         if ($NoDownload) {
             throw "ONNX Runtime dependency missing and downloads are disabled (-NoDownload). Run: pwsh -File scripts\init-dev-env.ps1 -EnsureOrt"
@@ -199,6 +200,26 @@ function Resolve-OwoOcrModels {
     }
     Write-Host "[init] OCR models missing (optional for builds; OCR feature disabled). Enable via: pwsh -File scripts\init-dev-env.ps1 -EnsureModels" -ForegroundColor Yellow
     return $false
+}
+
+# ---------------------------------------------------------------------------
+# Release gate (audit 6.1.5): release entries refuse a dirty work tree
+# ---------------------------------------------------------------------------
+function Assert-OwoCleanTree {
+    # Called by release entry points (package-desktop / build-installer).
+    # Explicit override: OWO_ALLOW_DIRTY_RELEASE=1 (recorded in the log).
+    param([switch]$AllowDirty)
+    if ($AllowDirty) { return }
+    if ($env:OWO_ALLOW_DIRTY_RELEASE -eq "1") {
+        Write-Host "[release] OWO_ALLOW_DIRTY_RELEASE=1: clean-tree gate skipped (recorded)" -ForegroundColor Yellow
+        return
+    }
+    Push-Location $script:OwoRepoRoot
+    try { $status = @(git status --porcelain 2>$null) } finally { Pop-Location }
+    if ($status.Count -gt 0) {
+        throw ("Release build refuses a dirty work tree (audit 6.1.5): {0} uncommitted/untracked entries. Commit all changes first, or set OWO_ALLOW_DIRTY_RELEASE=1 to override explicitly." -f $status.Count)
+    }
+    Write-Host "[release] clean-tree gate passed" -ForegroundColor Green
 }
 
 # ---------------------------------------------------------------------------
