@@ -29,6 +29,7 @@ const T = panel._test;
 const shellCss = readFileSync(join(here, "../style.css"), "utf8");
 const indexHtml = readFileSync(join(here, "../index.html"), "utf8");
 const appJs = readFileSync(join(here, "../app.js"), "utf8");
+const appDomainJs = readFileSync(join(here, "../app-domain.js"), "utf8");
 
 // ---------- fixture 工具 ----------
 
@@ -296,8 +297,10 @@ test("sectionsHtml：四类目节骨架 + 计数 + 重试按钮 data 属性 + �
   assert.match(html, /<span class="owo-ac-count has">1<\/span>/);
   assert.match(html, /<span class="owo-ac-count has">2<\/span>/);
 
-  // ① 人节点：团队徽标 + 任务清单 + 深链
-  assert.ok(html.includes("团队 awaiting_human"), "awaiting_team 徽标行");
+  // ① 人节点：团队徽标 + 任务清单 + 深链（§8：徽标为用户可见中文语义，
+  // 内部枚举 awaiting_human 不得出现在界面文本中）。
+  assert.ok(html.includes("团队等待人工处理"), "awaiting_team 徽标行");
+  assert.ok(!html.includes("awaiting_human"), "内部枚举不得泄漏到界面");
   assert.ok(html.includes('data-ac-goto="t-1"'));
   assert.ok(html.includes("在团队详情「人节点结果」区提交结果"), "人节点结果提交指引（不得出现 API 路径）");
   assert.ok(!/POST \//.test(html.match(/<span class="hint">[^<]*<\/span>/g)?.join("") || ""), "hint 文案不得包含 API 动词路径");
@@ -516,9 +519,12 @@ test("gotoWorkswarm：无 DOM 环境安全（Node 下不抛错）", () => {
 
 // ---------- 接线守卫 ----------
 
-test("接线守卫：index.html 脚本 + app.js PANEL_ORDER + style.css 第 21 节在场", () => {
+test("接线守卫：index.html 脚本 + PANEL_ORDER 唯一来源 app-domain.js + style.css 第 21 节在场", () => {
   assert.ok(indexHtml.includes('<script src="panels/action-center.panel.js"></script>'), "index.html 缺 action-center 脚本");
-  assert.ok(/PANEL_ORDER\s*=\s*\[\s*"action-center"/.test(appJs), "app.js PANEL_ORDER 未将 action-center 置于首位");
+  // 模块拆分（§12.3）后 PANEL_ORDER 唯一来源为 app-domain.js；app.js 不得复制回巨型文件。
+  assert.ok(!/const\s+PANEL_ORDER\s*=/.test(appJs), "PANEL_ORDER 不得在 app.js 中定义（唯一来源 app-domain.js）");
+  assert.match(appDomainJs, /const PANEL_ORDER = \[\s*"capabilities",\s*"action-center"/, "app-domain.js PANEL_ORDER 未注册 action-center");
+  assert.match(indexHtml, /<script src="app-domain\.js"><\/script>[\s\S]*<script src="app\.js"><\/script>/, "app-domain.js 必须先于 app.js 载入（经典脚本顺序）");
   assert.ok(shellCss.includes("21. 七期：Action Center"), "style.css 缺第 21 节 Action Center");
   for (const cls of [".owo-ac-item", ".owo-ac-badge.warn", ".owo-ac-count.has", ".owo-ac-result.ok"]) {
     assert.ok(shellCss.includes(cls), "style.css 缺 " + cls);

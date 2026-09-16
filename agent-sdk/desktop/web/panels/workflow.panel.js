@@ -181,16 +181,28 @@
   }
 
   function connectEvents(runId) {
-    var es = window.OwoWorkflowEventSource;
-    if (es) { es.close(); }
+    var handle = window.OwoWorkflowEventStream;
+    if (handle && typeof handle.abort === "function") { handle.abort(); }
     var el = document.getElementById("owo-workflow-events");
     if (!el) { return; }
-    var h = getHelpers();
-    var base = (h && h.baseUrl) || BASE;
-    es = new EventSource(base + "/workflow/run/" + encodeURIComponent(runId) + "/events");
-    window.OwoWorkflowEventSource = es;
-    es.onmessage = function (ev) { appendEvent(ev.data); };
-    es.onerror = function () { appendEvent("[events 连接中断]"); };
+    // §3.1：事件流要求 Bearer 认证，改用带 Authorization 头的 fetch-stream
+    // （EventSource 无法携带自定义头，token 不允许进 URL 查询串）。
+    var api = window.OwoApi;
+    if (!api || typeof api.openEventStream !== "function") {
+      appendEvent("[当前环境不支持带认证的事件流，已改用快照轮询]");
+      return;
+    }
+    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    handle = { abort: function () { if (ctrl) ctrl.abort(); } };
+    window.OwoWorkflowEventStream = handle;
+    api.openEventStream("/workflow/run/" + encodeURIComponent(runId) + "/events", {
+      signal: ctrl ? ctrl.signal : undefined,
+      onEvent: function (frame) { if (frame && frame.data) appendEvent(frame.data); },
+    }).catch(function (e) {
+      if (window.OwoWorkflowEventStream === handle) {
+        appendEvent("[events 连接中断] " + String((e && e.message) || e));
+      }
+    });
   }
 
   function appendEvent(frame) {
@@ -356,9 +368,9 @@
       this.refresh();
       bindValidate();
       bindRefresh();
-      if (window.OwoWorkflowEventSource) {
-        window.OwoWorkflowEventSource.close();
-        window.OwoWorkflowEventSource = null;
+      if (window.OwoWorkflowEventStream) {
+        if (typeof window.OwoWorkflowEventStream.abort === "function") window.OwoWorkflowEventStream.abort();
+        window.OwoWorkflowEventStream = null;
       }
     },
     refresh: function () {

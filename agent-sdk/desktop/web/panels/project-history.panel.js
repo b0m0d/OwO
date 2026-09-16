@@ -359,7 +359,7 @@
         '<div class="ph">' +
         '<div class="ph-head">' +
         "<h2>项目与运行历史</h2>" +
-        '<span class="hint">客户端聚合既有路由（无新增接口）：/teams · /teams/{id} · deliverables · workspace · POST /teams（复跑）</span>' +
+        '<span class="hint" title="技术详情：/teams · /teams/{id} · /projects/{pid}/deliverables · /projects/{pid}/workspace · POST /teams">聚合各项目的运行历史、产物与待办</span>' +
         '<button type="button" id="ph-refresh" class="owo-ac-mini">刷新</button>' +
         '<span id="ph-meta" class="hint" aria-live="polite"></span>' +
         "</div>" +

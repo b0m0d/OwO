@@ -36,7 +36,8 @@
         '<div class="inline"><input class="owo-market-rid" placeholder="远端插件 id"><input class="owo-market-rver" placeholder="版本（可选）"><button class="owo-market-installremote primary">下载并安装</button></div>' +
         "</div>" +
         "</div>" +
-        '<div class="owo-market-tools">' +
+        '<div class="hint">市场条目由插件包安装时自动登记；手工写入 seed JSON 属开发者操作（仅开发者模式显示）。</div>' +
+        '<div class="owo-market-tools owo-dev-block" data-dev>' +
         "<h3>Seed 示例市场条目</h3>" +
         '<div class="stack">' +
         '<textarea class="owo-market-seed" rows="4" spellcheck="false" placeholder=\'{"entries":[{"id":"owo.plugin.demo","name":"Demo","version":"1.0.0","min_app_version":"0.5.0"}]}\'></textarea>' +

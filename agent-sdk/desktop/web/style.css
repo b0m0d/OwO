@@ -336,6 +336,8 @@ body.show-tools .tools-toggle { color: var(--text); background: var(--raised); b
 }
 .dev-mode-toggle input { width: auto; }
 body:not(.dev-mode) section[data-dev] { display: none; }
+/* §8.1-205：面板内原始 JSON/DSL/seed 分块同样仅开发者模式可见（普通模式显示影响说明）。 */
+body:not(.dev-mode) [data-dev].owo-dev-block { display: none; }
 body.show-tools.dev-mode #toolsPanel section[data-dev],
 body:not(.show-tools).dev-mode #toolsPanel section[data-dev] { display: block; }
 body.dev-mode .dev-mode-toggle { color: var(--text); }
@@ -1054,6 +1056,37 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
 .owo-pl-tree > div { overflow-wrap: anywhere; }
 .owo-pl-failures { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; font-size: 12px; min-width: 0; }
 .owo-pl-failures .hint { overflow-wrap: anywhere; }
+
+/* §8.1 目录树多选选择器（写入路径）：搜索头 / 勾选列表 / 已选行 */
+.owo-pl-treebox { margin-top: 6px; }
+.owo-pl-tree-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.owo-pl-tree-list { border: 1px dashed var(--soft-border); border-radius: 8px; padding: 6px 8px; max-height: 240px; overflow: auto; font-size: 12px; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.owo-pl-tree-row { display: flex; align-items: center; gap: 5px; cursor: pointer; overflow-wrap: anywhere; }
+.owo-pl-tree-row:hover { background: rgba(127, 127, 127, 0.12); }
+.owo-pl-picked { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: 4px 0 6px; font-size: 12px; min-width: 0; }
+.owo-pl-pickrow { display: inline-flex; align-items: center; gap: 3px; border: 1px solid var(--soft-border); border-radius: 999px; padding: 1px 4px 1px 8px; overflow-wrap: anywhere; }
+
+/* §8.1 WorkSwarm 交接引用选择器：已选行 / 候选建议 */
+.owo-ws-refpick { display: flex; flex-direction: column; gap: 4px; margin: 3px 0 6px; min-width: 0; }
+.owo-ws-refrows { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-width: 0; }
+.owo-ws-refrow { display: inline-flex; align-items: center; gap: 3px; border: 1px solid var(--soft-border); border-radius: 999px; padding: 1px 4px 1px 8px; font-size: 12px; overflow-wrap: anywhere; }
+.owo-ws-refsug { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+
+/* §8.3 我现在能做什么：能力卡片目录 */
+.owo-cap-panel { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.owo-cap-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.owo-cap-tools h3 { margin: 0; }
+.owo-cap-list { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.owo-cap-card { border: 1px solid var(--soft-border); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.owo-cap-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.owo-cap-badge { border-radius: 999px; padding: 0 8px; font-size: 11px; border: 1px solid var(--soft-border); }
+.owo-cap-stable { background: rgba(46, 160, 67, 0.15); }
+.owo-cap-beta { background: rgba(210, 153, 34, 0.15); }
+.owo-cap-exp { background: rgba(127, 127, 127, 0.15); }
+.owo-cap-adv { background: rgba(88, 166, 255, 0.15); }
+.owo-cap-sum { font-size: 13px; }
+.owo-cap-entries { margin: 2px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.owo-cap-kind { display: inline-block; min-width: 40px; color: var(--text-muted, #888); }
 
 /* 窄视口：Launcher 步骤卡内边距收窄 */
 @media (max-width: 1280px) {

@@ -66,7 +66,7 @@ window.OwoPanels.goal = (function () {
       '<div class="sub">云端进度（SSE 订阅）</div>' +
       '<div class="owo-goal-row"><input id="owo-goal-cloud-task" placeholder="cloud task id（如 cloud-0001）" style="flex:1">' +
       '<button id="owo-goal-cloud-sub">订阅</button><button id="owo-goal-cloud-close">断开</button></div>' +
-      '<div class="owo-goal-cloudlog" id="owo-goal-cloudlog">（输入 task id 订阅 /cloud/tasks/{id}/events）</div>' +
+      '<div class="owo-goal-cloudlog" id="owo-goal-cloudlog" title="技术详情：GET /cloud/tasks/{id}/events（SSE）">（输入 task id 后点「订阅」查看云端进度）</div>' +
       '</div>'
     );
   }
@@ -186,9 +186,12 @@ window.OwoPanels.goal = (function () {
       : "（暂无计划）";
     el.innerHTML =
       '<div class="sub">目标：' + H.esc(goal.objective) + "（" + H.esc(goal.status) + "）</div>" +
+      '<details class="owo-dev-block" data-dev><summary>步骤定义（JSON · 开发者模式）</summary>' +
       '<div class="owo-goal-row"><span>步骤定义（JSON）</span>' +
       '<button id="owo-goal-save-plan">保存计划</button></div>' +
       '<textarea class="owo-goal-steps" id="owo-goal-steps">' + H.esc(stepsJson) + "</textarea>" +
+      "</details>" +
+      '<div class="sub hint">步骤计划由目标自动生成并按依赖分波执行；需要手工调整步骤 JSON 时，在设置中启用开发者模式后展开上述编辑器。</div>' +
       '<div class="owo-goal-row"><span>waves 预览</span>' +
       '<button id="owo-goal-run-now">运行（parallelism=2）</button>' +
       '<button id="owo-goal-poll">刷新状态</button></div>' +
@@ -334,25 +337,37 @@ window.OwoPanels.goal = (function () {
     var taskId = (input && input.value.trim()) || "";
     if (!taskId) return;
     closeCloud();
-    var base = H.baseUrl || "http://127.0.0.1:4098";
     var log = document.getElementById("owo-goal-cloudlog");
     if (log) log.textContent = "订阅 " + taskId + " ...";
-    cloudSource = new EventSource(base + "/cloud/tasks/" + encodeURIComponent(taskId) + "/events");
-    cloudSource.onmessage = function (ev) {
-      appendCloudLog(ev.data);
-    };
-    cloudSource.onerror = function () {
-      appendCloudLog("（连接错误/关闭）");
-      if (cloudSource) {
-        cloudSource.close();
+    // §3.1：事件流要求 Bearer 认证，改用带 Authorization 头的 fetch-stream
+    // （EventSource 无法携带自定义头，token 也不允许进 URL 查询串）。
+    var api = window.OwoApi;
+    if (!api || typeof api.openEventStream !== "function") {
+      appendCloudLog("（当前环境不支持带认证的事件流）");
+      return;
+    }
+    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    cloudSource = ctrl;
+    api.openEventStream("/cloud/tasks/" + encodeURIComponent(taskId) + "/events", {
+      signal: ctrl ? ctrl.signal : undefined,
+      onEvent: function (frame) {
+        if (frame && frame.data) appendCloudLog(frame.data);
+      },
+    }).then(function () {
+      if (cloudSource === ctrl) {
         cloudSource = null;
+        appendCloudLog("（流结束）");
       }
-    };
+    }).catch(function (e) {
+      if (cloudSource !== ctrl) return; // 已被新订阅/关闭取代
+      cloudSource = null;
+      appendCloudLog("（连接失败：" + String((e && e.message) || e) + "）");
+    });
   }
 
   function closeCloud() {
     if (cloudSource) {
-      cloudSource.close();
+      if (typeof cloudSource.abort === "function") cloudSource.abort();
       cloudSource = null;
     }
     appendCloudLog("（已断开）");

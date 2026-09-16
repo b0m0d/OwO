@@ -42,14 +42,15 @@
         '<div class="inline"><button class="owo-fleet-nodes-refresh">刷新</button></div>' +
         '<pre class="owo-fleet-nodes sub">—</pre>' +
         "</div>" +
-        '<div class="owo-fleet-tools">' +
+        '<div class="hint">任务提交使用原始 JSON 输入（仅开发者模式显示）；普通用户请从任务或 WorkSwarm 页面发起任务，输入由系统自动组装。</div>' +
+        '<div class="owo-fleet-tools owo-dev-block" data-dev>' +
         "<h3>任务提交</h3>" +
         '<div class="inline">' +
         '<input class="owo-fleet-task-id" placeholder="task_id（如 t-1）">' +
         '<input class="owo-fleet-task-worker" placeholder="worker（如 node-a）">' +
         "</div>" +
         '<textarea class="owo-fleet-task-input" rows="3" spellcheck="false" placeholder=\'input JSON，如 {"q":1}\'></textarea>' +
-        '<label class="inline"><input type="checkbox" class="owo-fleet-task-approval"> 需审批（approval_required）</label>' +
+        '<label class="inline"><input type="checkbox" class="owo-fleet-task-approval"> 需审批（approval_required）</label>' + // ui-lint:allow（开发者模式分块）
         '<div class="inline"><button class="owo-fleet-task-submit primary">提交</button></div>' +
         '<pre class="owo-fleet-task-submit-result sub">—</pre>' +
         "</div>" +

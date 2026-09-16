@@ -29,6 +29,7 @@ const T = panel._test;
 const shellCss = readFileSync(join(here, "../style.css"), "utf8");
 const indexHtml = readFileSync(join(here, "../index.html"), "utf8");
 const appJs = readFileSync(join(here, "../app.js"), "utf8");
+const appDomainJs = readFileSync(join(here, "../app-domain.js"), "utf8");
 
 // ---------- fixture 工具 ----------
 
@@ -393,8 +394,9 @@ test("index.html 引入 project-history 面板脚本", () => {
   assert.match(indexHtml, /panels\/project-history\.panel\.js/);
 });
 
-test("app.js PANEL_ORDER 注册 project-history", () => {
-  assert.match(appJs, /"project-history"/);
+test("PANEL_ORDER 注册 project-history（唯一来源 app-domain.js）", () => {
+  assert.ok(!/const\s+PANEL_ORDER\s*=/.test(appJs), "PANEL_ORDER 不得回归 app.js 定义");
+  assert.match(appDomainJs, /const PANEL_ORDER = \[[\s\S]*?"project-history",\s*\]/, "app-domain.js PANEL_ORDER 未注册 project-history");
 });
 
 test("style.css 提供面板样式节（.owo-ac-* 复用 + ph 专属类）", () => {

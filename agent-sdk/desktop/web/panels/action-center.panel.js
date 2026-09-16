@@ -593,10 +593,10 @@
     }
 
     var SEC_DEFS = [
-      { key: "human", no: "①", title: "等待 Human 结果", hint: "团队 awaiting_human / 人节点任务未完成", empty: "暂无等待人工结果的任务" },
-      { key: "review", no: "②", title: "待评审产物", hint: "pending_review + 校验未通过", empty: "暂无待评审产物" },
-      { key: "failed", no: "③", title: "失败步骤（可重试）", hint: "Failed/Aborted · 可一键重试失败节点", empty: "暂无可重试的失败步骤" },
-      { key: "lease", no: "④", title: "写租约持有", hint: "write_lease 未释放（单写租约）", empty: "当前无团队持有写租约" },
+      { key: "human", no: "①", title: "等待人工结果", hint: "有任务正在等待人工处理", empty: "暂无等待人工结果的任务" },
+      { key: "review", no: "②", title: "待评审产物", hint: "有产物等待评审，或校验未通过", empty: "暂无待评审产物" },
+      { key: "failed", no: "③", title: "失败步骤（可重试）", hint: "可一键重试失败节点", empty: "暂无可重试的失败步骤" },
+      { key: "lease", no: "④", title: "写入权持有", hint: "有团队正持有写入权（同一时刻仅一个团队可写入）", empty: "当前没有团队持有写入权" },
     ];
 
     function itemHtml(item, busy, results) {
@@ -609,7 +609,7 @@
           '<div class="owo-ac-line">' +
           '<span class="owo-ac-badge warn">等待人节点</span>' +
           "<b>" + esc(item.team_id || "—") + "</b>" +
-          '<span class="hint">' + (item.awaiting_team ? "团队 awaiting_human · " : "") + tasks.length + " 个未完成人节点</span>" +
+          '<span class="hint">' + (item.awaiting_team ? "团队等待人工处理 · " : "") + tasks.length + " 个未完成人节点</span>" +
           "</div>" +
           (tasks.length
             ? '<div class="owo-ac-sub hint">' + tasks.map(function (t) {
@@ -702,7 +702,7 @@
         '<div class="owo-ac">' +
         '<div class="owo-ac-head">' +
         "<h2>待我处理</h2>" +
-        '<span class="hint">客户端聚合既有路由（无新增接口）：/teams · /teams/{id} · /projects/{pid}/artifacts · steer(retry)</span>' +
+        '<span class="hint" title="技术详情：/teams · /teams/{id} · /projects/{pid}/artifacts · steer(retry)">汇总各团队的待办：人工结果、待评审产物、失败步骤与写入权</span>' + // ui-lint:allow（§8.2 允许的“技术详情”提示面）
         '<button type="button" id="ac-refresh" class="owo-ac-mini">刷新</button>' +
         '<span id="ac-meta" class="hint" aria-live="polite"></span>' +
         "</div>" +

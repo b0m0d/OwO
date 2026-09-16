@@ -50,6 +50,45 @@ test("后台刷新：防重入 + 页面隐藏暂停 + 路由可见性标注", ()
   assert.ok(plans.filter((plan) => plan.includes('"notChat"')).length === 3, "设置区三个刷新器只在路由页运行");
 });
 
+test("§3.1 事件流 Bearer 认证 + 域失效事件驱动 + 低频兜底 + 单一连接", () => {
+  assert.match(index, /<script src="core\/events\.js"><\/script>/, "事件失效网络必须随壳加载");
+  const eventsJs = readFileSync(join(here, "../core/events.js"), "utf8");
+  assert.match(eventsJs, /function createDomainInvalidator\(options\)/, "必须提供域失效订阅器");
+  assert.match(eventsJs, /version <= previous/, "旧版本事件必须被忽略（防重复刷新）");
+  assert.match(eventsJs, /debounceMs/, "同域短窗口必须防抖合并");
+  assert.match(eventsJs, /openStream/, "必须经带认证的 fetch-stream（openStream）订阅");
+  assert.doesNotMatch(eventsJs, /new EventSource\(/, "禁止匿名 EventSource（无法携带 Authorization 头）");
+  // §3.3 指标在状态机内部计数，业务 handler 不再累加。
+  assert.match(eventsJs, /eventRefreshes/, "必须统计实际事件刷新数");
+  assert.match(eventsJs, /coalescedInvalidations/, "必须统计防抖合并数");
+  assert.match(eventsJs, /duplicateInvalidations/, "必须统计重复失效丢弃数");
+  assert.match(eventsJs, /pollFallbackRefreshes/, "必须统计降级轮询次数");
+  assert.match(eventsJs, /hiddenWindowRefreshes/, "必须统计隐藏窗口业务刷新（验收目标 0）");
+  assert.doesNotMatch(app, /REQUEST_STATS\.duplicateRefreshes/, "业务 handler 不得再累加旧指标");
+  // §3.4 生命周期：base 变化重建、连接断开停流、卸载清理、Degraded 单一兜底调度。
+  assert.match(app, /function startInvalidation\(\)/, "必须提供事件失效启动入口");
+  assert.match(app, /function stopInvalidation\(\)/, "必须提供事件失效停止入口");
+  assert.match(app, /Object\.entries\(INVALIDATE_HANDLERS\)/, "启动时须逐一注册处理器");
+  assert.match(app, /invalidationBase === base/, "core 连接描述变化必须重建事件流");
+  assert.match(app, /beforeunload[\s\S]*?stopInvalidation\(\)/, "页面卸载必须停流");
+  assert.match(app, /markConnectionUnavailable\(\);\s*stopInvalidation\(\);/, "core 断开必须停流");
+  assert.match(app, /setPollFallback/, "必须注册 Degraded 单一兜底调度器");
+  // §3.1 api-client：带认证流式请求 + 401 单次刷新。
+  const apiClient = readFileSync(join(here, "../core/api-client.js"), "utf8");
+  assert.match(apiClient, /async openEventStream\(/, "api-client 必须提供带认证流式入口");
+  assert.match(apiClient, /Last-Event-ID/, "续传必须走 Last-Event-ID 头");
+  assert.match(apiClient, /token 不允许进入 URL|Authorization.*Bearer/s, "必须用 Authorization 头携带 token");
+  // 轮询降频：被事件覆盖的 chat 域兜底间隔不短于 5 分钟，health 保持 30 秒心跳。
+  const plans = app.match(/\{ refresh: (\w+), intervalMs: (\d+), routes: ([^}]+) \}/g) || [];
+  const healthPlan = plans.find((p) => p.includes("refreshHealth"));
+  assert.match(healthPlan, /intervalMs: 30000/, "health 保留 30 秒心跳");
+  for (const domain of ["refreshLearn", "refreshPlugins", "refreshPackages", "refreshAutomations", "refreshMcp", "refreshTraces", "refreshComputerTasks"]) {
+    const plan = plans.find((p) => p.includes(domain));
+    assert.ok(plan, `${domain} 必须有兜底计划`);
+    assert.match(plan, /intervalMs: 600000/, `${domain} 必须降为 10 分钟低频兜底`);
+  }
+});
+
 test("单飞恢复：定时驱动与手动重试共用同一控制器", () => {
   assert.match(app, /window\.OwoRecovery\.createRecoveryController/, "恢复必须经单飞控制器");
   assert.match(app, /if \(activeRecovery\) return activeRecovery\.trigger\(\);/, "recover() 必须复用控制器合并触发");

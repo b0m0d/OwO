@@ -861,6 +861,49 @@
     }
 
 
+  /// §8.1 引用选择器（artifact/evidence/member 引用）：已选结构化行（可移除）
+  /// + 搜索过滤后的候选按钮（可点击添加）。allowFree 时支持输入任意引用
+  /// （如证据链接/描述）后点「添加」成为一行。
+  /// opts = {kind, rows:[string], options:[{value,label}], query, allowFree}
+  function refPickerHtml(opts) {
+    var kind = String((opts && opts.kind) || "");
+    var rows = (opts && opts.rows) || [];
+    var options = (opts && opts.options) || [];
+    var query = (opts && opts.query) == null ? "" : String(opts.query);
+    var allowFree = !!(opts && opts.allowFree);
+    var rowsHtml = rows.length
+      ? rows.map(function (r) {
+          var v = String(r);
+          return (
+            '<span class="owo-ws-refrow"><span class="owo-ws-mono" title="' + esc(v) + '">' +
+            esc(short(v)) + "</span>" +
+            '<button type="button" class="owo-ws-mini" data-ws-ref-del="' + esc(kind + ":" + v) +
+            '" title="移除该引用">×</button></span>'
+          );
+        }).join(" ")
+      : '<span class="hint">暂无引用行</span>';
+    var sug = options
+      .map(function (o) {
+        return (
+          '<button type="button" class="owo-ws-mini" data-ws-ref-add="' + esc(kind + ":" + (o && o.value)) +
+          '" title="' + esc((o && o.label) || (o && o.value) || "") + '">' +
+          esc(short((o && o.label) || (o && o.value) || "")) + "</button>"
+        );
+      })
+      .join(" ");
+    return (
+      '<div class="owo-ws-refpick" data-ws-refpick="' + esc(kind) + '">' +
+      '<div class="owo-ws-refrows">' + rowsHtml + "</div>" +
+      '<div class="owo-ws-inline">' +
+      '<input class="owo-ws-refq" data-ws-ref-q="' + esc(kind) + '" size="34" placeholder="' +
+      (allowFree ? "搜索候选或输入引用后点添加" : "搜索候选引用") + '" value="' + esc(query) + '">' +
+      (allowFree ? '<button type="button" class="owo-ws-mini" data-ws-ref-free="' + esc(kind) + '">添加</button>' : "") +
+      "</div>" +
+      (sug ? '<div class="owo-ws-refsug">' + sug + "</div>" : '<div class="hint">无匹配候选</div>') +
+      "</div>"
+    );
+  }
+
   var api = {
     bindEsc: bindEsc,
     bindShort: bindShort,
@@ -898,6 +941,7 @@
     approvalBlockBanner: approvalBlockBanner,
     changeSetsHtml: changeSetsHtml,
     artifactRowHtml: artifactRowHtml,
+    refPickerHtml: refPickerHtml,
   };
 
   win.OwoWorkswarmRender = api;

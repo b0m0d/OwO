@@ -149,6 +149,10 @@
       // —— 八期：ChangeSet 审批闭环（二路交接；端点未上线时全部容错为空态） ——
       changeSets: null, // GET /teams/{id}/change-sets 归一列表（changeSetsView）；null=未拉取/404
       csApprovalBlock: null, // 九期：{blocked, reason} 批准门控（blocked 时禁用 Artifact 批准）
+    // §8.1 引用选择器：交接表单的关联产物/证据引用结构化行（不再手输 CSV）。
+    handoffRefs: { arts: [], evid: [] },
+    handoffRefQuery: { arts: "", evid: "" },
+    handoffArtsFetched: false, // 交接选择器产物候选懒加载标记（每次进详情重置）
       csBusy: {}, // key(change_set_id:action) -> true（accept/reject/revert 提交锁）
       csResults: {}, // change_set_id -> { ok, text }（动作结果行）
     };
@@ -1285,7 +1289,7 @@
           return d;
         })
         .catch(function (e) {
-          state.reviewFlash = { artifactId: id, ok: false, text: "下载失败：" + explainError(e, "GET /artifacts/{id}/content") };
+          state.reviewFlash = { artifactId: id, ok: false, text: "下载失败：" + explainError(e, "产物内容下载") };
           loadArtifacts(); // 重绘产物区以显示行级提示（reviewFlash 跨重绘保留）
         });
     }
@@ -1304,7 +1308,7 @@
           return d;
         })
         .catch(function (e) {
-          show("ws-act-result", "err", "交付清单下载失败：" + explainError(e, "GET /projects/{pid}/delivery-manifest"));
+          show("ws-act-result", "err", "交付清单下载失败：" + explainError(e, "交付清单下载"));
           throw e; // 交由 bindLockedButton 解锁
         });
     }
@@ -1716,6 +1720,109 @@
       xFrom.innerHTML = t
         ? '<option value="' + esc(t.worker) + '">' + esc(t.worker) + "（任务执行者）</option>"
         : '<option value="">—</option>';
+      paintToSelect();
+      paintHandoffRefPickers();
+    }
+
+    /// §8.1：to_member 可搜索选择器（成员下拉 + 自动缺省；替代自由输入 m-<角色>）。
+    function paintToSelect() {
+      var xTo = el("#ws-x-to");
+      if (!xTo) return;
+      var prev = xTo.value;
+      var ms = (state.team && state.team.members) || [];
+      xTo.innerHTML =
+        '<option value="">自动（交由团队/下游决定）</option>' +
+        ms.map(function (m) {
+          var label = (m.role ? m.role + " · " : "") + (m.member_id || "");
+          return '<option value="' + esc(m.member_id || "") + '">' + esc(label) + "</option>";
+        }).join("");
+      if (ms.some(function (m) { return m.member_id === prev; })) xTo.value = prev;
+      else xTo.value = "";
+    }
+
+    /// §8.1：关联产物/证据引用选择器（已选结构化行 + 搜索候选；替代手输 CSV）。
+    function artifactRefOptions() {
+      return (state.artifacts || []).map(function (a) {
+        var name = artifactFileName(a) || a.artifact_id || "";
+        var label = a && a.version != null ? name + " · v" + a.version : name;
+        return { value: String(a.artifact_id || ""), label: label };
+      }).filter(function (o) { return o.value; });
+    }
+
+    function paintHandoffRefPickers() {
+      // 产物候选懒加载：详情打开后首次绘制时拉一次 /artifacts（成功或失败均不再重试）。
+      if (!state.handoffArtsFetched) {
+        state.handoffArtsFetched = true;
+        loadArtifacts().then(function () {
+          paintHandoffRefPickers();
+        }).catch(function () { /* 候选拉取失败不阻塞选择器（可用自由填写） */ });
+      }
+      var artsBox = el("#ws-x-arts-pick");
+      var evidBox = el("#ws-x-evid-pick");
+      if (artsBox) {
+        artsBox.innerHTML = render.refPickerHtml({
+          kind: "arts",
+          rows: state.handoffRefs.arts,
+          options: domain.filterRefOptions(artifactRefOptions(), state.handoffRefQuery.arts, 8),
+          query: state.handoffRefQuery.arts,
+          allowFree: true,
+        });
+      }
+      if (evidBox) {
+        evidBox.innerHTML = render.refPickerHtml({
+          kind: "evid",
+          rows: state.handoffRefs.evid,
+          options: domain.filterRefOptions(artifactRefOptions(), state.handoffRefQuery.evid, 8),
+          query: state.handoffRefQuery.evid,
+          allowFree: true,
+        });
+      }
+    }
+
+    /// 选择器容器事件委托（添加/移除/搜索/自由添加）；renderDetail 挂载后调用一次。
+    function bindHandoffRefPickers() {
+      ["#ws-x-arts-pick", "#ws-x-evid-pick"].forEach(function (selId) {
+        var box = el(selId);
+        if (!box) return;
+        box.addEventListener("click", function (ev) {
+          var t = ev.target;
+          var add = t && t.getAttribute && t.getAttribute("data-ws-ref-add");
+          if (add) {
+            var ci = add.indexOf(":");
+            var kind = add.slice(0, ci);
+            var value = add.slice(ci + 1);
+            state.handoffRefs[kind] = domain.addRefRow(state.handoffRefs[kind], value);
+            paintHandoffRefPickers();
+            return;
+          }
+          var del = t && t.getAttribute && t.getAttribute("data-ws-ref-del");
+          if (del) {
+            var di = del.indexOf(":");
+            var dkind = del.slice(0, di);
+            var dvalue = del.slice(di + 1);
+            state.handoffRefs[dkind] = domain.removeRefRow(state.handoffRefs[dkind], dvalue);
+            paintHandoffRefPickers();
+            return;
+          }
+          var free = t && t.getAttribute && t.getAttribute("data-ws-ref-free");
+          if (free) {
+            var q = box.querySelector("[data-ws-ref-q]");
+            var v = q ? q.value : "";
+            state.handoffRefs[free] = domain.addRefRow(state.handoffRefs[free], v);
+            state.handoffRefQuery[free] = "";
+            paintHandoffRefPickers();
+          }
+        });
+        box.addEventListener("input", function (ev) {
+          var t = ev.target;
+          var kind = t && t.getAttribute && t.getAttribute("data-ws-ref-q");
+          if (!kind) return;
+          state.handoffRefQuery[kind] = t.value || "";
+          paintHandoffRefPickers();
+          var again = box.querySelector("[data-ws-ref-q]");
+          if (again) again.focus();
+        });
+      });
     }
 
     function populateSteerSelect() {
@@ -1998,6 +2105,10 @@
 
     function loadDetail(teamId) {
       state.current = teamId;
+      // §8.1：切换团队时重置交接引用选择器（结构化行不跨团队携带）。
+      state.handoffRefs = { arts: [], evid: [] };
+      state.handoffRefQuery = { arts: "", evid: "" };
+      state.handoffArtsFetched = false;
       var seq = ++detailSeq;
       var idEl = el("#ws-d-id");
       if (idEl) idEl.textContent = teamId;
@@ -2315,8 +2426,20 @@
     }
 
     // ---------- 视图：创建团队 ----------
+    var KNOWN_WORKERS = domain.KNOWN_WORKERS;
+    var CUSTOM_WORKER = domain.CUSTOM_WORKER;
+
     function roleRowHtml(role) {
       role = role || {};
+      // §8.1：worker 为下拉（known 集合 + 自定义…）；仅选“自定义…”才显示输入框。
+      var plan = domain.roleWorkerPlan(role.worker);
+      var workerSel =
+        '<select class="owo-ws-role-worker-sel">' +
+        KNOWN_WORKERS.map(function (k) {
+          return '<option value="' + k + '"' + (plan.select === k ? " selected" : "") + ">" + k + "</option>";
+        }).join("") +
+        '<option value="' + CUSTOM_WORKER + '"' + (plan.select === CUSTOM_WORKER ? " selected" : "") + ">自定义…</option>" +
+        "</select>";
       return (
         '<div class="owo-ws-role-row">' +
         '<input class="owo-ws-role-name" placeholder="角色，如 planner" size="12" value="' + esc(role.role || "") + '">' +
@@ -2325,7 +2448,8 @@
         '<option value="human"' + (role.assignee === "human" ? " selected" : "") + ">human</option>" +
         '<option value="worker"' + (role.assignee === "worker" ? " selected" : "") + ">worker</option>" +
         "</select>" +
-        '<input class="owo-ws-role-worker" placeholder="worker：agent/echo/sleep/fail（human=用户 id）" size="18" value="' + esc(role.worker || "") + '">' +
+        workerSel +
+        '<input class="owo-ws-role-worker" placeholder="自定义 worker 或 human 用户 id" size="18" value="' + esc(plan.custom || "") + '"' + (plan.select === CUSTOM_WORKER ? "" : " hidden") + ">" +
         '<input class="owo-ws-role-deps" placeholder="上游角色（逗号分隔）" size="16" value="' + esc((role.depends_on || []).join(",")) + '">' +
         '<button class="owo-ws-role-del" type="button" title="删除该角色">✕</button>' +
         "</div>"
@@ -2338,7 +2462,8 @@
       box.insertAdjacentHTML("beforeend", roleRowHtml(role || {}));
     }
 
-    function collectRoles() {
+    /// DOM → 原始角色行（含 workerSelected 标记，供提交前校验；不直接进请求体）。
+    function collectRoleRows() {
       var box = el("#ws-roles");
       if (!box) return [];
       var rows = box.querySelectorAll(".owo-ws-role-row");
@@ -2346,24 +2471,43 @@
       for (var i = 0; i < rows.length; i++) {
         var r = rows[i];
         var role = r.querySelector(".owo-ws-role-name").value.trim();
-        if (!role) continue;
-        var item = {
+        var sel = r.querySelector(".owo-ws-role-worker-sel");
+        var wInput = r.querySelector(".owo-ws-role-worker");
+        var selected = sel ? sel.value : "";
+        var worker = selected === CUSTOM_WORKER ? (wInput ? wInput.value.trim() : "") : selected;
+        out.push({
           role: role,
           assignee: r.querySelector(".owo-ws-role-assignee").value,
-        };
-        var w = r.querySelector(".owo-ws-role-worker").value.trim();
-        if (w) item.worker = w;
-        var deps = r
-          .querySelector(".owo-ws-role-deps")
-          .value.split(",")
-          .map(function (x) {
-            return x.trim();
-          })
-          .filter(Boolean);
-        if (deps.length) item.depends_on = deps;
-        out.push(item);
+          workerSelected: selected,
+          worker: worker,
+          depsText: r.querySelector(".owo-ws-role-deps").value,
+        });
       }
       return out;
+    }
+
+    /// §8.1 提交前校验：自定义 worker 行必填；返回错误文案数组。
+    function roleRowErrors() {
+      return domain.validateRoleRows(collectRoleRows());
+    }
+
+    function collectRoles() {
+      return domain.sanitizeRoles(
+        collectRoleRows().map(function (r) {
+          var deps = r.depsText
+            .split(",")
+            .map(function (x) {
+              return x.trim();
+            })
+            .filter(Boolean);
+          return {
+            role: r.role,
+            assignee: r.assignee,
+            worker: r.worker,
+            depends_on: deps,
+          };
+        })
+      );
     }
 
     function fillCreateTemplateSelect() {
@@ -2420,6 +2564,12 @@
       var strategy = stratEl ? String(stratEl.value || "auto") : "auto";
       body.strategy = strategy === "auto" ? "auto" : strategy;
       if (tpl && mode !== "single") body.template_id = tpl;
+      // §8.1：提交前校验角色规格（自定义 worker 行必填）。
+      var roleErrs = roleRowErrors();
+      if (roleErrs.length) {
+        show("ws-create-result", "err", roleErrs.join("；"));
+        return null;
+      }
       var roles = collectRoles();
       if (roles.length) body.roles = roles;
       show("ws-create-result", "", "创建中…");
@@ -2447,7 +2597,7 @@
           }, 400);
         })
         .catch(function (e) {
-          show("ws-create-result", "err", explainError(e, "创建团队 POST /teams"));
+          show("ws-create-result", "err", explainError(e, "创建团队"));
         });
     }
 
@@ -2473,13 +2623,20 @@
         "<label>模板</label>" +
         '<select id="ws-template"><option value="">（动态组队：按下方角色规格）</option></select>' +
         "</div>" +
-        '<div><label class="hint">角色规格 roles（可选；留空 = 所选模式的内置默认流程；swarmflow 留空将按 4 角色接力执行）</label>' +
+        '<div id="ws-roles-block"><label class="hint">角色规格 roles（可选；留空 = 所选模式的内置默认流程；swarmflow 留空将按 4 角色接力执行）</label>' +
         '<div id="ws-roles" style="display:flex;flex-direction:column;gap:6px"></div>' +
-        '<div class="owo-ws-inline" style="margin-top:6px"><button id="ws-role-add" class="owo-ws-mini" type="button">＋ 添加角色</button><span class="hint">depends_on 为逗号分隔的上游角色；assignee=human 时 worker 填用户 id</span></div></div>' +
+        '<div class="owo-ws-inline" style="margin-top:6px"><button id="ws-role-add" class="owo-ws-mini" type="button">＋ 添加角色</button><span class="hint">上游角色以逗号分隔；选择 human 承接时 worker 填用户 id（选“自定义…”后输入）</span></div></div>' +
         '<div class="owo-ws-inline"><button id="ws-create-go" class="primary">创建并启动</button><span class="hint">agent 类 worker：agent（模型驱动，需 OPENAI_API_KEY）/ echo（回显测试）/ sleep / fail</span></div>' +
         '<pre class="owo-ws-result sub" id="ws-create-result">—</pre>' +
         "</div>"
       );
+    }
+
+    /// §8.1：角色规格编辑器仅在非 single 模式显示（single 忽略角色规格）。
+    function paintRolesVisibility() {
+      var m = el("#ws-mode");
+      var blk = el("#ws-roles-block");
+      if (m && blk) blk.hidden = normStatus(m.value) === "single";
     }
 
     function bindCreate() {
@@ -2492,6 +2649,37 @@
         rolesBox.addEventListener("click", function (ev) {
           if (ev.target && ev.target.classList.contains("owo-ws-role-del")) ev.target.closest(".owo-ws-role-row").remove();
         });
+      if (rolesBox)
+        // §8.1 门禁：worker 选“自定义…”才显示输入框；assignee=human 自动切自定义（填用户 id）。
+        rolesBox.addEventListener("change", function (ev) {
+          var t = ev.target;
+          if (!t || !t.classList) return;
+          var row = t.closest(".owo-ws-role-row");
+          if (!row) return;
+          var sel = row.querySelector(".owo-ws-role-worker-sel");
+          var input = row.querySelector(".owo-ws-role-worker");
+          if (t.classList.contains("owo-ws-role-worker-sel")) {
+            var custom = t.value === CUSTOM_WORKER;
+            if (input) {
+              input.hidden = !custom;
+              input.placeholder = "自定义 worker";
+              if (custom) input.focus();
+              if (!custom) input.value = "";
+            }
+          } else if (t.classList.contains("owo-ws-role-assignee")) {
+            if (t.value === "human" && sel && input) {
+              sel.value = CUSTOM_WORKER;
+              input.hidden = false;
+              input.placeholder = "承接用户 id";
+              input.focus();
+            } else if (input) {
+              input.placeholder = "自定义 worker";
+            }
+          }
+        });
+      var modeSel = el("#ws-mode");
+      if (modeSel) modeSel.onchange = paintRolesVisibility;
+      paintRolesVisibility();
       var tpl = el("#ws-template");
       if (tpl)
         tpl.onchange = function () {
@@ -2816,7 +3004,7 @@
           syncDetail();
         })
         .catch(function (e) {
-          show("ws-act-result", "err", explainError(e, label + " POST /teams/{id}/steer"));
+          show("ws-act-result", "err", explainError(e, label));
         });
     }
 
@@ -2852,14 +3040,21 @@
       var roleEl = el("#ws-act-replace-role");
       var role = roleEl ? roleEl.value : "";
       if (!role) {
-        show("ws-act-result", "err", "replace 需要 role 字段：请先选择角色");
+        show("ws-act-result", "err", "换员前请先选择角色");
         return null;
       }
       var body = { command: "replace", role: role };
-      var w = el("#ws-act-replace-worker");
+      // §8.1：worker 门禁——known 下拉直选；“自定义…”须填写标识；空 = 不变更。
+      var wSel = el("#ws-act-replace-worker");
+      var wCustom = el("#ws-act-replace-worker-custom");
+      var resolved = domain.resolveReplaceWorker(wSel ? wSel.value : "", wCustom ? wCustom.value : "");
+      if (!resolved.ok) {
+        show("ws-act-result", "err", resolved.error);
+        return null;
+      }
+      if (resolved.worker) body.new_worker = resolved.worker;
       var u = el("#ws-act-replace-user");
       var n = el("#ws-act-replace-note");
-      if (w && w.value.trim()) body.new_worker = w.value.trim();
       if (u && u.value.trim()) body.new_user_id = u.value.trim();
       if (n && n.value.trim()) body.note = n.value.trim();
       return doSteerPost(body, "换员");
@@ -2898,7 +3093,7 @@
           syncDetail();
         })
         .catch(function (e) {
-          show("ws-h-result", "err", explainError(e, "人节点结果 POST /tasks/{id}/human-result"));
+          show("ws-h-result", "err", explainError(e, "提交人节点结果"));
         });
     }
 
@@ -2920,11 +3115,11 @@
         return null;
       }
       if (!from) {
-        show("ws-x-result", "err", "from_member 不能为空（必须为任务执行者 m-&lt;角色&gt;）");
+        show("ws-x-result", "err", "交出成员不能为空（必须为任务执行者）");
         return null;
       }
       if (!summary) {
-        show("ws-x-result", "err", "completed_summary 不能为空：请描述已完成的内容");
+        show("ws-x-result", "err", "完成摘要不能为空：请描述已完成的内容");
         return null;
       }
       var body = {
@@ -2932,8 +3127,9 @@
         from_member: from,
         completed_summary: summary,
         open_issues: splitCsv(el("#ws-x-issues")),
-        output_artifact_refs: splitCsv(el("#ws-x-arts")),
-        evidence_refs: splitCsv(el("#ws-x-evid")),
+        // §8.1：结构化引用行（可搜索选择器产出），不再手输 CSV。
+        output_artifact_refs: (state.handoffRefs.arts || []).slice(),
+        evidence_refs: (state.handoffRefs.evid || []).slice(),
         suggested_next_actions: splitCsv(el("#ws-x-next")),
         known_risks: splitCsv(el("#ws-x-risks")),
       };
@@ -2949,10 +3145,13 @@
               "。下游任务可据此继续。"
           );
           if (summaryEl) summaryEl.value = "";
+          state.handoffRefs = { arts: [], evid: [] };
+          state.handoffRefQuery = { arts: "", evid: "" };
+          paintHandoffRefPickers();
           syncDetail();
         })
         .catch(function (e) {
-          show("ws-x-result", "err", explainError(e, "交接 POST /tasks/{id}/handoff"));
+          show("ws-x-result", "err", explainError(e, "提交交接结果"));
         });
     }
 
@@ -2992,11 +3191,19 @@
         "</div>" +
         '<div class="owo-ws-form" id="ws-act-replace-form" style="display:none">' +
         '<div class="owo-ws-inline"><label>角色 role</label><select id="ws-act-replace-role"></select>' +
-        '<label>新 worker</label><input id="ws-act-replace-worker" placeholder="agent / echo / sleep / fail" size="14">' +
-        '<label>新用户 new_user_id</label><input id="ws-act-replace-user" placeholder="人节点换人时填写" size="12">' +
+        '<label>新 worker</label><select id="ws-act-replace-worker">' +
+        '<option value="">（不变更 worker）</option>' +
+        '<option value="agent">agent — 模型驱动</option>' +
+        '<option value="echo">echo — 回显测试</option>' +
+        '<option value="sleep">sleep — 模拟耗时</option>' +
+        '<option value="fail">fail — 模拟失败</option>' +
+        '<option value="__custom__">自定义…</option>' +
+        "</select>" +
+        '<input id="ws-act-replace-worker-custom" placeholder="自定义 worker 标识" size="14" hidden>' +
+        '<label>承接用户（可选）</label><input id="ws-act-replace-user" placeholder="人节点换人时填写" size="12">' +
         '<label>note</label><input id="ws-act-replace-note" placeholder="换员原因（可选）" size="20"></div>' +
         '<div class="owo-ws-inline"><button id="ws-act-replace-go" class="primary">提交换员</button></div>' +
-        '<p class="hint" style="margin:0">新 worker 自该角色任务的下一轮尝试生效；人节点可用 new_user_id 更换承接用户。</p>' +
+        '<p class="hint" style="margin:0">新执行方式自该角色任务的下一轮尝试生效；人节点可指定承接用户。</p>' +
         "</div>" +
         '<pre class="owo-ws-result sub" id="ws-act-result">—</pre>' +
         "</div>" +
@@ -3022,18 +3229,18 @@
         '<h3>任务交接 <span class="hint">记录"谁完成了什么、留下什么问题、下一步建议"</span></h3>' +
         '<div class="owo-ws-inline">' +
         "<label>任务</label><select id=\"ws-x-task\"></select>" +
-        "<label>from_member</label><select id=\"ws-x-from\"></select>" +
-        '<label>to_member（可选）</label><input id="ws-x-to" placeholder="m-&#60;角色&#62;，留空 = 交由团队/下游自动" size="16">' +
+        "<label>交出成员（任务执行者）</label><select id=\"ws-x-from\"></select>" +
+        '<label>接收成员（可选）</label><select id="ws-x-to"></select>' +
         "</div>" +
-        '<label class="hint">completed_summary 完成摘要（必填）</label>' +
+        '<label title="已完成内容与结论，下游任务据此继续">完成摘要（必填）</label>' +
         '<textarea id="ws-x-summary" rows="2" spellcheck="false"></textarea>' +
         '<details class="hint"><summary>可选明细（逗号分隔多项）</summary>' +
         '<div style="display:flex;flex-direction:column;gap:4px;margin:6px 0">' +
-        '<label>open_issues 遗留问题 <input id="ws-x-issues" size="60"></label>' +
-        '<label>output_artifact_refs 产物引用 <input id="ws-x-arts" size="60"></label>' +
-        '<label>evidence_refs 证据引用 <input id="ws-x-evid" size="60"></label>' +
-        '<label>suggested_next_actions 下一步建议 <input id="ws-x-next" size="60"></label>' +
-        '<label>known_risks 已知风险 <input id="ws-x-risks" size="60"></label>' +
+        '<label title="未解决、需要下游知晓或跟进的事项">遗留问题 <input id="ws-x-issues" size="60"></label>' +
+        '<label>关联产物（可搜索选择，可增删）</label><div id="ws-x-arts-pick"></div>' +
+        '<label>证据引用（可搜索选择或自由填写，可增删）</label><div id="ws-x-evid-pick"></div>' +
+        '<label title="建议下游执行的后续动作">下一步建议 <input id="ws-x-next" size="60"></label>' +
+        '<label title="已知的风险与注意事项">已知风险 <input id="ws-x-risks" size="60"></label>' +
         "</div></details>" +
         '<div class="owo-ws-inline"><button id="ws-x-go" class="primary">提交交接</button></div>' +
         '<pre class="owo-ws-result sub" id="ws-x-result">—</pre>' +
@@ -3102,6 +3309,16 @@
           toggleForm("ws-act-replace-form", "ws-act-replace-toggle");
         };
       bindLockedButton(el("#ws-act-replace-go"), doReplace, "提交中…");
+      // §8.1：worker 选“自定义…”才显示标识输入框；选其他值时清空并隐藏。
+      var wSel = el("#ws-act-replace-worker");
+      var wCustom = el("#ws-act-replace-worker-custom");
+      if (wSel && wCustom)
+        wSel.onchange = function () {
+          var custom = wSel.value === domain.CUSTOM_WORKER;
+          wCustom.hidden = !custom;
+          if (custom) wCustom.focus();
+          else wCustom.value = "";
+        };
       bindLockedButton(el("#ws-act-cancel"), function () {
         if (!win.confirm("取消该团队运行？未完成的任务将被中止，运行无法恢复。")) return null;
         state.cancelling = true; // 立即反馈"取消中"，不等服务端往返
@@ -3119,6 +3336,7 @@
       }, "取消中…");
       bindLockedButton(el("#ws-h-go"), doHumanResult, "提交中…");
       bindLockedButton(el("#ws-x-go"), doHandoff, "提交中…");
+      bindHandoffRefPickers();
       var xTask = el("#ws-x-task");
       if (xTask)
         xTask.onchange = function () {
@@ -3448,6 +3666,24 @@
       renderArtifactsChains: renderArtifactsChains,
       loadArtifactHistory: loadArtifactHistory,
       findArtifactById: findArtifactById,
+      // —— §8.1 挂钩：交接引用选择器（可搜索 + 可增删结构化行） ——
+      artifactRefOptions: artifactRefOptions,
+      paintHandoffRefPickers: paintHandoffRefPickers,
+      bindHandoffRefPickers: bindHandoffRefPickers,
+      addRefRow: domain.addRefRow,
+      removeRefRow: domain.removeRefRow,
+      filterRefOptions: domain.filterRefOptions,
+      // —— §8.1 挂钩：自定义 worker/role 门禁 ——
+      KNOWN_WORKERS: KNOWN_WORKERS,
+      CUSTOM_WORKER: CUSTOM_WORKER,
+      resolveReplaceWorker: domain.resolveReplaceWorker,
+      roleWorkerPlan: domain.roleWorkerPlan,
+      validateRoleRows: domain.validateRoleRows,
+      sanitizeRoles: domain.sanitizeRoles,
+      collectRoleRows: collectRoleRows,
+      roleRowErrors: roleRowErrors,
+      roleRowHtml: roleRowHtml,
+      paintRolesVisibility: paintRolesVisibility,
       // —— 五期挂钩：自适应组队 / 角色指标 / 版本链返工 / 交付物 / 诊断 ——
       strategyDecisionOf: strategyDecisionOf,
       strategyBoxHtml: strategyBoxHtml,

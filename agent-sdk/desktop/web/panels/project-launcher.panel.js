@@ -81,6 +81,15 @@
       readOnly: true,
       writePathsRaw: "",
       treeDepth: 2,
+      // §8.1 目录树多选选择器（写入路径）：预绑定树预览 + 勾选行 + 搜索过滤。
+      treePickerOpen: false,
+      treeBusy: false,
+      treeError: "",
+      treeEntries: null, // 最近一次 /workspace/tree 预览的 entries
+      treeRoot: "", // 预览对应的规范化 root 回显
+      treeDepthUsed: 0, // 预览实际使用的深度
+      treeQuery: "", // 选择器内搜索子串
+      pickedRows: [], // 勾选行 {path, type:"dir"|"file"}
       strategy: "auto",
       catalog: [],
       catalogLoaded: false,
@@ -113,6 +122,109 @@
       if (p === ".." || p.indexOf("..\\") >= 0 || p.indexOf("../") >= 0) return false;
       if (/^[a-zA-Z]:/.test(p)) return false; // 允许 root 本身带盘符；允许路径必须相对
       return true;
+    }
+
+    // ---------- §8.1 目录树多选（纯函数，Node 可测） ----------
+
+    /// 树条目过滤：按子串匹配路径（不区分大小写）；query 空时原样返回。
+    function filterTreeEntries(entries, query) {
+      var q = String(query == null ? "" : query).trim().toLowerCase();
+      var list = Array.isArray(entries) ? entries : [];
+      if (!q) return list;
+      return list.filter(function (en) {
+        return String((en && en.path) || "").toLowerCase().indexOf(q) >= 0;
+      });
+    }
+
+    /// 勾选切换（纯函数）：存在同路径行则移除，否则追加 {path, type}。
+    function toggleTreePick(rows, path, type) {
+      var p = String(path || "");
+      var out = [];
+      var found = false;
+      (Array.isArray(rows) ? rows : []).forEach(function (r) {
+        if (r && String(r.path) === p) {
+          found = true;
+          return;
+        }
+        out.push(r);
+      });
+      if (!found && p) out.push({ path: p, type: type === "dir" ? "dir" : "file" });
+      return out;
+    }
+
+    /// 勾选行合入 writePathsRaw：剔除 prevRows（上一轮勾选）保留手输，再并入当前勾选。
+    /// pathIsSafe 为额外防线（服务端树本身不含 `..`/符号链接）。
+    function mergePickedIntoRaw(raw, rows, prevRows) {
+      var prevSet = {};
+      (Array.isArray(prevRows) ? prevRows : []).forEach(function (r) {
+        if (r && r.path) prevSet[String(r.path)] = true;
+      });
+      var manual = parseWritePaths(raw).filter(function (p) {
+        return !prevSet[p];
+      });
+      var seen = {};
+      manual.forEach(function (p) {
+        seen[p] = true;
+      });
+      var out = manual.slice();
+      (Array.isArray(rows) ? rows : []).forEach(function (r) {
+        var p = String((r && r.path) || "");
+        if (p && !seen[p] && pathIsSafe(p)) {
+          seen[p] = true;
+          out.push(p);
+        }
+      });
+      return out.join(", ");
+    }
+
+    /// 选择器 HTML（依赖 esc；state 为只读入参）。
+    function treePickerHtml(s) {
+      var entries = filterTreeEntries(s.treeEntries, s.treeQuery);
+      var head =
+        '<div class="owo-pl-tree-head">' +
+        '<input id="pl-tree-search" size="36" placeholder="搜索路径（子串）" value="' + esc(s.treeQuery) + '">' +
+        '<button type="button" class="owo-ws-mini" data-pl-tree-reload>按当前深度重新读取</button>' +
+        '<span class="hint">' +
+        (s.treeRoot ? "root（规范化）：" + esc(s.treeRoot) + " · " : "") +
+        "深度 " + esc(String(s.treeDepthUsed || s.treeDepth)) +
+        (Array.isArray(s.treeEntries) ? " · 共 " + s.treeEntries.length + " 项" : "") +
+        "</span></div>";
+      var picked;
+      if (s.pickedRows.length) {
+        picked =
+          '<div class="owo-pl-picked">' +
+          '<span class="hint">已选（' + s.pickedRows.length + "）：</span>" +
+          s.pickedRows.map(function (r) {
+            return '<span class="owo-pl-pickrow">' + esc(r.path) +
+              ' <button type="button" class="owo-ws-mini" data-pl-unpick="' + esc(r.path) + '" title="移除">×</button></span>';
+          }).join(" ") + "</div>";
+      } else {
+        picked = '<div class="hint">尚未勾选：勾选目录（含其子树）或文件加入允许写入范围。</div>';
+      }
+      var list;
+      if (!Array.isArray(s.treeEntries)) {
+        list = '<div class="hint">尚未读取目录树。</div>';
+      } else if (!entries.length) {
+        list = '<div class="hint">无匹配条目。</div>';
+      } else {
+        list =
+          '<div class="owo-pl-tree-list">' +
+          entries.map(function (en) {
+            var p = String((en && en.path) || "");
+            if (!p) return "";
+            var isDir = en.type === "dir";
+            var checked = (s.pickedRows || []).some(function (r) {
+              return String(r.path) === p;
+            });
+            var level = Math.max(0, p.split("/").length - 1);
+            var name = p.split("/").pop() || p;
+            return '<label class="owo-pl-tree-row" style="padding-left:' + level * 14 + 'px">' +
+              '<input type="checkbox" class="pl-tree-check" data-pl-tree-path="' + esc(p) +
+              '" data-pl-tree-type="' + (isDir ? "dir" : "file") + '"' + (checked ? " checked" : "") + "> " +
+              '<span title="' + esc(p) + '">' + esc(name) + (isDir ? "/" : "") + "</span></label>";
+          }).join("") + "</div>";
+      }
+      return head + picked + list;
     }
 
     /// 汇总校验错误（空数组 = 通过）。
@@ -425,6 +537,74 @@
       if (errs) errs.innerHTML = "";
     }
 
+    // ---------- §8.1 目录树多选（交互） ----------
+
+    /// 拉取预绑定目录树并展开选择器（root 取 ② 输入；depth 取当前深度）。
+    function loadTree() {
+      syncStateFromDom();
+      var root = String(state.root || "").trim();
+      var box = el("#pl-treebox");
+      if (!root) {
+        state.treeError = "请先在 ② 填写项目目录（需真实存在的绝对路径）";
+        if (box) box.innerHTML = '<div class="owo-pl-failed">' + esc(state.treeError) + "</div>";
+        return;
+      }
+      state.treeBusy = true;
+      state.treeError = "";
+      if (box) box.innerHTML = '<div class="hint">正在读取目录树…（不跟随符号链接）</div>';
+      H.get("/workspace/tree?root=" + encodeURIComponent(root) + "&depth=" + encodeURIComponent(String(Number(state.treeDepth) || 2)))
+        .then(function (d) {
+          state.treeBusy = false;
+          state.treeEntries = (d && Array.isArray(d.entries)) ? d.entries : [];
+          state.treeRoot = String((d && d.root) || root);
+          state.treeDepthUsed = Number((d && d.depth) || state.treeDepth) || 2;
+          state.treePickerOpen = true;
+          repaintTreePicker();
+        })
+        .catch(function (e) {
+          state.treeBusy = false;
+          state.treeError = friendly(e);
+          if (box) box.innerHTML = '<div class="owo-pl-failed">目录树读取失败：' + esc(state.treeError) + "</div>";
+        });
+    }
+
+    /// 仅重绘选择器容器（不整面板重渲，保持滚动/输入位置）。
+    function repaintTreePicker() {
+      var box = el("#pl-treebox");
+      if (box) box.innerHTML = state.treePickerOpen ? treePickerHtml(state) : "";
+    }
+
+    /// 勾选/取消勾选一个路径：更新 pickedRows 并同步 writePathsRaw（手输保留）。
+    function treeCheckChange(path, type, checked) {
+      var prev = state.pickedRows.slice();
+      if (checked && !pathIsSafe(String(path || ""))) {
+        var box = el("#pl-treebox");
+        if (box) {
+          var bad = box.querySelector('[data-pl-tree-path="' + String(path).replace(/"/g, '\\"') + '"]');
+          if (bad) bad.checked = false;
+        }
+        state.treeError = "已拒绝不安全路径：" + path;
+        repaintTreePicker();
+        return;
+      }
+      state.pickedRows = toggleTreePick(state.pickedRows, path, type);
+      state.writePathsRaw = mergePickedIntoRaw(state.writePathsRaw, state.pickedRows, prev);
+      var wp = el("#pl-writepaths");
+      if (wp) wp.value = state.writePathsRaw;
+      repaintTreePicker();
+      repaintPreview();
+    }
+
+    function unpickPath(path) {
+      var prev = state.pickedRows.slice();
+      state.pickedRows = toggleTreePick(state.pickedRows, path, "");
+      state.writePathsRaw = mergePickedIntoRaw(state.writePathsRaw, state.pickedRows, prev);
+      var wp = el("#pl-writepaths");
+      if (wp) wp.value = state.writePathsRaw;
+      repaintTreePicker();
+      repaintPreview();
+    }
+
     function loadCatalog() {
       var box = el("#pl-catalog");
       if (box) box.innerHTML = stateBox("loading", "正在加载内置模板目录…");
@@ -547,6 +727,9 @@
         '<div id="pl-writebox"' + (state.readOnly ? ' hidden' : "") + ">" +
         '<label class="owo-pl-label">允许写入路径（相对 root，逗号或换行分隔；留空 = 拒绝一切写入）</label>' +
         '<textarea id="pl-writepaths" rows="2" placeholder="例如：src/，tests/">' + esc(state.writePathsRaw) + "</textarea>" +
+        '<div class="owo-ws-inline"><button type="button" class="owo-ws-mini" data-pl-tree-load>从目录树勾选允许路径（推荐）</button>' +
+        '<span class="hint">读取 ② 目录的目录树（不跟随符号链接），勾选目录/文件即并入上方允许路径</span></div>' +
+        '<div id="pl-treebox" class="owo-pl-treebox">' + (state.treePickerOpen ? treePickerHtml(state) : "") + "</div>" +
         "</div>" +
         '<div class="owo-ws-inline" id="pl-depth-group" role="group" aria-label="目录树深度（扫描范围）">' +
         '<button type="button" class="owo-ws-mini' + (Number(state.treeDepth) <= 2 ? " primary" : "") + '" data-pl-depth="2">快速 · 2 层</button>' +
@@ -594,6 +777,38 @@
         });
       var wp = el("#pl-writepaths");
       if (wp) wp.addEventListener("input", repaintPreview);
+      // §8.1 目录树多选：写路径区委托（点击载入/移除行；勾选变更；搜索输入）。
+      var wb = el("#pl-writebox");
+      if (wb) {
+        wb.addEventListener("click", function (ev) {
+          var t = ev.target;
+          if (t && t.hasAttribute && t.hasAttribute("data-pl-tree-load")) {
+            loadTree();
+            return;
+          }
+          if (t && t.hasAttribute && t.hasAttribute("data-pl-tree-reload")) {
+            loadTree();
+            return;
+          }
+          var up = t && t.getAttribute && t.getAttribute("data-pl-unpick");
+          if (up) unpickPath(up);
+        });
+        wb.addEventListener("change", function (ev) {
+          var t = ev.target;
+          if (t && t.classList && t.classList.contains("pl-tree-check")) {
+            treeCheckChange(t.getAttribute("data-pl-tree-path"), t.getAttribute("data-pl-tree-type"), !!t.checked);
+          }
+        });
+        wb.addEventListener("input", function (ev) {
+          var t = ev.target;
+          if (t && t.id === "pl-tree-search") {
+            state.treeQuery = t.value || "";
+            repaintTreePicker();
+            var again = el("#pl-tree-search");
+            if (again) again.focus();
+          }
+        });
+      }
       var dep = el("#pl-depth");
       if (dep) dep.addEventListener("change", repaintPreview);
       var depthGroup = el("#pl-depth-group");
@@ -660,6 +875,14 @@
       state: state,
       parseWritePaths: parseWritePaths,
       pathIsSafe: pathIsSafe,
+      filterTreeEntries: filterTreeEntries,
+      toggleTreePick: toggleTreePick,
+      mergePickedIntoRaw: mergePickedIntoRaw,
+      treePickerHtml: treePickerHtml,
+      loadTree: loadTree,
+      repaintTreePicker: repaintTreePicker,
+      treeCheckChange: treeCheckChange,
+      unpickPath: unpickPath,
       validateState: validateState,
       buildCreateBody: buildCreateBody,
       previewFromTemplate: previewFromTemplate,

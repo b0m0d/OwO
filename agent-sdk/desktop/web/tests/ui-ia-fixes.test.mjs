@@ -85,15 +85,16 @@ test("§5.1.3 项目页：深度改三段选项，原始数值进高级折叠", 
 });
 
 test("§5.5 审批卡：脱敏展示 + 原始 JSON 收进开发者详情 + scope 选项", () => {
-  const app = read("../app.js");
-  assert.match(app, /function describeApproval\(payload\)/, "审批卡必须提供可解释摘要");
-  assert.match(app, /将写入：/, "写文件显示目标路径");
-  assert.match(app, /将执行命令：/, "命令显示可执行程序与参数");
-  assert.match(app, /将联网访问：/, "联网显示域名");
-  assert.match(app, /能否撤销/, "审批卡回答能否撤销");
-  assert.match(app, /approvalRawJson/, "原始 JSON 收进开发者详情");
-  assert.match(app, /alwaysAllowBtn/, "破坏性操作隐藏始终允许按钮");
-  assert.match(app, /body\.scope = scope/, "响应携带 scope 选项");
+  // §12.3 模块拆分后审批卡实现位于 app-domain.js（唯一归属，见模块边界守卫）。
+  const domain = read("../app-domain.js");
+  assert.match(domain, /function describeApproval\(payload\)/, "审批卡必须提供可解释摘要");
+  assert.match(domain, /将写入：/, "写文件显示目标路径");
+  assert.match(domain, /将执行命令：/, "命令显示可执行程序与参数");
+  assert.match(domain, /将联网访问：/, "联网显示域名");
+  assert.match(domain, /能否撤销/, "审批卡回答能否撤销");
+  assert.match(domain, /approvalRawJson/, "原始 JSON 收进开发者详情");
+  assert.match(domain, /alwaysAllowBtn/, "破坏性操作隐藏始终允许按钮");
+  assert.match(domain, /body\.scope = scope/, "响应携带 scope 选项");
   const index = read("../index.html");
   assert.match(index, /id="approvalExplain"/, "审批条含说明区");
   assert.match(index, /id="approvalRaw"/, "审批条含开发者详情折叠");
@@ -128,10 +129,10 @@ test("§12-13 自由文本改约束控件：自动化三态 / MCP 传输切换 /
   assert.match(app, /function renderChipGroup\(hostId, catalogKey/, "必须提供 chips 渲染工具");
   assert.match(app, /function getSelectedChips\(hostId\)/, "必须提供 chips 取值工具");
   assert.match(app, /chipOptionsCatalog\(\)/, "chips 候选必须来自能力注册表目录");
-  // 白名单：可搜索 datalist 候选。
+  // 白名单：可搜索 datalist 候选（§12.3 拆分后 refreshWhitelist 位于 app-domain.js）。
   assert.match(index, /id="wlAppId"[^>]*list="wlAppCandidates"/, "白名单 app id 必须接 datalist");
   assert.match(index, /<datalist id="wlAppCandidates">/, "白名单 datalist 候选容器");
-  assert.match(app, /const datalist = \$\(\"wlAppCandidates\"\)/, "白名单刷新必须回填候选");
+  assert.match(read("../app-domain.js"), /const datalist = \$\("wlAppCandidates"\)/, "白名单刷新必须回填候选");
   assert.match(app, /function initConstrainedControls\(\)/, "约束控件必须一次性初始化");
   // 工作区路径：最近项目 datalist（普通模式不要求手写完整路径）。
   assert.match(index, /id="workspace"[^>]*list="workspaceCandidates"/, "工作区输入必须接最近项目 datalist");
@@ -145,6 +146,16 @@ test("§12-13 自由文本改约束控件：自动化三态 / MCP 传输切换 /
   assert.match(css, /\.chip-group/, "chips 容器样式");
   assert.match(css, /\.chip\.selected/, "chips 选中态样式");
   assert.match(css, /\.auto-group\[hidden\]/, "受控表单隐藏规则");
+});
+
+// §5.1.5 模块边界守卫：同一函数不得同时在 app.js 和 app-domain.js 定义，
+// 防止把已拆出的实现复制回巨型文件（经典脚本下同名声明会直接冲突或静默覆盖）。
+test("模块边界守卫：app.js 与 app-domain.js 函数定义零交集", () => {
+  const fnNames = (src) => new Set([...src.matchAll(/^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1]));
+  const inApp = fnNames(read("../app.js"));
+  const inDomain = fnNames(read("../app-domain.js"));
+  const dup = [...inApp].filter((n) => inDomain.has(n));
+  assert.deepEqual(dup, [], "重复定义的函数：" + dup.join(", "));
 });
 
 test("§12-12 工具与高级系统移入路由化设置页 + 开发者模式门控", () => {
