@@ -200,6 +200,8 @@ fn sample_body(path: &str) -> Option<&'static str> {
             Some(r#"{"name":"__missing__","transport":"http","url":"http://127.0.0.1:1"}"#)
         }
         "/mcp/remove" => Some(r#"{"name":"__missing__"}"#),
+        "/mcp/reconnect" => Some(r#"{"name":"__missing__"}"#),
+        "/mcp/enabled" => Some(r#"{"name":"__missing__","enabled":false}"#),
         "/locate/query" => Some(r#"{}"#),
         "/memory/mine-skill" => {
             Some(r#"{"name":"t","target_apps":[],"sensitivity":"low","description":"d"}"#)
@@ -338,6 +340,8 @@ fn resource_404_ok(path: &str) -> bool {
             | "/learn/export/{name}"
             | "/traces/{index}"
             | "/mcp/remove"
+            | "/mcp/reconnect"
+            | "/mcp/enabled"
             | "/automations/{id}/toggle"
             | "/perception/template/{app_id}"
             | "/computer-use/task/{id}/run"
@@ -444,6 +448,9 @@ fn resource_404_ok(path: &str) -> bool {
 
 #[tokio::test]
 async fn all_contract_endpoints_are_reachable() {
+    // §3.2：本测试会触发 mutation 领域失效发布；与矩阵测试共用发布锁，
+    // 避免并行测试把“恰好一次”断言污染成不稳定结果。
+    let _guard = invalidate_guard().await;
     let (state, _temp) = test_state().await;
     let app = build_router(Arc::clone(&state));
 
@@ -768,6 +775,8 @@ async fn product_eval_contract_shapes_are_frozen() {
 
 #[tokio::test]
 async fn v05_routes_are_registered_not_404_via_real_http() {
+    // §3.2：包含会发布领域失效的 mutation；与矩阵测试串行。
+    let _guard = invalidate_guard().await;
     let (state, _temp) = test_state().await;
     let token = state.auth_token.token().to_string();
     let app = build_router(Arc::clone(&state));
@@ -787,6 +796,8 @@ async fn v05_routes_are_registered_not_404_via_real_http() {
         "/plugins",
         "/project/rules",
         "/mcp",
+        "/mcp/health",
+        "/capabilities",
         "/traces",
         "/memory/observations",
         "/memory/recall?q=t&top_k=3",
@@ -960,28 +971,409 @@ async fn auth_token_desktop_pairing_is_documented_and_cors_allowed() {
     );
 }
 
-/// SSE 资源型路径豁免鉴权（EventSource 无法携带自定义头；只读遥测）。
+/// §3.1：事件流不再匿名——`/events/stream` 与全部资源型事件流均要求 Bearer。
+/// 匿名 → 401（正常 JSON 错误体）；错误 token → 401；有效 token → 进入处理器
+/// （/events/stream 直接 200 SSE；资源型路径对不存在 id 为 404，但绝不是 401）。
 #[tokio::test]
-async fn sse_paths_are_exempt_from_auth() {
+async fn event_streams_require_bearer_auth() {
     let (state, _temp) = test_state().await;
     let app = build_router(Arc::clone(&state));
-    for path in [
+    let sse_paths = [
+        "/events/stream",
         "/cloud/tasks/x/events",
         "/workflow/run/x/events",
-        "/events/stream",
-    ] {
+        "/teams/x/events",
+        "/fleet/tasks/x/events",
+    ];
+    for path in sse_paths {
         let response = app
             .clone()
             .oneshot(anonymous_request("GET", path, None))
             .await
             .unwrap();
-        let status = response.status().as_u16();
-        // 不应 401（鉴权豁免）；404 表示路由存在但资源缺失（workflow run 不存在）。
-        assert!(
-            status != 401,
-            "GET {path} 无 token 不应 401（SSE 豁免），实际 {status}"
+        assert_eq!(
+            response.status().as_u16(),
+            401,
+            "GET {path} 匿名应 401（事件流不再豁免）"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            parsed["code"], "auth/unauthorized/not_retryable",
+            "鉴权失败必须返回正常 JSON 错误（SSE 建立前拦截）"
         );
     }
+    for path in sse_paths {
+        let bad = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri(path)
+            .header(axum::http::header::AUTHORIZATION, "Bearer wrong-token")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(bad).await.unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            401,
+            "GET {path} 错误 token 应 401"
+        );
+    }
+    for path in sse_paths {
+        let response = app
+            .clone()
+            .oneshot(request(&state, "GET", path, None))
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        assert!(
+            status == 200 || status == 404,
+            "GET {path} 有效 token 不应 401，实际 {status}"
+        );
+    }
+    let response = app
+        .oneshot(request(&state, "GET", "/events/stream", None))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "/events/stream 有效 token 应 200"
+    );
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        content_type.contains("text/event-stream"),
+        "应为 SSE 响应，实际 {content_type}"
+    );
+}
+
+/// §3.2：领域失效发布测试串行锁——hub 单例 + 域版本是进程级共享状态，
+/// 并行 mutation 测试会把“恰好一次”断言污染成不稳定结果。
+static INVALIDATE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 带上限的发布锁获取：若持有者被某个卡死的请求拖住，等待方在 90s 后
+/// 快速失败（带诊断信息），而不是让整个测试二进制静默挂起。
+async fn invalidate_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        INVALIDATE_TEST_LOCK.lock(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            panic!("INVALIDATE_TEST_LOCK 90s 未获得：另一领域失效测试疑似卡死（快速失败诊断）")
+        }
+    }
+}
+
+/// §3.1 续传成功：`Last-Event-ID` 请求头指定续传起点，服务端从下一 seq 重放。
+#[tokio::test]
+async fn events_stream_resumes_from_last_event_id_header() {
+    use http_body_util::BodyExt;
+
+    let _guard = invalidate_guard().await;
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let hub = owo_agent_server::event_stream::hub();
+    let before = hub.last_seq();
+    let seq = hub.publish_invalidate(owo_agent_server::event_stream::InvalidateDomain::Projects);
+    assert!(seq > before, "发布应分配新 seq");
+    let req = axum::http::Request::builder()
+        .method(axum::http::Method::GET)
+        .uri("/events/stream")
+        .header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", state.auth_token.token()),
+        )
+        .header("Last-Event-ID", before.to_string())
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+        .await
+        .expect("首帧应立即重放（5s 超时）")
+        .expect("流不应报错")
+        .unwrap();
+    let bytes = frame.into_data().expect("首帧应为 data 帧");
+    let text = String::from_utf8_lossy(&bytes);
+    // §3.1 契约（R0 收口）：断言必须按真实帧格式解析两层 JSON——
+    // SSE data 行是外层 StreamEvent JSON，其 data 字段是内层失效载荷的
+    // JSON 字符串。直接搜未转义的 domain 会把"帧格式变更"误判为"续传失败"。
+    let data_line = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap_or_else(|| panic!("SSE 帧缺少 data 行，实际：{text}"));
+    let outer: serde_json::Value = serde_json::from_str(data_line)
+        .unwrap_or_else(|e| panic!("外层 StreamEvent JSON 解析失败（{e}），实际：{data_line}"));
+    assert_eq!(outer["seq"].as_u64(), Some(seq), "续传首帧 seq 应为发布点");
+    assert_eq!(
+        outer["kind"].as_str(),
+        Some("invalidate"),
+        "首帧应为失效事件"
+    );
+    let inner_str = outer["data"]
+        .as_str()
+        .unwrap_or_else(|| panic!("外层 data 字段应为 JSON 字符串，实际：{outer}"));
+    let payload: serde_json::Value = serde_json::from_str(inner_str)
+        .unwrap_or_else(|e| panic!("内层失效载荷 JSON 解析失败（{e}），实际：{inner_str}"));
+    assert_eq!(
+        payload["domain"].as_str(),
+        Some("projects"),
+        "失效领域应为 projects，实际：{payload}"
+    );
+    // id 行与外层 seq 一致（Last-Event-ID 续传游标同源）。
+    let id_line = text
+        .lines()
+        .find_map(|line| line.strip_prefix("id: "))
+        .and_then(|v| v.parse::<u64>().ok());
+    assert_eq!(id_line, Some(seq), "SSE id 行必须等于外层 seq");
+}
+
+/// §3.2 路由-事件矩阵：每个改变领域状态的 mutation 在成功后恰好发布一次
+/// 对应领域失效；失败路径（4xx/5xx）不得发布。新增 mutation 路由时必须
+/// 在本表登记 (method, path, body, domain)，防止漏接领域事件。
+#[tokio::test]
+async fn mutation_routes_publish_exactly_one_domain_invalidate() {
+    use owo_agent_server::event_stream::{hub, InvalidateDomain};
+
+    let _guard = invalidate_guard().await;
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    // settings 回读体：全字段合法，避免手写缺字段导致 400。
+    // 前置同样限时：任何路由卡死都在此处显式失败，而非把矩阵拖成挂起。
+    let settings_response = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        app.clone()
+            .oneshot(request(&state, "GET", "/settings", None)),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        other => panic!("GET /settings 契约前置异常（15s 超时或错误）：{other:?}"),
+    };
+    assert_eq!(
+        settings_response.status().as_u16(),
+        200,
+        "GET /settings 契约前置失败"
+    );
+    let settings_bytes = axum::body::to_bytes(settings_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let settings_json: serde_json::Value = serde_json::from_slice(&settings_bytes).unwrap();
+
+    let matrix: Vec<(&str, &str, serde_json::Value, InvalidateDomain)> = vec![
+        (
+            "POST",
+            "/automations",
+            serde_json::json!({"name":"ct-inv","schedule":{"kind":"daily","time":"09:00"},"reminder":"hi"}),
+            InvalidateDomain::Automations,
+        ),
+        (
+            "POST",
+            "/settings",
+            settings_json,
+            InvalidateDomain::Settings,
+        ),
+        (
+            "POST",
+            "/whitelist/manage",
+            serde_json::json!({"action":"list"}),
+            InvalidateDomain::Whitelist,
+        ),
+        (
+            "POST",
+            "/mcp/add",
+            serde_json::json!({"name":"__ct_invalid__","transport":"http","url":"http://127.0.0.1:1"}),
+            InvalidateDomain::Mcp,
+        ),
+        (
+            "POST",
+            "/learn/clear",
+            serde_json::json!({}),
+            InvalidateDomain::Learn,
+        ),
+        // 任务 2 尾·全量复核：learn 状态变更族补发布（成功恰一次 / 失败零发布）。
+        // learn/record 行缺 app_id/anchor/action_type/at → 422 → 断言失败路径零发布。
+        (
+            "POST",
+            "/learn/start",
+            serde_json::json!({}),
+            InvalidateDomain::Learn,
+        ),
+        (
+            "POST",
+            "/learn/record",
+            serde_json::json!({"action":"click"}),
+            InvalidateDomain::Learn,
+        ),
+        (
+            "POST",
+            "/learn/stop",
+            serde_json::json!({}),
+            InvalidateDomain::Learn,
+        ),
+        (
+            "POST",
+            "/learn/sink",
+            serde_json::json!({"name":"ct-inv-pkg","target_apps":[],"sensitivity":"low","description":"契约矩阵"}),
+            InvalidateDomain::Packages,
+        ),
+        (
+            "POST",
+            "/plugins/__ct_missing__/enabled",
+            serde_json::json!({"enabled":false}),
+            InvalidateDomain::Plugins,
+        ),
+        (
+            "POST",
+            "/project/rules",
+            serde_json::json!({"content":"契约矩阵项目规则"}),
+            InvalidateDomain::Projects,
+        ),
+        (
+            "POST",
+            "/computer-use/task",
+            serde_json::json!({"target_app":"notepad","description":"契约矩阵","allowed_actions":[],"max_duration_ms":60000}),
+            InvalidateDomain::Computer,
+        ),
+        // 任务 2：mutation 失效发布补全（成功恰一次 / 失败零发布）。
+        (
+            "POST",
+            "/memory/clear",
+            serde_json::json!({}),
+            InvalidateDomain::Memory,
+        ),
+        (
+            "POST",
+            "/memory/mine-skill",
+            // 空记忆 → 400：断言失败路径零发布。
+            serde_json::json!({"name":"ct-inv-skill","target_apps":[],"sensitivity":"low","description":"d"}),
+            InvalidateDomain::Memory,
+        ),
+        (
+            "POST",
+            "/skills/__ct_missing__/enabled",
+            serde_json::json!({"enabled":false}),
+            InvalidateDomain::Skills,
+        ),
+        (
+            "POST",
+            "/usage/topup",
+            serde_json::json!({"amount":0.0}),
+            InvalidateDomain::Usage,
+        ),
+        (
+            "POST",
+            "/session",
+            serde_json::json!({"workspace":".","model":"idle"}),
+            InvalidateDomain::Sessions,
+        ),
+        (
+            "POST",
+            "/session/__ct_missing__/fork",
+            serde_json::json!({}),
+            InvalidateDomain::Sessions,
+        ),
+        (
+            "POST",
+            "/mcp/enabled",
+            serde_json::json!({"name":"__ct_missing__","enabled":false}),
+            InvalidateDomain::Mcp,
+        ),
+        (
+            "POST",
+            "/mcp/reconnect",
+            serde_json::json!({"name":"__ct_missing__"}),
+            InvalidateDomain::Mcp,
+        ),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for (method, path, body, domain) in matrix {
+        let before = hub().domain_version(domain.as_str());
+        let body_text = serde_json::to_string(&body).unwrap();
+        // 行级 15s 上限：单行卡死只计为该行失败；最坏 9×15s 全套仍有界。
+        let response = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            app.clone()
+                .oneshot(request(&state, method, path, Some(&body_text))),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            other => {
+                failures.push(format!("{method} {path} 请求异常：{other:?}"));
+                continue;
+            }
+        };
+        let status = response.status().as_u16();
+        let after = hub().domain_version(domain.as_str());
+        if status == 200 {
+            if after - before != 1 {
+                failures.push(format!(
+                    "{method} {path} 成功应恰好发布一次 {domain:?} 失效（delta={}）",
+                    after - before
+                ));
+            }
+        } else if after != before {
+            failures.push(format!(
+                "{method} {path} 失败路径（{status}）不得发布 {domain:?} 失效"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "路由-事件矩阵失败：\n{}",
+        failures.join("\n")
+    );
+}
+
+/// §6.1.3：/health 必须携带完整构建身份——commit/dirty/built_at 三项语义。
+/// 编译期身份来自 owo-build-info 的 build.rs（§6.1.2 单一实现）；测试机构建
+/// 必能解析 git，故 commit 非 "unknown"、built_at 非空且为 RFC3339。
+#[tokio::test]
+async fn health_build_identity_has_full_semantics() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let response = app
+        .oneshot(request(&state, "GET", "/health", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let health: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let build = &health["build"];
+    assert!(
+        build.is_object(),
+        "/health 必须携带 build 身份对象：{health}"
+    );
+    let commit = build["commit"].as_str().unwrap_or_default();
+    assert!(!commit.is_empty(), "commit 必须非空（§6.1.3）");
+    assert_ne!(
+        commit, "unknown",
+        "编译期身份来自 owo-build-info 的 build.rs，测试机构建必能解析 git（§6.1.3）"
+    );
+    assert!(
+        matches!(build["dirty"], serde_json::Value::Bool(_)),
+        "dirty 必须是布尔（§6.1.3）"
+    );
+    let built_at = build["built_at"].as_str().unwrap_or_default();
+    assert!(
+        !built_at.is_empty(),
+        "built_at 必须非空——epoch 为编译期烧录，不得再读运行时变量（§6.1.3）"
+    );
+    chrono::DateTime::parse_from_rfc3339(built_at)
+        .unwrap_or_else(|error| panic!("built_at 必须是 RFC3339（实际 {built_at}）：{error}"));
 }
 
 /// CORS：不允许的跨源请求无 Access-Control-Allow-Origin（浏览器侧拒绝）；

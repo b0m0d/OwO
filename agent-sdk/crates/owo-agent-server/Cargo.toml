@@ -21,7 +21,10 @@ reqwest.workspace = true
 sha2.workspace = true
 zip.workspace = true
 tower-http = { version = "0.6", features = ["fs", "cors"] }
+# §6.1.2：共享构建身份（编译期烧录的 git commit/dirty/epoch），替代本 crate 的 build.rs。
+owo-build-info.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+http-body-util = "0.1"

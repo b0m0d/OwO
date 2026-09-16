@@ -1,0 +1,7 @@
+# 任务 5（P0）：消除 LNK4098（默认库 LIBCMT 冲突）。
+# 根因：ort-sys 预编译 onnxruntime 静态库内嵌 /DEFAULTLIB:LIBCMT（静态 CRT），
+# 与 Rust MSVC 工具链默认的动态 CRT（MSVCRT）冲突，最终链接 owo-agent-cli 时告警。
+# 处置：链接期忽略 LIBCMT 默认库指令（官方推荐 workaround；应用本身仍用 /MD 动态 CRT，
+# onnxruntime 为纯 C 运行库，不依赖 CRT 状态跨边界一致性）。仅作用于 MSVC Windows 目标。
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "link-args=/NODEFAULTLIB:LIBCMT"]

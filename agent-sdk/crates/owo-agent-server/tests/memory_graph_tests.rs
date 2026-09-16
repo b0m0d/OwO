@@ -48,7 +48,7 @@ async fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
         let mut memory = state.memory.lock().unwrap();
         memory
             .append(owo_agent_core::Observation {
-                ts: "2026-08-10T09:00:00Z".to_string(),
+                ts: fixture_ts(6),
                 app_id: "qq".to_string(),
                 kind: "sim_event".to_string(),
                 summary: "张子豪约定今晚八点开会".to_string(),
@@ -58,7 +58,7 @@ async fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
             .unwrap();
         memory
             .append(owo_agent_core::Observation {
-                ts: "2026-08-12T18:30:00Z".to_string(),
+                ts: fixture_ts(4),
                 app_id: "browser".to_string(),
                 kind: "sim_event".to_string(),
                 summary: "搜索 Rust 并发编程教程".to_string(),
@@ -105,6 +105,29 @@ fn request(method: &str, path: &str, body: Option<&str>) -> axum::http::Request<
     builder.body(axum::body::Body::empty()).unwrap()
 }
 
+// ---------- 固定时间锚（R0 门禁收口） ----------
+// MemoryStore 默认 30 天保留期会在加载时 prune 超期条目：fixture 若用固定
+// 绝对日期（如 2026-08-10），日期滑出窗口后整个预置记忆被清空，四个用例
+// 集体失败（时间炸弹）。现以进程级锚点相对偏移，锚点只初始化一次，
+// 跨 UTC 午夜也保持 fixture 与断言一致。
+
+fn anchor() -> chrono::DateTime<chrono::Utc> {
+    static ANCHOR: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> = std::sync::OnceLock::new();
+    *ANCHOR.get_or_init(chrono::Utc::now)
+}
+
+/// 锚点前 `days_ago` 天的 RFC3339（UTC `Z` 后缀：query 串中 `+` 会被
+/// www-form 解码成空格，禁用 to_rfc3339 默认偏移格式）。
+fn fixture_ts(days_ago: i64) -> String {
+    (anchor() - chrono::Duration::days(days_ago)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn fixture_day(days_ago: i64) -> String {
+    (anchor() - chrono::Duration::days(days_ago))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
 async fn call(app: &axum::Router, method: &str, path: &str, body: Option<&str>) -> (u16, Value) {
     let response = app
         .clone()
@@ -136,7 +159,11 @@ async fn entries_filter_by_app_and_time() {
     let (_, ranged) = call(
         &app,
         "GET",
-        "/memory/graph/entries?from=2026-08-11T00:00:00Z&to=2026-08-13T00:00:00Z",
+        &format!(
+            "/memory/graph/entries?from={}&to={}",
+            fixture_ts(5),
+            fixture_ts(1)
+        ),
         None,
     )
     .await;
@@ -159,13 +186,17 @@ async fn timeline_buckets_by_day() {
     let (_, timeline) = call(&app, "GET", "/memory/graph/timeline", None).await;
     let buckets = timeline["buckets"].as_array().unwrap();
     assert_eq!(buckets.len(), 2);
-    assert_eq!(buckets[0]["day"], "2026-08-10");
+    assert_eq!(buckets[0]["day"], fixture_day(6));
     assert_eq!(buckets[0]["count"].as_u64().unwrap(), 1);
     // 边界：只取一天。
     let (_, ranged) = call(
         &app,
         "GET",
-        "/memory/graph/timeline?from=2026-08-12T00:00:00Z&to=2026-08-12T23:59:59Z",
+        &format!(
+            "/memory/graph/timeline?from={}T00:00:00Z&to={}T23:59:59Z",
+            fixture_day(4),
+            fixture_day(4)
+        ),
         None,
     )
     .await;
@@ -174,7 +205,10 @@ async fn timeline_buckets_by_day() {
     let (_, empty) = call(
         &app,
         "GET",
-        "/memory/graph/timeline?from=2027-01-01T00:00:00Z",
+        &format!(
+            "/memory/graph/timeline?from={}T00:00:00Z",
+            fixture_day(-365)
+        ),
         None,
     )
     .await;
@@ -281,7 +315,7 @@ async fn recall_attaches_entity_hits() {
         matched.contains(&json!("张子")),
         "应含二元组实体：{matched:?}"
     );
-    assert!(hit["id"].as_str().unwrap().contains("2026-08-10"));
+    assert!(hit["id"].as_str().unwrap().contains(&fixture_day(6)));
 }
 
 #[tokio::test]

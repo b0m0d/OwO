@@ -22,9 +22,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use owo_agent_core::{
-    add_block, block_text, doc_title, doc_to_md, insert_child, load_doc, md_to_doc, move_block,
-    new_doc, remove_block, sanitize_html, save_doc, walk, Block, BlockId, BlockKind,
-    CanvasBlockData, CanvasNote, CanvasRect, NoteDoc, NoteIndex, NoteIndexer, SearchHit,
+    add_block, doc_title, doc_to_md, insert_child, load_doc, md_to_doc, move_block, new_doc,
+    remove_block, sanitize_html, save_doc, walk, Block, BlockKind, CanvasBlockData, CanvasNote,
+    CanvasRect, NoteDoc, NoteIndex, NoteIndexer, SearchHit,
 };
 
 // ----------------------------------------------------------------------------
@@ -988,13 +988,4 @@ async fn reindex_note(
         .reindex(&doc)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(json!({ "ok": true, "id": id, "reindexed": true })))
-}
-
-// 测试辅助：块文本（供导出与搜索调试）。
-#[allow(dead_code)]
-fn block_text_debug(doc: &NoteDoc, id: &BlockId) -> String {
-    doc.blocks
-        .get(id)
-        .map(|b| block_text(doc, b))
-        .unwrap_or_default()
 }

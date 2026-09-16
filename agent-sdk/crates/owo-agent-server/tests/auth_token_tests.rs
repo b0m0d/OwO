@@ -125,15 +125,11 @@ fn pairing_gate_full_matrix() {
 }
 
 #[test]
-fn public_and_sse_path_classification() {
+fn public_path_classification() {
     assert!(auth_token::is_public_path("/health"));
     assert!(auth_token::is_public_path("/openapi.json"));
     assert!(auth_token::is_public_path("/auth/token"));
     assert!(!auth_token::is_public_path("/session"));
-    assert!(auth_token::is_sse_path("/cloud/tasks/x/events"));
-    assert!(auth_token::is_sse_path("/events/stream"));
-    assert!(auth_token::is_sse_path("/workflow/run/r/events"));
-    assert!(!auth_token::is_sse_path("/workflow/run/r"));
 }
 
 /// Windows：token 文件 ACL 应仅含当前用户（继承移除后无 BUILTIN\Users 授权）。

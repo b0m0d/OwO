@@ -393,7 +393,10 @@ mod tests {
     fn memory_store_round_trip_and_clear() {
         let (mut store, path) = temp_store();
         let observation = Observation {
-            ts: "2026-08-12T00:00:00Z".to_string(),
+            // 保留期契约（默认 30 天）下 load/prune 会淘汰超期条目：
+            // round-trip 用例必须用"新鲜"时间戳，过期行为由
+            // memory_store_prunes_expired_observations 反向用例显式覆盖。
+            ts: chrono::Utc::now().to_rfc3339(),
             app_id: "qq".to_string(),
             kind: "sim_event".to_string(),
             summary: "点击发送".to_string(),
@@ -407,6 +410,41 @@ mod tests {
         let mut store = loaded;
         store.clear().expect("清空成功");
         assert_eq!(store.count(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 保留期淘汰的显式契约：磁盘上超期（>30 天）的观察在重新加载时
+    /// 被 prune 剔除，不再进入内存列表（不依赖系统时钟恰好接近某日）。
+    #[test]
+    fn memory_store_prunes_expired_observations() {
+        let (store, path) = temp_store();
+        let fresh = Observation {
+            ts: chrono::Utc::now().to_rfc3339(),
+            app_id: "qq".to_string(),
+            kind: "sim_event".to_string(),
+            summary: "保留窗口内".to_string(),
+            detail: json!({ "type": "send_clicked" }),
+            state_hash: 1,
+        };
+        let expired = Observation {
+            ts: (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+            summary: "超期条目".to_string(),
+            ..fresh.clone()
+        };
+        // 直接写盘两条（一条新鲜、一条超期），模拟历史数据。
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(store.path())
+            .expect("打开测试记忆文件");
+        use std::io::Write;
+        writeln!(file, "{}", serde_json::to_string(&expired).unwrap()).unwrap();
+        writeln!(file, "{}", serde_json::to_string(&fresh).unwrap()).unwrap();
+        drop(file);
+        drop(store);
+        let loaded = MemoryStore::new(path.clone());
+        assert_eq!(loaded.count(), 1, "超期条目应在加载时被剔除");
+        assert_eq!(loaded.list(0)[0].summary, "保留窗口内");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -454,7 +492,9 @@ mod tests {
         for index in 0..5 {
             store
                 .append(Observation {
-                    ts: "2026-08-13T00:00:00Z".to_string(),
+                    // 新鲜时间戳：本用例验证"超量淘汰"路径；若用固定旧日期，
+                    // 条目会先被 30 天保留期淘汰，超量断言退化为恒真（时间炸弹）。
+                    ts: chrono::Utc::now().to_rfc3339(),
                     app_id: "qq".to_string(),
                     kind: "sim_event".to_string(),
                     summary: format!("事件 {index}"),

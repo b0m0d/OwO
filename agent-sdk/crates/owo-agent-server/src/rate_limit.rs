@@ -11,9 +11,9 @@
 //! 本模块不引用 `crate::`/`super::`（AppState 全限定），可被测试以
 //! `#[path] mod` 独立编译。
 
-// 与 team_api.rs 同款模块级 allow(dead_code)：lib 目标经 build_router 使用
-// enforce_rate_limit；#[path] 独立编译的测试目标内中间件未被调用，
-// 避免 clippy -D warnings 在测试目标误报。
+// §13 第四批复核（clippy 全目标实测）：lib 目标内全部符号可达（零死亡，
+// expect 不成立），#[path] 测试目标内中间件等未被测试调用——#[path] 双目标
+// 差异场景，allow 为唯一正确形态（同 event_stream.rs）。
 #![allow(dead_code)]
 
 use axum::extract::State;

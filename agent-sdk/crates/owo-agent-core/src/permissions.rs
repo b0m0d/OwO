@@ -335,6 +335,11 @@ impl Policy {
         }
     }
 
+    /// §11 `/permissions` 视图：读取授权记忆存储（未注入则 None）。
+    pub fn grant_store(&self) -> Option<std::sync::Arc<crate::grant_store::GrantStore>> {
+        self.grants.read().ok().and_then(|guard| guard.clone())
+    }
+
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only.store(read_only, Ordering::Relaxed);
         if let Ok(mut profile) = self.profile.lock() {

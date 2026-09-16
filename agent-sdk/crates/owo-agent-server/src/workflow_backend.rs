@@ -13,7 +13,6 @@
 //! 接线：workflow_api.rs 以 `#[path = "workflow_backend.rs"] mod workflow_backend;` 自包含编译。
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -565,17 +564,4 @@ impl BackendChoice {
             _ => Self::Mock,
         }
     }
-}
-
-/// workspace 内文件安全写入（测试与后端共用）。
-#[allow(dead_code)] // 测试桩 API
-pub fn write_workspace_file(workspace: &Path, rel: &str, content: &str) -> Result<(), String> {
-    let base = workspace
-        .canonicalize()
-        .map_err(|e| format!("工作区解析失败：{e}"))?;
-    let joined = base.join(rel);
-    if let Some(parent) = joined.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
-    }
-    std::fs::write(&joined, content).map_err(|e| format!("写入失败：{e}"))
 }

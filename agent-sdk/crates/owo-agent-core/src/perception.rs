@@ -168,8 +168,9 @@ pub struct SituationStore {
 
 struct CaptureFrame {
     meta: CaptureMeta,
-    #[allow(dead_code)]
-    bytes: Vec<u8>,
+    // §13 批次：`bytes` 字段已删除——写入后无任何读取方（OCR 在构造前用局部
+    // 变量完成），保留反而违背"仅内存、用后即毁"的 L2 隐私语义（字节常驻
+    // 环形缓冲直至淘汰）。结论记录于 docs/internal/dead-code-inventory.md。
 }
 
 impl Default for SituationStore {
@@ -242,7 +243,6 @@ impl SituationStore {
                 }
                 self.capture_ring.push_back(CaptureFrame {
                     meta: frame.clone(),
-                    bytes: Vec::new(),
                 });
             }
             PerceptionEvent::Hypothesis { hypothesis } => {
@@ -316,9 +316,10 @@ impl SituationStore {
         if self.capture_ring.len() >= self.max_ring {
             self.capture_ring.pop_front();
         }
+        // §13：截图字节仅在本次 OCR 内消费，不入环形缓冲（用后即毁）。
+        drop(bytes);
         self.capture_ring.push_back(CaptureFrame {
             meta: frame.clone(),
-            bytes,
         });
         self.recent_actions.push_back("capture".to_string());
         if self.recent_actions.len() > 20 {

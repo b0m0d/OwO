@@ -1,9 +1,11 @@
 // R11:usage 质量收尾完成。
-// R12:usage 完成，待主控接线（四维报表 + 预算硬熔断即时置位 + prometheus 探针联动，契约测试已补）
-// R12:usage 完成，待主控接线（四维报表/硬熔断经 observability_api 用量探针联动 prometheus）。
+// R12:usage 完成（四维报表 + 预算硬熔断即时置位 + prometheus 探针联动，契约测试已补）
+// R12:usage 完成（四维报表/硬熔断经 observability_api 用量探针联动 prometheus）。
 //! 用量与成本归集（R8 + R9 + R10 持久化 + R11 硬停即时性）：四维用量 + 预算硬熔断 + `/usage` 路由。
 //! R11：`accumulate_budget` 累计后立即 `recheck`，预算超限在当次记录即置位硬熔断（不再等下轮）。
-//! R10:usage 持久化完成，待主控接线（`persist_to`/`load_from` 供定时落盘与启动恢复；
+//! R10:usage 持久化已接线（`persist_to`/`load_from` 由主控三面调用：启动恢复
+//! `restore_usage_snapshot`、定时落盘 `start_usage_persistence_loop`（每小时）、
+//! 优雅关闭 `persist_usage_snapshot`；
 //! `budget_exceeded_response` 供超限停轮返回 402+错误码；`/usage/report` 按天报表）。
 //!
 //! - 四维：session / workflow_run / goal_step / tool（`UsageDimension`）。
@@ -18,6 +20,10 @@
 //!
 //! 本模块不引用 `crate::`/`super::`，可被测试以 `#[path] mod` 独立编译；
 //! AppState 写全限定 `owo_agent_server::AppState`。
+//! §12：usage_topup 外移后，根项 `api_error_response`/`error_codes`/`logging`
+//! 经 crate 名全限定引用——独立编译（#[path]）时 `owo_agent_server` 为外部
+//! lib crate，后代可见性不成立，故三者已在 lib.rs 放宽为 `pub`；
+//! `global()` 等本域符号改为模块内直呼。
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -203,7 +209,6 @@ impl UsageStore {
 
     /// R10：直接压入一条已落盘的记录（load_from 恢复用；不重复累计预算，
     /// 预算状态由 `restore_budgets` 快照恢复）。环形上限同 record_usage。
-    #[allow(dead_code)] // 仅供主控接线（启动时 load_from 恢复）与测试以 #[path] 独立编译使用。
     pub fn push_record(&self, record: UsageRecord) {
         let mut records = self.inner.records.lock().unwrap_or_else(|e| e.into_inner());
         records.push(record);
@@ -213,7 +218,6 @@ impl UsageStore {
     }
 
     /// R10：预算快照（持久化用）。
-    #[allow(dead_code)] // 仅供 persist_to 与测试以 #[path] 独立编译使用。
     pub fn budgets_snapshot(&self) -> Vec<Budget> {
         self.inner
             .budgets
@@ -225,7 +229,6 @@ impl UsageStore {
     }
 
     /// R10：恢复预算快照（覆盖 + 重查熔断）。
-    #[allow(dead_code)] // 仅供主控接线（启动时 load_from 恢复）与测试以 #[path] 独立编译使用。
     pub fn restore_budgets(&self, budgets: Vec<Budget>) {
         let mut map = self.inner.budgets.lock().unwrap_or_else(|e| e.into_inner());
         map.clear();
@@ -237,7 +240,6 @@ impl UsageStore {
     }
 
     /// R10：恢复硬熔断状态（load_from 用）。
-    #[allow(dead_code)] // 仅供主控接线（启动时 load_from 恢复）与测试以 #[path] 独立编译使用。
     pub fn force_hard_stop(&self, reason: Option<String>) {
         self.inner.hard_stop.store(true, Ordering::Relaxed);
         *self
@@ -454,16 +456,14 @@ async fn usage_records(
 // ==================== R10：用量/预算持久化 ====================
 
 /// 用量快照文件名（相对目录）。
-#[allow(dead_code)] // 仅供 persist_to/load_from 使用；测试以 #[path] 独立编译时也引用。
 pub const USAGE_SNAPSHOT_FILE: &str = "usage.json";
 
 /// 用量快照版本。
-#[allow(dead_code)] // 仅供 persist_to 与测试以 #[path] 独立编译使用。
 pub const USAGE_SNAPSHOT_VERSION: u32 = 1;
 
 /// 落盘用量/预算/硬熔断快照（R10）：records + budgets + hard_stop → `<dir>/usage.json`。
-/// 返回快照路径。接线方可定时调用（如每小时），并在优雅关闭时最后落一次。
-#[allow(dead_code)] // 仅供主控接线（定时持久化/优雅关闭）与测试以 #[path] 独立编译使用。
+/// 返回快照路径。主控已接线：定时落盘（`start_usage_persistence_loop`，每小时）
+/// + 优雅关闭最后落一次（`persist_usage_snapshot`）。
 pub fn persist_to(dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(USAGE_SNAPSHOT_FILE);
@@ -484,7 +484,7 @@ pub fn persist_to(dir: &Path) -> std::io::Result<PathBuf> {
 
 /// 从快照恢复（R10）：重放 records、恢复 budgets 与硬熔断状态（崩溃后续接）。
 /// 返回恢复的记录条数；快照不存在返回 Ok(0)。
-#[allow(dead_code)] // 仅供主控接线（启动恢复）与测试以 #[path] 独立编译使用。
+/// 主控已接线：服务启动时 `restore_usage_snapshot` 调用。
 pub fn load_from(dir: &Path) -> std::io::Result<usize> {
     let path = dir.join(USAGE_SNAPSHOT_FILE);
     if !path.exists() {
@@ -604,9 +604,45 @@ async fn usage_report(
     Ok(Json(report(query.days.unwrap_or(7))))
 }
 
+/// GET /usage：当前模型用量快照 + 预算配置（供桌面端"设置与诊断"用量面板展示）。
+/// §12 自 lib.rs 机械外移（原 lib.rs usage_summary，因与本模块四维 usage_summary
+/// 同名而改命 usage_model_summary），路由面零变化。
+async fn usage_model_summary(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let usage = state.agent.provider().usage_snapshot();
+    let input_price = std::env::var("OWO_MODEL_INPUT_PRICE_PER_MTOK")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let output_price = std::env::var("OWO_MODEL_OUTPUT_PRICE_PER_MTOK")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let token_cap = std::env::var("OWO_USAGE_TOKEN_BUDGET")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    let cost_cap = std::env::var("OWO_USAGE_COST_BUDGET_USD")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok());
+    let cost = usage.cost_estimate_usd(input_price, output_price);
+    let violation =
+        owo_agent_core::budget_violation(&usage, token_cap, cost_cap, input_price, output_price);
+    Json(json!({
+        "usage": usage,
+        "cost_usd": cost,
+        "budget": {
+            "token_cap": token_cap,
+            "cost_cap_usd": cost_cap,
+            "input_price_per_mtok": input_price,
+            "output_price_per_mtok": output_price,
+            "violation": violation,
+        },
+    }))
+}
+
 /// 路由：/usage/*（供主控并入 build_router）。
 pub fn usage_router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/usage", axum::routing::get(usage_model_summary))
         .route("/usage/summary", axum::routing::get(usage_summary))
         .route("/usage/records", axum::routing::get(usage_records))
         .route("/usage/report", axum::routing::get(usage_report))
@@ -618,4 +654,53 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+// ---------- R8 预算加额（§12：usage_topup 自 lib.rs 机械外移） ----------
+
+/// R8：用量预算加额（解除硬熔断；主控接线 Agent 4 usage::request_topup）。
+#[derive(serde::Deserialize)]
+pub(super) struct UsageTopupRequest {
+    /// 加额（美元）；不填则仅解除熔断。
+    amount: Option<f64>,
+}
+
+pub(super) async fn usage_topup(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<UsageTopupRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let amount = request.amount.unwrap_or(0.0);
+    if !amount.is_finite() || amount < 0.0 {
+        // R10：错误码表统一响应体（validation/invalid_input → 400）。
+        let code = owo_agent_server::error_codes::ErrorCode::from_code(
+            "validation/invalid_input/not_retryable",
+        )
+        .unwrap_or_else(|_| owo_agent_server::error_codes::ErrorCode {
+            domain: "validation".into(),
+            reason: "invalid_input".into(),
+            retryable: false,
+            http_status: 400,
+            retry_after_ms: None,
+        });
+        return Err(owo_agent_server::api_error_response(
+            &code,
+            format!("amount 非法：{amount}（需 ≥0）"),
+        ));
+    }
+    global().request_topup(UsageDimension::Session, amount);
+    owo_agent_server::logging::info(
+        "usage",
+        None,
+        &format!("预算加额 ${amount:.2}，硬熔断已解除"),
+    );
+    // 任务 2：mutation 领域失效——用量面板/预算状态随加额刷新（仅成功路径，单次发布）。
+    owo_agent_server::event_stream::hub()
+        .publish_invalidate(owo_agent_server::event_stream::InvalidateDomain::Usage);
+    Ok(Json(json!({
+        "ok": true,
+        "topup_usd": amount,
+        "hard_stopped": global().is_hard_stopped(),
+        "note": "会话维度预算已加额，熔断解除（见 /usage/summary）",
+        "workspace": state.workspace.to_string_lossy(),
+    })))
 }

@@ -292,7 +292,8 @@ impl FleetHub {
 }
 
 /// 进程级控制面运行态（生产：Agent 1 挂载 `fleet_api::router` 时初始化；幂等）。
-/// 测试用 [`FleetHub::new`] 独立构造，故本函数在未挂载前标记 dead_code。
+/// lib.rs build_router 与 goal_api 的 `fleet_node` 目标接线均使用本函数；
+/// `#[path]` 独立编译的 fleet_api_tests 目标内无 lib 接线，故保留 allow。
 #[allow(dead_code)]
 pub fn fleet_hub(data_root: &std::path::Path) -> Arc<FleetHub> {
     static HUB: OnceLock<Arc<FleetHub>> = OnceLock::new();
@@ -363,8 +364,9 @@ pub fn router_with_hub(hub: Arc<FleetHub>) -> Router {
         .with_state(hub)
 }
 
-/// 组装 fleet 路由（待主控在 build_router merge；data_root 用于控制面持久化目录）。
-/// 测试用 [`router_with_hub`]，故本函数在未挂载前标记 dead_code。
+/// 组装 fleet 路由（data_root 用于控制面持久化目录）。
+/// lib.rs build_router 已 `.merge(fleet_api::router(...))` 挂载；
+/// `#[path]` 独立编译的 fleet_api_tests 目标内无挂载方，故保留 allow。
 #[allow(dead_code)]
 pub fn router(state: Arc<owo_agent_server::AppState>) -> Router {
     router_with_hub(fleet_hub(&state.data_root))

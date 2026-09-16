@@ -1751,11 +1751,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
  "clap",
  "colored",
  "crossterm",
  "owo-agent-core",
  "owo-agent-server",
+ "owo-build-info",
  "ratatui",
  "reqwest",
  "rustyline",
@@ -1763,6 +1765,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
  "uuid",
  "windows-sys 0.59.0",
 ]
@@ -1818,8 +1821,10 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "http-body-util",
  "owo-agent-core",
  "owo-agent-protocol",
+ "owo-build-info",
  "reqwest",
  "serde",
  "serde_json",
@@ -1833,6 +1838,10 @@ dependencies = [
  "uuid",
  "zip",
 ]
+
+[[package]]
+name = "owo-build-info"
+version = "0.1.0"
 
 [[package]]
 name = "owo-sim"

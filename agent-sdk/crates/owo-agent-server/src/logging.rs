@@ -1,9 +1,10 @@
 // R11:logging 质量收尾完成。
 // R12:logging 复核完成（trace_id 贯穿/脱敏，无需改动）。
 //! 结构化日志与 trace_id（R8 + R9 + R10 文件日志/轮转）：JSON 单行日志 + 统一脱敏 + 请求贯穿 ID。
-//! R10:logging 完成，待主控接线（`init_file_logging` 可选落盘 + 大小轮转；
+//! R10:logging 已接线（§13 批次八：`init_file_logging` serve 启动落盘
+//! `logs/server.jsonl` + 8MB×5 轮转，优雅关闭 `close_file_logging` 配对；
 //! `set_current_trace_id` 请求入口设置/清除；emit 未显式传 trace_id 时自动继承
-//! 全局上下文；`audit_event` 供审计可观测面日志）。
+//! 全局上下文；`audit_event` 已由自动化触发与服务生命周期三站点消费）。
 //!
 //! - `emit`：分级（trace/debug/info/warn/error）单行 JSON（ts/level/target/trace_id/msg/fields），
 //!   同时写 stderr 与（可选）轮转文件。
@@ -16,10 +17,10 @@
 //!
 //! 本模块不引用 `crate::`/`super::`，可被测试以 `#[path] mod` 独立编译。
 
-// 主控收尾接线说明：lib 目标仅引用 TraceId/emit/Level；Redactor/safe_field/
-// sanitize_json 属“测试面符号”，由测试以 #[path] 独立编译使用。
-// 同 event_stream.rs 模块级 allow 做法。
-#![allow(dead_code)]
+// 主控接线现状（§13 批次八更新）：lib 目标引用 TraceId/emit/Level 及全部
+// R10 面（init/close_file_logging、audit_event、safe_field、sanitize_json、
+// Redactor）；无 logging 专用 #[path] 测试目标（历史注释"测试面符号"已失实，
+// 批次七纠偏、批次八接线消化）。Level::Trace/Debug 为预留诊断级别，保留 allow。
 
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -30,7 +31,11 @@ use std::sync::Mutex;
 /// 日志级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
+    /// 预留诊断级别（当前无调用方；详细诊断开关接线时启用，届时摘除 allow）。
+    #[allow(dead_code)]
     Trace,
+    /// 预留诊断级别（同上）。
+    #[allow(dead_code)]
     Debug,
     Info,
     Warn,
@@ -50,6 +55,8 @@ impl Level {
 }
 
 /// 统一脱敏器：凭据/消息内容默认不落详文。
+/// 已接线（§13 批次八）：经 safe_field/sanitize_json 于 audit_event 与
+/// emit 文件落盘路径消费。
 pub struct Redactor;
 
 impl Redactor {
@@ -178,7 +185,23 @@ pub fn emit(
     }
     let line = entry.to_string();
     eprintln!("{}", line);
-    write_file_log(&line);
+    // R10 文件日志（§13 批次八接线）：落盘前对用户供给字段统一脱敏。
+    // 信任边界：ts/level/target/trace_id 为结构字段、msg 契约为第一方静态描述，
+    // 均保持原样；动态内容必须经 fields 传递（按字段名走 Redactor 策略，
+    // 未知字段名保守哈希）。stderr 保持完整原文供现场诊断。
+    let field_map: serde_json::Map<String, Value> = fields
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), value.clone()))
+        .collect();
+    let mut wrapped = json!({ "fields": field_map });
+    sanitize_json(&mut wrapped);
+    let mut file_entry = entry;
+    if let Some(map) = wrapped.get_mut("fields").and_then(|v| v.as_object_mut()) {
+        for (name, value) in map {
+            file_entry[name] = value.clone();
+        }
+    }
+    write_file_log(&file_entry.to_string());
 }
 
 // ==================== R10：文件日志与轮转 ====================
@@ -197,6 +220,7 @@ static FILE_LOG: Mutex<Option<FileLog>> = Mutex::new(None);
 /// 初始化文件日志（R10）：追加写入 `path`，达到 `max_bytes` 时轮转
 /// （`.1/.2/…` 移位），保留 `backups` 份（上限 9）。失败返回 Err，不 panic；
 /// 未初始化时 emit 仅落 stderr。
+/// 已接线（§13 批次八）：cli serve 启动时落盘 `logs/server.jsonl`（8MB×5 轮转）。
 pub fn init_file_logging(path: &Path, max_bytes: u64, backups: u32) -> std::io::Result<()> {
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -214,6 +238,7 @@ pub fn init_file_logging(path: &Path, max_bytes: u64, backups: u32) -> std::io::
 }
 
 /// 关闭文件日志（优雅关闭时调用）。
+/// 已接线（§13 批次八）：cli serve 关闭序列与 init 配对调用。
 pub fn close_file_logging() {
     *FILE_LOG.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
@@ -275,6 +300,7 @@ fn rotate(file_log: &mut FileLog) {
 
 /// 审计事件便捷（R10）：结构化 + trace_id 贯穿 + 详情强制脱敏。
 /// 注：HMAC 审计链在 core `audit_chain`；此处为可观测面审计日志事件。
+/// 已接线（§13 批次八）：自动化触发、服务启动/关闭生命周期三站点调用。
 pub fn audit_event(action: &str, trace_id: Option<&str>, detail: &str) {
     emit(
         Level::Info,
@@ -304,11 +330,13 @@ pub fn error(target: &str, trace_id: Option<&str>, message: &str, fields: &[(&st
 }
 
 /// 把字段值按脱敏策略转换（供调用方落日志前使用）。
+/// 已接线（§13 批次八）：audit_event 详情字段经由本函数脱敏。
 pub fn safe_field(name: &str, value: &str) -> Value {
     json!(Redactor::redact_field(name, value))
 }
 
 /// 把任意 JSON 值中的敏感字段原地脱敏（遍历一层，递归两层）。
+/// 已接线（§13 批次八）：emit 文件落盘路径对用户供给字段包装脱敏。
 pub fn sanitize_json(value: &mut Value) {
     fn walk(value: &mut Value, depth: usize) {
         if depth > 2 {

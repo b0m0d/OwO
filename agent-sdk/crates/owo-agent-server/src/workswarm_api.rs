@@ -1100,6 +1100,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/projects/{id}/workspace/tree",
             get(project_workspace::get_workspace_tree),
         )
+        // §8.1 启动器：团队创建前预览候选工作区目录树（写入路径多选数据源）。
+        .route(
+            "/workspace/tree",
+            get(project_workspace::preview_workspace_tree),
+        )
         .route(
             "/projects/{id}/workspace/git-status",
             get(project_workspace::get_workspace_git_status),

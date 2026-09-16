@@ -64,6 +64,8 @@ fn artifact(
 }
 
 #[derive(Clone, Copy)]
+// §13 批次一复核：此 allow 非过期——枚举变体未全部被构造（映射不构成构造），
+// 移除会触发 dead_code；保留并在此记录复核结论（清单报告该条需修正）。
 #[allow(dead_code)]
 enum ReviewStateForTest {
     Draft,

@@ -335,6 +335,8 @@ async fn install_remote(
     .await
     .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     audit("market/install-remote", format!("{} 远端安装完成", body.id));
+    // §3.2：远端插件安装成功后发布 plugins 域失效。
+    super::event_stream::hub().publish_invalidate(super::event_stream::InvalidateDomain::Plugins);
     ok(result)
 }
 async fn versions(
@@ -409,6 +411,8 @@ async fn install(
         "market/install",
         format!("{} v{} → {:?}", report.id, report.version, report.state),
     );
+    // §3.2：插件安装成功后发布 plugins 域失效。
+    super::event_stream::hub().publish_invalidate(super::event_stream::InvalidateDomain::Plugins);
     ok(json!({ "report": report }))
 }
 
@@ -435,6 +439,8 @@ async fn update(
             body.id, report.version, report.state
         ),
     );
+    // §3.2：插件更新成功后发布 plugins 域失效。
+    super::event_stream::hub().publish_invalidate(super::event_stream::InvalidateDomain::Plugins);
     ok(json!({ "report": report }))
 }
 
@@ -457,6 +463,8 @@ async fn uninstall(
         "market/uninstall",
         format!("{} 移除 {} 个文件", body.id, removed.len()),
     );
+    // §3.2：插件卸载成功后发布 plugins 域失效（404 路径不发布）。
+    super::event_stream::hub().publish_invalidate(super::event_stream::InvalidateDomain::Plugins);
     ok(json!({ "ok": true, "removed": removed, "audit": report }))
 }
 

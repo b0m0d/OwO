@@ -14,6 +14,12 @@ mod plugin_market_api;
 #[path = "../src/market_client.rs"]
 mod market_client;
 
+// §3.2：plugin_market_api 独立编译时经 `super::event_stream` 发布领域失效；
+// 此 shim 把 hub 转发到 lib 的真实单例（与运行时同一进程内实例）。
+mod event_stream {
+    pub use owo_agent_server::event_stream::{hub, InvalidateDomain};
+}
+
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;

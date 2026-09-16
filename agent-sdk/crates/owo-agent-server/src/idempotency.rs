@@ -9,9 +9,9 @@
 //! - `writes()`/`hits()` 计数器暴露实际执行/命中次数，供可观测性度量去重效果。
 //! - 本模块不引用 `crate::`/`super::`，可被测试以 `#[path] mod` 独立编译。
 
-// 主控收尾接线说明：lib 目标当前仅登记模块（无路由引用），全部符号由
-// idempotency_tests 以 #[path] 独立编译使用；与 team_api.rs 同款模块级
-// allow(dead_code)（后续接入幂等端点后移除）。
+// 主控收尾接线说明：lib 目标当前仅登记模块（无路由引用），符号在 lib 内死；
+// idempotency_tests 以 #[path] 独立编译并全部使用——allow 为 #[path] 双目标
+// 差异豁免（同 auth_token/rate_limit 模式），幂等端点接入后随测试目标一并复核。
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};

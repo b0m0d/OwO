@@ -11,9 +11,9 @@
 //! 本模块不引用 `crate::`/`super::`（AppState 全限定），可被测试以
 //! `#[path] mod` 独立编译。
 
-// 与 team_api.rs 同款模块级 allow(dead_code)：lib 目标经 build_router 使用
-// require_auth/bootstrap；#[path] 独立编译的测试目标内中间件未被调用，
-// 避免 clippy -D warnings 在测试目标误报。
+// §13 第四批复核（clippy 全目标实测）：lib 目标内全部符号可达（零死亡，
+// expect 不成立），#[path] 测试目标内中间件等未被测试调用——#[path] 双目标
+// 差异场景，allow 为唯一正确形态（同 event_stream.rs）。
 #![allow(dead_code)]
 
 use axum::extract::State;
@@ -102,16 +102,6 @@ pub fn instance_gate_allows(expected: Option<&str>, provided: Option<&HeaderValu
         None => true,
         Some(instance) => verify_desktop_instance(provided, instance),
     }
-}
-
-/// 仅列出实际存在的只读 SSE 路由；不能用“任意 /events 后缀”放大豁免面。
-/// 带鉴权的 fetch-stream 客户端仍会携带 Bearer，公开 EventSource 仅用于兼容旧客户端。
-pub fn is_sse_path(path: &str) -> bool {
-    path == "/events/stream"
-        || (path.starts_with("/cloud/tasks/") && path.ends_with("/events"))
-        || (path.starts_with("/workflow/run/") && path.ends_with("/events"))
-        || (path.starts_with("/teams/") && path.ends_with("/events"))
-        || (path.starts_with("/fleet/tasks/") && path.ends_with("/events"))
 }
 
 /// 本地 API bearer token。
@@ -250,14 +240,16 @@ pub fn apply_user_only_acl(_path: &Path) -> Result<(), String> {
 }
 
 /// 鉴权中间件：无 token 的 API 请求 → 401。
-/// 豁免：公开端点、SSE 资源型路径（`/…/events`，EventSource 无法带自定义头）。
+/// 豁免：仅公开端点。事件流（`/events/stream` 与资源型 `/…/events`）不再匿名
+/// 放行——前端统一使用带 `Authorization` 头的 fetch-stream 客户端订阅；
+/// 匿名/错误 token 一律 401（§3.1：内部运行事件不得暴露给本机匿名进程）。
 pub async fn require_auth(
     State(state): State<Arc<AppState>>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_string();
-    if is_public_path(&path) || is_sse_path(&path) {
+    if is_public_path(&path) {
         return next.run(request).await;
     }
     let authorized = {

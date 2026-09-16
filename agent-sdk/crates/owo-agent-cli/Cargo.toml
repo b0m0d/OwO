@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 owo-agent-core.workspace = true
 owo-agent-server.workspace = true
+# §6.1.2：共享构建身份（编译期烧录的 git commit/dirty/epoch），替代本 crate 的 build.rs。
+owo-build-info.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -17,9 +19,14 @@ tracing-subscriber.workspace = true
 rustyline = "14"
 colored = "2"
 uuid.workspace = true
+chrono.workspace = true
 reqwest.workspace = true
 ratatui = "0.29"
 crossterm = "0.28"
+
+# §5.3 TUI 快照测试：宽字符续格识别（unicode-width 与 ratatui 同源，避免宽度口径漂移）。
+[dev-dependencies]
+unicode-width = "0.2"
 
 [[bin]]
 name = "owo-agent"

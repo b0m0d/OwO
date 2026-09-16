@@ -11,10 +11,11 @@
 //! 安全：导入包先经脱敏评审（凭据/个人数据/危险动作关键词），高危立即 blocked；
 //! 包完整性由版本历史哈希 + FlowSkillPackage::validate 双重把关。
 //!
-//! 注：router 由主控合并进 build_router 前，模块内部结构暂未被 lib 引用，
-//! 故模块级 allow(dead_code)（接线后自动消除，保留无害）。
+//! 注：§13 第四批复核（clippy 全目标实测）——router 已由 lib.rs build_router
+//! merge，lib 内仍有部分死符号、#[path] 测试目标亦然，expect 在两目标均成立：
+//! 接线/使用完成后 expect 将失效并告警，-D warnings 下强制清理本属性。
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;

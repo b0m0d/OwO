@@ -80,7 +80,6 @@ fn with_runtime<T>(f: impl FnOnce(&RuntimeMetrics) -> T) -> T {
 }
 
 /// 记录一次工具调度耗时（ms）。超上限时丢弃最旧样本。
-#[allow(dead_code)] // 仅供接线方与 observability_tests 以 #[path] 独立编译调用；lib 目标内无引用。
 pub fn record_tool_duration_ms(duration_ms: u64) {
     with_runtime(|metrics| {
         let mut samples = metrics
@@ -95,7 +94,7 @@ pub fn record_tool_duration_ms(duration_ms: u64) {
 }
 
 /// 记录 SSE 连接增减（open=+1 / close=-1）。
-#[allow(dead_code)] // 仅供接线方与 observability_tests 以 #[path] 独立编译调用；lib 目标内无引用。
+#[allow(dead_code)] // 生产数据面已由 R7 MetricsSample 桥（lib.rs set_metrics_observer → ingest_metrics_sample）覆盖，直接调用会双重计数；保留仅供 observability_tests 以 #[path] 独立编译播种状态。
 pub fn record_sse_connection(delta: i64) {
     with_runtime(|metrics| {
         if delta > 0 {
@@ -116,13 +115,13 @@ pub fn record_sse_connection(delta: i64) {
 }
 
 /// 记录订阅队列深度（当前值快照）。
-#[allow(dead_code)] // 仅供接线方与 observability_tests 以 #[path] 独立编译调用；lib 目标内无引用。
+#[allow(dead_code)] // 生产数据面已由 R7 MetricsSample 桥覆盖（queue_depth 随样本快照更新），直接调用会双重计数；保留仅供 observability_tests 以 #[path] 独立编译播种状态。
 pub fn record_queue_depth(depth: u64) {
     with_runtime(|metrics| metrics.queue_depth.store(depth, Ordering::Relaxed));
 }
 
 /// 记录事件流发布/丢弃计数。
-#[allow(dead_code)] // 仅供接线方与 observability_tests 以 #[path] 独立编译调用；lib 目标内无引用。
+#[allow(dead_code)] // 生产数据面已由 R7 MetricsSample 桥覆盖（published/dropped 随样本累加），直接调用会双重计数；保留仅供 observability_tests 以 #[path] 独立编译播种状态。
 pub fn record_events(published: u64, dropped: u64) {
     with_runtime(|metrics| {
         metrics
@@ -132,19 +131,10 @@ pub fn record_events(published: u64, dropped: u64) {
     });
 }
 
-/// 记录慢消费者（lagged）断开次数。
-#[allow(dead_code)] // 仅供接线方与 observability_tests 以 #[path] 独立编译调用；lib 目标内无引用。
-pub fn record_event_lagged(count: u64) {
-    with_runtime(|metrics| {
-        metrics.sse_lagged.fetch_add(count, Ordering::Relaxed);
-    });
-}
-
 /// 消费 event_stream 指标钩子样本（R7 桥接）：
 /// 解析 `event_stream::MetricsSample::to_json()` 快照并更新运行时注册表。
 /// 与 event_stream 解耦（双方互不引用类型），主控接线：`event_stream::set_metrics_observer(closure)`，
 /// closure 内 `observability_api::ingest_metrics_sample(&sample.to_json())`。
-#[allow(dead_code)] // 仅供接线方与 observability_tests 以 #[path] 独立编译调用；lib 目标内无引用。
 pub fn ingest_metrics_sample(sample: &Value) {
     with_runtime(|metrics| {
         if let Some(v) = sample.get("conn_opened").and_then(|v| v.as_u64()) {
@@ -353,7 +343,6 @@ pub type SloReportProbe = Arc<dyn Fn() -> Value + Send + Sync>;
 static SLO_PROBE: Mutex<Option<SloReportProbe>> = Mutex::new(None);
 
 /// 注册 SLO 报告探针（主控接线：`register_slo_report_probe(Arc::new(slo::report_global))`）。
-#[allow(dead_code)] // 仅供主控接线与 observability_tests 以 #[path] 独立编译调用。
 pub fn register_slo_report_probe(probe: SloReportProbe) {
     let mut slot = SLO_PROBE.lock().unwrap_or_else(|e| e.into_inner());
     *slot = Some(probe);
@@ -694,7 +683,6 @@ pub type UsageProbe = Arc<dyn Fn() -> Value + Send + Sync>;
 static USAGE_PROBE: Mutex<Option<UsageProbe>> = Mutex::new(None);
 
 /// 注册用量探针（主控接线：`register_usage_probe(Arc::new(|| usage::global().summary()))`）。
-#[allow(dead_code)] // 仅供主控接线与 observability_tests 以 #[path] 独立编译调用。
 pub fn register_usage_probe(probe: UsageProbe) {
     let mut slot = USAGE_PROBE.lock().unwrap_or_else(|e| e.into_inner());
     *slot = Some(probe);
@@ -719,8 +707,11 @@ static TELEMETRY_COUNTERS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None
 /// 错误码分布：code → 次数（无请求内容）。
 static TELEMETRY_ERROR_CODES: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 
-/// 设置遥测开关（主控接线：CLI/设置面板联动；默认 false）。
-#[allow(dead_code)] // 仅供主控接线与 observability_tests 以 #[path] 独立编译调用。
+/// 设置遥测开关（已接线：cli serve 启动时经 lib `apply_telemetry_setting`
+/// 应用 settings.json 的 `telemetry_enabled`；默认 false）。
+/// #[path] observability_tests 目标内不调用该函数——双目标差异场景保留 allow
+/// （机制结论：expect 按单目标判定，必有未满足侧）。
+#[allow(dead_code)]
 pub fn set_telemetry_enabled(enabled: bool) {
     TELEMETRY_ENABLED.store(enabled, Ordering::Relaxed);
 }
@@ -729,8 +720,9 @@ pub fn telemetry_enabled() -> bool {
     TELEMETRY_ENABLED.load(Ordering::Relaxed)
 }
 
-/// 记录功能计数（接线方在关键路径调用；默认关时零开销）。
-#[allow(dead_code)] // 仅供接线方与 observability_tests 以 #[path] 独立编译调用。
+/// 记录功能计数（已接线：turn_api 回合入口打 "turn"；默认关时零开销）。
+/// #[path] observability_tests 目标内不调用——双目标差异场景保留 allow。
+#[allow(dead_code)]
 pub fn record_telemetry_counter(name: &str, delta: u64) {
     if !telemetry_enabled() {
         return;
@@ -740,8 +732,10 @@ pub fn record_telemetry_counter(name: &str, delta: u64) {
     *map.entry(name.to_string()).or_default() += delta;
 }
 
-/// 记录错误码分布（接线方在错误响应时调用；默认关时零开销）。
-#[allow(dead_code)] // 仅供接线方与 observability_tests 以 #[path] 独立编译调用。
+/// 记录错误码分布（已接线：lib `api_error_response` 错误响应统一出口打点；
+/// 默认关时零开销）。#[path] observability_tests 目标内不调用——双目标
+/// 差异场景保留 allow。
+#[allow(dead_code)]
 pub fn record_telemetry_error(code: &str) {
     if !telemetry_enabled() {
         return;
@@ -815,17 +809,11 @@ pub type SloAlertsProbe = Arc<dyn Fn() -> Value + Send + Sync>;
 static SLO_ALERTS_PROBE: Mutex<Option<SloAlertsProbe>> = Mutex::new(None);
 
 /// 注册 SLO 告警探针（主控接线：`register_slo_alerts_probe(Arc::new(slo::alerts_json_closure))`）。
-#[allow(dead_code)] // 仅供主控接线与 observability_tests 以 #[path] 独立编译调用。
+/// lib.rs 接线函数已调用；observability_tests 目标内无 lib 接线亦无测试调用，故保留 allow。
+#[allow(dead_code)]
 pub fn register_slo_alerts_probe(probe: SloAlertsProbe) {
     let mut slot = SLO_ALERTS_PROBE.lock().unwrap_or_else(|e| e.into_inner());
     *slot = Some(probe);
-}
-
-/// 仅供测试：清空 SLO 告警探针。
-#[allow(dead_code)] // 仅供 observability_tests 以 #[path] 独立编译调用；lib 目标内无引用。
-pub fn reset_slo_alerts_probe_for_test() {
-    let mut slot = SLO_ALERTS_PROBE.lock().unwrap_or_else(|e| e.into_inner());
-    *slot = None;
 }
 
 /// SLO 周期报告探针：`days` → 周期聚合报告 JSON（数据面在 slo.rs）。
@@ -834,17 +822,11 @@ pub type SloPeriodProbe = Arc<dyn Fn(u64) -> Value + Send + Sync>;
 static SLO_PERIOD_PROBE: Mutex<Option<SloPeriodProbe>> = Mutex::new(None);
 
 /// 注册 SLO 周期报告探针（主控接线：`register_slo_period_probe(Arc::new(slo::report_period_global))`）。
-#[allow(dead_code)] // 仅供主控接线与 observability_tests 以 #[path] 独立编译调用。
+/// lib.rs 接线函数已调用；observability_tests 目标内无 lib 接线亦无测试调用，故保留 allow。
+#[allow(dead_code)]
 pub fn register_slo_period_probe(probe: SloPeriodProbe) {
     let mut slot = SLO_PERIOD_PROBE.lock().unwrap_or_else(|e| e.into_inner());
     *slot = Some(probe);
-}
-
-/// 仅供测试：清空 SLO 周期报告探针。
-#[allow(dead_code)] // 仅供 observability_tests 以 #[path] 独立编译调用；lib 目标内无引用。
-pub fn reset_slo_period_probe_for_test() {
-    let mut slot = SLO_PERIOD_PROBE.lock().unwrap_or_else(|e| e.into_inner());
-    *slot = None;
 }
 
 #[derive(Deserialize)]

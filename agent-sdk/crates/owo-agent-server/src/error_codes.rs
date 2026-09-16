@@ -9,9 +9,11 @@
 //! [`ErrorCode::lookup`] 按（域, 原因）查已知注册表。
 //! 本模块不引用 `crate::`/`super::`，可被测试以 `#[path] mod` 独立编译。
 
-// 主控收尾接线说明：lib 目标当前仅登记模块（无路由引用），全部符号由
-// error_codes_tests 以 #[path] 独立编译使用；与 team_api.rs 同款模块级
-// allow(dead_code)（后续接入错误面后移除）。
+// 主控接线现状（§13 批次七纠偏）：lib 经 api_error_response（错误响应统一出口）
+// 与各域 handler 实际引用本模块类型与部分错误码；blanket 豁免的是 lib 内尚未被
+// 任何路由构造的错误码常量（声明面全量保留供契约与文档）。error_codes_tests
+// 以 #[path] 独立编译并全量使用——双目标差异场景保留 allow，错误面全量接入后
+// 复核收窄为 item 级（同 logging.rs 批次四模式）。
 #![allow(dead_code)]
 
 use serde_json::{json, Value};

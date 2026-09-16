@@ -17,9 +17,11 @@
 //! - 本模块不引用 `crate::`/`super::`，可被测试以 `#[path] mod` 独立编译；
 //!   AppState 写全限定 `owo_agent_server::AppState`。
 
-// 主控收尾接线说明：lib 目标仅引用 router/hub；其余符号由
-// event_stream_tests 以 #[path] 独立编译使用，lib 内属“测试面符号”。
-// 与 team_api.rs 同款模块级 allow(dead_code)（接线后保留无害）。
+// 主控收尾接线说明：本模块为 #[path] 双目标差异场景——lib 目标经 router/hub
+// 全链路可达（无 dead_code 触发），event_stream_tests 目标内部分符号（KIND_*、
+// publish_alert、InvalidateDomain 等）未被测试使用。allow 在 lib 内零触发、
+// 仅豁免测试目标局部死亡，为双目标差异的标准解（§13 第四批 clippy 实测确认，
+// expect 在此不适用：任一目标必有未满足期望）。
 #![allow(dead_code)]
 
 use axum::extract::Query;
@@ -50,6 +52,66 @@ pub const KIND_CIRCUIT: &str = "circuit";
 pub const KIND_ALERT: &str = "alert";
 pub const KIND_PROGRESS: &str = "progress";
 pub const KIND_HEARTBEAT: &str = "heartbeat";
+/// §12-15：领域失效事件（可合并，但语义上携带域版本号；前端按域刷新一次）。
+/// data = {"domain": "<域>", "version": <u64>}。写路径发布，前端不再按域轮询。
+pub const KIND_INVALIDATE: &str = "invalidate";
+
+/// §3.2：共享领域失效枚举——服务端与前端共同维护的唯一领域名单
+/// （前端 `INVALIDATE_HANDLERS` 必须逐一消费这里的全部领域，
+/// 路由-事件矩阵测试防止新增 mutation 漏接事件）。禁止自由字符串。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum InvalidateDomain {
+    Automations,
+    Whitelist,
+    Mcp,
+    Settings,
+    Packages,
+    Learn,
+    Plugins,
+    Computer,
+    Traces,
+    Projects,
+    Memory,
+    Skills,
+    Sessions,
+    Usage,
+}
+
+impl InvalidateDomain {
+    /// 线上契约字符串（SSE data 中的 `domain` 字段值；前后端一致）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automations => "automations",
+            Self::Whitelist => "whitelist",
+            Self::Mcp => "mcp",
+            Self::Settings => "settings",
+            Self::Packages => "packages",
+            Self::Learn => "learn",
+            Self::Plugins => "plugins",
+            Self::Computer => "computer",
+            Self::Traces => "traces",
+            Self::Projects => "projects",
+            Self::Memory => "memory",
+            Self::Skills => "skills",
+            Self::Sessions => "sessions",
+            Self::Usage => "usage",
+        }
+    }
+
+    /// 全部领域（矩阵测试/前端对账用）。
+    pub const ALL: &'static [InvalidateDomain] = &[
+        Self::Automations,
+        Self::Whitelist,
+        Self::Mcp,
+        Self::Settings,
+        Self::Packages,
+        Self::Learn,
+        Self::Plugins,
+        Self::Computer,
+        Self::Traces,
+        Self::Projects,
+    ];
+}
 
 /// 流事件：seq 全局单调；critical 表示审批/熔断等不可丢事件。
 /// R8：`trace_id` 贯穿（可选；发布方以 `publish_with_trace` 传入，SSE 帧内透传）。
@@ -214,6 +276,8 @@ pub struct EventStreamHub {
     dropped_critical_total: AtomicU64,
     connections_opened_total: AtomicU64,
     lagged_total: AtomicU64,
+    /// §12-15：域 → 最新失效版本号（前端 `?version=` 可只刷比自己新的域）。
+    domain_versions: Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl Default for EventStreamHub {
@@ -233,6 +297,7 @@ impl EventStreamHub {
             dropped_critical_total: AtomicU64::new(0),
             connections_opened_total: AtomicU64::new(0),
             lagged_total: AtomicU64::new(0),
+            domain_versions: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -303,6 +368,36 @@ impl EventStreamHub {
         )
     }
 
+    /// §12-15：发布领域失效事件（域版本号单调递增，data 携带 domain/version）。
+    /// 前端接收后只对该域刷新一次（对比自己缓存的 version），替代按域轮询。
+    /// 领域必须是共享 `InvalidateDomain` 枚举（§3.2：禁止自由字符串）。
+    pub fn publish_invalidate(&self, domain: InvalidateDomain) -> u64 {
+        let key = domain.as_str();
+        let version = {
+            let mut versions = self
+                .domain_versions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let next = versions.get(key).copied().unwrap_or(0) + 1;
+            versions.insert(key.to_string(), next);
+            next
+        };
+        self.publish(
+            KIND_INVALIDATE,
+            false,
+            json!({ "domain": key, "version": version }).to_string(),
+        )
+    }
+
+    /// §12-15：查询某域当前失效版本号（前端续传/对账用）。
+    pub fn domain_version(&self, domain: &str) -> u64 {
+        let versions = self
+            .domain_versions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        versions.get(domain).copied().unwrap_or(0)
+    }
+
     /// 订阅：返回订阅端 + 订阅时刻之前已发布事件的快照（供初始重放）。
     pub fn subscribe(&self) -> (Arc<Subscription>, Vec<StreamEvent>) {
         self.subscribe_after(0)
@@ -314,7 +409,8 @@ impl EventStreamHub {
     }
 
     /// 带自定义队列容量的订阅（背压测试用小容量；生产默认 1024）。
-    #[allow(dead_code)] // 仅供 event_stream_tests 以 #[path] 独立编译使用；lib 目标内无引用。
+    /// lib 经 subscribe_after（Last-Event-ID 续传）真实调用；event_stream_tests
+    /// 以 #[path] 独立编译亦调用——双目标均活，allow 已摘除（§13 批次七）。
     pub fn subscribe_with_capacity(
         &self,
         capacity: usize,
@@ -538,10 +634,16 @@ fn event_json(event: &StreamEvent) -> String {
     frame.to_string()
 }
 
-/// 把事件编码为完整 SSE 帧文本（`event: <kind>\ndata: <json>\n\n`）。
+/// 把事件编码为完整 SSE 帧文本（`event: <kind>\nid: <seq>\ndata: <json>\n\n`）。
+/// `id:` 行是客户端 Last-Event-ID 续传的依据（§3.1：断线重连带回该值）。
 #[allow(dead_code)] // 仅供 event_stream_tests 以 #[path] 独立编译使用。
 pub fn sse_frame_text(event: &StreamEvent) -> String {
-    format!("event: {}\ndata: {}\n\n", event.kind, event_json(event))
+    format!(
+        "event: {}\nid: {}\ndata: {}\n\n",
+        event.kind,
+        event.seq,
+        event_json(event)
+    )
 }
 
 /// SSE 端点查询参数：`?last_event_id=`。
@@ -550,16 +652,35 @@ struct StreamQuery {
     last_event_id: Option<u64>,
 }
 
+/// 解析续传起点：优先 `Last-Event-ID` 请求头（fetch-stream 客户端），
+/// 回退 `?last_event_id=` 查询参数（调试/脚本）。两者都缺省 → 从头重放。
+fn resolve_last_event_id(headers: &axum::http::HeaderMap, query: &StreamQuery) -> u64 {
+    if let Some(value) = headers.get("last-event-id") {
+        if let Ok(text) = value.to_str() {
+            if let Ok(parsed) = text.trim().parse::<u64>() {
+                return parsed;
+            }
+        }
+    }
+    query.last_event_id.unwrap_or(0)
+}
+
 /// SSE 端点：`GET /events/stream`（供主控并入 build_router）。
 /// 重放 `seq > last_event_id` 历史 → 实时流 → 空闲发心跳注释帧；
-/// 慢消费者（lagged）直接断开。
+/// 慢消费者（lagged）直接断开。需 Bearer（require_auth 中间件统一校验）。
 async fn events_stream(
     Query(query): Query<StreamQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Sse<UnboundedReceiverStream<Result<Event, Infallible>>> {
-    let (subscription, replay) = hub().subscribe_after(query.last_event_id.unwrap_or(0));
+    let last_event_id = resolve_last_event_id(&headers, &query);
+    let (subscription, replay) = hub().subscribe_after(last_event_id);
     let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
 
-    tokio::spawn(async move {
+    // 帧泵运行在专用 std 线程：recv_blocking 是 std Condvar 阻塞等待，
+    // 之前放在 tokio::spawn 里会占死 worker 线程（§16.1"移除阻塞接收器"——
+    // 运行时冒烟发现：live /events/stream 连心跳都收不到、订阅者永不关闭、
+    // 路由级续传测试挂起，同一根因）。unbounded tx 从 std 线程发送安全。
+    std::thread::spawn(move || {
         for event in replay {
             if send_frame(&tx, &event).is_err() {
                 hub().close(&subscription);
@@ -596,6 +717,7 @@ fn send_frame(
 ) -> Result<(), ()> {
     tx.send(Ok(Event::default()
         .event(&event.kind)
+        .id(event.seq.to_string())
         .data(event_json(event))))
         .map_err(|_| ())
 }

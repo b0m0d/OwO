@@ -257,8 +257,118 @@ async fn sse_frame_text_has_event_and_data_lines() {
     let (_, replay) = hub.subscribe();
     let frame = event_stream::sse_frame_text(&replay[0]);
     assert!(frame.starts_with("event: approval\n"), "帧格式：{frame}");
+    assert!(
+        frame.contains("\nid: 1\n"),
+        "帧必须含 id 行（Last-Event-ID 续传依据）：{frame}"
+    );
     assert!(frame.contains("\ndata: "), "帧格式：{frame}");
     assert!(frame.contains("\"seq\":1"), "帧含单调 seq：{frame}");
+}
+
+// ---------- R7 Wave 2：指标钩子（MetricsSample 观察者） ----------
+
+// ---------- §12-15/§3.2：领域失效事件（域版本 + 前端按域刷新一次） ----------
+
+#[tokio::test]
+async fn invalidate_publishes_domain_version_frame() {
+    let _guard = METRICS_TEST_LOCK.lock().await;
+    let hub = EventStreamHub::new();
+    let seq = hub.publish_invalidate(event_stream::InvalidateDomain::Automations);
+    assert_eq!(seq, 1, "首失效事件 seq=1");
+    let (_, replay) = hub.subscribe();
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].kind, event_stream::KIND_INVALIDATE);
+    let payload: serde_json::Value = serde_json::from_str(&replay[0].data).unwrap();
+    assert_eq!(payload["domain"], serde_json::json!("automations"));
+    assert_eq!(payload["version"], serde_json::json!(1));
+    assert!(
+        !replay[0].critical,
+        "失效事件可合并（断线重建时按版本对账）"
+    );
+}
+
+#[tokio::test]
+async fn invalidate_versions_increment_per_domain() {
+    let _guard = METRICS_TEST_LOCK.lock().await;
+    let hub = EventStreamHub::new();
+    hub.publish_invalidate(event_stream::InvalidateDomain::Automations);
+    hub.publish_invalidate(event_stream::InvalidateDomain::Automations);
+    hub.publish_invalidate(event_stream::InvalidateDomain::Whitelist);
+    hub.publish_invalidate(event_stream::InvalidateDomain::Automations);
+    assert_eq!(hub.domain_version("automations"), 3, "同域版本单调递增");
+    assert_eq!(hub.domain_version("whitelist"), 1, "不同域独立计数");
+    assert_eq!(hub.domain_version("unknown"), 0, "未发布域版本为 0");
+    // 事件顺序按 seq 单调（前端依赖）。
+    let (_, replay) = hub.subscribe();
+    let seqs: Vec<u64> = replay.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![1, 2, 3, 4]);
+    let versions: Vec<serde_json::Value> = replay
+        .iter()
+        .filter(|e| e.kind == event_stream::KIND_INVALIDATE)
+        .map(|e| serde_json::from_str::<serde_json::Value>(&e.data).unwrap()["version"].clone())
+        .collect();
+    assert_eq!(versions.len(), 4, "全部 4 次发布均为失效事件");
+    assert_eq!(
+        versions[3],
+        serde_json::json!(3),
+        "automations 最后一次版本=3"
+    );
+}
+
+/// §3.2：枚举契约字符串全矩阵——每个领域的 as_str() 与前端 `INVALIDATE_HANDLERS`
+/// 的键一一对应；`ALL` 完整覆盖 10 个领域，防止新增领域漏登记。
+#[test]
+fn invalidate_domain_enum_covers_all_domains_with_contract_strings() {
+    use event_stream::InvalidateDomain;
+    assert_eq!(
+        InvalidateDomain::ALL.len(),
+        10,
+        "领域数量变化时必须同步前端 INVALIDATE_HANDLERS 与矩阵测试"
+    );
+    let expected: &[(&InvalidateDomain, &str)] = &[
+        (&InvalidateDomain::Automations, "automations"),
+        (&InvalidateDomain::Whitelist, "whitelist"),
+        (&InvalidateDomain::Mcp, "mcp"),
+        (&InvalidateDomain::Settings, "settings"),
+        (&InvalidateDomain::Packages, "packages"),
+        (&InvalidateDomain::Learn, "learn"),
+        (&InvalidateDomain::Plugins, "plugins"),
+        (&InvalidateDomain::Computer, "computer"),
+        (&InvalidateDomain::Traces, "traces"),
+        (&InvalidateDomain::Projects, "projects"),
+    ];
+    for (domain, text) in expected {
+        assert_eq!(domain.as_str(), *text, "契约字符串漂移：{text}");
+    }
+    // ALL 必须与枚举成员一一对应（无重复、无遗漏）。
+    let mut seen: Vec<&str> = InvalidateDomain::ALL.iter().map(|d| d.as_str()).collect();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 10, "ALL 存在重复领域");
+}
+
+#[tokio::test]
+async fn invalidate_survives_replay_window() {
+    let _guard = METRICS_TEST_LOCK.lock().await;
+    let hub = EventStreamHub::new();
+    for i in 0..(event_stream::HISTORY_CAPACITY + 10) {
+        let _ = i;
+        hub.publish_invalidate(event_stream::InvalidateDomain::Traces);
+    }
+    // 订阅后重放窗口内应含最新失效事件，且 Last-Event-ID 续传不丢域版本。
+    let (_, replay) = hub.subscribe();
+    let last = replay.last().unwrap();
+    assert_eq!(last.kind, event_stream::KIND_INVALIDATE);
+    let last_seq = last.seq;
+    let version_before = hub.domain_version("traces");
+    let (resumed, replay2) = hub.subscribe_after(last_seq - 1);
+    assert!(!replay2.is_empty(), "续传窗口应有事件");
+    let version_after = hub.domain_version("traces");
+    assert_eq!(
+        version_before, version_after,
+        "域版本由 hub 持有，不受重放影响"
+    );
+    let _ = resumed;
 }
 
 // ---------- R7 Wave 2：指标钩子（MetricsSample 观察者） ----------

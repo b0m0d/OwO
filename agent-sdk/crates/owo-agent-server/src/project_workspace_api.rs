@@ -4,6 +4,7 @@
 //! - `PUT  /projects/{id}/workspace`：绑定/更新项目工作区（root 只读默认开）；
 //! - `GET  /projects/{id}/workspace`：读取绑定；
 //! - `GET  /projects/{id}/workspace/tree`：绑定目录树（深度受限，不跟随符号链接）；
+//! - `GET  /workspace/tree?root=&depth=`：预绑定目录树预览（§8.1 启动器多选数据源）；
 //! - `GET  /projects/{id}/workspace/git-status`：绑定目录的 `git status --porcelain`；
 //! - `GET  /projects/{id}/workspace/changes`：Worker 代码变更追踪（七期 · 二路：
 //!   变更文件 + diff 摘要 + 逐步骤记录 + 白名单越界原因）。
@@ -16,7 +17,7 @@
 //! - 只读绑定强制 `Policy::read_only` + 只读工具集（叠加在步骤级 read_only 之上）；
 //! - 写入需同时满足：非只读绑定 + `write_allowed_paths` 白名单（空 = root 内可写）+ 审批。
 
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use owo_agent_core::permissions::{Approver, Decision, Level, PermissionRequest};
@@ -399,6 +400,73 @@ pub(crate) async fn get_workspace_tree(
         "truncated": truncated,
         "entries": entries,
     })))
+}
+
+/// GET /workspace/tree?root=<绝对路径>&depth=<1-8>：预绑定目录树预览（§8.1 启动器）。
+///
+/// 团队创建前即可浏览候选工作区 root 的目录树，供「允许写入路径」多选选择器消费。
+/// 校验：root 必须为绝对路径且真实存在（canonicalize 失败 → 400，拒绝不存在目录）；
+/// 深度钳制 1-8；遍历复用 [`collect_tree`]（symlink/Junction 一律跳过，拒绝越界）。
+/// 返回形状与 `GET /projects/{id}/workspace/tree` 完全一致（root 为 canonical 回显）。
+pub(crate) async fn preview_workspace_tree(
+    State(_state): State<Arc<AppState>>,
+    Query(params): Query<TreePreviewQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if params.root.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "root 查询参数不能为空" })),
+        ));
+    }
+    let root_path = PathBuf::from(&params.root);
+    if !root_path.is_absolute() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "root 必须为绝对路径" })),
+        ));
+    }
+    let canonical = match std::fs::canonicalize(&root_path) {
+        Ok(path) => path,
+        Err(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("目录不存在或无法访问：{}", params.root) })),
+            ))
+        }
+    };
+    if !canonical.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "root 必须指向目录而非文件" })),
+        ));
+    }
+    let depth = params.depth.unwrap_or(2).clamp(1, 8);
+    let mut entries: Vec<Value> = Vec::new();
+    let mut truncated = false;
+    collect_tree(
+        &canonical,
+        &canonical,
+        depth,
+        0,
+        &mut entries,
+        &mut truncated,
+        2000,
+    );
+    Ok(Json(json!({
+        "root": canonical.to_string_lossy(),
+        "depth": depth,
+        "truncated": truncated,
+        "entries": entries,
+    })))
+}
+
+/// `GET /workspace/tree` 查询参数。
+#[derive(Debug, Deserialize)]
+pub struct TreePreviewQuery {
+    /// 候选工作区根目录（绝对路径）。
+    pub root: String,
+    /// 目录树深度（1-8，缺省 2）。
+    pub depth: Option<u32>,
 }
 
 /// 迭代式受限深度遍历（symlink/junction 一律跳过，不进入）。

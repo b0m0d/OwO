@@ -256,6 +256,10 @@ pub struct Settings {
     /// v0.4.30 模型用量预算。
     #[serde(default)]
     pub usage: UsageSettings,
+    /// §13 批次六：可选遥测开关（默认关；仅聚合功能计数/错误码分布/性能分位，
+    /// 不含任何消息/提示词/输出/文件内容——数据字典经 /metrics/telemetry/status 暴露）。
+    #[serde(default)]
+    pub telemetry_enabled: Option<bool>,
 }
 
 impl Settings {

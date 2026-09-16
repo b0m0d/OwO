@@ -5,6 +5,7 @@ members = [
     "crates/owo-agent-core",
     "crates/owo-agent-server",
     "crates/owo-agent-cli",
+    "crates/owo-build-info",
     "crates/owo-sim",
 ]
 
@@ -36,3 +37,4 @@ zip = "2"
 owo-agent-protocol = { path = "crates/owo-agent-protocol" }
 owo-agent-core = { path = "crates/owo-agent-core" }
 owo-agent-server = { path = "crates/owo-agent-server" }
+owo-build-info = { path = "crates/owo-build-info" }

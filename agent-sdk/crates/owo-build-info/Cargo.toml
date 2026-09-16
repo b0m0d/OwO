@@ -1,0 +1,10 @@
+[package]
+name = "owo-build-info"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# §6.1.2 共享构建身份 crate：零依赖，只承载 build.rs 烧录的编译期常量；
+# server/cli/desktop 壳统一消费，删除原先两份完全重复的 build.rs 实现。

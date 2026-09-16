@@ -19,8 +19,10 @@
 
 // 主控收尾接线说明：lib 目标仅引用 report_global（经 observability_api 的
 // /metrics/slo handler 注册探针）；其余符号由 slo_tests/observability_tests 以
-// #[path] 独立编译使用，lib 内属"测试面符号"。同 event_stream.rs 模块级 allow 做法。
-#![allow(dead_code)]
+// #[path] 独立编译使用，lib 内属"测试面符号"。
+// §13 第四批：blanket allow → expect（接线完成后本 expect 将失效并触发
+// unfulfilled_lint_expectations 告警，-D warnings 下强制摘除本属性）。
+#![expect(dead_code)]
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -504,13 +506,6 @@ pub fn set_alert_listener(listener: AlertListener) {
     *slot = Some(listener);
 }
 
-/// 仅供测试：清空告警监听器。
-#[allow(dead_code)] // 仅供 slo_tests 以 #[path] 独立编译使用；lib 目标内无引用。
-pub fn reset_alert_listener_for_test() {
-    let mut slot = ALERT_LISTENER.lock().unwrap_or_else(|e| e.into_inner());
-    *slot = None;
-}
-
 /// 告警注册表（R9）：规则 + 运行状态 + 最近事件（有界）。
 #[derive(Clone)]
 pub struct AlertRegistry {
@@ -727,12 +722,6 @@ pub fn alert_registry() -> Arc<AlertRegistry> {
     let mut slot = ALERT_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     slot.get_or_insert_with(|| Arc::new(AlertRegistry::new()))
         .clone()
-}
-
-/// 仅供测试：重置全局告警注册表。
-#[allow(dead_code)] // 仅供 slo_tests 以 #[path] 独立编译使用；lib 目标内无引用。
-pub fn reset_alert_registry_for_test() {
-    *ALERT_REGISTRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// 全局评估便捷：评估全部告警规则并返回新事件（接线方可定时调用）。
