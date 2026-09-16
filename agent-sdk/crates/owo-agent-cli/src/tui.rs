@@ -1,6 +1,6 @@
 //! OpenCode 式全屏 TUI（ratatui + crossterm）。
 
-use crate::{
+use crate::support::{
     apply_disabled_skills, build_agent_with_mcp, builtin_skills_root, connect_mcp_clients,
     display_path, ensure_data_root, load_mcp_configs, resolve_model, save_mcp_configs,
     AGENTS_TEMPLATE,
@@ -48,7 +48,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let workspace = args.workspace.canonicalize()?;
     let settings = Settings::load(&workspace);
-    crate::apply_egress_setting(&settings);
+    crate::support::apply_egress_setting(&settings);
     let model = resolve_model(args.model, settings.model.as_deref());
     let read_only = args.agent == "plan" || settings.read_only;
     let root = ensure_data_root(args.data_dir, &workspace);
@@ -63,7 +63,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
     let plugin_state = owo_agent_core::PluginStateStore::new(Some(root.join("plugin_state.json")));
     let enabled_plugins =
         owo_agent_core::plugin::discover_enabled_plugins(&workspace, &root, &plugin_state);
-    crate::merge_plugin_mcp(&enabled_plugins, &mut mcp_configs);
+    crate::support::merge_plugin_mcp(&enabled_plugins, &mut mcp_configs);
     let plugins: Vec<PluginManifest> = discovered_plugins
         .into_iter()
         .map(|(_, manifest)| manifest)
@@ -1582,7 +1582,7 @@ mod tests {
             &std::env::temp_dir().join(format!("owo-tui-test-{}.db", uuid::Uuid::new_v4())),
         )
         .unwrap();
-        let agent = Arc::new(crate::build_agent(&workspace, "mock", false).unwrap());
+        let agent = Arc::new(crate::support::build_agent(&workspace, "mock", false).unwrap());
         TuiApp::new(
             workspace,
             "mock".to_string(),
@@ -1740,5 +1740,142 @@ mod tests {
             .transcript
             .iter()
             .any(|(line, _)| line.contains("回合通道已断开")));
+    }
+
+    /// 任务 11 快照矩阵：TUI 渲染离线快照（TestBackend，无需真实终端）。
+    /// 覆盖 (read_only × show_diff_panel × running × streaming) 四维组合的
+    /// 关键渲染契约：标题模式芯片、输入框提示、流式指示符、状态行。
+    ///
+    /// §5.3 快照提取修正：中文宽字符在 TestBackend 中占两个 cell（主格 +
+    /// 续格），简单拼接全部 cell 会把续格内容一并拼入，制造"空 闲"式假象。
+    /// 现按行读取 buffer，用 unicode-width（与 ratatui 同源宽度口径）按
+    /// 符号显示宽度推进列游标并跳过续格；保留换行；只去除行尾空白。
+    fn snapshot_cells(terminal: &Terminal<ratatui::backend::TestBackend>) -> String {
+        use unicode_width::UnicodeWidthStr;
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+        let mut rows = Vec::new();
+        for y in area.top()..area.bottom() {
+            let mut row = String::new();
+            let mut x = area.left();
+            while x < area.right() {
+                let symbol: &str = buffer[(x, y)].symbol();
+                // 宽度至少按 1 计，防止零宽符号造成死循环。
+                let width = symbol.width().max(1) as u16;
+                row.push_str(symbol);
+                x += width;
+            }
+            rows.push(row.trim_end().to_string());
+        }
+        rows.join("\n")
+    }
+
+    fn draw_to_buffer(app: &TuiApp, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        snapshot_cells(&terminal)
+    }
+
+    #[test]
+    fn snapshot_idle_build_chat_shows_idle_chip_and_build_hint() {
+        let app = test_app();
+        let cells = draw_to_buffer(&app, 80, 24);
+        assert!(cells.contains("○ 空闲"), "空闲芯片缺失");
+        assert!(cells.contains("build"), "build 模式芯片缺失");
+        assert!(cells.contains("输入（build）"), "build 输入提示缺失");
+        assert!(cells.contains("就绪"), "状态行缺失");
+        assert!(cells.contains("会话"), "会话面板标题缺失");
+        // §5.3：快照按行保留换行，断言可区分标题 / 正文 / 输入框 / 状态栏。
+        let rows: Vec<&str> = cells.split('\n').collect();
+        assert_eq!(rows.len(), 24, "80×24 快照应恰好 24 行");
+        assert!(rows[0].contains("○ 空闲"), "模式芯片必须位于标题行");
+        assert!(rows[0].contains("| build"), "build 芯片位于标题行");
+        assert!(
+            rows.iter().any(|r| r.contains("输入（build）")),
+            "输入框标题独立成行"
+        );
+        assert!(
+            rows[23].contains("Tab") && rows[23].contains("中止/退出"),
+            "状态栏必须位于最后一行"
+        );
+    }
+
+    #[test]
+    fn snapshot_running_plan_shows_running_chip_plan_hint_and_streaming_marker() {
+        let mut app = test_app();
+        app.read_only = true;
+        app.running = true;
+        app.streaming = "正在生成…".to_string();
+        let cells = draw_to_buffer(&app, 80, 24);
+        assert!(cells.contains("● 运行中"), "运行中芯片缺失");
+        assert!(cells.contains("plan"), "plan 模式芯片缺失");
+        assert!(cells.contains("plan（只读）"), "只读输入提示缺失");
+        assert!(cells.contains("▍正在生成…"), "流式指示符缺失");
+    }
+
+    #[test]
+    fn snapshot_diff_panel_replaces_transcript_source() {
+        let mut app = test_app();
+        app.show_diff_panel = true;
+        app.diff_view = vec![("+ 新增行".to_string(), green())];
+        let cells = draw_to_buffer(&app, 80, 24);
+        assert!(cells.contains("diff"), "diff 芯片缺失");
+        assert!(cells.contains("新增行"), "diff 内容缺失");
+        assert!(!cells.contains("新 增"), "不得出现宽字符续格伪影");
+    }
+
+    /// §5.3 快照矩阵：120×30 大视口（标题不截断、边框行齐全）。
+    #[test]
+    fn snapshot_wide_viewport_120x30_keeps_title_and_status_rows() {
+        let mut app = test_app();
+        app.streaming = "流式输出中…".to_string();
+        let cells = draw_to_buffer(&app, 120, 30);
+        let rows: Vec<&str> = cells.split('\n').collect();
+        assert_eq!(rows.len(), 30, "120×30 快照应恰好 30 行");
+        assert!(rows[0].contains("○ 空闲"), "标题行芯片在场");
+        assert!(
+            rows.iter().any(|r| r.contains("▍流式输出中…")),
+            "流式指示符在场"
+        );
+        assert!(rows[29].contains("滚动"), "状态栏位于最后一行");
+        // 行尾空白已去除、行内空格保留。
+        assert!(rows.iter().all(|r| !r.ends_with(' ')), "行尾空白必须去除");
+        assert!(rows[0].contains(" | "), "标题行内分隔空格必须保留");
+    }
+
+    /// §5.3 快照矩阵：中文输入经宽字符提取后原样成行（不再"字 间 插 空"）。
+    #[test]
+    fn snapshot_chinese_input_renders_without_cell_artifacts() {
+        let mut app = test_app();
+        app.input = "你好，世界！".to_string();
+        let cells = draw_to_buffer(&app, 80, 24);
+        assert!(
+            cells.contains("你好，世界！"),
+            "中文输入必须连续呈现，实际：{cells}"
+        );
+        assert!(!cells.contains("你 好"), "不得出现宽字符续格伪影");
+    }
+
+    /// §5.3 快照矩阵：长工作区路径在 80 列标题中安全截断，不拖垮其余行。
+    #[test]
+    fn snapshot_long_workspace_path_truncates_title_only() {
+        let long_root = std::env::temp_dir().join(format!("owo-tui-长路径-{}", "目录".repeat(24)));
+        let mut app = test_app();
+        app.workspace = long_root.clone();
+        let cells = draw_to_buffer(&app, 80, 24);
+        let rows: Vec<&str> = cells.split('\n').collect();
+        assert_eq!(rows.len(), 24);
+        let title_display_width: usize = {
+            use unicode_width::UnicodeWidthStr;
+            rows[0].width()
+        };
+        assert!(
+            title_display_width <= 80,
+            "标题行显示宽度不得越界，实际 {title_display_width}"
+        );
+        // 截断只影响标题；输入框与状态栏照常渲染。
+        assert!(cells.contains("输入（build）"), "长路径不得破坏输入框");
+        assert!(rows[23].contains("Tab"), "长路径不得破坏状态栏");
     }
 }

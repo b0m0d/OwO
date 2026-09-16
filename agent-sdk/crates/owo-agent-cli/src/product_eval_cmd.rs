@@ -205,7 +205,7 @@ fn run_validate(
             }
         };
         let freeze_json = owo_agent_core::product_eval::parse_freeze(&text)?;
-        let default_model = crate::resolve_model(None, None);
+        let default_model = crate::support::resolve_model(None, None);
         let issues = verify_freeze(&bundle, &freeze_json, Some(&default_model));
         if issues.is_empty() {
             println!("freeze 一致性：通过（{}）", freeze_path.display());
@@ -235,7 +235,7 @@ fn run_freeze(
         print!("{}", format_validation(&validation));
         return Err("套件校验未通过：禁止冻结存在问题的任务集".into());
     }
-    let model = crate::resolve_model(None, None);
+    let model = crate::support::resolve_model(None, None);
     let base_url = std::env::var("OPENAI_BASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -653,7 +653,7 @@ async fn run_matrix_cmd(
         (
             Arc::new(ReferenceDryExecutor),
             "dry-reference".to_string(),
-            Some(crate::resolve_model(model, None)),
+            Some(crate::support::resolve_model(model, None)),
         )
     };
 
