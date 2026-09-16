@@ -15,6 +15,10 @@ __pycache__/
 *.py[cod]
 **/bin/
 **/obj/
+# Rust 仓库豁免：crates/*/src/bin 是 Cargo 二进制源码目录（core 的 MCP 测试
+# server），曾被上面的 **/bin/ 误吞导致任何干净 checkout 无法构建整个
+# workspace（2026-09-16 R1 C1 worktree 验证暴露）。VS/Python bin 仍排除。
+!agent-sdk/crates/*/src/bin/
 *.appx
 *.msix
 *.msixbundle
