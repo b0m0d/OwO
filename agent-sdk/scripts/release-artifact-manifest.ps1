@@ -46,16 +46,16 @@ if (-not (Test-Path $dir)) { throw "产物目录不存在：$dir" }
 if (-not $Out) { $Out = Join-Path $dir "release-manifest.json" }
 
 # §7.1：身份段与 /health.build、--version、doctor 同构——直接从已构建
-# 产物的 --version 输出读取（证明清单记录的是二进制自身主张，而非脚本
+# 产物的 --version 输出读取（证明清单记录的是产物自身主张，而非脚本
 # 重新 git 查询的巧合一致），再与当前树交叉核对，错配即失败。
-# 版本号打头（oneline 渲染格式："<version> api=…"）。禁止用 `-split " "`
-# 取段——PS 管道里单元素 unary split 会把下一行 `-Depth 4` 当输入字符串
-# 再切（ConvertTo-Json 参数绑定的经典陷阱），这里用零歧义的 Substring。
+# clap --version 渲染为 "<bin> <version> api=…"（首段是 bin 名）；版本号
+# = 首个以数字打头的空格分隔段。
 function Get-ExeVersion([string]$Line) {
     if (-not $Line) { return "" }
-    $i = $Line.IndexOf(" ")
-    if ($i -lt 1) { return $Line }
-    return $Line.Substring(0, $i)
+    foreach ($tok in ($Line -split " ")) {
+        if ($tok -and [char]::IsDigit($tok[0])) { return $tok }
+    }
+    return ""
 }
 
 function Get-ExeIdentity([string]$ExePath) {
@@ -125,7 +125,20 @@ $manifest = [ordered]@{
     artifacts    = $artifacts
 }
 
-$json = $manifest | ConvertTo-Json -Depth 4
+# PS 5.1 实测教训（R2 收口）：管道形态 `$manifest | ConvertTo-Json -Depth 4`
+# 在完整脚本环境里曾抛 ArgumentTransformationMetadataException（String→
+# SwitchParameter，绑定路径诡秘：同数据显式 -InputObject 形态连续 3 次干净、
+# 逐子对象全 OK）。发布清单不许随机红：用显式 -InputObject；若仍失败回退
+# 逐键重建的普通字典再序列化一次，两形态都炸才硬失败。
+$json = $null
+try {
+    $json = ConvertTo-Json -InputObject $manifest -Depth 4
+} catch {
+    Write-Host ("[manifest] 直接序列化失败（" + $_.Exception.Message + "），重试逐键重建…") -ForegroundColor Yellow
+    $acc = [ordered]@{}
+    foreach ($k in $manifest.Keys) { $acc[$k] = $manifest[$k] }
+    $json = ConvertTo-Json -InputObject $acc -Depth 4
+}
 [System.IO.File]::WriteAllText($Out, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 Write-Host "清单已写入：$Out"
 $json

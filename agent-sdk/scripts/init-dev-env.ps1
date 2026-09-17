@@ -32,14 +32,24 @@ Exit codes (direct run): 0 = OK; 2 = missing required dependency (actionable).
 
 [CmdletBinding()]
 param(
+    # ⚠ dot-source 参数卫生（与 resolve-ort.ps1 同一条纪律）：dot-source 时
+    # param 变量会注入**调用方**作用域——裸名 $EnsureOrt/$NoDownload 曾把
+    # ci-gate 自己的 -EnsureOrt 静默重置为 $false（下载开关失效），裸名
+    # $Json 类冲突更会让调用方对同名变量的普通赋值触发类型转换异常
+    # （PowerShell 变量名不区分大小写、首次绑定定型）。内部变量一律带
+    # $Owo 前缀；CLI 面经 Alias 保持原样（-File 直调/文档口径不变）。
     # Override the shared runtime cache root (default %LOCALAPPDATA%\OwO\Agent\runtime).
-    [string]$OrtCacheDir,
+    [Alias('OrtCacheDir')]
+    [string]$OwoOrtCacheDir,
     # Download the sherpa-onnx prebuilt archive when missing (needs network).
-    [switch]$EnsureOrt,
+    [Alias('EnsureOrt')]
+    [switch]$OwoEnsureOrt,
     # Download OCR models via the existing downloader when missing.
-    [switch]$EnsureModels,
+    [Alias('EnsureModels')]
+    [switch]$OwoEnsureModels,
     # Never download anything; fail when a required piece is absent.
-    [switch]$NoDownload
+    [Alias('NoDownload')]
+    [switch]$OwoNoDownload
 )
 
 # ---------------------------------------------------------------------------
@@ -65,7 +75,7 @@ $script:OwoMinOnnxRuntimeLibBytes = 100MB
 # ---------------------------------------------------------------------------
 $script:OwoSdkRoot = Split-Path -Parent $PSScriptRoot
 $script:OwoRepoRoot = Split-Path -Parent $script:OwoSdkRoot
-$script:OwoRuntimeCache = if ($OrtCacheDir) { (Join-Path (Resolve-Path $OrtCacheDir -ErrorAction SilentlyContinue).Path $script:OwoSherpaVersion) } else {
+$script:OwoRuntimeCache = if ($OwoOrtCacheDir) { (Join-Path (Resolve-Path $OwoOrtCacheDir -ErrorAction SilentlyContinue).Path $script:OwoSherpaVersion) } else {
     $base = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "OwO\Agent\runtime" } else { Join-Path $env:TEMP "owo-runtime" }
     Join-Path $base $script:OwoSherpaVersion
 }
@@ -282,7 +292,7 @@ function Initialize-OwoDevEnv {
 # Direct run: execute the full flow.
 if ($MyInvocation.InvocationName -ne ".") {
     try {
-        $null = Initialize-OwoDevEnv -EnsureModels:$EnsureModels -NoDownload:$NoDownload
+        $null = Initialize-OwoDevEnv -EnsureModels:$OwoEnsureModels -NoDownload:(($OwoNoDownload) -or (-not $OwoEnsureOrt))
         Write-Host "[init] init-dev-env OK. Repo: $script:OwoSdkRoot" -ForegroundColor Green
         exit 0
     } catch {

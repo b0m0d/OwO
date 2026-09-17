@@ -26,14 +26,24 @@ init-dev-env 同名函数），禁止再复制探测逻辑。
 #>
 [CmdletBinding()]
 param(
+    # ⚠ dot-source 参数卫生（本文件实测踩坑）：dot-source 会把 param 变量
+    # 注入**调用方**作用域——裸名 `Json` 曾以 [switch] 类型污染调用方的
+    # `$json = ConvertTo-Json ...` 赋值（PowerShell 变量名不区分大小写且
+    # 首次绑定定型，后续赋 string 触发 String→SwitchParameter 异常）；裸名
+    # `EnsureOrt` 会静默重置 ci-gate 自己的 -EnsureOrt 开关。全部参数带
+    # $Owo 前缀，CLI 面经 Alias 保持原样。
     # 缺失时允许从官方 release 下载并校验（sha256 固定）进稳定缓存。
-    [switch]$EnsureOrt,
+    [Alias('EnsureOrt')]
+    [switch]$OwoEnsureOrt,
     # 禁止任何下载（CI 保守模式）。
-    [switch]$NoDownload,
+    [Alias('NoDownload')]
+    [switch]$OwoNoDownload,
     # 输出 JSON 元数据而非纯路径。
-    [switch]$Json,
+    [Alias('Json')]
+    [switch]$OwoJson,
     # 安静模式（dot-source 场景由调用方自己打印）。
-    [switch]$Quiet
+    [Alias('Quiet')]
+    [switch]$OwoQuiet
 )
 
 # 注意：本文件是「库 + CLI」双面入口。作为库被 dot-source 时**不得**改动
@@ -92,8 +102,8 @@ function Resolve-OwoOrtEnv {
 # 直接执行入口（sidecar/installer/人工排障共用同一命令面）。
 if ($MyInvocation.InvocationName -ne ".") {
     try {
-        $meta = Resolve-OwoOrtEnv -EnsureOrt:$EnsureOrt -NoDownload:$NoDownload -Quiet:$Quiet
-        if ($Json) {
+        $meta = Resolve-OwoOrtEnv -EnsureOrt:$OwoEnsureOrt -NoDownload:$OwoNoDownload -Quiet:$OwoQuiet
+        if ($OwoJson) {
             $meta | ConvertTo-Json -Compress | Write-Output
         } else {
             Write-Output $meta.lib_dir
