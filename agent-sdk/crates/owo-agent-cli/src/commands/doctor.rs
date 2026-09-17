@@ -41,6 +41,14 @@ pub(crate) async fn run_doctor_cmd(args: DoctorArgs) -> Result<(), Box<dyn std::
     let mut failures = 0usize;
     let mut checks: Vec<(&str, bool, String)> = Vec::new();
 
+    // 0) 构建身份（§7.1：与 /health、--version、release manifest 同构，
+    //    单一来源 owo_build_info::identity()）。正常编译必然可解析；报
+    //    [fail] 意味着该二进制来自无 git 环境编译或身份覆写指向了过期
+    //    产物——正是发布链要在现场抓的错误。
+    let identity = owo_build_info::identity();
+    let identity_ok = identity.commit != "unknown" && !identity.commit.is_empty();
+    checks.push(("构建身份", identity_ok, identity.oneline()));
+
     // 1) 数据目录与关键存储文件。
     let storage_ok = data_root.is_dir() || std::fs::create_dir_all(&data_root).is_ok();
     checks.push(("数据目录", storage_ok, data_root.display().to_string()));

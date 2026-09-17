@@ -1376,6 +1376,40 @@ async fn health_build_identity_has_full_semantics() {
         .unwrap_or_else(|error| panic!("built_at 必须是 RFC3339（实际 {built_at}）：{error}"));
 }
 
+/// §7.1 单一事实源：/health 的 api_version 与 build 三元组必须逐字段等于
+/// `owo_build_info::identity()`（server 不得再有独立解析链/独立常量）。
+#[tokio::test]
+async fn health_identity_is_single_source_with_build_info() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let response = app
+        .oneshot(request(&state, "GET", "/health", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let health: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let identity = owo_build_info::identity();
+    assert_eq!(
+        health["api_version"].as_str(),
+        Some(identity.api_version),
+        "api_version 必须与 owo-build-info 同源"
+    );
+    assert_eq!(
+        health["build"]["commit"].as_str(),
+        Some(identity.commit.as_str())
+    );
+    assert_eq!(health["build"]["dirty"], serde_json::json!(identity.dirty));
+    assert_eq!(
+        health["build"]["built_at"].as_str(),
+        Some(identity.built_at.as_str())
+    );
+    // build_id（壳握手字段）与 build.commit 同源，不得出现第二种解析。
+    assert_eq!(health["build_id"].as_str(), Some(identity.commit.as_str()));
+}
+
 /// CORS：不允许的跨源请求无 Access-Control-Allow-Origin（浏览器侧拒绝）；
 /// webview/localhost 白名单放行并回显 ACAO。
 #[tokio::test]

@@ -263,7 +263,8 @@ foreach ($src in @($singleReport, $multiReport, $pairedOut)) {
     }
 }
 $gitCommit = git -C $sdkRoot rev-parse HEAD 2>$null
-$gitDirty = (git -C $sdkRoot status --porcelain 2>$null | Measure-Object).Count -gt 0
+# §7.3 统一口径：dirty 作用域 = 构建相关树（agent-sdk/，即 -C 后的 "."）。
+$gitDirty = (git -C $sdkRoot status --porcelain -uall -- . 2>$null | Measure-Object).Count -gt 0
 $info = @{
     batch = $Batch
     generated_at = (Get-Date).ToString("o")

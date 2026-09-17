@@ -290,29 +290,13 @@ pub(crate) fn display_path(path: &std::path::Path) -> String {
     raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string()
 }
 
-/// §4.2/§5.1/§6.1.2：core_ready 行的 build_id 解析——优先共享 crate
-/// owo-build-info 编译期烧录的 git commit（与二进制严格对应，不依赖运行时文件），
-/// 其次 OWO_BUILD_INFO 指定的 build-info.json 的 git_commit，再次 cwd 下
-/// build-info.json；均缺失时 "unknown"。
+/// §4.2/§5.1/§6.1.2/§7.1：core_ready 行的 build_id 解析——委托
+/// `owo_build_info::identity()` 单一链（① OWO_BUILD_INFO 覆写 ② 编译期
+/// 烧录 ③ cwd 遗留 build-info.json）。CLI 不再自持第二份回退链；与 server
+/// /health.build 严格同源（历史缺陷：CLI 编译期优先、server 覆写优先，
+/// 发布链覆写 build-info.json 时两侧会报告不同 build id）。
 pub(crate) fn resolve_build_id() -> String {
-    let compiled = owo_build_info::COMMIT;
-    if !compiled.is_empty() && compiled != "unknown" {
-        return compiled.to_string();
-    }
-    let path = std::env::var("OWO_BUILD_INFO")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("build-info.json"));
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|value| {
-            value["git_commit"]
-                .as_str()
-                .filter(|commit| !commit.is_empty())
-                .map(|commit| commit.to_string())
-        })
-        .unwrap_or_else(|| "unknown".to_string())
+    owo_build_info::identity().commit
 }
 
 pub(crate) fn merge_plugin_mcp(

@@ -1432,7 +1432,7 @@ async fn openapi_spec() -> Json<Value> {
                 },
                 "BuildInfo": {
                     "type": "object",
-                    "description": "构建信息（由统一构建入口生成 build-info.json 提供）",
+                    "description": "构建信息（§7.1 单一来源 owo-build-info：编译期烧录优先，OWO_BUILD_INFO 覆写文件兼容发布链）",
                     "properties": {
                         "commit": { "type": "string" },
                         "dirty": { "type": "boolean" },
@@ -1490,70 +1490,28 @@ async fn health() -> Json<HealthResponse> {
 
 static BUILD_INFO: OnceLock<Option<BuildInfo>> = OnceLock::new();
 
-/// 构建身份解析（§5.1/§6.1.2）——优先级：
-/// ① `OWO_BUILD_INFO` 显式指向的 build-info.json（发布链路/调试覆写）；
-/// ② 编译期烧录的 git 身份（owo-build-info crate，§6.1.2 单一实现，永不指向过期文件）；
-/// ③ cwd 下历史 build-info.json（开发机遗留产物，最后手段，可能过期）；
-/// 全部缺失时 build=None（等价旧行为，仅版本号）。
+/// 构建身份解析（§5.1/§6.1.2/§7.1）——委托 `owo_build_info::identity()`
+/// 单一链（① OWO_BUILD_INFO 覆写文件 → ② 编译期烧录 → ③ cwd 遗留文件 →
+/// 不可用）。server 不再自持回退链副本；旧实现里「覆写文件损坏直接返回
+/// None」的陷阱一并消除（损坏即跳过覆写、回落编译期事实，/health 身份
+/// 永不为空）。Unavailable 时保持 build=None（等价旧行为的仅版本形态）。
 fn load_build_info() -> &'static Option<BuildInfo> {
     BUILD_INFO.get_or_init(|| {
-        if let Ok(path) = std::env::var("OWO_BUILD_INFO") {
-            if !path.trim().is_empty() {
-                return read_build_info_file(PathBuf::from(path));
-            }
+        let identity = owo_build_info::identity();
+        if identity.source == owo_build_info::IdentitySource::Unavailable {
+            None
+        } else {
+            Some(BuildInfo {
+                commit: identity.commit,
+                dirty: identity.dirty,
+                built_at: identity.built_at,
+            })
         }
-        let commit = owo_build_info::COMMIT;
-        if owo_build_info::has_commit() {
-            let dirty = owo_build_info::DIRTY;
-            // 与 commit/dirty 同源：owo-build-info 的 build.rs 编译期烧录（§6.1.2），
-            // 不读运行时环境（否则运行时缺变量会让 built_at 恒为空）。
-            let epoch: i64 = owo_build_info::built_at_epoch() as i64;
-            let built_at = if epoch > 0 {
-                chrono::DateTime::from_timestamp(epoch, 0)
-                    .map(|time| time.to_rfc3339())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            return Some(BuildInfo {
-                commit: commit.to_string(),
-                dirty,
-                built_at,
-            });
-        }
-        read_build_info_file(PathBuf::from("build-info.json"))
     })
 }
 
-/// 读取一份 build-info.json（容忍 UTF-8 BOM）；缺失/损坏返回 None 并告警。
-fn read_build_info_file(path: PathBuf) -> Option<BuildInfo> {
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(
-                "build-info.json 读取失败（path={}，error={e}）；/health.build 将缺省（旧行为）",
-                path.display()
-            );
-            return None;
-        }
-    };
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
-    let v: Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                "build-info.json 解析失败（path={}，error={e}）；/health.build 将缺省（旧行为）",
-                path.display()
-            );
-            return None;
-        }
-    };
-    Some(BuildInfo {
-        commit: v["git_commit"].as_str().unwrap_or("unknown").to_string(),
-        dirty: v["git_dirty"].as_bool().unwrap_or(false),
-        built_at: v["built_at"].as_str().unwrap_or_default().to_string(),
-    })
-}
+// （§7.1 收口：build-info.json 解析链已迁入 owo_build_info::identity()
+//   单一实现，本文件不再持有副本。）
 
 // （§12：GET /usage 的 usage_summary 已外移至 usage.rs::usage_model_summary，
 //   经 usage_router 并入 build_router，路由面零变化）
@@ -1841,7 +1799,7 @@ pub async fn start_observer(state: Arc<AppState>) {
 // ===========================================================================
 
 /// API 版本（`x-owo-api-version`）。破坏性变更递增 minor；弃用期 ≥2 个 minor。
-pub const OWO_API_VERSION: &str = "0.7";
+pub const OWO_API_VERSION: &str = owo_build_info::API_VERSION;
 
 /// 已弃用路由登记：(路径前缀, since, until, 替代建议)。
 /// 命中时响应携带 `Deprecation` 头；当前无已弃用路由，破坏性变更前在此登记。

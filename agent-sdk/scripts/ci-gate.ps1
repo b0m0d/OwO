@@ -23,12 +23,25 @@ param(
     [switch]$SkipUtf8,
     [switch]$SkipPermissionCtor,
     [switch]$ServerOnly,
+    # §7.2：新终端直跑 CI 时允许把缺失的 ORT 下载进稳定缓存（默认保守：
+    # 探测失败即快速报错，不等链接阶段 LNK1120）。
+    [switch]$EnsureOrt,
     [string]$LogDir = ""
 )
 
 $ErrorActionPreference = "Continue"
 . (Join-Path $PSScriptRoot "ci-shared.ps1")
 Initialize-CiPath
+
+# §7.2：ORT 统一解析入口（进程级注入；与 dev/package/build-installer 同源）。
+. (Join-Path $PSScriptRoot "resolve-ort.ps1")
+try {
+    $null = Resolve-OwoOrtEnv -EnsureOrt:$EnsureOrt -NoDownload:(-not $EnsureOrt) -Quiet
+} catch {
+    Write-Host "[ci] ONNX Runtime 解析失败：$($_.Exception.Message)" -ForegroundColor Red
+    exit 2
+}
+
 $script:ciStepFilter = $Step.ToLowerInvariant()
 $root = Get-CiRepoRoot
 

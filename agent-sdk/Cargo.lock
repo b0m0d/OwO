@@ -1842,6 +1842,9 @@ dependencies = [
 [[package]]
 name = "owo-build-info"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "owo-sim"

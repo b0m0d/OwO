@@ -215,9 +215,12 @@ function Assert-OwoCleanTree {
         return
     }
     Push-Location $script:OwoRepoRoot
-    try { $status = @(git status --porcelain 2>$null) } finally { Pop-Location }
+    # §7.3 统一口径（与 owo-build-info/build.rs、release manifest 一致）：
+    # dirty 作用域 = agent-sdk/（构建相关树）；仓根个人文档/素材等
+    # 与构建无关的 untracked 资产不拦截发布。
+    try { $status = @(git status --porcelain -uall -- agent-sdk 2>$null) } finally { Pop-Location }
     if ($status.Count -gt 0) {
-        throw ("Release build refuses a dirty work tree (audit 6.1.5): {0} uncommitted/untracked entries. Commit all changes first, or set OWO_ALLOW_DIRTY_RELEASE=1 to override explicitly." -f $status.Count)
+        throw ("Release build refuses a dirty work tree (audit 6.1.5): {0} uncommitted/untracked entries under agent-sdk/. Commit all changes first, or set OWO_ALLOW_DIRTY_RELEASE=1 to override explicitly." -f $status.Count)
     }
     Write-Host "[release] clean-tree gate passed" -ForegroundColor Green
 }
@@ -236,7 +239,7 @@ function Write-OwoBuildInfo {
     pushd $script:OwoRepoRoot
     try {
         $commit = (git rev-parse --short=12 HEAD 2>$null | Out-String).Trim()
-        $dirty = (git status --porcelain 2>$null | Measure-Object).Count -gt 0
+        $dirty = (git status --porcelain -uall -- agent-sdk 2>$null | Measure-Object).Count -gt 0
     } finally {
         popd
     }

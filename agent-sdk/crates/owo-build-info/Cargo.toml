@@ -6,5 +6,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# §6.1.2 共享构建身份 crate：零依赖，只承载 build.rs 烧录的编译期常量；
-# server/cli/desktop 壳统一消费，删除原先两份完全重复的 build.rs 实现。
+# §6.1.2/§7.1 共享构建身份 crate：全工程唯一事实源。依赖刻意最小——仅
+# serde_json（build-info.json 兼容解析）；server/cli/desktop 壳统一消费，
+# 删除原先两份完全重复的 build.rs 与两条互相矛盾的解析链。
+
+[dependencies]
+serde_json.workspace = true

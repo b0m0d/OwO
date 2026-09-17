@@ -20,7 +20,20 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$env:PATH = "C:\Users\23843\.cargo\bin;" + $env:PATH
+# §7.2 收口：不再写死本机绝对路径（cargo 在 PATH 上直接复用，否则探测
+# %USERPROFILE%\.cargo\bin）；ORT 统一经 resolve-ort.ps1 进程级解析注入，
+# 与 dev.ps1 / ci-gate / package-desktop / build-installer 同源。
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+    if (Test-Path $cargoBin) { $env:PATH = "$cargoBin;$env:PATH" }
+}
+. (Join-Path $PSScriptRoot "resolve-ort.ps1")
+try {
+    $null = Resolve-OwoOrtEnv -NoDownload -Quiet
+} catch {
+    Write-Host "[gate] ONNX Runtime 解析失败：$($_.Exception.Message)" -ForegroundColor Red
+    exit 2
+}
 $root = Split-Path -Parent $PSScriptRoot   # agent-sdk/
 $failures = @()
 $steps = @()

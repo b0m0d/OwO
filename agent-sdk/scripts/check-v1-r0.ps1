@@ -23,24 +23,18 @@ Set-Location $sdkRoot
 Write-Host ("R0 closeout gate - root: {0}" -f $sdkRoot) -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
-# ORT auto-probe (audit 6.2): the single implementation lives in
-# init-dev-env.ps1 (Get-OwoOrtLibDir); this script only consumes it.
-# A fresh terminal without ORT_LIB_PATH fails at link stage; the probe sets
-# the variable for THIS PROCESS ONLY (never persisted to user/machine scope).
+# §7.2 ORT 统一解析入口（resolve-ort.ps1 → init-dev-env 单一实现）：
+# 解析成功则进程级注入 SHERPA_ONNX_LIB_DIR/ORT_LIB_PATH/ORT_LIB_LOCATION
+# 三个消费面（历史上只设 ORT_LIB_PATH 属不完整注入）；失败保持宽容
+# （本脚本部分检查不需要链接），只给出可操作指引。
 # ---------------------------------------------------------------------------
-. (Join-Path $PSScriptRoot "init-dev-env.ps1")
-if ($env:ORT_LIB_PATH) {
-    Write-Host ("[ORT] ORT_LIB_PATH already set: {0}" -f $env:ORT_LIB_PATH) -ForegroundColor DarkGray
+. (Join-Path $PSScriptRoot "resolve-ort.ps1")
+try {
+    $ortMeta = Resolve-OwoOrtEnv -NoDownload -Quiet
+    Write-Host ("[ORT] resolved (process only): {0} source={1} v{2}" -f $ortMeta.lib_dir, $ortMeta.source, $ortMeta.version) -ForegroundColor Cyan
 }
-else {
-    $probed = Get-OwoOrtLibDir
-    if ($probed) {
-        $env:ORT_LIB_PATH = $probed
-        Write-Host ("[ORT] ORT_LIB_PATH auto-probed (process only): {0}" -f $probed) -ForegroundColor Cyan
-    }
-    else {
-        Write-Host "[ORT] ORT_LIB_PATH not set and no onnxruntime.lib found (run: pwsh -File scripts\init-dev-env.ps1 -EnsureOrt) - linking may fail" -ForegroundColor Yellow
-    }
+catch {
+    Write-Host "[ORT] 未解析（run: pwsh -File scripts\resolve-ort.ps1 -EnsureOrt）- 依赖链接的检查可能失败：$($_.Exception.Message)" -ForegroundColor Yellow
 }
 
 $script:results = New-Object System.Collections.Generic.List[object]

@@ -42,13 +42,15 @@ if (Test-Path $initScript) {
     Write-Host "[init] dot-sourcing scripts/init-dev-env.ps1 (Lane 1 unified init)" -ForegroundColor Cyan
     . $initScript
 }
-# ORT probe via the unified single implementation (audit 6.2; process scope only).
-if (-not $env:ORT_LIB_PATH) {
-    $probed = Get-OwoOrtLibDir
-    if ($probed) {
-        $env:ORT_LIB_PATH = $probed
-        Write-Host ("[ORT] ORT_LIB_PATH auto-probed (process only): {0}" -f $probed) -ForegroundColor Cyan
-    }
+# §7.2 ORT 统一解析入口（进程级注入三消费面；缺失时宽容警告，eval 的
+# 链接依赖失败会在后续构建步骤显式暴露）。
+. (Join-Path $PSScriptRoot "resolve-ort.ps1")
+try {
+    $ortMeta = Resolve-OwoOrtEnv -NoDownload -Quiet
+    Write-Host ("[ORT] resolved (process only): {0} source={1} v{2}" -f $ortMeta.lib_dir, $ortMeta.source, $ortMeta.version) -ForegroundColor Cyan
+}
+catch {
+    Write-Host "[ORT] 未解析（run: pwsh -File scripts\resolve-ort.ps1 -EnsureOrt）：$($_.Exception.Message)" -ForegroundColor Yellow
 }
 
 # ---------------------------------------------------------------------------

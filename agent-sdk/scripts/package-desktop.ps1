@@ -24,18 +24,17 @@ $cargo = if ($env:OWO_CARGO) {
 $root = Split-Path $PSScriptRoot -Parent
 
 # §6.1.5/§6.2：统一构建门禁——发布打包拒绝 dirty 工作树（覆盖开关：
-# OWO_ALLOW_DIRTY_RELEASE=1）；ORT 原生依赖经 init-dev-env 单一实现解析，
-# 不再依赖旧终端遗留的环境变量。
-. (Join-Path $PSScriptRoot "init-dev-env.ps1")
+# OWO_ALLOW_DIRTY_RELEASE=1）；§7.2：ORT 原生依赖经统一解析入口
+# resolve-ort.ps1（委托 init-dev-env 单一实现，进程级注入），不再依赖
+# 旧终端遗留的环境变量。
+. (Join-Path $PSScriptRoot "resolve-ort.ps1")
 Assert-OwoCleanTree
-$ortLib = Get-OwoOrtLibDir
-if (-not $ortLib) {
-    throw "ONNX Runtime not found for packaging. Run: pwsh -File scripts\init-dev-env.ps1 -EnsureOrt"
+try {
+    $ortMeta = Resolve-OwoOrtEnv -NoDownload -Quiet
+    Write-Host ("[package] ORT resolved: {0} (source={1}, v{2}, {3})" -f $ortMeta.lib_dir, $ortMeta.source, $ortMeta.version, $ortMeta.crt)
+} catch {
+    throw "ONNX Runtime not found for packaging. Run: pwsh -File scripts\resolve-ort.ps1 -EnsureOrt （$($_.Exception.Message)）"
 }
-$env:SHERPA_ONNX_LIB_DIR = $ortLib
-$env:ORT_LIB_PATH = $ortLib
-$env:ORT_LIB_LOCATION = $ortLib
-Write-Host "[package] ORT resolved: $ortLib"
 
 # §6.2：构建封装——LNK4098（CRT 静态/动态混用）按发布失败处理，禁止带入安装包。
 function Invoke-OwoPackageBuild {
@@ -46,8 +45,13 @@ function Invoke-OwoPackageBuild {
         $log = & $cargo build @CargoArgs 2>&1 | ForEach-Object { "$_" }
         $log | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "$Stage 构建失败" }
-        if ($log -match "LNK4098") {
-            throw "检测到 LNK4098（CRT 混用）——发布构建禁止该警告（§6.2）"
+        # §7.3 零容忍升级：任意 LNK 码或 linker 告警行按发布失败处理。
+        # 唯一豁免：MSVC 工具链信息性 "creating library/exp" 输出
+        # （windows-msvc 链接 exe 必打的 informational，非 CRT 问题）。
+        $linkerNoise = @($log | Where-Object { $_ -match 'LNK\d{4}|warning: linker' } |
+            Where-Object { $_ -notmatch '正在创建库|Creating library' } | Select-Object -First 5)
+        if ($linkerNoise.Count -gt 0) {
+            throw ("{0}：发布构建检测到 {1} 条 linker 告警/错误——按失败处理（§7.3）：{2}" -f $Stage, $linkerNoise.Count, ($linkerNoise -join ' | '))
         }
     } finally {
         Pop-Location

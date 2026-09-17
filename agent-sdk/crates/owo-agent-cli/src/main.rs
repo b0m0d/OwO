@@ -17,7 +17,11 @@ use ui_output::{OutputMode, PermissionsProfile};
 #[derive(Parser)]
 #[command(
     name = "owo-agent",
-    version,
+    // §7.1：--version 与 /health.build、doctor、release manifest 同构
+    // （单一来源 owo_build_info::identity()，含 commit/dirty/built_at/api）。
+    // clap 4 derive 的 version 槽不接 String（Str: From<String> 不满足），
+    // identity() 为进程级 OnceLock 缓存，leak 一次即常驻（量级 <1KB）。
+    version = &*owo_build_info::identity().oneline().leak(),
     about = "OwO Agent SDK CLI（Codex 式 / OpenCode 式交互终端）"
 )]
 struct Cli {
@@ -159,4 +163,23 @@ fn print_help() {
     println!("  /abort              中止当前回合");
     println!("  /clear              清屏");
     println!("  /exit | /quit       退出");
+}
+
+#[cfg(test)]
+mod tests {
+    /// §7.1 冻结：`--version` 行（= identity().oneline()）必须携带 release
+    /// manifest 解析所依赖的全部字段键；缺任一字段，发布链交叉核对会瞎。
+    #[test]
+    fn version_line_carries_full_identity_fields() {
+        let line = owo_build_info::identity().oneline();
+        for key in ["api=", "commit=", "dirty=", "built_at=", "source="] {
+            assert!(line.contains(key), "--version 行缺 {key}：{line}");
+        }
+        // 版本号打头（release-artifact-manifest.ps1 按空格取第二段）。
+        let first = line.split(' ').next().unwrap_or_default();
+        assert!(
+            first.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "首段应为版本号：{line}"
+        );
+    }
 }
