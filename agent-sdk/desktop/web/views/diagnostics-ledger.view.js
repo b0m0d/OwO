@@ -434,6 +434,10 @@
     const overview = (data && data.overview) || {};
     const core = (data && data.core) || {};
     const records = Array.isArray(ledger.records) ? ledger.records : [];
+    // ⚠ 骨架态不得播报假数字：真机验收抓到过「最近请求数量：0 条（环形容量 0）」
+    // 在数据到达前闪现并被当成事实断言（§4.6 页面是给人下结论的地方，0 ≠ 未知）。
+    const loading = Boolean(data && data.loading);
+    const failed = Boolean(data && data.failed);
     const buckets = bucketCounts(ledger);
     const boot = lastBootstrap(records);
     const state = { data: data };
@@ -451,31 +455,42 @@
       "</style>" +
       '<div class="owo-ledger-actions">' +
       '<button type="button" id="owoLedgerRefresh">刷新台账</button>' +
-      '<button type="button" id="owoLedgerExport">导出脱敏诊断包</button>' +
+      '<button type="button" id="owoLedgerExport">生成脱敏诊断包</button>' +
       '<button type="button" id="owoLedgerCopy">复制诊断包 JSON</button>' +
+      '<button type="button" id="owoLedgerDownload">下载诊断包文件</button>' +
       '<span id="owoLedgerUpdated" class="sub">' +
       esc(data && data.updated_at ? "更新于 " + formatClock(data.updated_at) : "加载中…") +
       "</span></div>" +
-      '<div class="sub">最近请求数量：<b>' +
-      esc(Number(ledger.returned) || 0) +
-      "</b> 条（窗口累计 " +
-      esc(Number(ledger.total) || 0) +
-      "，环形容量 " +
-      esc(Number(ledger.cap) || 0) +
-      "）</div>" +
-      renderBuckets(buckets) +
-      '<h4>慢请求 Top ' +
-      SLOW_TOP_N +
-      "</h4>" +
-      renderSlowest(slowest(records, SLOW_TOP_N)) +
-      "<h4>按路由模板聚合（P50 / P95）</h4>" +
-      renderRoutes(routeAggregate(records)) +
-      "<h4>来源（x-owo-client）</h4>" +
-      renderSources(sourceCounts(records)) +
-      "<h4>core 重启与引导</h4>" +
-      renderCoreFacts(core, boot) +
-      "<h4>SSE 事件流</h4>" +
-      renderSse(overview, core) +
+      (failed
+        ? '<div class="sub" style="color:#c62828">台账端点不可达：' +
+          esc(data.errorText || "GET /diagnostics/requests 未返回数据") +
+          "（core 可能未就绪）。下方为壳侧可得事实，服务端计数以恢复后刷新为准。</div>" +
+          "<h4>core 重启与引导</h4>" +
+          renderCoreFacts(core, boot) +
+          "<h4>SSE 事件流</h4>" +
+          renderSse(overview, core)
+        : loading
+        ? '<div class="sub">正在读取服务端 ledger 与运行指标…</div>'
+        : '<div class="sub">最近请求数量：<b>' +
+          esc(Number(ledger.returned) || 0) +
+          "</b> 条（窗口累计 " +
+          esc(Number(ledger.total) || 0) +
+          "，环形容量 " +
+          esc(Number(ledger.cap) || 0) +
+          "）</div>" +
+          renderBuckets(buckets) +
+          '<h4>慢请求 Top ' +
+          SLOW_TOP_N +
+          "</h4>" +
+          renderSlowest(slowest(records, SLOW_TOP_N)) +
+          "<h4>按路由模板聚合（P50 / P95）</h4>" +
+          renderRoutes(routeAggregate(records)) +
+          "<h4>来源（x-owo-client）</h4>" +
+          renderSources(sourceCounts(records)) +
+          "<h4>core 重启与引导</h4>" +
+          renderCoreFacts(core, boot) +
+          "<h4>SSE 事件流</h4>" +
+          renderSse(overview, core)) +
       '<pre id="owoLedgerBundle" class="json-fallback" hidden></pre>';
 
     root.__owoLedgerState = state;
@@ -483,15 +498,30 @@
     if (refreshBtn) refreshBtn.addEventListener("click", () => load(root, { force: true }));
     const exportBtn = root.querySelector("#owoLedgerExport");
     if (exportBtn) {
+      // 「生成」只在页面内展开脱敏包：一键落盘是写用户目录的副作用，拆成显式的
+      // 「下载」按钮（验收脚本只点生成，不会把文件写进真实下载目录）。
       exportBtn.addEventListener("click", () => {
         const bundle = buildExportBundle(currentData(root));
+        const text = JSON.stringify(bundle, null, 2);
         const pre = root.querySelector("#owoLedgerBundle");
-        const size = downloadJson(bundle);
         if (pre) {
           pre.hidden = false;
-          pre.textContent = JSON.stringify(bundle, null, 2);
+          pre.textContent = text;
         }
-        note(root, "已导出脱敏诊断包（" + size + " 字节，已触发下载）。");
+        root.__owoLedgerBundle = bundle;
+        note(root, "已生成脱敏诊断包（" + text.length + " 字节，已在页面展开；可复制或下载）。");
+      });
+    }
+    const downloadBtn = root.querySelector("#owoLedgerDownload");
+    if (downloadBtn) {
+      downloadBtn.addEventListener("click", () => {
+        const bundle = buildExportBundle(currentData(root));
+        try {
+          const size = downloadJson(bundle);
+          note(root, "诊断包文件已提交下载（" + size + " 字节）。");
+        } catch (error) {
+          note(root, "下载不可用：" + (error && error.message ? error.message : String(error)) + "（可在页面展开后复制）");
+        }
       });
     }
     const copyBtn = root.querySelector("#owoLedgerCopy");
@@ -563,15 +593,28 @@
           updated_at: new Date().toISOString(),
         };
         if (!results[0]) {
-          note(root, "台账端点不可达：/diagnostics/requests 未返回数据（core 可能未就绪）。");
+          // 失败态必须**显式渲染**：留在「正在读取…」骨架上就是永久 loading（真机
+          // 抓到过一次：轮询在骨架上误判为已加载，四类计数全 0 还被当成事实）。
+          data.failed = true;
+          data.errorText = "GET /diagnostics/requests 未返回数据（core 可能未就绪）";
+          root.__owoLedgerState = { data: data };
+          render(root, data);
+          return data;
         }
         root.__owoLedgerState = { data: data };
-        if (!results[0]) return data;
         render(root, data);
         return data;
       },
       (error) => {
-        note(root, "读取诊断台账失败：" + (error && error.message ? error.message : String(error)));
+        const data = {
+          failed: true,
+          errorText: String((error && error.message) || error),
+          ledger: { records: [], aggregates: {} },
+          overview: null,
+          core: readCoreSnapshot(),
+        };
+        root.__owoLedgerState = { data: data };
+        render(root, data);
         return null;
       },
     );

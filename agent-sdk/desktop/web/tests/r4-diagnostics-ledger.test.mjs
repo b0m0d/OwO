@@ -182,7 +182,8 @@ test("渲染必须覆盖 §4.6 全部条目：数量、四类计数、慢请求�
     "来源（x-owo-client）",
     "core 重启与引导",
     "SSE 事件流",
-    "导出脱敏诊断包",
+    "生成脱敏诊断包",
+    "下载诊断包文件",
   ]) {
     assert.ok(html.includes(must), `页面缺少 §4.6 条目：${must}`);
   }
@@ -257,17 +258,38 @@ test("load() 经 OwoApi 取两个端点并渲染；端点不可达时给出可�
   });
   const root2 = makeRoot();
   await broken.OwoDiagnosticsLedger.load(root2, { force: true });
-  const updated = root2.querySelector("#owoLedgerUpdated");
-  assert.ok(updated.textContent.includes("台账端点不可达"), "端点失败必须说明白，禁止静默空白");
-  assert.ok(root2.innerHTML.includes("刷新台账"), "失败时仍保留骨架与重试出口");
+  assert.ok(root2.innerHTML.includes("台账端点不可达"), "端点失败必须说明白，禁止静默 loading 骨架");
+  assert.ok(root2.innerHTML.includes("刷新台账"), "失败时仍保留重试出口");
+  assert.ok(!root2.innerHTML.includes("最近请求数量"), "失败态不得播报请求数量（那是拿不到的事实）");
 });
 
-test("导出按钮产出脱敏包并可复制；复制不可用时降级为页面展开 JSON", async () => {
+test("骨架态不得播报假数字：0 ≠ 未知（真机误判回归）", () => {
+  const sandbox = makeSandbox();
+  const root = makeRoot();
+  sandbox.OwoDiagnosticsLedger.render(root, { loading: true });
+  assert.ok(!/环形容量 0/.test(root.innerHTML), "未取到数据前不得显示环形容量");
+  assert.ok(!root.innerHTML.includes("最近请求数量"), "骨架态不给数量结论");
+  assert.ok(root.innerHTML.includes("正在读取"), "骨架态必须说明在读取");
+  assert.ok(root.innerHTML.includes("刷新台账"), "骨架态仍保留重试出口");
+});
+
+test("生成/复制/下载三个出口分工明确：一键生成不得写用户目录", async () => {
   const copied = [];
+  let downloads = 0;
   const sandbox = makeSandbox({
-    navigator: { clipboard: { writeText: (text) => copied.push(text) } },
+    navigator: { clipboard: { writeText: (text) => Promise.resolve(copied.push(text)) } },
     __owoCoreDiagnostics: { state: "ready", logPath: "C:\\Users\\ovo\\core.log", instanceId: "inst-0123456789ab" },
+    anchors: { created: 0 },
   });
+  sandbox.URL.createObjectURL = () => "blob:stub";
+  const realCreate = sandbox.document.createElement;
+  sandbox.document.createElement = function (tag) {
+    const el = realCreate(tag);
+    if (String(tag).toLowerCase() === "a") {
+      el.click = () => { downloads += 1; };
+    }
+    return el;
+  };
   const root = makeRoot();
   sandbox.OwoDiagnosticsLedger.render(root, {
     ledger: seedLedger(),
@@ -275,7 +297,13 @@ test("导出按钮产出脱敏包并可复制；复制不可用时降级为页�
     core: sandbox.OwoDiagnosticsLedger.readCoreSnapshot(),
     updated_at: "2026-09-18T10:00:09.000Z",
   });
+  root.querySelector("#owoLedgerDownload").click();
+  assert.equal(downloads, 1, "§4.6「一键导出」= 单点下载即可拿到脱敏包（不要求先生成）");
   root.querySelector("#owoLedgerExport").click();
+  assert.equal(downloads, 1, "「生成」只展开，不得再触发文件下载（副作用必须是显式动作）");
+  const pre = root.querySelector("#owoLedgerBundle");
+  assert.equal(pre.hidden, false, "生成后必须在页面展开脱敏包");
+  assert.equal(root.querySelector("#owoLedgerUpdated").textContent.includes("已生成脱敏诊断包"), true);
   root.querySelector("#owoLedgerCopy").click();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(copied.length, 1, "复制走 clipboard.writeText 一次");

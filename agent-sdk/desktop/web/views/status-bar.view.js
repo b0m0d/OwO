@@ -23,10 +23,13 @@
   ];
 
   const PROVIDER_TTL_MS = 15000;
+  // 工作区走 IPC（零 HTTP），可以比提供商更勤：引导页里换目录后 5s 内状态条就该跟上。
+  const WORKSPACE_TTL_MS = 5000;
   const REFRESH_MS = 1000;
 
   const cache = {
     provider: { at: 0, value: null, pending: false },
+    workspace: { at: 0, root: "", pending: false },
     permission: { profile: null, pendingApprovals: null, grants: null },
   };
 
@@ -70,7 +73,10 @@
   }
 
   function workspaceFromFacts(source) {
-    const root = String((source && source.workspaceRoot) || "");
+    // 真机实测（R4 验收）：全新 WebView2 存储下 localStorage 里没有 owo.workspace，
+    // 只靠前端 state.workspaceRoot 会让工作区段在"壳其实已经带着工作区启动"时显示
+    // 「未选择」——壳的 get_workspace 才是权威来源（IPC，零 HTTP）。
+    const root = String((source && source.workspaceRoot) || (cache.workspace && cache.workspace.root) || "");
     const display = global.OwoWorkspaceDisplay;
     if (!root) return { text: "未选择", tone: "warn", detail: "尚未选择项目目录" };
     const alias = display ? display.alias(root) : pathSummary(root).split("\\").pop();
@@ -144,6 +150,10 @@
     return owner && typeof owner.invoke === "function" ? owner : null;
   }
 
+  function invokeShell(owner, command) {
+    return Promise.resolve(owner.invoke(command, {}));
+  }
+
   function refreshProviderCache(force) {
     if (cache.provider.pending) return;
     const age = Date.now() - cache.provider.at;
@@ -155,7 +165,7 @@
       return;
     }
     cache.provider.pending = true;
-    Promise.resolve(owner.invoke("get_provider_status", {})).then(
+    invokeShell(owner, "get_provider_status").then(
       (result) => {
         cache.provider.pending = false;
         cache.provider.at = Date.now();
@@ -166,6 +176,34 @@
         cache.provider.pending = false;
         cache.provider.at = Date.now();
         cache.provider.value = { error: String((error && error.message) || error) };
+        repaint();
+      },
+    );
+  }
+
+  /** 工作区段壳侧水合：get_workspace 是权威源，localStorage 只是用户刚改过的即时反馈。 */
+  function refreshWorkspaceCache(force) {
+    if (cache.workspace.pending) return;
+    const age = Date.now() - cache.workspace.at;
+    if (!force && age < WORKSPACE_TTL_MS) return;
+    const owner = invokeOwner();
+    if (!owner) {
+      cache.workspace.at = Date.now();
+      return;
+    }
+    cache.workspace.pending = true;
+    invokeShell(owner, "get_workspace").then(
+      (result) => {
+        cache.workspace.pending = false;
+        cache.workspace.at = Date.now();
+        const root = result && typeof result.workspace === "string" ? result.workspace : "";
+        // 壳报空也要清缓存：引导页里用户撤销/换目录后，状态条不得停留在旧值上。
+        cache.workspace.root = root;
+        repaint();
+      },
+      () => {
+        cache.workspace.pending = false;
+        cache.workspace.at = Date.now();
         repaint();
       },
     );
@@ -231,6 +269,7 @@
       button.appendChild(value);
       button.addEventListener("click", () => {
         if (segment.key === "model" || segment.key === "backend") refreshProviderCache(true);
+        if (segment.key === "workspace") refreshWorkspaceCache(true);
         const detail = { key: segment.key, target: segment.target };
         if (typeof global.dispatchEvent === "function" && typeof global.CustomEvent === "function") {
           global.dispatchEvent(new global.CustomEvent("owo:statusbar-navigate", { detail }));
@@ -255,10 +294,12 @@
       timer = global.setInterval(() => {
         if (uiHidden()) return;
         refreshProviderCache(false);
+        refreshWorkspaceCache(false);
         repaint();
       }, REFRESH_MS);
     }
     refreshProviderCache(true);
+    refreshWorkspaceCache(true);
     repaint();
     if (global.document && global.document.body) global.document.body.classList.add("has-global-status-bar");
   }
@@ -268,6 +309,12 @@
     timer = 0;
     host = null;
     source = null;
+    // 缓存必须一起清：验收脚本会在同一进程里连跑多个场景（不同私有工作区），
+    // 留着上一轮的工作区/提供商结果就是"看起来成功"的假绿。
+    cache.provider = { at: 0, value: null, pending: false };
+    cache.workspace = { at: 0, root: "", pending: false };
+    cache.permission = { profile: null, pendingApprovals: null, grants: null };
+    lastSerialized = "";
   }
 
   /** 权限中心/设置页把权威档位回灌给状态条（零额外请求）。 */

@@ -228,11 +228,56 @@ test("重绘只改文本不重建节点（保住键盘焦点）", () => {
   assert.match(sandbox.__host.children[3].children[1].textContent, /只读/);
 });
 
-test("状态条零新增 HTTP：模型段走壳 IPC（§8.2 首屏 ≤5 请求口径）", () => {
+test("状态条零新增 HTTP：模型/工作区段走壳 IPC（§8.2 首屏 ≤5 请求口径）", () => {
   assert.ok(!/fetch\(|XMLHttpRequest|OwoApi|apiClient/.test(viewSource), "视图内不得出现任何 HTTP 出口");
-  assert.match(viewSource, /owner\.invoke\("get_provider_status"/, "模型段只能经壳命令取提供商状态");
+  assert.match(viewSource, /invokeShell\(owner, "get_provider_status"\)/, "模型段只能经壳命令取提供商状态");
+  assert.match(viewSource, /invokeShell\(owner, "get_workspace"\)/, "工作区段必须壳侧水合（真机缺陷回归）");
   assert.match(viewSource, /PROVIDER_TTL_MS = 15000/, "IPC 取值必须带 TTL 缓存，不得每秒重查");
-  assert.match(viewSource, /if \(uiHidden\(\)\) return;[\s\S]{0,120}refreshProviderCache\(false\)/, "隐藏窗口不得继续刷新（§3.4）");
+  assert.match(viewSource, /WORKSPACE_TTL_MS = 5000/, "工作区变化要更勤（换目录后 5s 内可见）");
+  assert.match(viewSource, /if \(uiHidden\(\)\) return;[\s\S]{0,160}refreshProviderCache\(false\)/, "隐藏窗口不得继续刷新（§3.4）");
+});
+
+test("工作区段壳侧回灌：localStorage 为空时也必须显示已选工作区（R4 真机缺陷回归）", async () => {
+  // 真机全新 WebView2 存储下 localStorage 没有 owo.workspace，只读前端 state 会
+  // 在「壳其实带着工作区跑起来了」时显示「未选择」——28/31 那轮就是这么红的。
+  const invoked = [];
+  const sandbox = makeSandbox({
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        invoked.push(command);
+        if (command === "get_workspace") return Promise.resolve({ workspace: "D:\\work\\客户甲\\订单系统", state: "ready" });
+        return Promise.resolve({ ready: true, model: "glm-5.3-flash" });
+      },
+    },
+  });
+  sandbox.OwoWorkspaceDisplay = {
+    alias: (root) => String(root).split(/[\\/]/).filter(Boolean).pop(),
+    masked: (root) => root,
+  };
+  const host = sandbox.__host;
+  sandbox.OwoStatusBar.mount(host, { getFacts: () => ({ workspaceRoot: "" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(invoked.sort(), ["get_provider_status", "get_workspace"], "两段都必须各自查一次壳（都是 IPC，不发 HTTP）");
+  const ws = sandbox.OwoStatusBar.computeFacts({ workspaceRoot: "" }, null)[1];
+  assert.equal(ws.text, "订单系统", "壳报的工作区必须显示出来，不能停在「未选择」");
+  assert.equal(ws.tone, "ok");
+  assert.equal(ws.detail, "…\\客户甲\\订单系统");
+  // 撤销工作区后不得停留在旧值上（壳报空 = 状态条报空）。
+  sandbox.OwoStatusBar.unmount();
+  const sandbox2 = makeSandbox({
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_workspace") return Promise.resolve({ workspace: null, state: "no_workspace" });
+        return Promise.resolve({ ready: false });
+      },
+    },
+  });
+  sandbox2.OwoWorkspaceDisplay = { alias: (r) => r, masked: (r) => r };
+  sandbox2.OwoStatusBar.mount(sandbox2.__host, { getFacts: () => ({ workspaceRoot: "" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sandbox2.OwoStatusBar.computeFacts({ workspaceRoot: "" }, null)[1].text, "未选择");
 });
 
 test("接线：容器与脚本就位、boot 早期挂载、导航事件有接收方", () => {

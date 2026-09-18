@@ -664,6 +664,149 @@ function Get-OwoWebviewEtbDir {
     return (Join-Path $UserDataDir 'EBWebView')
 }
 
+# ---------------------------------------------------------------------------
+# 验收运行骨架（§3.3.3 私有环境 + R3-A3 验收模式 + §7 内嵌前端新鲜度门）
+#
+# 为什么收在这里：冷启动（verify-desktop-cold-boot）与故障矩阵
+# （verify-desktop-failure-matrix）各自抄了一份"私有目录 + 随包 core + 私有 bin +
+# CDP 端口 + UDF"的开头，R4/R5 再加一个脚本就是第三、第四份——这类复制以前直接
+# 造成过两份 ledger 实现分叉导致的假绿。新脚本一律走本函数；两份旧脚本的开头
+# 待 R6 去重时一并迁移（见执行记录未完成项）。
+# ---------------------------------------------------------------------------
+
+function New-OwoAcceptanceRun {
+    <#
+      组装一次隔离验收运行的全部路径与二进制（**不启动进程**）。
+      返回 hashtable：run_root/bin_dir/shell_exe/sidecar_exe/local_app_data/app_data/
+      temp_dir/project/agent_state_dir/data_root/log_dir/token_file/
+      webview_udf/webview_data_dir/cdp_requested/staged/identity/stamp/scenario。
+      -PrepareWorkspace：预置壳的"最近项目"指针（等价用户在引导页选过一次目录）。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$SdkRoot,
+        [Parameter(Mandatory = $true)][string]$Scenario,
+        [string]$Stamp = '',
+        [string]$ShellExe = '',
+        [string]$SidecarExe = '',
+        [ValidateSet('debug', 'release')][string]$Configuration = 'debug',
+        [switch]$PrepareWorkspace,
+        [switch]$SkipFreshnessGate
+    )
+    if (-not $Stamp) { $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss' }
+    if (-not $ShellExe) {
+        $ShellExe = Join-Path $SdkRoot "desktop\tauri\src-tauri\target\$Configuration\owo-agent-desktop.exe"
+    }
+    if (-not $SidecarExe) {
+        $SidecarExe = Join-Path $SdkRoot "target\$Configuration\owo-agent.exe"
+    }
+    if (-not (Test-Path -LiteralPath $ShellExe)) { throw "缺少桌面壳可执行文件：$ShellExe" }
+    if (-not (Test-Path -LiteralPath $SidecarExe)) {
+        throw "缺少 sidecar 可执行文件：$SidecarExe（先 cargo build -p owo-agent-cli）"
+    }
+    # §7 构建自包含：壳内嵌前端资产，改了 web 不重建壳就是在测上一版界面。
+    if (-not $SkipFreshnessGate) {
+        $null = Assert-OwoShellEmbedsCurrentWeb -ShellExe $ShellExe -WebRoot (Join-Path $SdkRoot 'desktop\web')
+    }
+
+    $runRoot = Join-Path ([IO.Path]::GetTempPath()) "owo-desktop-acceptance\$Stamp\$Scenario"
+    $localAppData = Join-Path $runRoot 'LocalAppData'
+    $appData = Join-Path $runRoot 'RoamingAppData'
+    $runTemp = Join-Path $runRoot 'Temp'
+    $project = Join-Path $runRoot 'project'
+    $webviewUdf = Join-Path $runRoot 'WebView2'
+    foreach ($dir in @($localAppData, $appData, $runTemp, $project, $webviewUdf)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+    $agentStateDir = Join-Path $localAppData 'OwO\Agent'
+    New-Item -ItemType Directory -Force -Path $agentStateDir | Out-Null
+    if ($PrepareWorkspace) {
+        # §4.6：预置"最近项目"指针（数据目录仍是全新的）。
+        Set-Content -Path (Join-Path $agentStateDir 'workspace.json') `
+            -Value ('{"path":"' + ($project -replace '\\', '\\') + '"}') -Encoding ASCII -NoNewline
+    }
+
+    . (Join-Path $PSScriptRoot 'stage-desktop-sidecar.ps1')
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # 子进程正常 stderr 不得被当成终止错误
+    try {
+        $staged = Stage-OwoDesktopSidecar -Configuration $Configuration -Quiet
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if (-not $staged -or -not $staged.source) { throw "随包 core 解析失败（stage-desktop-sidecar 无输出）" }
+    # 同世代校验：随包 core 与 SDK 构建产物不同世代时，测的是历史二进制（§8.3 踩过）。
+    $stagedCommit = ([regex]::Match([string]$staged.identity, 'commit=(\S+)')).Groups[1].Value
+    $sdkLine = ((& $SidecarExe --version 2>&1 | Out-String) -split '\r?\n' | Where-Object { $_ -match 'commit=' } | Select-Object -First 1)
+    $sdkCommit = ([regex]::Match([string]$sdkLine, 'commit=(\S+)')).Groups[1].Value
+    if ($stagedCommit -and $sdkCommit -and ($stagedCommit -ne $sdkCommit)) {
+        throw "随包 core 与 SDK 构建产物不同世代：staged=$stagedCommit sdk=$sdkCommit"
+    }
+    # R3-A3：本轮全部二进制进私有 bin；壳以验收模式启动（OWO_SIDECAR_ROOT=bin），
+    # 仓库/同目录/历史安装产物一律不参与解析。
+    $binDir = Join-Path $runRoot 'bin'
+    New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+    Copy-Item -LiteralPath $ShellExe -Destination (Join-Path $binDir 'owo-agent-desktop.exe') -Force
+    $shellDir = Split-Path -Parent $ShellExe
+    foreach ($dll in @(Get-ChildItem -LiteralPath $shellDir -Filter '*.dll' -ErrorAction SilentlyContinue)) {
+        Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $binDir $dll.Name) -Force
+    }
+    Copy-Item -LiteralPath $staged.source -Destination (Join-Path $binDir 'owo-agent.exe') -Force
+    $launchedCore = Join-Path $binDir 'owo-agent.exe'
+    $launchedSha = (Get-FileHash -LiteralPath $launchedCore -Algorithm SHA256).Hash
+    if ($launchedSha -ne $staged.sha256) {
+        throw "私有 bin 中的 core 与随包产物哈希不一致：bin=$launchedSha staged=$($staged.sha256)"
+    }
+
+    $cdpRequested = Get-OwoFreeTcpPort
+    $webviewDataDir = Get-OwoWebviewEtbDir -UserDataDir $webviewUdf
+    $null = Clear-OwoCdpPortFile -DataDir $webviewDataDir
+    return @{
+        scenario          = $Scenario
+        stamp             = $Stamp
+        run_root          = $runRoot
+        bin_dir           = $binDir
+        shell_exe         = (Join-Path $binDir 'owo-agent-desktop.exe')
+        repo_shell_exe    = $ShellExe
+        sidecar_exe       = $SidecarExe
+        launched_core     = $launchedCore
+        launched_sha256   = $launchedSha
+        staged            = $staged
+        identity          = [string]$staged.identity
+        local_app_data    = $localAppData
+        app_data          = $appData
+        temp_dir          = $runTemp
+        project           = $project
+        agent_state_dir   = $agentStateDir
+        data_root         = (Join-Path $agentStateDir 'data')
+        log_dir           = (Join-Path $agentStateDir 'logs')
+        token_file        = (Join-Path $agentStateDir 'data\auth\token')
+        webview_udf       = $webviewUdf
+        webview_data_dir  = $webviewDataDir
+        cdp_requested     = $cdpRequested
+    }
+}
+
+function Start-OwoAcceptanceShell {
+    <# 按 New-OwoAcceptanceRun 的结果启动壳（凭据只注入子进程，绝不回显）。 #>
+    param(
+        [Parameter(Mandatory = $true)]$Run,
+        [int]$CdpPort = 0,
+        [switch]$NoApiKey
+    )
+    $apiKey = ''
+    if (-not $NoApiKey) {
+        $apiKey = [Environment]::GetEnvironmentVariable('OPENAI_API_KEY', 'User')
+        if (-not $apiKey) {
+            throw '用户级环境变量 OPENAI_API_KEY 缺失：sidecar 无法启动（AGENTS.md 凭据红线：只注入，不回显）'
+        }
+    }
+    $port = if ($CdpPort -gt 0) { $CdpPort } else { [int]$Run.cdp_requested }
+    $psi = New-OwoShellStartInfo -ShellExe $Run.shell_exe -LocalAppData $Run.local_app_data `
+        -AppData $Run.app_data -TempDir $Run.temp_dir -ApiKey $apiKey -CdpPort $port `
+        -WebViewUserDataDir $Run.webview_udf -AcceptanceSidecarRoot $Run.bin_dir -NoApiKey:$NoApiKey
+    return [System.Diagnostics.Process]::Start($psi)
+}
+
 function Assert-OwoShellEmbedsCurrentWeb {
     <#
       §7 构建自包含：桌面壳 exe **内嵌** desktop/web 前端资产（tauri-build 在构建期
