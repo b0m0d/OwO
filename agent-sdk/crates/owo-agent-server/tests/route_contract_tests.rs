@@ -1136,6 +1136,113 @@ async fn events_stream_resumes_from_last_event_id_header() {
     assert_eq!(id_line, Some(seq), "SSE id 行必须等于外层 seq");
 }
 
+/// R3（§8.2）：新订阅（无 `Last-Event-ID`、无 `?last_event_id=`）**不得重放历史**。
+/// 真实桌面冷启动的首屏请求风暴根因即旧语义「缺省从头重放」：WebView 先水合、
+/// 随后连事件流，整环 invalidate 历史一次性下发 → 每个领域各刷一次
+/// （实测首屏业务请求 19 条，超 §8.2 的 ≤5 预算）。断线续传语义不受影响
+/// （见 `events_stream_resumes_from_last_event_id_header`）。
+#[tokio::test]
+async fn events_stream_fresh_subscription_does_not_replay_history() {
+    use http_body_util::BodyExt;
+    use owo_agent_server::event_stream::{hub, InvalidateDomain};
+
+    let _guard = invalidate_guard().await;
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    // 连接前已存在的历史事件：新订阅必须看不到它。
+    let stale = hub().publish_invalidate(InvalidateDomain::Projects);
+    let response = app
+        .clone()
+        .oneshot(request(&state, "GET", "/events/stream", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    // 连接之后再发布：这才是新订阅应收到的事件。
+    let live = hub().publish_invalidate(InvalidateDomain::Skills);
+    assert!(live > stale, "seq 单调");
+    let mut body = response.into_body();
+    let mut seen: Vec<u64> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        let budget = deadline.saturating_duration_since(std::time::Instant::now());
+        if budget.is_zero() {
+            break;
+        }
+        // `timeout(..).await` 的层序是 Result<**Option**<Result<Frame, Error>>, Elapsed>
+        // （帧迭代器先给"流是否还有下一帧"，再给"该帧是否出错"）。
+        let frame = match tokio::time::timeout(budget, body.frame()).await {
+            Ok(Some(Ok(frame))) => frame,
+            _ => break, // 超时 / 流结束 / 帧错误：都停止收集，由下方断言判定
+        };
+        // `Frame::into_data()` 返回 Result（心跳注释帧不是 data 帧 → 跳过）。
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&data).to_string();
+        let Some(line) = text.lines().find_map(|l| l.strip_prefix("data: ")) else {
+            continue; // 心跳注释帧无 data 行
+        };
+        let Ok(outer) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(seq) = outer["seq"].as_u64() {
+            seen.push(seq);
+            if seq == live {
+                break;
+            }
+        }
+    }
+    assert!(
+        seen.contains(&live),
+        "新订阅必须收到连接后的实时事件（已收 {seen:?}）"
+    );
+    assert!(
+        !seen.contains(&stale),
+        "新订阅不得重放连接前的历史事件 seq={stale}（首屏请求风暴根因），实际收到 {seen:?}"
+    );
+}
+
+/// R3（§8.2）配套：`?last_event_id=0` 是脚本/调试用的**显式**全量重放开关，
+/// 缺省语义变更不得把这个逃生口一起带走。
+#[tokio::test]
+async fn events_stream_explicit_zero_replays_history() {
+    use http_body_util::BodyExt;
+    use owo_agent_server::event_stream::{hub, InvalidateDomain};
+
+    let _guard = invalidate_guard().await;
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let stale = hub().publish_invalidate(InvalidateDomain::Whitelist);
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "GET",
+            "/events/stream?last_event_id=0",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+        .await
+        .expect("显式 last_event_id=0 应立即重放历史")
+        .expect("流不应报错")
+        .unwrap();
+    let first_frame = frame.into_data().expect("显式重放的首帧应为 data 帧");
+    let text = String::from_utf8_lossy(&first_frame);
+    let data_line = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap_or_else(|| panic!("SSE 帧缺少 data 行，实际：{text}"));
+    let outer: serde_json::Value = serde_json::from_str(data_line).expect("外层 JSON");
+    assert!(
+        outer["seq"].as_u64().unwrap_or(u64::MAX) <= stale,
+        "显式全量重放的首帧应是历史事件（≤{stale}），实际：{outer}"
+    );
+}
+
 /// §3.2 路由-事件矩阵：每个改变领域状态的 mutation 在成功后恰好发布一次
 /// 对应领域失效；失败路径（4xx/5xx）不得发布。新增 mutation 路由时必须
 /// 在本表登记 (method, path, body, domain)，防止漏接领域事件。
@@ -1280,6 +1387,13 @@ async fn mutation_routes_publish_exactly_one_domain_invalidate() {
             "POST",
             "/session/__ct_missing__/fork",
             serde_json::json!({}),
+            InvalidateDomain::Sessions,
+        ),
+        // M4.2：会话级模型路由 mutation（404 失败路径 → 零发布）。
+        (
+            "POST",
+            "/session/__ct_missing__/model",
+            serde_json::json!({"model":null}),
             InvalidateDomain::Sessions,
         ),
         (
@@ -1866,5 +1980,241 @@ async fn health_contract_version_and_optional_build() {
     assert_eq!(
         schemas["BuildInfo"]["required"],
         serde_json::json!(["commit", "dirty", "built_at"])
+    );
+}
+
+/// R3（§8.1）冷启动诊断 ledger 契约：
+/// 1. `/diagnostics/requests` 受 bearer 保护（匿名 401），不进入公开面；
+/// 2. 每条记录**恰好**六字段（method/route_template/started_at/duration_ms/status/source）；
+/// 3. 动态路由记录为模板（真实资源 id 不落 ledger），查询串不落；
+/// 4. Authorization/token 值绝不出现在报告任何字节里；
+/// 5. `x-owo-client` 头按白名单消毒（异常值 → other）；
+/// 6. fallback 静态资产不进 ledger（首屏 ≤5 口径只算 API）。
+#[tokio::test]
+async fn diagnostics_requests_ledger_is_protected_and_privacy_safe() {
+    use axum::http::{header, Method, Request};
+    use owo_agent_server::request_ledger_api;
+
+    /// 附带 bearer 与可选 `x-owo-client` 来源头的请求。
+    fn sourced(
+        state: &Arc<owo_agent_server::AppState>,
+        path: &str,
+        client: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut builder = Request::builder().method(Method::GET).uri(path).header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", state.auth_token.token()),
+        );
+        if let Some(value) = client {
+            builder = builder.header("x-owo-client", value);
+        }
+        builder.body(axum::body::Body::empty()).unwrap()
+    }
+
+    /// 发一次请求并解析 JSON 响应体（返回状态码与值）。
+    async fn body_json(
+        app: axum::Router,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> (u16, serde_json::Value) {
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    let (state, _temp) = test_state().await;
+    request_ledger_api::reset_for_test(&state.data_root);
+    let app = build_router(Arc::clone(&state));
+
+    // 1) 匿名必须 401（诊断面不得进入公开面）。
+    let (status, _) = body_json(
+        app.clone(),
+        anonymous_request("GET", "/diagnostics/requests", None),
+    )
+    .await;
+    assert_eq!(status, 401, "/diagnostics/requests 匿名应 401");
+
+    // 2) 制造流量：公开 health、动态资源路由（真实 id + 查询串）、
+    //    异常来源头的业务请求，以及一次 fallback 静态资产请求。
+    let marker_id = "ct-ghost-session-8f2a";
+    let traffic: Vec<axum::http::Request<axum::body::Body>> = vec![
+        sourced(&state, "/health", Some("web")),
+        sourced(
+            &state,
+            &format!("/session/{marker_id}/diff?deep=1&hint=LEAKME"),
+            Some("shell"),
+        ),
+        sourced(&state, "/sessions", Some("Bearer super-secret-value")),
+        // ServeDir fallback：不计入 ledger（首屏 ≤5 只算 API）。
+        sourced(&state, "/index.html", Some("web")),
+    ];
+    for req in traffic {
+        let (status, _) = body_json(app.clone(), req).await;
+        assert_ne!(status, 401, "合法 token 请求不应 401");
+    }
+
+    // 3) 读取报告：窗口 = 三条已匹配 API + 报告自身（自计）。
+    let (status, report) = body_json(
+        app.clone(),
+        request(&state, "GET", "/diagnostics/requests?limit=100", None),
+    )
+    .await;
+    assert_eq!(status, 200, "/diagnostics/requests 带 token 应 200");
+    let report_text = report.to_string();
+    assert_eq!(
+        report["cap"].as_u64(),
+        Some(request_ledger_api::LEDGER_CAP as u64)
+    );
+    let records = report["records"].as_array().unwrap();
+    let window = report["returned"].as_u64().unwrap() as usize;
+    assert_eq!(window, records.len(), "returned 必须等于窗口长度");
+    assert!(
+        records.len() >= 3,
+        "至少记录 health / session-diff / sessions：{report}"
+    );
+    assert!(
+        report["total"].as_u64().unwrap() >= window as u64,
+        "total 单调，不少于窗口长度"
+    );
+
+    // 每条记录恰好六字段白名单，且时间戳/时长/状态类型正确。
+    for record in records {
+        let obj = record.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "duration_ms",
+                "method",
+                "route_template",
+                "source",
+                "started_at",
+                "status"
+            ],
+            "ledger 记录必须恰好六字段：{record}"
+        );
+        let started_at = record["started_at"].as_str().unwrap();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(started_at).is_ok(),
+            "started_at 必须是 RFC3339：{started_at}"
+        );
+        assert!(record["duration_ms"].is_number(), "duration_ms 必须是数字");
+        assert!(record["status"].is_number(), "status 必须是数字");
+    }
+
+    // 4) 动态路由记录为模板；真实 id、查询串、凭据原文一律不落。
+    let templates: Vec<&str> = records
+        .iter()
+        .map(|r| r["route_template"].as_str().unwrap())
+        .collect();
+    assert!(
+        templates.contains(&"/session/{id}/diff"),
+        "应记录为路由模板：{templates:?}"
+    );
+    assert!(
+        !report_text.contains(marker_id),
+        "真实资源 id 不得进入 ledger"
+    );
+    assert!(
+        !report_text.contains("LEAKME") && !report_text.contains("deep=1"),
+        "查询串不得进入 ledger"
+    );
+    assert!(
+        !report_text.contains(state.auth_token.token()),
+        "bearer token 值不得出现在诊断报告里"
+    );
+    assert!(
+        !report_text.contains("super-secret-value"),
+        "异常 x-owo-client 原文必须被消毒"
+    );
+    assert!(
+        !report_text.contains("index.html"),
+        "fallback 静态资产不得进 ledger：{templates:?}"
+    );
+
+    // 5) source 消毒：合规值保留，异常值归 other。
+    let sources: Vec<&str> = records
+        .iter()
+        .map(|r| r["source"].as_str().unwrap())
+        .collect();
+    assert!(sources.contains(&"web"), "合规 source 应保留：{sources:?}");
+    assert!(sources.contains(&"shell"), "壳标签应保留：{sources:?}");
+    assert!(
+        sources.contains(&"other"),
+        "异常 source 应消毒为 other：{sources:?}"
+    );
+
+    // 6) 聚合口径与窗口自洽：health + auth_token + business == returned。
+    let aggregates = &report["aggregates"];
+    let health = aggregates["health"].as_u64().unwrap();
+    let auth = aggregates["auth_token"].as_u64().unwrap();
+    let business = aggregates["business"].as_u64().unwrap();
+    assert_eq!(health, 1, "/health 恰有一条（本轮唯一 health）");
+    assert_eq!(auth, 0, "本轮无 token 引导请求");
+    assert_eq!(
+        health + auth + business,
+        window as u64,
+        "三桶必须恰好覆盖窗口：{aggregates}"
+    );
+    assert!(business >= 2, "业务桶至少含 sessions 与 session-diff");
+
+    // 7) OpenAPI 契约：六字段 required 必须登记（TS SDK 与验收脚本共同基准）。
+    let (status, spec) =
+        body_json(app.clone(), request(&state, "GET", "/openapi.json", None)).await;
+    assert_eq!(status, 200);
+    let entry = &spec["paths"]["/diagnostics/requests"]["get"];
+    assert_eq!(
+        entry["operationId"],
+        serde_json::json!("diagnosticsRequests")
+    );
+    let item = &entry["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+        ["records"]["items"];
+    let mut required: Vec<&str> = item["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    required.sort_unstable();
+    assert_eq!(
+        required,
+        vec![
+            "duration_ms",
+            "method",
+            "route_template",
+            "source",
+            "started_at",
+            "status"
+        ]
+    );
+
+    // 8) CORS：ledger 来源标签与 trace 头必须预检放行（否则 WebView 发不出）。
+    let preflight = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/health")
+        .header(header::ORIGIN, "tauri://localhost")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .header(
+            header::ACCESS_CONTROL_REQUEST_HEADERS,
+            "x-owo-client,x-trace-id",
+        )
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = app.oneshot(preflight).await.unwrap();
+    let allowed = response
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(
+        allowed.contains("x-owo-client") && allowed.contains("x-trace-id"),
+        "CORS 必须放行 ledger 标签与 trace 头，实际为 {allowed:?}"
     );
 }

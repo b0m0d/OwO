@@ -190,6 +190,31 @@ pub trait ModelProvider: Send + Sync {
         Ok(output)
     }
 
+    /// 按请求覆盖模型（M4.2 会话级/档位路由）：`Some(model)` 时请求体使用该模型，
+    /// `None`/空串/`"default"` 哨兵回退 Provider 自身解析链。默认实现忽略覆盖并
+    /// 退化为 [`complete`](Self::complete)（测试桩/非 OpenAI Provider 零改动兼容）。
+    async fn complete_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        let _ = model;
+        self.complete(messages, tools).await
+    }
+
+    /// 流式版按请求覆盖（语义同 [`complete_with_model`](Self::complete_with_model)）。
+    async fn complete_stream_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelOutput, String> {
+        let _ = model;
+        self.complete_stream(messages, tools, on_delta).await
+    }
+
     /// 累计 token 用量快照（供回合增量统计；未实现的 Provider 返回零）。
     fn usage_snapshot(&self) -> TokenUsage {
         TokenUsage::default()
@@ -212,6 +237,60 @@ pub struct OpenAiCompatibleConfig {
 /// 便于随时一键实测：只需在进程环境提供 key，无需再配 BASE_URL/MODEL。
 pub const DEFAULT_MODEL_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
 pub const DEFAULT_MODEL_ID: &str = "glm-5.3-flash";
+
+/// `"default"` 哨兵（M4.2）：请求级模型覆盖等于该值时**不**固定模型，
+/// 回退 Provider 自身解析链（OPENAI_MODEL 运行时热切换 → 启动配置 → 内置默认）。
+/// 保证哨兵值绝不泄漏进请求体 `model` 字段。
+pub const MODEL_DEFAULT_SENTINEL: &str = "default";
+
+/// 模型档位（M4.2 任务类型路由）：main = 会话/回合主模型；fast = 子代理/压缩等
+/// 轻量任务；vision = 图像理解任务（视觉通道端点由 `vision` 模块自身配置）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTier {
+    Main,
+    Fast,
+    Vision,
+}
+
+impl ModelTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Fast => "fast",
+            Self::Vision => "vision",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "main" => Some(Self::Main),
+            "fast" => Some(Self::Fast),
+            "vision" => Some(Self::Vision),
+            _ => None,
+        }
+    }
+}
+
+/// 档位 → 模型解析（env 单一事实源，不落配置文件）：
+/// - `Main`：恒 `None`（走 Provider 自身解析链）；
+/// - `Fast`：`OWO_MODEL_FAST`；
+/// - `Vision`：`OWO_MODEL_VISION`，未配置时兼容视觉通道既有变量 `OWO_VISION_MODEL`。
+///
+/// 返回 `None` 表示该档位未显式配置，调用方回退主链
+/// （OPENAI_MODEL → 启动配置 → `DEFAULT_MODEL_ID`）。空串/纯空白视为未配置。
+pub fn resolve_tier_model(tier: ModelTier) -> Option<String> {
+    let names: &[&str] = match tier {
+        ModelTier::Main => return None,
+        ModelTier::Fast => &["OWO_MODEL_FAST"],
+        ModelTier::Vision => &["OWO_MODEL_VISION", "OWO_VISION_MODEL"],
+    };
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
 
 impl OpenAiCompatibleConfig {
     pub fn from_env() -> Result<Self, String> {
@@ -409,7 +488,26 @@ impl OpenAiCompatibleProvider {
             .unwrap_or_else(|| self.config.model.clone())
     }
 
-    fn request_body(&self, messages: &[ChatMessage], tools: &[ToolSpec], stream: bool) -> Value {
+    /// 请求体 `model` 字段取值（M4.2）：请求级覆盖优先；覆盖为空串或 `"default"`
+    /// 哨兵时回退 [`model`](Self::model) 解析链——哨兵值绝不泄漏进请求体。
+    fn effective_model(&self, model: Option<&str>) -> String {
+        match model.map(str::trim) {
+            Some(override_model)
+                if !override_model.is_empty() && override_model != MODEL_DEFAULT_SENTINEL =>
+            {
+                override_model.to_string()
+            }
+            _ => self.model(),
+        }
+    }
+
+    fn request_body(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        stream: bool,
+    ) -> Value {
         let tool_payload: Vec<Value> = tools
             .iter()
             .map(|spec| {
@@ -455,7 +553,7 @@ impl OpenAiCompatibleProvider {
             .collect();
 
         let mut body = json!({
-            "model": self.model(),
+            "model": self.effective_model(model),
             "messages": messages_payload,
             "stream": stream,
         });
@@ -576,13 +674,22 @@ impl ModelProvider for OpenAiCompatibleProvider {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> Result<ModelOutput, String> {
+        self.complete_with_model(None, messages, tools).await
+    }
+
+    async fn complete_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
         if !self.cloud_enabled() {
             return Err("云端模型已禁用（数据出境开关关闭）".to_string());
         }
         if let Some(reason) = self.usage_budget_check() {
             return Err(reason);
         }
-        let body = self.request_body(messages, tools, false);
+        let body = self.request_body(model, messages, tools, false);
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -640,13 +747,24 @@ impl ModelProvider for OpenAiCompatibleProvider {
         tools: &[ToolSpec],
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelOutput, String> {
+        self.complete_stream_with_model(None, messages, tools, on_delta)
+            .await
+    }
+
+    async fn complete_stream_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelOutput, String> {
         if !self.cloud_enabled() {
             return Err("云端模型已禁用（数据出境开关关闭）".to_string());
         }
         if let Some(reason) = self.usage_budget_check() {
             return Err(reason);
         }
-        let body = self.request_body(messages, tools, true);
+        let body = self.request_body(model, messages, tools, true);
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -1040,13 +1158,14 @@ impl ResilientProvider {
     /// 对单个 provider 执行带退避重试的调用；返回 (结果, 是否命中可重试失败)。
     async fn call_with_retry(
         provider: &Arc<dyn ModelProvider>,
+        model: Option<&str>,
         messages: &[ChatMessage],
         tools: &[ToolSpec],
         retry: &RetryPolicy,
     ) -> (Result<ModelOutput, String>, bool) {
         let mut attempt = 0;
         loop {
-            match provider.complete(messages, tools).await {
+            match provider.complete_with_model(model, messages, tools).await {
                 Ok(output) => return (Ok(output), false),
                 Err(error) => {
                     let retriable = is_retriable(&error, retry);
@@ -1077,6 +1196,15 @@ impl ModelProvider for ResilientProvider {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> Result<ModelOutput, String> {
+        self.complete_with_model(None, messages, tools).await
+    }
+
+    async fn complete_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
         if !self.breaker.allow_request() {
             return Err(format!(
                 "模型网关熔断器打开（连续失败 {} 次），请稍后重试",
@@ -1086,7 +1214,7 @@ impl ModelProvider for ResilientProvider {
         let mut errors: Vec<String> = Vec::new();
         for provider in self.providers() {
             let (result, retriable) =
-                Self::call_with_retry(&provider, messages, tools, &self.retry).await;
+                Self::call_with_retry(&provider, model, messages, tools, &self.retry).await;
             match result {
                 Ok(output) => {
                     self.breaker.record_success();
@@ -1111,6 +1239,17 @@ impl ModelProvider for ResilientProvider {
         tools: &[ToolSpec],
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelOutput, String> {
+        self.complete_stream_with_model(None, messages, tools, on_delta)
+            .await
+    }
+
+    async fn complete_stream_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelOutput, String> {
         if !self.breaker.allow_request() {
             return Err(format!(
                 "模型网关熔断器打开（连续失败 {} 次），请稍后重试",
@@ -1128,7 +1267,7 @@ impl ModelProvider for ResilientProvider {
                 let mut forward = |delta: String| deltas.push(delta);
                 let mut forward_mut: &mut (dyn FnMut(String) + Send) = &mut forward;
                 match provider
-                    .complete_stream(messages, tools, &mut forward_mut)
+                    .complete_stream_with_model(model, messages, tools, &mut forward_mut)
                     .await
                 {
                     Ok(output) => {
@@ -1427,7 +1566,7 @@ mod tests {
             cloud_enabled: false,
         })
         .unwrap();
-        let body = provider.request_body(&[], &[], true);
+        let body = provider.request_body(None, &[], &[], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
@@ -1451,18 +1590,209 @@ mod tests {
         std::env::remove_var("OWO_CLOUD_ENABLED");
         let config = OpenAiCompatibleConfig::from_env().unwrap();
         let provider = OpenAiCompatibleProvider::new(config).unwrap();
-        let body = provider.request_body(&[], &[], false);
+        let body = provider.request_body(None, &[], &[], false);
         assert_eq!(body["model"], "model-a");
         std::env::set_var("OPENAI_MODEL", "model-b");
-        let body = provider.request_body(&[], &[], false);
+        let body = provider.request_body(None, &[], &[], false);
         assert_eq!(body["model"], "model-b");
         std::env::set_var("OPENAI_MODEL", "");
-        let body = provider.request_body(&[], &[], false);
+        let body = provider.request_body(None, &[], &[], false);
         assert_eq!(body["model"], "model-a");
         std::env::remove_var("OWO_CLOUD_ENABLED");
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("OPENAI_BASE_URL");
         std::env::remove_var("OPENAI_MODEL");
+    }
+
+    /// M4.2 会话级路由：显式覆盖进请求体；空串/`"default"` 哨兵回退解析链且
+    /// 哨兵值绝不泄漏进请求体 `model` 字段。
+    #[test]
+    fn request_body_model_override_wins_and_sentinel_never_leaks() {
+        let _guard = ENV_LOCK.blocking_lock();
+        std::env::set_var("OPENAI_MODEL", "chain-model");
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            api_key: String::new(),
+            model: "config-model".to_string(),
+            cloud_enabled: false,
+        })
+        .unwrap();
+        assert_eq!(
+            provider.request_body(Some("vision-x"), &[], &[], false)["model"],
+            "vision-x"
+        );
+        assert_eq!(
+            provider.request_body(Some("  padded  "), &[], &[], false)["model"],
+            "padded"
+        );
+        assert_eq!(
+            provider.request_body(Some(MODEL_DEFAULT_SENTINEL), &[], &[], false)["model"],
+            "chain-model"
+        );
+        assert_eq!(
+            provider.request_body(Some("   "), &[], &[], false)["model"],
+            "chain-model"
+        );
+        assert_eq!(
+            provider.request_body(None, &[], &[], false)["model"],
+            "chain-model"
+        );
+        std::env::remove_var("OPENAI_MODEL");
+    }
+
+    /// M4.2 档位路由：Fast/Vision 从 env 解析（含 trim 与空白视为未配置）；
+    /// Vision 兼容视觉通道既有变量 `OWO_VISION_MODEL`；Main 恒走主链。
+    #[test]
+    fn tier_resolver_reads_env_with_vision_alias_fallback() {
+        let _guard = ENV_LOCK.blocking_lock();
+        for name in ["OWO_MODEL_FAST", "OWO_MODEL_VISION", "OWO_VISION_MODEL"] {
+            std::env::remove_var(name);
+        }
+        assert_eq!(resolve_tier_model(ModelTier::Main), None);
+        assert_eq!(resolve_tier_model(ModelTier::Fast), None);
+        assert_eq!(resolve_tier_model(ModelTier::Vision), None);
+        std::env::set_var("OWO_MODEL_FAST", " fast-m ");
+        std::env::set_var("OWO_MODEL_VISION", "vision-m");
+        std::env::set_var("OWO_VISION_MODEL", "shadowed");
+        assert_eq!(
+            resolve_tier_model(ModelTier::Fast).as_deref(),
+            Some("fast-m")
+        );
+        assert_eq!(
+            resolve_tier_model(ModelTier::Vision).as_deref(),
+            Some("vision-m")
+        );
+        std::env::remove_var("OWO_MODEL_VISION");
+        assert_eq!(
+            resolve_tier_model(ModelTier::Vision).as_deref(),
+            Some("shadowed")
+        );
+        std::env::set_var("OWO_MODEL_FAST", "   ");
+        assert_eq!(resolve_tier_model(ModelTier::Fast), None);
+        for name in ["OWO_MODEL_FAST", "OWO_VISION_MODEL"] {
+            std::env::remove_var(name);
+        }
+        assert_eq!(ModelTier::parse(" FAST "), Some(ModelTier::Fast));
+        assert_eq!(ModelTier::parse("nope"), None);
+        assert_eq!(ModelTier::Vision.as_str(), "vision");
+    }
+
+    /// M4.2：ResilientProvider 主链/failover 全链透传请求级模型覆盖。
+    #[tokio::test]
+    async fn resilient_chain_forwards_model_override() {
+        use std::sync::Mutex as StdMutex;
+        struct Recording {
+            seen: StdMutex<Vec<Option<String>>>,
+        }
+        #[async_trait]
+        impl ModelProvider for Recording {
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                tools: &[ToolSpec],
+            ) -> Result<ModelOutput, String> {
+                self.complete_with_model(None, messages, tools).await
+            }
+            async fn complete_with_model(
+                &self,
+                model: Option<&str>,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> Result<ModelOutput, String> {
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(model.map(str::to_string));
+                Ok(ModelOutput::Text("ok".to_string()))
+            }
+        }
+        let primary = Arc::new(Recording {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let fallback = Arc::new(Recording {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let resilient = ResilientProvider::new(
+            Arc::clone(&primary) as Arc<dyn ModelProvider>,
+            vec![Arc::clone(&fallback) as Arc<dyn ModelProvider>],
+            CircuitBreaker::from_env(),
+            RetryPolicy::from_env(),
+        );
+        resilient
+            .complete_with_model(Some("fast-x"), &[], &[])
+            .await
+            .expect("主链应成功");
+        resilient.complete(&[], &[]).await.expect("无覆盖也应成功");
+        let seen = primary
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(seen.as_slice(), &[Some("fast-x".to_string()), None]);
+        // 主链成功时 fallback 不应被调用。
+        assert!(fallback.seen.lock().unwrap().is_empty());
+    }
+
+    /// 真机门控（M4.1 + M4.2 wire 级）：显式覆盖必须到达真实端点请求体。
+    ///
+    /// canary 负证法：用不存在的模型名做请求级覆盖，期望端点报错；同时基准链
+    /// （同端点、无覆盖）必须成功。若实现忽略覆盖，canary 调用会静默走默认模型
+    /// 并成功 → 本测试必红。凭据只经 `OPENAI_API_KEY` 环境变量注入（红线）。
+    ///
+    /// ```text
+    /// $env:OPENAI_API_KEY = (用户级注入)
+    /// cargo test -p owo-agent-core --lib -- gateway::tests::live_model_override -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "真实端点：需要 OPENAI_API_KEY，显式 --ignored 运行"]
+    async fn live_model_override_reaches_endpoint() {
+        let _guard = ENV_LOCK.lock().await;
+        if std::env::var("OPENAI_API_KEY")
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            panic!("live 门控需要 OPENAI_API_KEY 环境变量（凭据仅经环境注入）");
+        }
+        std::env::remove_var("OPENAI_MODEL");
+        std::env::remove_var("OWO_CLOUD_ENABLED");
+        let config = OpenAiCompatibleConfig {
+            base_url: DEFAULT_MODEL_BASE_URL.to_string(),
+            api_key: std::env::var("OPENAI_API_KEY").unwrap(),
+            model: DEFAULT_MODEL_ID.to_string(),
+            cloud_enabled: true,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+        // ① 基准：无覆盖走链上默认模型，必须成功（证明端点/凭据可用）。
+        let baseline = provider
+            .complete(&[ChatMessage::user("只回复两个字：正常".to_string())], &[])
+            .await
+            .expect("基准链应成功（端点与凭据可用）");
+        assert!(
+            matches!(baseline, ModelOutput::Text(ref text) if !text.trim().is_empty()),
+            "基准链应返回非空文本：{baseline:?}"
+        );
+        // ② canary：不存在的模型名做请求级覆盖——覆盖若未进请求体，这次调用会
+        // 静默落到默认模型并成功（假绿），因此报错即是路由生效的证明。
+        let canary = provider
+            .complete_with_model(
+                Some("owo-routing-canary-not-exist"),
+                &[ChatMessage::user("ping".to_string())],
+                &[],
+            )
+            .await;
+        assert!(
+            canary.is_err(),
+            "canary 模型必须因请求体携带它而失败；实际成功＝覆盖未进 wire：{canary:?}"
+        );
+        // ③ "default" 哨兵：不得作为模型名发出去，必须回退链上默认（成功）。
+        let sentinel = provider
+            .complete_with_model(
+                Some(MODEL_DEFAULT_SENTINEL),
+                &[ChatMessage::user("只回复两个字：正常".to_string())],
+                &[],
+            )
+            .await
+            .expect("哨兵必须回退默认链，不得把 \"default\" 发给端点");
+        assert!(matches!(sentinel, ModelOutput::Text(_)));
     }
 
     #[test]

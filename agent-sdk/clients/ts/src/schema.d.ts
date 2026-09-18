@@ -196,6 +196,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["capabilitiesList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/change-sets/{id}": {
         parameters: {
             query?: never;
@@ -812,6 +828,23 @@ export interface paths {
             cookie?: never;
         };
         get: operations["desktopWindows"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/diagnostics/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 开发诊断：安全请求 ledger（R3 §8.1） */
+        get: operations["diagnosticsRequests"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1620,6 +1653,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/mcp/enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["mcpEnabled"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mcp/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["mcpHealthSnapshot"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mcp/reconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["mcpReconnect"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/mcp/remove": {
         parameters: {
             query?: never;
@@ -2372,6 +2453,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["permissionsStatus"];
+        put?: never;
+        post: operations["permissionsSetProfile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/permissions/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["grantsList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/permissions/grants/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["grantsRevoke"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/plugins": {
         parameters: {
             query?: never;
@@ -2840,22 +2969,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/workspace/tree": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["previewWorkspaceTree"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/schemas": {
         parameters: {
             query?: never;
@@ -3218,54 +3331,6 @@ export interface paths {
         get: operations["settingsGet"];
         put?: never;
         post: operations["settingsUpdate"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/permissions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["permissionsStatus"];
-        put?: never;
-        post: operations["permissionsSetProfile"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/permissions/grants": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["grantsList"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/permissions/grants/revoke": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["grantsRevoke"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4200,6 +4265,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/workspace/tree": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["previewWorkspaceTree"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/world-model/predict": {
         parameters: {
             query?: never;
@@ -4232,70 +4313,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/capabilities": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["capabilitiesList"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/mcp/health": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["mcpHealthSnapshot"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/mcp/reconnect": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["mcpReconnect"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/mcp/enabled": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["mcpEnabled"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4317,7 +4334,7 @@ export interface components {
             reviewer: string;
             team_id: string;
         };
-        /** @description 构建信息（由统一构建入口生成 build-info.json 提供） */
+        /** @description 构建信息（§7.1 单一来源 owo-build-info：编译期烧录优先，OWO_BUILD_INFO 覆写文件兼容发布链） */
         BuildInfo: {
             built_at: string;
             commit: string;
@@ -4375,11 +4392,21 @@ export interface components {
         EvalRunRequest: {
             suite_id: string;
         };
-        /** @description /health 响应（十期一路：build 为 additive 字段） */
+        /** @description /health 响应（十期一路：build 为 additive 字段；§4.2 实例握手字段 additive） */
         HealthResponse: {
+            /** @description 桌面壳与核心服务兼容性握手版本 */
+            api_version: string;
             auto_approve: boolean;
             build?: components["schemas"]["BuildInfo"];
+            /** @description 构建标识（git_commit，缺失 unknown） */
+            build_id?: string;
             healthy: boolean;
+            /** @description 桌面壳注入的实例身份（开发模式不序列化） */
+            instance_id?: string | null;
+            /** @description 服务进程 pid */
+            pid?: number;
+            /** @description 启动阶段（当前恒为 ready） */
+            stage?: string;
             version: string;
         };
         /** @description 矩阵单元格：(case_id, agent_mode, repetition)；agent_mode 为核心小写词（workswarm 拓扑序列化为 multi） */
@@ -4837,8 +4864,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description public bootstrap token (same-origin pairing; CORS whitelist blocks cross-origin reads) */
+            /** @description development bootstrap token; desktop release requires an ephemeral process-pairing proof header */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description desktop process pairing proof missing or invalid */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4950,6 +4984,24 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description enabled state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    capabilitiesList: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description capability catalog (single source for UI/CLI/diagnostics/help, §8.3) */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5229,8 +5281,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description SSE progress stream for cloud task */
+            /** @description SSE progress stream for cloud task (requires Bearer) */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description missing or invalid bearer token */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6096,6 +6155,54 @@ export interface operations {
             };
         };
     };
+    diagnosticsRequests: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 环形窗口报告：total/returned/cap/aggregates{health,auth_token,business}/records[]；records 每条严格六字段（method,route_template,started_at,duration_ms,status,source），禁止出现 Authorization/查询串/请求体/响应体/私人路径 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        aggregates: {
+                            auth_token: number;
+                            business: number;
+                            health: number;
+                        };
+                        cap: number;
+                        records: {
+                            duration_ms: number;
+                            method: string;
+                            route_template: string;
+                            /** @description x-owo-client 头消毒值（[a-z0-9_-]{1,32}），异常/缺失→other */
+                            source: string;
+                            /** @description RFC3339 毫秒 UTC */
+                            started_at: string;
+                            status: number;
+                        }[];
+                        returned: number;
+                        total: number;
+                    };
+                };
+            };
+            /** @description 缺少或非法 bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     evalGateReport: {
         parameters: {
             query?: never;
@@ -6182,16 +6289,27 @@ export interface operations {
     eventsStream: {
         parameters: {
             query?: {
+                /** @description 续传起点（调试/脚本用；缺省=新订阅只收新事件，0=显式全量重放历史） */
                 last_event_id?: number;
             };
-            header?: never;
+            header?: {
+                /** @description 断线续传起点（优先于 query 参数；缺省=只收新事件） */
+                "Last-Event-ID"?: number;
+            };
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description reliable SSE event stream (Last-Event-ID resume + bounded backpressure) */
+            /** @description reliable SSE event stream（带 Last-Event-ID 时零丢失续传重放；新订阅从当前 head 起只收新事件 + 有界背压；需 Bearer fetch-stream） */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description missing or invalid bearer token */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6468,8 +6586,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description SSE task event stream (history replay + live; ?format=json returns array) */
+            /** @description SSE task event stream (history replay + live; ?format=json returns array; requires Bearer) */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description missing or invalid bearer token */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7476,6 +7601,73 @@ export interface operations {
         };
         responses: {
             /** @description server added and connected */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mcpEnabled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    enabled: boolean;
+                    name: string;
+                };
+            };
+        };
+        responses: {
+            /** @description tool prefix enable/disable (process-level, model-invisible, not persisted) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mcpHealthSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description per-server MCP health (state machine, circuit breaker, failure counters) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mcpReconnect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    name: string;
+                };
+            };
+        };
+        responses: {
+            /** @description server reconnected from saved config (process-level uninstall + hot connect) */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -8615,6 +8807,91 @@ export interface operations {
             };
         };
     };
+    permissionsStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 当前权限档位 + 授权记忆（脱敏） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    permissionsSetProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    profile: "read_only" | "workspace" | "auto_review" | "full_access" | "custom";
+                };
+            };
+        };
+        responses: {
+            /** @description profile 已切换 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    grantsList: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 授权记忆列表（脱敏） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    grantsRevoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    grant_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 授权记忆已撤销 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     pluginsList: {
         parameters: {
             query?: never;
@@ -9545,48 +9822,6 @@ export interface operations {
             };
         };
     };
-    previewWorkspaceTree: {
-        parameters: {
-            query: {
-                root: string;
-                depth?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 预绑定目录树预览（形状与 /projects/{id}/workspace/tree 一致；root 为 canonical 回显） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        root?: string;
-                        depth?: number;
-                        truncated?: boolean;
-                        entries: ({
-                            path?: string;
-                            /** @enum {string} */
-                            type?: "dir" | "file";
-                            size?: number | null;
-                        } & {
-                            [key: string]: unknown;
-                        })[];
-                    };
-                };
-            };
-            /** @description root 缺失/非绝对路径/目录不存在/非目录 */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     schemasList: {
         parameters: {
             query?: never;
@@ -10084,78 +10319,6 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description workspace settings */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    permissionsStatus: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description current permission profile + grants (redacted) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    permissionsSetProfile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description profile switched */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    grantsList: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description grant list (redacted) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    grantsRevoke: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description grant revoked */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11031,6 +11194,13 @@ export interface operations {
                     };
                 };
             };
+            /** @description missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description unknown team */
             404: {
                 headers: {
@@ -11557,8 +11727,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description SSE run event stream */
+            /** @description SSE run event stream (requires Bearer) */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description missing or invalid bearer token */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11654,6 +11831,48 @@ export interface operations {
             };
         };
     };
+    previewWorkspaceTree: {
+        parameters: {
+            query: {
+                root: string;
+                depth?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 预绑定目录树预览（形状与 /projects/{id}/workspace/tree 一致；root 为 canonical 回显） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        depth?: number;
+                        entries: ({
+                            path?: string;
+                            size?: number | null;
+                            /** @enum {string} */
+                            type?: "dir" | "file";
+                        } & {
+                            [key: string]: unknown;
+                        })[];
+                        root?: string;
+                        truncated?: boolean;
+                    };
+                };
+            };
+            /** @description root 缺失/非绝对路径/目录不存在/非目录 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     worldModelPredict: {
         parameters: {
             query?: never;
@@ -11712,91 +11931,6 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description active rule model + candidates + per-signature samples + calibration report */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    capabilitiesList: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description capability catalog (single source for UI/CLI/diagnostics/help, §8.3) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    mcpHealthSnapshot: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description per-server MCP health (state machine, circuit breaker, failure counters) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    mcpReconnect: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    name: string;
-                };
-            };
-        };
-        responses: {
-            /** @description server reconnected from saved config (process-level uninstall + hot connect) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    mcpEnabled: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    name: string;
-                    enabled: boolean;
-                };
-            };
-        };
-        responses: {
-            /** @description tool prefix enable/disable (process-level, model-invisible, not persisted) */
             200: {
                 headers: {
                     [name: string]: unknown;

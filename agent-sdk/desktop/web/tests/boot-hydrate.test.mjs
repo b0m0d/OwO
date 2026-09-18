@@ -69,10 +69,22 @@ test("§3.1 事件流 Bearer 认证 + 域失效事件驱动 + 低频兜底 + 单
   assert.match(app, /function startInvalidation\(\)/, "必须提供事件失效启动入口");
   assert.match(app, /function stopInvalidation\(\)/, "必须提供事件失效停止入口");
   assert.match(app, /Object\.entries\(INVALIDATE_HANDLERS\)/, "启动时须逐一注册处理器");
-  assert.match(app, /invalidationBase === base/, "core 连接描述变化必须重建事件流");
+  // R3（§8.2）：幂等键必须含实例身份——core 重启后端口可能被系统复用，只比 base
+  // 会留下上一代进程的订阅器与 Last-Event-ID 游标（新事件版本号落在游标之下被丢弃）。
+  assert.match(app, /invalidationKey === key/, "core 连接描述变化必须重建事件流");
+  assert.match(app, /base \+ "#" \+ \(apiClient\.coreInstanceId \|\| ""\)/, "幂等键必须包含实例身份");
+  assert.doesNotMatch(app, /invalidationBase === base/, "不得退回只比 base 的旧口径");
   assert.match(app, /beforeunload[\s\S]*?stopInvalidation\(\)/, "页面卸载必须停流");
   assert.match(app, /markConnectionUnavailable\(\);\s*stopInvalidation\(\);/, "core 断开必须停流");
   assert.match(app, /setPollFallback/, "必须注册 Degraded 单一兜底调度器");
+  // R3（§8.2）真实桌面实测缺陷的结构性防回潮断言：
+  // ① 订阅器只交路径给宿主（base 由 api-client 单点组装，杜绝双前缀）；
+  // ② 进入 Degraded 不得立即冲刷全部领域（首屏零风暴）。
+  assert.match(eventsJs, /openStream\(streamPath,/, "openStream 必须收到路径而非绝对 URL");
+  assert.doesNotMatch(eventsJs, /openStream\(fullUrl/, "禁止把 baseUrl 预拼的绝对 URL 交给宿主");
+  const degradeBlock = eventsJs.match(/function startPollFallback\(\)[\s\S]*?\n    \}/);
+  assert.ok(degradeBlock, "必须存在 Degraded 兜底调度器");
+  assert.doesNotMatch(degradeBlock[0], /\n\s*tick\(\);/, "兜底首 tick 必须等一个完整周期");
   // §3.1 api-client：带认证流式请求 + 401 单次刷新。
   const apiClient = readFileSync(join(here, "../core/api-client.js"), "utf8");
   assert.match(apiClient, /async openEventStream\(/, "api-client 必须提供带认证流式入口");
@@ -95,4 +107,42 @@ test("单飞恢复：定时驱动与手动重试共用同一控制器", () => {
   assert.match(app, /window\.owoRecoverService = \(\) => recovery\.trigger\(\);/, "外部重试入口必须合并到控制器");
   assert.match(app, /recovery\.trigger\(\)\.catch\(\(\) => \{\}\)\.then\(/, "定时驱动不得产生未处理拒绝");
   assert.match(app, /resetCoreConnection/, "恢复前必须重查核心连接（动态端口/实例可能变化）");
+});
+
+test("§8.2 桌面后台态：守卫不得只看 document.visibilityState", () => {
+  const connection = readFileSync(join(here, "../shell/connection.js"), "utf8");
+  // 壳注入入口 + 统一口径 + 三个守卫点全部改走 uiHidden()。
+  assert.match(app, /window\.owoSetBackground = function \(hidden\)/, "必须暴露壳注入入口");
+  assert.match(app, /shellBackgroundHidden = Boolean\(hidden\)/, "注入值必须归一为布尔");
+  assert.match(app, /if \(running \|\| uiHidden\(\)\) return;/, "后台刷新守卫必须用 uiHidden()");
+  assert.match(app, /invalidator\.setPollFallback\(\(\) => \{\s*if \(uiHidden\(\)\) return;/, "兜底轮询守卫必须用 uiHidden()");
+  assert.match(
+    app,
+    /if \(!shellBackgroundHidden && invalidator[\s\S]{0,120}onVisibility\(\)/,
+    "唤回后必须补刷隐藏期间攒下的域失效"
+  );
+  assert.match(connection, /uiHidden\(\)[\s\S]{0,80}document\.visibilityState === "hidden"/, "隐藏期请求计数与守卫同口径");
+});
+
+test("§8.2 第5条：运行期重握手后必须按新代际重建事件订阅与请求通道", () => {
+  // 只在"启动失败"分支挂恢复控制器是不够的：core 在运行期被壳重启时端口与
+  // bearer 同时换代，旧端口只会网络失败。客户端两层都得接上。
+  const connection = readFileSync(join(here, "../shell/connection.js"), "utf8");
+  const client = readFileSync(join(here, "../core/api-client.js"), "utf8");
+  assert.match(
+    connection,
+    /owo:connection[\s\S]{0,520}startInvalidation\(\)/,
+    "ready 事件必须重建失效订阅器（幂等键含实例身份，同代际早退）"
+  );
+  assert.match(
+    client,
+    /catch \(error\) \{[\s\S]{0,260}handleNetworkFailure\(allowRetry\)[\s\S]{0,160}return execute\(false\)/,
+    "fetch 网络失败分支必须触发重查连接并重试一次"
+  );
+  assert.match(
+    client,
+    /handleNetworkFailure\(allowRetry\)[\s\S]{0,700}resetCoreConnection\(\)/,
+    "重查必须整体失效注入 token 与缓存描述符（不能只清 this.token）"
+  );
+  assert.match(client, /REHANDSHAKE_COOLDOWN_MS/, "重查必须有冷却窗口（防风暴放大）");
 });

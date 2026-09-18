@@ -446,6 +446,40 @@ impl EventStreamHub {
         (subscription, replay)
     }
 
+    /// R3（§8.2）：新订阅 = **只收注册之后的事件**（不重放历史）。
+    ///
+    /// head 读取与订阅登记放在同一次 `subscribers` 临界区内：登记前发布的事件
+    /// 属于"历史"（桌面 WebView 先水合再连流，本就不需要重放），登记后发布的
+    /// 事件必然进入本队列。旧语义「缺省从头重放」会让整环历史一次性下发，
+    /// 每个领域各刷一次——真实桌面冷启动实测首屏业务请求 19 条（超 §8.2 预算）。
+    pub fn subscribe_live_only(&self) -> (Arc<Subscription>, Vec<StreamEvent>) {
+        let subscription = Arc::new(Subscription {
+            queue: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
+            last_delivered: Arc::new(AtomicU64::new(0)),
+            dropped_mergeable: Arc::new(AtomicU64::new(0)),
+            dropped_critical: Arc::new(AtomicU64::new(0)),
+            lagged: Arc::new(AtomicBool::new(false)),
+            closed: Arc::new(AtomicBool::new(false)),
+            capacity: DEFAULT_QUEUE_CAPACITY,
+        });
+        let head = {
+            let mut subscribers = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+            let head = self.next_seq.load(Ordering::Relaxed);
+            // 游标预置为当前 head：后续 Last-Event-ID 续传据此计算。
+            subscription.last_delivered.store(head, Ordering::Relaxed);
+            subscribers.push(Arc::clone(&subscription));
+            head
+        };
+        self.connections_opened_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.emit_metrics(MetricsSample {
+            conn_opened: 1,
+            ..self.sample()
+        });
+        let _ = head;
+        (subscription, Vec::new())
+    }
+
     /// 活跃连接数（未关闭的订阅者）。
     pub fn active_connections(&self) -> usize {
         let subscribers = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
@@ -653,27 +687,36 @@ struct StreamQuery {
 }
 
 /// 解析续传起点：优先 `Last-Event-ID` 请求头（fetch-stream 客户端），
-/// 回退 `?last_event_id=` 查询参数（调试/脚本）。两者都缺省 → 从头重放。
-fn resolve_last_event_id(headers: &axum::http::HeaderMap, query: &StreamQuery) -> u64 {
+/// 回退 `?last_event_id=` 查询参数（调试/脚本，`0` = 显式要求全量重放）。
+///
+/// R3（§8.2）收口——**两者都缺省 → `None` = 新订阅，只收注册之后的事件**。
+/// 旧语义「缺省从头重放」在真实桌面冷启动下是首屏请求风暴的直接成因：WebView 先
+/// 水合、随后建立事件流，整环历史 invalidate 帧一次性下发 → 14 个域各刷一次
+/// （实测首屏业务请求 19 条，超 §8.2 预算）。断线续传必须显式携带
+/// `Last-Event-ID`（fetch-stream 客户端本就携带），零丢失语义不变。
+fn resolve_last_event_id(headers: &axum::http::HeaderMap, query: &StreamQuery) -> Option<u64> {
     if let Some(value) = headers.get("last-event-id") {
         if let Ok(text) = value.to_str() {
             if let Ok(parsed) = text.trim().parse::<u64>() {
-                return parsed;
+                return Some(parsed);
             }
         }
     }
-    query.last_event_id.unwrap_or(0)
+    query.last_event_id
 }
 
 /// SSE 端点：`GET /events/stream`（供主控并入 build_router）。
-/// 重放 `seq > last_event_id` 历史 → 实时流 → 空闲发心跳注释帧；
-/// 慢消费者（lagged）直接断开。需 Bearer（require_auth 中间件统一校验）。
+/// 带 `Last-Event-ID`（或 `?last_event_id=`）时重放其后历史再接实时流（断线零丢失）；
+/// 缺省为新订阅：只收注册之后的事件。空闲发心跳注释帧；慢消费者（lagged）直接断开。
+/// 需 Bearer（require_auth 中间件统一校验）。
 async fn events_stream(
     Query(query): Query<StreamQuery>,
     headers: axum::http::HeaderMap,
 ) -> Sse<UnboundedReceiverStream<Result<Event, Infallible>>> {
-    let last_event_id = resolve_last_event_id(&headers, &query);
-    let (subscription, replay) = hub().subscribe_after(last_event_id);
+    let (subscription, replay) = match resolve_last_event_id(&headers, &query) {
+        Some(last_event_id) => hub().subscribe_after(last_event_id),
+        None => hub().subscribe_live_only(),
+    };
     let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
 
     // 帧泵运行在专用 std 线程：recv_blocking 是 std Condvar 阻塞等待，

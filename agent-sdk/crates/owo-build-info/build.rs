@@ -10,27 +10,51 @@
 //! 一致）：**构建作用域 = agent-sdk/**——tracked 改动 + agent-sdk 内未跟踪
 //! 文件都算脏；仓根的个人文档/素材等构建不相关 untracked 资产不算脏
 //! （否则该机永远无法产出 clean release，门禁形同虚设）。
+//!
+//! R3 收口（实测发现的 R2 缺陷）：此前 `git -C <agent-sdk>` 配 pathspec
+//! `-- agent-sdk`，pathspec 相对 `-C` 目录解析成 `agent-sdk/agent-sdk`
+//! → 永远为空 → **dirty 恒为 false**（release clean-tree 门形同虚设）；
+//! 且 `rerun-if-changed` 指向 `agent-sdk/.git/…`（.git 实际在仓根）→ 路径
+//! 不存在 → 每次构建都重跑。现改为：作用域用 `-- .`（与 SDK 目录名解耦），
+//! 触发路径用 `git rev-parse --show-toplevel` 解析出的真实 `.git`。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
-    // 提交/暂存变化时重跑（index 变化覆盖 commit 与 dirty 状态变化）。
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/index");
-
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
-    // crates/<crate> → 仓库根（git -C 自会向上解析到真实仓库）。
-    let repo_root = manifest_dir.join("..").join("..");
+    // crates/<crate> → agent-sdk（构建作用域根）。
+    let sdk_root = manifest_dir.join("..").join("..");
 
-    let commit = git(&repo_root, &["rev-parse", "HEAD"])
+    // 真实 git 根（.git 所在）；解析失败则保守地不上报触发路径（=每次重跑）。
+    if let Some(toplevel) = git(&sdk_root, &["rev-parse", "show-toplevel"]) {
+        let git_root = PathBuf::from(toplevel);
+        // 提交/暂存变化时重跑（index 变化覆盖 commit 与 dirty 状态变化）。
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_root
+                .join(".git")
+                .join("HEAD")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_root
+                .join(".git")
+                .join("index")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+    }
+    println!("cargo:rerun-if-env-changed=OWO_ALLOW_DIRTY_RELEASE");
+
+    let commit = git(&sdk_root, &["rev-parse", "HEAD"])
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
-    let dirty = match git(
-        &repo_root,
-        &["status", "--porcelain", "-uall", "--", "agent-sdk"],
-    ) {
+    // pathspec `.` = `-C` 目录本身（agent-sdk），与 SDK 在仓库中的名字/深度解耦。
+    let dirty = match git(&sdk_root, &["status", "--porcelain", "-uall", "--", "."]) {
         Some(output) => !output.trim().is_empty(),
         None => true,
     };

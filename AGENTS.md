@@ -16,6 +16,15 @@
 - **文件编码**：所有源文件必须为 UTF-8；Windows 下写入含中文的 .rs/.md 文件时禁止经 GBK 控制台中转（会导致 mojibake 损坏）。提交前用 `cargo fmt --check` + `git diff` 抽查。
 - **并行协作**：多个 Agent 并行时按 `AGENTS-COORD.md` 认领文件；同一文件同一时间只允许一个 Agent 修改；涉及 `owo-agent-server/src/lib.rs` 等核心文件的改动需先跑 `cargo check` 验证。
 - **HTTP 契约**：服务端新增/修改路由必须同步 `tests/route_contract_tests.rs`（路由面契约测试），防止接口回归丢失。
+- **原生依赖前置（构建挂死陷阱）**：新开进程**不带** ONNX Runtime 环境变量，直接跑 `cargo` 会让 `ort-sys`/`sherpa-onnx-sys` 退化为联网下载产物，在受限沙箱内**静默挂死**（实测 15 分钟零 CPU、无 `rustc`，无任何报错）。任何手写 `cargo` 命令前必须先注入解析入口：
+
+  ```powershell
+  cd agent-sdk
+  . scripts\resolve-ort.ps1; Resolve-OwoOrtEnv -Quiet   # 仅进程级注入，不写用户/机器级变量
+  cargo test -p owo-agent-server --locked               # 之后才可执行
+  ```
+
+  `ci-gate.ps1` / `dev.ps1` / sidecar 与安装包脚本已统一走该入口；只注入 `SHERPA_ONNX_LIB_DIR`/`ORT_LIB_PATH`/`ORT_LIB_LOCATION` 三变量的做法不再允许另复制一份探测逻辑（方案 §7.2）。
 
 ## 模型凭据与环境变量（OPENAI_*）
 

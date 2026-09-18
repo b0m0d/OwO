@@ -114,6 +114,9 @@ impl Redactor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceId(pub String);
 
+/// 贯穿头名（wire 与 CORS 放行清单的唯一来源）。
+pub const TRACE_HEADER: &str = "x-trace-id";
+
 impl TraceId {
     /// 生成新 trace_id（uuid v4 短格式）。
     pub fn generate() -> Self {

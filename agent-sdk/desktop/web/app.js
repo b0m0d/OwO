@@ -917,14 +917,42 @@ const INVALIDATE_HANDLERS = {
   usage: refreshUsage,
 };
 let invalidator = null;
-let invalidationBase = null;
+let invalidationKey = null;
+// §8.2/§3.4 唯一"界面是否不可见"口径。
+//
+// 只看 document.visibilityState 在桌面壳里是不够的：实测 `window.hide()`
+// （wry set_visible → WebView2 SetIsVisible）后窗口在 Win32 层已不可见，
+// 页面可见性却仍是 "visible"，于是隐藏期照样按定时器打业务请求。
+// 壳在隐藏/唤回时注入 owoSetBackground（main.rs sync_window_background），
+// 浏览器直连场景仍走 visibilitychange——两个信号取并集，任一为隐藏即视为隐藏。
+let shellBackgroundHidden = false;
+function uiHidden() {
+  if (shellBackgroundHidden) return true;
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+window.owoSetBackground = function (hidden) {
+  shellBackgroundHidden = Boolean(hidden);
+  if (window.OwoInvalidation && typeof window.OwoInvalidation.setShellBackground === "function") {
+    // events.js 的可见性口径与这里保持同一事实（避免两套判断）。
+    window.OwoInvalidation.setShellBackground(shellBackgroundHidden);
+  }
+  if (!shellBackgroundHidden && invalidator && typeof invalidator.onVisibility === "function") {
+    invalidator.onVisibility(); // 补刷隐藏期间攒下的域失效（恰好一次）
+  }
+  return uiHidden();
+};
+window.owoUiHidden = uiHidden;
+
 function startInvalidation() {
   if (!window.OwoInvalidation) return;
   const base = apiClient.baseUrl || API_BASE;
-  // 幂等：同一连接描述下不重建；base/instance 变化（core 重启）必须先停旧流。
-  if (invalidator && invalidationBase === base) return;
+  // R3（§8.2）：幂等键必须含**实例身份**——core 被重启后端口可能被系统复用，
+  // 仅比对 base 会保留旧订阅器（其 Last-Event-ID 游标属于上一代进程，seq 已
+  // 重新计数），新事件的版本号落在游标之下 → 被当作 duplicate 丢弃，域不再刷新。
+  const key = base + "#" + (apiClient.coreInstanceId || "");
+  if (invalidator && invalidationKey === key) return;
   stopInvalidation();
-  invalidationBase = base;
+  invalidationKey = key;
   invalidator = window.OwoInvalidation.createDomainInvalidator({
     baseUrl: base,
     openStream: (path, streamOptions) => apiClient.openEventStream(path, streamOptions),
@@ -934,7 +962,7 @@ function startInvalidation() {
   }
   // §3.4：事件流 Degraded 时的唯一兜底调度器（隐藏窗口不发业务请求）。
   invalidator.setPollFallback(() => {
-    if (document.visibilityState === "hidden") return;
+    if (uiHidden()) return; // 隐藏期不发业务请求（§3.4/§8.2）
     for (const handler of Object.values(INVALIDATE_HANDLERS)) {
       Promise.resolve().then(handler).catch(() => {});
     }
@@ -948,7 +976,7 @@ function stopInvalidation() {
     invalidator.stop();
     invalidator = null;
   }
-  invalidationBase = null;
+  invalidationKey = null;
 }
 
 // §3.4 生命周期：core 连接断开（owo:connection ready=false）即停事件流；
@@ -1168,7 +1196,9 @@ function routeActive(routes) {
 function scheduleRefresh(refresh, intervalMs, routes) {
   let running = false; // 防重入：上一轮未完成时不叠加下一轮
   setInterval(() => {
-    if (running || document.visibilityState === "hidden") return;
+    // uiHidden() 而不是 visibilityState：桌面壳收进后台后页面仍是 "visible"
+    // （实测隐藏 5 分钟里 30s 健康轮询照打 10 次）。
+    if (running || uiHidden()) return;
     if (!routeActive(routes)) return;
     running = true;
     Promise.resolve()

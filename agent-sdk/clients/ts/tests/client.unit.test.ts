@@ -956,6 +956,7 @@ test("十期契约（/health additive build：BuildInfo 三字段 + 旧形状仍
   const withBuild: Health200 = {
     healthy: true,
     version: "0.1.0",
+    api_version: "0.7",
     auto_approve: false,
     build: { commit: "8412021", dirty: true, built_at: "2026-08-30T04:00:00Z" },
   };
@@ -964,10 +965,61 @@ test("十期契约（/health additive build：BuildInfo 三字段 + 旧形状仍
   assert.equal(typeof withBuild.build?.built_at, "string");
 
   // 旧形状：build 缺省（skip_serializing_if）仍合法——required 未变。
-  const legacy: Health200 = { healthy: true, version: "0.1.0", auto_approve: true };
+  const legacy: Health200 = {
+    healthy: true,
+    version: "0.1.0",
+    api_version: "0.7",
+    auto_approve: true,
+  };
   assert.equal(legacy.build, undefined);
 
   // BuildInfo 形状面：dirty 必为布尔，commit/built_at 必为字符串。
   const build: Build = { commit: "HEAD", dirty: false, built_at: "" };
   assert.equal(build.dirty, false);
+});
+
+// ---------------------------------------------------------------------------
+// R3（§8.1）契约：/diagnostics/requests 六字段白名单 ledger（验收取证唯一事实源）。
+// ---------------------------------------------------------------------------
+
+test("R3 契约（/diagnostics/requests：ledger 六字段白名单 + 三桶聚合）", () => {
+  type Report200 =
+    operations["diagnosticsRequests"]["responses"][200]["content"]["application/json"];
+  type Record200 = Report200["records"][number];
+  type Aggregates = Report200["aggregates"];
+
+  // 恰好六字段：多余键（如 path/body/authorization）在类型层即不可构造。
+  const record: Record200 = {
+    method: "GET",
+    route_template: "/session/{id}/diff",
+    started_at: "2026-09-17T08:41:33.120Z",
+    duration_ms: 7,
+    status: 404,
+    source: "web",
+  };
+  assert.equal(Object.keys(record).length, 6);
+  assert.ok(
+    !("path" in record) &&
+      !("query" in record) &&
+      !("authorization" in record) &&
+      !("body" in record),
+    "ledger 禁止记录原始路径/查询串/凭据/请求体",
+  );
+  assert.ok(
+    !("real_id" in record),
+    "route_template 恒为模板，真实资源 id 不落 ledger",
+  );
+
+  const report: Report200 = {
+    total: 3,
+    returned: 3,
+    cap: 512,
+    aggregates: { health: 1, auth_token: 0, business: 2 } satisfies Aggregates,
+    records: [record],
+  };
+  assert.equal(
+    report.aggregates.health + report.aggregates.auth_token + report.aggregates.business,
+    report.returned,
+    "三桶必须恰好覆盖窗口内记录",
+  );
 });

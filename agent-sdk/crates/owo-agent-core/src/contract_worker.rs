@@ -171,7 +171,10 @@ impl ContractSubagentRunner<'_> {
         // 输出契约（V1）：system prompt 追加契约条款，让模型首轮即可按
         // WorkerOutputV1 JSON 输出；不合规时共享执行器最多定向修复一次。
         let system_prompt = format!("{base_prompt}{}", contract_system_prompt(read_only));
-        let mut session = Session::new(workspace, self.model.clone(), Some(system_prompt));
+        // M4.2：调用方给出的模型显式进入请求体（非空且非 `"default"` 哨兵即固定）；
+        // 空串/哨兵表示自动——回退 Provider 解析链（OPENAI_MODEL 热切换 → 启动配置 → 内置默认）。
+        let mut session = Session::new(workspace, self.model.clone(), Some(system_prompt))
+            .with_model_override(Some(self.model.clone()));
         let mut on_event = |_event: &TurnEvent| {};
         let outcome = agent
             .run_turn(

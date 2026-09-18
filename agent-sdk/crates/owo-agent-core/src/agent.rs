@@ -471,9 +471,18 @@ impl Agent {
             };
             // §9.2：每次模型调用（即下一回合的 retry 点）前复查剩余预算；
             // 激活时以阶段剩余预算包裹超时，超时即结构化失败。
+            // M4.2 会话级路由：显式覆盖（创建会话时指定）进请求体；未覆盖时
+            // Provider 自行解析（OPENAI_MODEL 热切换 → 启动配置 → 内置默认）。
+            // 克隆出循环体，避免与 `commit_turn_messages(session, …)` 的再借用冲突。
+            let wire_model = session.model_override.clone();
             let attempt = async {
                 tokio::select! {
-                    output = self.provider.complete_stream(&messages, &tools, &mut emit_delta) => {
+                    output = self.provider.complete_stream_with_model(
+                        wire_model.as_deref(),
+                        &messages,
+                        &tools,
+                        &mut emit_delta,
+                    ) => {
                         output.map_err(AgentError::Gateway)
                     }
                     _ = wait_for_abort(abort) => Err(AgentError::Aborted),
@@ -674,7 +683,7 @@ impl Agent {
                                     abort,
                                     depth: self.config.subagent_depth,
                                     max_turns: self.config.max_turns,
-                                    model: session.model.clone(),
+                                    model: session.model_override.clone().unwrap_or_default(),
                                 };
                                 let tool = self
                                     .registry
@@ -796,7 +805,7 @@ impl Agent {
                                     abort,
                                     depth: self.config.subagent_depth,
                                     max_turns: self.config.max_turns,
-                                    model: session.model.clone(),
+                                    model: session.model_override.clone().unwrap_or_default(),
                                 };
                                 let mut ctx = ToolContext {
                                     workspace: &workspace,
@@ -964,9 +973,12 @@ impl Agent {
              未完成事项、关键决策、当前上下文；不要编造新信息）：\n\n{}",
             serde_json::to_string(&head).unwrap_or_else(|_| "[]".to_string())
         );
+        // 压缩摘要是轻量任务：走 fast 档（OWO_MODEL_FAST 配置时路由到便宜模型，
+        // 未配置回退 Provider 解析链；M4.2 任务类型路由）。
+        let fast_model = crate::gateway::resolve_tier_model(crate::gateway::ModelTier::Fast);
         let summary = match self
             .provider
-            .complete(&[ChatMessage::user(prompt)], &[])
+            .complete_with_model(fast_model.as_deref(), &[ChatMessage::user(prompt)], &[])
             .await
         {
             Ok(crate::gateway::ModelOutput::Text(text)) => text,
@@ -1299,6 +1311,87 @@ mod tests {
         assert!(
             *state.peak.lock().unwrap() >= 2,
             "两个宿主验证只读工具必须并发（活跃峰值 ≥2）"
+        );
+    }
+
+    /// M4.2：`session.model_override` 是请求级路由真相——显式覆盖进 wire，
+    /// `"default"` 哨兵清除后透传 None（Provider 解析链）；展示模型与 wire 解耦。
+    #[tokio::test]
+    async fn session_model_override_reaches_wire_model() {
+        struct WireRecorder {
+            seen: Mutex<Vec<Option<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl ModelProvider for WireRecorder {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> Result<ModelOutput, String> {
+                Err("本测试只走流式路径".to_string())
+            }
+            async fn complete_stream_with_model(
+                &self,
+                model: Option<&str>,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+                on_delta: &mut (dyn FnMut(String) + Send),
+            ) -> Result<ModelOutput, String> {
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(model.map(str::to_string));
+                on_delta("完成".to_string());
+                Ok(ModelOutput::Text("完成".to_string()))
+            }
+        }
+        let recorder = Arc::new(WireRecorder {
+            seen: Mutex::new(Vec::new()),
+        });
+        let agent = Agent::new(
+            recorder.clone() as Arc<dyn ModelProvider>,
+            ToolRegistry::new(),
+            Policy::new("."),
+            AgentConfig {
+                max_turns: 4,
+                ..Default::default()
+            },
+        );
+        let approver = crate::permissions::AutoApprover { allow: true };
+        let mut session = Session::new(std::env::temp_dir(), "display-model", None)
+            .with_model_override(Some("wire-x".to_string()));
+        agent
+            .run_turn(
+                &mut session,
+                "你好",
+                &approver,
+                &AtomicBool::new(false),
+                &mut |_| {},
+            )
+            .await
+            .expect("回合应成功");
+        // 展示值不受路由覆盖影响。
+        assert_eq!(session.model, "display-model");
+        // "default" 哨兵 = 清除覆盖 → 下一回合透传 None（回退 Provider 链）。
+        session.set_model_override(Some("default".to_string()));
+        agent
+            .run_turn(
+                &mut session,
+                "再来",
+                &approver,
+                &AtomicBool::new(false),
+                &mut |_| {},
+            )
+            .await
+            .expect("第二回合应成功");
+        let seen = recorder
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            seen.as_slice(),
+            &[Some("wire-x".to_string()), None],
+            "覆盖必须进 wire；清除后必须回退 Provider 解析链"
         );
     }
 

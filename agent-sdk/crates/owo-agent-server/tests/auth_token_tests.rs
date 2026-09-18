@@ -25,27 +25,51 @@ fn generates_random_long_tokens() {
 }
 
 #[test]
-fn persists_token_to_file_and_reloads() {
+fn mints_and_persists_token_per_boot() {
     let (_temp, root) = temp_root();
-    let created = AuthToken::load_or_create(&root);
+    let created = AuthToken::mint_for_boot(&root);
     let path = AuthToken::file_path(&root);
     assert!(path.is_file(), "token 文件应已创建");
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert_eq!(on_disk.trim(), created.token());
 
-    let reloaded = AuthToken::load_or_create(&root);
-    assert_eq!(reloaded.token(), created.token(), "重启应复用同一 token");
-    assert!(reloaded.acl_warning().is_none());
+    let next = AuthToken::mint_for_boot(&root);
+    assert_ne!(
+        next.token(),
+        created.token(),
+        "§8.2：core 重启必须换发新 bearer（旧值不得跨代际复用）"
+    );
+    let rotated = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(rotated.trim(), next.token(), "文件必须反映当前代际");
+    assert!(next.acl_warning().is_none());
+    assert!(!created.verify(next.token()), "新 token 不应被旧值命中");
 }
 
+/// §8.2 第 5 条：上一代进程泄漏的 bearer 在新代际上必须被拒（401 的判定源）。
 #[test]
-fn reuses_existing_valid_token_file() {
+fn previous_generation_token_is_rejected_after_reboot() {
+    let (_temp, root) = temp_root();
+    let old = AuthToken::mint_for_boot(&root);
+    let fresh = AuthToken::mint_for_boot(&root);
+    assert!(fresh.verify(fresh.token()));
+    assert!(
+        !fresh.verify(old.token()),
+        "旧代际 token 必须失效（否则重启不构成凭据轮换）"
+    );
+}
+
+/// 文件里预先存在的陌生值（别的安装/别的机器/被篡改）不得被继承。
+#[test]
+fn does_not_inherit_pre_existing_token_file() {
     let (_temp, root) = temp_root();
     let path = AuthToken::file_path(&root);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "pre-existing-32-char-token-abcdef123456").unwrap();
-    let loaded = AuthToken::load_or_create(&root);
-    assert_eq!(loaded.token(), "pre-existing-32-char-token-abcdef123456");
+    let loaded = AuthToken::mint_for_boot(&root);
+    assert_ne!(loaded.token(), "pre-existing-32-char-token-abcdef123456");
+    assert!(loaded.token().len() >= 64);
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(on_disk.trim(), loaded.token(), "预置值必须被覆盖");
 }
 
 #[test]
@@ -54,7 +78,7 @@ fn overwrites_corrupt_or_empty_token_file() {
     let path = AuthToken::file_path(&root);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "   ").unwrap();
-    let loaded = AuthToken::load_or_create(&root);
+    let loaded = AuthToken::mint_for_boot(&root);
     assert!(loaded.token().len() >= 64, "空文件应重新生成");
 }
 
@@ -64,7 +88,7 @@ fn falls_back_to_memory_token_when_unwritable() {
     let (_temp, root) = temp_root();
     let blocker = root.join("blocker");
     std::fs::write(&blocker, "file-not-dir").unwrap();
-    let loaded = AuthToken::load_or_create(&blocker);
+    let loaded = AuthToken::mint_for_boot(&blocker);
     assert!(loaded.token().len() >= 64, "降级也应返回可用 token");
     assert!(loaded.acl_warning().is_some(), "应携带降级警告");
 }
@@ -137,7 +161,7 @@ fn public_path_classification() {
 #[test]
 fn token_file_acl_is_user_only() {
     let (_temp, root) = temp_root();
-    let created = AuthToken::load_or_create(&root);
+    let created = AuthToken::mint_for_boot(&root);
     assert!(
         created.acl_warning().is_none(),
         "ACL 应用不应失败：{:?}",

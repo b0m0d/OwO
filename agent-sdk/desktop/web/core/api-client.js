@@ -5,6 +5,12 @@
 (function (global) {
   "use strict";
 
+  // §8.1：ledger 来源标签（服务端 request_ledger_api.CLIENT_HEADER / 消毒白名单同源）。
+  const OWO_CLIENT_HEADER = "x-owo-client";
+  const OWO_CLIENT_SOURCE = "web";
+  // §8.2 第 5 条：连接层失败后重查壳连接的冷却窗口（防止核心真挂时轮询风暴）。
+  const REHANDSHAKE_COOLDOWN_MS = 1000;
+
   class ApiError extends Error {
     constructor(message, details) {
       super(message);
@@ -30,10 +36,41 @@
       this.pairingOverride = null;
       // §4 首屏收敛：壳注入的短期 bearer token（正式桌面模式免去 GET /auth/token）。
       this.injectedToken = null;
+      // §8.2 第 5 条：运行期重连状态（连续网络失败计数 + 重查冷却时刻）。
+      this.networkFailures = 0;
+      this.lastRehandshakeAt = 0;
+    }
+
+    /**
+     * §8.2 第 5 条：core 被壳重启后**端口和 bearer 都会换**（每次启动换发 token）。
+     * 打到旧端口的 fetch 以网络错误失败，根本不会命中 401 分支——只靠 401 重连
+     * 不够，必须在连接层失败时整体重查壳连接（resetCoreConnection 会一并失效
+     * 注入 token 与缓存描述符），再让调用方重试一次。
+     * 冷却窗口用于避免"核心确实没起来"时每次轮询都重查一遍（风暴放大）。
+     * @param {boolean} allowRetry 本次尝试是否还允许重试
+     * @returns {boolean} 是否已重查连接（true 时调用方可重试一次）
+     */
+    handleNetworkFailure(allowRetry) {
+      this.networkFailures += 1;
+      if (!allowRetry) return false;
+      const now = Date.now();
+      if (now - this.lastRehandshakeAt < REHANDSHAKE_COOLDOWN_MS) return false;
+      this.lastRehandshakeAt = now;
+      this.networkFailures = 0;
+      this.resetCoreConnection();
+      return true;
     }
 
     url(path) {
       return this.baseUrl + path;
+    }
+
+    // §8.1：来源标签——服务端 ledger 只收 method/route_template/started_at/
+    // duration_ms/status/source 六字段，本头即 source 的唯一来源（服务端消毒）。
+    static withSourceTag(headers) {
+      const out = new Headers(headers || {});
+      if (!out.has(OWO_CLIENT_HEADER)) out.set(OWO_CLIENT_HEADER, OWO_CLIENT_SOURCE);
+      return out;
     }
 
     // §4.2：解析 Tauri invoke 入口（公开 API 优先，兼容 internals）。
@@ -136,9 +173,9 @@
       }
       if (this.tokenPromise) return this.tokenPromise;
       this.tokenPromise = this.ensureCoreConnection().then(() => this.desktopPairingProof()).then((pairing) => {
-        const headers = { Accept: "application/json" };
-        if (pairing) headers["X-Owo-Desktop-Pairing"] = pairing;
-        if (this.coreInstanceId) headers["x-owo-desktop-instance"] = this.coreInstanceId;
+        const headers = ApiClient.withSourceTag({ Accept: "application/json" });
+        if (pairing) headers.set("X-Owo-Desktop-Pairing", pairing);
+        if (this.coreInstanceId) headers.set("x-owo-desktop-instance", this.coreInstanceId);
         return global.fetch(this.url("/auth/token"), { headers: headers });
       }).then(async (response) => {
         if (!response.ok) {
@@ -179,7 +216,7 @@
       delete opts.responseType;
       delete opts.retryAuth;
       delete opts.public;
-      const headers = new Headers(opts.headers || {});
+      const headers = ApiClient.withSourceTag(opts.headers || {});
       if (opts.json !== undefined) {
         opts.body = JSON.stringify(opts.json);
         delete opts.json;
@@ -199,11 +236,20 @@
         try {
           response = await global.fetch(this.url(path), Object.assign({}, opts, { headers: requestHeaders }));
         } catch (error) {
+          // 连接层失败（端口没了 / 连接被拒）：可能是壳刚重启了 core。
+          // 先整体重查连接再重试一次；重查冷却期内或已重试过则照常上抛。
+          if (this.handleNetworkFailure(allowRetry)) {
+            headers.delete("Authorization");
+            return execute(false);
+          }
           this.emit(false, { error: error });
           throw error;
         }
         if (response.status === 401 && allowRetry) {
-          this.token = null;
+          // §8.2 第 5 条：core 被壳重启后会换发 bearer（每次启动 mint_for_boot）。
+          // 只清 this.token 不够——injectedToken 与缓存的连接描述符会把旧值再注入
+          // 一遍，重试必然二次 401。必须整体重查壳连接（端口/实例/token 一并更新）。
+          this.resetCoreConnection();
           headers.delete("Authorization");
           return execute(false);
         }
@@ -216,6 +262,7 @@
           });
         }
         this.unavailableUntil = 0;
+        this.networkFailures = 0;
         this.emit(true, { status: response.status, path: path });
         if (responseType === "response") return response;
         if (responseType === "blob") return response.blob();
@@ -253,7 +300,7 @@
       const signal = opts.signal || undefined;
       const onEvent = typeof opts.onEvent === "function" ? opts.onEvent : null;
       const onOpen = typeof opts.onOpen === "function" ? opts.onOpen : null;
-      const headers = new Headers(opts.headers || {});
+      const headers = ApiClient.withSourceTag(opts.headers || {});
       headers.set("Accept", "text/event-stream");
       if (opts.lastEventId != null && opts.lastEventId !== "") {
         headers.set("Last-Event-ID", String(opts.lastEventId));

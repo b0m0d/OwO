@@ -53,6 +53,9 @@ pub(crate) fn http_request(
     let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
     let mut request =
         format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    // §8.1（R3）：ledger 来源标签——壳侧全部 loopback 请求走本唯一出口，
+    // 服务端以 source=shell 归类（与 web/cli 区分，供冷启动请求预算取证）。
+    request.push_str("x-owo-client: shell\r\n");
     for (name, value) in headers {
         request.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -156,7 +159,54 @@ pub(crate) fn parse_ready_line(line: &str) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_ready_line, validate_health_payload, HealthProbe};
+    use super::{http_request, parse_ready_line, validate_health_payload, HealthProbe};
+
+    /// §8.1（R3）：壳对核心的每一个请求都必须自带 ledger 来源标签（source=shell），
+    /// 且不得吞掉调用方附加的头——冷启动请求预算取证完全依赖这一归类。
+    #[test]
+    fn shell_http_request_tags_ledger_source_and_keeps_caller_headers() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback 监听");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 2048];
+            let read = stream.read(&mut buf).unwrap_or(0);
+            let text = String::from_utf8_lossy(&buf[..read]).to_string();
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            let _ = stream.flush();
+            text
+        });
+
+        let (status, body) = http_request(
+            port,
+            "GET",
+            "/health",
+            &[("x-owo-desktop-instance", "inst-1".to_string())],
+            None,
+        )
+        .expect("http_request 应成功");
+        assert_eq!(status, 200, "响应状态应解析为 200");
+        assert_eq!(body, "{}", "响应体应原样返回");
+
+        let text = server.join().expect("join");
+        let lowered = text.to_ascii_lowercase();
+        assert!(
+            lowered.contains("x-owo-client: shell"),
+            "壳请求必须自带 ledger 来源标签，实际请求头：{text}"
+        );
+        assert!(
+            lowered.contains("x-owo-desktop-instance: inst-1"),
+            "调用方附加头不得丢失，实际请求头：{text}"
+        );
+        assert!(
+            lowered.contains("connection: close"),
+            "loopback 短连接语义保持：{text}"
+        );
+    }
 
     #[test]
     fn health_handshake_accepts_matching_api_version() {

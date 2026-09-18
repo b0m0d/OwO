@@ -63,6 +63,9 @@ mod plugin_market_api;
 pub mod product_eval_api;
 mod project_api;
 mod rate_limit;
+/// R3（§8.1）：安全请求 ledger（六字段白名单，/diagnostics/requests 消费）。
+/// `pub` 仅为契约测试可用 `reset_for_test` 取得干净窗口（同 event_stream 先例）。
+pub mod request_ledger_api;
 mod schemas_api;
 mod session_api;
 mod settings_api;
@@ -93,6 +96,7 @@ pub use fleet_api::{fleet_hub, router_with_hub as fleet_router_with_hub, FleetHu
 extern crate self as owo_agent_server;
 
 use axum::extract::DefaultBodyLimit;
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -225,8 +229,9 @@ impl AppState {
         {
             agent.set_permission_profile(profile);
         }
-        // X03：本地 API bearer token（启动生成/复用 + ACL；失败降级为内存 token）。
-        let auth_token = Arc::new(auth_token::AuthToken::load_or_create(&data_root));
+        // X03/R3（§8.2）：本地 API bearer token **每次启动换发**并覆盖写盘（+ ACL）；
+        // 写盘失败降级为内存 token。旧代际 bearer 因此在新进程上必然 401。
+        let auth_token = Arc::new(auth_token::AuthToken::mint_for_boot(&data_root));
         let rate_limiter = Arc::new(rate_limit::RateLimiter::from_env());
         let shutdown_gate = Arc::new(shutdown::ShutdownGate::from_env());
         // V1 三日（第四路）：ProductEval suite 注册根目录（v1 → workspace/evals/v1/suite.json）。
@@ -373,6 +378,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/rename", post(session_api::session_rename))
         .route("/session/{id}/archive", post(session_api::session_archive))
         .route("/session/{id}/pin", post(session_api::session_pin))
+        .route("/session/{id}/model", post(session_api::session_set_model))
         .route("/session/{id}/children", get(session_api::children))
         .route(
             "/session/{id}/export/{format}",
@@ -619,6 +625,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(intent_api::router(state.clone()))
         // R8 存储运维（备份/恢复/导出/清空）。
         .merge(backup::router(state.clone()))
+        // R3（§8.1）：冷启动诊断 ledger（GET /diagnostics/requests，仅六字段）。
+        .merge(request_ledger_api::router(state.clone()))
         // R8 用量与成本归集（Agent 4 交付：usage_router 四维用量 + 预算硬熔断）。
         .merge(usage::usage_router(state.clone()))
         // R10 契约治理：JSON Schema 版本化发布（/schemas/*）+ 契约变更 RFC 登记见本文件契约区。
@@ -657,41 +665,76 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// R8/R9：trace_id 请求贯穿——从 `X-Trace-Id` 头继承（不合法则生成），回填响应头，
 /// 设置全局 trace 上下文（Agent 4 logging：后台任务/SSE/指标可继承），
 /// 并落一条结构化访问日志（脱敏不落消息体）。
+///
+/// R3（§8.1）：同一最外层切面把请求写入进程内安全 ledger（`request_ledger_api`）。
+/// 只记录路由模板（axum `MatchedPath`），未匹配路由（fallback 静态资产服务）
+/// 不进 ledger；访问日志同口径改用 `route_template` 字段，避免真实资源 id
+/// 进入日志面。
 async fn trace_id_middleware(
+    State(state): State<Arc<AppState>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let inherited = request
         .headers()
-        .get("x-trace-id")
+        .get(logging::TRACE_HEADER)
         .and_then(|value| value.to_str().ok());
     let trace_id = logging::TraceId::from_header(inherited);
     logging::set_current_trace_id(Some(trace_id.as_str()));
     let method = request.method().to_string();
+    // 路由模板优先（隐私：参数段恒为 {name}）；fallback 无模板 → None，不记录。
+    let route_template = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|matched| matched.as_str().to_string());
     let path = request.uri().path().to_string();
+    let source = request_ledger_api::sanitize_source(
+        request
+            .headers()
+            .get(request_ledger_api::CLIENT_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let started = std::time::Instant::now();
     let mut response = next.run(request).await;
     if let Ok(value) = trace_id
         .to_header_value()
         .parse::<axum::http::HeaderValue>()
     {
-        response.headers_mut().insert("x-trace-id", value);
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static(logging::TRACE_HEADER),
+            value,
+        );
     }
-    logging::emit(
-        logging::Level::Info,
-        "http",
-        Some(trace_id.as_str()),
-        "request",
-        &[
-            ("method", serde_json::json!(method)),
-            ("path", serde_json::json!(path)),
-            ("status", serde_json::json!(response.status().as_u16())),
-            (
-                "duration_ms",
-                serde_json::json!(started.elapsed().as_millis() as u64),
-            ),
-        ],
-    );
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let status = response.status().as_u16();
+    if let Some(template) = route_template {
+        request_ledger_api::record(
+            &state.data_root,
+            request_ledger_api::RequestRecord {
+                method: method.clone(),
+                route_template: template.clone(),
+                started_at: started_at.clone(),
+                duration_ms,
+                status,
+                source: source.clone(),
+            },
+        );
+        let _ = path; // 原始 path 只存在于局部，既不落日志也不落 ledger。
+        logging::emit(
+            logging::Level::Info,
+            "http",
+            Some(trace_id.as_str()),
+            "request",
+            &[
+                ("method", serde_json::json!(method)),
+                ("route_template", serde_json::json!(template)),
+                ("status", serde_json::json!(status)),
+                ("duration_ms", serde_json::json!(duration_ms)),
+                ("source", serde_json::json!(source)),
+            ],
+        );
+    }
     logging::set_current_trace_id(None);
     response
 }
@@ -717,6 +760,9 @@ fn cors_layer() -> CorsLayer {
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
             axum::http::HeaderName::from_static(auth_token::DESKTOP_PAIRING_HEADER),
+            // R3（§8.1）：ledger 来源标签与 trace 贯穿头（跨源预检需显式放行）。
+            axum::http::HeaderName::from_static(request_ledger_api::CLIENT_HEADER),
+            axum::http::HeaderName::from_static(logging::TRACE_HEADER),
         ])
         .max_age(std::time::Duration::from_secs(600))
 }
@@ -792,6 +838,7 @@ async fn openapi_spec() -> Json<Value> {
             "/session/{id}/rename": { "post": { "operationId": "sessionRename", "parameters": [path_param("id")], "responses": { "200": { "description": "renamed session" } } } },
             "/session/{id}/archive": { "post": { "operationId": "sessionArchive", "parameters": [path_param("id")], "responses": { "200": { "description": "archive state" } } } },
             "/session/{id}/pin": { "post": { "operationId": "sessionPin", "parameters": [path_param("id")], "responses": { "200": { "description": "pin state" } } } },
+            "/session/{id}/model": { "post": { "operationId": "sessionSetModel", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "model": { "type": "string", "nullable": true, "description": "非空=固定请求模型；null/空串/\"default\"=清除覆盖（回退 OPENAI_MODEL→启动配置→内置默认；哨兵不落库、不进请求体）" } } } } } }, "responses": { "200": { "description": "{ id, model, model_override }" }, "404": { "description": "session not found" } } } },
             "/session/{id}/children": { "get": { "operationId": "sessionChildren", "parameters": [path_param("id")], "responses": { "200": { "description": "children" } } } },
             "/session/{id}/export/{format}": { "get": { "operationId": "exportSession", "parameters": [path_param("id"), path_param("format")], "responses": { "200": { "description": "md or html" } } } },
             "/sessions": { "get": { "operationId": "listSessions", "responses": { "200": { "description": "session list" } } } },
@@ -1146,12 +1193,13 @@ async fn openapi_spec() -> Json<Value> {
             "/command/audit": { "get": { "operationId": "commandAudit", "responses": { "200": { "description": "command execution audit tail" } } } },
             "/workflow/run/{run_id}/approval": { "post": { "operationId": "workflowRunApproval", "parameters": [path_param("run_id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "decision": { "type": "string" } }, "required": ["decision"] } } } }, "responses": { "200": { "description": "approval decision recorded" } } } },
             "/workflow/run/{run_id}/events": { "get": { "operationId": "workflowRunEvents", "parameters": [path_param("run_id")], "responses": { "200": { "description": "SSE run event stream (requires Bearer)" }, "401": { "description": "missing or invalid bearer token" } } } },
-            "/events/stream": { "get": { "operationId": "eventsStream", "security": [{ "bearerAuth": [] }], "parameters": [{ "name": "last_event_id", "in": "query", "required": false, "schema": { "type": "integer" } }, { "name": "Last-Event-ID", "in": "header", "required": false, "schema": { "type": "integer" }, "description": "断线续传起点（优先于 query 参数）" }], "responses": { "200": { "description": "reliable SSE event stream (Last-Event-ID resume + bounded backpressure; requires Bearer — clients must use fetch-stream with Authorization header)" }, "401": { "description": "missing or invalid bearer token" } } } },
+            "/events/stream": { "get": { "operationId": "eventsStream", "security": [{ "bearerAuth": [] }], "parameters": [{ "name": "last_event_id", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "续传起点（调试/脚本用；缺省=新订阅只收新事件，0=显式全量重放历史）" }, { "name": "Last-Event-ID", "in": "header", "required": false, "schema": { "type": "integer" }, "description": "断线续传起点（优先于 query 参数；缺省=只收新事件）" }], "responses": { "200": { "description": "reliable SSE event stream（带 Last-Event-ID 时零丢失续传重放；新订阅从当前 head 起只收新事件 + 有界背压；需 Bearer fetch-stream）" }, "401": { "description": "missing or invalid bearer token" } } } },
             "/metrics/runtime": { "get": { "operationId": "metricsRuntime", "responses": { "200": { "description": "runtime process metrics" } } } },
             "/metrics/slo": { "get": { "operationId": "metricsSlo", "responses": { "200": { "description": "SLO registry with error budget and attainment status" } } } },
             "/metrics/slo/alerts": { "get": { "operationId": "metricsSloAlerts", "responses": { "200": { "description": "SLO alert rules and structured alert events" } } } },
             "/metrics/slo/report": { "get": { "operationId": "metricsSloReport", "parameters": [{ "name": "days", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "SLO period report (JSON)" } } } },
             "/metrics/prometheus": { "get": { "operationId": "metricsPrometheus", "responses": { "200": { "description": "Prometheus text exposition format" } } } },
+            "/diagnostics/requests": { "get": { "operationId": "diagnosticsRequests", "summary": "开发诊断：安全请求 ledger（R3 §8.1）", "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 512, "description": "取最近 N 条（缺省 200，上限=环形容量）" } }], "responses": { "200": { "description": "环形窗口报告：total/returned/cap/aggregates{health,auth_token,business}/records[]；records 每条严格六字段（method,route_template,started_at,duration_ms,status,source），禁止出现 Authorization/查询串/请求体/响应体/私人路径", "content": { "application/json": { "schema": { "type": "object", "required": ["total", "returned", "cap", "aggregates", "records"], "properties": { "total": { "type": "integer" }, "returned": { "type": "integer" }, "cap": { "type": "integer" }, "aggregates": { "type": "object", "required": ["health", "auth_token", "business"], "properties": { "health": { "type": "integer" }, "auth_token": { "type": "integer" }, "business": { "type": "integer" } } }, "records": { "type": "array", "items": { "type": "object", "required": ["method", "route_template", "started_at", "duration_ms", "status", "source"], "properties": { "method": { "type": "string" }, "route_template": { "type": "string" }, "started_at": { "type": "string", "description": "RFC3339 毫秒 UTC" }, "duration_ms": { "type": "integer" }, "status": { "type": "integer" }, "source": { "type": "string", "description": "x-owo-client 头消毒值（[a-z0-9_-]{1,32}），异常/缺失→other" } } } } } } } } }, "401": { "description": "缺少或非法 bearer token" } } } },
             "/auth/token": { "get": { "operationId": "authTokenBootstrap", "security": [], "responses": { "200": { "description": "development bootstrap token; desktop release requires an ephemeral process-pairing proof header" }, "403": { "description": "desktop process pairing proof missing or invalid" } } } },
             "/storage/backup": { "post": { "operationId": "storageBackup", "responses": { "200": { "description": "zip backup (b64 + saved path)" } } } },
             "/storage/restore": { "post": { "operationId": "storageRestore", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "archive_b64": { "type": "string" } }, "required": ["archive_b64"] } } } }, "responses": { "200": { "description": "restore result with pre-backup" } } } },

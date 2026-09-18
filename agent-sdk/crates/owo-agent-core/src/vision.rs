@@ -46,7 +46,16 @@ impl VisionConfig {
             provider,
             model,
             base_url: std::env::var("OWO_VISION_BASE_URL").ok(),
-            api_key: std::env::var("OWO_VISION_API_KEY").ok(),
+            // M4.2：视觉通道凭据允许独立 BYOK（OWO_VISION_API_KEY）；未配置时
+            // 复用主链 OPENAI_API_KEY（同为 OpenAI-compatible 端点即开箱可用）。
+            api_key: std::env::var("OWO_VISION_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("OPENAI_API_KEY")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                }),
             ollama_host: std::env::var("OLLAMA_HOST").unwrap_or_else(|_| {
                 std::env::var("OWO_OLLAMA_HOST")
                     .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string())
@@ -501,6 +510,59 @@ async fn current_ocr_lines(bmp: &[u8]) -> Vec<crate::ocr::OcrLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真机门控（M4.1/M5.3）：OpenAI-compatible 视觉通道端到端。
+    ///
+    /// 凭据与端点**只经环境变量注入**（红线：不落盘、不回显密钥）：
+    /// ```text
+    /// $env:OPENAI_API_KEY = (取用户级)
+    /// $env:OWO_VISION_PROVIDER = "openai"
+    /// $env:OWO_VISION_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+    /// $env:OWO_VISION_MODEL    = "glm-4v-flash"
+    /// cargo test -p owo-agent-core --lib -- vision::tests::live_openai_channel -- --ignored --nocapture
+    /// ```
+    /// 自造纯色 PNG（走真实 BMP→PNG 转换链）→ 视觉模型描述主色 → 命中预期色词。
+    #[tokio::test]
+    #[ignore = "真实视觉端点：需要 OPENAI_API_KEY + OWO_VISION_* 环境变量，显式 --ignored 运行"]
+    async fn live_openai_channel_describes_generated_png() {
+        if std::env::var("OPENAI_API_KEY")
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            panic!("live 视觉门控需要 OPENAI_API_KEY 环境变量（凭据仅经环境注入）");
+        }
+        let config = VisionConfig::from_env();
+        assert_eq!(config.provider, "openai", "需设 OWO_VISION_PROVIDER=openai");
+        // 8x8 纯红 32bpp BMP（BGRA 像素），走 bmp_to_png 真实编码链。
+        let (width, height) = (8i32, 8i32);
+        let pixel_bytes = (width * height * 4) as usize;
+        let total = 54 + pixel_bytes;
+        let mut bmp = vec![0u8; total];
+        bmp[0..2].copy_from_slice(b"BM");
+        bmp[2..6].copy_from_slice(&(total as u32).to_le_bytes());
+        bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+        bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+        bmp[18..22].copy_from_slice(&width.to_le_bytes());
+        bmp[22..26].copy_from_slice(&height.to_le_bytes());
+        bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+        bmp[28..30].copy_from_slice(&32u16.to_le_bytes());
+        for pixel in bmp[54..].chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 0, 255, 255]); // BGRA 红
+        }
+        let png = bmp_to_png(&bmp).expect("纯色 BMP 应可转 PNG");
+        let answer = describe_openai(
+            &config,
+            &png,
+            "这张纯色图主要是什么颜色？只回答一个颜色词，不要解释。",
+        )
+        .await
+        .expect("真实视觉端点应返回描述");
+        println!("live 视觉模型 {} 回答：{answer}", config.model);
+        assert!(
+            answer.contains('红') || answer.contains("red") || answer.contains("Red"),
+            "视觉模型应识别出红色，实际回答：{answer}"
+        );
+    }
 
     #[test]
     fn bmp_to_png_produces_valid_png() {

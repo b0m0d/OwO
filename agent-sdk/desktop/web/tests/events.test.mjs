@@ -62,7 +62,12 @@ test("§3.1 经 openStream（带认证 fetch-stream）建立唯一连接并收�
   inv.on("automations", () => { calls += 1; });
   inv.start();
   assert.equal(stream.calls.length, 1, "start 只建立一条连接");
-  assert.equal(stream.calls[0].path, "http://127.0.0.1:4096/events/stream");
+  assert.equal(stream.calls[0].path, "/events/stream", "R3（§8.2）：交给宿主的是路径，base 由 api-client 统一组装");
+  assert.equal(
+    stream.calls[0].opts.url,
+    "http://127.0.0.1:4096/events/stream",
+    "诊断字段保留完整 URL（不参与请求组装）",
+  );
   assert.ok(stream.calls[0].opts.signal instanceof AbortSignal, "必须可取消（AbortSignal）");
   stream.open(200);
   assert.equal(inv.state(), "live", "onOpen 后进入 live");
@@ -182,6 +187,65 @@ test("§3.4 隐藏窗口：不触发刷新（canary=0），回可见补刷一次
   }
 });
 
+test("§8.2 桌面壳隐藏：visibilityState 仍 visible 时后台标记必须接管守卫", async () => {
+  // 实测：壳 window.hide() 后 WebView2 的 document.visibilityState 依旧是
+  // "visible"（SetIsVisible 不传导），所以桌面端只能靠壳注入的后台标记。
+  const stream = fakeStream();
+  const fakeDocument = {
+    visibilityState: "visible", // 关键：桌面隐藏时页面仍是 visible
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const originalDocument = globalThis.document;
+  globalThis.document = fakeDocument;
+  try {
+    assert.equal(OwoInvalidation.setShellBackground(true), "hidden", "标记生效即为隐藏口径");
+    const inv = OwoInvalidation.createDomainInvalidator({
+      baseUrl: "http://127.0.0.1:4096",
+      debounceMs: 5,
+      openStream: stream.openStream,
+    });
+    let calls = 0;
+    inv.on("audit", () => { calls += 1; });
+    inv.start();
+    stream.open();
+    stream.frame(invalidateFrame("audit", 1, 1));
+    await sleep(30);
+    assert.equal(calls, 0, "壳隐藏期不得触发业务刷新（即便页面 visible）");
+    assert.equal(inv.versionOf("audit"), 1, "隐藏期间版本仍推进");
+    // 唤回：先清标记，再由调用方（app.js）触发 onVisibility 补刷。
+    OwoInvalidation.setShellBackground(false);
+    inv.onVisibility();
+    await sleep(30);
+    assert.equal(calls, 1, "唤回后补刷恰好一次");
+    inv.stop();
+  } finally {
+    // 模块级标记必须复位，否则会污染后续用例（真实文档不会被壳注入）。
+    OwoInvalidation.setShellBackground(false);
+    if (originalDocument) globalThis.document = originalDocument;
+    else delete globalThis.document;
+  }
+});
+
+test("§8.2 后台标记与页面可见性取并集：任一隐藏即隐藏", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { visibilityState: "hidden", addEventListener() {}, removeEventListener() {} };
+  try {
+    OwoInvalidation.setShellBackground(false);
+    assert.equal(OwoInvalidation.visibility(), "hidden", "浏览器模式：页面 hidden 即为隐藏");
+    OwoInvalidation.setShellBackground(true);
+    assert.equal(OwoInvalidation.visibility(), "hidden", "两个信号都为真时仍是隐藏");
+    globalThis.document.visibilityState = "visible";
+    assert.equal(OwoInvalidation.visibility(), "hidden", "页面转 visible 但壳仍隐藏 → 保持隐藏");
+    OwoInvalidation.setShellBackground(false);
+    assert.equal(OwoInvalidation.visibility(), "visible", "两个信号都解除才恢复");
+  } finally {
+    OwoInvalidation.setShellBackground(false);
+    if (originalDocument) globalThis.document = originalDocument;
+    else delete globalThis.document;
+  }
+});
+
 test("§3.1 断线重连带 Last-Event-ID 续传", async () => {
   const stream = fakeStream();
   const inv = OwoInvalidation.createDomainInvalidator({
@@ -271,4 +335,61 @@ test("§3.4 幂等：重复 start 不叠加连接", () => {
   assert.equal(stream.calls.length, 1, "重复 start 只建立一条连接");
   inv.stop();
   inv.stop(); // stop 幂等
+});
+
+// R3（§8.2）真实桌面冷启动实测发现的两个装配级缺陷，锁成回归用例：
+// ① 订阅器把 baseUrl 先拼成绝对 URL 再交给 api-client，桌面注入动态端口后
+//    变成双前缀 → 事件流永远连不上（浏览器直连 base 为空串恰好掩盖）；
+// ② 连不上即 Degraded，而 Degraded 立即 tick 一次 → 首屏瞬间冲刷全部领域。
+
+test("R3 §8.2 桌面注入 base 后事件流 URL 只有一个前缀（宿主组装）", async () => {
+  const originalFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    seen.push(String(url));
+    return new Response("", { status: 500 });
+  };
+  try {
+    const { ApiClient } = await import("../core/api-client.js");
+    const api = new ApiClient("http://127.0.0.1:23157");
+    api.token = "injected-by-shell";
+    api.injectedToken = "injected-by-shell";
+    const inv = OwoInvalidation.createDomainInvalidator({
+      baseUrl: api.baseUrl,
+      debounceMs: 0,
+      reconnectBaseMs: 5000,
+      pollIntervalMs: 600000,
+      openStream: (path, opts) => api.openEventStream(path, opts),
+    });
+    inv.start();
+    await sleep(30);
+    assert.equal(seen.length, 1, "只应发出一次事件流请求");
+    assert.equal(
+      seen[0],
+      "http://127.0.0.1:23157/events/stream",
+      `URL 不得双前缀，实际：${seen[0]}`,
+    );
+    inv.stop();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("R3 §8.2 进入 Degraded 不得立即全量冲刷（兜底仍按周期跑）", async () => {
+  let ticks = 0;
+  const inv = OwoInvalidation.createDomainInvalidator({
+    baseUrl: "http://127.0.0.1:4096",
+    debounceMs: 0,
+    reconnectBaseMs: 2,
+    pollIntervalMs: 40,
+    openStream: () => Promise.reject(new Error("boom")),
+  });
+  inv.setPollFallback(() => { ticks += 1; });
+  inv.start();
+  await sleep(30);
+  assert.equal(inv.state(), "degraded", "连续 2 次失败进入 Degraded");
+  assert.equal(ticks, 0, "降级瞬间不得冲刷领域（首屏零风暴）");
+  await sleep(100);
+  assert.ok(ticks >= 1, "兜底轮询必须按周期继续（降级不失明）");
+  inv.stop();
 });

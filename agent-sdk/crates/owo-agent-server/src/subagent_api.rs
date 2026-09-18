@@ -25,6 +25,29 @@ pub(super) struct SubagentRunRequest {
     model: Option<String>,
 }
 
+/// M4.2 子代理模型解析：显式请求 > fast 档（`OWO_MODEL_FAST`）> 空串（自动 =
+/// Provider 解析链，OPENAI_MODEL 热切换 → 启动配置 → 内置默认）。
+/// 返回 `(wire, display)`：wire 为契约执行器固定模型（空 = 不固定）；
+/// display 仅供响应/审计展示，绝不参与路由。
+fn resolve_subagent_model(explicit: Option<String>) -> (String, String) {
+    if let Some(value) = explicit
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v != owo_agent_core::gateway::MODEL_DEFAULT_SENTINEL)
+    {
+        return (value.clone(), value);
+    }
+    if let Some(fast) =
+        owo_agent_core::gateway::resolve_tier_model(owo_agent_core::gateway::ModelTier::Fast)
+    {
+        return (fast.clone(), fast);
+    }
+    let display = std::env::var("OPENAI_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| owo_agent_core::gateway::DEFAULT_MODEL_ID.to_string());
+    (String::new(), display)
+}
+
 pub(super) async fn subagent_run(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SubagentRunRequest>,
@@ -34,16 +57,10 @@ pub(super) async fn subagent_run(
     }
     let started = std::time::Instant::now();
     let workspace = state.workspace.clone();
-    let model = request
-        .model
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            std::env::var("OPENAI_MODEL")
-                .unwrap_or_else(|_| owo_agent_core::gateway::DEFAULT_MODEL_ID.to_string())
-        });
+    let (wire_model, display_model) = resolve_subagent_model(request.model);
     let agent = Arc::clone(&state.agent);
     let text = agent
-        .run_subagent(&workspace, &model, &request.prompt, request.read_only)
+        .run_subagent(&workspace, &wire_model, &request.prompt, request.read_only)
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -68,8 +85,54 @@ pub(super) async fn subagent_run(
     Ok(Json(json!({
         "ok": true,
         "read_only": request.read_only,
-        "model": model,
+        "model": display_model,
         "duration_ms": duration_ms,
         "text": text,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_subagent_model;
+
+    /// 本文件按独立编译约束不使用 crate::/super:: 路径（生产代码），
+    /// 测试仅在本模块内引用私有函数，不破坏该约束。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn explicit_beats_fast_tier_beats_auto_with_display_fallback() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for name in ["OWO_MODEL_FAST", "OPENAI_MODEL"] {
+            std::env::remove_var(name);
+        }
+        // 显式优先（含 trim）。
+        assert_eq!(
+            resolve_subagent_model(Some(" pick-me ".to_string())),
+            ("pick-me".to_string(), "pick-me".to_string())
+        );
+        // 无显式 → fast 档进请求体（wire=display=fast-m）。
+        std::env::set_var("OWO_MODEL_FAST", "fast-m");
+        assert_eq!(
+            resolve_subagent_model(None),
+            ("fast-m".to_string(), "fast-m".to_string())
+        );
+        // 无显式、无 fast 档 → wire 空（自动，Provider 解析链）；display 仅展示。
+        std::env::remove_var("OWO_MODEL_FAST");
+        std::env::set_var("OPENAI_MODEL", "env-m");
+        assert_eq!(
+            resolve_subagent_model(Some("  ".to_string())),
+            (String::new(), "env-m".to_string())
+        );
+        // "default" 哨兵 = 自动（与空同义，不得固定到请求体）。
+        assert_eq!(
+            resolve_subagent_model(Some("default".to_string())),
+            (String::new(), "env-m".to_string())
+        );
+        std::env::remove_var("OPENAI_MODEL");
+        let default_display = owo_agent_core::gateway::DEFAULT_MODEL_ID.to_string();
+        assert_eq!(
+            resolve_subagent_model(None),
+            (String::new(), default_display)
+        );
+    }
 }

@@ -1,8 +1,9 @@
 //! 会话元数据 HTTP API（§12：从 lib.rs 机械外移的 session 元数据域·第一刀）。
 //!
 //! 路由面（`GET /sessions`、`POST /session`、`GET /session/{id}`、
-//! `POST /session/{id}/rename|archive|pin`、`GET /session/{id}/children`）
-//! 与 /openapi.json 登记保持不变，零行为变化。
+//! `POST /session/{id}/rename|archive|pin|model`、`GET /session/{id}/children`）。
+//! M4.2：`/model` 为新增的会话级模型路由入口；创建请求的 `model` 字段语义
+//! 升级为真实路由（进 `model_override` 并落库），未指定保持自动。
 //! 回合执行（turn/diff/revert/…）仍留 lib.rs，经本模块共享
 //! `to_session_info`/`load_session`，语义不变。
 //!
@@ -86,13 +87,27 @@ pub(super) async fn create_session(
             format!("工作区不存在：{}", request.workspace),
         ));
     }
-    let model = request.model.unwrap_or_else(|| {
+    // M4.2 会话级模型路由：显式请求的模型进入 `model_override`（真正参与请求体）；
+    // 未显式指定（含 `"default"` 哨兵归一化）时按 Provider 解析链自动选择
+    // （OPENAI_MODEL 热切换 → 启动配置 → 内置默认），`model` 字段仅为展示值。
+    let explicit = request
+        .model
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v != owo_agent_core::gateway::MODEL_DEFAULT_SENTINEL);
+    let model = explicit.clone().unwrap_or_else(|| {
         std::env::var("OPENAI_MODEL")
-            .unwrap_or_else(|_| owo_agent_core::gateway::DEFAULT_MODEL_ID.to_string())
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| owo_agent_core::gateway::DEFAULT_MODEL_ID.to_string())
     });
     let session = state
         .store
         .create(&workspace, &model, request.system_prompt.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .with_model_override(explicit);
+    state
+        .store
+        .save(&session)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     state
         .sessions
@@ -125,6 +140,8 @@ pub(super) async fn get_session(
         "id": session.id,
         "title": session.display_title(),
         "model": session.model,
+        // M4.2：路由真相 = model_override（null = 按 Provider 解析链自动）。
+        "model_override": session.model_override,
         "workspace": session.workspace.to_string_lossy(),
         "created_at": session.created_at,
         "updated_at": session.updated_at,
@@ -149,6 +166,39 @@ pub(super) struct ArchiveRequest {
 #[derive(Deserialize)]
 pub(super) struct PinRequest {
     pinned: bool,
+}
+
+#[derive(Deserialize)]
+pub(super) struct SetModelRequest {
+    /// M4.2 会话级模型路由：非空字符串固定请求模型；`null`/空串/`"default"`
+    /// 哨兵 = 清除覆盖，回退 Provider 解析链（哨兵值不落库、不进请求体）。
+    model: Option<String>,
+}
+
+pub(super) async fn session_set_model(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<SetModelRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let _session_guard = owo_agent_server::acquire_session_lock(&state, &id).await?;
+    let mut session = load_session(&state, &id)?;
+    session.set_model_override(request.model);
+    state
+        .store
+        .save(&session)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    state
+        .sessions
+        .lock()
+        .map_err(poison)?
+        .insert(session.id.clone(), session.clone());
+    owo_agent_server::event_stream::hub()
+        .publish_invalidate(owo_agent_server::event_stream::InvalidateDomain::Sessions);
+    Ok(Json(json!({
+        "id": session.id,
+        "model": session.model,
+        "model_override": session.model_override,
+    })))
 }
 
 pub(super) async fn session_rename(

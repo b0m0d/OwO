@@ -66,12 +66,22 @@ function markConnectionReady() {
 }
 
 window.addEventListener("owo:connection", (event) => {
-  if (event.detail && event.detail.ready) markConnectionReady();
-  else markConnectionUnavailable();
+  if (event.detail && event.detail.ready) {
+    markConnectionReady();
+    // §8.2 第 5 条：运行期重握手成功后，baseUrl 与实例身份都可能已经换代际。
+    // startInvalidation 以「base#instanceId」为幂等键：同代际直接早退（零开销），
+    // 新代际才会重建事件流订阅器（旧订阅器持有上一代 seq 游标，留着就会漏刷新）。
+    if (typeof startInvalidation === "function") startInvalidation();
+  } else {
+    markConnectionUnavailable();
+  }
 });
 
 async function api(path, options = {}) {
-  bumpRequestStat(document.visibilityState === "hidden");
+  // 隐藏期请求计数必须用与守卫同口径的 uiHidden()（app.js 提供）：
+  // 只看 document.visibilityState 的话，桌面壳 hide 到托盘后这里恒记为"可见"，
+  // §3.4 的隐藏期请求指标会一路报 0（实测正是如此）。
+  bumpRequestStat(typeof uiHidden === "function" ? uiHidden() : document.visibilityState === "hidden");
   return apiClient.request(path, options);
 }
 

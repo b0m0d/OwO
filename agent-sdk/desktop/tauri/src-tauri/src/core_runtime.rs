@@ -11,8 +11,8 @@
 //! - 优雅关闭：先带 Bearer（启动时以配对+实例身份引导取得）与实例头调用
 //!   `/server/shutdown`，等待 2s，再 `taskkill /T /F` 兜底清进程树。
 use serde_json::Value;
-use std::io::{BufRead, Read};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -171,10 +171,7 @@ impl CoreRuntime {
     /// 当前 WebView，省去浏览器模式下的 GET /auth/token 冷启动请求）。
     /// 只经 Tauri IPC 传给本窗口，不落盘、不写日志（redact 兜底）。
     pub fn bearer_token(&self) -> Option<String> {
-        self.bearer
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
+        self.bearer.lock().ok().and_then(|guard| guard.clone())
     }
 
     pub fn state(&self) -> CoreState {
@@ -346,12 +343,31 @@ impl CoreRuntime {
     /// §4.3/§4.4：ready 消息绑定本次代际（独立 channel + 独立 exit 信号），
     /// 旧代 core 迟到的 stdout/退出事件不会污染本次启动。
     fn launch_once(&self) -> Result<(CoreConnection, ChildGeneration), CoreError> {
-        let exe = core_server_path();
-        if !exe.exists() {
-            return Err(CoreError::BinaryMissing);
-        }
+        let (exe, rejected) = core_server_path();
         let workspace = self.workspace().ok_or(CoreError::NoWorkspace)?; // start() 已保证存在；防御式返回
         let log = open_core_log().map_err(|_| CoreError::SpawnFailed)?;
+        // 先开日志再判定缺失：错误页的「查看日志」按钮必须有可打开的对象，
+        // 而"被跳过的历史产物"正是缺失场景下最有价值的排障线索。
+        if !rejected.is_empty() {
+            let names: Vec<String> = rejected
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            append_log_line(
+                &log,
+                &format!(
+                    "[runtime] 已跳过缺少构建身份的历史 core 产物：{}（请用当前 SDK 源码重新构建或重新安装）",
+                    names.join("、")
+                ),
+            );
+        }
+        let exe = match exe {
+            Some(path) => path,
+            None => {
+                append_log_line(&log, "[runtime] 无可用 core 产物（候选均缺失或无构建身份）");
+                return Err(CoreError::BinaryMissing);
+            }
+        };
         *self
             .log_path
             .lock()
@@ -655,27 +671,94 @@ fn kill_process_tree(pid: u32) {
         .output();
 }
 
-/// 便携/开发双模式的 core 可执行文件定位。
-pub fn core_server_path() -> PathBuf {
+/// R3（§8.3）：`--version` 输出是否携带**可用构建身份**。
+///
+/// R2 起 `owo-agent` 产物一律打印 `commit=<sha> dirty=<bool> built_at=<iso>
+/// source=compiled`。缺该行说明它是构建身份链之前的历史产物——这类文件曾被
+/// 手工复制进壳的 `target/debug`，而"同目录优先"解析会静默选中它，表现为
+/// 40 秒握手超时的"莫名冷启动失败"（实测）。宁可拒绝并给出明确日志，也不要
+/// 拉起一个来历不明的核心。
+fn version_output_has_build_identity(stdout: &str) -> bool {
+    stdout
+        .split_whitespace()
+        .any(|token| token.starts_with("commit=") && !token.starts_with("commit=unknown"))
+        && stdout.contains("built_at=")
+}
+
+/// 探测单个候选的构建身份；探测失败（无法启动 / 5s 无输出 / 非零退出 /
+/// 无 `commit=`）一律返回 false。
+fn candidate_has_build_identity(path: &Path) -> bool {
+    let mut child = match Command::new(path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW：探测不得弹窗
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return false;
+    };
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        if BufReader::new(stdout).read_to_string(&mut text).is_ok() {
+            let _ = tx.send(text);
+        }
+    });
+    let Ok(text) = rx.recv_timeout(Duration::from_secs(5)) else {
+        let _ = child.kill();
+        return false;
+    };
+    let Ok(status) = child.wait() else {
+        let _ = child.kill();
+        return false;
+    };
+    status.success() && version_output_has_build_identity(&text)
+}
+
+/// 在候选列表中挑选第一个"存在且具备构建身份"的 core，并把**存在但被拒绝**的
+/// 候选回传给调用方写日志（不静默丢弃：这是排障的关键线索）。
+fn pick_current_core(candidates: &[PathBuf]) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let mut rejected = Vec::new();
+    for candidate in candidates {
+        if !candidate.exists() {
+            continue;
+        }
+        if candidate_has_build_identity(candidate) {
+            return (Some(candidate.clone()), rejected);
+        }
+        rejected.push(candidate.clone());
+    }
+    (None, rejected)
+}
+
+/// 便携/开发双模式的 core 可执行文件定位（R3：解析结果必须带构建身份）。
+///
+/// 返回 `(选中的 core, 存在但被拒绝的历史产物)`。选中为 `None` 时调用方按
+/// `BinaryMissing` 处理——"存在但来历不明"与"缺失"对用户的可操作动作相同：
+/// 重新构建/重装，而不是等握手超时。
+pub fn core_server_path() -> (Option<PathBuf>, Vec<PathBuf>) {
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let bundled = dir.join("owo-agent-x64.exe");
-            if bundled.exists() {
-                return bundled;
-            }
-            let sibling = dir.join("owo-agent.exe");
-            if sibling.exists() {
-                return sibling;
-            }
+            candidates.push(dir.join("owo-agent-x64.exe"));
+            candidates.push(dir.join("owo-agent.exe"));
         }
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest
-        .parent()
-        .and_then(|parent| parent.parent())
-        .and_then(|parent| parent.parent())
-        .map(|root| root.join("target").join("debug").join("owo-agent.exe"))
-        .unwrap_or_else(|| PathBuf::from("owo-agent.exe"))
+    candidates.push(
+        manifest
+            .parent()
+            .and_then(|parent| parent.parent())
+            .and_then(|parent| parent.parent())
+            .map(|root| root.join("target").join("debug").join("owo-agent.exe"))
+            .unwrap_or_else(|| PathBuf::from("owo-agent.exe")),
+    );
+    pick_current_core(&candidates)
 }
 
 /// §4.6 工作区持久化：数据目录（`%LOCALAPPDATA%\OwO\Agent\`）下的 `workspace.json`。
@@ -1055,9 +1138,10 @@ fn free_port() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        redact, workspace_state_path, CoreError, CoreRuntime, CoreState, ProviderConfig,
-        RESTART_DELAYS,
+        pick_current_core, redact, version_output_has_build_identity, workspace_state_path,
+        CoreError, CoreRuntime, CoreState, ProviderConfig, RESTART_DELAYS,
     };
+    use std::path::PathBuf;
     use std::time::Duration;
 
     #[test]
@@ -1145,18 +1229,77 @@ mod tests {
         }
     }
 
+    // ---- R3（§8.3）core 产物身份解析 ----
+
+    /// 构建身份判定只接受 R2 起的完整身份行；"来历不明"（无 commit /
+    /// `commit=unknown` / 缺 built_at）一律判为不可用。
+    #[test]
+    fn build_identity_probe_accepts_only_current_identity_line() {
+        assert!(version_output_has_build_identity(
+            "owo-agent 0.1.0 api=0.7 commit=cec606583d1280af dirty=false built_at=2026-09-17T15:45:56Z source=compiled"
+        ));
+        // R2 之前的历史产物：只有版本行（实测被手工复制进壳 target 后劫持解析）。
+        assert!(!version_output_has_build_identity("owo-agent 0.1.0"));
+        // 非 git 环境编译出的身份等同未知。
+        assert!(!version_output_has_build_identity(
+            "owo-agent 0.1.0 commit=unknown built_at=2026-09-17T15:45:56Z"
+        ));
+        // 有 commit 但缺 built_at：身份不完整。
+        assert!(!version_output_has_build_identity(
+            "owo-agent commit=abc123"
+        ));
+    }
+
+    /// 候选解析：不存在的候选只是未命中（不进拒绝清单），存在但无构建身份的
+    /// 候选必须**不被选中**且**可追溯**（调用方据此写日志）。
+    #[test]
+    fn core_candidate_selection_rejects_identityless_artifact_and_reports_it() {
+        let missing = std::env::temp_dir().join("owo-not-exist-core-9f3a.exe");
+        assert!(!missing.exists());
+        // cargo.exe 是真实可执行文件，但 `--version` 不含 commit= → 必须判为不可用。
+        let identityless = PathBuf::from(env!("CARGO"));
+        assert!(
+            identityless.exists(),
+            "测试前置：cargo 可执行文件应存在（{}）",
+            identityless.display()
+        );
+        let (selected, rejected) = pick_current_core(&[missing.clone(), identityless.clone()]);
+        assert!(selected.is_none(), "无身份候选不得被选中：{selected:?}");
+        assert_eq!(
+            rejected,
+            vec![identityless.clone()],
+            "存在但无身份的候选必须回传供日志留痕"
+        );
+        assert!(
+            !rejected.contains(&missing),
+            "不存在的候选不算被拒绝（未命中 ≠ 来历不明）"
+        );
+    }
+
     // ---- §4.6 工作区 ----
 
     /// 数据目录指向临时目录，避免污染真实 `%LOCALAPPDATA%\OwO\Agent`。
-    /// 调用方需要在此生效期间尽快完成读写（`--test-threads=1` 下无并行干扰）。
+    ///
+    /// R3 收口：`LOCALAPPDATA` 是**进程级**共享状态，此前靠“调用方尽快完成读写”
+    /// 的口头约定 + `--test-threads=1` 才不互相踩（一个用例 `remove_var` 会让并行的
+    /// 另一用例落回真实数据目录）。现以全局互斥锁强制串行，`cargo test` 默认并行
+    /// 同样稳定——门禁不再依赖手工参数。
+    fn data_dir_serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn with_isolated_data_dir(block: impl FnOnce()) {
+        let _serial = data_dir_serial();
         let temp = std::env::temp_dir().join(format!("owo-desktop-test-{}", uuid::Uuid::new_v4()));
         let previous = std::env::var_os("LOCALAPPDATA");
         std::env::set_var("LOCALAPPDATA", &temp);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(block));
-        std::env::remove_var("LOCALAPPDATA");
-        if let Some(previous) = previous {
-            std::env::set_var("LOCALAPPDATA", previous);
+        match previous {
+            Some(previous) => std::env::set_var("LOCALAPPDATA", previous),
+            None => std::env::remove_var("LOCALAPPDATA"),
         }
         let _ = std::fs::remove_dir_all(&temp);
         if let Err(payload) = result {

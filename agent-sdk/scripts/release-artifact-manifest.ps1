@@ -88,6 +88,13 @@ foreach ($name in $Names) {
         if ($identity.commit -ne $commit) {
             throw ("产物身份与仓库 HEAD 错配：exe commit={0} tree={1}——产物可能过期或树已移动（§7.1/§7.3）" -f $identity.commit, $commit)
         }
+        # R3 补强：产物的 dirty 主张必须与独立 git 事实一致。此前 build.rs 的
+        # dirty 作用域口径漂移成"恒为 false"，clean-tree 门禁静默失效——单向
+        # 校验 commit 抓不到它；这里把 dirty 也纳入交叉核对，回归即失败。
+        $treeDirty = ("$dirty").ToLowerInvariant()
+        if ($identity.dirty -and $identity.dirty -ne $treeDirty) {
+            throw ("产物 dirty 主张与 git 事实不一致：exe dirty={0} tree dirty={1}——构建身份作用域可能再次漂移（§7.3）" -f $identity.dirty, $treeDirty)
+        }
     }
 }
 

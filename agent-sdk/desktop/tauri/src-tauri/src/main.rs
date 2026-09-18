@@ -42,6 +42,21 @@ fn updater_endpoint_is_placeholder() -> bool {
         .unwrap_or(false)
 }
 
+/// 把窗口可见性事实同步给前端（壳 → 页面的单向注入）。
+///
+/// 为什么必须显式同步：实测 WebView2 不把 `controller.SetIsVisible(false)` 传导给
+/// `document.visibilityState`（窗口在 Win32 层已不可见，页面仍是 "visible"），
+/// 于是前端所有"隐藏期不产生业务请求"的守卫在桌面壳里都是死代码。
+/// 这里注入 `owoSetBackground(bool)`（`desktop/web/app.js` 提供，未加载时短路无害），
+/// 并同时发一份 `owo:visibility` 事件供其它消费者使用。
+fn sync_window_background(window: &tauri::WebviewWindow, visible: bool) {
+    let flag = if visible { "false" } else { "true" };
+    let _ = window.eval(format!(
+        "window.owoSetBackground && window.owoSetBackground({flag});"
+    ));
+    let _ = window.emit("owo:visibility", serde_json::json!({ "visible": visible }));
+}
+
 /// §4.1 唤回窗口：显示、取消最小化、聚焦，并把窗口移回当前可见显示器
 /// （连续双击、被遮挡、最小化、关闭到托盘四种场景都必须把同一窗口带回前台）。
 fn show_main_window(app: &tauri::AppHandle) {
@@ -49,8 +64,31 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        sync_window_background(&window, true);
         move_onto_visible_monitor(&window);
     }
+}
+
+/// §4.2/§8.2：显式隐藏/唤回主窗口，走**产品自身的隐藏路径**（wry `set_visible`
+/// = Win32 `SW_HIDE` + WebView2 `controller.SetIsVisible`）。
+///
+/// 为什么需要这条命令：本机实测从**外部**调 `ShowWindow(SW_HIDE)` 不会让页面进入
+/// `document.visibilityState === "hidden"`（只有 controller 的 SetIsVisible 会），
+/// 于是"隐藏期不产生业务请求"既无法从外部触发、也无法被真实验证；同时界面里的
+/// "收进后台"入口也复用本命令，避免再长第二份隐藏逻辑。
+#[tauri::command]
+fn set_window_visible(app: tauri::AppHandle, visible: bool) -> serde_json::Value {
+    let mut now = visible;
+    if let Some(window) = app.get_webview_window("main") {
+        if visible {
+            show_main_window(&app);
+        } else {
+            let _ = window.hide();
+            sync_window_background(&window, false);
+        }
+        now = window.is_visible().unwrap_or(visible);
+    }
+    serde_json::json!({ "visible": now })
 }
 
 /// 窗口越出所有可见显示器（例如显示拓扑变化后）时，移回主显示器工作区中央。
@@ -267,6 +305,7 @@ fn main() {
             commands::set_workspace,
             commands::get_provider_status,
             commands::set_provider,
+            set_window_visible,
             desktop_pairing
         ])
         // §4.2 关闭到托盘协议：主窗口关闭请求一律拦截为隐藏到托盘，
@@ -276,6 +315,11 @@ fn main() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
+                    // §8.2：隐藏后必须把后台态注入页面——WebView2 的
+                    // document.visibilityState 不会因 SetIsVisible 改变（实测）。
+                    if let Some(webview) = window.get_webview_window("main") {
+                        sync_window_background(&webview, false);
+                    }
                     emit_background_notice_once(window.app_handle());
                 }
             }
@@ -298,7 +342,7 @@ fn emit_background_notice_once(app: &tauri::AppHandle) {
     for window in app.webview_windows().values() {
         let _ = window.emit(
             "owo:background",
-            serde_json::json!({ "message": "OwO Agent 仍在后台运行，点击托盘图标可再次打开工作台。" }),
+            serde_json::json!({ "message": "OwO Agent 仍在后台运行：右键托盘图标选「打开工作台」，或按 Ctrl+Alt+Shift+O、再次启动程序回到工作台。" }),
         );
     }
 }

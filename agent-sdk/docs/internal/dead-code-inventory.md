@@ -99,7 +99,7 @@
 
 | 符号 | allow 行 | 生产引用 | 测试引用 | 入口 | 结论 | 理由/兼容要求 |
 |---|---|---|---|---|---|---|
-| 整模块（AuthToken/require_auth/auth_token_bootstrap 等） | src/auth_token.rs:17 | lib 全链路可达：lib.rs:229（`AuthToken::load_or_create`）、:347（`/auth/token` 路由）、:639（require_auth 中间件）、:721（配对头）、:1481；ops_api.rs:46-48 | auth_token_tests（#[path] 目标内中间件等未被测试调用） | route: `GET /auth/token`（引导）+ 全局鉴权中间件 | 保留（有说明） | 行注释（第四批 clippy 全目标实测）：lib 目标零死亡、expect 不成立；#[path] 双目标差异场景 allow 为唯一正确形态（同 event_stream.rs） |
+| 整模块（AuthToken/require_auth/auth_token_bootstrap 等） | src/auth_token.rs:17 | lib 全链路可达：lib.rs:229（`AuthToken::mint_for_boot`）、:347（`/auth/token` 路由）、:639（require_auth 中间件）、:721（配对头）、:1481；ops_api.rs:46-48 | auth_token_tests（#[path] 目标内中间件等未被测试调用） | route: `GET /auth/token`（引导）+ 全局鉴权中间件 | 保留（有说明） | 行注释（第四批 clippy 全目标实测）：lib 目标零死亡、expect 不成立；#[path] 双目标差异场景 allow 为唯一正确形态（同 event_stream.rs） |
 | 整模块（ErrorCode/from_code/lookup/code 等） | src/error_codes.rs:15 | **部分接线**：usage.rs:675（`ErrorCode::from_code`）、lib.rs:1823-1835（`api_error_response` 签名与字段读取）、lib.rs:1834（遥测错误码打点） | error_codes_tests、production_readiness_tests（#[path] 全用） | route: 统一错误响应体 `{error:{code,...}}`（HTTP 错误面） | 保留（有说明）⚠ | 行注释"lib 目标当前仅登记模块（无路由引用）"**已滞后**（lib 已部分接线）；`http_status()`/`retry_after()`/`to_json()`/`code()` 是否仍 lib 死需 clippy 实测，收窄复核列入下一批 |
 | 整模块（IdempotencyRegistry 等） | src/idempotency.rs:15 | 无（lib.rs:48 仅登记模块，无路由引用） | idempotency_tests、production_readiness_tests（#[path] 全用） | route: 无（幂等端点未接入） | C | 行注释："幂等端点接入后随测试目标一并复核"。规划入口=请求级幂等中间件/端点；接入时同步 `tests/route_contract_tests.rs` |
 | 整模块（enforce_rate_limit/RateLimitConfig 等） | src/rate_limit.rs:17 | lib 可达：lib.rs:643（enforce_rate_limit 中间件） | rate_limit_tests（#[path] 目标内中间件未调用） | route: 全局中间件（/command、/subagent/run、/team/import 等敏感面） | 保留（有说明） | 同 auth_token：第四批实测，双目标差异场景 allow 为唯一正确形态 |
@@ -109,7 +109,7 @@
 
 | 符号 | allow 行 | 生产引用 | 测试引用 | 入口 | 结论 | 理由/兼容要求 |
 |---|---|---|---|---|---|---|
-| `EventStreamHub::last_delivered()` | :178 | 0 引用（全仓无调用） | 0 引用 | route: 无（Last-Event-ID 续传未接线） | C | 行注释："接线方在 SSE 断线续传时使用；当前 lib 目标与测试内无引用"。规划入口=SSE 断线续传（`subscribe_after` 重放已备）；续传方案若调整则转 D |
+| `EventStreamHub::last_delivered()` | :178 | 0 引用（全仓无调用；字段本身在订阅/派发路径被写） | 0 引用 | route: `/events/stream`（Last-Event-ID 续传**已接线**） | C | 行注释："接线方在 SSE 断线续传时使用；当前 lib 目标与测试内无引用"。R3 更新：续传链路已经 `resolve_last_event_id`→`subscribe_after` 接入路由，新增 `subscribe_live_only` 承载"缺省不重放"语义；**只读访问器本身**仍无调用方（订阅者游标只写不读），R6 决定摘除或接入诊断面板 |
 | `reset_metrics_observer_for_test()` | :255 | 无 | event_stream_tests:382-525、observability_tests:596/629 | — | B | 行注释：仅供 event_stream_tests / observability_tests 以 #[path] 独立编译使用（test-only） |
 | `EventStreamHub::subscribe_with_capacity()` | :404 | **lib 可达**：同模块 `subscribe_after`:400 调用（生产订阅路径） | event_stream_tests:139/162/198-199/216/432/456/486/506 | route: 间接（/events/stream 订阅） | **A** | 行注释"仅供 event_stream_tests…lib 目标内无引用"**与代码矛盾**（同模块 subscribe_after 构成真实引用）；allow 疑似过期，待 clippy 全目标实测后摘除 |
 | `reset_hub_for_test()` | :608 | 无 | event_stream_tests:232、observability_tests:595 | — | B | test-only（与 sse.rs:228 同名不同物） |

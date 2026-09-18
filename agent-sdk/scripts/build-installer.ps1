@@ -48,17 +48,21 @@ try {
     Pop-Location
 }
 
-$binDir = Join-Path $tauriDir "binaries"
-New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-Copy-Item -LiteralPath (Join-Path $root "target\$Configuration\owo-agent.exe") `
-    -Destination (Join-Path $binDir "owo-agent.exe-x86_64-pc-windows-msvc.exe") -Force
-# §7.3：复制 sidecar 后立即哈希核对（复制损坏零窗口）。
-$sidecarSrc = Get-FileHash -LiteralPath (Join-Path $root "target\$Configuration\owo-agent.exe") -Algorithm SHA256
-$sidecarDst = Get-FileHash -LiteralPath (Join-Path $binDir "owo-agent.exe-x86_64-pc-windows-msvc.exe") -Algorithm SHA256
-if ($sidecarSrc.Hash -ne $sidecarDst.Hash) {
-    throw "sidecar 复制后 SHA-256 不一致（src=$($sidecarSrc.Hash) dst=$($sidecarDst.Hash)）——发布中止（§7.3）"
+# R3（§7.3）：随包 core 预置统一走 stage-desktop-sidecar.ps1（**唯一实现**，与
+# ci-gate 的 desktop-stage 步、真机验收脚本同源）：清残留 → 按 externalBin 正确
+# 命名复制 → SHA-256 核对 → 构建身份核对。
+# 历史缺陷：这里曾把新 core 复制成 `owo-agent.exe-<triple>.exe`，而 tauri-build
+# 只认 `owo-agent-<triple>.exe`——于是安装包持续打包 binaries/ 里另一份来历不明
+# 的旧 core（实测 8/31 残留），"哈希核对通过"核对的却是那个没人读的文件。
+. (Join-Path $PSScriptRoot "stage-desktop-sidecar.ps1")
+try {
+    $staged = Stage-OwoDesktopSidecar -Configuration $Configuration -NoBuild
+} catch {
+    throw "sidecar 预置失败（§7.3）：$($_.Exception.Message)"
 }
-Write-Host "[installer] sidecar 复制哈希核对通过：$($sidecarDst.Hash)"
+Write-Host "[installer] 随包 core 就位：$($staged.destination)"
+Write-Host "[installer] sidecar 身份：$($staged.identity)"
+Write-Host "[installer] sidecar 复制哈希核对通过：$($staged.sha256)"
 
 Push-Location $tauriDir
 try {

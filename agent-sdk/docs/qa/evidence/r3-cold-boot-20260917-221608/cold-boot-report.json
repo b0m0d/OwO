@@ -1,0 +1,69 @@
+﻿{
+    "stamp":  "20260917-221608",
+    "run_root":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-coldboot-20260917-221608",
+    "evidence_dir":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-cold-boot-20260917-221608",
+    "hidden_minutes":  5,
+    "skipped_hidden":  true,
+    "failure_notes":  [
+                          "无法连接到远程服务器"
+                      ],
+    "checks":  [
+                   {
+                       "name":  "壳在 45s 内拉起 sidecar 并报 core_ready",
+                       "pass":  true,
+                       "detail":  "pid=41324 port=23157 build_id=cec606583d1280af4f6e3ddf506dce84ee5b10be"
+                   },
+                   {
+                       "name":  "/health 报告 healthy 且 api_version 与壳期望一致",
+                       "pass":  true,
+                       "detail":  "healthy=True api=0.7 stage=ready build_id=cec606583d1280af4f6e3ddf506dce84ee5b10be"
+                   },
+                   {
+                       "name":  "ready 行 build_id = /health.build_id = sidecar --version commit",
+                       "pass":  true,
+                       "detail":  "ready=cec606583d1280af4f6e3ddf506dce84ee5b10be health=cec606583d1280af4f6e3ddf506dce84ee5b10be"
+                   },
+                   {
+                       "name":  "/health.instance_id 非空（壳注入实例身份，握手闭环）",
+                       "pass":  true,
+                       "detail":  "instance_id=2d993dda313b40eb9849c947eece4935"
+                   },
+                   {
+                       "name":  "桌面主窗口在 20s 内出现（非空白壳/非永久 loading）",
+                       "pass":  true,
+                       "detail":  "hwnd=2165638"
+                   },
+                   {
+                       "name":  "token 文件落在本次私有数据根（未污染真实目录）",
+                       "pass":  true,
+                       "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-coldboot-20260917-221608\\LocalAppData\\OwO\\Agent\\data\\auth\\token"
+                   },
+                   {
+                       "name":  "首次可输入前业务请求 ≤5（服务端 ledger 权威口径）",
+                       "pass":  false,
+                       "detail":  "business=19 routes=/sessions,/skills,/whitelist,/project/rules,/whitelist,/project/rules,/skills,/sessions,/automations,/mcp,/settings,/learn/packages,/learn/status,/computer-use/tasks,/plugins,/traces,/memory/observations,/usage,/mcp/health"
+                   },
+                   {
+                       "name":  "注入 token 模式下零 /auth/token（壳注入生效，未回落到引导端点）",
+                       "pass":  false,
+                       "detail":  "auth_token=1"
+                   },
+                   {
+                       "name":  "事件连接唯一（无双重 SSE）",
+                       "pass":  true,
+                       "detail":  "events_stream=0"
+                   },
+                   {
+                       "name":  "ledger source 归类含 web/shell（来源标签链路可用）",
+                       "pass":  true,
+                       "detail":  "sources=shell,web"
+                   },
+                   {
+                       "name":  "core 意外退出后壳自动受控重启并再次 ready",
+                       "pass":  false,
+                       "detail":  "new pid=41324 port=23157"
+                   }
+               ],
+    "passed":  8,
+    "failed":  3
+}

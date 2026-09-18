@@ -1,7 +1,8 @@
-//! 本地 API 鉴权（R7 X03）：随机 bearer token + 文件持久化 + 用户级 ACL。
+//! 本地 API 鉴权（R7 X03）：随机 bearer token + 文件发现通道 + 用户级 ACL。
 //!
-//! - 启动时生成 256 位随机 token（两个 uuid v4 拼接），写入 `<data_root>/auth/token`；
-//!   已存在有效 token 时复用（桌面端重启不失效）。
+//! - **每次启动换发**：生成 256 位随机 token（两个 uuid v4 拼接）并覆盖写
+//!   `<data_root>/auth/token`（§8.2 第 5 条：core 重启后旧 bearer 必须立即失效；
+//!   文件内容始终是当前代际可用值，外部工具以文件为发现通道，行为不变）。
 //! - Windows 下用 `icacls` 把文件 ACL 收紧为仅当前用户（`/inheritance:r /grant:r`）；
 //!   ACL 应用失败时优雅降级（返回 `acl_warning`），服务仍可运行，由审计记录提示。
 //! - 校验为恒定时间比较（长度不匹配同样消耗相同指令量，不提前返回）。
@@ -131,21 +132,21 @@ impl AuthToken {
         data_root.join("auth").join(TOKEN_FILE_NAME)
     }
 
-    /// 从文件加载或创建：
-    /// - 文件存在且非空 → 复用；
-    /// - 否则生成新 token 并持久化 + 收紧 ACL；
-    /// - 任何 IO 失败都不 panic：回退到内存 token（`persisted=false`），并带警告。
-    pub fn load_or_create(data_root: &Path) -> Self {
+    /// 每次核心启动**铸造新 token 并覆盖写盘**（§8.2 第 5 条）。
+    ///
+    /// 旧实现在文件存在时直接复用，语义是"token 跨重启存活"——后果是上一代进程
+    /// 泄漏出去的 bearer 在 core 重启后**仍然长期可用**，桌面壳重启代际只体现在
+    /// pid/端口上，凭据却没有换代。现在每次启动都换发：
+    /// - `<data_root>/auth/token` 始终是当前代际的有效值（外部工具仍以文件为
+    ///   发现通道，行为不变）；
+    /// - 上一代 bearer 立即失效：持旧值的调用方收到 401，桌面 WebView 经壳重查
+    ///   连接描述符（`resetCoreConnection` → `get_core_connection`）拿新值；
+    /// - 文件里预先存在的陌生值不再被继承（防止把别的安装/别的机器的 token 当自己的）。
+    ///
+    /// IO 失败不 panic：退回内存 token 并携带 `acl_warning`，此时文件内容不可信，
+    /// 桌面壳仍可通过配对引导拿到当前代际 token。
+    pub fn mint_for_boot(data_root: &Path) -> Self {
         let path = Self::file_path(data_root);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            let token = content.trim().to_string();
-            if !token.is_empty() && token.len() >= 32 {
-                return Self {
-                    token,
-                    acl_warning: None,
-                };
-            }
-        }
         let fresh = Self::generate();
         match Self::persist(&path, &fresh.token) {
             Ok(()) => fresh,

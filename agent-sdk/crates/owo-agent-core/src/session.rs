@@ -46,6 +46,11 @@ pub struct Session {
     /// 置顶标记（列表优先）。
     #[serde(default)]
     pub pinned: bool,
+    /// M4.2 会话级模型覆盖：`Some(model)` 固定请求模型（回合/压缩外的一切调用
+    /// 都走该模型）；`None` 表示按 Provider 解析链（OPENAI_MODEL 热切换 → 启动
+    /// 配置 → 内置默认）。`model` 字段仅为展示值，路由以本字段为准。
+    #[serde(default)]
+    pub model_override: Option<String>,
 }
 
 impl Session {
@@ -71,7 +76,33 @@ impl Session {
             title: None,
             archived: false,
             pinned: false,
+            model_override: None,
         }
+    }
+
+    /// 模型覆盖归一（M4.2）：trim；空串与 `"default"` 哨兵 = None（自动）。
+    fn normalize_model_override(model: Option<String>) -> Option<String> {
+        model
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && value != crate::gateway::MODEL_DEFAULT_SENTINEL)
+    }
+
+    /// 设置会话级模型覆盖（M4.2）；空串/纯空白/`"default"` 哨兵视为清除覆盖
+    /// （回退 Provider 链）；哨兵不落库。
+    pub fn with_model_override(mut self, model: Option<String>) -> Self {
+        self.model_override = Self::normalize_model_override(model);
+        self
+    }
+
+    /// 会话级模型路由设置（M4.2）：非空字符串固定请求模型；`None`、空串与
+    /// `"default"` 哨兵一律清除覆盖（回退 Provider 解析链，哨兵不落库、不进请求体）。
+    /// 固定时展示模型同步为固定值；清除时展示模型保持现状。
+    pub fn set_model_override(&mut self, model: Option<String>) {
+        self.model_override = Self::normalize_model_override(model);
+        if let Some(value) = self.model_override.clone() {
+            self.model = value;
+        }
+        self.updated_at = Utc::now().to_rfc3339();
     }
 
     /// 展示标题：优先自定义标题，否则取首条用户消息，最后回退为会话短 ID。
@@ -195,6 +226,8 @@ impl Session {
             title: None,
             archived: false,
             pinned: false,
+            // fork 继承父会话的模型覆盖（路由语义随历史一起派生）。
+            model_override: self.model_override.clone(),
         }
     }
 
@@ -436,6 +469,53 @@ mod tests {
         assert_eq!(store.list().len(), 1);
         let loaded = store.load(&session.id).unwrap();
         assert_eq!(loaded.id, session.id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// M4.2：`model_override` JSON 存储往返 + 旧文件（缺该字段）兼容 + fork 继承。
+    #[test]
+    fn model_override_roundtrip_legacy_compat_and_fork_inherits() {
+        let root = std::env::temp_dir().join(format!(
+            "owo-session-override-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = JsonSessionStore::new(&root);
+        let session = store
+            .create(std::path::Path::new("."), "glm-5.3-flash", None)
+            .unwrap()
+            .with_model_override(Some("vision-pro".to_string()));
+        store.save(&session).unwrap();
+        let loaded = store.load(&session.id).unwrap();
+        assert_eq!(loaded.model_override.as_deref(), Some("vision-pro"));
+        // 展示模型与路由覆盖解耦：覆盖不改展示值。
+        assert_eq!(loaded.model, "glm-5.3-flash");
+        // 空串覆盖 = 清除（回退 Provider 解析链）；"default" 哨兵同样归一为自动，
+        // 且绝不作为展示/存储值（M4.2 哨兵不泄漏）。
+        let cleared = loaded.clone().with_model_override(Some("  ".to_string()));
+        assert_eq!(cleared.model_override, None);
+        let sentinel = loaded
+            .clone()
+            .with_model_override(Some("default".to_string()));
+        assert_eq!(sentinel.model_override, None);
+        let mut pinned = loaded.clone();
+        pinned.set_model_override(Some("wire-y".to_string()));
+        assert_eq!(pinned.model_override.as_deref(), Some("wire-y"));
+        assert_eq!(pinned.model, "wire-y", "固定时展示同步");
+        pinned.set_model_override(Some("default".to_string()));
+        assert_eq!(pinned.model_override, None, "哨兵必须清除覆盖");
+        assert_eq!(pinned.model, "wire-y", "清除不改展示（不猜测缺省值）");
+        // fork 继承覆盖（路由语义随历史派生）。
+        assert_eq!(loaded.fork(0).model_override.as_deref(), Some("vision-pro"));
+        // 旧格式文件（无 model_override 字段）必须照常加载为 None。
+        let legacy = store
+            .create(std::path::Path::new("."), "old-model", None)
+            .unwrap();
+        let mut raw: serde_json::Value = serde_json::to_value(&legacy).expect("会话应可序列化");
+        raw.as_object_mut()
+            .expect("会话是对象")
+            .remove("model_override");
+        std::fs::write(store.plain_path(&legacy.id), raw.to_string()).unwrap();
+        assert_eq!(store.load(&legacy.id).unwrap().model_override, None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

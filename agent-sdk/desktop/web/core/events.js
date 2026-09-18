@@ -20,7 +20,19 @@
   const DEFAULT_POLL_INTERVAL_MS = 15000;
   const DEGRADE_AFTER_FAILURES = 2;
 
+  // 桌面壳的"收进后台"事实源。
+  //
+  // R3 实测：壳调用 `window.hide()`（wry set_visible → ShowWindow(SW_HIDE) +
+  // WebView2 controller.SetIsVisible(false)）后，窗口在 Win32 层确实不可见，
+  // **但 document.visibilityState 仍是 "visible"**——WebView2 不把 SetIsVisible
+  // 传导给页面可见性。于是所有以 `visibilityState === "hidden"` 为准的守卫
+  // （刷新暂停、失效延后、隐藏期请求计数）在桌面壳里是**死代码**：隐藏 5 分钟
+  // 照打 10 次健康轮询。因此壳在隐藏/唤回时直接注入本标记（main.rs
+  // `set_window_visible` → webview.eval），页面可见性只作为浏览器模式的补充信号。
+  let shellBackgroundHidden = false;
+
   function visibility() {
+    if (shellBackgroundHidden) return "hidden";
     return (typeof document !== "undefined" && document.visibilityState) || "visible";
   }
 
@@ -29,7 +41,7 @@
    * @param {{
    *   baseUrl?: string,
    *   path?: string,
-   *   openStream?: (path: string, opts: {lastEventId?: number, signal: AbortSignal,
+   *   openStream?: (path: string, opts: {url?: string, lastEventId?: number, signal: AbortSignal,
    *     onEvent: (frame: {event: string, data: string, id?: string}) => void,
    *     onOpen?: (status: number) => void}) => Promise<void>,
    *   debounceMs?: number,
@@ -48,7 +60,14 @@
     const now = typeof opts.now === "function" ? opts.now : () => Date.now();
     const openStream = typeof opts.openStream === "function" ? opts.openStream : null;
     const streamPath = opts.path || "/events/stream";
-    const fullUrl = String(opts.baseUrl || "").replace(/\/$/, "") + streamPath;
+    // §8.2（R3 实测缺陷）：宿主（api-client）才是 URL 组装的唯一位置——它按当前
+    // baseUrl（桌面注入的动态端口）拼接 path。此前本模块把 baseUrl 先拼成绝对
+    // URL 再交给 openEventStream，导致桌面模式下双前缀
+    // （`http://127.0.0.1:PORThttp://127.0.0.1:PORT/events/stream`）→ fetch 直接
+    // 解析失败 → 连续 2 次失败进入 Degraded → 兜底轮询把 14 个域全刷一遍
+    // （首屏业务请求 19 条）。浏览器直连时 baseUrl 为空串，恰好掩盖了该缺陷。
+    // `baseUrl` 仅保留为诊断字段（snapshot.url），不参与请求 URL 组装。
+    const diagnosticUrl = String(opts.baseUrl || "").replace(/\/$/, "") + streamPath;
 
     let state = "stopped"; // stopped | connecting | live | degraded
     let controller = null; // AbortController（当前连接）
@@ -178,7 +197,8 @@
           // 兜底失败等待下一 tick。
         }
       };
-      tick();
+      // §8.2（R3）：首个 tick 也必须等一个完整周期——否则「连接装配失败 → 立即
+      // 全量刷新」会在首屏窗口叠加一整轮 14 域业务请求，把降级惩罚成请求风暴。
       pollTimer = setInterval(tick, pollIntervalMs);
     }
 
@@ -203,7 +223,9 @@
       setState(state === "degraded" ? "degraded" : "connecting");
       controller = typeof AbortController !== "undefined" ? new AbortController() : null;
       const attempt = controller;
-      const promise = openStream(fullUrl, {
+      // 传路径而非绝对 URL：base（含桌面注入的动态端口）由宿主 api-client 统一组装。
+      const promise = openStream(streamPath, {
+        url: diagnosticUrl,
         lastEventId: lastEventId || undefined,
         signal: controller ? controller.signal : undefined,
         onEvent: handleFrame,
@@ -289,6 +311,13 @@
           controller = null;
         }
       },
+      /**
+       * 壳侧后台态变化（由 `global.owoSetShellBackground` 统一驱动）。
+       * 回到前台时补刷隐藏期间攒下的域失效，与 visibilitychange 同一条路径。
+       */
+      onVisibility() {
+        onVisibilityChange();
+      },
       /** 当前已消费的最高版本（对账/调试）。 */
       versionOf(domain) {
         return versions.get(domain) || 0;
@@ -303,6 +332,7 @@
           state,
           reconnectAttempts,
           lastEventId,
+          url: diagnosticUrl,
         });
       },
       /** 测试钩子：直接注入一帧（绕过网络）。 */
@@ -312,7 +342,23 @@
     };
   }
 
-  global.OwoInvalidation = { createDomainInvalidator, INVALIDATE_EVENT };
+  global.OwoInvalidation = {
+    createDomainInvalidator,
+    INVALIDATE_EVENT,
+    /**
+     * 设置壳侧后台态（app.js 的 owoSetBackground 是唯一调用方）。
+     * 只改口径，不代替实例补刷——补刷由持有实例的调用方触发 onVisibility()，
+     * 避免"模块级注册表 + 实例生命周期"两处真相。
+     * @param {boolean} hidden
+     * @returns {string} 生效后的可见性口径
+     */
+    setShellBackground(hidden) {
+      shellBackgroundHidden = Boolean(hidden);
+      return visibility();
+    },
+    /** 当前口径（诊断/测试）。 */
+    visibility,
+  };
   if (typeof module !== "undefined" && module.exports) {
     module.exports = global.OwoInvalidation;
   }

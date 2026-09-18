@@ -122,8 +122,10 @@ test("Tauri 桌面端先向壳询问核心连接，携带实例身份与配对�
     await client.get("/sessions");
     assert.deepEqual(commands, ["get_core_connection"], "配对证明改由连接描述符提供，无需再问 desktop_pairing");
     assert.equal(String(seen[0].url), "http://127.0.0.1:6071/auth/token", "基址必须切换到壳报告的动态端口");
-    assert.equal(seen[0].options.headers["x-owo-desktop-instance"], "a1b2c3d4e5f60718293a4b5c6d7e8f90");
-    assert.equal(seen[0].options.headers["X-Owo-Desktop-Pairing"], "0123456789abcdef0123456789abcdef");
+    assert.equal(seen[0].options.headers.get("x-owo-desktop-instance"), "a1b2c3d4e5f60718293a4b5c6d7e8f90");
+    assert.equal(seen[0].options.headers.get("X-Owo-Desktop-Pairing"), "0123456789abcdef0123456789abcdef");
+    // §8.1：ledger 来源标签——web 出口一律自带 x-owo-client（含 token 引导请求）。
+    assert.equal(seen[0].options.headers.get("x-owo-client"), "web");
     assert.deepEqual(global.__owoCoreDiagnostics, {
       state: "ready",
       port: 6071,
@@ -231,6 +233,160 @@ test("§4 壳注入 token：桌面模式冷启动零 /auth/token 请求，重连
     await client.get("/sessions");
     assert.equal(seen.filter((i) => i.url.includes("127.0.0.1:6072")).length, 1, "重查连接后基址切换到新实例");
     assert.equal(seen.filter((i) => i.url.endsWith("/sessions"))[1].options.headers.get("Authorization"), "Bearer injected-token-2");
+  } finally {
+    global.fetch = originalFetch;
+    global.__owoCoreDiagnostics = originalDiagnostics;
+    if (originalTauri === undefined) delete global.__TAURI_INTERNALS__;
+    else global.__TAURI_INTERNALS__ = originalTauri;
+  }
+});
+
+test("§8.2 第5条：401 必须整体重查壳连接（旧注入 token 不得复用）", async () => {
+  // core 每次启动换发 bearer。若 401 重试只清 this.token，injectedToken 会把
+  // 上一代 token 再注入一遍 → 二次 401 → 界面永久"未授权"。这条测试锁死修复。
+  const originalFetch = global.fetch;
+  const originalTauri = global.__TAURI_INTERNALS__;
+  const originalDiagnostics = global.__owoCoreDiagnostics;
+  const seen = [];
+  const commands = [];
+  let connectionGeneration = 0;
+  global.__TAURI_INTERNALS__ = {
+    invoke: async (command) => {
+      commands.push(command);
+      if (command === "get_core_connection") {
+        connectionGeneration += 1;
+        return {
+          port: 6110 + connectionGeneration,
+          instanceId: "inst-" + connectionGeneration,
+          pairing: "0123456789abcdef0123456789abcdef",
+          token: "injected-token-" + connectionGeneration,
+          state: "ready",
+        };
+      }
+      throw new Error("unexpected command " + command);
+    },
+  };
+  global.fetch = async (url, options = {}) => {
+    const text = String(url);
+    seen.push({ url: text, options });
+    if (text.includes(":6111")) {
+      return new Response("expired", { status: 401 }); // 上一代端口：token 已换发
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+  try {
+    const client = new ApiClient("http://127.0.0.1:4096");
+    const result = await client.get("/sessions");
+    assert.deepEqual(result, { ok: true }, "401 重试后应成功");
+    assert.equal(
+      commands.filter((c) => c === "get_core_connection").length,
+      2,
+      "401 后必须重新向壳查询连接（而非只清本地 token）"
+    );
+    assert.ok(
+      !seen.some((item) => item.url.endsWith("/auth/token")),
+      "桌面模式重连不得回落到公开引导端点"
+    );
+    const retry = seen[seen.length - 1];
+    assert.ok(retry.url.includes(":6112"), `重试应打到新一代端口：${retry.url}`);
+    assert.equal(retry.options.headers.get("Authorization"), "Bearer injected-token-2");
+    assert.equal(
+      seen.filter((item) => item.options.headers.get("x-owo-client")).length,
+      seen.length,
+      "每次尝试（含重试）都必须带来源标签"
+    );
+  } finally {
+    global.fetch = originalFetch;
+    global.__owoCoreDiagnostics = originalDiagnostics;
+    if (originalTauri === undefined) delete global.__TAURI_INTERNALS__;
+    else global.__TAURI_INTERNALS__ = originalTauri;
+  }
+});
+
+test("§8.2 第5条：core 重启换端口后，网络失败必须触发重查连接并重试成功", async () => {
+  // 旧端口上的 fetch 是**网络错误**（不是 401）：只修 401 分支时运行期重启会永久失联。
+  const originalFetch = global.fetch;
+  const originalTauri = global.__TAURI_INTERNALS__;
+  const originalDiagnostics = global.__owoCoreDiagnostics;
+  const seen = [];
+  const commands = [];
+  let generation = 0;
+  global.__TAURI_INTERNALS__ = {
+    invoke: async (command) => {
+      commands.push(command);
+      if (command === "get_core_connection") {
+        generation += 1;
+        return {
+          port: 6210 + generation,
+          instanceId: "gen-" + generation,
+          pairing: "0123456789abcdef0123456789abcdef",
+          token: "tok-" + generation,
+          state: "ready",
+        };
+      }
+      throw new Error("unexpected command " + command);
+    },
+  };
+  global.fetch = async (url, options = {}) => {
+    const text = String(url);
+    seen.push({ url: text, auth: options.headers.get("Authorization") });
+    if (text.includes(":6211")) {
+      throw new TypeError("Failed to fetch"); // 上一代端口：进程已没了
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+  try {
+    const client = new ApiClient("http://127.0.0.1:4096");
+    const result = await client.get("/sessions");
+    assert.deepEqual(result, { ok: true }, "网络失败后应经重查连接自愈");
+    assert.ok(
+      commands.filter((c) => c === "get_core_connection").length >= 2,
+      `连接层失败必须重查壳连接，实际命令：${commands.join(",")}`
+    );
+    assert.equal(seen[seen.length - 1].url, "http://127.0.0.1:6212/sessions");
+    assert.equal(seen[seen.length - 1].auth, "Bearer tok-2", "重试必须带新一代 bearer");
+    assert.equal(client.networkFailures, 0, "成功后网络失败计数归零");
+  } finally {
+    global.fetch = originalFetch;
+    global.__owoCoreDiagnostics = originalDiagnostics;
+    if (originalTauri === undefined) delete global.__TAURI_INTERNALS__;
+    else global.__TAURI_INTERNALS__ = originalTauri;
+  }
+});
+
+test("§8.2 第5条：核心始终不可达时网络失败只重试一次并受冷却约束（不得风暴重查）", async () => {
+  const originalFetch = global.fetch;
+  const originalTauri = global.__TAURI_INTERNALS__;
+  const originalDiagnostics = global.__owoCoreDiagnostics;
+  let connectionQueries = 0;
+  global.__TAURI_INTERNALS__ = {
+    invoke: async () => {
+      connectionQueries += 1;
+      return {
+        port: 6310,
+        instanceId: "down",
+        pairing: "0123456789abcdef0123456789abcdef",
+        token: "tok-down",
+        state: "ready",
+      };
+    },
+  };
+  global.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  try {
+    const client = new ApiClient("http://127.0.0.1:4096");
+    // 第 1 次请求：失败 → 重查连接 → 再失败 → 上抛（不得吞错，UI 才能显示未连接）。
+    await assert.rejects(() => client.get("/sessions"), "核心不可达必须上抛");
+    const afterFirst = connectionQueries;
+    assert.ok(afterFirst >= 1, "首次失败应至少重查一次连接");
+    // 第 2、3 次请求：处于重查冷却窗口内，不得再向壳发起查询（风暴放大防护）。
+    await assert.rejects(() => client.get("/sessions"));
+    await assert.rejects(() => client.get("/skills"));
+    assert.equal(connectionQueries, afterFirst, "冷却期内不得重复重查壳连接");
+    // 尝试计数：req1 两次尝试（重查前 1 次 + 重查后 1 次，重查时归零）、
+    // req2/req3 各一次 → 稳定为 3。用它验证"失败被如实记录，不被吞掉"。
+    assert.equal(client.networkFailures, 3, "网络失败计数供诊断读取（重查后归零再累计）");
   } finally {
     global.fetch = originalFetch;
     global.__owoCoreDiagnostics = originalDiagnostics;

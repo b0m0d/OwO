@@ -47,27 +47,42 @@ pub struct Migration {
 
 /// 顺序迁移表：任何 schema 变更都必须以新条目显式注册（禁止隐式 ALTER）。
 /// v1：sessions 列补齐（此前为运行时逐列探测的隐式 ALTER，R8 收敛为注册迁移）。
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "sessions 列补齐（message_redo_json/title/archived/pinned）",
-    run: |conn| {
-        let columns = table_columns(conn, "sessions")?;
-        for (column, definition) in [
-            ("message_redo_json", "TEXT NOT NULL DEFAULT '[]'"),
-            ("title", "TEXT"),
-            ("archived", "INTEGER NOT NULL DEFAULT 0"),
-            ("pinned", "INTEGER NOT NULL DEFAULT 0"),
-        ] {
-            if !columns.iter().any(|existing| existing == column) {
-                conn.execute_batch(&format!(
-                    "ALTER TABLE sessions ADD COLUMN {column} {definition}"
-                ))
-                .map_err(sqlite_error)?;
+/// v2：M4.2 会话级模型路由（`model_override` 列）。
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "sessions 列补齐（message_redo_json/title/archived/pinned）",
+        run: |conn| {
+            let columns = table_columns(conn, "sessions")?;
+            for (column, definition) in [
+                ("message_redo_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("title", "TEXT"),
+                ("archived", "INTEGER NOT NULL DEFAULT 0"),
+                ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+            ] {
+                if !columns.iter().any(|existing| existing == column) {
+                    conn.execute_batch(&format!(
+                        "ALTER TABLE sessions ADD COLUMN {column} {definition}"
+                    ))
+                    .map_err(sqlite_error)?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        },
     },
-}];
+    Migration {
+        version: 2,
+        name: "sessions 列补齐（model_override：M4.2 会话级模型路由）",
+        run: |conn| {
+            let columns = table_columns(conn, "sessions")?;
+            if !columns.iter().any(|existing| existing == "model_override") {
+                conn.execute_batch("ALTER TABLE sessions ADD COLUMN model_override TEXT")
+                    .map_err(sqlite_error)?;
+            }
+            Ok(())
+        },
+    },
+];
 
 /// 迁移运行状态（供健康/状态面板展示；只读降级时 last_error 给出原因）。
 #[derive(Debug, Clone, Default)]
@@ -126,7 +141,8 @@ fn base_schema() -> &'static str {
          message_redo_json TEXT NOT NULL DEFAULT '[]',
          title TEXT,
          archived INTEGER NOT NULL DEFAULT 0,
-         pinned INTEGER NOT NULL DEFAULT 0
+         pinned INTEGER NOT NULL DEFAULT 0,
+         model_override TEXT
      );
      CREATE TABLE IF NOT EXISTS audit (
          id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -278,8 +294,8 @@ impl SqliteSessionStore {
             "INSERT INTO sessions (
                  id, workspace, model, system_prompt, messages_json, snapshots_json,
                  created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json,
-                 title, archived, pinned
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 title, archived, pinned, model_override
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
                  workspace=excluded.workspace,
                  model=excluded.model,
@@ -293,7 +309,8 @@ impl SqliteSessionStore {
                  message_redo_json=excluded.message_redo_json,
                  title=excluded.title,
                  archived=excluded.archived,
-                 pinned=excluded.pinned",
+                 pinned=excluded.pinned,
+                 model_override=excluded.model_override",
             params![
                 session.id,
                 session.workspace.to_string_lossy(),
@@ -310,6 +327,7 @@ impl SqliteSessionStore {
                 session.title,
                 i64::from(session.archived),
                 i64::from(session.pinned),
+                session.model_override,
             ],
         )
         .map_err(sqlite_error)?;
@@ -321,7 +339,7 @@ impl SqliteSessionStore {
             .query_row(
                 "SELECT id, workspace, model, system_prompt, messages_json, snapshots_json,
                         created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json,
-                        title, archived, pinned
+                        title, archived, pinned, model_override
                  FROM sessions WHERE id = ?1",
                 [id],
                 |row| {
@@ -341,6 +359,7 @@ impl SqliteSessionStore {
                         row.get::<_, Option<String>>(12)?,
                         row.get::<_, bool>(13)?,
                         row.get::<_, bool>(14)?,
+                        row.get::<_, Option<String>>(15)?,
                     ))
                 },
             )
@@ -367,6 +386,7 @@ impl SqliteSessionStore {
             title: row.12,
             archived: row.13,
             pinned: row.14,
+            model_override: row.15,
         })
     }
 }
@@ -655,6 +675,7 @@ mod tests {
         assert!(loaded.title.is_none());
         assert!(!loaded.pinned);
         assert!(!loaded.archived);
+        assert_eq!(loaded.model_override, None, "v2 迁移后旧行覆盖列为 NULL");
         let mut session = store.create(Path::new("."), "mock", None).unwrap();
         session.rename("迁移后新会话".to_string());
         store.save(&session).unwrap();
@@ -662,6 +683,26 @@ mod tests {
             store.load(&session.id).unwrap().title.as_deref(),
             Some("迁移后新会话")
         );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    /// M4.2：`model_override` 列往返（含重开库）；覆盖不改变展示模型。
+    #[test]
+    fn model_override_roundtrip_survives_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("owo-sqlite-model-{}.db", uuid::Uuid::new_v4()));
+        let store = SqliteSessionStore::open(&path).unwrap();
+        let mut session = store.create(Path::new("."), "glm-5.3-flash", None).unwrap();
+        assert_eq!(session.model_override, None);
+        session.model_override = Some("vision-pro".to_string());
+        store.save(&session).unwrap();
+        drop(store);
+        let reopened = SqliteSessionStore::open(&path).unwrap();
+        let loaded = reopened.load(&session.id).unwrap();
+        assert_eq!(loaded.model_override.as_deref(), Some("vision-pro"));
+        assert_eq!(loaded.model, "glm-5.3-flash");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
@@ -701,20 +742,20 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("owo-sqlite-migrate-{}.db", uuid::Uuid::new_v4()));
         let store = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(store.migration_status().schema_version, 1);
+        assert_eq!(store.migration_status().schema_version, 2);
         assert!(store.migration_status().pending.is_empty());
         assert!(!store.is_read_only());
         drop(store);
         // 再次打开：无新迁移应用，schema_version 保持。
         let reopened = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(reopened.migration_status().schema_version, 1);
+        assert_eq!(reopened.migration_status().schema_version, 2);
         assert!(reopened.migration_status().applied.is_empty());
         assert!(!reopened.is_read_only());
         let conn = Connection::open(&path).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
@@ -746,7 +787,10 @@ mod tests {
         assert!(!store.is_read_only());
         assert_eq!(
             store.migration_status().applied,
-            vec!["v1: sessions 列补齐（message_redo_json/title/archived/pinned）"]
+            vec![
+                "v1: sessions 列补齐（message_redo_json/title/archived/pinned）",
+                "v2: sessions 列补齐（model_override：M4.2 会话级模型路由）",
+            ]
         );
         let mut session = store.create(Path::new("."), "mock", None).unwrap();
         session.rename("v1 迁移会话".to_string());

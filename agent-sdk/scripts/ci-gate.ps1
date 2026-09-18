@@ -1,5 +1,6 @@
 ﻿# ci-gate.ps1 — agent-sdk CI 核心门禁（PR/Merge 工作流与本地验证共用；幂等、只读为主）
-# 步骤顺序：utf8 → permission-ctor → fmt → clippy → test → route-contract → node → ts
+# 步骤顺序：utf8 → permission-ctor → forbidden-files → fmt → clippy → test →
+#          route-contract → node → ts → desktop(src-tauri: fmt/clippy/test)
 # 约定：块内通过退出码或 $global:LASTEXITCODE = 1 表达失败（避免 throw 吞掉已捕获输出）；
 #       前置条件缺失用 return 实现受控跳过（绿色 + SKIP 说明）。
 # 用法：
@@ -7,8 +8,8 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\ci-gate.ps1 -Step fmt
 #   powershell -ExecutionPolicy Bypass -File scripts\ci-gate.ps1 -Step clippy -LogDir "$env:TEMP\ci-gate-logs"
 # 参数：
-#   -Step <词>           只运行 Id 包含该词的步骤（CI 拆分步骤与本地排查用）
-#   -SkipFmt/-SkipClippy/-SkipTest/-SkipNode/-SkipTs/-SkipRouteContract/-SkipUtf8/-SkipPermissionCtor
+#   -Step <词>           只运行 Id 包含该词的步骤（CI 拆分步骤与本地排查用；-Step desktop 跑壳三步）
+#   -SkipFmt/-SkipClippy/-SkipTest/-SkipNode/-SkipTs/-SkipRouteContract/-SkipUtf8/-SkipPermissionCtor/-SkipDesktop
 #   -ServerOnly          workspace 测试退化为只测 owo-agent-server 单包
 #   -LogDir <目录>       把每步输出与 summary.json 落盘（诊断 artifact）
 # 退出码：0 = 全过；1 = 存在失败步骤。
@@ -22,6 +23,8 @@ param(
     [switch]$SkipRouteContract,
     [switch]$SkipUtf8,
     [switch]$SkipPermissionCtor,
+    # R3：桌面壳（src-tauri 独立 workspace）三步；本地快速跑主仓时可跳过。
+    [switch]$SkipDesktop,
     [switch]$ServerOnly,
     # §7.2：新终端直跑 CI 时允许把缺失的 ORT 下载进稳定缓存（默认保守：
     # 探测失败即快速报错，不等链接阶段 LNK1120）。
@@ -228,6 +231,45 @@ if (-not $SkipTs) {
         } finally {
             Pop-Location
         }
+    }
+}
+
+# 7) 桌面壳（src-tauri 独立 workspace）：stage → fmt → clippy → test
+#    R3（§8.1/§8.2）补位：桌面壳此前不在任何门禁内——R2 把 OWO_API_VERSION 改为
+#    re-export 后，壳的 build.rs 文本抓取静默失效（壳根本编译不过）却无人报警。
+#    冷启动/错误恢复的真实验收必须有壳侧编译与单测护栏。
+if (-not $SkipDesktop) {
+    $shellDir = Join-Path $root "desktop\tauri\src-tauri"
+    $shellPresent = Test-Path (Join-Path $shellDir "Cargo.toml")
+    if (-not $shellPresent) {
+        Write-Host "    [desktop] 无 src-tauri Cargo.toml，跳过壳侧四步"
+    }
+    Invoke-CiStep -Name "桌面壳随包 core 预置（externalBin 命名+身份+SHA-256）" -Id "desktop-stage" -Cwd $root -LogDir $LogDir -Block {
+        if (-not $shellPresent) { $global:LASTEXITCODE = 0; return }
+        # Tauri 硬要求 binaries/owo-agent-<triple>.exe 存在。历史上开发者用手工复制
+        # 旧 core 救火，制造了安装包错包与开发期同目录劫持（build-installer 还曾用错
+        # 文件名，tauri-build 根本不读）。门禁内自动预置 = 每次都校验该产物来自当前
+        # 源码、命名正确、哈希一致，等价于把那条门禁视野外的隐藏路径纳入门禁。
+        . (Join-Path $PSScriptRoot "stage-desktop-sidecar.ps1")
+        try {
+            $null = Stage-OwoDesktopSidecar -Configuration debug
+            $global:LASTEXITCODE = 0
+        } catch {
+            Write-Host "    [desktop-stage] $($_.Exception.Message)"
+            $global:LASTEXITCODE = 1
+        }
+    }
+    Invoke-CiStep -Name "桌面壳 cargo fmt --check（src-tauri）" -Id "desktop-fmt" -Cwd $shellDir -LogDir $LogDir -Block {
+        if (-not $shellPresent) { $global:LASTEXITCODE = 0; return }
+        cargo fmt --check
+    }
+    Invoke-CiStep -Name "桌面壳 cargo clippy --all-targets --locked -- -D warnings（src-tauri）" -Id "desktop-clippy" -Cwd $shellDir -LogDir $LogDir -Block {
+        if (-not $shellPresent) { $global:LASTEXITCODE = 0; return }
+        cargo clippy --all-targets --locked -- -D warnings
+    }
+    Invoke-CiStep -Name "桌面壳 cargo test --locked（src-tauri）" -Id "desktop-test" -Cwd $shellDir -LogDir $LogDir -Block {
+        if (-not $shellPresent) { $global:LASTEXITCODE = 0; return }
+        cargo test --locked
     }
 }
 

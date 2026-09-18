@@ -125,11 +125,13 @@ if (-not (Test-Path $onnxRuntimeDll)) {
 @"
 OwO Agent 便携版（v0.4 P1/P2/P3 + v0.5 M-E）
 
-运行：双击 owo-agent-desktop.exe（自动拉起同目录 owo-agent.exe 核心服务，端口 4096）。
+运行：双击 owo-agent-desktop.exe（自动拉起同目录 owo-agent.exe 核心服务；端口由系统动态分配，实际地址写入日志）。
 快捷键：Ctrl+Alt+Shift+O 唤起工作台。
+排障：核心拉起失败/身份不符时界面会给出错误页；日志在 %LOCALAPPDATA%\OwO\Agent\logs\，
+      可用 `owo-agent.exe --version` 核对随包核心构建身份（commit/dirty/built_at）。
 
 环境变量（可选）：
-  OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL  模型凭据（默认 DeepSeek 兼容端点需自行设置）
+  OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL  模型凭据（缺省内置 BigModel 端点与模型，仅需提供密钥）
   OWO_AGENT_DATA                                    数据目录（会话/审计/技能，默认 %LOCALAPPDATA%\OwO\Agent）
   OWO_SKILLS_DIR                                    内置技能包目录（默认使用随包 skills/）
   OWO_ONNX_OCR_MODEL_DIR                            本地 ONNX OCR 模型目录（默认 models/ocr 或数据目录）

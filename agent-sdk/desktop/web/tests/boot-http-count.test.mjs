@@ -14,8 +14,10 @@ const BOOT_BUSINESS_PATHS = ["/sessions", "/skills", "/whitelist", "/project/rul
 
 function startCountingServer() {
   const hits = [];
+  const sources = [];
   const server = http.createServer((req, res) => {
     hits.push(req.url.split("?")[0]);
+    sources.push(req.headers["x-owo-client"] || null);
     const auth = req.headers["authorization"] || "";
     const isPublic = ["/health", "/auth/token", "/openapi.json"].includes(req.url);
     if (!auth.startsWith("Bearer ") && !isPublic) {
@@ -33,10 +35,30 @@ function startCountingServer() {
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
-      resolve({ server, hits, port: server.address().port });
+      resolve({ server, hits, sources, port: server.address().port });
     });
   });
 }
+
+test("§8.1 web 出口自带 x-owo-client: web 标签（服务端 ledger 归类唯一依据）", async () => {
+  const { server, hits, sources, port } = await startCountingServer();
+  try {
+    const client = new ApiClient(`http://127.0.0.1:${port}`);
+    client.injectedToken = "injected-by-shell";
+    client.token = client.injectedToken;
+    await client.get("/health");
+    await client.post("/sessions", {});
+    await client.get("/skills", { headers: { Accept: "application/json" } });
+    assert.equal(hits.length, 3, "三类调用都应到达传输层");
+    assert.deepEqual(
+      sources,
+      ["web", "web", "web"],
+      "每个出口都必须带来源标签（缺失即无法区分 web/shell/cli）"
+    );
+  } finally {
+    server.close();
+  }
+});
 
 test("§4 desktop-webview 模式：壳注入 token，冷启动真实请求 = 5 且零 /auth/token", async () => {
   const { server, hits, port } = await startCountingServer();
