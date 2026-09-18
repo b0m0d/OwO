@@ -265,6 +265,30 @@ test("壳侧报未配置且 core 也没就绪时，模型段就该显眼（不�
   assert.match(model.text, /未配置/);
 });
 
+test("未显式选择但环境有凭据：模型段说清来源，既不谎称已选也不报未配置", async () => {
+  // provider.rs 与 core 统一为「显式选择 > 环境凭据」后，ready=true + provider=unset
+  // 是合法组合（内置端点兜底）。状态条必须写明凭据来源，否则用户以为从没配上。
+  const sandbox = makeSandbox({
+    __owoCoreDiagnostics: { state: "ready" },
+    __TAURI_INTERNALS__: {
+      invoke: (command) =>
+        Promise.resolve(
+          command === "get_provider_status"
+            ? { provider: "unset", ready: true, keyConfigured: true, model: "", baseUrl: "" }
+            : { workspace: "" },
+        ),
+    },
+  });
+  sandbox.OwoWorkspaceDisplay = { alias: (r) => r, masked: (r) => r };
+  sandbox.OwoStatusBar.mount(sandbox.__host, { getFacts: () => ({}) });
+  await flush();
+  const model = sandbox.OwoStatusBar.computeFacts({}, null)[2];
+  assert.equal(model.tone, "ok", "可用就是可用：" + model.text);
+  assert.match(model.text, /环境变量凭据|内置端点/, "必须标明凭据来源：" + model.text);
+  assert.ok(!/未配置/.test(model.text), "不得再说未配置：" + model.text);
+  assert.match(model.detail, /未显式选择|可在设置/, "明细要说明这是兜底路径：" + model.detail);
+});
+
 test("重绘只改文本不重建节点（保住键盘焦点）", () => {
   const sandbox = mountedSandbox({ source: { workspaceRoot: "", reading: false } });
   const firstNodes = sandbox.__host.children.slice();

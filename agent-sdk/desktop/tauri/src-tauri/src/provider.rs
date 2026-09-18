@@ -214,20 +214,29 @@ pub struct ProviderStatus {
     pub mode: ProviderMode,
     pub base_url: String,
     pub model: String,
-    /// 云端模式是否已具备 API key（只回存在性，不回值）。
+    /// 是否已具备可用 API key（只回存在性，不回值）。
     pub key_configured: bool,
-    /// 可否立即发起模型调用（云端需 key；Ollama/Unset 依模式）。
+    /// 可否立即发起模型调用（云端/未选择都看环境凭据是否存在；Ollama 恒可）。
     pub ready: bool,
 }
 
+/// 口径必须与 core 取凭据的顺序一致：core 在没有显式提供商时，仍会用
+/// `OPENAI_API_KEY` + 内置 BigModel 端点工作（`gateway.rs` 的 EnvProviderProbe 语义，
+/// 见 support.rs 的 `provider/not_configured` 注释）。壳这边如果一律把 `Unset`
+/// 判成"未就绪"，就会出现两份互斥真相：
+/// - 机器上其实有密钥（桌面安装包常见）→ 壳说未就绪 → 引导页顶掉健康主界面
+///   （R3-BUG-23 实测把 §8.2 冷启动打成 36/43）；
+/// - 机器上没有密钥 → §3.4 规定终态是"core 正常运行 + 模型配置引导"，
+///   可这个信号如果和第一条混在一起，前端就没法只凭它判终态。
+///
+/// 所以判定收敛为：**显式选择 > 环境凭据**，两条路径同一口径。
 pub fn provider_status(config: &ProviderConfig) -> ProviderStatus {
+    let ambient_key = std::env::var_os("OPENAI_API_KEY").is_some();
     let (key_configured, ready) = match config.mode {
-        ProviderMode::Cloud => {
-            let has_key = std::env::var_os("OPENAI_API_KEY").is_some();
-            (has_key, has_key)
-        }
+        ProviderMode::Cloud => (ambient_key, ambient_key),
         ProviderMode::Ollama => (false, true),
-        ProviderMode::Unset => (false, false),
+        // Unset + 有环境凭据 = core 可用（内置端点兜底），不得谎报未就绪。
+        ProviderMode::Unset => (ambient_key, ambient_key),
     };
     ProviderStatus {
         mode: config.mode,
@@ -290,13 +299,42 @@ mod tests {
         assert!(save_provider_config(&config).is_ok());
     }
 
+    /// `provider_status` 读进程环境，改环境变量的用例必须串行（否则并行测试互踩，
+    /// 表现为"偶发红"——这种红比不测更糟，因为它教人去怀疑真实回归）。
+    fn env_serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn status_reflects_mode_and_key_presence() {
+        let _serial = env_serial();
+        // 无环境凭据：Unset 与 Cloud 都不得声称就绪（§3.4 引导页判据的前提）。
+        std::env::remove_var("OPENAI_API_KEY");
         let status = provider_status(&ProviderConfig::unset());
-        assert!(!status.ready);
+        assert!(!status.ready, "无凭据且未选择提供商时必须未就绪");
+        assert!(!status.key_configured);
         assert_eq!(status.base_url, "");
+        assert!(
+            !provider_status(&ProviderConfig::cloud()).ready,
+            "云端无 key 不得谎报就绪"
+        );
         let status = provider_status(&ProviderConfig::ollama());
-        assert!(status.ready);
+        assert!(status.ready, "本地 Ollama 不需要凭据");
         assert_eq!(status.model, "local");
+
+        // 有环境凭据：无论是否显式选过提供商，都必须与 core 的实际能力一致
+        // （core 会用 OPENAI_API_KEY + 内置端点工作，壳不得另说一套）。
+        std::env::set_var("OPENAI_API_KEY", "presence-check-not-a-real-key");
+        let cloud = provider_status(&ProviderConfig::cloud());
+        assert!(cloud.ready && cloud.key_configured, "云端有 key 必须就绪");
+        let unset = provider_status(&ProviderConfig::unset());
+        assert!(
+            unset.ready && unset.key_configured,
+            "未显式选择但环境有凭据 = core 可用；谎报未就绪会让引导页顶掉健康主界面（R3-BUG-23）"
+        );
+        std::env::remove_var("OPENAI_API_KEY");
     }
 }

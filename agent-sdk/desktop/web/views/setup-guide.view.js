@@ -216,7 +216,10 @@
       if (mode === "cloud") text += state.keyConfigured ? " · 已检测到 API 密钥（不显示内容）" : " · 缺少模型凭据（需先在系统环境变量配置）";
       if (state.ready && !providerUnset) {
         text += " · 就绪";
-        status.textContent = "当前：" + (mode === "cloud" ? "云端" : mode === "ollama" ? "本地 Ollama" : "未配置") +
+        status.textContent = "当前：" + (mode === "cloud" ? "云端" : mode === "ollama" ? "本地 Ollama" : "未显式选择") +
+          // provider.rs 与 core 同口径（显式选择 > 环境凭据）：未选择但环境有凭据
+          // 时 core 用内置端点工作，这里必须说清来源，不能写成"未配置 · 就绪"。
+          (mode === "unset" && state.keyConfigured ? "（OPENAI_API_KEY + 内置云端端点）" : "") +
           (state.baseUrl ? " · " + state.baseUrl : "") + (state.model ? " · " + state.model : "") +
           (mode === "cloud" ? (state.keyConfigured ? " · 已检测到 API 密钥（不显示内容）" : " · 缺少 OPENAI_API_KEY（需先在系统环境变量配置）") : "") +
           " · 就绪";

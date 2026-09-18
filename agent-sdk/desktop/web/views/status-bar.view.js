@@ -114,6 +114,15 @@
     const model = entry.model || "未设置";
     const provider = entry.provider || "未知";
     const coreReady = String((global.__owoCoreDiagnostics || {}).state || "") === "ready";
+    // 未显式选择提供商但环境里有凭据：壳与 core 现在同一口径判"可用"（provider.rs
+    // 的"显式选择 > 环境凭据"），这里必须说清是**内置端点兜底**，而不是谎称用户选过。
+    if (entry.ready !== false && provider === "unset") {
+      return {
+        text: "环境变量凭据 · 内置端点",
+        tone: "ok",
+        detail: "未显式选择提供商：core 正在用 OPENAI_API_KEY + 内置云端端点工作，可在设置里明确选择",
+      };
+    }
     if (entry.ready === false && coreReady) {
       return {
         text: provider + " · 壳侧未配置",

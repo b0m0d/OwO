@@ -1131,28 +1131,41 @@ function syncOpenApiLink() {
 // R3-B（§3.4 provider 契约）：core ready 但提供商未配置时同样先分流引导页
 // ——模型不可用的正确终态是"模型配置引导"，不是错误卡/loading（壳 IPC 判定，零 HTTP）。
 // 非 Tauri 环境（浏览器直连 4096）跳过——那里没有壳来管理工作区。
+// §3.4 引导门的取样窗口：壳侧过渡态（starting/restarting）里"提供商未配置"这个
+// 事实还没成立，一次性快照会把 §3.4 规定的引导页终态判成"直接进主界面"
+// （真机矩阵 provider-unset 三条红：core 现在**按契约正常启动**，占位提供商只在
+// 模型调用时返回稳定码，所以引导判据只能等壳侧出终态之后再取）。
+// 等待只走 Tauri IPC（ensureCoreConnection 非 ready 时不缓存），零 HTTP，
+// 不影响 §8.2 首屏 ≤5 请求口径；超时按"不进引导"处理，让真正的故障走错误卡。
+const SETUP_GATE_SETTLE_MS = 6000;
+const SETUP_GATE_TICK_MS = 250;
+
 async function needsSetup() {
   const owner = window.OwoApiClient && window.OwoApiClient.tauriInvokeOwner(window);
   if (!owner) return false;
+  const deadline = Date.now() + SETUP_GATE_SETTLE_MS;
+  let connection = null;
   try {
-    const connection = await apiClient.ensureCoreConnection();
-    if (!connection) return false;
-    if (connection.state === "no_workspace") return true;
-    // §3.4「provider 未配置」的**规定终态是模型配置引导，不是错误卡**。core 在没有任何
-    // 可用提供商时直接以 provider/not_configured 退出（不拉起一个必然 502 的服务），
-    // 因此这里必须同时接受两条路径：core 已 ready 但壳判定提供商未就绪；以及 core
-    // 以该稳定码失败退出。历史上只认第一条，无密钥场景被渲染成通用错误卡（矩阵三条
-    // 断言全红），而归因错误的错误卡会让用户去查网络/重装，永远修不好。
-    if (connection.errorCode === "provider/not_configured") return true;
-    if (connection.state === "ready" && typeof owner.invoke === "function") {
-      try {
-        const status = await owner.invoke.call(owner, "get_provider_status");
-        return !!(status && status.ready === false);
-      } catch (_) {
-        return false;
-      }
+    for (;;) {
+      connection = await apiClient.ensureCoreConnection();
+      if (!connection) return false;
+      if (connection.state === "no_workspace") return true;
+      // §3.4「provider 未配置」的**规定终态是模型配置引导，不是错误卡**。历史上只认
+      // ready + 壳配置视图一条路径，无密钥场景被渲染成通用错误卡（矩阵三条断言全红），
+      // 而归因错误的错误卡会让用户去查网络/重装，永远修不好。
+      if (connection.errorCode === "provider/not_configured") return true;
+      if (connection.state === "ready" || connection.state === "failed") break;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, SETUP_GATE_TICK_MS));
     }
-    return false;
+    // 已出终态的失败（core/exited、storage/not_writable…）不是"未配置提供商"：
+    // 那类必须落错误卡 + 稳定码动作，不能被引导页盖掉归因。
+    if (connection.state !== "ready") return false;
+    // 到这一步两份视图已经同口径：壳的 provider_status 与 core 一样按
+    // "显式选择 > 环境凭据"判定（provider.rs），因此 ready 之后取一次不会
+    // 把有密钥的健康启动顶进引导页（R3-BUG-23 的教训），也不会漏掉真没凭据的机器。
+    const status = await owner.invoke.call(owner, "get_provider_status");
+    return !!(status && status.ready === false);
   } catch (_) {
     return false;
   }
