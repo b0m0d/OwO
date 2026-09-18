@@ -442,6 +442,37 @@ main {
   flex-direction: column;
   background: var(--surface);
 }
+/* §4.3 全局状态条：五段皆可点击（不是文字灯），窄窗口下换行不溢出。 */
+.global-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--soft-border);
+  background: var(--panel);
+}
+.owo-status-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 260px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.owo-status-item .owo-status-label { color: var(--muted); flex: none; }
+.owo-status-item .owo-status-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.owo-status-item[data-tone="ok"] { border-color: var(--green); color: var(--green); }
+.owo-status-item[data-tone="warn"] { border-color: var(--yellow); color: var(--yellow); }
+.owo-status-item[data-tone="bad"] { border-color: var(--red); color: var(--red); }
+.owo-status-item[data-tone="muted"] { color: var(--muted); }
+.owo-status-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 #contextBar {
   display: flex;
   align-items: center;
@@ -779,6 +810,11 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
   #appRail { padding: 12px 4px; gap: 5px; }
   .rail-button { width: 48px; min-width: 0; min-height: 46px; padding: 6px 2px; font-size: 10px; }
   .rail-button span { font-size: 16px; }
+  /* §4.10 三档窗口：中屏收紧状态条胶囊宽度，保持整段可读不截义。 */
+  .owo-status-item { max-width: 190px; }
+}
+@supports not (selector(:focus-visible)) {
+  .owo-status-item:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 }
 @media (max-width: 860px) {
   body { grid-template-columns: 52px minmax(0, 1fr); }
@@ -789,6 +825,10 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
   #chatForm { padding: 10px 14px 14px; }
   #appRail { padding: 10px 2px; }
   .rail-button { width: 44px; }
+  /* 窄屏：状态段只留值（"可用"/"OwO-master · 可写"），标签靠 aria-label/title 保义。 */
+  .global-status-bar { padding: 5px 8px; gap: 4px; }
+  .owo-status-item { max-width: 148px; padding: 2px 7px; }
+  .owo-status-item .owo-status-label { display: none; }
 }
 
 /* ---------- 16. WorkSwarm 面板二轮增强（第四路 · V1-R2 联动） ----------

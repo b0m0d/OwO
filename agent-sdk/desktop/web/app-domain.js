@@ -496,6 +496,8 @@ async function sendPrompt() {
     }
     if (!finished && !assistantText) streaming.remove();
     hideApproval();
+    // §4.3 状态条判据：正常收尾=已完成（中断/失败在 catch 里各自归类）。
+    state.lastTurnOutcome = finished ? "completed" : "failed";
     state.attachments = [];
     renderAttachmentChips();
     await refreshSessions(state.sessionId);
@@ -504,8 +506,10 @@ async function sendPrompt() {
   } catch (error) {
     if (!assistantText) streaming.remove();
     if (error.name !== "AbortError") {
+      state.lastTurnOutcome = "failed";
       addMessage("error", `回合失败：${error.message}`);
     } else {
+      state.lastTurnOutcome = "cancelled";
       addMessage("system", "已中断回合");
     }
   } finally {

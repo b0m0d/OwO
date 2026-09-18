@@ -9,6 +9,8 @@ const state = {
   attachments: [],
   abortController: null,
   selectionVersion: 0,
+  // §4.3 状态条「当前任务」段的判据：completed | cancelled | failed（空=本轮未跑过）。
+  lastTurnOutcome: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -616,6 +618,38 @@ function renderSettingsTabs(content) {
   content.appendChild($("settingsSection"));
 }
 
+// §4.3 全局状态条：五段（后台/工作区/模型/权限/当前任务）全部可点击。
+// **零新增 HTTP**（§8.2 首屏 ≤5 口径）：后台读壳 IPC 快照、工作区读前端 state、
+// 模型走壳命令 get_provider_status（IPC）、权限档位由权限中心回灌、任务读运行态。
+function initGlobalStatusBar() {
+  const root = $("globalStatusBar");
+  if (!root) return;
+  if (!window.OwoStatusBar || typeof window.OwoStatusBar.mount !== "function") {
+    root.textContent = "状态条视图未加载";
+    return;
+  }
+  window.OwoStatusBar.mount(root, {
+    getFacts: () => ({
+      workspaceRoot: state.workspaceRoot || $("workspace").value.trim(),
+      reading: state.reading,
+      pendingApproval: state.pendingApproval,
+      lastTurnOutcome: state.lastTurnOutcome || "",
+    }),
+  });
+}
+
+window.addEventListener("owo:statusbar-navigate", (event) => {
+  const detail = (event && event.detail) || {};
+  const target = String(detail.target || "");
+  if (detail.key === "permission") {
+    // 权限中心（§4.5）落地前，权限段先落设置页；落地后改指 permissions 路由。
+    navigate("settings");
+    return;
+  }
+  if (ROUTE_META[target]) navigate(target);
+  else navigate("chat");
+});
+
 // §4.6 诊断请求台账：只在「设置」路由按需加载（不占用首屏 ≤5 请求口径）。
 function refreshDiagnosticsLedger() {
   const root = $("diagnosticsLedger");
@@ -1156,6 +1190,9 @@ async function boot() {
   initPanels();
   initDeveloperMode();
   initConstrainedControls();
+  // 状态条必须在水合之前就位：引导页/错误页也要能看出「后台在启动」还是「失败」，
+  // 而且它在 boot 早期挂载，不参与任何 HTTP 计数。
+  initGlobalStatusBar();
   syncOpenApiLink();
   if (await needsSetup()) {
     renderSetupGuide();
