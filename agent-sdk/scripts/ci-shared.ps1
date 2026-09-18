@@ -123,6 +123,72 @@ function Assert-CiMemoryGate {
     return $mem
 }
 
+# 红线 7 补充（本轮实测事故驱动）：**磁盘和内存一样是资源安全红线**，但指南 §2.4
+# 原文只写了内存门。后果是真实的：全 workspace 串行一轮在 target\debug\deps 里堆出
+# 数百个 PDB（实测 45.6 GB / 722 个），盘满后 link.exe 报
+# `LNK1318 非意外的 PDB 错误: LIMIT`，表面像"编译失败"，实为磁盘耗尽——
+# 一整轮 30 分钟验证直接作废，还把用户的盘逼到只剩 0.1 GB。
+# 这里在**启动前**就拒绝，并把阈值与处置办法写进异常文案（不靠事后猜）。
+function Get-CiDiskStatus {
+    <# 读构建卷剩余空间；读不到就如实报 unknown（不猜"空间充足"）。 #>
+    param(
+        [string]$Path = '',
+        [int]$MinFreeGbStrict = 10,
+        [int]$MinFreeGbNormal = 4
+    )
+    $target = if ($Path) { $Path } else { Get-CiRepoRoot }
+    $item = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+    $driveName = if ($item -and $item.PSDrive -and $item.PSDrive.Name) { $item.PSDrive.Name }
+                 elseif ($item) { ($item.FullName -replace '^(\$:).*', '$1') -replace ':$', '' }
+                 else { '' }
+    $pd = if ($driveName) { Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue } else { $null }
+    if (-not $pd) {
+        return [pscustomobject]@{
+            status = 'unknown'; drive = $driveName; free_gb = $null; total_gb = $null
+            min_free_gb = $null; ok = $true; source = 'none'
+        }
+    }
+    return [pscustomobject]@{
+        status      = 'ok'
+        drive       = $driveName
+        free_gb     = [Math]::Round($pd.Free / 1GB, 2)
+        total_gb    = [Math]::Round((($pd.Free + $pd.Used)) / 1GB, 2)
+        min_free_gb = 0          # 由调用方按档位填（此处只做读取，不做策略）
+        ok          = $true
+        source      = 'psdrive'
+    }
+}
+
+# 构建前磁盘门：strict（完整 workspace/release/原生依赖重链）要求 ≥20 GB，定向 ≥6 GB。
+# 差这么多有实测依据：一轮全量测试的 PDB/中间产物增量实测 13.7 GB，且 debug 依赖树
+# 本身还会继续膨胀；门必须高于一轮的真实消耗，才能让"盘满"变成"拒绝启动"而不是
+# "跑到链接阶段半途炸掉"（那等于给注定失败的长任务开假绿灯）。
+function Assert-CiDiskGate {
+    param(
+        [ValidateSet('normal', 'strict')][string]$Mode = 'normal',
+        [string]$Path = '',
+        [string]$Context = 'cargo',
+        [int]$MinFreeGb = -1
+    )
+    # 阈值可覆盖只为让"拒绝路径"能被离线断言测到（负例不能依赖磁盘真的快满）。
+    # strict=20 GB 是**实测**定的：全 workspace 串行一轮（88 套件）实测吃掉 13.7 GB
+    # （51.4 → 37.7）。原先写 10 GB 会让一轮注定半途炸在 LNK1318 的构建通过检查——
+    # 那不是门，是假绿灯；阈值必须高于一轮的实测消耗并留安全余量。
+    $min = if ($MinFreeGb -ge 0) { $MinFreeGb } elseif ($Mode -eq 'strict') { 20 } else { 6 }
+    $disk = Get-CiDiskStatus -Path $Path -MinFreeGbStrict $min -MinFreeGbNormal $min
+    $disk | Add-Member -NotePropertyName min_free_gb -NotePropertyValue $min -Force
+    if ($disk.status -eq 'unknown') {
+        Write-Host ("    [§2.4] 构建卷剩余空间不可读取（{0}）——本轮仍执行，但请自行确认磁盘余量" -f $Context) -ForegroundColor Yellow
+        return $disk
+    }
+    $disk.ok = ($disk.free_gb -ge $min)
+    if (-not $disk.ok) {
+        throw ("§2.4 资源红线（resource_limited）：{0} 拒绝启动 Rust 构建——卷 {1}: 仅剩 {2} GB，{3} 档要求 ≥ {4} GB。PDB/中间产物会在链接阶段瞬间吃满磁盘（实测 LNK1318 PDB LIMIT）。请删除可再生产物（target\debug\incremental、*.pdb 均可安全删，重编即恢复）后重试；禁止用提高超时或改小并发来绕过磁盘门。" -f `
+                $Context, $disk.drive, $disk.free_gb, $Mode, $min)
+    }
+    return $disk
+}
+
 # 红线 4：不得同时运行两组 Cargo——已有 cargo/rustc/link 时等待，等待超时后拒绝。
 function Assert-CiBuildIdle {
     param([int]$WaitSec = 900, [int]$PollSec = 10, [string]$Context = 'cargo')
@@ -284,6 +350,7 @@ function Invoke-CiCargo {
     $compiles = Test-CiCargoCompiles -Arguments $Arguments
     if ($compiles) {
         $null = Assert-CiMemoryGate -Context $Label
+        $disk = Assert-CiDiskGate -Mode $mode -Path $Cwd -Context $Label
         if (-not $SkipIdleGate) { Assert-CiBuildIdle -Context $Label }
     }
     $safe = Protect-CiCargoArguments -Arguments $Arguments -Jobs $limits.jobs -TestThreads $limits.test_threads
@@ -334,6 +401,7 @@ function Invoke-CiCargoCapture {
 function Get-CiResourceState {
     New-CiFailureState
     $mem = Get-CiMemoryStatus
+    $disk = Get-CiDiskStatus
     $mode = Get-CiRustPolicyMode
     $limits = Get-CiRustResourceLimits -Mode $mode
     return [ordered]@{
@@ -346,6 +414,8 @@ function Get-CiResourceState {
         cpu_logical     = [int]$env:NUMBER_OF_PROCESSORS
         memory_gate     = [ordered]@{ min_free_gb = 6.0; max_used_percent = 80.0 }
         memory_at_write  = [ordered]@{ status = $mem.status; total_gb = $mem.total_gb; free_gb = $mem.free_gb; used_percent = $mem.used_percent; source = $mem.source }
+        # §2.4 补充门：构建卷余量（PDB/中间产物会在链接阶段瞬间吃满磁盘）。
+        disk_at_write    = [ordered]@{ status = $disk.status; drive = $disk.drive; free_gb = $disk.free_gb; total_gb = $disk.total_gb; source = $disk.source }
         applied         = @($script:ciResourceApplied)
         guard_events    = @($script:ciResourceEvents)
     }

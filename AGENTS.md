@@ -13,7 +13,20 @@
 - 权限默认 deny；任何工具调用必须经过权限策略，审批与主 Agent 分离。
 - M1 验收项：会话、审计、diff/revert、工具权限必须保持工作，改动需带契约测试。
 - Rust 代码保持 `cargo fmt` 与 `clippy` 干净；契约测试随功能提交。
-- **文件编码**：所有源文件必须为 UTF-8；Windows 下写入含中文的 .rs/.md 文件时禁止经 GBK 控制台中转（会导致 mojibake 损坏）。提交前用 `cargo fmt --check` + `git diff` 抽查。
+- **Rust 编译与测试资源安全红线（强制，不是建议）**：本机 32 逻辑处理器 / 约 32 GB 内存，未限并发会同时起大量 `rustc`/`link.exe`/测试分片，把整机拖进分页卡死（用户正在用这台机器时工程必须让路）。规则与标准命令见 `builGoal/Agent-SDK-后续任务实施指南-2026-09-18.md` §2.4；脚本层唯一实现在 `agent-sdk/scripts/ci-shared.ps1`（红线 1/2 档位、红线 3 显式 `-j`、红线 4 构建空闲门、红线 7 内存门与运行中守护、红线 10 真实退出码）。手写命令必须自带并发上限：
+
+  ```powershell
+  cd agent-sdk
+  . scripts\resolve-ort.ps1; Resolve-OwoOrtEnv -Quiet | Out-Null   # 先解 ORT（上一条规则）
+  $env:CARGO_BUILD_JOBS = "2"; $env:RUST_TEST_THREADS = "2"          # 定向测试档
+  cargo test -p owo-agent-core --test gateway_tests --locked -j 2 -- --test-threads=2
+  # 完整 workspace / 完整 core / release / 原生依赖重链 → 一律降为 1：
+  #   cargo test --workspace --locked -j 1 -- --test-threads=1
+  ```
+
+  禁止：依赖 Cargo 默认 32 路并发；一次跑两组 `cargo`；用 `--quiet` + `Select-Object -Last` 隐藏长任务进度（要心跳不要黑盒——用 `Invoke-CiCargo` 即自带 30s 心跳与逐行 tee）；用加长 timeout 代替并发限制；为省时间调高并发。可用物理内存 <6 GB 或已用 ≥80% 时**不得启动**新构建（`Invoke-CiCargo` 会自动拒绝并在 `summary.json` 写 `resource_limited`，退出码 137）。
+   **磁盘同样是红线**：构建卷剩余 <20 GB（完整 workspace / release / 原生依赖重链档）或 <6 GB（定向档）时**不得启动**构建——`Invoke-CiCargo` 已内置 `Assert-CiDiskGate`，不足即拒绝并列出可删的可再生产物。实测依据：全 workspace 串行一轮吃掉 **13.7 GB**；盘满时 `link.exe` 报 `LNK1318 非意外的 PDB 错误: LIMIT`，看起来像编译失败，实际是磁盘耗尽、整轮验证作废。可安全删除的再生产物：`target/**/incremental`、`target/**/*.pdb`（实测一次释放 48.6 GB），重编即恢复。
+- **文件编码**：所有源文件必须为 UTF-8；Windows 下写入含中文的 .rs/.md 文件时禁止经 GBK 控制台中转（会导致 mojibake 损坏）。提交前用 `cargo fmt --check` + `git diff` 抽查。**`.ps1` 必须带 UTF-8 BOM**（`ci-gate -Step utf8` 实测会抓到；用编辑工具改 `.ps1` 后必须复查 BOM，`[IO.File]::ReadAllBytes` 前 3 字节应为 `239,187,191`）。
 - **并行协作**：多个 Agent 并行时按 `AGENTS-COORD.md` 认领文件；同一文件同一时间只允许一个 Agent 修改；涉及 `owo-agent-server/src/lib.rs` 等核心文件的改动需先跑 `cargo check` 验证。
 - **HTTP 契约**：服务端新增/修改路由必须同步 `tests/route_contract_tests.rs`（路由面契约测试），防止接口回归丢失。
 - **原生依赖前置（构建挂死陷阱）**：新开进程**不带** ONNX Runtime 环境变量，直接跑 `cargo` 会让 `ort-sys`/`sherpa-onnx-sys` 退化为联网下载产物，在受限沙箱内**静默挂死**（实测 15 分钟零 CPU、无 `rustc`，无任何报错）。任何手写 `cargo` 命令前必须先注入解析入口：

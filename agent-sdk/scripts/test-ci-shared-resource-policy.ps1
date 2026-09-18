@@ -117,6 +117,28 @@ Add-Result 'summary.json 落盘 resources 段（可证明安全参数）' `
     "jobs=$($sum.resources.jobs) threads=$($sum.resources.test_threads) step=$($sum.step_state)"
 Remove-Item -LiteralPath $tmp -Recurse -Force
 
+# ---- §2.4 磁盘门（LNK1318 PDB LIMIT 事故驱动）：必须"启动前拒绝"而非"半途炸掉" ----
+$disk = Get-CiDiskStatus
+Add-Result '磁盘读取：能报出构建卷余量（读不到必须显式 unknown，不得猜充足）' `
+    (($disk.status -eq 'unknown') -or (($disk.status -eq 'ok') -and ($disk.free_gb -gt 0) -and $disk.drive)) `
+    "status=$($disk.status) drive=$($disk.drive) free=$($disk.free_gb)GB"
+$allow = $null; $allowOk = $true
+try { $allow = Assert-CiDiskGate -Mode strict -MinFreeGb 0 -Context 'selftest' } catch { $allowOk = $false }
+Add-Result '磁盘门：阈值 0 时放行（不误伤正常构建）' ($allowOk -and $allow.ok) "ok=$($allow.ok)"
+$rejectMsg = ''
+try {
+    $huge = [int]((Get-CiDiskStatus).free_gb + 500)
+    $null = Assert-CiDiskGate -Mode strict -MinFreeGb $huge -Context 'selftest'
+    $rejectMsg = '<未抛出：负例失效>'
+} catch { $rejectMsg = $_.Exception.Message }
+Add-Result '磁盘门：余量不足必须 throw resource_limited（禁止提高超时/降并发绕过）' `
+    ($rejectMsg -match 'resource_limited' -and $rejectMsg -match '拒绝启动') "msg=$($rejectMsg.Substring(0,[Math]::Min(60,$rejectMsg.Length)))"
+Add-Result '磁盘门异常文案自带可操作处置（指出可再生产物与恢复方式）' `
+    ($rejectMsg -match 'incremental' -and $rejectMsg -match 'pdb') '需提到可删的可再生产物'
+$resKeys = if ($sum.resources) { ($sum.resources.PSObject.Properties.Name -join ',') } else { 'none' }
+Add-Result 'summary.resources 必须带构建卷余量（盘满导致的失败要能被事后归因）' `
+    ($null -ne $sum.resources.disk_at_write) "keys=$resKeys"
+
 $fail = @($results | Where-Object { -not $_.ok })
 Write-Host ("[selftest] {0}/{1} 通过" -f (@($results).Count - $fail.Count), @($results).Count)
 if ($fail.Count -gt 0) { exit 1 }
