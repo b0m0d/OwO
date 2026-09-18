@@ -23,6 +23,10 @@ $cargo = if ($env:OWO_CARGO) {
 
 $root = Split-Path $PSScriptRoot -Parent
 
+# §2.4：统一资源红线执行层（cargo 步骤全部经 Invoke-CiCargo*；与 ci-gate 同一实现）。
+. (Join-Path $PSScriptRoot "ci-shared.ps1")
+Initialize-CiPath
+
 # §6.1.5/§6.2：统一构建门禁——发布打包拒绝 dirty 工作树（覆盖开关：
 # OWO_ALLOW_DIRTY_RELEASE=1）；§7.2：ORT 原生依赖经统一解析入口
 # resolve-ort.ps1（委托 init-dev-env 单一实现，进程级注入），不再依赖
@@ -37,24 +41,23 @@ try {
 }
 
 # §6.2：构建封装——LNK4098（CRT 静态/动态混用）按发布失败处理，禁止带入安装包。
+# §2.4 资源安全红线：桌面发布链（壳与 sidecar，含 ONNX/Sherpa 原生重链）一律 strict
+# 档 -j 1；启动前过内存门与构建空闲门；输出流式落盘后仍全量扫描 linker 噪声。
 function Invoke-OwoPackageBuild {
     param([string]$Stage, [string]$WorkingDir, [string[]]$CargoArgs)
-    Push-Location $WorkingDir
-    try {
-        Write-Host "[package] $Stage..."
-        $log = & $cargo build @CargoArgs 2>&1 | ForEach-Object { "$_" }
-        $log | ForEach-Object { Write-Host $_ }
-        if ($LASTEXITCODE -ne 0) { throw "$Stage 构建失败" }
-        # §7.3 零容忍升级：任意 LNK 码或 linker 告警行按发布失败处理。
-        # 唯一豁免：MSVC 工具链信息性 "creating library/exp" 输出
-        # （windows-msvc 链接 exe 必打的 informational，非 CRT 问题）。
-        $linkerNoise = @($log | Where-Object { $_ -match 'LNK\d{4}|warning: linker' } |
-            Where-Object { $_ -notmatch '正在创建库|Creating library' } | Select-Object -First 5)
-        if ($linkerNoise.Count -gt 0) {
-            throw ("{0}：发布构建检测到 {1} 条 linker 告警/错误——按失败处理（§7.3）：{2}" -f $Stage, $linkerNoise.Count, ($linkerNoise -join ' | '))
-        }
-    } finally {
-        Pop-Location
+    $logPath = Join-Path ([IO.Path]::GetTempPath()) ("owo-package-{0}-{1}.log" -f ($Stage -replace '[^\w]', ''), (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    Write-Host "[package] $Stage（§2.4 strict 档 -j 1）..."
+    # 调用方只传子命令之后的参数（-p/-–release），此处统一补 build 并过红线归一。
+    $log = Invoke-CiCargoCapture -Arguments (@('build') + @($CargoArgs)) -Cwd $WorkingDir -TimeoutSec 7200 -HeartbeatSec 30 `
+        -Label ("package-" + ($Stage -replace '[^\w]', '')) -PolicyMode 'strict' -LogFile $logPath -CargoExe $cargo
+    if ($global:LASTEXITCODE -ne 0) { throw "$Stage 构建失败（cargo exit=$global:LASTEXITCODE；§2.4 日志：$logPath）" }
+    # §7.3 零容忍升级：任意 LNK 码或 linker 告警行按发布失败处理。
+    # 唯一豁免：MSVC 工具链信息性 "creating library/exp" 输出
+    # （windows-msvc 链接 exe 必打的 informational，非 CRT 问题）。
+    $linkerNoise = @($log | Where-Object { $_ -match 'LNK\d{4}|warning: linker' } |
+        Where-Object { $_ -notmatch '正在创建库|Creating library' } | Select-Object -First 5)
+    if ($linkerNoise.Count -gt 0) {
+        throw ("{0}：发布构建检测到 {1} 条 linker 告警/错误——按失败处理（§7.3）：{2}" -f $Stage, $linkerNoise.Count, ($linkerNoise -join ' | '))
     }
 }
 

@@ -31,21 +31,25 @@ try {
 $configArgs = @()
 if ($Configuration -eq "release") { $configArgs = @("--release") }
 
-Push-Location $root
-try {
-    Write-Host "[installer] 构建核心服务（$Configuration）..."
-    $buildLog = & $cargo build -p owo-agent-cli @configArgs 2>&1 | ForEach-Object { "$_" }
-    $buildLog | ForEach-Object { Write-Host $_ }
-    if ($LASTEXITCODE -ne 0) { throw "核心服务构建失败" }
-    # §7.3 零容忍升级：任意 LNK 码（含 LNK4098 CRT 混用、LNK1120 等）或
-    # linker 警告行都按发布失败处理，不允许带入安装包。
-    $linkerNoise = @($buildLog | Where-Object { $_ -match 'LNK\d{4}|warning: linker' } |
-        Where-Object { $_ -notmatch '正在创建库|Creating library' } | Select-Object -First 5)
-    if ($linkerNoise.Count -gt 0) {
-        throw ("发布构建检测到 {0} 条 linker 告警/错误——按失败处理（§7.3）：{1}" -f $linkerNoise.Count, ($linkerNoise -join ' | '))
-    }
-} finally {
-    Pop-Location
+# §2.4 资源安全红线：安装包链路属"release/原生依赖重链"，一律 strict 档（-j 1），
+# 并在启动前过内存门与构建空闲门；输出流式落盘（红线 5 不隐藏长任务进度），
+# 完整日志仍交给下面的 linker 零容忍门扫描。
+. (Join-Path $PSScriptRoot "ci-shared.ps1")
+Initialize-CiPath
+$buildLogPath = Join-Path ([IO.Path]::GetTempPath()) ("owo-installer-build-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+Write-Host "[installer] 构建核心服务（$Configuration，§2.4 strict 档 -j 1）..."
+$buildLog = Invoke-CiCargoCapture -Arguments (@('build', '-p', 'owo-agent-cli') + $configArgs) `
+    -Cwd $root -TimeoutSec 7200 -HeartbeatSec 30 -Label 'installer-build' `
+    -PolicyMode 'strict' -LogFile $buildLogPath -CargoExe $cargo
+if ($global:LASTEXITCODE -ne 0) {
+    throw "核心服务构建失败（cargo exit=$global:LASTEXITCODE；§2.4 日志：$buildLogPath）"
+}
+# §7.3 零容忍升级：任意 LNK 码（含 LNK4098 CRT 混用、LNK1120 等）或
+# linker 警告行都按发布失败处理，不允许带入安装包。
+$linkerNoise = @($buildLog | Where-Object { $_ -match 'LNK\d{4}|warning: linker' } |
+    Where-Object { $_ -notmatch '正在创建库|Creating library' } | Select-Object -First 5)
+if ($linkerNoise.Count -gt 0) {
+    throw ("发布构建检测到 {0} 条 linker 告警/错误——按失败处理（§7.3）：{1}" -f $linkerNoise.Count, ($linkerNoise -join ' | '))
 }
 
 # R3（§7.3）：随包 core 预置统一走 stage-desktop-sidecar.ps1（**唯一实现**，与

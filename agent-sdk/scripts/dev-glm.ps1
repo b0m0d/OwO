@@ -31,6 +31,9 @@ param(
     [string]$Workspace = (Split-Path -Parent $PSScriptRoot)
 )
 $ErrorActionPreference = 'Stop'
+# §2.4 Rust 编译与测试资源安全红线：统一经 ci-shared 执行层（与 ci-gate/dev 同一实现）。
+. (Join-Path $PSScriptRoot "ci-shared.ps1")
+Initialize-CiPath
 
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
     throw "缺少凭据：请设置环境变量 OPENAI_API_KEY 或用 -ApiKey 传入（凭据不得写入脚本/仓库文件）"
@@ -43,4 +46,10 @@ if (-not $env:OWO_CLOUD_ENABLED) { $env:OWO_CLOUD_ENABLED = 'true' }
 
 Write-Host "[dev-glm] provider=$env:OPENAI_BASE_URL model=$env:OPENAI_MODEL port=$Port"
 Write-Host "[dev-glm] workspace=$Workspace"
-cargo run -q -p owo-agent-cli -- serve --port $Port --workspace $Workspace
+# §2.4 红线 1：cargo run serve → normal 档（编译段 -j 2；启动前过内存门 + 构建空闲门）。
+# 常驻服务进程不启用"运行中内存守护"（红线 7 的保护对象是 rustc/测试分片风暴，
+# 不是用户主动拉起的 dev server；见 ci-shared.ps1 的 Test-CiCargoGuardRunning）。
+# 真实退出码写 $global:LASTEXITCODE（红线 10）：serve 非零退出即 throw（EAP=Stop）。
+Invoke-CiCargo -Arguments @('run', '-q', '-p', 'owo-agent-cli', '--', 'serve', '--port', "$Port", '--workspace', $Workspace) `
+    -Cwd (Split-Path -Parent $PSScriptRoot) -HeartbeatSec 60 -Label 'dev-glm-serve' -PolicyMode 'normal'
+if ($global:LASTEXITCODE -ne 0) { throw "serve stopped (exit $global:LASTEXITCODE)" }

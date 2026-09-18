@@ -64,12 +64,21 @@ function Stage-OwoDesktopSidecar {
             throw "缺少 $source：请先构建核心服务（cargo build -p owo-agent-cli$(if ($Configuration -eq 'release') { ' --release' })）"
         }
         if (-not $Quiet) { Write-Host "[stage] 构建 owo-agent-cli（$Configuration）..." }
+        # §2.4 资源安全红线：sidecar 构建链接 ONNX/Sherpa 原生依赖 → strict 档 -j 1；
+        # 本函数可能被 ci-gate/build-installer（已 dot-source ci-shared）复用，也可能
+        # 独立执行，因此按"缺才补引"的方式接入同一实现，不复制第二份红线逻辑。
+        if (-not (Get-Command Invoke-CiCargo -ErrorAction SilentlyContinue)) {
+            . (Join-Path $PSScriptRoot "ci-shared.ps1")
+            Initialize-CiPath
+        }
+        $policyMode = if ($Configuration -eq 'release') { 'strict' } else { 'normal' }
         Push-Location $sdkRoot
         try {
             $configArgs = @('-q', '-p', 'owo-agent-cli')
             if ($Configuration -eq 'release') { $configArgs += '--release' }
-            & cargo build @configArgs 2>&1 | ForEach-Object { Write-Host $_ }
-            if ($LASTEXITCODE -ne 0) { throw "核心服务构建失败（exit=$LASTEXITCODE）" }
+            Invoke-CiCargo -Arguments (@('build') + $configArgs) -Cwd $sdkRoot -TimeoutSec 7200 `
+                -HeartbeatSec 30 -Label 'stage-sidecar-build' -PolicyMode $policyMode
+            if ($global:LASTEXITCODE -ne 0) { throw "核心服务构建失败（exit=$global:LASTEXITCODE；§2.4 档=$policyMode）" }
         } finally {
             Pop-Location
         }

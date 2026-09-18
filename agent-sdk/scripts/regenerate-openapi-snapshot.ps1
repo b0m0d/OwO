@@ -22,6 +22,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# §2.4 Rust 编译与测试资源安全红线：统一经 ci-shared 执行层（与 ci-gate/dev 同一实现）。
+# 本脚本唯一的 cargo 调用是 debug 构建 owo-agent-cli；临时 serve 进程走 Start-Process，
+# 不属编译段，端口/服务/快照写回逻辑保持原样。
+. (Join-Path $PSScriptRoot "ci-shared.ps1")
+Initialize-CiPath
 $sdkRoot = if ($AgentRoot) { $AgentRoot } else { Split-Path -Parent $PSScriptRoot }
 Set-Location $sdkRoot
 $exe = Join-Path $sdkRoot 'target\debug\owo-agent.exe'
@@ -30,8 +35,13 @@ if ($Build -or -not (Test-Path $exe)) {
     Write-Host '[regal] 构建 debug 核心（含 ONNX Runtime 环境注入）…'
     . (Join-Path $sdkRoot 'scripts\resolve-ort.ps1')
     Resolve-OwoOrtEnv -Quiet
-    & cargo build -q -p owo-agent-cli
-    if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（exit=$LASTEXITCODE）" }
+    # §2.4 红线 1：单包 debug 构建（cargo build -p owo-agent-cli）→ normal 档（-j 2）；
+    # 非 release、非 workspace 全量，无需降为 1。原 `-q` 只压 cargo 进度行，保留。
+    # §2.4 红线 10：成败用 $global:LASTEXITCODE 判定——统一入口在启动失败(1)/超时(124)/
+    # 内存守护(137)时都写非零码，仍按原语义 throw（EAP=Stop 下 throw 即 exit≠0）。
+    Invoke-CiCargo -Arguments @('build', '-q', '-p', 'owo-agent-cli') -Cwd $sdkRoot `
+        -HeartbeatSec 30 -Label 'regal-build' -PolicyMode 'normal'
+    if ($global:LASTEXITCODE -ne 0) { throw "cargo build 失败（exit=$global:LASTEXITCODE）" }
 }
 if (-not (Test-Path $exe)) { throw "找不到核心可执行文件：$exe（先加 -Build）" }
 

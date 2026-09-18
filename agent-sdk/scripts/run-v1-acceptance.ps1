@@ -44,6 +44,13 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+# §2.4 Rust 编译与测试资源安全红线：统一经 ci-shared 执行层（与 ci-gate/dev 同一实现）。
+# cargo run 会先编译 owo-agent-cli 依赖图再常驻跑 eval 批次，必须走 Invoke-CiCargo：
+# 显式 -j、启动前内存门 + 构建空闲门（红线 4/7）、30s 心跳 + 逐行回显（红线 5）、
+# 真实退出码写 $global:LASTEXITCODE（红线 10）。eval 批次本身并发上限 1（见 concurrency_cap），
+# 属定向工作 → normal 档（-j 2）；不得因批量耗时而提高并发（红线 8）。
+. (Join-Path $PSScriptRoot "ci-shared.ps1")
+Initialize-CiPath
 $sdkRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $sdkRoot
 Write-Host ("V1 acceptance - root: {0}  out: {1}" -f $sdkRoot, $OutRoot) -ForegroundColor Cyan
@@ -51,13 +58,20 @@ Write-Host ("V1 acceptance - root: {0}  out: {1}" -f $sdkRoot, $OutRoot) -Foregr
 # 预构建二进制复用：并行路线的 WIP 编辑可能让 cargo run 在启动瞬间碰到中段编译错误；
 # 传入 -Exe <path> 后全部 CLI 调用走固定二进制，批量全程不受并行编辑影响（版本 = 冻结时刻）。
 # 注意：函数只执行不返回值（原生 stdout 会污染返回值）；退出码一律由调用方读 $LASTEXITCODE。
+# §2.4 红线 10：调用方读取的 $LASTEXITCODE 即 $global:LASTEXITCODE——Invoke-CiCargo 与
+# 直跑二进制都会写它（含被内存守护中止的 137），preflight/freeze/run 的失败分支保持原样。
 function Invoke-EvalCli {
     param([string]$Verb, [string[]]$RestArgs)
     $cli = @("product-eval", $Verb) + @($RestArgs)
     if ($Exe) {
+        # §2.4：固定二进制路径直跑（不触发任何编译），保留原 stdout 透传语义；
+        # 退出码仍由调用方读 $LASTEXITCODE，与改造前一致。
         & $Exe @cli
     } else {
-        cargo run -q -p owo-agent-cli -- @cli
+        # §2.4 红线 1：cargo run → normal 档（-j 2）。统一入口逐行回显 CLI 输出（红线 5），
+        # 真实退出码写 $global:LASTEXITCODE（含 137 内存守护 / 124 超时），调用方判定不变（红线 10）。
+        Invoke-CiCargo -Arguments (@('run', '-q', '-p', 'owo-agent-cli', '--') + @($cli)) -Cwd $sdkRoot `
+            -HeartbeatSec 60 -Label ("acc-" + ($Verb -replace '[^\w]', '')) -PolicyMode 'normal'
     }
 }
 

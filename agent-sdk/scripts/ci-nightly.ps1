@@ -29,6 +29,17 @@ $script:ciStepFilter = ""
 $root = Get-CiRepoRoot
 if (-not $LogDir) { $LogDir = Join-Path $env:TEMP ("owo-ci-nightly-" + [guid]::NewGuid().ToString("N")) }
 
+# §2.4 资源红线前置门：nightly 含 release 全量构建（红线 2 → strict 档），
+# 启动前必须过内存门与构建空闲门；越线直接以非零退出收口，不允许边卡机器边跑。
+try {
+    $null = Set-CiRustResourcePolicy -Mode 'strict' -Source 'ci-nightly'
+    $null = Assert-CiMemoryGate -Context 'ci-nightly'
+    $null = Assert-CiBuildIdle -Context 'ci-nightly' -WaitSec 120 -PollSec 10
+} catch {
+    Write-Host ("[§2.4] 资源红线拒绝启动 nightly：{0}" -f $_.Exception.Message) -ForegroundColor Red
+    exit 2
+}
+
 function Test-CiServerReady {
     param([int]$Port)
     if ($Port -le 0) { return $false }
@@ -67,8 +78,11 @@ if (-not $SkipDeny) {
 # 3) release 模式较重测试
 if (-not $SkipReleaseTest) {
     Invoke-CiStep -Name "cargo test --workspace --release --locked" -Id "release-test" -Cwd $root -LogDir $LogDir -Block {
-        cargo test --workspace --release --locked
-        if ($global:LASTEXITCODE -ne 0) { throw "release 模式测试失败" }
+        # §2.4 红线 2：release + 完整 workspace + 原生依赖重链 → 固定 -j 1 / 1 线程。
+        $log = if ($LogDir) { Join-Path $LogDir "release-test.stream.log" } else { "" }
+        Invoke-CiCargo -Arguments @('test', '--workspace', '--release', '--locked') `
+            -Cwd $root -TimeoutSec 14400 -HeartbeatSec 30 -LogFile $log -Label 'release-test' -PolicyMode 'strict'
+        if ($global:LASTEXITCODE -ne 0) { throw "release 模式测试失败（exit $global:LASTEXITCODE；124=超时，137=§2.4 内存守护）" }
     }
 }
 

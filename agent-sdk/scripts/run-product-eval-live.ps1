@@ -29,6 +29,13 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+# §2.4 Rust 编译与测试资源安全红线：统一经 ci-shared 执行层（与 ci-gate/dev 同一实现）。
+# cargo run 会先编译 owo-agent-cli 及其依赖图，因此必须走 Invoke-CiCargo：显式 -j、
+# 启动前内存门 + 构建空闲门（红线 4/7）、30s 心跳 + 逐行回显（红线 5）、真实退出码写
+# $global:LASTEXITCODE（红线 10）。本脚本的 eval 运行是单 CLI 进程串行跑任务，
+# 属定向工作 → normal 档（-j 2）；绝不因批量耗时而提高并发（红线 8）。
+. (Join-Path $PSScriptRoot "ci-shared.ps1")
+Initialize-CiPath
 $sdkRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $sdkRoot
 Write-Host ("R1 live baseline - root: {0}  out: {1}" -f $sdkRoot, $OutRoot) -ForegroundColor Cyan
@@ -75,9 +82,14 @@ function Invoke-EvalRun {
     param([string]$Label, [string[]]$RunArgs)
     Write-Host ""
     Write-Host ("== [live] {0} ==" -f $Label) -ForegroundColor Cyan
-    cargo run -q -p owo-agent-cli -- product-eval run @suiteArgs @modelArgs @RunArgs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host ("    run FAILED (exit={0}): {1}" -f $LASTEXITCODE, $Label) -ForegroundColor Red
+    # §2.4 红线 1：cargo run（编译 owo-agent-cli 后跑单个 eval 任务）→ normal 档；
+    # 原 `-q` 只压 cargo 自身进度、不隐藏评测输出，保留以维持 stdout 语义。
+    # 成败判定改用 $global:LASTEXITCODE（Invoke-CiCargo 写入，含 124/137），
+    # 失败计数与 exit 1 收口逻辑不变（红线 10）。
+    Invoke-CiCargo -Arguments (@('run', '-q', '-p', 'owo-agent-cli', '--') + @($RunArgs)) -Cwd $sdkRoot `
+        -HeartbeatSec 60 -Label ("live-" + ($Label -replace '[^\w]', '_')) -PolicyMode 'normal'
+    if ($global:LASTEXITCODE -ne 0) {
+        Write-Host ("    run FAILED (exit={0}): {1}" -f $global:LASTEXITCODE, $Label) -ForegroundColor Red
         $script:failedRuns++
         return $false
     }
@@ -89,10 +101,13 @@ function Invoke-EvalRun {
 # ---------------------------------------------------------------------------
 Write-Host "== [live] preflight gate ==" -ForegroundColor Cyan
 $preflightOut = Join-Path $sdkRoot $OutRoot
-cargo run -q -p owo-agent-cli -- product-eval preflight @suiteArgs --out $preflightOut
-if ($LASTEXITCODE -ne 0) {
+# §2.4 红线 1：cargo run（preflight）→ normal 档；判定用 $global:LASTEXITCODE，
+# 被内存守护(137)/超时(124)中止时同样走 PREFLIGHT BLOCKED exit 2——绝不记为通过（红线 10）。
+Invoke-CiCargo -Arguments (@('run', '-q', '-p', 'owo-agent-cli', '--', 'product-eval', 'preflight') + @($suiteArgs) + @('--out', $preflightOut)) `
+    -Cwd $sdkRoot -HeartbeatSec 60 -Label 'live-preflight' -PolicyMode 'normal'
+if ($global:LASTEXITCODE -ne 0) {
     Write-Host "" 
-    Write-Host ("PREFLIGHT BLOCKED (exit={0}): live baseline NOT executed." -f $LASTEXITCODE) -ForegroundColor Red
+    Write-Host ("PREFLIGHT BLOCKED (exit={0}): live baseline NOT executed." -f $global:LASTEXITCODE) -ForegroundColor Red
     Write-Host "Reference (dry) results are NOT a substitute for live runs - fix the blocking items above and re-run." -ForegroundColor Red
     exit 2
 }
@@ -145,7 +160,10 @@ $wsReport = Join-Path $sdkRoot (Join-Path $OutRoot "workswarm-single\report.json
 Write-Host ""
 Write-Host "==================== R1 LIVE BASELINE SUMMARY ====================" -ForegroundColor Cyan
 if ((Test-Path $agentReport) -and (Test-Path $wsReport)) {
-    cargo run -q -p owo-agent-cli -- product-eval compare $agentReport $wsReport
+    # §2.4 红线 1：compare 只读两份 report.json 做统计，cargo run 仍需编译 → normal 档；
+    # 该步成败仍由脚本既有的 failedRuns/汇总语义收口（compare 输出直接回显，不缓冲）。
+    Invoke-CiCargo -Arguments @('run', '-q', '-p', 'owo-agent-cli', '--', 'product-eval', 'compare', $agentReport, $wsReport) `
+        -Cwd $sdkRoot -HeartbeatSec 60 -Label 'live-compare' -PolicyMode 'normal'
 }
 Write-Host ("single-agent journal : {0}" -f $agentReport.Replace("report.json", "state.jsonl"))
 Write-Host ("workswarm journal    : {0}" -f $wsReport.Replace("report.json", "state.jsonl"))

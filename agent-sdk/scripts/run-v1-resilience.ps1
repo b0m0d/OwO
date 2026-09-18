@@ -31,6 +31,28 @@ $ErrorActionPreference = "Continue"
 $sdkRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $sdkRoot
 
+# §2.4 资源安全红线（本脚本此前以 --test-threads 4 起跑，越线）：统一经 ci-shared
+# 的红线层执行——定向测试 -j 2 / --test-threads 2、启动前内存门与构建空闲门、
+# 实时进度 + 完整日志落盘（替代 Tee-Object 后 Out-Null 的"看不到在跑还是卡住"）。
+. (Join-Path $PSScriptRoot "ci-shared.ps1")
+Initialize-CiPath
+$null = Set-CiRustResourcePolicy -Mode 'normal' -Source 'run-v1-resilience'
+$script:ResilienceLogSeq = 0
+
+function Invoke-ResilienceCargo {
+    param(
+        [Parameter(Mandatory = $true)][string]$Tag,
+        [Parameter(Mandatory = $true)][string[]]$CargoArgs,
+        [ValidateSet('auto', 'normal', 'strict')][string]$PolicyMode = 'normal'
+    )
+    $script:ResilienceLogSeq++
+    $logDir = Join-Path ([IO.Path]::GetTempPath()) 'owo-resilience-logs'
+    $log = Join-Path $logDir ("{0}-{1}-{2}.log" -f $script:ResilienceLogSeq, $Tag, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $lines = Invoke-CiCargoCapture -Arguments $CargoArgs -Cwd $sdkRoot -HeartbeatSec 30 -Label $Tag `
+        -PolicyMode $PolicyMode -LogFile $log
+    return , @($lines)
+}
+
 Write-Host "== [resilience] root: $sdkRoot ==" -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
@@ -38,9 +60,10 @@ Write-Host "== [resilience] root: $sdkRoot ==" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 if (-not $OnlyCloseout -and -not $OnlyHttp -and -not $OnlyResponsiveness) {
     Write-Host "== [resilience] cargo check --all-targets ==" -ForegroundColor Cyan
-    cargo check --workspace --all-targets 2>&1 | Tee-Object -Variable checkOut | Out-Null
+    $checkOut = Invoke-ResilienceCargo -Tag 'check' -PolicyMode 'strict' `
+        -CargoArgs @('check', '--workspace', '--all-targets')
     $checkLines = $checkOut | Select-String -Pattern "^error"
-    if ($LASTEXITCODE -ne 0) {
+    if ($global:LASTEXITCODE -ne 0) {
         Write-Host "BUILD BLOCKED: workspace 编译失败（可能系并行路线的 WIP 编辑）：" -ForegroundColor Red
         $checkLines | ForEach-Object { Write-Host ("    " + $_.Line) -ForegroundColor Yellow }
         exit 2
@@ -64,7 +87,8 @@ if (-not $OnlyHttp -and -not $OnlyResponsiveness) {
         "two_write_workers_sharing_lease_keep_change_sets_isolated"
     )
     foreach ($t in $unitTests) {
-        cargo test -p owo-agent-server --lib $t -- --exact --nocapture 2>&1 | Tee-Object -Variable runOut | Out-Null
+        $runOut = Invoke-ResilienceCargo -Tag ("unit-" + ($t -replace '[^\w]', '')) `
+            -CargoArgs @('test', '-p', 'owo-agent-server', '--lib', $t, '--', '--exact', '--nocapture')
         $passed = ($runOut | Select-String -Pattern "test result: ok").Count -gt 0
         if ($passed) { $totalOk++ } else { $failures += "closeout/$t" }
         Write-Host ("    {0} : {1}" -f $t, $(if ($passed) { "PASS" } else { "FAIL" })) -ForegroundColor $(if ($passed) { "Green" } else { "Red" })
@@ -76,8 +100,9 @@ if (-not $OnlyHttp -and -not $OnlyResponsiveness) {
 # ---------------------------------------------------------------------------
 if (-not $OnlyCloseout -and -not $OnlyResponsiveness) {
     Write-Host "== [resilience] HTTP 恢复面（v1_execution_safety_tests）==" -ForegroundColor Cyan
-    cargo test -p owo-agent-server --test v1_execution_safety_tests -- --test-threads 4 2>&1 |
-        Tee-Object -Variable httpOut | Out-Null
+    # 并发上限由 §2.4 注入（--test-threads 2）；此处不得再自带更高并发参数。
+    $httpOut = Invoke-ResilienceCargo -Tag 'http-safety' `
+        -CargoArgs @('test', '-p', 'owo-agent-server', '--test', 'v1_execution_safety_tests')
     $tests = $httpOut | Select-String -Pattern "^test ([\w_]+) \.\.\. (ok|FAILED)"
     $httpOk = 0; $httpFail = 0
     foreach ($m in $tests) {
@@ -109,8 +134,10 @@ if (-not $OnlyCloseout -and -not $OnlyResponsiveness) {
 # ---------------------------------------------------------------------------
 if (-not $OnlyCloseout -and -not $OnlyHttp) {
     Write-Host "== [resilience] 取消响应性契约（workswarm_responsiveness_tests）==" -ForegroundColor Cyan
-    cargo test -p owo-agent-core --test workswarm_responsiveness_tests -- --test-threads 4 2>&1 |
-        Tee-Object -Variable respOut | Out-Null
+    # §2.4：取消响应性用例需要"长 Worker + 测量用例"同时在场，2 线程即满足；
+    # 历史值 --test-threads 4 属越线并发，现由红线层注入 2。
+    $respOut = Invoke-ResilienceCargo -Tag 'responsiveness' `
+        -CargoArgs @('test', '-p', 'owo-agent-core', '--test', 'workswarm_responsiveness_tests')
     $respOk = 0; $respFail = 0
     foreach ($m in ($respOut | Select-String -Pattern "^test ([\w_]+) \.\.\. (ok|FAILED)")) {
         if ($m.Matches[0].Groups[2].Value -eq "ok") { $respOk++ } else { $respFail++ }

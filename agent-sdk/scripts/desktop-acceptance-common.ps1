@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 desktop-acceptance-common.ps1 — 桌面真机验收的共享原语（重构方案 §8.1/§8.2/§8.3）。
 
