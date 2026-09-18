@@ -1040,19 +1040,42 @@ function syncOpenApiLink() {
 
 // §4.6 首次配置判定：壳报告 no_workspace 时 core 不会启动，
 // readiness 轮询永远不成功，必须直接进入工作区/提供商引导。
+// R3-B（§3.4 provider 契约）：core ready 但提供商未配置时同样先分流引导页
+// ——模型不可用的正确终态是"模型配置引导"，不是错误卡/loading（壳 IPC 判定，零 HTTP）。
 // 非 Tauri 环境（浏览器直连 4096）跳过——那里没有壳来管理工作区。
 async function needsSetup() {
   const owner = window.OwoApiClient && window.OwoApiClient.tauriInvokeOwner(window);
   if (!owner) return false;
   try {
     const connection = await apiClient.ensureCoreConnection();
-    return !!(connection && connection.state === "no_workspace");
+    if (!connection) return false;
+    if (connection.state === "no_workspace") return true;
+    // §3.4「provider 未配置」的**规定终态是模型配置引导，不是错误卡**。core 在没有任何
+    // 可用提供商时直接以 provider/not_configured 退出（不拉起一个必然 502 的服务），
+    // 因此这里必须同时接受两条路径：core 已 ready 但壳判定提供商未就绪；以及 core
+    // 以该稳定码失败退出。历史上只认第一条，无密钥场景被渲染成通用错误卡（矩阵三条
+    // 断言全红），而归因错误的错误卡会让用户去查网络/重装，永远修不好。
+    if (connection.errorCode === "provider/not_configured") return true;
+    if (connection.state === "ready" && typeof owner.invoke === "function") {
+      try {
+        const status = await owner.invoke.call(owner, "get_provider_status");
+        return !!(status && status.ready === false);
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
   } catch (_) {
     return false;
   }
 }
 
 // §4.6：渲染首次配置引导；完成后落在 recover()（服务恢复轮询）。
+// R3-B 缺陷修正：app.js 是顶层脚本（非 (function(global){…}) 包装的视图模块），
+// 作用域里没有 `global` 标识符——上一版这里写 `global.__owoCoreDiagnostics` 抛
+// ReferenceError，`content.replaceChildren()` 已清空却在渲染前中断，界面表现为
+// "标题有了、正文空白"（矩阵取证：contentLen=0 / errs=rej:global is not defined）。
+// 除修标识符外，这里再加兜底：引导页自身异常也必须落到错误卡，绝不允许白屏。
 function renderSetupGuide() {
   document.body.classList.remove("route-chat");
   const view = $("routeView");
@@ -1062,8 +1085,18 @@ function renderSetupGuide() {
   $("routeHeader").innerHTML =
     "<div><h2>首次配置</h2><p>选择项目工作区与模型提供商后即可开始使用。</p></div>";
   content.replaceChildren();
-  if (window.renderOwoSetupGuide) {
-    window.renderOwoSetupGuide(content, global.__owoCoreDiagnostics || null, () => recover());
+  if (!window.renderOwoSetupGuide) {
+    if (window.renderOwoServiceError) {
+      renderOwoServiceError(content, new Error("引导视图未加载"), recover);
+    }
+    return;
+  }
+  try {
+    window.renderOwoSetupGuide(content, window.__owoCoreDiagnostics || null, () => recover());
+  } catch (error) {
+    // 引导页抛错时不能留下空白主区：回落到错误卡，保留可操作出口。
+    content.replaceChildren();
+    if (window.renderOwoServiceError) renderOwoServiceError(content, error, recover);
   }
 }
 
@@ -1082,6 +1115,8 @@ async function recover() {
     try {
       await readiness.wait(10000);
       await hydrateShell();
+      // 与 boot() 同一结论：ready 之后不得用壳的 provider 配置面二次改判终态，
+      // 唯一判据是核心上报的 provider/not_configured 稳定码（见 boot() 里的注记）。
       serviceReady = true;
       if (window.owoRouter) window.owoRouter.start();
       startRefreshTimers();
@@ -1118,6 +1153,14 @@ async function boot() {
   try {
     await readiness.wait(10000);
     await hydrateShell();
+    // ⚠ 这里**不得**再用壳的 get_provider_status 复查一次提供商来决定进不进引导页。
+    // 实测（§8.2 冷启动复跑）：密钥由 sidecar 环境注入、core 正常 ready 的健康启动里，
+    // 壳自己的 provider 配置面仍可报 ready=false —— 于是引导页把健康主界面整个顶掉
+    // （composerVisible=false、setupGuide=407 字），并且因为 boot() 提前 return，
+    // 首屏请求/SSE 计数全部失控（business=16、events=4、同路由 x4）。
+    // 「provider 未配置」的正确判据是**核心自己上报的稳定码**
+    // （needsSetup 里 connection.errorCode === "provider/not_configured"）：
+    // 它是唯一权威归因，不用两份互不一致的配置视图去猜。
     serviceReady = true;
     if (window.owoRouter) window.owoRouter.start();
   } catch (error) {

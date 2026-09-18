@@ -320,6 +320,50 @@ impl OpenAiCompatibleConfig {
     }
 }
 
+/// R3-B（§3.4「provider 未配置」契约）：无凭据时的占位 Provider。
+///
+/// 桌面 serve 在无 `OPENAI_API_KEY` 时**必须** ready（诊断/设置/会话/工具全部
+/// 可用），模型调用一律返回稳定码 `provider/not_configured` + 可操作中文指引。
+/// 归因留给"core 早退/握手超时"是历史缺陷 R3-BUG-05：用户看到的是无法修复的
+/// 模糊报错。UI 侧据此呈现模型配置引导（§4.8 Unset 语义：core ready，模型调用
+/// 在引导后生效）。
+pub struct UnconfiguredModelProvider {
+    reason: String,
+}
+
+impl UnconfiguredModelProvider {
+    /// 统一错误模型（§2.4）的稳定码：layer=provider，name=not_configured。
+    pub const CODE: &'static str = "provider/not_configured";
+
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    /// 带稳定码前缀的错误文案（UI 与日志的唯一文案面；UI 按码渲染，不匹配中文）。
+    pub fn message(&self) -> String {
+        format!(
+            "{}：模型提供商未配置（{}）。请在设置中选择云端或本地 Ollama，或经环境变量 OPENAI_API_KEY 配置凭据",
+            Self::CODE,
+            self.reason
+        )
+    }
+}
+
+#[async_trait]
+impl ModelProvider for UnconfiguredModelProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        Err(self.message())
+    }
+
+    // complete_stream/complete_with_model 走 trait 默认实现 → 同样落到 complete 的 Err。
+}
+
 /// OpenAI-compatible `/chat/completions` 客户端（覆盖 OpenAI、DeepSeek、Ollama、多数代理）。
 pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
@@ -1500,6 +1544,25 @@ mod tests {
         // 无 usage 的空 delta 仍按心跳忽略。
         assert!(
             parse_sse_payload(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#).is_none()
+        );
+    }
+
+    /// R3-B（§3.4）：占位 Provider 的调用面必须携带稳定码 provider/not_configured
+    /// （UI/矩阵按码断言，不按中文文案）。
+    #[tokio::test]
+    async fn unconfigured_provider_returns_stable_code() {
+        let provider = UnconfiguredModelProvider::new("缺少 OPENAI_API_KEY 环境变量");
+        let error = provider
+            .complete(&[ChatMessage::user("hi".to_string())], &[])
+            .await
+            .expect_err("无凭据调用必须失败，不得静默返回空文本");
+        assert!(
+            error.starts_with(UnconfiguredModelProvider::CODE),
+            "错误必须以稳定码开头：{error}"
+        );
+        assert!(
+            error.contains("OPENAI_API_KEY"),
+            "错误必须给出可操作指引：{error}"
         );
     }
 

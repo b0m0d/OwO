@@ -203,6 +203,9 @@ fn sample_body(path: &str) -> Option<&'static str> {
         "/mcp/reconnect" => Some(r#"{"name":"__missing__"}"#),
         "/mcp/enabled" => Some(r#"{"name":"__missing__","enabled":false}"#),
         "/locate/query" => Some(r#"{}"#),
+        // 「测试连接」无请求体（端点取自配置），但要走同一个 sample_body 查表面，
+        // 缺这一条会被 reachable 测试当成"没有样例体的新路由"而跳过断言。
+        "/settings/provider-test" => Some(r#"{}"#),
         "/memory/mine-skill" => {
             Some(r#"{"name":"t","target_apps":[],"sensitivity":"low","description":"d"}"#)
         }
@@ -867,6 +870,9 @@ async fn unauthorized_requests_get_401() {
         ("GET", "/session/x/diff", None),
         ("POST", "/goal", Some(r#"{"objective":"t"}"#)),
         ("GET", "/audit", None),
+        // §3.4 引导页「测试连接」：它会回显掩码端点与连通结论，属受保护面——
+        // 无 token 必须 401，否则任何本机进程都能拿它探测（并可能探测内网）。
+        ("POST", "/settings/provider-test", Some("{}")),
     ] {
         let response = app
             .clone()

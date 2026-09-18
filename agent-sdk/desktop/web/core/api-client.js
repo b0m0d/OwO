@@ -128,12 +128,24 @@
           }
         }
         global.__owoCoreDiagnostics = ApiClient.buildCoreDiagnostics(connection);
+        // R3-B（§3.4 终态可见性）：**只有 ready 才长期缓存**。历史缺陷：首屏第一次
+        // 查询发生在核心还在启动时（state=starting，无 errorCode），此后 Promise 被
+        // 永久复用 → 壳后来进入 failed(storage/not_writable / core/exited /
+        // core/handshake_timeout) 的稳定码永远读不到，错误卡只能落到"默认三出口 +
+        // 通用文案"。真机故障矩阵里 core-exit / core-hang / data-dir-unwritable 三条
+        // 全因此红（不是产品没报错，是 UI 拿的是陈旧快照）。
+        // 非 ready 时放开下一次重查：这是 Tauri IPC，不进 HTTP 台账，
+        // 不影响 §8.2 首屏请求预算；在途请求仍由 coreConnectionPromise 单飞合并。
+        if (!connection || connection.state !== "ready") {
+          this.coreConnectionPromise = null;
+        }
         return connection;
       }).catch((error) => {
         global.__owoCoreDiagnostics = {
           state: "unknown",
           message: String((error && error.message) || error),
         };
+        this.coreConnectionPromise = null;
         return null;
       });
       return this.coreConnectionPromise;

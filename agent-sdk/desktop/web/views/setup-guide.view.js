@@ -89,6 +89,13 @@
       if (state && state.workspace) {
         pathInput.value = state.workspace;
         pathInput.title = state.workspace;
+        // R3-B：工作区已配置过 → 本卡自动完成，用户只需处理提供商（provider
+        // 未配置场景引导页直达模型配置部分，不被重复的目录确认卡住）。
+        if (!form.dataset.done && typeof global.__owoSetupContinue === "function") {
+          form.dataset.done = "1";
+          showMessage(form, "已保存的工作区：" + state.workspace, true);
+          global.__owoSetupContinue("workspace");
+        }
       }
     }).catch(function () { /* 诊断不影响表单 */ });
 
@@ -119,7 +126,12 @@
     });
   }
 
-  function renderProviderCard(root) {
+  function renderProviderCard(root, diagnostics) {
+    // §3.4：引导页必须自带稳定码。壳在没有提供商时以 provider/not_configured 失败，
+    // 该码是本页的"归因锚点"——即使用户随后手动点了「稍后配置」，这里展示的仍是
+    // 当前判定依据，而不是等 get_provider_status 回来的竞态结果。
+    const shellCode = diagnostics && typeof diagnostics.errorCode === "string" ? diagnostics.errorCode : "";
+    const providerUnset = shellCode === "provider/not_configured";
     const card = document.createElement("section");
     card.className = "setup-card";
     card.innerHTML =
@@ -137,6 +149,11 @@
       '<label><input type="radio" name="provider-mode" value="unset" /> 稍后配置</label>' +
       "</div>" +
       '<p class="sub" data-role="status">读取提供商状态…</p>' +
+      // §3.4「provider 未配置」契约动作：打开模型设置 / 测试连接（TCP 层探测，不发真实请求）。
+      '<div class="inline">' +
+      '<button type="button" data-action="open_provider_settings" data-role="open-settings">打开模型设置</button>' +
+      '<button type="button" data-action="test_connection" data-role="test-connection">测试连接</button>' +
+      "</div>" +
       '<button type="submit" class="primary">保存并应用</button>' +
       "</form>";
     root.appendChild(card);
@@ -166,15 +183,57 @@
       if (state.baseUrl) baseUrl.value = state.baseUrl;
       if (state.model) model.value = state.model;
       syncFields();
-      let text = "当前：" + (mode === "cloud" ? "云端" : mode === "ollama" ? "本地 Ollama" : "未配置");
-      if (state.baseUrl) text += " · " + state.baseUrl;
-      if (state.model) text += " · " + state.model;
-      if (mode === "cloud") text += state.keyConfigured ? " · 已检测到 API 密钥（不显示内容）" : " · 缺少 OPENAI_API_KEY（需先在系统环境变量配置）";
-      if (state.ready) text += " · 就绪";
-      status.textContent = text;
+      let text = "当前：" + esc(mode === "cloud" ? "云端" : mode === "ollama" ? "本地 Ollama" : "未配置");
+      if (state.baseUrl) text += " · " + esc(state.baseUrl);
+      if (state.model) text += " · " + esc(state.model);
+      if (mode === "cloud") text += state.keyConfigured ? " · 已检测到 API 密钥（不显示内容）" : " · 缺少模型凭据（需先在系统环境变量配置）";
+      if (state.ready && !providerUnset) {
+        text += " · 就绪";
+        status.textContent = "当前：" + (mode === "cloud" ? "云端" : mode === "ollama" ? "本地 Ollama" : "未配置") +
+          (state.baseUrl ? " · " + state.baseUrl : "") + (state.model ? " · " + state.model : "") +
+          (mode === "cloud" ? (state.keyConfigured ? " · 已检测到 API 密钥（不显示内容）" : " · 缺少 OPENAI_API_KEY（需先在系统环境变量配置）") : "") +
+          " · 就绪";
+      } else {
+        // §3.4 契约：未配置态必须携带稳定错误码（矩阵/单测按码断言，不匹配中文）。
+        status.innerHTML = text + ' · <code>provider/not_configured</code>（模型暂不可用，选择提供商后即可开始）';
+      }
     }).catch(function () {
-      status.textContent = "无法读取提供商状态（可稍后在设置中调整）";
+      // 读不到状态也必须给出归因码：静默降级成"稍后在设置中调整"会让矩阵的
+      // "引导页呈现稳定错误码"断言失去依据，用户也不知道下一步该做什么。
+      status.innerHTML = providerUnset
+        ? '模型提供商未配置 · <code>provider/not_configured</code>（选择提供商后即可开始）'
+        : "无法读取提供商状态（可稍后在设置中调整）";
     });
+
+    // §3.4 契约动作：打开模型设置（进设置页）与测试连接（核心侧 TCP 探测，稳定码回执）。
+    const openSettingsBtn = card.querySelector('[data-role="open-settings"]');
+    if (openSettingsBtn) {
+      openSettingsBtn.addEventListener("click", function () {
+        if (global.owoRouter && typeof global.owoRouter.go === "function") global.owoRouter.go("settings");
+        else showMessage(form, "引导页内即可完成提供商选择（设置页暂不可达）", false);
+      });
+    }
+    const testBtn = card.querySelector('[data-role="test-connection"]');
+    if (testBtn) {
+      testBtn.addEventListener("click", function () {
+        const api = global.OwoApi;
+        if (!api || typeof api.post !== "function") {
+          showMessage(form, "测试连接暂不可用（API 客户端未就绪）", false);
+          return;
+        }
+        testBtn.disabled = true;
+        api.post("/settings/provider-test", {}).then(function (result) {
+          showMessage(form, "测试结果：" + ((result && result.code) || "unknown") +
+            (result && result.endpoint ? " · " + result.endpoint : "") +
+            (result && typeof result.latency_ms === "number" ? " · " + result.latency_ms + "ms" : ""),
+            !!(result && result.ok));
+        }).catch(function (error) {
+          showMessage(form, "测试连接失败：" + String((error && error.message) || error), false);
+        }).finally(function () {
+          testBtn.disabled = false;
+        });
+      });
+    }
 
     form.addEventListener("submit", function (event) {
       event.preventDefault();
@@ -228,6 +287,6 @@
       }
     };
     renderWorkspaceCard(guide, diagnostics || null);
-    renderProviderCard(guide);
+    renderProviderCard(guide, diagnostics || null);
   };
 })(typeof window !== "undefined" ? window : globalThis);

@@ -157,9 +157,30 @@ pub(crate) fn parse_ready_line(line: &str) -> Option<Value> {
     Some(value)
 }
 
+/// R3-B（§3.4）：解析核心启动期致命错误行 `core_fatal`。
+/// 约定：一行 JSON，含 `"event":"core_fatal"` 与非空 `code`（layer/name 稳定码）；
+/// 该行使壳立即以对应错误码进入 Failed，而不是烧完握手超时猜原因。
+pub(crate) fn parse_fatal_line(line: &str) -> Option<Value> {
+    let trimmed = line.trim();
+    if !trimmed.contains("\"event\":\"core_fatal\"") {
+        return None;
+    }
+    let value: Value = serde_json::from_str(trimmed).ok()?;
+    if value.get("event").and_then(Value::as_str) != Some("core_fatal") {
+        return None;
+    }
+    let has_code = value
+        .get("code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| code.contains('/'));
+    has_code.then_some(value)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{http_request, parse_ready_line, validate_health_payload, HealthProbe};
+    use super::{
+        http_request, parse_fatal_line, parse_ready_line, validate_health_payload, HealthProbe,
+    };
 
     /// §8.1（R3）：壳对核心的每一个请求都必须自带 ledger 来源标签（source=shell），
     /// 且不得吞掉调用方附加的头——冷启动请求预算取证完全依赖这一归类。
@@ -279,5 +300,25 @@ mod tests {
             "缺 pid"
         );
         assert!(parse_ready_line("not json with \"event\":\"core_ready\"").is_none());
+    }
+
+    /// R3-B（§3.4）：core_fatal 行解析——有效码直通，噪声/无码/非 fatal 事件拒绝。
+    #[test]
+    fn parses_core_fatal_lines_with_stable_code_only() {
+        let value = parse_fatal_line(
+            r#"{"event":"core_fatal","code":"storage/not_writable","message":"数据目录不可写：C:\\x"}"#,
+        )
+        .expect("标准 fatal 行应可解析");
+        assert_eq!(value["code"].as_str(), Some("storage/not_writable"));
+        assert!(parse_fatal_line("tracing: 普通日志行").is_none());
+        assert!(parse_fatal_line(r#"{"event":"core_ready","pid":1,"port":9}"#).is_none());
+        assert!(
+            parse_fatal_line(r#"{"event":"core_fatal","code":"broken","message":"x"}"#).is_none(),
+            "非 layer/name 形状的稳定码不接受（§2.4 统一错误模型）"
+        );
+        assert!(
+            parse_fatal_line(r#"{"event":"core_fatal","message":"无码"}"#).is_none(),
+            "缺 code 不接受——宁可落回超时也不得静默通过"
+        );
     }
 }

@@ -55,7 +55,7 @@ fn state_to_value(state: &CoreState, log_path: &std::path::Path) -> Value {
 /// 启动诊断状态（§4.3：错误码 + 用户文案 + 日志入口；独立于 core API 可用）。
 #[tauri::command]
 pub fn get_core_state(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Value {
-    state_to_value(&runtime.state(), &runtime.log_path())
+    runtime_state_value(&runtime)
 }
 
 /// 连接描述符：WebView 据此构造 API base 并随请求携带实例身份头。
@@ -82,8 +82,8 @@ pub fn get_core_connection(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> V
             }
             value
         }
-        other => {
-            let mut value = state_to_value(&other, &runtime.log_path());
+        _ => {
+            let mut value = runtime_state_value(&runtime);
             value["port"] = json!(0);
             value
         }
@@ -94,7 +94,7 @@ pub fn get_core_connection(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> V
 #[tauri::command]
 pub fn retry_core_start(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Value {
     runtime.retry();
-    state_to_value(&runtime.state(), &runtime.log_path())
+    runtime_state_value(&runtime)
 }
 
 /// 打开日志目录（资源管理器），供用户自助排障。
@@ -162,6 +162,50 @@ pub fn get_provider_status(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> V
     })
 }
 
+/// §3.4/§4.7 动作 `choose_data_directory`：存储错误（storage/not_writable）后
+/// 用原生目录对话框改选数据根——写指针后受控重启核心。只改目录选择，不触碰凭据。
+#[tauri::command]
+pub async fn choose_data_directory(
+    runtime: State<'_, std::sync::Arc<CoreRuntime>>,
+) -> Result<Value, String> {
+    // rfd 异步对话框：不阻塞 IPC 线程；用户取消也是合法终态（ok=false）。
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("选择新的数据目录")
+        .pick_folder()
+        .await;
+    let Some(folder) = picked else {
+        return Ok(json!({ "ok": false, "canceled": true }));
+    };
+    let path = folder.path().to_path_buf();
+    match crate::core_runtime::save_data_root_override(&path) {
+        Ok(canonical) => {
+            runtime.retry();
+            Ok(json!({
+                "ok": true,
+                "data_root": canonical.to_string_lossy(),
+                "state": state_to_value(&runtime.state(), &runtime.log_path())["state"].clone(),
+            }))
+        }
+        Err(error) => Ok(json!({ "ok": false, "error": error })),
+    }
+}
+
+/// R3-B（§3.4 终态可见性）：带"最近一次失败"的完整诊断状态对象。
+/// `CoreState::Starting/Restarting` 本身不含稳定码（重试窗口内还没有新事实），
+/// 但上一代的故障码必须继续可见——否则 UI 在退避期间只能渲染默认三出口 + 通用文案，
+/// 而 §3.4 要求"按 code 渲染动作"。ready 态不注入（不得携带陈旧故障）。
+fn runtime_state_value(runtime: &CoreRuntime) -> Value {
+    let state = runtime.state();
+    let mut value = state_to_value(&state, &runtime.log_path());
+    let state_name = value.get("state").and_then(Value::as_str).unwrap_or("");
+    if !matches!(state_name, "ready" | "failed") {
+        if let Some((code, message)) = runtime.last_error() {
+            value["errorCode"] = json!(code);
+            value["message"] = json!(message);
+        }
+    }
+    value
+}
 /// 更新提供商选择（mode: cloud|ollama|unset；baseUrl/model 可选覆盖）。
 /// 保存成功后受控重启 core 使新环境生效。
 #[tauri::command]

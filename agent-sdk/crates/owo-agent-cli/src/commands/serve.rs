@@ -17,13 +17,37 @@ pub(crate) struct ServeArgs {
     workspace: PathBuf,
 }
 
+/// R3-B（§3.4 契约）：启动期致命错误以恰好一行 `core_fatal` JSON 上报到 stdout
+/// （桌面壳解析并映射为稳定错误码，UI 呈现对应恢复动作），随后非零退出。
+/// 消息**必须脱敏**：只带目录路径与 OS 错误文本，绝不携带凭据/环境变量值。
+fn emit_core_fatal(code: &str, message: &str) -> ! {
+    println!(
+        "{}",
+        serde_json::json!({ "event": "core_fatal", "code": code, "message": message })
+    );
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    std::process::exit(3);
+}
+
 pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let settings = Settings::load(&workspace);
     apply_egress_setting(&settings);
     settings.apply_usage_env();
     let model = resolve_model(None, settings.model.as_deref());
-    let root = ensure_data_root(None, &workspace);
+    // R3-B（§3.4 `storage/not_writable`）：桌面壳上下文（实例身份由壳注入）绝不允许
+    // 静默把数据根迁移到工作区 `.owo-agent`——用户必须看到存储错误并"更换数据目录"。
+    // 非桌面 CLI 保持既有回退行为不变。
+    let desktop_ctx = std::env::var_os("OWO_DESKTOP_INSTANCE_ID").is_some();
+    let root = if desktop_ctx {
+        match ensure_data_root_checked(None) {
+            Ok(root) => root,
+            Err(reason) => emit_core_fatal("storage/not_writable", &reason),
+        }
+    } else {
+        ensure_data_root(None, &workspace)
+    };
     let plugin_state = owo_agent_core::PluginStateStore::new(Some(root.join("plugin_state.json")));
     let plugins =
         owo_agent_core::plugin::discover_enabled_plugins(&workspace, &root, &plugin_state);
@@ -33,7 +57,7 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
     let _ = install_builtin_packages(&builtin_skills_root(), &root);
     let mut skills = SkillRegistry::discover(&workspace, &root);
     apply_disabled_skills(&mut skills, &settings);
-    let agent = build_agent_with_mcp(
+    let agent = build_agent_with_mcp_serve(
         &workspace,
         &model,
         settings.read_only,
@@ -41,7 +65,18 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
         &skills,
         &settings.deny_commands,
     )?;
-    let store = SqliteSessionStore::open(&root.join("index.db"))?;
+    let store = match SqliteSessionStore::open(&root.join("index.db")) {
+        Ok(store) => store,
+        Err(error) => {
+            if desktop_ctx {
+                emit_core_fatal(
+                    "storage/not_writable",
+                    &format!("会话库不可打开：{}（{error}）", display_path(&root)),
+                )
+            }
+            return Err(error.into());
+        }
+    };
     let state = Arc::new(owo_agent_server::AppState::new(
         agent,
         store,

@@ -30,11 +30,24 @@ test("路由切换在清空页面前保留设置节点，自动恢复会启动�
     /setSettingsLocation\(false\);\s*content\.replaceChildren\(\);\s*setSettingsLocation\(route === "settings"\);/,
     "设置节点必须在 routeContent 清空前回迁，避免 settings -> 其他页 -> settings 丢失节点"
   );
+  // 意图断言，不锁字面相邻行：上一版把 `hydrateShell(); serviceReady = true;` 逐字
+  // 钉死，结果 §3.4 要求的"ready 之后复查提供商"一进来就误判成回归。现在分别断言
+  // ①恢复完成后确实启用后台刷新；②每条 ready 路径都先过引导门（提供商未配置时
+  // 停在引导页，而不是放进一个请求必挂的主界面）。
   assert.match(
     app,
-    /await hydrateShell\(\);\s*serviceReady = true;\s*if \(window\.owoRouter\) window\.owoRouter\.start\(\);\s*startRefreshTimers\(\);/,
+    /hydrateShell\(\);[\s\S]{0,600}?serviceReady = true;[\s\S]{0,200}?startRefreshTimers\(\);/,
     "自动恢复完成后必须启用后台刷新"
   );
+  // 引导门只允许存在于"终态尚未确定"的两个入口：boot() 开头与 recover() 开头。
+  // ready 之后再复查会出事：壳的 provider 配置面与 core 的实际可用性是两套视图，
+  // 密钥注入到 sidecar 的健康启动里壳仍可报 ready=false，于是引导页顶掉健康主界面，
+  // 并把 §8.2 的首屏请求/SSE 计数全打乱（实测 business 4→16、events 1→4）。
+  const setupGates = (app.match(/if \(await needsSetup\(\)\)/g) || []).length;
+  assert.equal(setupGates, 2,
+    `needsSetup 门必须恰好 2 处（boot/recover 各一次），不得在 hydrateShell 之后复查（当前 ${setupGates}）`);
+  assert.ok(!/hydrateShell\(\);[\s\S]{0,200}?if \(await needsSetup\(\)\)/.test(app),
+    "hydrateShell 之后不得再出现 needsSetup 分流（终态判据只能是核心上报的稳定码）");
   assert.match(index, /var localCore = "http:\/\/127\.0\.0\.1:4096"/);
   assert.match(index, /window\.OWO_API_BASE = window\.OWO_API_BASE/);
 });
@@ -138,6 +151,44 @@ test("Tauri 桌面端先向壳询问核心连接，携带实例身份与配对�
     });
   } finally {
     global.fetch = originalFetch;
+    global.__owoCoreDiagnostics = originalDiagnostics;
+    if (originalTauri === undefined) delete global.__TAURI_INTERNALS__;
+    else global.__TAURI_INTERNALS__ = originalTauri;
+  }
+});
+
+test("R3-B §3.4：非 ready 的连接快照不得被永久缓存（否则稳定码永远读不到）", async () => {
+  const originalTauri = global.__TAURI_INTERNALS__;
+  const originalDiagnostics = global.__owoCoreDiagnostics;
+  let queries = 0;
+  // 壳的真实时序：第一次查询时核心还在启动（无码），之后才进 failed 带稳定码。
+  const responses = [
+    { state: "starting", attempt: 0, logPath: "C:\\logs\\desktop-core-1.log" },
+    { state: "failed", errorCode: "storage/not_writable", message: "存储错误：数据目录不可写", logPath: "C:\\logs\\desktop-core-1.log" },
+  ];
+  global.__TAURI_INTERNALS__ = {
+    invoke: async () => {
+      const value = responses[Math.min(queries, responses.length - 1)];
+      queries += 1;
+      return value;
+    },
+  };
+  try {
+    const client = new ApiClient("http://127.0.0.1:4096");
+    const first = await client.ensureCoreConnection();
+    assert.equal(first.state, "starting");
+    assert.equal(global.__owoCoreDiagnostics.errorCode, undefined, "启动期本来就没有错误码（不得编造）");
+    // 关键断言：陈旧快照不得被复用——否则错误卡只能渲染默认三出口，用户看不到真因。
+    const second = await client.ensureCoreConnection();
+    assert.equal(queries, 2, "非 ready 必须允许再查（ready 才长期缓存）");
+    assert.equal(second.errorCode, "storage/not_writable");
+    assert.equal(global.__owoCoreDiagnostics.errorCode, "storage/not_writable", "诊断面必须携带稳定码（UI 按码渲染动作）");
+    // 在途合并仍要成立：并发两次调用只发一次 IPC。
+    const before = queries;
+    const [a, b] = await Promise.all([client.ensureCoreConnection(), client.ensureCoreConnection()]);
+    assert.equal(queries, before + 1, "在途请求必须单飞合并，不得变成 IPC 轮询风暴");
+    assert.equal(a.errorCode, b.errorCode);
+  } finally {
     global.__owoCoreDiagnostics = originalDiagnostics;
     if (originalTauri === undefined) delete global.__TAURI_INTERNALS__;
     else global.__TAURI_INTERNALS__ = originalTauri;

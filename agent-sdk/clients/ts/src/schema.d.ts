@@ -3193,6 +3193,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/session/{id}/model": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["sessionSetModel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/session/{id}/permission/{request_id}": {
         parameters: {
             query?: never;
@@ -3347,6 +3363,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["settingsEgress"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/provider-test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["settingsProviderTest"];
         delete?: never;
         options?: never;
         head?: never;
@@ -10128,6 +10160,40 @@ export interface operations {
             };
         };
     };
+    sessionSetModel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 非空=固定请求模型；null/空串/"default"=清除覆盖（回退 OPENAI_MODEL→启动配置→内置默认；哨兵不落库、不进请求体） */
+                    model?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description { id, model, model_override } */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description session not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     respondPermission: {
         parameters: {
             query?: never;
@@ -10337,6 +10403,24 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description cloud enabled state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    settingsProviderTest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description provider self-diagnosis (R3 §3.4): stable code provider/not_configured|endpoint_reachable|endpoint_unreachable + masked endpoint; no secrets, no model calls (TCP probe only) */
             200: {
                 headers: {
                     [name: string]: unknown;

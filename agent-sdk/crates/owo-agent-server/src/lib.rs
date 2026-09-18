@@ -515,6 +515,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(settings_api::settings_get).post(settings_api::settings_update),
         )
         .route("/settings/egress", post(settings_api::settings_egress))
+        .route(
+            "/settings/provider-test",
+            post(settings_api::settings_provider_test),
+        )
         // §5.3/§5.4 权限档位与授权记忆管理（UI/CLI 统一入口）。
         .route(
             "/permissions",
@@ -931,6 +935,7 @@ async fn openapi_spec() -> Json<Value> {
             "/automations/reminders/clear": { "post": { "operationId": "automationsClearReminders", "responses": { "200": { "description": "ok" } } } },
             "/settings": { "get": { "operationId": "settingsGet", "responses": { "200": { "description": "workspace settings" } } }, "post": { "operationId": "settingsUpdate", "responses": { "200": { "description": "workspace settings" } } } },
             "/settings/egress": { "post": { "operationId": "settingsEgress", "responses": { "200": { "description": "cloud enabled state" } } } },
+            "/settings/provider-test": { "post": { "operationId": "settingsProviderTest", "responses": { "200": { "description": "provider self-diagnosis (R3 §3.4): stable code provider/not_configured|endpoint_reachable|endpoint_unreachable + masked endpoint; no secrets, no model calls (TCP probe only)" } } } },
             "/permissions": { "get": { "operationId": "permissionsStatus", "responses": { "200": { "description": "当前权限档位 + 授权记忆（脱敏）" } } }, "post": { "operationId": "permissionsSetProfile", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "profile": { "type": "string", "enum": ["read_only", "workspace", "auto_review", "full_access", "custom"] } }, "required": ["profile"] } } } }, "responses": { "200": { "description": "profile 已切换" } } } },
             "/permissions/grants": { "get": { "operationId": "grantsList", "responses": { "200": { "description": "授权记忆列表（脱敏）" } } } },
             "/permissions/grants/revoke": { "post": { "operationId": "grantsRevoke", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "grant_id": { "type": "string" } }, "required": ["grant_id"] } } } }, "responses": { "200": { "description": "授权记忆已撤销" } } } },

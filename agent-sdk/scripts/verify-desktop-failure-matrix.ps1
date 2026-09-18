@@ -52,46 +52,43 @@ $null = Assert-OwoShellEmbedsCurrentWeb -ShellExe $ShellExe -WebRoot (Join-Path 
 $sdkSidecar = Join-Path $sdkRoot 'target\debug\owo-agent.exe'
 $sdkCoreHashBefore = if (Test-Path -LiteralPath $sdkSidecar) { (Get-FileHash -LiteralPath $sdkSidecar -Algorithm SHA256).Hash } else { '' }
 
-# ---- 场景表（执行顺序 = §3.5 由快到慢）-------------------------------------------
-# expected_codes 为"可接受的错误码集合"（§3.4 契约冻结在 R3-B 提交对齐）；
-# required_actions 为错误卡"必须提供的动作"关键词（§3.4 动作列）。
+# ---- 场景表（§3.4 契约冻结 + §3.5 由快到慢执行序）--------------------------------
+# ExpectedCodes = 稳定错误码集合（精确；仅故障注入竞态面大的场景允许多码）；
+# RequiredActions = 错误卡/引导页"必须提供的动作"（§3.4 动作列，全部必须出现）；
+# FinalBudgetSec = 最终态时限（§3.4 两层时限之第二层：缺失/早退 15，身份/引导 20，挂死 45）。
 $scenarios = @(
     [pscustomobject]@{ Id = 'binary-missing'; Kind = 'missing';
         ExpectedCodes = @('core/binary_missing'); NeedsWorkspace = $true; NeedsKey = $true;
-        Expect = 'error'; FinalBudgetSec = 15; RequiredActions = @('重新检查', '打开诊断位置', '重新连接');
-        Note = '安装不完整：必须直接给出缺失说明与日志入口' },
+        Expect = 'error'; FinalBudgetSec = 15; RequiredActions = @('重新检查', '打开诊断位置');
+        Note = '§3.4：后台组件缺失 → core/binary_missing；动作=重新检查/打开诊断位置' },
     [pscustomobject]@{ Id = 'identity-mismatch'; Kind = 'identity';
         ExpectedCodes = @('core/identity_mismatch'); NeedsWorkspace = $true; NeedsKey = $true;
-        Expect = 'error'; FinalBudgetSec = 20; RequiredActions = @('重新安装', '重建');
-        Note = '伪造别窗口的 core_ready：端口冲突/旧服务残留场景' },
+        Expect = 'error'; FinalBudgetSec = 20; RequiredActions = @('重新安装或重建');
+        Note = '§3.4：伪造别窗口 core_ready → core/identity_mismatch；动作=重新安装或重建' },
     [pscustomobject]@{ Id = 'no-workspace'; Kind = 'healthy';
         ExpectedCodes = @('workspace/required'); NeedsWorkspace = $false; NeedsKey = $true;
-        Expect = 'guide'; FinalBudgetSec = 20; RequiredActions = @('选择', '目录');
-        Note = '未选项目：应落到配置引导页（不得白屏）' },
+        Expect = 'guide'; FinalBudgetSec = 20; RequiredActions = @('选择项目工作区');
+        Note = '§3.4：未选工作区 → 工作区引导（workspace/required），动作=选择文件夹' },
     [pscustomobject]@{ Id = 'provider-unset'; Kind = 'healthy';
-        ExpectedCodes = @('core/handshake_timeout', 'core/spawn_failed', 'core/exited');
-        NeedsWorkspace = $true; NeedsKey = $false;
-        Expect = 'error'; FinalBudgetSec = 45; RequiredActions = @('打开模型设置', '测试连接');
-        KnownGap = '凭据缺失时 sidecar 直接退出，界面只能报握手超时——归因不准确（应为"模型未配置"专码 + 可在壳内预检）；修复对齐 §3.4 契约（provider/not_configured → 引导页）'
-        Note = '模型凭据缺失：不得白屏/永久 loading（错误码归因已知不准，见 known_gap）' },
+        ExpectedCodes = @('provider/not_configured'); NeedsWorkspace = $true; NeedsKey = $false;
+        Expect = 'guide'; FinalBudgetSec = 20; RequiredActions = @('打开模型设置', '测试连接'); GuideCode = $true;
+        Note = '§3.4：provider 未配置 → core 正常运行 + 模型配置引导（R3-BUG-05 错误归因已修）' },
     [pscustomobject]@{ Id = 'data-dir-unwritable'; Kind = 'healthy';
-        ExpectedCodes = @('core/spawn_failed', 'core/handshake_timeout', 'core/exited');
-        NeedsWorkspace = $true; NeedsKey = $true;
-        Expect = 'error'; FinalBudgetSec = 45; RequiredActions = @('更换数据目录', '重试');
-        KnownGap = '当前 core 会静默回退工作区 .owo-agent（无错误面）；§3.4 契约要求 storage/not_writable，修复在 R3-B 契约对齐提交'
-        Note = '数据根被同名文件占据：写盘失败必须可见（见 known_gap）' },
+        ExpectedCodes = @('storage/not_writable'); NeedsWorkspace = $true; NeedsKey = $true;
+        Expect = 'error'; FinalBudgetSec = 20; RequiredActions = @('更换数据目录', '重试');
+        Note = '§3.4：数据目录不可写 → 启动失败并报 storage/not_writable（core_fatal 协议行）' },
     [pscustomobject]@{ Id = 'example-mcp-off'; Kind = 'healthy';
         ExpectedCodes = @(); NeedsWorkspace = $true; NeedsKey = $true;
         Expect = 'mcp-audit'; FinalBudgetSec = 45; RequiredActions = @();
-        Note = '示例 MCP 不得在生产 profile 启用（§8.3 末条）' },
+        Note = '§3.4：示例 MCP 关闭 → 正常主界面 + 工具状态 disabled（可查看禁用原因）' },
     [pscustomobject]@{ Id = 'core-exit'; Kind = 'exit';
-        ExpectedCodes = @('core/handshake_timeout', 'core/exited'); NeedsWorkspace = $true; NeedsKey = $true;
-        Expect = 'error'; FinalBudgetSec = 45; RequiredActions = @('重启后台', '查看诊断', '重新连接');
-        Note = '核心启动即退出：不得静默重启循环' },
+        ExpectedCodes = @('core/exited'); NeedsWorkspace = $true; NeedsKey = $true;
+        Expect = 'error'; FinalBudgetSec = 15; RequiredActions = @('重启后台', '查看诊断');
+        Note = '§3.4：sidecar 早退 → core/exited（协议行之前退出即判早退，不再烧成超时）' },
     [pscustomobject]@{ Id = 'core-hang'; Kind = 'hang';
         ExpectedCodes = @('core/handshake_timeout'); NeedsWorkspace = $true; NeedsKey = $true;
-        Expect = 'error'; FinalBudgetSec = 60; RequiredActions = @('终止并重试', '重新连接');
-        Note = '核心只挂起不输出 → 就绪超时（25s ready 行 + 15s 兼容回退）' }
+        Expect = 'error'; FinalBudgetSec = 45; RequiredActions = @('终止并重试');
+        Note = '§3.4：sidecar 挂死 → core/handshake_timeout；动作=终止并重试' }
 )
 if ($List) { $scenarios | ForEach-Object { "{0,-20} {1}" -f $_.Id, $_.Note }; exit 0 }
 
@@ -192,9 +189,20 @@ public static class OwoFaultStub
 }
 '@
 $stubExe = Join-Path $toolsDir 'owo-fault-stub.exe'
-Add-Type -TypeDefinition $stubSource -OutputType Exe -OutputAssembly $stubExe
+# ⚠ `-OutputType Exe` 只有 PowerShell 7 认；本仓（含 ci-gate）标准执行器是
+# powershell.exe 5.1，实测 5.1 直接抛
+# "Cannot bind parameter 'OutputType'... Unable to match the identifier name Exe"，
+# 整个矩阵在编译 stub 一步就崩（场景一条都没跑，却可能被外层当成"环境问题"忽略）。
+# ConsoleApplication 在 5.1 与 7 都合法且都产出控制台 exe → 用它。
+Add-Type -TypeDefinition $stubSource -OutputType ConsoleApplication -OutputAssembly $stubExe
 if (-not (Test-Path -LiteralPath $stubExe)) { throw "fault stub 编译失败：$stubExe" }
-Write-Host "[faults] fault stub 就位：$stubExe（运行目录 $runRoot）"
+# stub 必须自报构建身份，否则壳的"拒绝无 commit= 候选"门会让它根本不被拉起——
+# 那时测到的是 binary_missing 而不是目标场景（假归因）。这里显式跑一次 --version 断言。
+$stubIdentity = ((& $stubExe --version 2>&1) | Out-String).Trim()
+if ($stubIdentity -notmatch 'commit=') {
+    throw "fault stub 未自报构建身份（--version 无 commit=）：$stubIdentity"
+}
+Write-Host "[faults] fault stub 就位：$stubExe（运行目录 $runRoot，身份 $stubIdentity）"
 
 # ---- 单个场景执行（§3.3.4 生命周期：prepare→inject→launch→observe→assert→collect→cleanup）----
 function Invoke-Scenario {
@@ -336,15 +344,35 @@ function Invoke-Scenario {
         Add-Check $id '10s 内界面可操作（无永久 loading）' ($first -and $first.actionable) `
             "t=$($facts.actionable_at_sec)s health=`"$($first.healthText)`""
 
-        # ② 等到最终态：错误卡 / 引导页 / 正常界面（时限见 scenario.FinalBudgetSec）。
+        # ② 等到**声明终态**（§3.4 第二层时限）：错误卡带稳定码 / 引导页 / 正常界面。
+        # R3-BUG-06 的反向复发必须在此堵住：上一版循环"看见任何错误卡就 break"，
+        # 而界面在 t≈1.5s 就会先渲染一张无码的默认卡（readiness 超时），于是
+        # core-hang（45s）/ data-dir-unwritable / provider-unset 三条永远只在 1.5s 取证，
+        # 稳定码"来不及"出现——报出来的是"产品没报错"，实际是验收脚本提前收工。
+        # 判据用**卡面可见文本里是否出现稳定码**，不读内部全局：用户能看到的才算终态。
         $stage = 'assert'
         $final = $null
+        $terminalCodes = @('core/binary_missing', 'core/spawn_failed', 'core/handshake_timeout',
+            'core/identity_mismatch', 'core/exited', 'core/no_workspace', 'workspace/required',
+            'provider/not_configured', 'storage/not_writable')
         $deadline = (Get-Date).AddSeconds($Scenario.FinalBudgetSec)
         while ((Get-Date) -lt $deadline) {
             $final = Get-OwoVisibleUiText -Port $cdpPort -TimeoutSec 5
-            if ($final -and ($final.errorCard -or $final.setupGuide -or ($final.composerVisible -and $Scenario.Expect -ne 'error'))) { break }
+            $terminal = $false
+            if ($final) {
+                switch ($Scenario.Expect) {
+                    'error' {
+                        if (-not [string]::IsNullOrEmpty([string]$final.errorCard) -and
+                            @($terminalCodes | Where-Object { [string]$final.errorCard -like "*$_*" }).Count -gt 0) { $terminal = $true }
+                    }
+                    'guide' { if (-not [string]::IsNullOrEmpty([string]$final.setupGuide)) { $terminal = $true } }
+                    default { if ($final.composerVisible) { $terminal = $true } }
+                }
+            }
+            if ($terminal) { break }
             Start-Sleep -Milliseconds 800
         }
+        $facts.terminal_budget_hit = (Get-Date) -ge $deadline
         $facts.error_at_sec = if ($final -and $final.errorCard) { [Math]::Round(((Get-Date) - $started).TotalSeconds, 1) } else { -1 }
         $facts.error_card = if ($final) { [string]$final.errorCard } else { '' }
         $facts.setup_guide_len = if ($final) { ([string]$final.setupGuide).Length } else { 0 }
@@ -365,20 +393,34 @@ function Invoke-Scenario {
                     "found=$($facts.error_code) allowed=$($allowed -join '|')"
                 $needles = @($Scenario.RequiredActions)
                 if ($needles.Count -eq 0) { $needles = @('重新连接') }
-                $hit = @($needles | Where-Object { $facts.error_card -like "*$_*" })
-                Add-Check $id "错误卡提供动作（$($needles -join '/'))" ($hit.Count -gt 0) `
-                    "card=$($facts.error_card.Substring(0, [Math]::Min(120, $facts.error_card.Length)))"
+                # §3.4「必须提供的动作」= 全部出现（缺一即假通过）。
+                $missing = @($needles | Where-Object { $facts.error_card -notlike "*$_*" })
+                Add-Check $id "错误卡提供全部契约动作（$($needles -join '/'))" ($missing.Count -eq 0) `
+                    "missing=$($missing -join '/'); card=$($facts.error_card.Substring(0, [Math]::Min(120, $facts.error_card.Length)))"
                 $folded = Invoke-OwoCdpEval -Port $cdpPort -Expression "!!document.querySelector('.service-error details')" -TimeoutSec 6
                 $facts.details_folded = [bool]$folded
                 Add-Check $id '技术详情以折叠区呈现（不糊在正文里）' ($folded -eq $true) "details=$folded"
             }
         }
         if ($Scenario.Expect -eq 'guide') {
+            # 业务引导终态（§3.4 行 5/6）：必须是引导页本身（非错误卡、非白屏），
+            # 且提供契约动作；provider 场景还必须在页面呈现稳定码 provider/not_configured。
+            $guideText = if ($facts.ui_final) { [string]$facts.ui_final.setupGuide } else { '' }
             $guideOk = ($facts.setup_guide_len -gt 0) -and ($facts.error_card -eq '')
-            Add-Check $id '未选项目落到配置引导页（非错误卡、非白屏）' $guideOk `
-                "setupGuide=$($facts.setup_guide_len) 字 errorCard=$($facts.error_card.Length) 字 actionable=$($facts.ui_final.actionable)"
+            Add-Check $id '业务引导终态：配置引导页可见（非错误卡、非白屏）' $guideOk `
+                "setupGuide=$($facts.setup_guide_len) 字 errorCard=$($facts.error_card.Length) 字 actionable=$($facts.ui_final.actionable) t=$($facts.actionable_at_sec)s"
+            $needles = @($Scenario.RequiredActions)
+            $missing = @($needles | Where-Object { $guideText -notlike "*$_*" })
+            Add-Check $id "引导页提供全部契约动作（$($needles -join '/'))" ($guideOk -and $missing.Count -eq 0) `
+                "missing=$($missing -join '/')"
             Add-Check $id '引导页提供可操作动作' ([bool]($facts.ui_final -and $facts.ui_final.actionable)) `
                 "body=$($facts.ui_final.bodyText)"
+            if ($Scenario.GuideCode) {
+                $codeOk = @($Scenario.ExpectedCodes | Where-Object { $guideText -like "*$_*" }).Count -eq $Scenario.ExpectedCodes.Count
+                Add-Check $id "引导页呈现稳定错误码（$($Scenario.ExpectedCodes -join '/'))" $codeOk `
+                    "guide_has_code=$codeOk"
+                $facts.error_code = if ($codeOk) { $Scenario.ExpectedCodes -join ',' } else { '' }
+            }
         }
         if ($Scenario.Expect -eq 'mcp-audit') {
             $tokenFile = Join-Path $agentLeaf 'data\auth\token'
@@ -387,7 +429,7 @@ function Invoke-Scenario {
                 Add-Check $id '健康启动（用于 MCP 审计）' $false '未读到 core_ready'
             } else {
                 $token = if (Test-Path -LiteralPath $tokenFile) { (Get-Content -LiteralPath $tokenFile -Raw).Trim() } else { '' }
-                $mcp = Invoke-OwoCoreApi -Base "http://127.0.0.1:$($ready.port)" -Path '/mcp/servers' -Token $token
+                $mcp = Invoke-OwoCoreApi -Base "http://127.0.0.1:$($ready.port)" -Path '/mcp' -Token $token
                 $text = ($mcp | ConvertTo-Json -Depth 8)
                 $enabled = ($text -match '"example-hello"' -and $text -match '"(enabled|running)"\s*:\s*true')
                 Add-Check $id '示例 MCP（owo.plugin.example-hello）未在生产 profile 启用' (-not $enabled) `
@@ -397,13 +439,22 @@ function Invoke-Scenario {
         }
 
         # 截图证据：重获窗口（可见性+尺寸验证）→ 截屏 → 像素级有效性（§3.3.1/§3.3.2）。
+        # 验证失败时把"那一刻该进程的全部顶层窗口"一起写进结论与取证（否则只能靠
+        # 加等待时间猜是产品隐藏了窗口还是脚本盯错句柄——指南 §7.3 禁止那种做法）。
         if (-not $SkipScreenshots) {
-            $winShot = Get-OwoValidatedWindow -ProcessId $proc.Id -TimeoutSec 10 -RequireVisible
-            if (-not $winShot.ok) { throw "截图前窗口验证失败：$($winShot.fail_reasons -join ';')" }
+            # 钉住 observe 阶段已验证过的窗口复验：MainWindowHandle 实测会被同进程的
+            # 15x15 辅助窗口/窗口重建瞬间劫持（同一场景两轮分别量出 1295x837 与 15x15），
+            # 钉住 + 面积降序候选复验后，"界面真没恢复"和"脚本盯错句柄"才不再是同一句话。
+            $winShot = Get-OwoValidatedWindow -ProcessId $proc.Id -TimeoutSec 10 -RequireVisible -PreferredHwnd $win.hwnd
+            if (-not $winShot.ok) {
+                throw ("截图前窗口验证失败：{0}；hwnd={1} {2}x{3} vis={4} min={5} restored={6} candidates={7} observe_hwnd={8}" -f ($winShot.fail_reasons -join ';'), $winShot.hwnd, $winShot.width, $winShot.height, $winShot.visible, $winShot.minimized, $winShot.restored_before_measure, $winShot.candidate_count, $win.hwnd)
+            }
             $null = Set-OwoWindowGeometry -Hwnd $winShot.hwnd -Width 1280 -Height 720
             Start-Sleep -Milliseconds 900
-            $winShot = Get-OwoValidatedWindow -ProcessId $proc.Id -TimeoutSec 8 -RequireVisible
-            if (-not $winShot.ok) { throw "几何调整后窗口验证失败：$($winShot.fail_reasons -join ';')" }
+            $winShot = Get-OwoValidatedWindow -ProcessId $proc.Id -TimeoutSec 8 -RequireVisible -PreferredHwnd $win.hwnd
+            if (-not $winShot.ok) {
+                throw ("几何调整后窗口验证失败：{0}；hwnd={1} {2}x{3} vis={4} min={5} restored={6} candidates={7} observe_hwnd={8}" -f ($winShot.fail_reasons -join ';'), $winShot.hwnd, $winShot.width, $winShot.height, $winShot.visible, $winShot.minimized, $winShot.restored_before_measure, $winShot.candidate_count, $win.hwnd)
+            }
             $shot = Join-Path $evDir "fault-$id-1280x720.png"
             $null = Save-OwoWindowShot -Hwnd $winShot.hwnd -Path $shot
             $metric = Test-OwoScreenshot -Path $shot -ExpectedWidth $winShot.width -ExpectedHeight $winShot.height
@@ -436,7 +487,17 @@ function Invoke-Scenario {
             Copy-Item -LiteralPath $shellLog[0].FullName -Destination (Join-Path $logsCopy 'desktop-core.log') -Force
             Copy-Item -LiteralPath $shellLog[0].FullName -Destination (Join-Path $evDir 'desktop-core.log') -Force
         } else {
-            Add-Check $id '壳日志存在（可观测性底线）' $false "logDir=$logDir 无 desktop-core-*.log"
+            # 无 core 日志分两种情形，必须区分，否则"契约允许的沉默"会被当成缺陷：
+            #   · NeedsWorkspace=$false（no-workspace）：按 §4.6 壳**不得**拉起 core，
+            #     因此不存在 desktop-core-*.log；可观测性由壳状态（workspace/required）
+            #     承担，已由"稳定错误码/引导页"两条断言硬校验。这里显式记为通过并留痕。
+            #   · 其余场景：core 应当被拉起，日志缺失就是真缺陷。
+            if (-not $Scenario.NeedsWorkspace) {
+                Add-Check $id '可观测性底线：按契约不拉起 core，故不要求 core 日志（状态由壳承担）' $true `
+                    "logDir=$logDir 无 desktop-core-*.log（no_workspace 预期）"
+            } else {
+                Add-Check $id '壳日志存在（可观测性底线）' $false "logDir=$logDir 无 desktop-core-*.log"
+            }
         }
         $facts.executed = $true
         Add-Check $id '场景完整执行（prepare→collect 全阶段无异常）' $true "stages=ok"
@@ -506,7 +567,12 @@ finally {
     $hashNow = ''
     if (Test-Path -LiteralPath $sdkSidecar) { $hashNow = (Get-FileHash -LiteralPath $sdkSidecar -Algorithm SHA256).Hash }
     if ($sdkCoreHashBefore -and $hashNow -and ($hashNow -ne $sdkCoreHashBefore)) { $hashOk = $false }
-    $renameResidue = @(Get-ChildItem -LiteralPath (Split-Path -Parent $sdkSidecar) -Filter 'owo-agent.exe.*' -ErrorAction SilentlyContinue)
+    # ⚠ 残留判定不能用 `-Filter 'owo-agent.exe.*'`：Win32 通配的遗留规则里
+    # `name.*` 连 `name` 本体一起匹配（实测把真实的 owo-agent.exe 自己算成残留，
+    # 于是这条"防破坏产物"的门反而天天假红）。改为按真实文件名正则判定
+    # `owo-agent.exe.<任意后缀>`（历史缺陷场景就是被改名成这样的备份）。
+    $renameResidue = @(Get-ChildItem -LiteralPath (Split-Path -Parent $sdkSidecar) -Filter 'owo-agent.exe*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^owo-agent\.exe\.' })
     Add-Check 'ALL' '真实 debug core 未被改动（哈希前后一致，R3-BUG-03）' ($hashOk -and $renameResidue.Count -eq 0) `
         "hash_before=$($sdkCoreHashBefore.Substring(0, [Math]::Min(12, $sdkCoreHashBefore.Length))) hash_after=$($hashNow.Substring(0, [Math]::Min(12, $hashNow.Length))) rename_residue=$($renameResidue.Count)"
     $summaryPath = Join-Path $EvidenceDir 'failure-matrix-report.json'

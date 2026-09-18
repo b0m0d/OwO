@@ -50,7 +50,16 @@ test("§5.1.8 OpenAPI 链接由 API base 构造绝对地址", () => {
 test("§4.6/§4.8 首次配置引导：NoWorkspace 分流 + 提供商选择", () => {
   const app = read("../app.js");
   assert.match(app, /async function needsSetup\(\)/, "必须提供 needsSetup 判定");
-  assert.match(app, /renderOwoSetupGuide\(content, global\.__owoCoreDiagnostics \|\| null, \(\) => recover\(\)\)/, "引导完成后落回 recover");
+  // 断言"接线意图"而不是抄实现字面量：上一版这里逐字写了 `global.__owoCoreDiagnostics`，
+  // 等于把 ReferenceError 缺陷固化进契约（app.js 是顶层脚本，没有 global 标识符）。
+  // 现在要求：渲染时携带壳快照（window.__owoCoreDiagnostics）且完成后回调 recover。
+  assert.match(
+    app,
+    /renderOwoSetupGuide\(\s*content,\s*window\.__owoCoreDiagnostics[\s\S]{0,60}?=>\s*recover\(\)\s*\)/,
+    "引导渲染必须带壳快照并把完成动作接回 recover"
+  );
+  assert.match(app, /catch\s*\(error\)[\s\S]{0,200}renderOwoServiceError\(content,\s*error,\s*recover\)/,
+    "引导抛错必须回落错误卡（不允许主区空白）");
   const guide = read("../views/setup-guide.view.js");
   assert.match(guide, /get_workspace/, "引导读取当前工作区");
   assert.match(guide, /set_workspace/, "引导可设置工作区");

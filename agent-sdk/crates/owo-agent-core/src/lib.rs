@@ -206,6 +206,7 @@ pub use fleet_transport::{
 pub use gateway::{
     budget_violation, parse_usage_value, ChatMessage, ModelOutput, ModelProvider,
     OpenAiCompatibleConfig, OpenAiCompatibleProvider, TokenUsage, ToolCall,
+    UnconfiguredModelProvider,
 };
 pub use goal::{
     Goal, GoalBudget, GoalRunState, GoalRunner, GoalStatus, RunnerConfig, Worker, WorkerRegistry,

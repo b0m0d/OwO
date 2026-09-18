@@ -27,6 +27,7 @@ function Add-OwoDesktopWin32 {
     if (-not ('OwoWin32' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class OwoWin32 {
     [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int W, int H, bool repaint);
@@ -37,21 +38,78 @@ public static class OwoWin32 {
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
     [StructLayout(LayoutKind.Sequential)] public struct OwoRect { public int Left; public int Top; public int Right; public int Bottom; }
+
+    // ---- 窗口枚举（R3-B 取证稳定性） -------------------------------------------
+    // 为什么不能只信 Process.MainWindowHandle：.NET 的 MainWindowHandle 不保证是
+    // "业务主窗口"——它按启发式挑选，一个同进程 15x15 的辅助窗口（WebView2/Tauri/
+    // 输入法候选窗都会建）就能把它整个换掉。实测故障矩阵里同一场景上一轮量到
+    // 1295x837、下一轮量到 15x15，截图门于是变成抛硬币。
+    //
+    // 委托回调**必须写在 C# 内部**：早期版本在 PowerShell 侧构造 EnumWindows 回调，
+    // PS 5.1 在 native 回调里抛 "Argument types do not match"（嵌套委托/结构体封送
+    // 的已知坑），换不来结果只换来 flaky。这里返回按客户面积降序排列的句柄数组，
+    // PowerShell 侧从大到小逐个复验，辅助窗口永远排不到前面。
+    private delegate bool OwoEnumProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(OwoEnumProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);   // GA_ROOT=2
+    private const uint GA_ROOT = 2;
+
+    /// 返回属于 pid 的**顶层可见候选**窗口句柄，按面积从大到小排序（含不可见顶层窗口，
+    /// 由调用方决定可见性要求；最小化窗口按 GetWindowRect 的真实伪矩形面积参与排序）。
+    public static IntPtr[] TopLevelWindowHandlesByArea(uint processId) {
+        var pairs = new List<KeyValuePair<long, IntPtr>>();
+        EnumWindows((h, l) => {
+            uint pid;
+            GetWindowThreadProcessId(h, out pid);
+            if (pid != processId) return true;
+            if (GetAncestor(h, GA_ROOT) != h) return true;            // 只要根窗口：过滤子窗口/嵌入控件
+            OwoRect r;
+            if (!GetWindowRect(h, out r)) return true;
+            long w = r.Right - r.Left, hh = r.Bottom - r.Top;
+            if (w <= 0 || hh <= 0) return true;                        // 零尺寸/未实例化的残窗口
+            pairs.Add(new KeyValuePair<long, IntPtr>(w * hh, h));
+            return true;
+        }, IntPtr.Zero);
+        pairs.Sort((a, b) => b.Key.CompareTo(a.Key));                  // 面积降序：主窗口必然排第一
+        var result = new IntPtr[pairs.Count];
+        for (int i = 0; i < pairs.Count; i++) result[i] = pairs[i].Value;
+        return result;
+    }
 }
 '@
     }
+    # 加载失败必须致命：静默降级会把"窗口身份检查"退化成猜——本文件存在的理由就是消除这类假通过。
+    if (-not ('OwoWin32' -as [type])) {
+        throw "OwoWin32 类型未能加载（Add-Type 静默失败）——窗口身份与截图验真不可用，验收必须停止"
+    }
 }
 
+# dot-source 即加载：类型可用性与"哪个消费方记得调用"解耦（幂等，可重复 dot-source）。
+Add-OwoDesktopWin32
+
 function Get-OwoShellWindow {
-    <# 等主窗口句柄出现；超时返回 IntPtr.Zero（不得把"没窗口"当成功）。 #>
+    <# 等主窗口句柄出现；超时返回 IntPtr.Zero（不得把"没窗口"当成功）。
+       与 Get-OwoValidatedWindow 同一套候选解析——本文件曾经并存两份窗口解析，
+       分叉直接造成过一次假绿（见 verify-desktop-cold-boot.ps1 顶部注记）。 #>
     param([int]$ProcessId, [int]$TimeoutSec = 20)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $firstAlive = [IntPtr]::Zero
     while ((Get-Date) -lt $deadline) {
         $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) { return $proc.MainWindowHandle }
+        if (-not $proc) { return [IntPtr]::Zero }
+        foreach ($cand in @(Resolve-OwoShellWindowCandidate -ProcessId $ProcessId -Process $proc)) {
+            if ($cand -eq [IntPtr]::Zero -or -not [OwoWin32]::IsWindow($cand)) { continue }
+            $owner = [uint32]0
+            $null = [OwoWin32]::GetWindowThreadProcessId($cand, [ref]$owner)
+            if ([int]$owner -ne $ProcessId) { continue }
+            # 优先返回"真的可见"的那个：等窗口出现时，面积最大的候选可能是
+            # 还没显示的宿主窗口（返回它就等于让调用方拿一个黑窗口去截图）。
+            if ([OwoWin32]::IsWindowVisible($cand) -and -not [OwoWin32]::IsIconic($cand)) { return $cand }
+            if ($firstAlive -eq [IntPtr]::Zero) { $firstAlive = $cand }
+        }
         Start-Sleep -Milliseconds 300
     }
-    return [IntPtr]::Zero
+    return $firstAlive
 }
 
 function Set-OwoWindowGeometry {
@@ -93,6 +151,34 @@ function Save-OwoWindowShot {
     return "$width x $height"
 }
 
+function Resolve-OwoShellWindowCandidate {
+    <#
+      在一个进程的多个顶层窗口里挑出"业务主窗口"候选，按优先级返回句柄列表。
+
+      顺序：调用方钉住的句柄 → 面积降序的顶层窗口 → Process.MainWindowHandle 兜底。
+      MainWindowHandle 排最后而不是排第一：它是 .NET 的启发式结果，实测会被同进程
+      15x15 辅助窗口劫持（故障矩阵同一场景两轮量出 1295x837 / 15x15 即为此）。
+      这里只负责"排候选"，是否可用仍由 Get-OwoValidatedWindow 逐个复验判定，
+      因此不违反 §3.3.1「绝不复用缓存 HWND」——每个候选都要重新验身份。
+    #>
+    param([int]$ProcessId, [System.Diagnostics.Process]$Process, [IntPtr]$PreferredHwnd = [IntPtr]::Zero)
+    $candidates = New-Object System.Collections.Generic.List[IntPtr]
+    if ($PreferredHwnd -ne [IntPtr]::Zero) { $candidates.Add($PreferredHwnd) }
+    try {
+        foreach ($h in @([OwoWin32]::TopLevelWindowHandlesByArea([uint32]$ProcessId))) {
+            if ($h -ne [IntPtr]::Zero -and -not $candidates.Contains($h)) { $candidates.Add($h) }
+        }
+    } catch {
+        # 枚举不可用（极端权限/会话隔离）时静默降级到 MainWindowHandle，但必须留痕，
+        # 否则"枚举修好了"这件事以后没人知道是真是假。
+        $global:OwoWindowEnumError = $_.Exception.Message
+    }
+    if ($Process -and $Process.MainWindowHandle -ne [IntPtr]::Zero -and -not $candidates.Contains($Process.MainWindowHandle)) {
+        $candidates.Add($Process.MainWindowHandle)
+    }
+    return @($candidates)
+}
+
 function Get-OwoValidatedWindow {
     <#
       R3-A1（指南 §3.3.1）：窗口身份检查——每次截图/隐藏/恢复/core 重启后**重新获取**
@@ -105,6 +191,9 @@ function Get-OwoValidatedWindow {
     #>
     param(
         [int]$ProcessId,
+        # 已在前一阶段验证过的句柄（如 observe 阶段拿到的主窗口）。给了就先试它，
+        # 但仍要复验身份；失效则自动落到"按面积排好的顶层窗口候选"重新解析。
+        [IntPtr]$PreferredHwnd = [IntPtr]::Zero,
         [int]$TimeoutSec = 20,
         [int]$MinWidth = 800,
         [int]$MinHeight = 520,
@@ -124,16 +213,54 @@ function Get-OwoValidatedWindow {
             discovered_at  = (Get-Date).ToUniversalTime().ToString('o')
             ok             = $false
             fail_reasons   = @()
+            restored_before_measure = $false
+            candidate_count = 0
         }
         $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
         if (-not $proc) {
             $info.fail_reasons = @('process_exited')
             return [pscustomobject]$info
         }
-        $hwnd = $proc.MainWindowHandle
+        # 每次重新取句柄（绝不复用缓存 HWND，§3.3.1）；"最小化伪矩形"由下面的
+        # restored_before_measure 分支处理：先 SW_RESTORE 再量，避免把"只是最小化了"
+        # 误报成"界面没恢复"，也避免拿 158x26 的伪矩形去判截图有效。
+        $candidates = @(Resolve-OwoShellWindowCandidate -ProcessId $ProcessId -Process $proc -PreferredHwnd $PreferredHwnd)
+        $info.candidate_count = $candidates.Count
+        # 三级择优（R3.6 实测教训：只按面积挑"属于本 PID 的最大窗口"会挑中不可见的
+        # 顶层辅助窗口，面积还可能比主窗口大，于是冷启动 3 条截图断言整片报
+        # window_not_visible——不是界面没了，是脚本盯错了窗口）：
+        #   ① 可见 + 未最小化 + 尺寸达标 → 直接认定主窗口；
+        #   ② 可见或处于最小态（下面 SW_RESTORE 分支要救的就是它）→ 次选；
+        #   ③ 仅"归属本 PID 的活窗口" → 兜底，只为把失败原因说清楚。
+        $hwnd = [IntPtr]::Zero
+        $softFallback = [IntPtr]::Zero
+        $anyFallback = [IntPtr]::Zero
+        foreach ($cand in $candidates) {
+            if ($cand -eq [IntPtr]::Zero -or -not [OwoWin32]::IsWindow($cand)) { continue }
+            $ownerCheck = [uint32]0
+            $null = [OwoWin32]::GetWindowThreadProcessId($cand, [ref]$ownerCheck)
+            # 只接受"确实属于本进程"的候选：MainWindowHandle 在句柄失效时会返回别的
+            # 进程的窗口，放过来就是把别人的界面当我们的截图（R3-BUG-02 同一类）。
+            if ([int]$ownerCheck -ne $ProcessId) { continue }
+            if ($anyFallback -eq [IntPtr]::Zero) { $anyFallback = $cand }
+            $candVisible = [OwoWin32]::IsWindowVisible($cand)
+            $candIconic = [OwoWin32]::IsIconic($cand)
+            if (($candVisible -or $candIconic) -and $softFallback -eq [IntPtr]::Zero) { $softFallback = $cand }
+            if (-not $RequireVisible) { $hwnd = $cand; break }   # 软探测：不判可见性，首个归属即可
+            if (-not $candVisible -or $candIconic) { continue }
+            $cr = New-Object 'OwoWin32+OwoRect'
+            if (-not [OwoWin32]::GetWindowRect($cand, [ref]$cr)) { continue }
+            if (($cr.Right - $cr.Left) -lt $MinWidth -or ($cr.Bottom - $cr.Top) -lt $MinHeight) { continue }
+            $hwnd = $cand
+            break
+        }
+        if ($hwnd -eq [IntPtr]::Zero) {
+            if ($softFallback -ne [IntPtr]::Zero) { $hwnd = $softFallback }
+            elseif ($anyFallback -ne [IntPtr]::Zero) { $hwnd = $anyFallback }
+        }
         $info.hwnd = $hwnd
-        if ($hwnd -eq [IntPtr]::Zero -or -not [OwoWin32]::IsWindow($hwnd)) {
-            $info.fail_reasons = @('invalid_hwnd')
+        if ($hwnd -eq [IntPtr]::Zero) {
+            $info.fail_reasons = @("no_candidate_window(count=$($candidates.Count))")
         } else {
             $ownerPid = [uint32]0
             $null = [OwoWin32]::GetWindowThreadProcessId($hwnd, [ref]$ownerPid)
@@ -151,6 +278,25 @@ function Get-OwoValidatedWindow {
                     $info.right = $rect.Right; $info.bottom = $rect.Bottom
                     $info.width = $rect.Right - $rect.Left
                     $info.height = $rect.Bottom - $rect.Top
+                    # 最小化窗口的 GetWindowRect 返回的是"最小化伪矩形"（实测 158×26
+                    # 且 IsIconic=true）——直接判失败会把"窗口其实只是被最小化"误报成
+                    # "界面没恢复"。这里显式还原一次再量，并把动作留在结果里（证据必须
+                    # 说明这张截图是在还原后拍的，而不是凭空变大）。
+                    if ($info.minimized) {
+                        $null = [OwoWin32]::ShowWindow($hwnd, 9)   # SW_RESTORE
+                        $info.restored_before_measure = $true
+                        Start-Sleep -Milliseconds 450
+                        $rect2 = New-Object 'OwoWin32+OwoRect'
+                        if ([OwoWin32]::GetWindowRect($hwnd, [ref]$rect2)) {
+                            $rect = $rect2
+                            $info.left = $rect2.Left; $info.top = $rect2.Top
+                            $info.right = $rect2.Right; $info.bottom = $rect2.Bottom
+                            $info.width = $rect2.Right - $rect2.Left
+                            $info.height = $rect2.Bottom - $rect2.Top
+                        }
+                        $info.visible = [OwoWin32]::IsWindowVisible($hwnd)
+                        $info.minimized = [OwoWin32]::IsIconic($hwnd)
+                    }
                     $fails = @()
                     if (-not $info.visible) { $fails += 'window_not_visible' }
                     if ($info.minimized) { $fails += 'window_minimized' }
@@ -282,6 +428,7 @@ function Test-OwoScreenshot {
     $result.ok = ($result.fail_reasons.Count -eq 0)
     return [pscustomobject]$result
 }
+
 
 function Get-OwoScreenshotMetricLine {
     <# 断言 detail 用的单行指标摘要（宽/高/字节/非黑比例/方差/失败原因）。 #>
@@ -691,14 +838,30 @@ function Invoke-OwoCdpEval {
             try { $message = $chunk | ConvertFrom-Json } catch { $trace.Add("bad_json len=$($chunk.Length)"); continue }
             if ($null -eq $message) { continue }
             if ($message.id -ne 1) { continue }   # 事件通知帧：继续等响应
-            if ($message.error) {
-                $global:OwoCdpLastError = "cdp_error $($message.error.code): $($message.error.message)"
+            # CDP 成功响应**没有** error 字段，失败响应没有 result 字段——两者都必须
+            # 按"属性是否存在"判定：直取不存在的属性在 Set-StrictMode -Version Latest
+            # 的调用方里会抛 "property cannot be found"，把真实故障伪装成 CDP 异常。
+            if ($message.PSObject.Properties['error']) {
+                $err = $message.error
+                $global:OwoCdpLastError = 'cdp_error {0}: {1}' -f `
+                    $(if ($err.PSObject.Properties['code']) { $err.code } else { '?' }), `
+                    $(if ($err.PSObject.Properties['message']) { $err.message } else { '<no message>' })
+                $trace.Add($global:OwoCdpLastError)
+                break
+            }
+            if (-not $message.PSObject.Properties['result']) {
+                $global:OwoCdpLastError = 'cdp_response_without_result'
                 $trace.Add($global:OwoCdpLastError)
                 break
             }
             $trace.Add("frames=$frames ok")
             $global:OwoCdpTrace = @($trace)
-            return $message.result.result.value
+            $res = $message.result
+            if (-not $res.PSObject.Properties['result']) { return $null }   # 无 value 语义（如被 CDP 丢弃）
+            $inner = $res.result
+            if ($inner.PSObject.Properties['value']) { return $inner.value }
+            if ($inner.PSObject.Properties['description']) { return $inner.description }
+            return $null
         }
         if (-not $global:OwoCdpLastError) {
             $global:OwoCdpLastError = "no_response frames=$frames budget=${TimeoutSec}s"
@@ -740,7 +903,7 @@ function Get-OwoVisibleUiText {
     healthText: txt(document.getElementById("health")),
     routeText: txt(document.getElementById("routeContent")),
     errorCard: txt(document.querySelector(".service-error")),
-    setupGuide: txt(document.querySelector(".setup-guide")),
+    setupGuide: txt(document.querySelector(".setup-guide, .setup-card")),
     composerVisible: visible(document.getElementById("prompt")),
     actionable: actionable,
     bodyText: txt(document.body).slice(0, 600)

@@ -22,7 +22,7 @@ use std::time::Duration;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt as _;
 
-use crate::core_supervisor::{self, parse_ready_line};
+use crate::core_supervisor::{self, parse_fatal_line, parse_ready_line};
 use crate::provider::{self, ProviderConfig};
 
 /// 由 build.rs 从核心服务的 OWO_API_VERSION 单一源码读取。
@@ -41,6 +41,9 @@ const READY_LINE_TIMEOUT: Duration = Duration::from_secs(25);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 /// §4.3 稳定错误码 + 用户可操作文案（壳的启动诊断页直接消费）。
+/// R3-B（指南 §3.4 契约冻结）：八故障场景的错误码为唯一事实源——
+/// `core/*` 属壳-核心故障层，`workspace/required` 属工作区层，
+/// `storage/not_writable` 属存储层（由核心 `core_fatal` 行上报后映射）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreError {
     BinaryMissing,
@@ -51,6 +54,8 @@ pub enum CoreError {
     /// §4.6：未选择项目工作区（NoWorkspace）。正常由 `start()` 门控，
     /// launch_once 内仅作防御性兜底。
     NoWorkspace,
+    /// §3.4：数据目录不可写（核心启动期 `core_fatal code=storage/not_writable`）。
+    StorageNotWritable,
 }
 
 impl CoreError {
@@ -61,18 +66,31 @@ impl CoreError {
             CoreError::HandshakeTimeout => "core/handshake_timeout",
             CoreError::IdentityMismatch => "core/identity_mismatch",
             CoreError::ExitedUnexpectedly => "core/exited",
-            CoreError::NoWorkspace => "core/no_workspace",
+            // §3.4 冻结：未选工作区的目标错误码是 `workspace/required`（旧
+            // `core/no_workspace` 把"业务引导"错归因为"核心故障层"）。
+            CoreError::NoWorkspace => "workspace/required",
+            CoreError::StorageNotWritable => "storage/not_writable",
         }
     }
 
     pub fn user_message(&self) -> &'static str {
         match self {
-            CoreError::BinaryMissing => "核心服务文件缺失，安装可能不完整",
+            CoreError::BinaryMissing => "后台组件缺失：核心服务文件缺失，安装可能不完整",
             CoreError::SpawnFailed => "核心服务启动失败，请查看日志",
-            CoreError::HandshakeTimeout => "服务已启动但未完成初始化",
-            CoreError::IdentityMismatch => "检测到不属于本窗口的旧服务",
-            CoreError::ExitedUnexpectedly => "核心服务意外退出，多次重启未恢复",
+            CoreError::HandshakeTimeout => "启动超时：服务已启动但未完成初始化",
+            CoreError::IdentityMismatch => "组件身份不一致：检测到不属于本窗口的旧服务",
+            CoreError::ExitedUnexpectedly => "后台意外退出：可重启后台或查看诊断日志",
             CoreError::NoWorkspace => "尚未选择项目工作区",
+            CoreError::StorageNotWritable => "存储错误：数据目录不可写，请更换数据目录或修复权限",
+        }
+    }
+
+    /// 核心 `core_fatal` 行的稳定码 → 壳错误（未知码保守归 spawn_failed，
+    /// 原始码留在日志里；不允许把陌生码静默升级成"成功"）。
+    pub fn from_fatal_code(code: &str) -> CoreError {
+        match code {
+            "storage/not_writable" => CoreError::StorageNotWritable,
+            _ => CoreError::SpawnFailed,
         }
     }
 }
@@ -124,6 +142,12 @@ pub struct CoreRuntime {
     workspace: Arc<Mutex<Option<PathBuf>>>,
     /// §4.8：用户显式选择的模型提供商（数据目录持久化；密钥不落盘）。
     provider_cfg: Arc<Mutex<ProviderConfig>>,
+    /// R3-B（§3.4 终态可见性）：最近一次启动失败的 `(稳定码, 用户文案)`。
+    /// 必须独立于 CoreState 存活：失败后监督线程会立刻进 Starting/Restarting 退避
+    /// 重试，而那两个状态本身不带码——真机故障矩阵实测（core-exit / core-hang /
+    /// data-dir-unwritable）UI 因此抓到无码快照，渲染成默认三出口 + 通用文案，
+    /// 用户看不出真实故障，验收也判"错误码不在期望集合内"。
+    last_error: Arc<Mutex<Option<(String, String)>>>,
 }
 
 impl CoreRuntime {
@@ -139,6 +163,7 @@ impl CoreRuntime {
             child_pid: Arc::new(Mutex::new(None)),
             workspace: Arc::new(Mutex::new(load_saved_workspace())),
             provider_cfg: Arc::new(Mutex::new(provider::load_provider_config())),
+            last_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -160,6 +185,7 @@ impl CoreRuntime {
             child_pid: Arc::new(Mutex::new(None)),
             workspace: Arc::new(Mutex::new(workspace)),
             provider_cfg: Arc::new(Mutex::new(provider::load_provider_config())),
+            last_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -186,6 +212,32 @@ impl CoreRuntime {
             .lock()
             .map(|path| path.clone())
             .unwrap_or_default()
+    }
+
+    /// R3-B（§3.4 终态可见性）：记录一次启动失败（稳定码 + 用户文案）。
+    /// 在 `set_state(Failed)` 之前调用，使错误码在随后的退避重试中仍然可查——
+    /// 监督线程进 Starting/Restarting 后，CoreState 本身不带码，UI 会退化成
+    /// "默认三出口 + 通用文案"，用户与验收都看不到真实故障。
+    fn record_failure(&self, failure: CoreError) {
+        if let Ok(mut guard) = self.last_error.lock() {
+            *guard = Some((
+                failure.code().to_string(),
+                failure.user_message().to_string(),
+            ));
+        }
+    }
+
+    /// 成功就绪即清陈旧错误（不得让上一代的故障码继续挂在诊断面上）。
+    fn clear_failure(&self) {
+        if let Ok(mut guard) = self.last_error.lock() {
+            *guard = None;
+        }
+    }
+
+    /// 最近一次启动失败（`None` = 从未失败或已恢复）。命令层据此在
+    /// starting/restarting 状态下仍然呈现稳定码与文案。
+    pub fn last_error(&self) -> Option<(String, String)> {
+        self.last_error.lock().ok().and_then(|guard| guard.clone())
     }
 
     /// §4.6 当前项目工作区（None = 未选择，处于 NoWorkspace）。
@@ -217,8 +269,18 @@ impl CoreRuntime {
     }
 
     /// 手动重试（诊断页按钮）：代数递增使旧监督线程失效，立即重新拉起。
+    /// R3-B（§3.4 动作「终止并重试」）：先**终止当前子进程树**再启动新代——旧监督
+    /// 线程在代际切换后只 drop 句柄不杀进程，挂死的 core 会成孤儿继续占端口。
     pub fn retry(self: &Arc<Self>) {
         self.generation.fetch_add(1, Ordering::SeqCst);
+        let pid = self
+            .child_pid
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pid) = pid {
+            kill_process_tree(pid);
+        }
         self.start();
     }
 
@@ -290,6 +352,8 @@ impl CoreRuntime {
             self.set_state(CoreState::Starting { attempt });
             match self.launch_once() {
                 Ok((connection, generation_handle)) => {
+                    // 成功就绪：清掉上一代的陈旧故障码，避免诊断面继续呈现旧故障。
+                    self.clear_failure();
                     self.set_state(CoreState::Ready(connection));
                     let reason = wait_for_exit(&generation_handle, generation, &self.generation);
                     if self.shutdown_requested.load(Ordering::SeqCst) {
@@ -301,6 +365,7 @@ impl CoreRuntime {
                         return;
                     }
                     if attempt as usize >= RESTART_DELAYS.len() {
+                        self.record_failure(CoreError::ExitedUnexpectedly);
                         self.set_state(CoreState::Failed {
                             code: CoreError::ExitedUnexpectedly.code(),
                             message: CoreError::ExitedUnexpectedly.user_message().to_string(),
@@ -323,9 +388,11 @@ impl CoreRuntime {
                     }
                     if failure == CoreError::NoWorkspace {
                         // §4.6：工作区被并发清除等竞态 → 回到 NoWorkspace 引导，不报 Failed。
+                        self.clear_failure();
                         self.set_state(CoreState::NoWorkspace);
                         return;
                     }
+                    self.record_failure(failure);
                     self.set_state(CoreState::Failed {
                         code: failure.code(),
                         message: failure.user_message().to_string(),
@@ -411,10 +478,24 @@ impl CoreRuntime {
         spawn_log_thread(stdout, &self.pairing, &log, Some(ready_tx));
         spawn_log_thread(stderr, &self.pairing, &log, None);
 
-        // 就绪判定：等本次代际的 core_ready 行取得实际端口（--port 0 由系统分配）。
+        // 就绪判定：等本次代际的协议行取得实际端口（--port 0 由系统分配）。
         let ready = wait_ready_line(&ready_rx, &generation);
+        // §3.4：核心上报的 core_fatal 行优先处理（如 storage/not_writable）——
+        // 明确错误码 + 立即失败，绝不让它烧完超时冒充"握手失败"。
+        if let ReadyOutcome::Line(ref value) = ready {
+            if value["event"].as_str() == Some("core_fatal") {
+                let code = value["code"].as_str().unwrap_or("unknown");
+                let message = value["message"].as_str().unwrap_or("核心服务遇到致命错误");
+                append_log_line(
+                    &log,
+                    &format!("[runtime] core 上报致命错误：code={code} message={message}"),
+                );
+                generation.terminate();
+                return Err(CoreError::from_fatal_code(code));
+            }
+        }
         match ready {
-            Some(value) => {
+            ReadyOutcome::Line(value) => {
                 let port = value["port"].as_u64().unwrap_or(0) as u16;
                 // §4.3：ready 消息先校验实例身份与端口非 0，再经 /health 二次确认。
                 let instance_ok = value["instance_id"]
@@ -465,7 +546,16 @@ impl CoreRuntime {
                     generation,
                 ))
             }
-            None => {
+            ReadyOutcome::Exited => {
+                // R3-B（§3.4）：早退是独立终态 `core/exited`（15s 级），不再烧完
+                // 两轮超时伪装成"握手超时"——错误归因决定用户能否自助修复。
+                append_log_line(
+                    &log,
+                    "[runtime] core 早退：ready 行之前进程已退出（core/exited）",
+                );
+                Err(CoreError::ExitedUnexpectedly)
+            }
+            ReadyOutcome::Timeout => {
                 // §4.4：旧核心无 core_ready 行 → 壳自选空闲端口重启一次；每代独立 exit 信号，
                 // 且 kill 旧代后先等待旧 watch 完整结束才创建新代（不串用旧退出事件）。
                 append_log_line(&log, "[runtime] 未观察到 core_ready 行，走固定端口兼容回退");
@@ -503,7 +593,13 @@ impl CoreRuntime {
                 )
                 .map_err(|error| {
                     append_log_line(&log, &format!("[runtime] 兼容回退实例校验失败：{error}"));
-                    CoreError::HandshakeTimeout
+                    // 兼容代也可能秒退（stub/坏安装）：按事实归 core/exited，
+                    // 只有"活着但不响应"才是 handshake_timeout。
+                    if fallback_generation.has_exited() {
+                        CoreError::ExitedUnexpectedly
+                    } else {
+                        CoreError::HandshakeTimeout
+                    }
                 })?;
                 self.bootstrap_bearer(fallback_port);
                 Ok((
@@ -635,24 +731,58 @@ impl ChildGeneration {
     fn has_exited(&self) -> bool {
         self.exit_flag.load(Ordering::SeqCst)
     }
+
+    /// 有界等待退出标志落地：stdout EOF 与 watch 线程的 child.wait() 返回之间存在
+    /// 毫秒级竞态，直接判"还活着"会把早退烧成两轮握手超时（§3.4 的 core/exited
+    /// 终态与 15s 时限同时失效）。只等不改判定：超时后原样返回当前事实。
+    fn wait_exit_within(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if self.has_exited() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.has_exited()
+    }
 }
 
-/// §4.3 等待本次代际的 core_ready 行：绑定本代 channel，不使用全局缓存；
-/// 子进程提前退出（未及输出 ready）或超时 → None（调用方决定兼容回退/失败）。
-fn wait_ready_line(rx: &mpsc::Receiver<Value>, generation: &ChildGeneration) -> Option<Value> {
+/// R3-B（§3.4 时限契约）：等待本次代际的首个协议行（core_ready 或 core_fatal）。
+/// 区分为三态而不是旧的 Option：
+/// - `Line`：拿到协议行（fatal 行由调用方映射为明确错误码）；
+/// - `Exited`：子进程在协议行之前退出/管道 EOF → **早退**（core/exited，15s 内出
+///   终态），不再烧 25+15 秒伪装成"握手超时"（R3-BUG-05 同族归因错误）；
+/// - `Timeout`：进程活着但 25s 无协议行 → 走兼容回退（旧核心路径）。
+enum ReadyOutcome {
+    Line(Value),
+    Exited,
+    Timeout,
+}
+
+fn wait_ready_line(rx: &mpsc::Receiver<Value>, generation: &ChildGeneration) -> ReadyOutcome {
     let deadline = std::time::Instant::now() + READY_LINE_TIMEOUT;
     loop {
         if generation.has_exited() {
-            return None;
+            return ReadyOutcome::Exited;
         }
         match rx.recv_timeout(Duration::from_millis(150)) {
-            Ok(value) => return Some(value),
+            Ok(value) => return ReadyOutcome::Line(value),
             Err(RecvTimeoutError::Timeout) => {
                 if std::time::Instant::now() >= deadline {
-                    return None;
+                    return ReadyOutcome::Timeout;
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Disconnected) => {
+                // stdout 线程结束（管道 EOF）：进程多半已退，但退出标志要等 watch 线程
+                // 的 child.wait() 返回才置位，两者存在毫秒级竞态。直接判 Timeout 会把
+                // 早退烧成 25s+15s 的握手超时，§3.4 的 core/exited 终态与 15s 时限
+                // 同时失效（真机故障矩阵实测正是这样红的）。
+                return if generation.wait_exit_within(Duration::from_millis(2_000)) {
+                    ReadyOutcome::Exited
+                } else {
+                    ReadyOutcome::Timeout
+                };
+            }
         }
     }
 }
@@ -830,6 +960,44 @@ fn save_workspace(path: &std::path::Path) -> Result<(), String> {
     std::fs::write(&state_path, text).map_err(|error| format!("保存工作区失败：{error}"))
 }
 
+/// R3-B（§3.4 动作「更换数据目录」/§4.7 `choose_data_directory`）：用户在存储
+/// 错误后显式改选的数据根指针（`<LOCALAPPDATA>\OwO\Agent\data_root.json`）。
+/// 核心子进程的 `OWO_AGENT_DATA` 优先用它，缺省仍为 `<LOCALAPPDATA>\OwO\Agent\data`。
+fn data_root_pointer_path() -> Option<PathBuf> {
+    local_appdata().map(|base| base.join("OwO").join("Agent").join("data_root.json"))
+}
+
+pub fn load_data_root_override() -> Option<PathBuf> {
+    let path = data_root_pointer_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let dir = value.get("path")?.as_str()?;
+    let candidate = PathBuf::from(dir);
+    if candidate.is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+pub fn save_data_root_override(path: &std::path::Path) -> Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("数据目录不可用：{error}"))?;
+    if !canonical.is_dir() {
+        return Err("所选路径不是目录".to_string());
+    }
+    let pointer = data_root_pointer_path().ok_or_else(|| "无法确定数据目录".to_string())?;
+    if let Some(parent) = pointer.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("创建数据目录失败：{error}"))?;
+    }
+    let payload = serde_json::json!({ "path": canonical.to_string_lossy() });
+    let text = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("序列化数据目录指针失败：{error}"))?;
+    std::fs::write(&pointer, text).map_err(|error| format!("保存数据目录指针失败：{error}"))?;
+    Ok(canonical)
+}
+
 /// 注入核心子进程环境（§4.2/§4.7/§4.8）：配对证明 + 实例身份在 debug/release 中
 /// 保持一致（生产协议单一）；开发便利经显式 `OWO_DESKTOP_DEV_AUTH=1` 开关启用，
 /// 默认关闭——不允许"调试版能用、安装包空壳"的双标准。
@@ -862,10 +1030,10 @@ fn apply_core_env(
         if cfg!(debug_assertions) { "0" } else { "1" },
     );
     if let Some(local) = local_appdata() {
-        command.env(
-            "OWO_AGENT_DATA",
-            local.join("OwO").join("Agent").join("data"),
-        );
+        let default_root = local.join("OwO").join("Agent").join("data");
+        // §3.4 动作「更换数据目录」：用户显式改选过的数据根优先生效。
+        let effective = load_data_root_override().unwrap_or(default_root);
+        command.env("OWO_AGENT_DATA", effective);
     }
     crate::provider::apply_provider_env(command, provider_cfg, log_path);
 }
@@ -900,6 +1068,10 @@ fn spawn_log_thread<R: Read + Send + 'static>(
                         append_log_line(&log_path, &redact(&line, &pairing));
                         if let Some(tx) = &ready_tx {
                             if let Some(value) = parse_ready_line(&line) {
+                                let _ = tx.send(value);
+                            } else if let Some(value) = parse_fatal_line(&line) {
+                                // §3.4：核心致命行与 ready 行走同一本次代际通道，
+                                // 旧代迟到行同样不会污染新代。
                                 let _ = tx.send(value);
                             }
                         }
@@ -1176,8 +1348,9 @@ fn free_port() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        core_server_path, pick_current_core, redact, version_output_has_build_identity,
-        workspace_state_path, CoreError, CoreRuntime, CoreState, ProviderConfig, RESTART_DELAYS,
+        core_server_path, load_data_root_override, pick_current_core, redact,
+        save_data_root_override, version_output_has_build_identity, workspace_state_path,
+        CoreError, CoreRuntime, CoreState, ProviderConfig, RESTART_DELAYS,
     };
     use std::path::PathBuf;
     use std::time::Duration;
@@ -1249,12 +1422,24 @@ mod tests {
 
     #[test]
     fn core_error_codes_and_messages_are_stable() {
+        // R3-B（§3.4）契约冻结集：这些码是故障矩阵断言与错误卡渲染的唯一事实源。
         assert_eq!(CoreError::BinaryMissing.code(), "core/binary_missing");
         assert_eq!(CoreError::HandshakeTimeout.code(), "core/handshake_timeout");
         assert_eq!(CoreError::IdentityMismatch.code(), "core/identity_mismatch");
         assert_eq!(CoreError::SpawnFailed.code(), "core/spawn_failed");
         assert_eq!(CoreError::ExitedUnexpectedly.code(), "core/exited");
-        assert_eq!(CoreError::NoWorkspace.code(), "core/no_workspace");
+        assert_eq!(CoreError::NoWorkspace.code(), "workspace/required");
+        assert_eq!(CoreError::StorageNotWritable.code(), "storage/not_writable");
+        assert_eq!(
+            CoreError::from_fatal_code("storage/not_writable"),
+            CoreError::StorageNotWritable,
+            "核心致命码必须映射到同名稳定错误"
+        );
+        assert_eq!(
+            CoreError::from_fatal_code("other/unknown"),
+            CoreError::SpawnFailed,
+            "陌生致命码保守归 spawn_failed（原始码留日志，不静默升级）"
+        );
         for error in [
             CoreError::BinaryMissing,
             CoreError::SpawnFailed,
@@ -1262,9 +1447,44 @@ mod tests {
             CoreError::IdentityMismatch,
             CoreError::ExitedUnexpectedly,
             CoreError::NoWorkspace,
+            CoreError::StorageNotWritable,
         ] {
             assert!(!error.user_message().is_empty(), "{:?} 需要用户文案", error);
+            assert!(
+                error.code().contains('/'),
+                "{:?} 错误码必须是 layer/name 形状（§2.4 统一错误模型）",
+                error
+            );
         }
+    }
+
+    #[test]
+    fn data_root_override_roundtrip_and_validity() {
+        with_isolated_data_dir(|| {
+            assert_eq!(
+                load_data_root_override(),
+                None,
+                "无指针文件时必须回缺省数据根"
+            );
+            let missing = std::env::temp_dir().join(format!(
+                "owo-data-root-definitely-missing-{}",
+                uuid::Uuid::new_v4()
+            ));
+            assert!(
+                save_data_root_override(&missing).is_err(),
+                "不存在的目录必须拒绝"
+            );
+            let dir =
+                std::env::temp_dir().join(format!("owo-data-root-ok-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let saved = save_data_root_override(&dir).expect("合法目录必须可写入指针");
+            assert_eq!(
+                load_data_root_override(),
+                Some(saved),
+                "指针必须可重读（§3.4 更换数据目录动作的持久化面）"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     // ---- R3（§8.3）core 产物身份解析 ----

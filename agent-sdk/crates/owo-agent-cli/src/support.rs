@@ -118,9 +118,66 @@ pub(crate) fn build_agent_with_mcp(
     let mut config = OpenAiCompatibleConfig::from_env()?;
     config.model = model.to_string();
     // R9：模型网关韧性（重试/退避/熔断/failover 强→次选云→本地）。
-    let provider = Arc::new(owo_agent_core::gateway::ResilientProvider::from_config(
-        config,
-    )?);
+    let provider: Arc<dyn owo_agent_core::ModelProvider> = Arc::new(
+        owo_agent_core::gateway::ResilientProvider::from_config(config)?,
+    );
+    assemble_agent(
+        provider,
+        workspace,
+        model,
+        read_only,
+        mcp_clients,
+        skills,
+        deny_commands,
+    )
+}
+
+/// §3.4（R3-B 契约）：桌面 `serve` 专用构建——缺少模型凭据时**不拒绝启动**，
+/// 降级为 `UnconfiguredModelProvider`（core ready，诊断/设置/会话/工具全部可用，
+/// 模型调用返回稳定码 `provider/not_configured`，UI 据此呈现模型配置引导）。
+/// 其余 CLI 命令（chat/turn/repl/tui）走上面的严格路径：缺凭据立刻报错，行为不变。
+pub(crate) fn build_agent_with_mcp_serve(
+    workspace: &std::path::Path,
+    model: &str,
+    read_only: bool,
+    mcp_clients: &[(String, Arc<tokio::sync::Mutex<McpClient>>)],
+    skills: &SkillRegistry,
+    deny_commands: &[String],
+) -> Result<Agent, Box<dyn std::error::Error>> {
+    let provider: Arc<dyn owo_agent_core::ModelProvider> = match OpenAiCompatibleConfig::from_env()
+    {
+        Ok(mut config) => {
+            config.model = model.to_string();
+            Arc::new(owo_agent_core::gateway::ResilientProvider::from_config(
+                config,
+            )?)
+        }
+        Err(error) => {
+            eprintln!("警告：{error}——模型提供商降级为未配置（serve 继续提供诊断/设置/会话）");
+            Arc::new(owo_agent_core::UnconfiguredModelProvider::new(error))
+        }
+    };
+    assemble_agent(
+        provider,
+        workspace,
+        model,
+        read_only,
+        mcp_clients,
+        skills,
+        deny_commands,
+    )
+}
+
+/// 共享装配体：策略/预算/CAS/MCP 挂载/技能/审批链（两条构建路径唯一实现）。
+fn assemble_agent(
+    provider: Arc<dyn owo_agent_core::ModelProvider>,
+    workspace: &std::path::Path,
+    model: &str,
+    read_only: bool,
+    mcp_clients: &[(String, Arc<tokio::sync::Mutex<McpClient>>)],
+    skills: &SkillRegistry,
+    deny_commands: &[String],
+) -> Result<Agent, Box<dyn std::error::Error>> {
     let mut policy = if read_only {
         Policy::read_only(workspace.to_path_buf())
     } else {
@@ -283,6 +340,17 @@ pub(crate) fn ensure_data_root(
     let fallback = workspace.join(".owo-agent");
     let _ = std::fs::create_dir_all(&fallback);
     fallback
+}
+
+/// R3-B（§3.4 `storage/not_writable`）：严格版数据根准备——**不**静默迁移。
+/// 首选目录不可写即返回 Err（原因含脱敏路径），由调用方决定是否降级；
+/// 桌面壳上下文必须用本函数：悄悄把会话/审计搬进用户项目目录是"看起来成功"
+/// 的存储缺陷（工作区 `.owo-agent` 回退仅限非桌面 CLI，保持既有行为）。
+pub(crate) fn ensure_data_root_checked(override_dir: Option<PathBuf>) -> Result<PathBuf, String> {
+    let preferred = data_root(override_dir);
+    std::fs::create_dir_all(&preferred)
+        .map(|()| preferred.clone())
+        .map_err(|error| format!("数据目录不可写：{}（{error}）", display_path(&preferred)))
 }
 
 pub(crate) fn display_path(path: &std::path::Path) -> String {
