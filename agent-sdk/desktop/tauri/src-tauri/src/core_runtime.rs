@@ -368,6 +368,16 @@ impl CoreRuntime {
                 return Err(CoreError::BinaryMissing);
             }
         };
+        // R3-A3（§3.3.3）：实际启动二进制的绝对路径必须落日志——验收报告据此
+        // 记录"到底启动了哪个 exe"（脚本再对它做 SHA-256），杜绝解析结果不明。
+        append_log_line(
+            &log,
+            &format!(
+                "[runtime] launching core: {} (acceptance={})",
+                exe.display(),
+                acceptance_mode()
+            ),
+        );
         *self
             .log_path
             .lock()
@@ -736,13 +746,41 @@ fn pick_current_core(candidates: &[PathBuf]) -> (Option<PathBuf>, Vec<PathBuf>) 
     (None, rejected)
 }
 
+/// R3-A3（指南 §3.3.3）：验收模式判定——**仅 debug 构建**且 `OWO_DESKTOP_ACCEPTANCE=1`
+/// 生效。release 构建完全忽略该变量（产品路径不存在这条旁路）。
+fn acceptance_mode() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("OWO_DESKTOP_ACCEPTANCE")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+}
+
 /// 便携/开发双模式的 core 可执行文件定位（R3：解析结果必须带构建身份）。
 ///
 /// 返回 `(选中的 core, 存在但被拒绝的历史产物)`。选中为 `None` 时调用方按
 /// `BinaryMissing` 处理——"存在但来历不明"与"缺失"对用户的可操作动作相同：
 /// 重新构建/重装，而不是等握手超时。
+///
+/// 验收模式（§3.3.3）：候选只来自 `OWO_SIDECAR_ROOT`（未设时为壳所在目录），
+/// **禁止**回退仓库 target、PATH 或历史安装目录——故障场景因此不再需要改名
+/// 真实 debug 产物（R3-BUG-03），"目录里没有 sidecar"即真实的 binary_missing。
 pub fn core_server_path() -> (Option<PathBuf>, Vec<PathBuf>) {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    if acceptance_mode() {
+        let root = std::env::var_os("OWO_SIDECAR_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+            });
+        let Some(dir) = root else {
+            return (None, Vec::new());
+        };
+        candidates.push(dir.join("owo-agent-x64.exe"));
+        candidates.push(dir.join("owo-agent.exe"));
+        return pick_current_core(&candidates);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("owo-agent-x64.exe"));
@@ -1138,8 +1176,8 @@ fn free_port() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        pick_current_core, redact, version_output_has_build_identity, workspace_state_path,
-        CoreError, CoreRuntime, CoreState, ProviderConfig, RESTART_DELAYS,
+        core_server_path, pick_current_core, redact, version_output_has_build_identity,
+        workspace_state_path, CoreError, CoreRuntime, CoreState, ProviderConfig, RESTART_DELAYS,
     };
     use std::path::PathBuf;
     use std::time::Duration;
@@ -1248,6 +1286,58 @@ mod tests {
         assert!(!version_output_has_build_identity(
             "owo-agent commit=abc123"
         ));
+    }
+
+    /// R3-A3（§3.3.3）：验收模式 = `debug_assertions` 且 `OWO_DESKTOP_ACCEPTANCE=1`。
+    /// 行为冻结：候选只来自 `OWO_SIDECAR_ROOT`；空目录 → BinaryMissing（**不得**
+    /// 回退仓库 target——那正是故障矩阵被迫改名真实 debug core 的根因 R3-BUG-03）；
+    /// 场景目录内"存在但无身份"的候选照旧进 rejected 清单留痕。
+    #[test]
+    fn acceptance_mode_uses_sidecar_root_only_and_never_falls_back() {
+        if !cfg!(debug_assertions) {
+            // release 构建完全忽略该变量：本用例只在 debug 下断言（产品旁路不存在）。
+            return;
+        }
+        let _serial = data_dir_serial();
+        let temp = std::env::temp_dir().join(format!("owo-accept-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).expect("场景根目录");
+        let prev_accept = std::env::var_os("OWO_DESKTOP_ACCEPTANCE");
+        let prev_root = std::env::var_os("OWO_SIDECAR_ROOT");
+        std::env::set_var("OWO_DESKTOP_ACCEPTANCE", "1");
+        std::env::set_var("OWO_SIDECAR_ROOT", &temp);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (selected, rejected) = core_server_path();
+            assert!(
+                selected.is_none(),
+                "空 sidecar 根不得回退仓库产物找 core：{selected:?}"
+            );
+            assert!(
+                rejected.is_empty(),
+                "验收模式不扫描仓库目录，不应出现历史产物拒绝项：{rejected:?}"
+            );
+            // 场景目录放"无构建身份"的可执行文件：必须被拒并回传留痕（证明扫描范围=根目录）。
+            let fake = temp.join("owo-agent.exe");
+            std::fs::copy(env!("CARGO"), &fake).expect("复制无身份候选");
+            let (selected, rejected) = core_server_path();
+            assert!(selected.is_none(), "无身份候选不得被选中：{selected:?}");
+            assert_eq!(
+                rejected,
+                vec![fake.clone()],
+                "场景目录内的无身份候选必须回传供日志留痕"
+            );
+        }));
+        match prev_accept {
+            Some(value) => std::env::set_var("OWO_DESKTOP_ACCEPTANCE", value),
+            None => std::env::remove_var("OWO_DESKTOP_ACCEPTANCE"),
+        }
+        match prev_root {
+            Some(value) => std::env::set_var("OWO_SIDECAR_ROOT", value),
+            None => std::env::remove_var("OWO_SIDECAR_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     /// 候选解析：不存在的候选只是未命中（不进拒绝清单），存在但无构建身份的
