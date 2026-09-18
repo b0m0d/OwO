@@ -1,0 +1,18 @@
+{
+    "id":  "binary-missing",
+    "kind":  "missing",
+    "note":  "§3.4：后台组件缺失 → core/binary_missing；动作=重新检查/打开诊断位置",
+    "expected_codes":  [
+                           "core/binary_missing"
+                       ],
+    "required_actions":  [
+                             "重新检查",
+                             "打开诊断位置"
+                         ],
+    "final_budget_sec":  15,
+    "needs_workspace":  true,
+    "needs_key":  true,
+    "acceptance_mode":  "OWO_DESKTOP_ACCEPTANCE=1 + OWO_SIDECAR_ROOT=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-021128\\binary-missing",
+    "injected_sidecar":  "\u003cnone: 场景目录刻意不放 sidecar\u003e",
+    "sidecar_sha256":  ""
+}

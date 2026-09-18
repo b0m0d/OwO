@@ -227,3 +227,127 @@ pass/fail）、`status-bar.json`、`status-bar-click-workspace.json`、`ledger-p
 - 台账 `generation` 在验收里恒为"第 0 代"（无人点重试/换目录），
   "换代后口径跟着变"只有单测覆盖，**没有**真机端到端覆盖。
 - §4.10 其余真机项：键盘 Tab 全链走查、审批四动作（§4.5.2）、空/加载/错误/大数据逐页走查。
+
+---
+
+## R4.3 全量回归抓出的引导门回归（provider-unset 三条红）
+
+### 1. 触发方式（不是读代码读出来的）
+
+R4.2 收口后按用户口径自动串跑全量：`verify-desktop-cold-boot.ps1` → 43/43 绿；
+`verify-desktop-failure-matrix.ps1` → **79/82**，三条红全在 `provider-unset`
+（引导页不可见 / 缺契约动作 / 不呈现稳定码），取证
+`docs/qa/evidence/r3-failure-matrix-20260919-014955/`。
+
+### 2. 根因（两处，互相放大）
+
+- **R4-BUG-08（引导门一次性快照）**：R3-C 门禁重列 sidecar 后，core 在**完全没有凭据**时
+  不再以 `provider/not_configured` 退出，而是按 §3.4 的"正常运行"继续 ready，把稳定码
+  推迟到模型调用时返回（`gateway.rs` 占位 Provider 设计）。而 `needsSetup()` 只在 boot()
+  开头取一次壳快照：那一刻壳还在 `starting` → 判"不需要引导" → 用户直接进主界面，
+  每次模型调用都挂。**§3.4 规定这一类的可操作终态是模型配置引导**，所以这是产品缺陷，
+  不是断言写得严。
+- **R4-BUG-09（壳与 core 两份凭据口径）**：`provider_status()` 里 `Unset` 一律
+  `ready=false`，可 core 实际会用 `OPENAI_API_KEY` + 内置 BigModel 端点工作。
+  这个分歧正是 R3-BUG-23"引导页顶掉健康主界面"的根，也堵住了"ready 之后复查一次"
+  这条唯一能修 R4-BUG-08 的路。
+
+### 3. 修法
+
+- `provider.rs::provider_status`：判定收敛为**显式选择 > 环境凭据**，与 core 取凭据顺序
+  一致；`Unset` + 环境有 key = 就绪（不再谎报未配置），无 key = 未就绪（引导判据成立）。
+  两条路径各一条定向断言，且**改环境变量的用例用静态锁串行**（并行互踩的偶发红比不测更糟）。
+- `app.js::needsSetup()`：壳侧未出终态时以 250 ms 节拍**有界等待**（`SETUP_GATE_SETTLE_MS=6000`，
+  远在 §3.4 的 10 s 可操作时限内），只走 Tauri IPC **零 HTTP**（不污染 §8.2 首屏 ≤5 口径）；
+  保留 `provider/not_configured` 稳定码短路；`failed` 终态直接放行错误卡，
+  **不再复查提供商**（避免把 `core/exited`/`storage/not_writable` 的归因盖成引导页）。
+- 状态条/引导页文案：`ready + provider=unset` 说"环境变量凭据 · 内置端点"并写明来源，
+  两份视图真不一致时才用"壳侧未配置"。
+
+### 4. 契约测试
+
+- 新建 `desktop/web/tests/r4-setup-gate.test.mjs`（6 条）：用**大括号配平从 app.js
+  抽出真实 `needsSetup` 函数体**在 VM 沙箱执行——这类缺陷全在取样时序上，
+  源码字符串断言抓不住"什么时候会返回 false"。覆盖：starting×2→ready+未就绪=进引导、
+  有环境凭据的健康启动=不进引导、`failed` 不进引导且零提供商复查、
+  `no_workspace`/稳定码即时短路、永不收敛时**有界**返回、非壳环境不猜、函数体零 HTTP。
+- `r4-status-bar.test.mjs` +1 条（内置端点兜底文案）；`api-client.test.mjs` 归一条款不变。
+- 结果：web **363/363**；壳 **31/31**（`provider::tests::status_reflects_mode_and_key_presence`
+  改写为 env 受控 + 串行）；`cargo fmt --all --check` 0、`clippy --all-targets -D warnings` 0
+  （首轮抓到 `doc_lazy_continuation` 一条，已按建议补空行）。
+
+### 5. 真机复验（顺序：重列 sidecar → 重建壳 → 跑验收）
+
+- `stage-desktop-sidecar.ps1` → `cargo build`（strict `-j 1`）→ 壳 mtime 02:11 > 最新 web 02:07
+  （内嵌前端新鲜度门通过）。
+- `verify-desktop-failure-matrix.ps1 -Only provider-unset`：**10/10 全绿**
+  （`r3-failure-matrix-20260919-021110`），引导页 419 字、`provider/not_configured` 上屏、
+  工作区卡显示"选择目录… 由原生目录选择器设定"（§4.4 在故障场景同样成立）。
+- 全量链（矩阵 10 场景 + 冷启动含隐藏期 + R4 UI）串跑结果见本节末续写
+  （同一轮自动跑，日志 `docs/qa/logs/r4-full-chain-*.log`）。
+
+### 6. 这一轮暴露的流程问题（备案，不掩盖）
+
+- R3-C 门禁"全量一轮"重列了 sidecar，但**故障矩阵没有随之复跑**（只在 R3.6 的旧核上绿过）；
+  壳/核世代一换，UI 终态判据就可能失效。以后凡是**重列 sidecar** 的提交，
+  §8.3 故障矩阵必须与 §8.2 冷启动一起跑（本轮起写进 R4 退出条件）。
+- `Invoke-CiCargo -LogFile` 传相对路径会按 pwsh 工具的 cwd（不是 `-Cwd`）解析而报
+  `DirectoryNotFoundException`——日志写不出等于自断取证；后续一律绝对路径。
+- 背景任务用 `Out-File`/管道抓不到 `Write-Host` 的 PASS/FAIL 行（信息流不进管道），
+  本轮改用 `Start-Transcript`，验收输出才真正留痕。
+
+---
+
+## R4.4 设计定档 · §4.5 统一权限中心（先定契约，再动 Rust）
+
+> 本节是**设计**，不是完成声明。实现前的现状盘点（逐条带证据位，经只读盘点复核）：
+
+### 1. 现状（为什么这一节必须先写设计）
+
+| 指南 §4.5 要求 | 服务端现状 | 结论 |
+|---|---|---|
+| 当前权限预设（只读/工作区编辑/受控执行/自定义） | 单枚举 `PermissionProfile`（`permissions.rs`），`GET/POST /permissions`（`lib.rs:522-531`）已可读写 | 有，但只有一维 |
+| 文件系统/命令/网络**三维度实际范围** | 无此拆分：只有 profile + `settings.workspace_write` 两个松字段展开 | **缺**，前端映射不出来 |
+| 待审批请求列表 | `AppState.pending_approvals`（`lib.rs:130-131`，`oneshot::Sender<Decision> + PermissionRequest`）**没有任何列路由**，只能从回合 SSE 流里看到 | **缺关键读取面** |
+| 审批动作（拒绝/仅本次/本任务/工作区长期） | `POST /session/{id}/permission/{request_id}`（`lib.rs:369`，`turn_api.rs:366`）；scope 字面量是 `once/session/one_hour/always_readonly`（`grant_store.rs:42-50`），拒绝走 `allow:false` 不是 scope | 有，但**口径与 §4.5.2 不一致**，且必须先知道 session id |
+| 已授权范围与有效期 | `GET /permissions/grants` 有；但 `GrantStore` 是**纯内存**（`lib.rs:221`，无表无文件） | "工作区长期"重启即蒸发 = **假承诺** |
+| 撤销入口 | `POST /permissions/grants/revoke` 逐条撤销有；无会话/工作区级联 | 部分 |
+| 最近审批历史 | 审计事件里有 `permission` 类事件，无专用读取面 | 需要查询面 |
+| 完全访问风险拆解 | 无 | **缺** |
+| 前端 | `desktop/web` **从未调用过 `/permissions`**；权限页不存在（状态条权限段落设置页，`app.js` 里有注释） | 整页待建 |
+
+**三条硬结论**（决定了"纯前端做不了 §4.5"）：
+① 无全局待审批列表；② 无三维度实际范围；③ grants 不持久化，"长期允许"是空头承诺。
+
+### 2. 目标契约（新增面，全部走既有鉴权与 ledger 标签）
+
+- `GET /permissions/overview` → 
+  `{ profile, dimensions: { filesystem, command, network, persistence, scopes[] },
+     pending: [{request_id, session_id, tool, level, risk_note, args_summary, destructive, requested_at}],
+     grants: [{grant_id, tool_id, scope, path_scope, host_scope, expires_at, remaining_uses}],
+     decisions: [{at, tool, decision, scope, session_id}] }`
+  - `dimensions` 由**服务端**从 profile + 设置 + grant 展开成 §4.5.3 词表；
+    表达不下的真实规则一律回 `custom` + 原始规则清单，**不得为了好看而误映射**。
+  - `args_summary` 走 `redact_args`（只暴露键名/类型/长度），路径只给必要范围。
+- `POST /permissions/decide` → `{request_id, decision: deny|once|task|workspace}`：
+  权限中心不关心 session id（服务端经 `pending_approval_sessions` 反查）；
+  `task|workspace` 生成对应 Grant，`deny` 不落 Grant。
+- `POST /permissions/revoke` → `{level: grant|session|workspace, grant_id?, session_id?}`。
+- Grant 持久化：`GrantStore` 落 `data_root/grants.json`（tmp→rename 原子写，
+  读回时丢弃过期/用尽项），否则"工作区长期允许"重启失效属**不可接受的静默退化**。
+- 词表对齐：`once→once`、`task→session`、`workspace→always_readonly|one_hour`（按动作类别），
+  对外统一暴露 §4.5.2 四词，旧 scope 字面量在 wire 上保留兼容读取。
+
+### 3. 落地顺序与验证天花板
+
+1. Rust：`permission_center_api.rs`（读面 + 决定 + 撤销）+ `grant_store` 持久化
+   → `server/lib.rs` 接线 → `tests/route_contract_tests.rs` 同步（AGENTS.md 红线）
+   → openapi 快照 + `clients/ts` 再生成。
+2. 前端：`desktop/web/permissions/{domain,api,controller,render}.js`（§4.8 四件套）
+   + `permissions` 路由 + rail 增「工具与权限」（§4.2）+ 状态条权限段改指真页。
+3. 验收：`verify-desktop-r4-ui.ps1` 增权限中心段（§4.10）：
+   拒绝 / 仅本次 / 本任务 / 工作区长期四动作各一条真机断言 + 撤销后再查必须消失 +
+   完全访问必须出现范围/时长/风险三要素与二次确认；重启壳后长期 grant 仍在（持久化端到端）。
+
+**已知风险**：`server/lib.rs` 是 2049 行聚合文件（R6 待拆），本轮只做加法接线不改结构；
+`pending_approvals` 持锁跨 `.await` 会造成回合停滞——新增读面必须**先克隆摘要再放锁**。
