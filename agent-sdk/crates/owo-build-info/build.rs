@@ -27,26 +27,51 @@ fn main() {
     // crates/<crate> → agent-sdk（构建作用域根）。
     let sdk_root = manifest_dir.join("..").join("..");
 
-    // 真实 git 根（.git 所在）；解析失败则保守地不上报触发路径（=每次重跑）。
-    if let Some(toplevel) = git(&sdk_root, &["rev-parse", "show-toplevel"]) {
-        let git_root = PathBuf::from(toplevel);
-        // 提交/暂存变化时重跑（index 变化覆盖 commit 与 dirty 状态变化）。
-        println!(
-            "cargo:rerun-if-changed={}",
-            git_root
-                .join(".git")
-                .join("HEAD")
-                .to_string_lossy()
-                .replace('\\', "/")
-        );
-        println!(
-            "cargo:rerun-if-changed={}",
-            git_root
-                .join(".git")
-                .join("index")
-                .to_string_lossy()
-                .replace('\\', "/")
-        );
+    // 真实 git 目录（绝对、兼容 worktree）；解析失败则保守地不上报触发路径（=每次重跑）。
+    if let Some(git_dir_raw) = git(&sdk_root, &["rev-parse", "--absolute-git-dir"]) {
+        let git_dir = PathBuf::from(git_dir_raw);
+        // ⚠ 触发路径必须是**提交时会变的文件**。两处历史缺陷：
+        // 1) 原先上报 `.git/HEAD`：分支上 HEAD 内容只是 `ref: refs/heads/<branch>`
+        //    这行符号引用，提交只改引用文件本身，HEAD 的 mtime 不动 → 身份跨提交
+        //    不刷新。实测：连改两笔提交后 `--version` 仍报旧 commit 与旧 built_at
+        //    （`.git/HEAD` mtime 停在 08-11，而 index/引用文件都是本次提交时刻），
+        //    于是"壳与 core build id 一致"的自证其实一致地错着。
+        // 2) 第一版修法用 `rev-parse --git-path HEAD` 拼 `show-toplevel`：该输出是
+        //    **相对调用目录**（`../.git/HEAD`），拼错成不存在的绝对路径 → Cargo
+        //    无法 stat → 变成"每次无条件重跑"（全量重建，另一个方向的错）。
+        // 现在：符号引用解析成引用文件本身（detached 才回退 HEAD），全部基于
+        // `--absolute-git-dir`，并带上 `index`（dirty 状态）与 `packed-refs`
+        // （分支被 `git pack-refs` 打包时引用搬家）。
+        let mut triggers: Vec<PathBuf> = Vec::new();
+        // 用**完整**引用名（`refs/heads/<branch>`）：`--short` 会剥掉 `refs/heads/`
+        // 前缀，拼出来的是不存在的路径（实测会静默退回 HEAD 分支，等于没修）。
+        match git(&sdk_root, &["symbolic-ref", "--quiet", "HEAD"]) {
+            Some(branch) if !branch.is_empty() => {
+                let mut ref_path = git_dir.clone();
+                for part in branch.split('/') {
+                    ref_path = ref_path.join(part);
+                }
+                if ref_path.exists() {
+                    triggers.push(ref_path);
+                } else {
+                    // 分支被打包进 packed-refs：改盯 HEAD + packed-refs（下面兜底）。
+                    triggers.push(git_dir.join("HEAD"));
+                }
+            }
+            // detached HEAD：HEAD 文件自身就是提交号，会随 checkout/commit 变化。
+            _ => triggers.push(git_dir.join("HEAD")),
+        }
+        triggers.push(git_dir.join("index"));
+        let packed_refs = git_dir.join("packed-refs");
+        if packed_refs.exists() {
+            triggers.push(packed_refs);
+        }
+        for path in triggers {
+            println!(
+                "cargo:rerun-if-changed={}",
+                path.to_string_lossy().replace('\\', "/")
+            );
+        }
     }
     println!("cargo:rerun-if-env-changed=OWO_ALLOW_DIRTY_RELEASE");
 
