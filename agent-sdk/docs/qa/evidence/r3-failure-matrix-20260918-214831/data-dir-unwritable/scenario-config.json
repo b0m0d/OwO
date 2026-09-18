@@ -1,0 +1,18 @@
+{
+    "id":  "data-dir-unwritable",
+    "kind":  "healthy",
+    "note":  "§3.4：数据目录不可写 → 启动失败并报 storage/not_writable（core_fatal 协议行）",
+    "expected_codes":  [
+                           "storage/not_writable"
+                       ],
+    "required_actions":  [
+                             "更换数据目录",
+                             "重试"
+                         ],
+    "final_budget_sec":  20,
+    "needs_workspace":  true,
+    "needs_key":  true,
+    "acceptance_mode":  "OWO_DESKTOP_ACCEPTANCE=1 + OWO_SIDECAR_ROOT=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260918-214831\\data-dir-unwritable",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260918-214831\\data-dir-unwritable\\owo-agent.exe",
+    "sidecar_sha256":  "536D2B4212D0D28A8DD35A151112A7C1B9CA27F77770518C2EAF1C98E3DA6A11"
+}

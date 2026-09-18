@@ -1,0 +1,9 @@
+[runtime] launching core: C:\Users\23843\AppData\Local\Temp\owo-desktop-acceptance\20260918-214831\provider-unset\owo-agent.exe (acceptance=true)
+[provider] 未选择模型提供商（Unset）：core 就绪但模型调用暂不可用，请在设置中选择云端或本地 Ollama
+警告：缺少 OPENAI_API_KEY 环境变量（或设置 OPENAI_BASE_URL 指向本地兼容端点）——模型提供商降级为未配置（serve 继续提供诊断/设置/会话）
+2026-09-18T13:49:11.329123Z  WARN owo_agent_server: 文件日志初始化失败（仅落 stderr）：系统找不到指定的路径。 (os error 3)
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-18T13:49:11.329783900+00:00"}
+2026-09-18T13:49:11.355645Z  INFO owo_agent::commands::serve: owo-agent server listening on http://127.0.0.1:53578
+{"api_version":"0.7","build_id":"b7abba8a841ef33acbe67d45bbf4cbe2e41dc612","event":"core_ready","instance_id":"05677a33c2254b9fa7629d3bf662a649","pid":15384,"port":53578}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/health","source":"shell","status":200,"target":"http","trace_id":"5f5da2f7712b4fef809628d9","ts":"2026-09-18T13:49:11.363797100+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/auth/token","source":"shell","status":200,"target":"http","trace_id":"ba47f6b50ee64b9598921766","ts":"2026-09-18T13:49:11.368775600+00:00"}

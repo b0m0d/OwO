@@ -1,0 +1,289 @@
+{
+    "label":  "cold-boot",
+    "captured_at":  "2026-09-18T13:25:10.0184662Z",
+    "server_total":  31,
+    "returned":  31,
+    "web_total":  28,
+    "web_health":  8,
+    "web_auth":  0,
+    "web_events":  4,
+    "web_business":  16,
+    "web_business_routes":  [
+                                "GET /sessions",
+                                "GET /skills",
+                                "GET /project/rules",
+                                "GET /whitelist",
+                                "GET /sessions",
+                                "GET /skills",
+                                "GET /whitelist",
+                                "GET /project/rules",
+                                "GET /sessions",
+                                "GET /skills",
+                                "GET /whitelist",
+                                "GET /project/rules",
+                                "GET /sessions",
+                                "GET /skills",
+                                "GET /whitelist",
+                                "GET /project/rules"
+                            ],
+    "web_route_repeats":  [
+                              "GET /sessions x4",
+                              "GET /skills x4",
+                              "GET /project/rules x4",
+                              "GET /whitelist x4"
+                          ],
+    "shell_total":  2,
+    "shell_auth":  1,
+    "shell_health":  1,
+    "other_total":  0,
+    "probe_total":  1,
+    "sources":  [
+                    "probe",
+                    "shell",
+                    "web"
+                ],
+    "records":  [
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "shell",
+                        "started_at":  "2026-09-18T13:24:48.754Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/auth/token",
+                        "source":  "shell",
+                        "started_at":  "2026-09-18T13:24:48.759Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:02.013Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  1,
+                        "method":  "GET",
+                        "route_template":  "/events/stream",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:02.024Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:02.027Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/sessions",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:02.040Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/skills",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:02.042Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/project/rules",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:02.047Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/whitelist",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:02.050Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:03.879Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:03.886Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/events/stream",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:03.888Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/sessions",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:03.894Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/skills",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:03.895Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/whitelist",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:03.895Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/project/rules",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:03.899Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:07.006Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/events/stream",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:07.016Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:07.017Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/sessions",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:07.023Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/skills",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:07.025Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/whitelist",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:07.025Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/project/rules",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:07.028Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:08.885Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:08.893Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/events/stream",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:08.895Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/sessions",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:08.900Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/skills",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:08.902Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/whitelist",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:08.903Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/project/rules",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T13:25:08.905Z",
+                        "status":  200
+                    }
+                ],
+    "web_buckets_sum":  28,
+    "web_buckets_ok":  true
+}
