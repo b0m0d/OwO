@@ -51,8 +51,8 @@ if (-not $EvidenceDir) {
 }
 New-Item -ItemType Directory -Force -Path $EvidenceDir | Out-Null
 
-# ---- 私有运行环境（全新数据目录）-------------------------------------------------
-$runRoot = Join-Path ([IO.Path]::GetTempPath()) "owo-desktop-coldboot-$stamp"
+# ---- 私有运行环境（全新数据目录；§3.3.3 统一命名空间 owo-desktop-acceptance）----
+$runRoot = Join-Path ([IO.Path]::GetTempPath()) "owo-desktop-acceptance\$stamp\coldboot"
 $localAppData = Join-Path $runRoot 'LocalAppData'
 $appData = Join-Path $runRoot 'RoamingAppData'
 $runTemp = Join-Path $runRoot 'Temp'
@@ -127,61 +127,55 @@ $sdkCommit = CommitOf ((& $SidecarExe --version 2>&1 | Out-String) -split '\r?\n
 if ($stagedCommit -ne $sdkCommit) {
     throw "随包 core 与 SDK 构建产物不同世代：staged=$stagedCommit sdk=$sdkCommit（§8.3 sidecar 过旧）"
 }
-$sibling = Join-Path (Split-Path -Parent $ShellExe) 'owo-agent.exe'
-if (Test-Path -LiteralPath $sibling) {
-    # tauri-build 只在**构建壳**时把随包 core 复制到壳旁边；单独重建 sidecar 不刷新
-    # 那个副本 → "同目录优先"会让壳继续跑上一版 core（实测：核心侧 token 换发已
-    # 生效，验收仍观察到旧行为）。按 SHA-256 对齐，等价于安装包内的同批次产物。
-    $siblingHash = (Get-FileHash -LiteralPath $sibling -Algorithm SHA256).Hash
-    if ($siblingHash -ne $staged.sha256) {
-        Copy-Item -LiteralPath $staged.source -Destination $sibling -Force
-        Write-Host "[coldboot] 壳同目录 sidecar 副本已按哈希刷新（原为上一版构建产物）"
-    }
-    $siblingLine = ((& $sibling --version 2>&1 | Out-String) -split '\r?\n' | Where-Object { $_ -match 'commit=' } | Select-Object -First 1)
-    if (-not $siblingLine) {
-        throw "壳同目录存在缺少构建身份的旧 sidecar：$sibling（壳会跳过它，但取证必须在干净布局上做）"
-    }
-    if ((CommitOf $siblingLine) -ne $stagedCommit) {
-        throw "壳同目录 sidecar 与随包 core 不同世代：sibling=$(CommitOf $siblingLine) staged=$stagedCommit"
-    }
-    Write-Host "[coldboot] 壳同目录 sidecar 与随包 core 同批次 ✓"
+# R3-A3（§3.3.3）：本轮全部二进制复制进私有 bin——壳以验收模式启动
+# （OWO_SIDECAR_ROOT=bin），仓库/同目录历史产物不再参与解析；旧"按哈希刷新壳
+# 同目录 sidecar 副本"的 sibling hack 随之作废（那是回退解析时代的补丁）。
+$binDir = Join-Path $runRoot 'bin'
+New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+Copy-Item -LiteralPath $ShellExe -Destination (Join-Path $binDir 'owo-agent-desktop.exe') -Force
+foreach ($dll in @(Get-ChildItem -LiteralPath (Split-Path -Parent $ShellExe) -Filter '*.dll' -ErrorAction SilentlyContinue)) {
+    Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $binDir $dll.Name) -Force
 }
-Save-Json @{ sidecar_version_line = $coreIdentity; shell_exe = $ShellExe; sidecar_exe = $SidecarExe; staged_sha256 = $staged.sha256 } 'binaries.json' | Out-Null
+Copy-Item -LiteralPath $staged.source -Destination (Join-Path $binDir 'owo-agent.exe') -Force
+$launchedCore = Join-Path $binDir 'owo-agent.exe'
+$launchedSha = (Get-FileHash -LiteralPath $launchedCore -Algorithm SHA256).Hash
+if ($launchedSha -ne $staged.sha256) {
+    throw "私有 bin 中的 core 与随包产物哈希不一致：bin=$launchedSha staged=$($staged.sha256)"
+}
+Save-Json @{
+    sidecar_version_line = $coreIdentity
+    shell_exe            = $ShellExe
+    sidecar_exe          = $SidecarExe
+    staged_sha256        = $staged.sha256
+    bin_dir              = $binDir
+    launched_core        = $launchedCore
+    launched_sha256      = $launchedSha
+    acceptance_mode      = $true
+} 'binaries.json' | Out-Null
+$effectiveShell = Join-Path $binDir 'owo-agent-desktop.exe'
 
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = $ShellExe
-$psi.UseShellExecute = $false
-$psi.WorkingDirectory = Split-Path -Parent $ShellExe
-$psi.EnvironmentVariables['LOCALAPPDATA'] = $localAppData
-$psi.EnvironmentVariables['APPDATA'] = $appData
-$psi.EnvironmentVariables['TEMP'] = $runTemp
-$psi.EnvironmentVariables['TMP'] = $runTemp
 $apiKey = [Environment]::GetEnvironmentVariable('OPENAI_API_KEY', 'User')
 if (-not $apiKey) { throw '用户级环境变量 OPENAI_API_KEY 缺失：sidecar 无法启动（AGENTS.md 凭据红线：只注入，不回显）' }
-$psi.EnvironmentVariables['OPENAI_API_KEY'] = $apiKey
-# 取证需要直连核心读 ledger；开发便利开关仅影响 token 引导路径（默认协议不变）。
-$psi.EnvironmentVariables.Remove('OWO_DESKTOP_DEV_AUTH')
 # §8.2「首次可输入前」需要 DOM 事实：开 WebView2 远程调试端口（只绑 loopback，
-# 进程退出即消失），用 CDP 读实际渲染结果替代「睡几秒再猜」的软断言。
-# 申请到的端口只是候选：Chromium 被抢口时会静默换口，真实端口以 UDF 下
-# DevToolsActivePort 为准（Resolve-OwoCdpPort）。
+# 进程退出即消失），用 CDP 读实际渲染结果替代「睡几秒再猜」的软断言；申请端口只是
+# 候选，真实端口以 UDF 下 DevToolsActivePort 为准（Resolve-OwoCdpPort）。
+# WebView2 UDF 由 known-folder API 派生、不受 LOCALAPPDATA 重定向影响——必须专属，
+# 否则与已安装版本共用浏览器进程组（实测踩过）。以上全部由共享启动器
+# New-OwoShellStartInfo 统一实现（与故障矩阵同源，杜绝两份环境构造漂移）。
 $cdpRequested = Get-OwoFreeTcpPort
-$psi.EnvironmentVariables['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = "--remote-debugging-port=$cdpRequested"
-# WebView2 的用户数据目录由 Windows known-folder API 派生，**不受 LOCALAPPDATA
-# 环境变量重定向影响**：不设它就会与本机已安装版本共用同一个浏览器进程组，
-# 页面目标/调试端口都不受本次验收控制（实测：/json/version 活着但取不到 DOM 事实）。
-# 因此给本轮一个专属 UDF，浏览器进程组也随之独占。
 $webViewUdf = Join-Path $runRoot 'WebView2'
 New-Item -ItemType Directory -Force -Path $webViewUdf | Out-Null
-$psi.EnvironmentVariables['WEBVIEW2_USER_DATA_FOLDER'] = $webViewUdf
 $webviewDataDir = Get-OwoWebviewEtbDir -UserDataDir $webViewUdf
 if (Clear-OwoCdpPortFile -DataDir $webviewDataDir) {
     Write-Host "[coldboot] 已清除上一轮 DevToolsActivePort（本轮端口出现即为事实）"
 }
+$psi = New-OwoShellStartInfo -ShellExe $effectiveShell -LocalAppData $localAppData -AppData $appData -TempDir $runTemp `
+    -ApiKey $apiKey -CdpPort $cdpRequested -WebViewUserDataDir $webViewUdf -AcceptanceSidecarRoot $binDir
 
 $shellProc = [System.Diagnostics.Process]::Start($psi)
-Write-Host "[coldboot] 桌面壳 pid=$($shellProc.Id)（私有环境=$runRoot）"
+Write-Host "[coldboot] 桌面壳 pid=$($shellProc.Id)（私有环境=$runRoot，验收 bin=$binDir）"
 $failureNotes = @()
+$shotChecks = New-Object System.Collections.ArrayList
 
 try {
     $ready = Wait-OwoCoreReady -LogDir $logDir -TimeoutSec 45 -ExcludePid 0
@@ -199,8 +193,10 @@ try {
         "ready=$($ready.build_id) health=$($health.build_id)"
     Add-Check '/health.instance_id 非空（壳注入实例身份，握手闭环）' ([string]::IsNullOrEmpty($health.instance_id) -eq $false) "instance_id=$($health.instance_id)"
 
-    $hwnd = Get-OwoShellWindow -ProcessId $shellProc.Id
-    Add-Check '桌面主窗口在 20s 内出现（非空白壳/非永久 loading）' ($hwnd -ne [IntPtr]::Zero) "hwnd=$hwnd"
+    $win0 = Get-OwoValidatedWindow -ProcessId $shellProc.Id -TimeoutSec 20 -RequireVisible
+    Add-Check '桌面主窗口在 20s 内出现且身份有效（HWND 非零/属本 PID/可见/≥800×520，R3-A1）' $win0.ok `
+        "hwnd=$($win0.hwnd) owner_pid=$($win0.process_id) size=$($win0.width)x$($win0.height) fail=$($win0.fail_reasons -join ';')"
+    $hwnd = $win0.hwnd
 
     # DOM 事实通道：以 DevToolsActivePort 为准解析**实际**端口（被抢口时 Chromium 换口）。
     $cdpPort = Resolve-OwoCdpPort -DataDir $webviewDataDir -RequestedPort $cdpRequested -TimeoutSec 25
@@ -256,6 +252,9 @@ try {
         (($boot.sources -contains 'web') -and ($boot.sources -contains 'shell')) "sources=$($boot.sources -join ',')"
 
     if (-not $SkipScreenshots -and $hwnd -ne [IntPtr]::Zero) {
+        # R3-A1：每档截图都**重新获取并验证窗口**（隐藏/重载后旧 HWND 不可信，
+        # R3-BUG-02），截图必须通过解码/尺寸/字节/像素比例/方差五重检查
+        # （R3-BUG-01：158×26 黑线判通过的历史就此封死）。
         foreach ($size in @(@(900, 600), @(1280, 720), @(1920, 1080))) {
             $targetW = $size[0]; $targetH = $size[1]
             $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
@@ -267,10 +266,17 @@ try {
             Start-Sleep -Milliseconds 1200
             $shot = Join-Path $EvidenceDir ("desktop-{0}x{1}.png" -f $targetW, $targetH)
             try {
-                $geometry = Save-OwoWindowShot -Hwnd $hwnd -Path $shot
-                Add-Check "截图 ${targetW}x${targetH}" (Test-Path $shot) "$shot（$geometry）"
+                $winShot = Get-OwoValidatedWindow -ProcessId $shellProc.Id -TimeoutSec 8 -RequireVisible `
+                    -MinWidth ([Math]::Min(800, $targetW)) -MinHeight ([Math]::Min(520, $targetH))
+                if (-not $winShot.ok) { throw "窗口验证失败：$($winShot.fail_reasons -join ';')" }
+                $hwnd = $winShot.hwnd
+                $null = Save-OwoWindowShot -Hwnd $hwnd -Path $shot
+                $metric = Test-OwoScreenshot -Path $shot -ExpectedWidth $winShot.width -ExpectedHeight $winShot.height
+                $null = $shotChecks.Add([pscustomobject]@{ stage = "boot-${targetW}x${targetH}"; window_pid = $winShot.process_id; metric = $metric })
+                Add-Check "截图 ${targetW}x${targetH}（可解码/尺寸/字节/像素比例/方差全检）" $metric.ok `
+                    "$shot（$($winShot.width)x$($winShot.height)） $(Get-OwoScreenshotMetricLine $metric)"
             } catch {
-                Add-Check "截图 ${targetW}x${targetH}" $false $_.Exception.Message
+                Add-Check "截图 ${targetW}x${targetH}（可解码/尺寸/字节/像素比例/方差全检）" $false $_.Exception.Message
             }
         }
     }
@@ -421,10 +427,19 @@ try {
             if (-not $SkipScreenshots) {
                 $shot = Join-Path $EvidenceDir 'desktop-restored.png'
                 try {
-                    $geometry = Save-OwoWindowShot -Hwnd $hwnd -Path $shot
-                    Add-Check '恢复显示后截图（无永久 loading）' (Test-Path $shot) "$shot（$geometry）"
+                    # R3-A1 原缺陷现场：恢复后旧 HWND 可能指向失效区域（历史截图
+                    # 158×26/145 字节黑线仍被判通过）。现强制：重新发现窗口 →
+                    # 身份/可见/尺寸验证 → 截图 → 五重像素级有效性检查，任一不过即红。
+                    $winR = Get-OwoValidatedWindow -ProcessId $shellProc.Id -TimeoutSec 15 -RequireVisible
+                    if (-not $winR.ok) { throw "恢复后窗口未通过身份验证：$($winR.fail_reasons -join ';')" }
+                    $hwnd = $winR.hwnd
+                    $null = Save-OwoWindowShot -Hwnd $hwnd -Path $shot
+                    $metric = Test-OwoScreenshot -Path $shot -ExpectedWidth $winR.width -ExpectedHeight $winR.height
+                    $null = $shotChecks.Add([pscustomobject]@{ stage = 'restored'; window_pid = $winR.process_id; metric = $metric })
+                    Add-Check '恢复显示后截图（重获窗口 + 五重有效性检查，无永久 loading）' $metric.ok `
+                        "$shot（$($winR.width)x$($winR.height)） $(Get-OwoScreenshotMetricLine $metric)"
                 } catch {
-                    Add-Check '恢复显示后截图（无永久 loading）' $false $_.Exception.Message
+                    Add-Check '恢复显示后截图（重获窗口 + 五重有效性检查，无永久 loading）' $false $_.Exception.Message
                 }
                 $uiRestored = Get-OwoVisibleUiText -Port $cdpPort -TimeoutSec 8
                 Add-Check '唤回后界面仍可操作（隐藏期未把 UI 拖成错误态）' `
@@ -470,6 +485,8 @@ finally {
         hidden_minutes = $HiddenMinutes
         skipped_hidden = [bool]$SkipHiddenWindow
         failure_notes = $failureNotes
+        # R3-A1：每张截图的像素级验真指标（尺寸/字节/非黑比例/方差 + 失败原因）。
+        screenshot_metrics = @($shotChecks)
         checks        = @($results)
         passed        = @($results | Where-Object { $_.pass }).Count
         failed        = @($results | Where-Object { -not $_.pass }).Count

@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 desktop-acceptance-common.ps1 — 桌面真机验收的共享原语（重构方案 §8.1/§8.2/§8.3）。
 
@@ -33,6 +33,9 @@ public static class OwoWin32 {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out OwoRect rect);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
     [StructLayout(LayoutKind.Sequential)] public struct OwoRect { public int Left; public int Top; public int Right; public int Bottom; }
 }
 '@
@@ -88,6 +91,203 @@ function Save-OwoWindowShot {
         $bitmap.Dispose()
     }
     return "$width x $height"
+}
+
+function Get-OwoValidatedWindow {
+    <#
+      R3-A1（指南 §3.3.1）：窗口身份检查——每次截图/隐藏/恢复/core 重启后**重新获取**
+      窗口，绝不复用缓存 HWND（窗口被隐藏/重载/重建后旧句柄会指向失效区域，
+      实测截出过 158×26 的黑条还被判通过）。
+
+      通过条件（§3.3.1 逐条）：HWND 非零且 IsWindow；PID 属于本轮 shell；
+      RequireVisible 时另需 IsWindowVisible、未最小化、宽 ≥800、高 ≥520。
+      返回带 ok/fail_reasons 的描述符（不 throw：调用方要把失败写进断言报告）。
+    #>
+    param(
+        [int]$ProcessId,
+        [int]$TimeoutSec = 20,
+        [int]$MinWidth = 800,
+        [int]$MinHeight = 520,
+        [switch]$RequireVisible
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $info = $null
+    while ($true) {
+        $info = [ordered]@{
+            hwnd           = [IntPtr]::Zero
+            process_id     = 0
+            visible        = $false
+            minimized      = $false
+            left = 0; top = 0; right = 0; bottom = 0
+            width          = 0
+            height         = 0
+            discovered_at  = (Get-Date).ToUniversalTime().ToString('o')
+            ok             = $false
+            fail_reasons   = @()
+        }
+        $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if (-not $proc) {
+            $info.fail_reasons = @('process_exited')
+            return [pscustomobject]$info
+        }
+        $hwnd = $proc.MainWindowHandle
+        $info.hwnd = $hwnd
+        if ($hwnd -eq [IntPtr]::Zero -or -not [OwoWin32]::IsWindow($hwnd)) {
+            $info.fail_reasons = @('invalid_hwnd')
+        } else {
+            $ownerPid = [uint32]0
+            $null = [OwoWin32]::GetWindowThreadProcessId($hwnd, [ref]$ownerPid)
+            $info.process_id = [int]$ownerPid
+            if ([int]$ownerPid -ne $ProcessId) {
+                $info.fail_reasons = @("hwnd_pid_mismatch(owner=$ownerPid expected=$ProcessId)")
+            } else {
+                $rect = New-Object OwoWin32+OwoRect
+                if (-not [OwoWin32]::GetWindowRect($hwnd, [ref]$rect)) {
+                    $info.fail_reasons = @('get_window_rect_failed')
+                } else {
+                    $info.visible = [OwoWin32]::IsWindowVisible($hwnd)
+                    $info.minimized = [OwoWin32]::IsIconic($hwnd)
+                    $info.left = $rect.Left; $info.top = $rect.Top
+                    $info.right = $rect.Right; $info.bottom = $rect.Bottom
+                    $info.width = $rect.Right - $rect.Left
+                    $info.height = $rect.Bottom - $rect.Top
+                    $fails = @()
+                    if (-not $info.visible) { $fails += 'window_not_visible' }
+                    if ($info.minimized) { $fails += 'window_minimized' }
+                    if ($info.width -lt $MinWidth) { $fails += "width_lt_${MinWidth}($($info.width))" }
+                    if ($info.height -lt $MinHeight) { $fails += "height_lt_${MinHeight}($($info.height))" }
+                    if ($info.width -le 0 -or $info.height -le 0) { $fails += 'non_positive_rect' }
+                    if ($RequireVisible) {
+                        $info.fail_reasons = @($fails)
+                        $info.ok = ($fails.Count -eq 0)
+                    } else {
+                        $info.ok = $true   # 软探测：只保证"句柄属于本 PID 且几何可读"
+                    }
+                }
+            }
+        }
+        if ($info.ok) { return [pscustomobject]$info }
+        if ((Get-Date) -ge $deadline) { return [pscustomobject]$info }
+        Start-Sleep -Milliseconds 300
+    }
+}
+
+function Test-OwoScreenshot {
+    <#
+      R3-A1（指南 §3.3.2）：截图真实性检查。截屏只证明"文件存在"毫无意义——
+      必须可解码、尺寸与窗口一致、体积达标、非黑非透明像素达标、方差非零
+      （防纯色图假通过）。所有指标进报告；ok=false 时 fail_reasons 给出全部原因。
+
+      截图只能证明"有画面"；可操作性由调用方的 CDP 断言继续负责。
+    #>
+    param(
+        [string]$Path,
+        [int]$ExpectedWidth = 0,
+        [int]$ExpectedHeight = 0,
+        [int]$MinWidth = 800,
+        [int]$MinHeight = 520,
+        [long]$MinBytes = 8192,
+        [double]$MinNonBlackRatio = 0.01,
+        [double]$MinVariance = 100.0
+    )
+    $result = [ordered]@{
+        path            = $Path
+        bytes           = 0
+        width           = 0
+        height          = 0
+        non_black_ratio = 0.0
+        variance        = 0.0
+        samples         = 0
+        ok              = $false
+        fail_reasons    = @()
+    }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        $result.fail_reasons = @('missing_file')
+        return [pscustomobject]$result
+    }
+    $result.bytes = (Get-Item -LiteralPath $Path).Length
+    if ($result.bytes -lt $MinBytes) { $result.fail_reasons += "bytes_lt_${MinBytes}($($result.bytes))" }
+    $bitmap = $null
+    $fs = $null
+    try {
+        # 用 FileStream 打开再解码：FromFile 会锁文件句柄，取证目录随后还要被清理；
+        # Bitmap 在其生命周期内持续引用该流，因此流必须比 bitmap 晚释放（外层 finally）。
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $bitmap = New-Object System.Drawing.Bitmap($fs)
+        $result.width = $bitmap.Width
+        $result.height = $bitmap.Height
+    } catch {
+        $result.fail_reasons += "undecodable($($_.Exception.Message))"
+        if ($bitmap) { try { $bitmap.Dispose() } catch { } }
+        if ($fs) { try { $fs.Dispose() } catch { } }
+        $result.fail_reasons = @($result.fail_reasons)
+        return [pscustomobject]$result
+    }
+    try {
+        if ($result.width -lt $MinWidth -or $result.height -lt $MinHeight) {
+            $result.fail_reasons += "undersized($($result.width)x$($result.height) < ${MinWidth}x${MinHeight})"
+        }
+        if ($ExpectedWidth -gt 0 -and $ExpectedHeight -gt 0) {
+            $wDiff = [Math]::Abs($result.width - $ExpectedWidth) / $ExpectedWidth
+            $hDiff = [Math]::Abs($result.height - $ExpectedHeight) / $ExpectedHeight
+            if ($wDiff -gt 0.10 -or $hDiff -gt 0.10) {
+                $result.fail_reasons += "size_mismatch_vs_window(${ExpectedWidth}x${ExpectedHeight} actual=$($result.width)x$($result.height))"
+            }
+        }
+        # 像素采样（最多 ~30k 点）：非黑非透明比例 + 亮度方差。
+        $rect = New-Object System.Drawing.Rectangle(0, 0, $result.width, $result.height)
+        $locked = $bitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $bufBytes = [Math]::Abs($locked.Stride) * $result.height
+        $buf = New-Object 'byte[]' $bufBytes
+        [System.Runtime.InteropServices.Marshal]::Copy($locked.Scan0, $buf, 0, $bufBytes)
+        $bitmap.UnlockBits($locked)
+        $strideAbs = [Math]::Abs($locked.Stride)
+        $step = [Math]::Max(1, [int][Math]::Floor([Math]::Sqrt(($result.width * $result.height) / 30000.0)))
+        $lumas = New-Object System.Collections.Generic.List[double]
+        $nonBlack = 0
+        for ($y = 0; $y -lt $result.height; $y += $step) {
+            $rowBase = $y * $strideAbs
+            for ($x = 0; $x -lt $result.width; $x += $step) {
+                $i = $rowBase + $x * 4
+                $b = $buf[$i]; $g = $buf[$i + 1]; $r = $buf[$i + 2]; $a = $buf[$i + 3]
+                $luma = 0.299 * $r + 0.587 * $g + 0.114 * $b
+                $null = $lumas.Add($luma)
+                if ($a -ge 128 -and [Math]::Max([Math]::Max($r, $g), $b) -gt 24) { $nonBlack += 1 }
+            }
+        }
+        $count = $lumas.Count
+        $result.samples = $count
+        if ($count -eq 0) {
+            $result.fail_reasons += 'no_samples'
+        } else {
+            $result.non_black_ratio = [Math]::Round($nonBlack / $count, 6)
+            $mean = 0.0
+            foreach ($v in $lumas) { $mean += $v }
+            $mean = $mean / $count
+            $var = 0.0
+            foreach ($v in $lumas) { $d = $v - $mean; $var += $d * $d }
+            $result.variance = [Math]::Round($var / $count, 4)
+            if ($result.non_black_ratio -lt $MinNonBlackRatio) {
+                $result.fail_reasons += "mostly_black_or_transparent(ratio=$($result.non_black_ratio) < $MinNonBlackRatio)"
+            }
+            if ($result.variance -lt $MinVariance) {
+                $result.fail_reasons += "flat_content(variance=$($result.variance) < $MinVariance)"
+            }
+        }
+    } finally {
+        $bitmap.Dispose()
+        if ($fs) { try { $fs.Dispose() } catch { } }
+    }
+    $result.fail_reasons = @($result.fail_reasons)
+    $result.ok = ($result.fail_reasons.Count -eq 0)
+    return [pscustomobject]$result
+}
+
+function Get-OwoScreenshotMetricLine {
+    <# 断言 detail 用的单行指标摘要（宽/高/字节/非黑比例/方差/失败原因）。 #>
+    param($Metric)
+    $reasons = if (@($Metric.fail_reasons).Count -gt 0) { " fail=$(($Metric.fail_reasons) -join ';')" } else { '' }
+    return "size=$($Metric.width)x$($Metric.height) bytes=$($Metric.bytes) non_black_ratio=$($Metric.non_black_ratio) variance=$($Metric.variance) samples=$($Metric.samples)$reasons"
 }
 
 function Save-OwoEvidenceJson {
@@ -275,6 +475,9 @@ function New-OwoShellStartInfo {
         [string]$ApiKey,
         [int]$CdpPort = 0,
         [string]$WebViewUserDataDir = '',
+        # R3-A3（指南 §3.3.3）：非空即进入壳的验收模式（仅 debug 壳生效）：
+        # sidecar 候选只来自该根目录，禁止回退仓库/PATH/历史安装目录。
+        [string]$AcceptanceSidecarRoot = '',
         [switch]$NoApiKey
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -285,6 +488,10 @@ function New-OwoShellStartInfo {
     $psi.EnvironmentVariables['APPDATA'] = $AppData
     $psi.EnvironmentVariables['TEMP'] = $TempDir
     $psi.EnvironmentVariables['TMP'] = $TempDir
+    if ($AcceptanceSidecarRoot) {
+        $psi.EnvironmentVariables['OWO_DESKTOP_ACCEPTANCE'] = '1'
+        $psi.EnvironmentVariables['OWO_SIDECAR_ROOT'] = $AcceptanceSidecarRoot
+    }
     if ($NoApiKey) {
         $psi.EnvironmentVariables.Remove('OPENAI_API_KEY')
     } elseif ($ApiKey) {
