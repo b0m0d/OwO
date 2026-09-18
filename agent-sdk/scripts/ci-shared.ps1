@@ -535,6 +535,24 @@ function Write-CiStepSummary {
 # 用法：块内 `Invoke-CiLoggedCommand -Exe cargo -Arguments @('test','--workspace') -TimeoutSec 5400 -LogFile ...`
 # 结束把退出码写入 $global:LASTEXITCODE（超时=124，§2.4 内存守护=137）；
 # 本函数自身不 throw，保持门禁统计语义。Rust 构建一律走 Invoke-CiCargo（含红线门）。
+# R3-C 缺陷修复（R3-BUG-25）：.cmd 垫片必须用绝对路径启动。
+# ProcessStartInfo 用裸名（npm.cmd / tsc.cmd）启动批处理时，cmd 的 %~dp0 会退化成
+# 工作目录，垫片随后去找 <工作目录>\node_modules\npm\bin\npm-cli.js —— 报
+# "Cannot find module"，看起来像依赖坏了，实际是启动方式坏了。门禁 ts/ts-unit
+# 两步就是这么全红的（npm --version 同命令行用绝对路径立刻成功）。
+function Resolve-CiCommandPath {
+    param([Parameter(Mandatory = $true)][string]$Exe, [string]$Cwd = "")
+    if ($Exe -match '[\\/]') { return $Exe }
+    # 本地工具优先（node_modules\.bin 里的 .cmd 垫片只有按目录解析才存在）
+    if ($Cwd) {
+        $local = Join-Path (Join-Path $Cwd "node_modules\.bin") $Exe
+        if (Test-Path -LiteralPath $local) { return (Resolve-Path -LiteralPath $local).Path }
+    }
+    $found = Get-Command $Exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found -and $found.Source) { return $found.Source }
+    return $Exe
+}
+
 function Invoke-CiLoggedCommand {
     param(
         [Parameter(Mandatory = $true)][string]$Exe,
@@ -551,7 +569,7 @@ function Invoke-CiLoggedCommand {
     $tag = if ($Label) { $Label } else { $Exe }
     $script:ciLastCommandResourceLimited = $false
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $Exe
+    $psi.FileName = Resolve-CiCommandPath -Exe $Exe -Cwd $Cwd
     # PS5.1/.NET Framework 无 ArgumentList：逐 token 安全引用拼 Arguments。
     $psi.Arguments = ($Arguments | ForEach-Object {
         if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
@@ -561,6 +579,9 @@ function Invoke-CiLoggedCommand {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     if ($Cwd) { $psi.WorkingDirectory = $Cwd }
+    if ($psi.FileName -ne $Exe) {
+        Write-Host ("    [{0}] 可执行文件解析：{1} → {2}" -f $tag, $Exe, $psi.FileName)
+    }
     $outQ = New-Object System.Collections.Concurrent.ConcurrentQueue[string]
     $errQ = New-Object System.Collections.Concurrent.ConcurrentQueue[string]
     $proc = $null

@@ -31,6 +31,9 @@ __pycache__/
 /agent-sdk/baseline_*.log
 /agent-sdk/gate-results-*.log
 /agent-sdk/.check_err.log
+# §2.4/§3.6 门禁与验收脚本的分步流式日志（可再生的运行产物；**归档证据**只入
+# docs/qa/evidence/**，那里按 §8 有意入库，见 ci-gate forbidden-files 的 evidence 放行）
+/agent-sdk/docs/qa/logs/
 # 历史误入库的构建/门禁日志（2026-09 已从索引移除；工作区副本保留自查）
 /agent-sdk/cargo_check.log
 /agent-sdk/clippy.log

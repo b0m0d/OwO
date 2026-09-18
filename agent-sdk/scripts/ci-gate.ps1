@@ -201,8 +201,12 @@ if (-not $SkipPermissionCtor) {
             git -C $root check-ignore -q $full 2>$null
             if ($LASTEXITCODE -eq 0) { $skipped++; continue }
             $lower = $name.ToLowerInvariant()
+            # docs/qa/evidence/** 是 §8 验收要求的**归档证据**位置（截图 + 真机 core 日志），
+            # 不是源码目录：.log 规则对它放行；密钥/数据库/构建缓存三条规则仍全程生效
+            # （证据里出现 .db 或密钥文件照样红，这不是可以绕的口子）。
+            $isEvidence = $rel -match '^docs[\\/]qa[\\/]evidence[\\/]'
             if ($lower -match "\.code-workspace$") { $forbidden += "$rel（编辑器 workspace 误入源码）" }
-            elseif ($lower -match "\.log$" -or $lower -match "\.log\.\d+$") { $forbidden += "$rel（日志文件误入源码）" }
+            elseif (($lower -match "\.log$" -or $lower -match "\.log\.\d+$") -and -not $isEvidence) { $forbidden += "$rel（日志文件误入源码）" }
             elseif ($lower -match "\.(db|sqlite|sqlite3|db-wal|db-shm)$") { $forbidden += "$rel（临时数据库误入源码）" }
             elseif ($sourceExts -notcontains $f.Extension -and $lower -match "(api[_-]?key|secret|\.pem|\.pfx|credential|id_rsa|id_ed25519)") { $forbidden += "$rel（疑似密钥/凭据文件）" }
         }

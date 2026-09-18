@@ -1,0 +1,71 @@
+﻿{
+    "timestamp":  "2026-09-18T15:39:36Z",
+    "ok":  false,
+    "completed":  true,
+    "interrupted":  false,
+    "resources":  {
+                      "redline":  "§2.4 Rust 编译与测试资源安全红线",
+                      "mode":  "strict",
+                      "jobs":  1,
+                      "test_threads":  1,
+                      "policy_source":  "desktop-test",
+                      "cargo_env":  {
+                                        "CARGO_BUILD_JOBS":  "1",
+                                        "RUST_TEST_THREADS":  "1"
+                                    },
+                      "cpu_logical":  32,
+                      "memory_gate":  {
+                                          "min_free_gb":  6,
+                                          "max_used_percent":  80
+                                      },
+                      "memory_at_write":  {
+                                              "status":  "ok",
+                                              "total_gb":  31.63,
+                                              "free_gb":  12.25,
+                                              "used_percent":  61.3,
+                                              "source":  "cim"
+                                          },
+                      "disk_at_write":  {
+                                            "status":  "ok",
+                                            "drive":  "T",
+                                            "free_gb":  34.02,
+                                            "total_gb":  400,
+                                            "source":  "psdrive"
+                                        },
+                      "applied":  [
+                                      null,
+                                      "clippy=strict(-j 1/--test-threads 1)",
+                                      "test=strict(-j 1/--test-threads 1)",
+                                      "route-contract=normal(-j 2/--test-threads 2)",
+                                      "desktop-clippy=strict(-j 1/--test-threads 1)",
+                                      "desktop-test=strict(-j 1/--test-threads 1)"
+                                  ],
+                      "guard_events":  [
+                                           null
+                                       ]
+                  },
+    "steps":  [
+                  "UTF-8 校验（rs/ts/js/html/json/css/md/ps1）",
+                  "构造检查（PermissionRequest { 只允许出现在 permissions.rs）",
+                  "forbidden-files（.code-workspace/.log/.db+密钥/构建缓存不得进源码目录）",
+                  "cargo fmt --all -- --check",
+                  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+                  "cargo test --workspace --locked",
+                  "cargo test -p owo-agent-server --test route_contract_tests --locked",
+                  "node --check（app.js + core/*.js + views/*.view.js + panels/*.panel.js）",
+                  "桌面 web 契约测试（node --test desktop/web/tests/*.test.mjs）",
+                  "TS 客户端单测（clients\\ts npm run test:unit）",
+                  "TS 类型检查（clients\\ts npm run typecheck）",
+                  "桌面壳随包 core 预置（externalBin 命名+身份+SHA-256）",
+                  "桌面壳 cargo fmt --check（src-tauri）",
+                  "桌面壳 cargo clippy --all-targets --locked -- -D warnings（src-tauri）",
+                  "桌面壳 cargo test --locked（src-tauri）",
+                  "桌面验收原语负例自测（test-desktop-acceptance-common.ps1）",
+                  "§2.4 资源红线脚本层自测（test-ci-shared-resource-policy.ps1）"
+              ],
+    "failures":  [
+                     "forbidden-files（.code-workspace/.log/.db+密钥/构建缓存不得进源码目录）: exit = 1",
+                     "TS 客户端单测（clients\\ts npm run test:unit）: exit = 1",
+                     "TS 类型检查（clients\\ts npm run typecheck）: exit = 1"
+                 ]
+}
