@@ -407,6 +407,16 @@ async function refreshSettings() {
     $("runtimeEndpoint").textContent = `${runtime.endpoint_kind === "local" ? "本地兼容接口" : "云端兼容接口"} · ${runtime.credential_source || "未知凭据来源"}`;
     $("runtimeCredential").textContent = runtime.credential_source === "environment" ? "系统环境变量" : (runtime.credential_source || "未配置");
     $("connectionSummary").textContent = `${runtime.provider || "未知提供商"} / ${model || "未配置模型"} · ${cloudEnabled ? "云端已启用" : "云端已关闭"}`;
+    // §4.3 模型段回灌：core 实际生效配置才是权威源。壳侧 get_provider_status 只是
+    // 进程配置视图——密钥经 sidecar 注入时它会误报 unset（真机截图抓到过）。
+    if (window.OwoStatusBar && typeof window.OwoStatusBar.reportModel === "function") {
+      window.OwoStatusBar.reportModel({
+        provider: runtime.provider || "",
+        model: model || "",
+        credential: runtime.credential_source || "",
+        cloud: cloudEnabled !== false,
+      });
+    }
     $("settingsPreview").textContent = JSON.stringify(
       {
         runtime,
@@ -737,6 +747,38 @@ $("workspace").addEventListener("change", () => {
     $("workspace").title = "当前项目：" + $("workspace").value;
   }
 });
+
+// §4.4 文件夹必须走 Tauri 原生目录选择器：桌面壳里输入框转只读、由
+// `choose_project_directory` 设定（壳侧校验 + 持久化 + 受控重启核心）。
+// 上面那段手输兼容只在浏览器 dev 模式生效——那里没有原生选择器，
+// 模块会把按钮禁用并写明降级原因，不会假装成功。
+function applyWorkspacePicked(workspace) {
+  state.workspaceRoot = workspace;
+  localStorage.setItem("owo.workspace", workspace);
+  rememberWorkspace(workspace);
+  refreshWorkspaceCandidates();
+  if (window.OwoStatusBar && typeof window.OwoStatusBar.repaint === "function") {
+    window.OwoStatusBar.repaint();
+  }
+  // 换工作区 = 壳已重拉核心（新代际）：连接描述符里的端口/token 全部作废。
+  if (window.OwoApi && typeof window.OwoApi.resetCoreConnection === "function") {
+    window.OwoApi.resetCoreConnection();
+  }
+  addMessage("system", `项目工作区已切换为 ${window.OwoFolderPicker.aliasFor(workspace)}，正在等待核心就绪…`);
+  recover().catch(() => { /* 终态由服务错误卡呈现 */ });
+}
+if (window.OwoFolderPicker && $("workspace") && $("chooseWorkspace")) {
+  const picker = window.OwoFolderPicker.attach($("workspace"), $("chooseWorkspace"), {
+    title: "选择项目工作区（原生目录选择器）",
+    onPicked: applyWorkspacePicked,
+    onCanceled: () => { /* 取消是合法终态：保持原值，不改状态、不报错 */ },
+    onError: (message) => addMessage("error", `选择工作区失败：${message}`),
+  });
+  const hint = $("workspacePickerHint");
+  if (hint && !picker.native) {
+    hint.textContent = "浏览器开发模式：无原生目录选择器，可直接填写路径（仅开发用，桌面版不适用）。";
+  }
+}
 $("newSession").addEventListener("click", () => {
   newSession().catch((error) => addMessage("error", `创建会话失败：${error.message || error}`));
 });

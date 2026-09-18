@@ -76,6 +76,9 @@ pub fn get_core_connection(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> V
                 // 面板可比对 buildId != expectedBuildId 提示安装包与核心版本错配。
                 "expectedBuildId": owo_build_info::COMMIT,
                 "state": "ready",
+                // §4.6：ready 时也必须带上代际，否则台账只在故障期拿得到，
+                // 日常反而看不到"壳到底重拉过几次"这个权威事实。
+                "generation": runtime.generation(),
             });
             if let Some(token) = runtime.bearer_token() {
                 value["token"] = json!(token);
@@ -123,6 +126,18 @@ pub fn get_workspace(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Value {
     })
 }
 
+/// §4.6 工作区回执的唯一形状来源：手输路径（引导页兼容）与原生选择器
+/// **必须返回同一个形状**，否则前端要为两个入口写两套判定（迟早漂移）。
+/// `generation` 是壳侧重启口径的权威字段（§4.6 台账），重启之后取值才是新代际。
+fn workspace_receipt(runtime: &CoreRuntime, canonical: &std::path::Path) -> Value {
+    json!({
+        "ok": true,
+        "workspace": canonical.to_string_lossy(),
+        "state": state_to_value(&runtime.state(), &runtime.log_path())["state"].clone(),
+        "generation": runtime.generation(),
+    })
+}
+
 /// §4.6 选择项目工作区。校验 + 持久化，然后按当前运行状态受控重启：
 /// 已在运行 → 代际递增重拉（新工作区生效）；未运行（NoWorkspace/Stopped/Failed）→ 直接启动。
 #[tauri::command]
@@ -135,11 +150,7 @@ pub fn set_workspace(path: String, runtime: State<'_, std::sync::Arc<CoreRuntime
             } else {
                 runtime.start();
             }
-            json!({
-                "ok": true,
-                "workspace": canonical.to_string_lossy(),
-                "state": state_to_value(&runtime.state(), &runtime.log_path())["state"].clone(),
-            })
+            workspace_receipt(runtime.inner().as_ref(), &canonical)
         }
         Err(error) => json!({ "ok": false, "error": error }),
     }
@@ -190,6 +201,34 @@ pub async fn choose_data_directory(
     }
 }
 
+/// §4.4 表单控件规范：文件夹必须由 **Tauri 原生目录选择器**选，禁止要求用户手输完整路径。
+/// 与 `set_workspace` 同一套校验/持久化/受控重启语义（`set_workspace` 保留给
+/// 引导页里"已知路径"的程序化设置，不作为日常输入口）。取消是合法终态，不报错。
+#[tauri::command]
+pub async fn choose_project_directory(
+    runtime: State<'_, std::sync::Arc<CoreRuntime>>,
+) -> Result<Value, String> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("选择项目工作区")
+        .pick_folder()
+        .await;
+    let Some(folder) = picked else {
+        return Ok(json!({ "ok": false, "canceled": true }));
+    };
+    let path = folder.path().to_path_buf();
+    match runtime.set_workspace(path.as_path()) {
+        Ok(canonical) => {
+            if runtime.is_running() {
+                runtime.retry();
+            } else {
+                runtime.start();
+            }
+            Ok(workspace_receipt(runtime.inner().as_ref(), &canonical))
+        }
+        Err(error) => Ok(json!({ "ok": false, "error": error })),
+    }
+}
+
 /// R3-B（§3.4 终态可见性）：带"最近一次失败"的完整诊断状态对象。
 /// `CoreState::Starting/Restarting` 本身不含稳定码（重试窗口内还没有新事实），
 /// 但上一代的故障码必须继续可见——否则 UI 在退避期间只能渲染默认三出口 + 通用文案，
@@ -197,6 +236,9 @@ pub async fn choose_data_directory(
 fn runtime_state_value(runtime: &CoreRuntime) -> Value {
     let state = runtime.state();
     let mut value = state_to_value(&state, &runtime.log_path());
+    // §4.6 诊断台账的「最近一次 core 重启」需要壳侧权威计数：代际（手动重连/换目录
+    // 才 +1）与当代 attempt（崩溃自动重启）是两个不同事实，分开给，UI 不得混称。
+    value["generation"] = json!(runtime.generation());
     let state_name = value.get("state").and_then(Value::as_str).unwrap_or("");
     if !matches!(state_name, "ready" | "failed") {
         if let Some((code, message)) = runtime.last_error() {
@@ -247,5 +289,92 @@ pub fn set_provider(
             })
         }
         Err(error) => json!({ "ok": false, "error": error }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_runtime::{CoreConnection, CoreState};
+
+    fn fresh_runtime() -> std::sync::Arc<CoreRuntime> {
+        std::sync::Arc::new(CoreRuntime::new_with_workspace(
+            "pairing-under-test".into(),
+            "instance-under-test".into(),
+            None,
+        ))
+    }
+
+    #[test]
+    fn runtime_state_value_always_exposes_generation() {
+        // §4.6：诊断台账读的是 `payload.generation`。缺这个字段 = UI 只能说
+        // "壳未上报"，与接旧壳无异；所以字段存在性本身是契约，不靠肉眼对齐。
+        let runtime = fresh_runtime();
+        let value = runtime_state_value(&runtime);
+        assert_eq!(value["state"].as_str(), Some("starting"));
+        assert!(
+            value["generation"].is_number(),
+            "generation 必须在 payload 里，不得只在部分状态出现：{value}"
+        );
+        assert_eq!(value["generation"].as_u64(), Some(runtime.generation()));
+        runtime.retry();
+        assert_eq!(
+            runtime_state_value(&runtime)["generation"].as_u64(),
+            Some(1),
+            "手动重连后 payload 必须跟着换代走"
+        );
+    }
+
+    #[test]
+    fn workspace_receipt_shape_is_shared_by_both_entry_points() {
+        // 手输路径（引导页兼容）与原生选择器必须回同一个形状，
+        // 否则前端要为两个入口写两套判定（迟早漂移）。
+        let runtime = fresh_runtime();
+        let path = std::path::Path::new("T:/owo-receipt-check");
+        let value = workspace_receipt(&runtime, path);
+        assert_eq!(value["ok"].as_bool(), Some(true));
+        assert_eq!(value["workspace"].as_str(), Some("T:/owo-receipt-check"));
+        assert_eq!(value["state"].as_str(), Some("starting"));
+        assert!(value["generation"].is_number(), "回执必须带代际：{value}");
+    }
+
+    #[test]
+    fn ready_descriptor_carries_identity_and_generation_but_stays_secrets_only_over_ipc() {
+        // ready 描述符是 WebView 唯一的连接/身份来源：字段名即前端契约
+        // （api-client.js 逐字读取），改名等于断链，故在此钉死形状。
+        let runtime = fresh_runtime();
+        *runtime.state_for_test().lock().unwrap() = CoreState::Ready(CoreConnection {
+            pid: 4242,
+            port: 17319,
+            api_version: "0.7".into(),
+            build_id: "build-under-test".into(),
+            instance_id: "instance-under-test".into(),
+        });
+        let value = state_to_value(&runtime.state(), &runtime.log_path());
+        assert_eq!(value["state"].as_str(), Some("ready"));
+        assert_eq!(value["port"].as_u64(), Some(17319));
+        assert_eq!(value["pid"].as_u64(), Some(4242));
+        assert_eq!(value["instanceId"].as_str(), Some("instance-under-test"));
+        assert_eq!(value["buildId"].as_str(), Some("build-under-test"));
+        // pairing/token 由命令层另行注入，不在状态映射里（防止被日志/台账顺手带走）。
+        assert!(value.get("pairing").is_none(), "状态映射不得携带 pairing");
+        assert!(
+            value.get("token").is_none(),
+            "状态映射不得携带 bearer token"
+        );
+    }
+
+    #[test]
+    fn no_workspace_is_a_configuration_state_not_a_failure() {
+        // §4.6：没有工作区是**待配置**，UI 据此渲染「选择目录」而非「重试」；
+        // 因此它既不能挂错误码，也不能被当成 Failed 进入重试退避。
+        let runtime = fresh_runtime();
+        runtime.start();
+        let value = runtime_state_value(&runtime);
+        assert_eq!(value["state"].as_str(), Some("no_workspace"));
+        assert!(
+            value.get("errorCode").is_none(),
+            "待配置态不得凭空出现故障码：{value}"
+        );
     }
 }

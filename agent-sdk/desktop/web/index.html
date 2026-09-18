@@ -38,7 +38,11 @@
   <aside id="sidebar">
     <section>
       <h2>工作区</h2>
-      <input id="workspace" placeholder="当前项目工作区（新建会话时填写）" aria-label="当前项目工作区" list="workspaceCandidates">
+      <div class="owo-field-row">
+        <input id="workspace" placeholder="当前项目工作区（新建会话时填写）" aria-label="当前项目工作区" list="workspaceCandidates">
+        <button id="chooseWorkspace" class="secondary" type="button">选择目录…</button>
+      </div>
+      <p class="sub" id="workspacePickerHint">桌面版由原生目录选择器设定，不需要手输完整路径。</p>
       <datalist id="workspaceCandidates"></datalist>
     </section>
     <section>
@@ -350,6 +354,7 @@
   <script src="core/recovery.js"></script>
   <script src="core/events.js"></script>
   <script src="core/workspace-display.js"></script>
+  <script src="core/folder-picker.js"></script>
   <script src="shell/connection.js"></script>
   <script src="shell/markdown.js"></script>
   <script src="shell/speech.js"></script>

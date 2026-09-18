@@ -218,6 +218,53 @@ test("当前任务段：运行 / 等待审批 / 已取消 / 已完成 / 空闲�
   assert.equal(task({}).text, "空闲");
 });
 
+async function flush() {
+  // 壳 IPC 是跨 realm 的 thenable，微任务要过好几跳；用宏任务冲刷，别靠猜跳数。
+  for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+test("模型段两份真相不混着说：壳侧报未配置但 core 已就绪时不得标红下结论", async () => {
+  // 真机截图抓到的现场：密钥经 sidecar 注入，壳的 get_provider_status 报
+  // provider=unset/ready=false，而 core 正常 ready 并在用 glm-5.3-flash——
+  // 状态条当时显示「模型 unset · 未配置」（黄），与同一条「后台 可用」自相矛盾。
+  const sandbox = makeSandbox({
+    __owoCoreDiagnostics: { state: "ready" },
+    __TAURI_INTERNALS__: {
+      invoke: (command) =>
+        Promise.resolve(command === "get_provider_status" ? { provider: "unset", ready: false, model: "" } : { workspace: "" }),
+    },
+  });
+  sandbox.OwoWorkspaceDisplay = { alias: (r) => r, masked: (r) => r };
+  sandbox.OwoStatusBar.mount(sandbox.__host, { getFacts: () => ({ workspaceRoot: "" }) });
+  await flush();
+  const model = sandbox.OwoStatusBar.computeFacts({}, null)[2];
+  assert.notEqual(model.tone, "warn", "core 已就绪时不得把壳侧视图当结论标黄：" + model.text);
+  assert.notEqual(model.tone, "bad");
+  assert.match(model.text, /壳侧/, "必须说明这是壳侧视图：" + model.text);
+  assert.match(model.detail, /不一致|为准/, "明细要指出两份视图不一致：" + model.detail);
+  // 设置页从 core 水合到实际生效模型后回灌 → 模型段改说权威事实。
+  sandbox.OwoStatusBar.reportModel({ provider: "GLM", model: "glm-5.3-flash", credential: "environment" });
+  const after = sandbox.OwoStatusBar.computeFacts({}, null)[2];
+  assert.equal(after.text, "GLM · glm-5.3-flash");
+  assert.equal(after.tone, "ok");
+  assert.match(after.detail, /core/, "回灌值必须标明来源是 core");
+});
+
+test("壳侧报未配置且 core 也没就绪时，模型段就该显眼（不是永远温和）", async () => {
+  const sandbox = makeSandbox({
+    __owoCoreDiagnostics: { state: "failed", errorCode: "provider/not_configured" },
+    __TAURI_INTERNALS__: {
+      invoke: (command) =>
+        Promise.resolve(command === "get_provider_status" ? { provider: "unset", ready: false, model: "" } : { workspace: "" }),
+    },
+  });
+  sandbox.OwoStatusBar.mount(sandbox.__host, { getFacts: () => ({}) });
+  await flush();
+  const model = sandbox.OwoStatusBar.computeFacts({}, null)[2];
+  assert.equal(model.tone, "warn", "真未配置必须标黄，不能拿「壳侧视图」当挡箭牌：" + model.text);
+  assert.match(model.text, /未配置/);
+});
+
 test("重绘只改文本不重建节点（保住键盘焦点）", () => {
   const sandbox = mountedSandbox({ source: { workspaceRoot: "", reading: false } });
   const firstNodes = sandbox.__host.children.slice();

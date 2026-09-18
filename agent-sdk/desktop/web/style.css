@@ -1249,6 +1249,11 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
 .setup-card label { display: block; margin: 10px 0 4px; font-size: 13px; color: var(--text); }
 .setup-card input[type="text"] { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); }
 .setup-row { display: flex; gap: 8px; align-items: center; }
+/* §4.4 字段 + 原生选择器按钮同一行；输入框在桌面版是只读展示。 */
+.owo-field-row { display: flex; gap: 6px; align-items: center; }
+.owo-field-row input { flex: 1; min-width: 0; }
+.owo-field-row input[readonly] { background: var(--surface-2, rgba(0,0,0,.03)); cursor: default; }
+.owo-field-row button { flex: 0 0 auto; white-space: nowrap; }
 .setup-row input[type="text"] { flex: 1; }
 .setup-row label { display: inline-flex; gap: 6px; align-items: center; margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: pointer; }
 .setup-row label:nth-of-type(1) { margin-top: 12px; }

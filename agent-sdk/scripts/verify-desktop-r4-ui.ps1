@@ -4,14 +4,19 @@ verify-desktop-r4-ui.ps1 — R4（§4.3 全局状态条 / §4.6 诊断台账 / �
 事实源全部是**真机**：真实 Tauri 壳 + 真实 WebView2 + 真实 sidecar，DOM 结论只从
 WebView2 CDP 取，请求计数只从服务端 /diagnostics/requests ledger 取（§8.1 口径）。
 
-三组断言：
+四组断言（共 36 条 Add-Check）：
   ① §4.3：五段（后台/工作区/模型/权限/当前任务）真的存在、真是 button、真的可聚焦、
      点击真的换页，且工作区段只给「名称 + 路径摘要」不回显绝对路径。
-  ② §4.6：设置页台账八项条目齐备；四类计数自洽（health+auth+events+business = returned，
+  ② §4.4：工作区字段在壳内转只读 + 原生目录选择器入口就绪（指向 choose_project_directory），
+     文案不再引导手输/粘贴绝对路径。**只验接线，不点原生对话框**（Win32 模态框不在
+     本窗口客户区内，CDP/截图都覆盖不到——去点它只会把自动化卡死）。
+     §4.6「最近一次 core 重启」必须取壳侧 generation（Tauri IPC → api-client → 台账），
+     不得退化成 /auth/token 引导次数近似。
+  ③ §4.6：设置页台账八项条目齐备；四类计数自洽（health+auth+events+business = returned，
      与服务端窗口口径一致）；导出脱敏包结构齐备；**页面文本与导出包双双**不得出现
      本地绝对路径/授权头/原始 query。
-  ③ §8.2 回归护栏：状态条与台账不改首屏口径（业务请求 ≤5、无同路由重复）。
-  ④ §4.10：三档窗口（900×600 / 1280×720 / 1920×1080）状态条不溢出 + 截图像素验真。
+  ④ §8.2 回归护栏：状态条与台账不改首屏口径（业务请求 ≤5、无同路由重复）。
+  ⑤ §4.10：三档窗口（900×600 / 1280×720 / 1920×1080）状态条不溢出 + 截图像素验真。
 
 用法（在 agent-sdk/ 目录）：
   .\scripts\verify-desktop-r4-ui.ps1                    # 全量
@@ -144,6 +149,17 @@ $exprLedgerPage = @'
     return isNaN(n) ? null : n;
   }
   var rows = root.querySelectorAll(".owo-ledger-table tbody tr");
+  function kvValue(label) {
+    var list = root.querySelectorAll(".owo-ledger-kv");
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i].querySelector("span");
+      if (s && s.textContent.trim() === label) {
+        var v = list[i].querySelector("strong");
+        return v ? v.textContent.trim() : null;
+      }
+    }
+    return null;
+  }
   var bundle = null;
   if (window.OwoDiagnosticsLedger && root.__owoLedgerState) {
     try {
@@ -171,6 +187,11 @@ $exprLedgerPage = @'
     hasPercentile: /按路由模板聚合/.test(text),
     hasSources: /来源/.test(text),
     hasRestart: /core 重启与引导/.test(text),
+    restartFact: kvValue("最近一次 core 重启"),
+    bootCount: kvValue("窗口内引导次数"),
+    hasAuthoritativeCaveat: /取自壳侧权威快照/.test(text),
+    hasApproximationCaveat: /以 \/auth\/token 引导次数近似/.test(text),
+    authCardHintNative: /壳注入 token 时为 0/.test(text),
     hasSse: /SSE 事件流/.test(text),
     hasExportButton: !!exportBtn,
     exportLabel: exportBtn ? (exportBtn.textContent || "").trim() : "",
@@ -218,6 +239,34 @@ $clickSettings = @'
   if (!el) return "missing";
   el.click();
   return "clicked";
+})()
+'@
+
+# §4.4 表单控件规范：文件夹必须走原生目录选择器，禁止要求手输完整路径。
+# 这里**只验接线，绝不点击按钮**：rfd 弹出的是 Win32 模态框，不属于本窗口
+# 客户区，CDP 与截图都覆盖不到；验收去点它只会把自己卡到超时（那是人工
+# 交互项，见执行记录 §8）。判定的是"壳内确实把输入框转成了只读 + 原生入口"。
+$exprFolderPicker = @'
+(function () {
+  var input = document.getElementById("workspace");
+  var button = document.getElementById("chooseWorkspace");
+  var hint = document.getElementById("workspacePickerHint");
+  if (!input || !button) return JSON.stringify({ present: false });
+  var picker = window.OwoFolderPicker || null;
+  return JSON.stringify({
+    present: true,
+    readOnly: input.readOnly === true,
+    ariaReadonly: input.getAttribute("aria-readonly"),
+    inputMode: input.dataset ? (input.dataset.owoFolderPicker || "") : "",
+    buttonMode: button.dataset ? (button.dataset.owoFolderPicker || "") : "",
+    buttonLabel: (button.textContent || "").trim(),
+    buttonDisabled: button.disabled === true,
+    buttonFocusable: button.tabIndex !== -1,
+    hint: hint ? (hint.textContent || "").trim() : "",
+    moduleReady: !!(picker && typeof picker.pick === "function"),
+    nativeAvailable: !!(picker && picker.isNativeAvailable(window)),
+    command: picker ? String(picker.PICK_COMMAND || "") : ""
+  });
 })()
 '@
 
@@ -334,6 +383,21 @@ try {
         (($null -ne $focus) -and [bool]$focus.active -and $focus.key -eq 'permission') `
         "active=$($focus.active) key=$($focus.key) tag=$($focus.tag)"
 
+    # ================= ①.5 §4.4 文件夹原生选择器接线 =================
+    $picker = Get-CdpJson -Port $cdpPort -Expression $exprFolderPicker -TimeoutSec 10
+    $null = Save-OwoEvidenceJson -Dir $EvidenceDir -Name 'folder-picker.json' -InputObject $picker
+    Add-Check '§4.4 工作区输入框在壳内转只读（禁止要求手输完整路径）' `
+        (($null -ne $picker) -and [bool]$picker.present -and [bool]$picker.readOnly -and `
+            ($picker.ariaReadonly -eq 'true') -and ($picker.inputMode -eq 'native')) `
+        "readOnly=$($picker.readOnly) aria=$($picker.ariaReadonly) mode=$($picker.inputMode)"
+    Add-Check '§4.4 原生选择器入口就绪并指向壳侧命令（不是浏览器降级桩）' `
+        (([bool]$picker.moduleReady) -and [bool]$picker.nativeAvailable -and `
+            (-not [bool]$picker.buttonDisabled) -and ($picker.buttonMode -eq 'native') -and `
+            ($picker.command -eq 'choose_project_directory')) `
+        "module=$($picker.moduleReady) native=$($picker.nativeAvailable) disabled=$($picker.buttonDisabled) command=$($picker.command) label=`"$($picker.buttonLabel)`""
+    Add-Check '§4.4 工作区文案不再引导粘贴绝对路径（口径改为原生选择器）' `
+        ($picker.hint -match '原生目录选择器') "hint=`"$($picker.hint)`""
+
     # ================= ② §4.6 诊断请求台账 =================
     $null = Invoke-OwoCdpEval -Port $cdpPort -Expression $clickSettings -TimeoutSec 8
     $ledger = $null
@@ -360,11 +424,18 @@ try {
         (([int]$ledger.returned -le [int]$ledger.total) -and ([int]$ledger.cap -eq 512)) `
         "returned=$($ledger.returned) total=$($ledger.total) cap=$($ledger.cap)"
     Add-Check '台账真的聚合出数据行（慢请求/聚合表非空）' ([int]$ledger.rowCount -ge 3) "rows=$($ledger.rowCount)"
+    # §4.6「最近一次 core 重启」必须有权威口径：壳侧 generation 经 Tauri IPC →
+    # api-client 归一 → 台账渲染。任何一环断了都会静默退化成"壳未上报 + 近似"，
+    # 所以这里要求的是**不出现**近似文案。
+    Add-Check '§4.6 重启口径取壳侧权威代际（不以 /auth/token 引导次数近似）' `
+        (($ledger.restartFact -match '^第 [0-9]+ 代') -and [bool]$ledger.hasAuthoritativeCaveat -and `
+            (-not [bool]$ledger.hasApproximationCaveat)) `
+        "restart=`"$($ledger.restartFact)`" bootstraps=$($ledger.bootCount) auth_card=$($ledger.authCardHintNative)"
     $pageLeaks = @(Test-NoForbiddenEcho -Text ([string]$ledger.text))
     Add-Check '台账页面文本不回显绝对路径/授权头/原始 query' ($pageLeaks.Count -eq 0) "hits=$($pageLeaks -join ',')"
 
     $bundleText = [string]$ledger.bundle
-    $bundleKeys = @('"schema"', '"buckets"', '"slowest"', '"routes"', '"sources"', '"sse"', '"redaction"', '"bootstraps"', '"server_active_connections"')
+    $bundleKeys = @('"schema"', '"buckets"', '"slowest"', '"routes"', '"sources"', '"sse"', '"redaction"', '"bootstraps"', '"server_active_connections"', '"shell_generation"', '"shell_attempt"')
     $missingKeys = @()
     foreach ($key in $bundleKeys) { if (-not $bundleText.Contains($key)) { $missingKeys += $key } }
     Add-Check '一键导出的脱敏诊断包结构齐备（含重启近似与 SSE 计数）' ($missingKeys.Count -eq 0) `
@@ -388,6 +459,23 @@ try {
     Add-Check '「刷新台账」可重复取数（returned 不小于上一次）' `
         (($null -ne $refreshed) -and ([int]$refreshed.returned -ge $beforeRefresh)) `
         "before=$beforeRefresh after=$($refreshed.returned)"
+
+    # 模型段两份真相核对（R4-BUG-05）：壳侧 get_provider_status 在密钥经 sidecar
+    # 注入时会误报 unset；设置页从 core 水合回灌后，模型段必须改说权威事实、不得标黄。
+    $barAfterSettings = Get-CdpJson -Port $cdpPort -Expression $exprStatusBar -TimeoutSec 10
+    $modelSeg = $null
+    $backendSeg = $null
+    foreach ($seg in $barAfterSettings.segments) {
+        if ($seg.key -eq 'model') { $modelSeg = $seg }
+        if ($seg.key -eq 'backend') { $backendSeg = $seg }
+    }
+    Add-Check '模型段不与后台段自相矛盾（core 就绪时不说「未配置」）' `
+        (($backendSeg.tone -eq 'ok') -and ($modelSeg.tone -ne 'bad') -and ($modelSeg.tone -ne 'warn')) `
+        "backend=$($backendSeg.value)/$($backendSeg.tone) model=`"$($modelSeg.value)`"/$($modelSeg.tone)"
+    Add-Check '模型段回灌 core 实际生效模型（设置页水合）' `
+        ($modelSeg.value -match 'glm|GLM|bigmodel|ollama|本地') `
+        "model=`"$($modelSeg.value)`""
+    $null = Save-OwoEvidenceJson -Dir $EvidenceDir -Name 'status-bar-after-settings.json' -InputObject $barAfterSettings
 
     # ================= ③ §4.10 三档窗口 =================
     if (-not $SkipScreenshots) {

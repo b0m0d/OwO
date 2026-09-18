@@ -213,6 +213,14 @@
         instance_prefix: instancePrefix(core.instanceId),
         // 壳侧 logPath 是本地绝对路径：只导出「是否可打开」，不导出路径本身。
         log_available: Boolean(core.logPath),
+        // §4.6 重启口径：壳未上报时保持 null（不得用引导次数冒充重启次数，
+        // 也不得把 null 归零——`Number(null) === 0` 是个真陷阱）。
+        shell_generation: core.generation === null || core.generation === undefined || !Number.isFinite(Number(core.generation))
+          ? null
+          : Number(core.generation),
+        shell_attempt: core.attempt === null || core.attempt === undefined || !Number.isFinite(Number(core.attempt))
+          ? null
+          : Number(core.attempt),
         bootstraps: { count: boot.count, last_started_at: boot.last_started_at },
       },
       sse: {
@@ -288,7 +296,7 @@
     return (
       '<div class="owo-ledger-cards">' +
       card("health 探测", buckets.health, "壳就绪轮询/诊断页，不计业务") +
-      card("auth 引导", buckets.auth, "每次 core 重启恰好一次") +
+      card("auth 引导", buckets.auth, "壳注入 token 时为 0，不等于未引导") +
       card("events（SSE）", buckets.events, "business 子集，单列") +
       card("业务请求", buckets.business, "不含 SSE") +
       "</div>"
@@ -398,17 +406,32 @@
     };
     const stateText = zh[String(core.state || "unknown")] || String(core.state || "unknown");
     const row = kvRow;
+    // §4.6「最近一次 core 重启」的权威口径来自壳侧：generation = 手动重连/换目录
+    // 换代次数，attempt = 当代崩溃自动重启次数。两者缺一时不得假装知道
+    // （注意 `Number(null) === 0`，所以判定必须先把 null/undefined 排除掉）。
+    const counted = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
+    const hasGeneration = counted(core.generation);
+    const hasAttempt = counted(core.attempt);
+    const restartText = hasGeneration
+      ? "第 " + Number(core.generation) + " 代" + (hasAttempt ? " · 当代自动重启 " + Number(core.attempt) + " 次" : "")
+      : "壳未上报";
+    const caveat = hasGeneration
+      ? "口径：重启代际/当代自动重启次数取自壳侧权威快照（Tauri IPC，不经 HTTP）；「窗口内引导次数」只统计 /auth/token，桌面正式冷启动多为 0，不能当重启数读。"
+      : "口径：壳未上报重启计数时，以 /auth/token 引导次数近似「最近一次 core 重启」。";
     return (
       '<div class="owo-ledger-kvlist">' +
       row("当前状态", stateText) +
       row("稳定错误码", core.errorCode ? maskSecretValue(core.errorCode) : "无", Boolean(core.errorCode)) +
+      row("最近一次 core 重启", restartText) +
       row("core PID", Number.isFinite(Number(core.pid)) ? Number(core.pid) : "—") +
       row("实例前缀", core.instanceId ? instancePrefix(core.instanceId) : "—") +
       row("窗口内引导次数", boot.count) +
       row("最近一次引导", boot.last_started_at ? formatClock(boot.last_started_at) : "窗口内未见 /auth/token") +
       row("日志可打开", core.logPath ? "是（路径不回显）" : "否") +
       "</div>" +
-      '<div class="sub">口径：壳未上报重启计数时，以 /auth/token 引导次数近似「最近一次 core 重启」。</div>'
+      '<div class="sub">' +
+      esc(caveat) +
+      "</div>"
     );
   }
 
@@ -557,6 +580,9 @@
       errorCode: diag.errorCode || (diag.connection && diag.connection.errorCode) || null,
       pid: diag.pid,
       instanceId: diag.instanceId,
+      // §4.6：壳侧重启口径（旧壳/未上报时为 undefined，渲染层必须显式降级）。
+      generation: diag.generation,
+      attempt: diag.attempt,
       // 展示与导出都先过脱敏：绝不把本地绝对路径带进 DOM。
       logPath: maskLocalPath(diag.logPath),
       message: maskSecretValue(maskLocalPath(diag.message)),

@@ -193,6 +193,13 @@ impl CoreRuntime {
         &self.pairing
     }
 
+    /// 测试注入用：暴露状态锁，便于构造 Ready/Failed 等只能由监督线程产生的状态，
+    /// 从而对命令层的 payload 形状做契约测试（生产路径一律走 `state()`/`set_state`）。
+    #[cfg(test)]
+    pub fn state_for_test(&self) -> Arc<Mutex<CoreState>> {
+        Arc::clone(&self.state)
+    }
+
     /// §4 首屏收敛：壳已引导的 core bearer token（供 get_core_connection 注入
     /// 当前 WebView，省去浏览器模式下的 GET /auth/token 冷启动请求）。
     /// 只经 Tauri IPC 传给本窗口，不落盘、不写日志（redact 兜底）。
@@ -212,6 +219,14 @@ impl CoreRuntime {
             .lock()
             .map(|path| path.clone())
             .unwrap_or_default()
+    }
+
+    /// 当前**启动代际**（`retry()` 递增：手动重连、换工作区、换数据目录都会 +1）。
+    /// 口径必须说准：同一代内 core 崩溃后的**自动重启**只累加 `attempt`，不换代——
+    /// 所以这个数不是"重启总次数"。§4.6 诊断台账要显示「最近一次 core 重启」，
+    /// 权威事实是 `generation` + 当代 `attempt` 两者，`/auth/token` 引导次数只是近似。
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// R3-B（§3.4 终态可见性）：记录一次启动失败（稳定码 + 用户文案）。
@@ -1669,6 +1684,43 @@ mod tests {
                 "重启后必须恢复已保存的工作区"
             );
             let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn generation_counts_manual_retry_only() {
+        // §4.6 台账口径的根基：`generation` 只在**手动重连/换目录**时递增。
+        // 崩溃自动重启由监督线程在同一代内累加 `attempt`，两者不得混成一个计数，
+        // 否则「最近一次 core 重启」会把 5 次崩溃读成 5 次换代。
+        with_isolated_data_dir(|| {
+            let runtime = std::sync::Arc::new(CoreRuntime::new_with_workspace(
+                "pairing".into(),
+                "inst".into(),
+                None,
+            ));
+            assert_eq!(runtime.generation(), 0, "新实例代际从 0 起算");
+            runtime.retry();
+            runtime.retry();
+            assert_eq!(runtime.generation(), 2, "retry() 每次换代 +1");
+            // 无工作区时 retry 仍走 NoWorkspace：不起监督线程、不拉进程。
+            assert!(matches!(runtime.state(), CoreState::NoWorkspace));
+            runtime.start();
+            assert_eq!(
+                runtime.generation(),
+                2,
+                "start() 不得改变代际（否则崩溃恢复会被记成换代）"
+            );
+        });
+    }
+
+    #[test]
+    fn bearer_token_is_none_until_shell_provisions_it() {
+        // §4 首屏收敛前置事实：未引导时不得凭空给出 token
+        // （给了 = 陈旧凭据被注入到新窗口）。
+        with_isolated_data_dir(|| {
+            let runtime = CoreRuntime::new_with_workspace("pairing".into(), "inst".into(), None);
+            assert_eq!(runtime.bearer_token(), None);
+            assert_eq!(runtime.pairing(), "pairing");
         });
     }
 

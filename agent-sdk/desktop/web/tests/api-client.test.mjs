@@ -146,6 +146,8 @@ test("Tauri 桌面端先向壳询问核心连接，携带实例身份与配对�
       buildId: "abc123",
       // §6.1.4：旧壳不带 expectedBuildId → 归一为 null（比对降级为不可用，不误报）。
       expectedBuildId: null,
+      // §4.6：同一份旧壳夹具也不带 generation → 归一为 null，台账据此显示"壳未上报"。
+      generation: null,
       apiVersion: "0.7",
       instanceId: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
     });
@@ -232,6 +234,8 @@ test("§6.1.4 诊断对象同时暴露 expected/actual build id（不一致时�
       buildId: "actual-core-build",
       expectedBuildId: "shell-expected-build",
       apiVersion: "0.7",
+      // §4.6：代际由壳上报；这份桩描述符没带该字段 → 归一为 null（不是 0）。
+      generation: null,
       instanceId: "inst-mismatch",
     });
     assert.notEqual(global.__owoCoreDiagnostics.buildId, global.__owoCoreDiagnostics.expectedBuildId);
@@ -474,6 +478,9 @@ test("核心未就绪时保留原基址，并暴露启动诊断供恢复流程�
       errorCode: "core/spawn_failed",
       message: "核心服务启动失败",
       logPath: "C:\\logs\\core.log",
+      // §4.6：壳未上报重启计数时归一为 null（UI 必须说"壳未上报"，不得显示 0）。
+      attempt: null,
+      generation: null,
     });
     // 恢复前重查连接：缓存与基址必须复位
     client.resetCoreConnection();
@@ -558,6 +565,30 @@ test("§3.1 openEventStream：Last-Event-ID 头续传 + SSE 逐帧解析（id/�
   } finally {
     global.fetch = original;
   }
+});
+
+test("§4.6 壳诊断归一：generation/attempt 必须透出，旧壳缺失时保持 null", () => {
+  const ready = ApiClient.buildCoreDiagnostics({
+    state: "ready",
+    port: 4096,
+    pid: 12,
+    instanceId: "inst",
+    generation: 5,
+  });
+  assert.equal(ready.generation, 5, "ready 时也要带代际，否则台账日常看不到重启事实");
+  assert.equal(ApiClient.buildCoreDiagnostics({ state: "ready", port: 1, pid: 2 }).generation, null,
+    "旧壳未上报必须显式为 null，不得补 0（0 与未上报是两回事）");
+  const starting = ApiClient.buildCoreDiagnostics({
+    state: "starting",
+    attempt: 2,
+    generation: 1,
+    errorCode: "core/exited",
+    message: "core 退出",
+    logPath: "C:\\logs\\core.log",
+  });
+  assert.equal(starting.attempt, 2, "同代自动重启次数与代际是两个事实，都要透出");
+  assert.equal(starting.generation, 1);
+  assert.equal(starting.errorCode, "core/exited");
 });
 
 test("§3.1 openEventStream：Last-Event-ID 头随请求发送", async () => {

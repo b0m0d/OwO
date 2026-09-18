@@ -325,3 +325,71 @@ test("接线：index.html 引脚本 + 容器就位，app.js 只在设置路由�
   assert.ok(boot && hydrate, "首屏任务清单应存在");
   assert.ok(!/DiagnosticsLedger/.test(boot[1] + hydrate[1]), "§8.2 首屏 ≤5 请求：台账不得进首屏清单");
 });
+
+test("§4.6 重启口径：壳上报 generation/attempt 时用权威计数，不再拿引导次数近似", () => {
+  const sandbox = makeSandbox({
+    __owoCoreDiagnostics: {
+      state: "restarting",
+      attempt: 2,
+      generation: 3,
+      pid: 42,
+      instanceId: "restart-instance-0123456789",
+      logPath: "D:\\data\\logs\\core.log",
+      message: "core exited unexpectedly",
+    },
+    owoInvalidatorState: () => null,
+  });
+  const ledger = sandbox.OwoDiagnosticsLedger;
+  const core = ledger.readCoreSnapshot();
+  assert.equal(core.generation, 3, "壳快照必须把 generation 透出来（api-client 归一后）");
+  assert.equal(core.attempt, 2);
+  const root = makeRoot();
+  ledger.render(root, { ledger: seedLedger(), overview: OVERVIEW, core: core, updated_at: "2026-09-18T10:00:09.000Z" });
+  const html = root.innerHTML;
+  assert.ok(html.includes("最近一次 core 重启"), "§4.6 条目：重启事实必须在页面可见");
+  assert.ok(html.includes("第 3 代"), "代际必须真渲染出来");
+  assert.ok(html.includes("当代自动重启 2 次"), "同代崩溃自动重启与换代是两个事实，必须分开");
+  assert.ok(!html.includes("以 /auth/token 引导次数近似"), "有权威计数时不得再挂近似口径");
+  assert.ok(html.includes("取自壳侧权威快照"), "口径来源必须写明，避免与 auth 卡片互证");
+  const bundle = ledger.buildExportBundle({ ledger: seedLedger(), overview: OVERVIEW, core: core });
+  assert.equal(bundle.core.shell_generation, 3);
+  assert.equal(bundle.core.shell_attempt, 2);
+});
+
+test("§4.6 旧壳未上报代际：显式说「壳未上报」并保留近似口径（不得用 0 冒充）", () => {
+  const sandbox = makeSandbox({
+    __owoCoreDiagnostics: { state: "ready", pid: 8, instanceId: "old-shell-instance-01" },
+  });
+  const ledger = sandbox.OwoDiagnosticsLedger;
+  const core = ledger.readCoreSnapshot();
+  assert.equal(core.generation, undefined, "旧壳没有该字段 → 不得凭空补 0");
+  const root = makeRoot();
+  ledger.render(root, { ledger: seedLedger(), overview: OVERVIEW, core: core, updated_at: "2026-09-18T10:00:09.000Z" });
+  assert.ok(root.innerHTML.includes("壳未上报"), "缺失必须显式呈现为未知");
+  assert.ok(root.innerHTML.includes("以 /auth/token 引导次数近似"), "无权威计数时才允许近似口径");
+});
+
+test("§4.6 auth 卡片口径修正：壳注入 token 后引导数为 0 不等于未引导", () => {
+  const sandbox = makeSandbox({ __owoCoreDiagnostics: { state: "ready", generation: 1 } });
+  const noAuth = {
+    total: 3,
+    returned: 2,
+    cap: 512,
+    aggregates: { health: 2, auth_token: 0, business: 0 },
+    records: [
+      { method: "GET", route_template: "/health", started_at: "2026-09-18T10:00:00.100Z", duration_ms: 3, status: 200, source: "shell" },
+      { method: "GET", route_template: "/health", started_at: "2026-09-18T10:00:01.100Z", duration_ms: 4, status: 200, source: "shell" },
+    ],
+  };
+  const root = makeRoot();
+  sandbox.OwoDiagnosticsLedger.render(root, {
+    ledger: noAuth,
+    overview: OVERVIEW,
+    core: sandbox.OwoDiagnosticsLedger.readCoreSnapshot(),
+    updated_at: "2026-09-18T10:00:09.000Z",
+  });
+  assert.ok(root.innerHTML.includes("壳注入 token 时为 0，不等于未引导"), "§4 冷启动不再请求 /auth/token，提示语必须同步");
+  assert.ok(!root.innerHTML.includes("每次 core 重启恰好一次"), "旧口径（每重启必有一次引导）已不成立");
+  assert.ok(root.innerHTML.includes("窗口内未见 /auth/token"), "无引导记录时说明事实而不是显示 0 就完事");
+});
+

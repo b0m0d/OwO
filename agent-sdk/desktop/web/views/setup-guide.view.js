@@ -43,7 +43,8 @@
     line.classList.toggle("ok", !!ok);
   }
 
-  // 工作区选择表单：文本输入 + 目录选择（webkitdirectory 仅取路径）。
+  // 工作区选择表单：桌面版走 **Tauri 原生目录选择器**（§4.4 禁止要求手输完整
+  // 路径）；只有纯浏览器 dev 模式没有原生选择器时才保留文本框可输入。
   function renderWorkspaceCard(root, diagnostics) {
     const card = document.createElement("section");
     card.className = "setup-card";
@@ -61,29 +62,55 @@
       '<button type="button" data-role="browse">浏览…</button>' +
       "</div>" +
       '<input data-role="dir-picker" type="file" webkitdirectory hidden />' +
-      '<p class="sub">提示：也可粘贴完整绝对路径（必须真实存在）。</p>' +
+      '<p class="sub" data-role="path-hint">提示：也可粘贴完整绝对路径（必须真实存在）。</p>' +
       '<button type="submit" class="primary">使用此目录</button>' +
       "</form>";
     root.appendChild(card);
 
     const form = card.querySelector('[data-role="workspace-form"]');
     const pathInput = card.querySelector('[data-role="path"]');
+    const browseButton = card.querySelector('[data-role="browse"]');
+    const pathHint = card.querySelector('[data-role="path-hint"]');
     const picker = card.querySelector('[data-role="dir-picker"]');
-    card.querySelector('[data-role="browse"]').addEventListener("click", function () {
-      picker.value = "";
-      picker.click();
-    });
-    picker.addEventListener("change", function () {
-      if (picker.files && picker.files.length > 0) {
-        const first = picker.files[0];
-        let dir = first.webkitRelativePath || first.name;
-        const slash = dir.indexOf("/");
-        if (slash > 0) dir = dir.slice(0, slash);
-        // webkitdirectory 只能给出相对名，无法还原绝对路径；
-        // 回退为提示用户手动粘贴（路径解析在 rust 侧 canonicalize 保证存在性）。
-        showMessage(form, "请粘贴该目录的完整路径（浏览器安全限制无法读取绝对路径）", false);
-      }
-    });
+    const nativePicker = global.OwoFolderPicker && global.OwoFolderPicker.isNativeAvailable(global);
+    if (nativePicker) {
+      // 原生选择器一旦选定，壳侧已完成校验 + 持久化 + 受控重启：
+      // 本卡直接判定完成，不再要求用户多点一次「使用此目录」。
+      global.OwoFolderPicker.attach(pathInput, browseButton, {
+        title: "选择项目工作区（原生目录选择器）",
+        onPicked: function (workspace) {
+          if (!form.dataset.done) {
+            form.dataset.done = "1";
+            global.__owoSetupContinue && global.__owoSetupContinue("workspace");
+          }
+          showMessage(form, "工作区已设置：" + workspace, true);
+        },
+        onCanceled: function () {
+          showMessage(form, "已取消选择，工作区保持不变。", true);
+        },
+        onError: function (message) {
+          showMessage(form, "选择失败：" + message, false);
+        },
+      });
+      pathHint.textContent = "由原生目录选择器设定，不需要手输完整路径。";
+    } else {
+      // 浏览器 dev 模式：webkitdirectory 只能给出相对名，取不到绝对路径。
+      browseButton.addEventListener("click", function () {
+        picker.value = "";
+        picker.click();
+      });
+      picker.addEventListener("change", function () {
+        if (picker.files && picker.files.length > 0) {
+          const first = picker.files[0];
+          let dir = first.webkitRelativePath || first.name;
+          const slash = dir.indexOf("/");
+          if (slash > 0) dir = dir.slice(0, slash);
+          // webkitdirectory 只能给出相对名，无法还原绝对路径；
+          // 回退为提示用户手动粘贴（路径解析在 rust 侧 canonicalize 保证存在性）。
+          showMessage(form, "请粘贴该目录的完整路径（浏览器安全限制无法读取绝对路径）", false);
+        }
+      });
+    }
 
     invoke("get_workspace").then(function (state) {
       if (state && state.workspace) {

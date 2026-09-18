@@ -94,6 +94,12 @@
           expectedBuildId: typeof descriptor.expectedBuildId === "string" ? descriptor.expectedBuildId : null,
           apiVersion: descriptor.apiVersion,
           instanceId: descriptor.instanceId,
+          // §4.6：壳侧启动代际（旧壳没有该字段 → null，UI 必须显式说"壳未上报"）。
+          // 判定先排除 null：`Number(null) === 0` 会把"未上报"伪装成"第 0 代"。
+          generation:
+            descriptor.generation === null || descriptor.generation === undefined || !Number.isFinite(Number(descriptor.generation))
+              ? null
+              : Number(descriptor.generation),
         };
       }
       return {
@@ -101,6 +107,8 @@
         errorCode: descriptor.errorCode,
         message: descriptor.message,
         logPath: descriptor.logPath,
+        attempt: descriptor.attempt === null || descriptor.attempt === undefined || !Number.isFinite(Number(descriptor.attempt)) ? null : Number(descriptor.attempt),
+        generation: descriptor.generation === null || descriptor.generation === undefined || !Number.isFinite(Number(descriptor.generation)) ? null : Number(descriptor.generation),
       };
     }
 

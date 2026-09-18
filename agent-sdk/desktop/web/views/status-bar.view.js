@@ -31,6 +31,8 @@
     provider: { at: 0, value: null, pending: false },
     workspace: { at: 0, root: "", pending: false },
     permission: { profile: null, pendingApprovals: null, grants: null },
+    // 设置页从 core 水合到的实际生效模型（唯一权威源），回灌给模型段。
+    model: null,
   };
 
   function backendFromDiagnostics(diag, streamState) {
@@ -96,11 +98,29 @@
   }
 
   function modelFromCache() {
+    // 两份真相不能混着说（R3-B 缺陷 23 的同族问题，真机截图抓到）：
+    // 密钥由壳注入 sidecar 环境时，壳自己的 get_provider_status 仍会报
+    // provider=unset/ready=false，而 core 实际已就绪并在用 glm-5.3-flash。
+    // 所以：① 设置页水合到的 core 事实优先回灌；② 只有壳视图时不得把
+    // 「未配置」当结论标红，必须说明这是壳侧视图。
+    if (cache.model) {
+      const info = cache.model;
+      const label = [info.provider, info.model].filter(Boolean).join(" · ") || "已配置";
+      return { text: label, tone: "ok", detail: "来源：core 实际生效配置（设置页水合）" };
+    }
     const entry = cache.provider.value;
     if (!entry) return { text: "读取中…", tone: "muted" };
     if (entry.error) return { text: "未读取", tone: "warn", detail: entry.error };
     const model = entry.model || "未设置";
     const provider = entry.provider || "未知";
+    const coreReady = String((global.__owoCoreDiagnostics || {}).state || "") === "ready";
+    if (entry.ready === false && coreReady) {
+      return {
+        text: provider + " · 壳侧未配置",
+        tone: "muted",
+        detail: "core 已就绪并在服务；壳侧配置视图与 core 不一致，实际生效模型见设置页",
+      };
+    }
     if (entry.ready === false) return { text: provider + " · 未配置", tone: "warn" };
     return { text: provider + " · " + model, tone: "ok" };
   }
@@ -314,12 +334,22 @@
     cache.provider = { at: 0, value: null, pending: false };
     cache.workspace = { at: 0, root: "", pending: false };
     cache.permission = { profile: null, pendingApprovals: null, grants: null };
+    cache.model = null;
     lastSerialized = "";
   }
 
   /** 权限中心/设置页把权威档位回灌给状态条（零额外请求）。 */
   function reportPermission(info) {
     cache.permission = Object.assign({}, cache.permission, info || {});
+    repaint();
+  }
+
+  /**
+   * 设置页把 core 实际生效的提供商/模型回灌给模型段（§4.3「provider、模型、连接状态」
+   * 的唯一权威源；壳侧 get_provider_status 只是进程配置视图，两者不一致时以 core 为准）。
+   */
+  function reportModel(info) {
+    cache.model = info && typeof info === "object" ? info : null;
     repaint();
   }
 
@@ -335,6 +365,7 @@
     profileWritable: profileWritable,
     computeFacts: computeFacts,
     reportPermission: reportPermission,
+    reportModel: reportModel,
     mount: mount,
     unmount: unmount,
     repaint: repaint,

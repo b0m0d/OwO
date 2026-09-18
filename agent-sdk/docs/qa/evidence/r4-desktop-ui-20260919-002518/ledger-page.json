@@ -1,0 +1,23 @@
+{
+    "present":  true,
+    "textLen":  415,
+    "text":  "刷新台账生成脱敏诊断包复制诊断包 JSON下载诊断包文件 加载中… 最近请求数量：0 条（窗口累计 0，环形容量 0） 0 health 探测 壳就绪轮询/诊断页，不计业务 0 auth 引导 每次 core 重启恰好一次 0 events（SSE） business 子集，单列 0 业务请求 不含 SSE 慢请求 Top 8 窗口内暂无请求记录。 按路由模板聚合（P50 / P95） 窗口内暂无可聚合记录。 来源（x-owo-client） 窗口内暂无来源记录。 core 重启与引导 当前状态 未知 稳定错误码 无 core PID — 实例前缀 — 窗口内引导次数 0 最近一次引导 窗口内未见 /auth/token 日志可打开 否 口径：壳未上报重启计数时，以 /auth/token 引导次数近似「最近一次 core 重启」。 SSE 事件流 /metrics/overview 未就绪，暂无服务端 SSE 计数。",
+    "health":  0,
+    "auth":  0,
+    "events":  0,
+    "business":  0,
+    "returned":  0,
+    "total":  0,
+    "cap":  0,
+    "hasSlow":  true,
+    "hasPercentile":  true,
+    "hasSources":  true,
+    "hasRestart":  true,
+    "hasSse":  true,
+    "hasExportButton":  true,
+    "exportLabel":  "生成脱敏诊断包",
+    "hasRefreshButton":  true,
+    "rowCount":  0,
+    "bundle":  "{\"schema\":\"owo-diagnostic-bundle/1\",\"generated_at\":\"2026-09-18T16:25:36.365Z\",\"ledger\":{\"total\":0,\"returned\":0,\"cap\":0,\"buckets\":{\"health\":0,\"auth\":0,\"events\":0,\"business\":0,\"business_server\":0,\"total_records\":0},\"routes\":[],\"slowest\":[],\"sources\":{}},\"core\":{\"state\":\"unknown\",\"error_code\":null,\"pid\":null,\"instance_prefix\":\"\",\"log_available\":false,\"bootstraps\":{\"count\":0,\"last_started_at\":null}},\"sse\":{\"server_active_connections\":0,\"server_total_connections\":0,\"server_lagged_total\":0,\"client_state\":\"unknown\",\"client_reconnects\":null},\"redaction\":{\"policy\":\"禁止回显：原始 URL query、授权头、配对秘密、用户输入全文、本地绝对路径\",\"absolute_paths_removed\":true,\"authorization_headers_removed\":true}}",
+    "note":  "加载中…"
+}

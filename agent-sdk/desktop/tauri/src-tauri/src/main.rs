@@ -306,6 +306,7 @@ fn main() {
             commands::get_provider_status,
             commands::set_provider,
             commands::choose_data_directory,
+            commands::choose_project_directory,
             set_window_visible,
             desktop_pairing
         ])
