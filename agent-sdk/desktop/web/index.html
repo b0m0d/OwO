@@ -241,6 +241,9 @@
       <div class="inline">
         <button id="storageClearBtn" class="danger" title="二次确认后清空会话/审计/笔记/记忆/自动化">一键清空数据…</button>
       </div>
+      <!-- §4.6 诊断请求台账：数据源 = GET /diagnostics/requests + GET /metrics/overview（壳侧仅用 IPC 快照）。 -->
+      <h3>诊断请求台账</h3>
+      <div id="diagnosticsLedger" class="owo-diagnostics-ledger">进入本页自动加载；也可手动刷新。</div>
       <a id="openapiLink" href="openapi.json" target="_blank" rel="noopener" title="由本地核心服务提供（按当前连接构造绝对地址）">OpenAPI 3.1</a>
       <a href="privacy.md" target="_blank" rel="noopener">隐私声明（数据字典/一键关闭/保留期）</a>
     </section>
@@ -350,6 +353,7 @@
   <script src="shell/speech.js"></script>
   <script src="views/service-error.view.js"></script>
   <script src="views/setup-guide.view.js"></script>
+  <script src="views/diagnostics-ledger.view.js"></script>
   <script src="panels/capabilities.panel.js"></script>
   <script src="panels/action-center.panel.js"></script>
   <script src="panels/project-history.panel.js"></script>

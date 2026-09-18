@@ -1,0 +1,299 @@
+// R4-3 §4.6「诊断请求台账」契约测试。
+//
+// 两层：
+//   ① 行为层——把 views/diagnostics-ledger.view.js 载入 VM 沙箱（假 DOM），
+//      喂一份合成 ledger/overview/壳快照，断言四类计数、慢请求 Top N、
+//      按 route_template 的 P50/P95、来源分布、最近引导、SSE 计数都真的渲染出来；
+//      并断言 §4.6 禁止回显清单（本地绝对路径 / Bearer / query）在任何渲染与导出
+//      字符串里都不出现。这条最容易「页面做了、脱敏漏了」，所以两个出口都测。
+//   ② 接线层——index.html 的脚本引用与容器、app.js 的按需加载（不得进首屏清单）。
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+
+const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
+const viewSource = readFileSync(join(WEB, "views", "diagnostics-ledger.view.js"), "utf8");
+const indexHtml = readFileSync(join(WEB, "index.html"), "utf8");
+const appSource = readFileSync(join(WEB, "app.js"), "utf8");
+
+// ---- 假 DOM：只实现本视图用到的面（innerHTML / querySelector / addEventListener）----
+function makeRoot() {
+  const nodes = new Map();
+  const root = {
+    _html: "",
+    isConnected: true,
+    get innerHTML() {
+      return this._html;
+    },
+    set innerHTML(value) {
+      this._html = String(value);
+      nodes.clear();
+    },
+    querySelector(selector) {
+      const key = String(selector);
+      if (!nodes.has(key)) {
+        nodes.set(key, {
+          id: key,
+          hidden: false,
+          textContent: "",
+          value: "",
+          style: {},
+          listeners: {},
+          addEventListener(type, handler) {
+            (this.listeners[type] = this.listeners[type] || []).push(handler);
+          },
+          setAttribute() {},
+          appendChild() {},
+          remove() {},
+          select() {},
+          click() {
+            (this.listeners.click || []).forEach((fn) => fn());
+          },
+        });
+      }
+      return nodes.get(key);
+    },
+  };
+  return root;
+}
+
+function makeSandbox(extra) {
+  const sandbox = Object.assign(
+    {
+      document: {
+        createElement: () => ({ style: {}, setAttribute() {}, appendChild() {}, remove() {}, click() {}, select() {}, value: "" }),
+        body: { appendChild() {}, removeChild() {} },
+        execCommand: () => true,
+      },
+      navigator: {},
+      URL: { createObjectURL: () => "blob:stub", revokeObjectURL() {} },
+      Blob: function Blob() {},
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+    },
+    extra || {},
+  );
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(viewSource, sandbox, { filename: "diagnostics-ledger.view.js" });
+  return sandbox;
+}
+
+const SEED_RECORDS = [
+  { method: "GET", route_template: "/health", started_at: "2026-09-18T10:00:00.100Z", duration_ms: 3, status: 200, source: "shell" },
+  { method: "GET", route_template: "/health", started_at: "2026-09-18T10:00:01.100Z", duration_ms: 4, status: 200, source: "shell" },
+  { method: "POST", route_template: "/auth/token", started_at: "2026-09-18T10:00:01.200Z", duration_ms: 12, status: 200, source: "web" },
+  { method: "GET", route_template: "/events", started_at: "2026-09-18T10:00:02.000Z", duration_ms: 900, status: 200, source: "web" },
+  { method: "GET", route_template: "/sessions", started_at: "2026-09-18T10:00:03.000Z", duration_ms: 40, status: 200, source: "web" },
+  { method: "GET", route_template: "/sessions/{id}", started_at: "2026-09-18T10:00:04.000Z", duration_ms: 80, status: 200, source: "web" },
+  { method: "GET", route_template: "/sessions/{id}", started_at: "2026-09-18T10:00:05.000Z", duration_ms: 800, status: 200, source: "web" },
+  { method: "POST", route_template: "/turns", started_at: "2026-09-18T10:00:06.000Z", duration_ms: 1500, status: 500, source: "shell" },
+];
+
+function seedLedger() {
+  const health = SEED_RECORDS.filter((r) => r.route_template === "/health").length;
+  const auth = SEED_RECORDS.filter((r) => r.route_template === "/auth/token").length;
+  return {
+    total: 900,
+    returned: SEED_RECORDS.length,
+    cap: 512,
+    aggregates: { health, auth_token: auth, business: SEED_RECORDS.length - health - auth },
+    records: SEED_RECORDS.slice(),
+  };
+}
+
+const OVERVIEW = { sse: { active_connections: 2, total_connections: 7, lagged_total: 1 } };
+
+test("四类计数：health/auth 取服务端口径，events 单列且 business 去掉 SSE", () => {
+  const sandbox = makeSandbox();
+  const ledger = sandbox.OwoDiagnosticsLedger;
+  const buckets = ledger.bucketCounts(seedLedger());
+  assert.equal(buckets.health, 2);
+  assert.equal(buckets.auth, 1);
+  assert.equal(buckets.events, 1, "/events 必须被认成 SSE 一类");
+  assert.equal(buckets.business_server, 5, "服务端 business 含 SSE");
+  assert.equal(buckets.business, 4, "页面 business 口径剔除 SSE，四类可互相核对");
+});
+
+test("P50/P95 按 route_template 聚合：最近秩法 + 错误计数", () => {
+  const sandbox = makeSandbox();
+  const ledger = sandbox.OwoDiagnosticsLedger;
+  const rows = ledger.routeAggregate(SEED_RECORDS);
+  const detail = rows.find((r) => r.route === "/sessions/{id}");
+  assert.ok(detail, "/sessions/{id} 应聚合成一行");
+  assert.equal(detail.count, 2);
+  assert.equal(detail.p50_ms, 80, "最近秩：2 条时 P50 取第 1 小");
+  assert.equal(detail.p95_ms, 800, "P95 取最大");
+  assert.equal(detail.errors, 0);
+  const turns = rows.find((r) => r.route === "/turns");
+  assert.equal(turns.errors, 1, "status≥400 计入错误");
+  assert.equal(rows[0].route, "/turns", "默认按 P95 降序，最慢的路由排最前");
+});
+
+test("慢请求 Top N 按耗时降序，来源分布分 web/shell", () => {
+  const sandbox = makeSandbox();
+  const ledger = sandbox.OwoDiagnosticsLedger;
+  const top = ledger.slowest(SEED_RECORDS, 3);
+  assert.deepEqual(
+    top.map((r) => Number(r.duration_ms)),
+    [1500, 900, 800],
+  );
+  // 沙箱内创建的对象原型与宿主不同，跨 realm 比较走 JSON 归一。
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(ledger.sourceCounts(SEED_RECORDS))),
+    { shell: 3, web: 5 },
+  );
+  const boot = ledger.lastBootstrap(SEED_RECORDS);
+  assert.equal(boot.count, 1);
+  assert.equal(boot.last_started_at, "2026-09-18T10:00:01.200Z");
+});
+
+test("渲染必须覆盖 §4.6 全部条目：数量、四类计数、慢请求、P50/P95、来源、重启、SSE、导出", () => {
+  const sandbox = makeSandbox({
+    __owoCoreDiagnostics: {
+      state: "restarting",
+      errorCode: "core/exited",
+      pid: 4242,
+      instanceId: "abcdef0123456789",
+      logPath: "C:\\Users\\private\\AppData\\Local\\owo\\core.log",
+      message: "process exited with Bearer sk-should-not-leak",
+    },
+    owoInvalidatorState: () => ({ state: "degraded", reconnectAttempts: 3 }),
+  });
+  const root = makeRoot();
+  sandbox.OwoDiagnosticsLedger.render(root, {
+    ledger: seedLedger(),
+    overview: OVERVIEW,
+    core: sandbox.OwoDiagnosticsLedger.readCoreSnapshot(),
+    updated_at: "2026-09-18T10:00:09.000Z",
+  });
+  const html = root.innerHTML;
+  for (const must of [
+    "最近请求数量",
+    "health 探测",
+    "auth 引导",
+    "events（SSE）",
+    "业务请求",
+    "慢请求 Top",
+    "按路由模板聚合（P50 / P95）",
+    "来源（x-owo-client）",
+    "core 重启与引导",
+    "SSE 事件流",
+    "导出脱敏诊断包",
+  ]) {
+    assert.ok(html.includes(must), `页面缺少 §4.6 条目：${must}`);
+  }
+  assert.ok(html.includes("1500 ms"), "慢请求表要真的带耗时");
+  assert.ok(html.includes("web（界面）") && html.includes("shell（桌面壳）"), "来源要给用户看得懂的口径");
+  assert.ok(html.includes("当前连接数"), "SSE 当前连接数必须展示");
+});
+
+test("§4.6 禁止回显：本地绝对路径、Bearer、配对秘密、原始 query 都不得出现在页面或导出包", () => {
+  const sandbox = makeSandbox({
+    __owoCoreDiagnostics: {
+      state: "failed",
+      errorCode: "storage/not_writable",
+      pid: 1,
+      instanceId: "zeta-instance-id-0123456789",
+      logPath: "D:\\secret-data-root\\logs\\core.log",
+      message: "open failed: Authorization: Bearer tok-abc.def-123 at /home/ovo/private",
+    },
+    owoInvalidatorState: () => null,
+  });
+  const ledger = sandbox.OwoDiagnosticsLedger;
+  const core = ledger.readCoreSnapshot();
+  const root = makeRoot();
+  ledger.render(root, { ledger: seedLedger(), overview: OVERVIEW, core: core, updated_at: "2026-09-18T10:00:09.000Z" });
+  const html = root.innerHTML;
+  for (const forbidden of [
+    "secret-data-root",
+    "core.log",
+    "/home/ovo",
+    "Bearer",
+    "tok-abc",
+    "zeta-instance-id-0123456789",
+  ]) {
+    assert.ok(!html.includes(forbidden), `页面不得出现 ${forbidden}`);
+  }
+  const bundle = JSON.stringify(ledger.buildExportBundle({ ledger: seedLedger(), overview: OVERVIEW, core: core }));
+  for (const forbidden of ["secret-data-root", "core.log", "/home/ovo", "Bearer", "tok-abc", "zeta-instance-id-0123456789"]) {
+    assert.ok(!bundle.includes(forbidden), `导出包不得出现 ${forbidden}`);
+  }
+  assert.equal(JSON.parse(bundle).schema, ledger.EXPORT_SCHEMA);
+  assert.ok(ledger.maskLocalPath("C:\\a\\b") === "<本地路径已脱敏>", "盘符路径必须脱敏");
+  assert.ok(ledger.maskLocalPath("\\\\nas\\share") === "<本地路径已脱敏>", "UNC 路径必须脱敏");
+  assert.ok(ledger.maskLocalPath("core.log") === "core.log", "纯文件名可保留（非路径）");
+  assert.ok(ledger.stripQuery("/sessions?limit=999") === "/sessions", "query 一律剥离");
+});
+
+test("load() 经 OwoApi 取两个端点并渲染；端点不可达时给出可读提示而非空白", async () => {
+  const calls = [];
+  const sandbox = makeSandbox({
+    OwoApi: {
+      get(path) {
+        calls.push(path);
+        if (path.startsWith("/diagnostics/requests")) return Promise.resolve(seedLedger());
+        return Promise.resolve(OVERVIEW);
+      },
+    },
+    __owoCoreDiagnostics: { state: "ready", pid: 7, instanceId: "ready-instance" },
+  });
+  const root = makeRoot();
+  const data = await sandbox.OwoDiagnosticsLedger.load(root, { force: true });
+  assert.deepEqual(calls, ["/diagnostics/requests?limit=200", "/metrics/overview"], "台账 = ledger + overview 两端点，且都走 OwoApi（不裸 fetch）");
+  assert.equal(data.ledger.total, 900);
+  assert.ok(root.innerHTML.includes("最近请求数量"));
+  assert.ok(!/fetch\(|XMLHttpRequest/.test(viewSource), "视图内禁止裸 fetch：网络只经 core/api-client.js（§4.8）");
+
+  const broken = makeSandbox({
+    OwoApi: {
+      get() {
+        return Promise.reject(new Error("core 未就绪"));
+      },
+    },
+  });
+  const root2 = makeRoot();
+  await broken.OwoDiagnosticsLedger.load(root2, { force: true });
+  const updated = root2.querySelector("#owoLedgerUpdated");
+  assert.ok(updated.textContent.includes("台账端点不可达"), "端点失败必须说明白，禁止静默空白");
+  assert.ok(root2.innerHTML.includes("刷新台账"), "失败时仍保留骨架与重试出口");
+});
+
+test("导出按钮产出脱敏包并可复制；复制不可用时降级为页面展开 JSON", async () => {
+  const copied = [];
+  const sandbox = makeSandbox({
+    navigator: { clipboard: { writeText: (text) => copied.push(text) } },
+    __owoCoreDiagnostics: { state: "ready", logPath: "C:\\Users\\ovo\\core.log", instanceId: "inst-0123456789ab" },
+  });
+  const root = makeRoot();
+  sandbox.OwoDiagnosticsLedger.render(root, {
+    ledger: seedLedger(),
+    overview: OVERVIEW,
+    core: sandbox.OwoDiagnosticsLedger.readCoreSnapshot(),
+    updated_at: "2026-09-18T10:00:09.000Z",
+  });
+  root.querySelector("#owoLedgerExport").click();
+  root.querySelector("#owoLedgerCopy").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(copied.length, 1, "复制走 clipboard.writeText 一次");
+  const bundle = JSON.parse(copied[0]);
+  assert.equal(bundle.schema, sandbox.OwoDiagnosticsLedger.EXPORT_SCHEMA);
+  assert.equal(bundle.core.log_available, true, "只导出「日志可否打开」");
+  assert.ok(!JSON.stringify(bundle).includes("Users"), "导出包不得含本地绝对路径");
+  assert.equal(bundle.sse.server_active_connections, 2);
+  assert.equal(bundle.ledger.buckets.events, 1);
+});
+
+test("接线：index.html 引脚本 + 容器就位，app.js 只在设置路由按需加载（不进首屏清单）", () => {
+  assert.match(indexHtml, /<script src="views\/diagnostics-ledger\.view\.js"><\/script>/, "视图必须被 index.html 引入");
+  assert.match(indexHtml, /<div id="diagnosticsLedger"/, "设置页必须有台账容器");
+  assert.match(appSource, /function refreshDiagnosticsLedger\(/, "app.js 必须有加载入口");
+  assert.match(appSource, /refreshServerStatus\(\);\s*\n\s*refreshDiagnosticsLedger\(\);/, "台账随「设置」路由加载，与其余设置刷新同批");
+  const boot = /const BOOT_LAZY_TASKS = \[([\s\S]*?)\];/.exec(appSource);
+  const hydrate = /const BOOT_HYDRATE_TASKS = \[([\s\S]*?)\];/.exec(appSource);
+  assert.ok(boot && hydrate, "首屏任务清单应存在");
+  assert.ok(!/DiagnosticsLedger/.test(boot[1] + hydrate[1]), "§8.2 首屏 ≤5 请求：台账不得进首屏清单");
+});

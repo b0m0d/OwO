@@ -616,6 +616,17 @@ function renderSettingsTabs(content) {
   content.appendChild($("settingsSection"));
 }
 
+// §4.6 诊断请求台账：只在「设置」路由按需加载（不占用首屏 ≤5 请求口径）。
+function refreshDiagnosticsLedger() {
+  const root = $("diagnosticsLedger");
+  if (!root) return;
+  if (!window.OwoDiagnosticsLedger || typeof window.OwoDiagnosticsLedger.load !== "function") {
+    root.textContent = "诊断台账视图未加载";
+    return;
+  }
+  Promise.resolve(window.OwoDiagnosticsLedger.load(root, { force: true })).catch(() => {});
+}
+
 function renderRoute(route) {
   const meta = ROUTE_META[route] || ROUTE_META.chat;
   const isChat = route === "chat";
@@ -652,6 +663,7 @@ function renderRoute(route) {
     refreshSettings();
     refreshUsage();
     refreshServerStatus();
+    refreshDiagnosticsLedger();
     return;
   }
   const intro = document.createElement("div");
