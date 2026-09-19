@@ -40,6 +40,11 @@ owo-agent-mcp.workspace = true
 # server 的 memory_graph_api 继续经 lib.rs 的同名别名模块使用既有路径。
 # ProactiveSettings 随域搬到该 crate，core 的 settings.rs 用 pub use 转出。
 owo-agent-memory.workspace = true
+# 受信策略内核（M12）：permissions / permission_spec / grant_store / tool_effects 已下沉到
+# owo-agent-policy（指南 §4 的 tool-host/crates/policy 第一段）。core 的 agent / tools /
+# subagent / autoreview / settings 与 server 的权限中心继续经 lib.rs 的同名别名模块使用
+# 既有路径；工具命名契约 sanitize_tool_name 随之迁走，tools.rs 用 pub(crate) use 反向引用。
+owo-agent-policy.workspace = true
 # 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
 # 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
 # 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成

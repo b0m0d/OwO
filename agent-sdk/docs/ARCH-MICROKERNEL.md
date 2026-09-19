@@ -70,7 +70,8 @@ pub use owo_agent_kernel::{
 | **M9** | `owo-agent-workswarm` | project_space_store / team_benefit / workswarm_output（2,847 行）；**编排的契约与状态先行、执行侧仍留 core** | **0** | `workswarm` / `team_strategy` / `artifact_pipeline` / `contract_worker` / `worker_profile` + server 5 个 api 模块（经别名，未改代码） | ✅ 已完成，见 §11 |
 | **M10** | `owo-agent-mcp` | MCP 宿主第一段：`mcp`（646 行）+ 两台假服务器 + 13 条 MCP 集成测试；**零出边** | **0** | `agent` / `tools` / `tool_effects` + server `mcp_api`（经别名，未改代码） | ✅ 已完成，见 §12（server 与冒烟已在 §13 的同一工作树上补齐） |
 | **M11** | `owo-agent-memory` | memory + observe + learn（2,454 行）+ `ProactiveSettings` 随域搬入；两处跨 crate 边**已在前面步骤倒置完毕** | **0** | `action_program` / `computer_use` / `executor` / `share_skill` / `workflow` / `settings` + server（经别名，未改代码） | ✅ 已完成，见 §13 |
-| **M12** | 下一个候选见 §14 | — | — | — | 待执行 |
+| **M12** | `owo-agent-policy` | permissions + permission_spec + grant_store + tool_effects（3,068 行）+ 工具命名契约随域下沉 | **0** | `agent` / `tools` / `subagent` / `autoreview` / `settings` + server 权限中心（经别名，未改代码） | ✅ 已完成，见 §14 |
+| **M13** | 下一个候选见 §15 | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -732,7 +733,7 @@ note: the function is defined here --> crates\owo-agent-contracts\src\skill.rs:1
 
 ## 11. M9：`owo-agent-workswarm`（已完成）——编排的契约/状态先行，执行侧留待 A2
 
-候选取舍与两路扫描数据见 §14；本节记录边界、结果与证据。
+候选取舍与两路扫描数据见 §15；本节记录边界、结果与证据。
 
 ### 11.1 边界与依赖方向
 
@@ -763,7 +764,7 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 所以正确的迁移顺序是**先切零出边的契约/状态侧，再切执行侧**：本步搬走的三个模块
 没有任何出边，搬完立即满足"core 零改动、可独立编译、可独立测试"；执行侧
 （`workswarm.rs` 本体 4,328 行）留着与 `goal`/`workflow`/`fleet` 的环一起处理，
-按 §14 的建议排到 A2（统一 Daemon）之后。
+按 §15 的建议排到 A2（统一 Daemon）之后。
 
 ### 11.3 本步的调用方改动量：**0 行**（除 core 的 lib.rs 接线）
 
@@ -819,7 +820,7 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 
 ## 12. M10：`owo-agent-mcp`（已完成）——MCP 宿主第一段，连测试服务器与集成测试一起搬
 
-候选取舍见 §14；本节记录边界、结果与证据。
+候选取舍见 §15；本节记录边界、结果与证据。
 
 ### 12.1 边界与依赖方向
 
@@ -949,7 +950,7 @@ Cargo 的环检测只看普通依赖图，dev-dependency 的环不成环——co
 
 ## 13. M11：`owo-agent-memory`（已完成）——前几步的倒置在这里兑现
 
-候选取舍见 §14；本节记录边界、结果与证据。
+候选取舍见 §15；本节记录边界、结果与证据。
 
 ### 13.1 边界与依赖方向
 
@@ -1034,7 +1035,94 @@ M7 把 `McpServerConfig` 从 core 的 `mcp.rs` 搬到消费它的插件域，这
 | `Cargo.toml` / core 的 `Cargo.toml` | 新增 workspace 成员与依赖；**server / cli / 集成测试未改一行** |
 
 
-## 14. 后续候选与取舍记录
+## 14. M12：`owo-agent-policy`（已完成）——Tool Host 的判定侧，与"权限不可绕过"的第一段
+
+候选取舍见 §15；本节记录边界、结果与证据。
+
+### 14.1 边界与依赖方向
+
+| 模块 | 行数 | 内容 |
+|---|---:|---|
+| `permissions` | 1,055 | 授权判定核心：`Level` / `Policy` / `Approver` / `PermissionProfile` / `PermissionRequest`（grant 命中、spec 收紧、效应类别参与决策） |
+| `grant_store` | 877 | 授权凭证存储：`GrantStore` / `GrantScope`（指纹稳定、按 workspace/host/任务域生效、可撤销、可过期） |
+| `tool_effects` | 575 | 工具效应声明与矩阵：`EffectClass` / `ToolEffect`（内置矩阵 + MCP 注解降级 + 未声明即拒绝） |
+| `permission_spec` | 564 | 四维权限规格（filesystem / command / network / persistence）+ `nearest_profile` 反推 |
+| `tool_names` | 50 | 工具命名契约 `sanitize_tool_name`（**从 core 的 tools.rs 随域下沉**，见 14.3） |
+| `lib.rs` | 38 | 边界文档 + glob re-export |
+
+```text
+kernel(M0) ─► tool-safety(M3) ─► plugins(M7) ─► mcp(M10) ─┐
+                                                          ├─► owo-agent-policy ─► owo-agent-core ─► server/cli
+```
+
+### 14.2 四个模块为什么必须同迁：互相引用，且双向
+
+```
+permissions      → grant_store, permission_spec, tool_effects
+permission_spec  → permissions
+grant_store      → permissions
+tool_effects     → permissions
+```
+
+八条引用**全部落在集合内部**：单独搬任何一个都会立刻与留在 core 的三个成环。
+整组同迁之后这些边不再跨 crate 边界 → **零倒置**，与 M3（`sandbox ↔ audit_chain`）、
+M11（`memory ↔ observe`）是同一条判据的第三次应用。
+
+### 14.3 对外的两条出边：一条随域下沉，一条改绝对路径
+
+| 出边 | 处置 | 理由 |
+|---|---|---|
+| `tool_effects → tools::sanitize_tool_name`（6 处） | 函数**随策略内核下沉**为 `tool_names::sanitize_tool_name`；core 的 `tools.rs` 改为 `pub(crate) use owo_agent_policy::tool_names::sanitize_tool_name;` | 这个命名函数**同时是权限判定的输入**：效应表按工具名查表、MCP 前缀按同一名字生成、内置矩阵按名字分类。两条消费链（工具注册表 / 效应权限表）必须同源，否则"登记名"与"执行名"会漂移——那正是"权限不可绕过"最怕的漏口。可见性保持 `pub(crate)`，core 的公共面不变 |
+| `tool_effects → mcp::McpTool`（1 处） | 改绝对路径 `owo_agent_mcp::McpTool` | MCP 的 DTO 属 MCP 域（M10 已下沉），按「类型随域走」由消费方依赖域名。方向 `policy → mcp → plugins → tool-safety → kernel`，无环 |
+| `tool_effects → owo_agent_plugins::McpServerConfig` | 无需改动 | M7 就已经是绝对路径 |
+
+### 14.4 本步暴露的第三类可见性陷阱：`pub(crate)` 会**变成死代码**
+
+M8 撞到的是 `pub(crate)` 跨 crate 后"不可见"（编译错误 `E0603`）。这次是它的兄弟形态：
+`Policy::set_read_only_runtime` / `replace_runtime_deny` 原本是 `pub(crate)`，
+**唯一调用方在 core 的 `agent.rs`**。搬进新 crate 后：
+
+* 新 crate 内部只有测试调用它们；
+* 于是 `check` 报 **`dead_code` warning**（不是 error）——
+  "权限开关没人用"看起来像小事，实际意味着**运行时收紧/放宽只读的入口断了**。
+
+处置：提权为 `pub` 并补 doc 注释说明为什么（调用方跨 crate 了）。
+
+**教训（已入 §4 坑表）**：搬迁前扫 `pub(crate)` 不能只看"外部是否引用它"，
+还要看 **"它的调用方是否与被搬的模块一起走"**——不一起走就要提权，
+而且这次的表现是 warning 而不是 error，**只看"编译过了"会漏掉**。
+以后每步的 `check` 必须逐条读 warning，不能只看 exit code。
+
+### 14.5 验收证据（可复现）
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| 新 crate 独立编译 | `cargo check -p owo-agent-policy --all-targets` | **exit=0**（首次带 `dead_code` warning，见 14.4，已修） | `docs/qa/logs/mk-m12-check-crate-*.log` |
+| workspace 全目标编译 | `cargo check --workspace --all-targets` | **exit=0**，108 s | `docs/qa/logs/mk-m12-check-ws-*.log` |
+| 新 crate 自身测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-policy -Tag m12-policy` | **exit=0**，**51/51 通过** | `docs/qa/logs/mk-shard-m12-policy-lib-*.log` |
+| 全量 core 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-core -Tag m12-core` | **exit=0**，**31/31 分片全绿**（`--lib` 287 passed / 2 ignored + 30 个集成目标） | `docs/qa/logs/mk-shard-m12-core-*.log` |
+| 全量 server 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-server -Tag m12-server` | **exit=0**，**40/40 分片全绿**（`--lib` 63 + 39 个集成目标；含权限相关的 `permissions_center_api_tests` 7、`permissions_profile_api_tests` 5、`production_security_contract_tests` 7） | `docs/qa/logs/mk-shard-m12-server-*.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m12-policy` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m12-policy-20260920-032821/report.json` |
+| 依赖闭包 | `cargo tree -p owo-agent-policy -e normal` | 顶层只有 `mcp` / `plugins` / async-trait / chrono / serde / serde_json / sha2 / tracing / uuid；**core / kernel / contracts / workswarm / sherpa / ndarray / ort / rusqlite 均 0 次** | `docs/qa/logs/mk-m12-tree.log` |
+| core 体量 | `git ls-tree` + 逐行统计 | **53 文件 / 40,630 行 → 49 文件 / 37,567 行**（−3,063 行）；新 crate 6 文件 / 3,159 行 | 与 §1 同口径 |
+
+> 单测条数守恒核对：core `--lib` 由 336 降到 **287**（−49），新 crate **51** 条
+> = 随代码搬来的 49 条 + 为 `tool_names` 新增的 2 条（"连字符必须保留"的回归断言，
+> 见 14.3）。**测试没有被删，而是随代码搬家并顺带加密了契约。**
+
+### 14.6 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `crates/owo-agent-core/src/{permissions,permission_spec,grant_store,tool_effects}.rs` | `git mv` 到新 crate；`tool_effects.rs` 改 7 处路径（6 处命名函数 + 1 处 `McpTool`）；`permissions.rs` 2 个 `pub(crate)` 方法提权为 `pub` |
+| `crates/owo-agent-policy/src/tool_names.rs` | 新文件（50 行）：`sanitize_tool_name` 及其 2 条单测（从 core 的 tools.rs 迁出，并补了"连字符必须保留"的回归断言） |
+| `crates/owo-agent-core/src/tools.rs` | 删除 `pub(crate) fn sanitize_tool_name` 定义，改为 `pub(crate) use owo_agent_policy::tool_names::sanitize_tool_name;` |
+| `crates/owo-agent-core/src/lib.rs` | 删除 4 个 `pub mod`，改为 `pub use owo_agent_policy::{grant_store, permission_spec, permissions, tool_effects};` + 边界注释块 |
+| `crates/owo-agent-policy/{Cargo.toml,src/lib.rs}` | 新 crate（边界文档 + glob re-export + "不得依赖 core"的约束） |
+| `Cargo.toml` / core 的 `Cargo.toml` | 新增 workspace 成员与依赖；**server / cli / 集成测试未改一行** |
+
+
+## 15. 后续候选与取舍记录
 
 M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做

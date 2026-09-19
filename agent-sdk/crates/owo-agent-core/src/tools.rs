@@ -351,18 +351,11 @@ impl ToolRegistry {
     }
 }
 
-/// 工具名只允许字母数字、下划线与连字符（模型 API 约束）。
-pub(crate) fn sanitize_tool_name(name: &str) -> String {
-    name.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
+/// 工具名规范化函数已随策略内核下沉到 `owo-agent-policy`（M12）：
+/// 它同时是权限/效应判定的输入（`effect_class_for` 按名字查表、MCP 前缀按名字生成），
+/// 两条消费链必须共用同一份命名规则，否则会出现"登记名"与"执行名"漂移。
+/// 这里保持 `pub(crate)` 可用性不变（原来的可见性就是 `pub(crate)`）。
+pub(crate) use owo_agent_policy::tool_names::sanitize_tool_name;
 
 /// MCP 工具注册前缀（`{server}_{tool}` 命名空间）：如 `owo_plugin_owo-translate_`。
 pub fn mcp_tool_prefix(server_name: &str) -> String {

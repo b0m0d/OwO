@@ -1,0 +1,35 @@
+[package]
+name = "owo-agent-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 受信策略内核（M12）：指南 §4 目标结构 `tool-host/crates/policy` 的第一段。
+#
+# 边界（见 docs/ARCH-MICROKERNEL.md §14）：
+#   * 四个模块在 core 依赖图里互相引用（permissions ↔ permission_spec / grant_store /
+#     tool_effects），**同迁一个 crate**，这些边不再跨 crate 边界 → 零倒置；
+#   * 对外只有两条出边，都不成环：
+#       `tool_effects → tools::sanitize_tool_name`：该命名函数是权限/效应判定的输入
+#       （效应表按工具名查表），两条消费链必须同源 → 函数随策略内核下沉为
+#       `tool_names`，core 的 `tools.rs` 以 `pub(crate) use` 反向引用（可见性不变）。
+#       `tool_effects → mcp::McpTool`：MCP 工具 DTO 属 MCP 域（M10 已下沉），
+#       这里按「类型随域走」改为绝对路径 `owo_agent_mcp::McpTool`。
+#   * **本 crate 不得依赖 owo-agent-core**：core 依赖本 crate（agent / tools /
+#     subagent / autoreview / settings / server 都引用权限面）。
+#
+# 本 crate 不依赖 owo-agent-kernel / owo-agent-contracts：策略判定是纯逻辑 +
+# serde + 哈希，不需要内核原语，也不读领域数据形状（保持依赖面最小）。
+
+[dependencies]
+owo-agent-mcp.workspace = true
+owo-agent-plugins.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+# 以下两个只在**内联全限定路径**里出现（`tracing::warn!` 5 处、
+# `std::sync::atomic` 等），`use` 行扫描看不到——M5/M10 都踩过，这里直接核过。
+tracing.workspace = true

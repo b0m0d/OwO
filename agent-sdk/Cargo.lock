@@ -1804,6 +1804,7 @@ dependencies = [
  "owo-agent-mcp",
  "owo-agent-memory",
  "owo-agent-plugins",
+ "owo-agent-policy",
  "owo-agent-protocol",
  "owo-agent-tool-safety",
  "owo-agent-workswarm",
@@ -1921,6 +1922,21 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "uuid",
+]
+
+[[package]]
+name = "owo-agent-policy"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "owo-agent-mcp",
+ "owo-agent-plugins",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
  "uuid",
 ]
 

@@ -25,7 +25,6 @@ pub mod fleet_node_protocol;
 pub mod fleet_transport;
 pub mod gateway;
 pub mod goal;
-pub mod grant_store;
 pub mod locate;
 pub mod mcp_health;
 pub mod node_agent;
@@ -34,8 +33,6 @@ pub mod ocr;
 pub mod onnx_ocr;
 pub mod paddle_ocr;
 pub mod perception;
-pub mod permission_spec;
-pub mod permissions;
 pub mod remote_step;
 pub mod scene;
 pub mod schema_budget;
@@ -50,7 +47,6 @@ pub mod subagent;
 pub mod team_prompt;
 /// 自适应组队策略引擎（R3 第一路：single/team/auto 判定 + 可展示理由）。
 pub mod team_strategy;
-pub mod tool_effects;
 pub mod tools;
 pub mod trace;
 pub mod vision;
@@ -182,6 +178,22 @@ pub use owo_agent_mcp::mcp;
 //     与集成测试）。
 // ---------------------------------------------------------------------------
 pub use owo_agent_memory::{learn, memory, observe};
+
+// ---------------------------------------------------------------------------
+// 受信策略内核（M12）兼容层：permissions / permission_spec / grant_store / tool_effects
+// 已下沉到独立 crate `owo-agent-policy`（指南 §4 的 tool-host/crates/policy 第一段）。
+//
+// 四个模块在 core 内互相引用（permissions ↔ permission_spec/grant_store/tool_effects），
+// **同迁一个 crate** 后这些边不再跨 crate 边界，因此无需任何倒置。对外的两条出边：
+//   * `tools::sanitize_tool_name`（原 `pub(crate)`）：它是效应表与 MCP 前缀的命名输入，
+//     必须与执行侧同源 → 随策略内核下沉到 `tool_names`，core 的 tools.rs 用
+//     `pub(crate) use` 反向引用（可见性与公共面不变）；
+//   * `mcp::McpTool`：MCP DTO 属 MCP 域（M10 已下沉）→ 改绝对路径 `owo_agent_mcp::McpTool`。
+//
+// 入边（agent / tools / subagent / autoreview / settings + server 的 permissions_center_api
+// 与集成测试）全部由下面的别名模块满足，调用方零改动。
+// ---------------------------------------------------------------------------
+pub use owo_agent_policy::{grant_store, permission_spec, permissions, tool_effects};
 
 pub use owo_agent_plugins::{plugin, McpServerConfig};
 

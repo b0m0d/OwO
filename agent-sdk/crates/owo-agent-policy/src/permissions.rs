@@ -358,7 +358,9 @@ impl Policy {
         }
     }
 
-    pub(crate) fn set_read_only_runtime(&self, read_only: bool) {
+    /// 运行时切换只读模式（M12 提权为 `pub`：唯一调用方 `agent::set_read_only` 已在
+    /// core，`pub(crate)` 跨 crate 后不可达——就是 M8 记档的可见性收缩）。
+    pub fn set_read_only_runtime(&self, read_only: bool) {
         self.read_only.store(read_only, Ordering::Relaxed);
         if let Ok(mut profile) = self.profile.lock() {
             *profile = if read_only {
@@ -439,7 +441,8 @@ impl Policy {
         }
     }
 
-    pub(crate) fn replace_runtime_deny(&self, fragments: &[String]) {
+    /// 整体替换运行时 deny 片段（同样因调用方在 core 而提权为 `pub`）。
+    pub fn replace_runtime_deny(&self, fragments: &[String]) {
         if let Ok(mut runtime) = self.runtime_deny.lock() {
             runtime.clear();
             for fragment in fragments {

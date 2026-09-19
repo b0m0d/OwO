@@ -113,8 +113,8 @@ pub fn register_mcp_effect(
     ensure_builtin_seeded();
     let full_name = format!(
         "{}_{}",
-        crate::tools::sanitize_tool_name(server_name),
-        crate::tools::sanitize_tool_name(tool_name)
+        crate::tool_names::sanitize_tool_name(server_name),
+        crate::tool_names::sanitize_tool_name(tool_name)
     );
     let (class, risk_note) = classify_mcp_annotations(annotations, host_verified_readonly);
     let effect = ToolEffect {
@@ -179,8 +179,8 @@ static TRUSTED_READONLY: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap
 pub fn declare_trusted_readonly(server_name: &str, tool_name: &str, schema_hash: &str) {
     let full_name = format!(
         "{}_{}",
-        crate::tools::sanitize_tool_name(server_name),
-        crate::tools::sanitize_tool_name(tool_name)
+        crate::tool_names::sanitize_tool_name(server_name),
+        crate::tool_names::sanitize_tool_name(tool_name)
     );
     TRUSTED_READONLY
         .write()
@@ -201,8 +201,8 @@ pub fn schema_fingerprint(input_schema: &Value) -> String {
 pub fn is_trusted_readonly(server_name: &str, tool_name: &str, schema_hash: &str) -> bool {
     let full_name = format!(
         "{}_{}",
-        crate::tools::sanitize_tool_name(server_name),
-        crate::tools::sanitize_tool_name(tool_name)
+        crate::tool_names::sanitize_tool_name(server_name),
+        crate::tool_names::sanitize_tool_name(tool_name)
     );
     TRUSTED_READONLY
         .read()
@@ -233,7 +233,7 @@ pub fn trusted_readonly_count() -> usize {
 /// 连接注册前调用；未列出的工具不受影响。
 pub fn declare_trusted_from_config(
     config: &owo_agent_plugins::McpServerConfig,
-    tools: &[crate::mcp::McpTool],
+    tools: &[owo_agent_mcp::McpTool],
 ) -> usize {
     if config.trusted_readonly.is_empty() {
         return 0;
