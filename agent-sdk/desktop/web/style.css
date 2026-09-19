@@ -1308,3 +1308,29 @@ body.route-chat main { grid-column: 4; }
 @media (max-width: 1180px) {
   #routeHeader, #routeContent { padding-left: 22px; padding-right: 22px; }
 }
+
+/* ===========================================================================
+   23. §4.5 权限中心（permissions/）—— 四维生效表 / 待审批四动作 /
+       已授权与三粒度撤销 / 完全访问二次确认卡。
+   布局骨架在 permissions/permissions.view.js 的 styleBlock 内联，这里只补
+   主题变量、语义色与键盘可达性（§4.10：焦点必须可见）。
+   =========================================================================== */
+.owo-perm-table th { background: var(--surface-2, rgba(127, 127, 127, 0.08)); font-weight: 600; }
+.owo-perm-card { background: var(--surface, transparent); border-color: var(--soft-border, #ddd); }
+.owo-perm-empty { background: var(--surface, transparent); }
+.owo-perm-bad { color: var(--red, #c62828); }
+.owo-perm-warn { color: var(--yellow, #b26a00); }
+.owo-perm-card button.allow { border-color: var(--green-line); color: var(--green); }
+.owo-perm-card button.deny { border-color: var(--red-line); color: var(--red); }
+.owo-perm-grid select:focus-visible,
+.owo-perm-card button:focus-visible,
+.owo-perm-table + .inline button:focus-visible,
+[data-perm-action]:focus-visible {
+  outline: 2px solid var(--accent, #1565c0);
+  outline-offset: 1px;
+}
+.owo-perm-group h5 { margin: 8px 0 4px; font-size: 13px; color: var(--muted); }
+@media (max-width: 1280px) {
+  .owo-perm-table { font-size: 11px; }
+  .owo-perm-kv span { min-width: 72px; }
+}

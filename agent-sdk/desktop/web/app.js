@@ -574,6 +574,8 @@ const ROUTE_META = {
   projects: { title: "项目", description: "选择工作区、查看项目历史，并预览权限范围。" },
   workswarm: { title: "WorkSwarm", description: "把复杂任务拆给 Coordinator 与 Worker，集中查看进度与产物。" },
   artifacts: { title: "产物与待办", description: "处理 Human、Artifact 评审和 ChangeSet，再交付最终结果。" },
+  // §4.5 统一权限中心：档位与实际范围、待审批、已授权与撤销、完全访问风险拆解。
+  permissions: { title: "权限中心", description: "查看生效范围与来源，处理审批、撤销授权，并管理完全访问的风险与时长。" },
   settings: { title: "设置", description: "查看实际生效的模型连接、权限、用量和存储状态。" },
 };
 
@@ -652,8 +654,8 @@ window.addEventListener("owo:statusbar-navigate", (event) => {
   const detail = (event && event.detail) || {};
   const target = String(detail.target || "");
   if (detail.key === "permission") {
-    // 权限中心（§4.5）落地前，权限段先落设置页；落地后改指 permissions 路由。
-    navigate("settings");
+    // §4.5 权限中心已落地：状态条权限段直达权限页（此前临时落设置页）。
+    navigate("permissions");
     return;
   }
   if (ROUTE_META[target]) navigate(target);
@@ -683,6 +685,10 @@ function renderRoute(route) {
   const content = $("routeContent");
   if (!view || !content) return;
   view.hidden = isChat;
+  // §4.5 权限中心：离开路由即 dispose（清挂起 timer 与确认卡，本页禁止 setInterval）。
+  if (window.OwoPanels && window.OwoPanels.permissions && window.OwoPanels.permissions.dispose) {
+    window.OwoPanels.permissions.dispose();
+  }
   if (isChat) {
     if (window.OwoPanels && window.OwoPanels.workswarm && window.OwoPanels.workswarm.dispose) {
       window.OwoPanels.workswarm.dispose();
@@ -726,6 +732,17 @@ function renderRoute(route) {
   if (route === "projects") mountPanel("project-launcher", root);
   if (route === "workswarm") mountPanel("workswarm", root);
   if (route === "artifacts") mountPanel("action-center", root);
+  if (route === "permissions") mountPermissionsPanel(root);
+}
+
+// §4.5 权限中心：进入 permissions 路由时把面板挂到本路由专属容器（离开即 dispose）。
+// 与其余一级路由同构：**只有挂载那一刻才发第一个请求**，不占用首屏 ≤5 口径。
+function mountPermissionsPanel(root) {
+  if (!root || !window.OwoPanels || !window.OwoPanels.permissions) return;
+  window.OwoPanels.permissions.mount(root, panelHelpers(root));
+  for (const button of document.querySelectorAll("#panelNav button")) {
+    button.classList.toggle("active", button.dataset.panel === "permissions");
+  }
 }
 
 window.owoRouter = window.OwoRouter

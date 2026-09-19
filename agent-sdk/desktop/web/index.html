@@ -31,6 +31,7 @@
     <button class="rail-button" type="button" title="项目" data-rail-target="projects"><span>⌘</span>项目</button>
     <button class="rail-button" type="button" title="WorkSwarm 团队" data-rail-target="workswarm"><span>◎</span>团队</button>
     <button class="rail-button" type="button" title="产物与待办" data-rail-target="artifacts"><span>◇</span>产物</button>
+    <button class="rail-button" type="button" title="权限中心：审批、授权范围与撤销" data-rail-target="permissions"><span>⛨</span>权限</button>
     <span class="rail-spacer"></span>
     <button class="rail-button" type="button" title="设置" data-rail-target="settings"><span>⚙</span>设置</button>
   </nav>
@@ -362,6 +363,12 @@
   <script src="views/setup-guide.view.js"></script>
   <script src="views/diagnostics-ledger.view.js"></script>
   <script src="views/status-bar.view.js"></script>
+  <!-- §4.5/§4.8 权限中心：四分模块按依赖顺序加载（domain → api → controller → view），
+       必须在 app.js 之前；页面数据只在进入该路由时按需请求，不进首屏链路。 -->
+  <script src="permissions/permissions.domain.js"></script>
+  <script src="permissions/permissions.api.js"></script>
+  <script src="permissions/permissions.controller.js"></script>
+  <script src="permissions/permissions.view.js"></script>
   <script src="panels/capabilities.panel.js"></script>
   <script src="panels/action-center.panel.js"></script>
   <script src="panels/project-history.panel.js"></script>

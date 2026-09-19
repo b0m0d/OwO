@@ -17,6 +17,9 @@ const groups = [
   { dir: "views", pattern: (name) => name.endsWith(".js") },
   { dir: "panels", pattern: (name) => name.endsWith(".js") },
   { dir: "panels/workswarm", pattern: (name) => name.endsWith(".js") },
+  // §4.8 权限中心四分（domain/api/controller/render）与 panels 同等对待：
+  // 新增前端目录必须显式登记进 lint 面，否则 index.html 挂了脚本也没人查。
+  { dir: "permissions", pattern: (name) => name.endsWith(".js") },
 ];
 
 function listScripts() {
