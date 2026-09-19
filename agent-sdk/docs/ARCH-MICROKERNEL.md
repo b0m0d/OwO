@@ -1242,7 +1242,39 @@ M8–M9 用同一次 `crate::` 扫描（含 `crate::{a, b}` 块与 `super::`）�
 "optional dependency + feature" 足够，实际三条路都不成立，最终靠"独立 workspace +
 薄门面 crate"才落地。这条经验已写入 §4 的坑表。
 
-### M10 及以后的排序建议（M0–M9 实测后更新）
+### M12 之后的实测排序（M13 起，用同一次 `crate::` 扫描算的，不是估计）
+
+M12 之后 core 剩 49 文件 / 37,567 行。把"出边全部逃向已迁出的 crate"（= 可以直接搬）
+与"逃向仍在 core 的模块"（= 必须先搬那个模块）分开看：
+
+| 模块 | 行数 | 入边 | 出边（`crate::`） | 能否立刻搬 |
+|---|---:|---:|---|---|
+| `mcp_health` | 532 | 2 | `tool_effects` —— **M12 后已是 `owo-agent-policy`** | ✅ 可归位（域名=MCP 工具健康/熔断，按效应类别判可重试） |
+| `share_skill` | 246 | 0 | `learn` —— **M11 后已是 `owo-agent-memory`** | ✅ 可归位（技能包分享/导入属学习域） |
+| `accessibility` | 158 | 5 | **无** | ⚠️ 能搬，但域名是 Perception（指南 §3），建议随 Perception 一步走，避免二次搬迁 |
+| `schema_budget` | 253 | 1 | `tools`（仍在 core） | ❌ 等 `tools` |
+| `workflow` | 1,461 | 0 | `action_program`、`assert`（仍在 core） | ❌ 等 `action_program`/`assert` |
+| `action_program` | 902 | 1 | `assert` + `ocr`/`perception`/`scene`/`executor` | ❌ 等 Perception |
+| `assert` | 525 | 2 | `ocr`/`perception`/`scene` | ❌ 等 Perception |
+| `tools` | 1,132 | 7 | 11 条，含 `computer_use`/`session`/`subagent` | ❌ 多步（§9 A4 分段） |
+| `executor` | 1,356 | 2 | `accessibility`/`element_registry`/`locate`/`ocr`/`scene` | ❌ 等 Perception |
+| `computer_use` | 2,355 | 1 | 12 条，含 `executor`/`tools`/`vision` | ❌ 最后 |
+| `trace` / `session` / `goal` | 163 / 663 / 1,639 | 0 / 7 / 4 | 多条指向 core 内部 | ❌ 属"总线型"，更可能留在 core 或被 Daemon 收编 |
+
+结论（M13 的具体建议）：
+
+1. **M13 = 两个"归位"小步合并**：`mcp_health` → `owo-agent-policy`（新增 0 依赖，
+   `policy → mcp` 的方向已存在，不成环）、`share_skill` → `owo-agent-memory`
+   （只需 memory 依赖）。合计 778 行、零倒置、零新依赖——它们的出边目标**在 M11/M12
+   里刚好已经被搬成了 crate**，所以这一步是前两步的利息。
+2. **M14 = Perception Worker**：唯一能兑现指南 §10"普通 Agent 改动不触发 ONNX 编译"
+   的一步，也是 §1 判据里"5 条出边全是双向边"的那个真环。必须先写 ADR（倒置 vs 整组
+   搬迁），并且它必须是**独立 workspace**（§3.2 已实测：feature 关不住会成环的边）。
+3. **M15+ = `action_program`/`assert`/`workflow`**：它们只有 Perception 一个前置。
+4. **最后 = `executor`/`tools`/`computer_use`**（§9 A4 的分段），以及 `trace`/`session`/`goal`
+   这类被多个域引用的总线型模块。
+
+### 历史排序（M10 当时的判断，保留作对照）
 
 实测把代价排序改写了三次（M1 的环比预估严重、M3 比 ADR 简单一半、M8 多出一整类边界），
 所以只给方向、不给承诺：
