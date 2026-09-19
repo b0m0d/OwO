@@ -1,0 +1,68 @@
+[
+    {
+        "scenario":  "binary-missing",
+        "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+        "pass":  true,
+        "detail":  "hwnd=5705558 owner=30840 t=0.6s fail="
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "DOM 事实通道（WebView2 CDP）建立",
+        "pass":  true,
+        "detail":  "requested=35825 effective=35825"
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "10s 内界面可操作（无永久 loading）",
+        "pass":  true,
+        "detail":  "t=1.4s health=\"本地服务未连接\""
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "出现统一错误卡（含发生/已自动/下一步三段）",
+        "pass":  true,
+        "detail":  "t=5.6s（时限 15s 内）"
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "错误终态在 15s 时限内到达（§3.4）",
+        "pass":  true,
+        "detail":  "error_at_sec=5.6 budget=15"
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "错误码在期望集合内（不得含糊报错）",
+        "pass":  true,
+        "detail":  "found=core/binary_missing allowed=core/binary_missing"
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "错误卡提供全部契约动作（重新检查/打开诊断位置)",
+        "pass":  true,
+        "detail":  "missing=; card=本地核心服务暂不可用 核心服务未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重"
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "技术详情以折叠区呈现（不糊在正文里）",
+        "pass":  true,
+        "detail":  "details=True"
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "故障面截图（重获窗口 + 五重有效性）",
+        "pass":  true,
+        "detail":  "size=1280x720 bytes=89190 non_black_ratio=0.998183 variance=1126.245 samples=36864"
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "sidecar 缺失场景确实未拉起任何 core（日志无 launching 行）",
+        "pass":  true,
+        "detail":  "launched_core=\u003cnone\u003e"
+    },
+    {
+        "scenario":  "binary-missing",
+        "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+        "pass":  true,
+        "detail":  "stages=ok"
+    }
+]

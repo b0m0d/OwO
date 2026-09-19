@@ -135,6 +135,25 @@ Add-Result '磁盘门：余量不足必须 throw resource_limited（禁止提高
     ($rejectMsg -match 'resource_limited' -and $rejectMsg -match '拒绝启动') "msg=$($rejectMsg.Substring(0,[Math]::Min(60,$rejectMsg.Length)))"
 Add-Result '磁盘门异常文案自带可操作处置（指出可再生产物与恢复方式）' `
     ($rejectMsg -match 'incremental' -and $rejectMsg -match 'pdb') '需提到可删的可再生产物'
+
+# ---- 磁盘门的"输出污染"：§2.4 门自己制造假红的实测事故 ----
+# 门在成功时向管道吐一个磁盘状态对象。在"返回单个元数据"的函数里裸调它，调用方按
+# 属性取值就会撞到状态对象的同名字段——stage-desktop-sidecar 的 `$staged.source`
+# 取到 'psdrive'，Copy-Item 当场炸，4 个故障场景 + 冷启动全红，且红得像产品回归。
+function Get-CleanStageLike {
+    $null = Assert-CiDiskGate -Mode normal -MinFreeGb 0 -Context 'selftest'
+    return [pscustomobject]@{ source = 'real' }
+}
+function Get-LeakyStageLike {
+    Assert-CiDiskGate -Mode normal -MinFreeGb 0 -Context 'selftest'
+    return [pscustomobject]@{ source = 'real' }
+}
+$leaky = @(Get-LeakyStageLike)
+$clean = @(Get-CleanStageLike)
+Add-Result '门确实向管道吐状态对象（污染来源定性，不是偶发现象）' ($leaky.Count -ge 2) "leaky_count=$($leaky.Count)"
+Add-Result '单对象返回契约：函数内必须吞门输出（$null= / Out-Null），否则调用方取到错字段' `
+    (($clean.Count -eq 1) -and (@(Get-CleanStageLike).source -eq 'real')) `
+    "clean_count=$($clean.Count) source=$(if ($clean.Count -eq 1) { $clean[0].source } else { 'AMBIGUOUS' })"
 $resKeys = if ($sum.resources) { ($sum.resources.PSObject.Properties.Name -join ',') } else { 'none' }
 Add-Result 'summary.resources 必须带构建卷余量（盘满导致的失败要能被事后归因）' `
     ($null -ne $sum.resources.disk_at_write) "keys=$resKeys"

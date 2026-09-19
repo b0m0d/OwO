@@ -31,6 +31,8 @@ param(
     [string]$OwoConfiguration = 'debug',
     [Alias('NoBuild')]
     [switch]$OwoNoBuild,
+    # 允许暂存"与 HEAD 不同世代"的 core（仅供排障复现旧产物；正常链一律拒绝）。
+    [switch]$OwoAllowStaleIdentity,
     [Alias('Json')]
     [switch]$OwoJson
 )
@@ -55,9 +57,21 @@ function Stage-OwoDesktopSidecar {
         [ValidateSet('debug', 'release')]
         [string]$Configuration = 'debug',
         [switch]$NoBuild,
+        [switch]$AllowStaleIdentity,
         [switch]$Quiet
     )
     $sdkRoot = $script:OwoStageSdkRoot
+    # §2.4 磁盘红线：这里会在"产物缺失/过期"时真的去构建 core（debug 也要几 GB 余量）。
+    # 独立执行时补引同一实现，不复制第二份红线逻辑；调用方已 dot-source 过就直接复用。
+    if (-not (Get-Command Assert-CiDiskGate -ErrorAction SilentlyContinue)) {
+        . (Join-Path $PSScriptRoot "ci-shared.ps1")
+        Initialize-CiPath
+    }
+    # 必须吞返回值：`Assert-CiDiskGate` 成功时会往管道吐一个磁盘状态对象，而本函数的
+    # 契约是"返回单个元数据对象"。混进第二个对象后调用方 `$staged.source` 会取到状态
+    # 对象的 `source='psdrive'`，Copy-Item 当场炸——实测把 4 个故障场景 + 冷启动全打成
+    # 红，且红的原因长得像产品回归（§2.4 门自己成了假红的源头）。
+    $null = Assert-CiDiskGate -Mode normal -Path (Join-Path $sdkRoot 'target') -Context 'stage-sidecar'
     $source = Join-Path $sdkRoot "target\$Configuration\owo-agent.exe"
     if (-not (Test-Path -LiteralPath $source)) {
         if ($NoBuild) {
@@ -92,6 +106,26 @@ function Stage-OwoDesktopSidecar {
         throw "target\$Configuration\owo-agent.exe 无构建身份（--version 不含 commit=）——它是历史残留，请重新构建（§7.3）"
     }
     $sourceIdentity = $sourceIdentityText.Trim()
+
+    # 世代核对（实测坑，2026-09-19）：产物**存在时本函数不重建**，于是"提交之后直接跑
+    # stage"会把提交前构建的 core 暂存进 binaries/。壳在 src-tauri 编译期就会警告身份
+    # 错代，运行时更直接判 `core/identity_mismatch`——整条桌面验收链（矩阵 82 + 冷启动 43
+    # + UI 48，实测 30 分钟）会全部因为错误理由变红，且红的原因和真实回归长得一样。
+    # 与其让下游炸，不如在这里拒绝，并把可执行动作写进消息。
+    $stagedCommit = if ($sourceIdentity -match 'commit=([0-9a-f]{40})') { $Matches[1] } else { '' }
+    $headCommit = ''
+    try {
+        $headLines = @(& git -C $sdkRoot rev-parse HEAD 2>&1 | ForEach-Object { $_.ToString().Trim() })
+        $headCommit = ($headLines | Where-Object { $_ -match '^[0-9a-f]{40}$' } | Select-Object -First 1)
+    } catch { }
+    if ($stagedCommit -and $headCommit -and ($stagedCommit -ne $headCommit)) {
+        if (-not $AllowStaleIdentity) {
+            throw "随包 core 是别代的产物（core commit=$($stagedCommit.Substring(0,7)) HEAD=$($headCommit.Substring(0,7))）：先删 target\$Configuration\owo-agent.exe 或跑 cargo build -p owo-agent-cli 重建，再 stage；确要复现旧产物用 -AllowStaleIdentity（§7.3）"
+        }
+        if (-not $Quiet) {
+            Write-Host "[stage] 警告：按请求放行错代 core（core=$($stagedCommit.Substring(0,7)) HEAD=$($headCommit.Substring(0,7))）——真机验收会判 core/identity_mismatch"
+        }
+    }
 
     $triple = Get-OwoRustcHostTriple
     $binDir = Join-Path $sdkRoot 'desktop\tauri\src-tauri\binaries'
@@ -132,7 +166,8 @@ function Stage-OwoDesktopSidecar {
 # 直接执行入口（人工排障 / 脚本前置自检）。
 if ($MyInvocation.InvocationName -ne '.') {
     try {
-        $meta = Stage-OwoDesktopSidecar -Configuration $OwoConfiguration -NoBuild:$OwoNoBuild
+        $meta = Stage-OwoDesktopSidecar -Configuration $OwoConfiguration -NoBuild:$OwoNoBuild `
+            -AllowStaleIdentity:$OwoAllowStaleIdentity
         if ($OwoJson) { $meta | ConvertTo-Json -Compress | Write-Output }
         else { Write-Output $meta.destination }
         exit 0

@@ -259,7 +259,11 @@
     function requestFullAccess(spec) {
       const candidate = isPlainObject(spec) ? spec : state.draft;
       if (!candidate || !domain || !domain.needsFullAccessConfirm(candidate)) {
-        state.notice = "";
+        // 不能静默 return：按钮就摆在那里，点了什么都不发生等于一个死控件
+        // （实测真机第一轮就是这样把"确认卡未出现"读成断言失败的）。
+        // 这里明说"当前草稿不含不受限维度"，并保留按钮的下一次可点状态。
+        state.notice = "当前配置不含不受限的命令或网络维度，无需二次确认；把某一维改为「不受限」后再申请。";
+        state.confirming = null;
         paint();
         return null;
       }
@@ -272,6 +276,8 @@
         requiresConfirm: !state.fullAccess || state.fullAccess.requires_confirm !== false,
       };
       state.errors = [];
+      // 上一次"无需确认"的解释性提示不能留在真正开出来的卡上面。
+      state.notice = "";
       paint();
       return state.confirming;
     }

@@ -497,6 +497,29 @@ test("controller·完全访问：双确认 + 风险告知 + 时长选择，未�
   assert.equal(submitted.body.duration_secs, 600, "确认后必须带上时长");
 });
 
+test("controller·无需确认时不留死控件：给原因而不是静默 return", async () => {
+  const h = harness([{ value: OVERVIEW }]);
+  await h.controller.load();
+  // 默认草稿（allowlisted / deny）不含不受限维度：此时二次确认没有意义。
+  assert.equal(h.controller.requestFullAccess(), null, "无需确认不得伪造一张卡");
+  const snap = h.controller.snapshot();
+  assert.equal(snap.confirming, null);
+  assert.match(snap.notice, /不含不受限/, "点了按钮必须说清楚为什么没反应");
+  assert.equal(h.calls.filter((call) => call.path === "/permissions/spec").length, 0, "解释性分支不得提交配置");
+  // 含不受限维度的候选直接走同一个入口（不经 setDimension，免得多清一次提示）。
+  const opened = h.controller.requestFullAccess({
+    filesystem: "workspace_write",
+    command: "unrestricted",
+    network: "deny",
+    persistence: "task",
+    scopes: [],
+  });
+  assert.ok(opened, "含不受限维度时必须开确认卡");
+  assert.equal(opened.spec.command, "unrestricted");
+  assert.ok(opened.durationOptions.length >= 2, "时长候选随卡给出，不能让用户手填");
+  assert.equal(h.controller.snapshot().notice, "", "开卡后上一条解释文案要清掉");
+});
+
 test("controller·取消二次确认回到未提交态；一步关闭完全访问不需要确认", async () => {
   const h = harness([{ value: OVERVIEW }, { value: { ok: true } }, { value: OVERVIEW }]);
   await h.controller.load();

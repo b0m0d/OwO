@@ -1,0 +1,68 @@
+[
+    {
+        "scenario":  "core-hang",
+        "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+        "pass":  true,
+        "detail":  "hwnd=4982080 owner=13848 t=0.5s fail="
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "DOM 事实通道（WebView2 CDP）建立",
+        "pass":  true,
+        "detail":  "requested=57324 effective=57324"
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "10s 内界面可操作（无永久 loading）",
+        "pass":  true,
+        "detail":  "t=1.1s health=\"连接中…\""
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "出现统一错误卡（含发生/已自动/下一步三段）",
+        "pass":  true,
+        "detail":  "t=44s（时限 45s 内）"
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "错误终态在 45s 时限内到达（§3.4）",
+        "pass":  true,
+        "detail":  "error_at_sec=44 budget=45"
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "错误码在期望集合内（不得含糊报错）",
+        "pass":  true,
+        "detail":  "found=core/handshake_timeout allowed=core/handshake_timeout"
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "错误卡提供全部契约动作（终止并重试)",
+        "pass":  true,
+        "detail":  "missing=; card=本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新"
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "技术详情以折叠区呈现（不糊在正文里）",
+        "pass":  true,
+        "detail":  "details=True"
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "故障面截图（重获窗口 + 五重有效性）",
+        "pass":  true,
+        "detail":  "size=1280x720 bytes=82953 non_black_ratio=0.998183 variance=971.3794 samples=36864"
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+        "pass":  true,
+        "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-140540\\core-hang\\owo-agent.exe sha256=46E38762A3A3499A3FC1AA234D3C884E9EB2E0D2137817018BC13A4649E50DCF"
+    },
+    {
+        "scenario":  "core-hang",
+        "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+        "pass":  true,
+        "detail":  "stages=ok"
+    }
+]

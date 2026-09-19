@@ -351,3 +351,85 @@ R4.2 收口后按用户口径自动串跑全量：`verify-desktop-cold-boot.ps1`
 
 **已知风险**：`server/lib.rs` 是 2049 行聚合文件（R6 待拆），本轮只做加法接线不改结构；
 `pending_approvals` 持锁跨 `.await` 会造成回合停滞——新增读面必须**先克隆摘要再放锁**。
+
+## R4.5 落地 · §4.5 统一权限中心（判定链接入 + 前端四分页面）
+
+### 1. 落地清单
+
+| 文件 | 干了什么 |
+| --- | --- |
+| `crates/owo-agent-core/src/permission_spec.rs`（新） | §4.5.3 四维词表与结构化 profile：`FilesystemScope`/`RuleScope`/`PersistenceScope` + `PermissionSpec`，`from_profile` 如实投影（投影不出的落 `custom`，不硬编）、`nearest_profile` **只用于"是否等价只读"一个判断**、`expand` 出四维规则、`extra_denial` 只收紧不放宽、`risk_notes` 完全访问风险四条、`dimension_of` 归类（`browser_*`→network、`run_command`/`shell.`/`command:`→command、文件类→filesystem；UI 注入类不归本模块，留给档位与审批链） |
+| `crates/owo-agent-core/src/permissions.rs` | `Policy` 持 `spec: Arc<Mutex<Option<PermissionSpec>>>`；`decision()` 在 **Read 放行与 grant 命中之前**过收紧层；`set_spec`/`spec`/`clear_spec`；5 条新单测（收紧优先于 grant、filesystem=none 连读也拒、无 spec 行为逐条不变、只读上界、收紧不动档位） |
+| `crates/owo-agent-core/src/grant_store.rs` | `GrantScope` 增 `Task`/`Workspace`（旧四值字面量与语义不变，`parse` 向前兼容）+ `label()`/`persists()`；**长期授权落盘** `<data_root>/grants.json`（只写"无到期且无次数上限"的授权，tmp→rename 原子写，坏文件改名 `*.json.bad` 保留现场后按空启动）；`revoke_workspace` 级联；`revoke`/`revoke_tool`/`prune_expired` 成功后同步刷新落盘；`Grant.scope` 字段（展示用，不参与判定）；6 条新单测 |
+| `crates/owo-agent-core/src/settings.rs` | `Settings.permission_spec: Option<PermissionSpec>`（结构化配置跨重启） |
+| `crates/owo-agent-server/src/settings_api.rs` | `GET /permissions/overview`（服务端展开 `dimensions`/`expanded` + 全局 `pending` + `grants` + `recent_decisions` + `full_access.risk_notes` + `scope_literals`）；`POST /permissions/spec`（字面量校验、scopes 必须工作区相对、完全访问三要素、只读模式拒绝保存更宽配置）；`grants_revoke` 扩为三粒度（`grant_id`/`tool_id`/`all`，空 body 400）；`grant_rows` 统一三处列表形状 |
+| `crates/owo-agent-server/src/lib.rs` | 两条新路由 + OpenAPI 登记（新增 `permission_spec_schema()` 单一词表来源）；`AppState::new` 用 `GrantStore::persisting(data_root/grants.json)` 并在档位**之后**恢复 spec；`POST /settings` 同步 spec（缺省即清除，不留两套真相） |
+| `crates/owo-agent-server/tests/route_contract_tests.rs` | `sample_body` 与路由-事件矩阵各登记一处（`/permissions/spec` → `Settings` 领域失效） |
+| `crates/owo-agent-server/tests/permissions_center_api_tests.rs`（新） | 7 条 HTTP 契约：维度服务端展开、提交落盘与 source 翻转、完全访问三要素与 8h 上限、越界/空 custom 拒绝、只读上界、三粒度撤销、跨 AppState 重建的长期授权 |
+| `desktop/web/permissions/{domain,api,controller,view}.js`（新） | §4.8 四分：domain 纯函数与词表、api 唯一持路径且传输经注入、controller 三态 + 提交前校验 + 双确认 + 撤销后复查 + dispose、view 注册 `OwoPanels.permissions` 与事件委托 |
+| `desktop/web/{app.js,index.html,style.css}` | `ROUTE_META.permissions` + rail「权限」入口 + 状态条权限段从"降级到设置页"改指真页 + 渲染后回灌 `OwoStatusBar.reportPermission` |
+| `desktop/web/tests/r4-permissions.test.mjs`（新） | 37 条：域函数、api 路径与 body、controller loading/error/empty、审批四动作、三粒度撤销、假控件防护、接线（路由/rail/脚本顺序/降级分支）、四条分层红线 |
+| `desktop/web/tests/panels-lint.test.mjs` | `groups` 显式登记 `permissions` 目录（新前端目录不登记就红） |
+| `scripts/verify-desktop-r4-ui.ps1` | 新增 §4.5 段 11 条真机断言（见 §5） |
+| `clients/ts/openapi.json` + `src/schema.d.ts` | `regenerate-openapi-snapshot.ps1 -Build` 再生成（273 paths，typecheck 通过） |
+
+### 2. 三条语义红线是怎么被机器守住的（不是"写在注释里"）
+
+1. **范围必须服务端给出**。`/permissions/overview` 的 `dimensions[].effective/summary/source`
+   来自 `PermissionSpec::expand()`；前端 domain 层对缺项只补 `synthesized: true` 的占位行
+   （稳骨架、不算事实），控制器空态判据显式排除占位行。真机断言要求四维**每维都有非空
+   生效值**且 `source ∈ {profile, spec}`，任何一环退化成前端自造都会红。
+2. **维度只能收紧**。`extra_denial` 永不调用 `Decision::Allow`；`decision()` 里它排在
+   Read 放行与 grant 命中之前，`dimension_deny_beats_grant_hit` 用"同一策略同一 grant，
+   只把命令维度改成 deny → 必须从 Allow 翻成 Deny"钉住顺序；档位侧 `set_spec` 只允许把
+   档位**推到只读**，绝不反推放宽（否则 `AutoReview` 会被降级）。
+3. **完全访问必须范围 + 时长 + 风险**。缺 `confirm` 或缺 `duration_secs` 都是 400
+   （`confirmation/required`），时长硬上限 8 小时（超了 `validation/failed`），
+   风险清单由 `risk_notes()` 四条给出；真机断言点「申请完全访问」后必须同时出现
+   ≥4 条风险与 ≥2 个时长选项，取消后卡片收起且**不发任何请求**。
+
+### 3. 本轮抓出的实现缺陷（都是测试/真机抓的，不是读代码读出来的）
+
+| 编号 | 症状 | 根因 | 处置 |
+| --- | --- | --- | --- |
+| R4-BUG-10 | 提交 spec 会顺手放宽档位 | 最初写成 `set_profile(spec.nearest_profile())`，而 `AutoReview` 在若干面比 `Workspace` 更严，反推必然降级 | 收紧层承担减法；档位只在"等价只读"时被推到 `ReadOnly`，其余一律不动（`spec_tightens_without_moving_the_profile_dial`） |
+| R4-BUG-11 | 只读模式下可保存更宽的结构化配置 | `forces_read_only = nearest==ReadOnly \|\| current==ReadOnly` 让冲突判据 `is_read_only && !forces_read_only` 恒假——**闸门是死代码** | 拆成两件事：上界（只读态拒绝非只读等价 spec，400）与收紧（等价只读才推档位）。由 `read_only_mode_rejects_loosening_spec` 首先抓到 |
+| R4-BUG-12 | 权限页永远不显示空态，且缺维度时像有配置 | domain 为稳骨架把四维补成 4 行，控制器用 `!dimensions.length` 判空 → 恒非空 | 占位行打 `synthesized` 标记，空态只认权威行 |
+| R4-BUG-13 | HTTP 200 + `{"ok":false,"error":{code}}` 时稳定错误码消失 | 不可用分支自造 `new Error("…缺少档位与维度矩阵")`，`normalizeError` 又从内层对象找 `.error` | 传整个 envelope 给 `normalizeError`，`fail()` 增 `codeOverride`；有码用服务端原文，无码才自述 |
+| R4-BUG-14 | 两处"假绿"测试 | ① 委托测试没 `setController(stub)` 就断言派发（`onAction` 早退返回 undefined，被误读成"返回值就是 undefined"）；② 跨 Realm 对象用 `deepEqual`、把 `typeof client.request` 能力探测数成调用点 | ①补绑桩并断言 `calls[0]`；②经 `plain()` 往返 + 只数 `client.request(` |
+| R4-BUG-15 | 后台整链"跑完 exit=1"但什么都没发生 | 后台命令里嵌套调用 `pwsh -File`，该主机 PATH 无 `pwsh`（PowerShell 7 未安装），脚本从未起跑 | 改用调用运算符 `&` 直接跑；教训：**后台任务起跑 ≠ 断言通过**，必须看日志里的真实步骤行 |
+| R4-BUG-16 | 故障矩阵 4 场景 + 冷启动全红，报 `Cannot find path 'psdrive'`（`failed_stage=inject`，看起来像 sidecar 注入的产品回归） | 给 `Stage-OwoDesktopSidecar` 新加 §2.4 磁盘门时裸调 `Assert-CiDiskGate`——它在成功时**向管道吐一个状态对象**，于是本应"返回单个元数据"的函数返回了两个对象，调用方 `$staged.source` 撞到状态对象的 `source='psdrive'` 字段，`Copy-Item` 当场炸 | 按仓库既有写法 `$null = Assert-CiDiskGate …` 吞输出；实测函数输出恢复单对象且 `source` 正确；并在 `test-ci-shared-resource-policy.ps1` 加 2 条断言把这个"输出污染"类永久锁住（selftest 29 → **31/31**）。教训：**门禁本身也可能是假红的源头**，加门必须同时检查它的输出面 |
+| R4-BUG-17 | 「申请完全访问」按钮在默认配置下**静默无事发生**（真机第一轮被读成"确认卡没出现"的断言失败） | `requestFullAccess()` 遇到不含不受限维度的草稿直接 `return`，既不提示也不改状态——一个能点但什么都不做的控件 | 改为显式解释文案（"当前配置不含不受限的命令或网络维度…"），并清掉上一条提示；新增单测同时覆盖"无需确认要给原因"与"含不受限维度必须真的开卡"。教训：**断言失败先怀疑自己有没有走真路径**，验收脚本原来用默认草稿点按钮，等于从没走过这条产品分支 |
+| R4-BUG-18 | 验收脚本自身两处口径错误（同时具备假阳与假阴能力） | ① 维度表按 `td[0..3]` 取"键/生效/来源/摘要"，实际视图用 `<th>` 承载维度名 → 四列全部错位；② 用**整页** `.owo-perm-risk li` 计数当"确认卡三要素"，而页面常驻风险预览使 `risks=4` 恒成立 → 卡没开也能通过 | ①改为 `<th>`+`td[0..2]`，并把服务端事实（`GET /permissions/overview` 的 `dimensions[].key/summary/source`、`expanded=4`、`full_access.risk_notes≥4`、`grants_persisted=true`）与 DOM 渲染**分成两组断言**，各按各自口径校验（含中文标签与 `来源未标注` 占位识别）；②`riskItems/durationOptions/confirmHasScope` 一律限定在 `[data-perm-confirm]` 卡内计数。教训：**渲染层断言必须绑定作用域**，全局 `querySelectorAll` 计数的"通过"往往测的是别的元素 |
+| R4-BUG-19 | 状态条断言抓到瞬时态：`后台段反映核心就绪` 报 `backend="检查中"`（同一次运行稍后又显示 `可用/ok`） | 等待循环只要"五段齐全"就取样，而后端段的 ready→可用 折叠晚于骨架首帧；断言因此依赖运气（同一脚本前几轮恰好绿过） | 等待条件收紧为"后端段落定到可用或 24 s 超时"，并在断言详情里回显 `settle=` 落定与否——真坏时仍会失败，不把断言改成永真。教训：**验收脚本的等待条件必须是要断言的那个事实**，否则就是在采样竞态 |
+
+### 4. 过程与工具事实（备案）
+
+- 派给子代理的前端权限中心任务**两次**在同一处被上游模型流空闲超时打断（第二次 43 ms 即失败）。
+  磁盘上已有其 ~71 KB 产物与 41 条测试，主线接手后修掉 7 条红（其中 2 条是它踩坏的既有守卫：
+  `api-client` 的"只有 core 能碰网络"被**注释里的 `fetch()` 字样**误报、`panels-lint` 因新目录
+  未登记而红）。结论：产物落盘不等于完成，且这类"跨文件面接线"任务在流不稳定时不如主线直做。
+- 全量 Rust 验证：`cargo fmt --check`、`clippy -p owo-agent-core -p owo-agent-server --all-targets -D warnings`
+  均 exit 0；core lib **503/503**、center-api 7/7、permissions-profile 5/5、route-contract 23/23。
+  Web 全量 **404/404**（§4.5 前端落地时）→ 修 R4-BUG-17 后补 1 条死控件回归，现为 **405/405**。
+  全程 §2.4 normal 档（`-j 2` / `--test-threads=2`），`-LogFile` 一律绝对路径。
+- 提交：`dcf3f7b`（服务端地基）、`585d178`（前端四分页面）。
+
+### 5. 真机整链（顺序即契约：重建 core → 重建壳 → 三套验收 → 壳单测）
+
+世代链本轮首次被**脚本硬门**保护：`stage-desktop-sidecar.ps1` 在"产物已存在时不重建"，
+提交后直接 stage 会把上一代 core 塞进 `binaries/`，壳运行期判 `core/identity_mismatch`，
+于是整条真机链以错误的理由全红（实测第一轮就这样烧掉 30 分钟）。现在 stage 后立刻核对
+`staged commit == HEAD`，不等就 throw（`-AllowStaleIdentity` 仅供排障复现旧产物）。
+
+| 轮次 | 世代核对 | 结果 | 结论 |
+| --- | --- | --- | --- |
+| 第一轮 `r45-matrix-20260919-131822` | 壳构建期即警告 core=`2f838bc` vs HEAD=`585d178` | 主动终止（未产出可信数字） | 世代门生效前的问题，作废处理正确（世代硬门因此补进 `stage-desktop-sidecar.ps1`） |
+| 第二轮 `r45-matrix-20260919-132205` | `same_generation=True` ✅ | 矩阵 45/49：4 场景 `Cannot find path 'psdrive'` | 全红原因＝R4-BUG-16（门禁自身输出污染），非产品回归；冷启动同因中止 |
+| 第三轮（修复 R4-BUG-16 后重投） | `same_generation=True` ✅ | 矩阵 **82/82**、冷启动 **43/43**、壳单测 **31/31**；R4 UI **46/48** | 唯一两条红都在验收脚本侧（R4-BUG-18），产品面首轮真机事实全部正确：`present=True / profile="workspace（工作区编辑）" / dims=4 / overview_calls=1 delta=1 / 隐藏 5 min 零新增请求` |
+| 第四轮（修 R4-BUG-17/18/19，web 资产重建进壳） | 世代不变 `commit=585d178 dirty=true`，随包 core sha256 `7DC82D6456FB…` | **四套全绿**：R4 UI **52/52**（`r4-desktop-ui-20260919-r45final`）、故障矩阵 **82/82**（`r45-matrix-final`，末条 `hash_before=7DC82D6456FB hash_after=7DC82D6456FB` 证真实 core 未被改动）、冷启动 **43/43**（`r45-coldboot-final`：首屏业务请求 4、零 `/auth/token` 回落、事件流唯一、隐藏 5 min 新增 0 请求、重启后旧 bearer 401/新 bearer 200）、壳单测 **31/31**（`docs/qa/logs/r45-shell-test-final.log`，§2.4 strict `-j 1`） | §4.5 全链在真机上通过：服务端事实与 DOM 渲染分开断言；完全访问走真路径（默认草稿→给解释，改成不受限→开卡，`risks=4 durations=4`）；整页只发 1 次 overview（台账差值＝1）。矩阵里 `core-hang` 终态仍在 **44 s / 45 s** 预算内（余量 1 s，与 R3 的 44.2 s 同量级）——该项按指南交给 R5 基线定档，不在本轮私调时限 |
+
+第四轮的关键事实（不写结论只写读数）：维度表 `文件系统=工作区内读写/档位展开 命令执行=白名单内允许/档位展开 网络访问=白名单内允许/档位展开 授权有效期=本任务/档位展开`；
+确认卡正文含 `"filesystem":"workspace_write","command":"unrestricted","network":"unrestricted"` + 四档时长（10 分钟/1 小时/4 小时/8 小时）+ 四条风险原文；
+`grants_persisted=True` 证明"工作区长期"这一格这次不是勾了就算——它真的落到 `grants.json`；
+取消确认后 `[data-perm-confirm]` 消失且台账 `web_business` 差值仍为 1（整个走查零泄漏请求）。

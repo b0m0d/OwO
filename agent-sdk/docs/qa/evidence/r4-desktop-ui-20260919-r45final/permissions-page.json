@@ -1,0 +1,46 @@
+{
+    "present":  true,
+    "dims":  [
+                 {
+                     "key":  "文件系统",
+                     "effective":  "工作区内读写",
+                     "source":  "档位展开",
+                     "summary":  "工作区内可写，越界路径拒绝"
+                 },
+                 {
+                     "key":  "命令执行",
+                     "effective":  "白名单内允许",
+                     "source":  "档位展开",
+                     "summary":  "command 按白名单/审批放行"
+                 },
+                 {
+                     "key":  "网络访问",
+                     "effective":  "白名单内允许",
+                     "source":  "档位展开",
+                     "summary":  "network 按白名单/审批放行"
+                 },
+                 {
+                     "key":  "授权有效期",
+                     "effective":  "本任务",
+                     "source":  "档位展开",
+                     "summary":  "授权在本任务内有效，任务结束即失效"
+                 }
+             ],
+    "dimCount":  4,
+    "profile":  "workspace（工作区编辑）",
+    "pendingEmpty":  true,
+    "grantsEmpty":  true,
+    "decisionCount":  0,
+    "approvalScopes":  "",
+    "hasRequestFullAccess":  true,
+    "confirmOpen":  false,
+    "confirmText":  "",
+    "riskItems":  0,
+    "pageRiskItems":  4,
+    "durationOptions":  0,
+    "confirmHasScope":  false,
+    "nonConfigurable":  0,
+    "emptyStateMarks":  3,
+    "textLen":  843,
+    "text":  "O\nOwO Agent\n本地优先\n当前工作区\n本地项目\n☾\n本地服务已连接\n感知：—\n学习：—\n☰\n任务\n⌘\n项目\n◎\n团队\n◇\n产物\n⛨\n权限\n⚙\n设置\n后台\n可用\n工作区\nproject · 可写\n模型\nbigmodel · glm-5.3-flash\n权限\nworkspace（工作区编辑）\n当前任务\n空闲\n权限中心\n\n查看生效范围与来源，处理审批、撤销授权，并管理完全访问的风险与时长。\n\n权限中心\n查看生效范围与来源，处理审批、撤销授权，并管理完全访问的风险与时长。\n刷新权限概览\n保存权限配置\n更新于 06:04:32\n权限档位与生效范围\n当前档位\nworkspace（工作区编辑）\n档位由服务端展开为权威策略矩阵；本页只展示生效值，不在前端重算。\n维度\t当前生效\t来源\t范围摘要\t可配置项\n文件系统\t工作区内读写\t档位展开\t工作区内可写，越界路径拒绝\t\n禁止\n工作区内只读\n工作区内读写\n自定义\n\n命令执行\t白名单内允许\t档位展开\tcommand 按白名单/审批放行\t\n禁止\n白名单内允许\n不受限\n\n网络访问\t白名单内允许\t档位展开\tnetwork 按白名单/审批放行\t\n禁止\n白名单内允许\n不受限\n\n授权有效期\t本任务\t档位展开\t授权在本任务内有效，任务结束即失效\t\n仅本次\n本任务\n工作区长期\n改动只影响本工作区；维度只能收紧，不能绕过档位既有禁令（服务端权威校验）。\n允许范围（工作区相对路径）\n未添加额外范围：使用档位默认范围即可。\n添加范围\n完全访问\n状态\n未开启\n文件：工作区内可写；覆盖/删除不可自动撤销（依赖变更集回滚）\n命令：不设限制，外部程序与系统副作用无法回滚\n网络：不设限制，出境数据无法召回\n有效期：工作区长期（必须显式撤销才失效）\n申请完全访问（需二次确认）\n待审批请求\n当前没有等待审批的请求。出现新的工具申请时会自动列在这里。\n已授予的权限\n暂无长期授权记录。审批时选择「本任务」或「工作区长期」会出现在这里。\n最近审批决定\n暂无审批历史。"
+}

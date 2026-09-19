@@ -1,0 +1,17 @@
+{
+    "id":  "no-workspace",
+    "kind":  "healthy",
+    "note":  "§3.4：未选工作区 → 工作区引导（workspace/required），动作=选择文件夹",
+    "expected_codes":  [
+                           "workspace/required"
+                       ],
+    "required_actions":  [
+                             "选择项目工作区"
+                         ],
+    "final_budget_sec":  20,
+    "needs_workspace":  false,
+    "needs_key":  true,
+    "acceptance_mode":  "OWO_DESKTOP_ACCEPTANCE=1 + OWO_SIDECAR_ROOT=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-140540\\no-workspace",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-140540\\no-workspace\\owo-agent.exe",
+    "sidecar_sha256":  "7DC82D6456FBB440011D5C1A93B55AE53C6119170F6EAAE8043D167EF53F98C1"
+}

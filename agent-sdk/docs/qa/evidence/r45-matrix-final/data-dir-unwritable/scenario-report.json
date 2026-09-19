@@ -1,0 +1,59 @@
+{
+    "id":  "data-dir-unwritable",
+    "note":  "§3.4：数据目录不可写 → 启动失败并报 storage/not_writable（core_fatal 协议行）",
+    "kind":  "healthy",
+    "expected_codes":  [
+                           "storage/not_writable"
+                       ],
+    "required_actions":  [
+                             "更换数据目录",
+                             "重试"
+                         ],
+    "final_budget_sec":  20,
+    "known_gap":  "",
+    "executed":  true,
+    "failed_stage":  "",
+    "error_type":  "",
+    "error_message":  "",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-140540\\data-dir-unwritable",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-140540\\data-dir-unwritable\\owo-agent.exe",
+    "sidecar_sha256":  "7DC82D6456FBB440011D5C1A93B55AE53C6119170F6EAAE8043D167EF53F98C1",
+    "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-140540\\data-dir-unwritable\\owo-agent.exe",
+    "shell_pid":  33628,
+    "window_at_sec":  0.5,
+    "actionable_at_sec":  1.1,
+    "error_at_sec":  11.9,
+    "error_code":  "storage/not_writable",
+    "error_card":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： storage/not_writable · 存储错误：数据目录不可写，请更换数据目录或修复权限 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 更换数据目录 重试 技术详情",
+    "setup_guide_len":  0,
+    "details_folded":  true,
+    "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-final\\data-dir-unwritable\\fault-data-dir-unwritable-1280x720.png",
+    "screenshot_metric":  {
+                              "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-final\\data-dir-unwritable\\fault-data-dir-unwritable-1280x720.png",
+                              "bytes":  83036,
+                              "width":  1280,
+                              "height":  720,
+                              "non_black_ratio":  0.998183,
+                              "variance":  970.9954,
+                              "samples":  36864,
+                              "ok":  true,
+                              "fail_reasons":  [
+
+                                               ]
+                          },
+    "ui_final":  {
+                     "healthText":  "本地服务未连接",
+                     "routeText":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： storage/not_writable · 存储错误：数据目录不可写，请更换数据目录或修复权限 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 更换数据目录 重试 技术详情",
+                     "errorCard":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： storage/not_writable · 存储错误：数据目录不可写，请更换数据目录或修复权限 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 更换数据目录 重试 技术详情",
+                     "setupGuide":  "",
+                     "composerVisible":  false,
+                     "actionable":  true,
+                     "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务未连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 存储不可写 工作区 project 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 服务连接 正在等待本地核心服务恢复。 本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： storage/not_writable · 存储错误：数据目录不可写，请更换数据目录或修复权限 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 更换数据目录 重试 技术详情"
+                 },
+    "cleanup":  {
+                    "shell_pid":  33628,
+                    "residual_procs":  0,
+                    "notes":  "Stop-OwoShellTree 已执行"
+                },
+    "terminal_budget_hit":  false
+}

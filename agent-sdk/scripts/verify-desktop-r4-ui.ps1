@@ -4,9 +4,12 @@ verify-desktop-r4-ui.ps1 — R4（§4.3 全局状态条 / §4.6 诊断台账 / �
 事实源全部是**真机**：真实 Tauri 壳 + 真实 WebView2 + 真实 sidecar，DOM 结论只从
 WebView2 CDP 取，请求计数只从服务端 /diagnostics/requests ledger 取（§8.1 口径）。
 
-四组断言（共 36 条 Add-Check）：
+各组断言（条数以 summary.json 为准，此处只列口径；注释里写死条数必然过期）：
   ① §4.3：五段（后台/工作区/模型/权限/当前任务）真的存在、真是 button、真的可聚焦、
      点击真的换页，且工作区段只给「名称 + 路径摘要」不回显绝对路径。
+  ②.5 §4.5：权限中心——服务端事实（四维矩阵 / 摘要来源 / 风险清单 / 展开规则 / 落盘）
+     与 DOM 渲染**分开断言**，完全访问二次确认走真路径（默认草稿→给解释，改成不受限→
+     开卡），整页请求数由台账差值锁死（禁轮询）。
   ② §4.4：工作区字段在壳内转只读 + 原生目录选择器入口就绪（指向 choose_project_directory），
      文案不再引导手输/粘贴绝对路径。**只验接线，不点原生对话框**（Win32 模态框不在
      本窗口客户区内，CDP/截图都覆盖不到——去点它只会把自动化卡死）。
@@ -279,6 +282,110 @@ $clickRefresh = @'
 })()
 '@
 
+# ---- §4.5 权限中心：DOM 事实表达式（真机上这一页到底长什么样、发了几次请求）----
+$exprPermissionsPage = @'
+(function () {
+  var table = document.querySelector(".owo-perm-table");
+  var rows = table ? table.querySelectorAll("tbody tr") : [];
+  var dims = [];
+  for (var i = 0; i < rows.length; i++) {
+    var head = rows[i].querySelector("th");
+    var cells = rows[i].querySelectorAll("td");
+    if (cells.length < 3) continue;
+    dims.push({
+      key: (head && head.textContent || "").trim(),
+      effective: (cells[0].textContent || "").trim(),
+      source: (cells[1].textContent || "").trim(),
+      summary: (cells[2].textContent || "").trim()
+    });
+  }
+  function kvValue(label) {
+    var list = document.querySelectorAll(".owo-perm-kv");
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i].querySelector("span");
+      if (s && (s.textContent || "").trim() === label) {
+        var strong = list[i].querySelector("strong");
+        if (strong) return (strong.textContent || "").trim();
+        var code = list[i].querySelector("code");
+        if (code) return (code.textContent || "").trim();
+        var rest = (list[i].textContent || "").replace((s.textContent || ""), "").trim();
+        return rest;
+      }
+    }
+    return null;
+  }
+  var seen = {};
+  var approvalNodes = document.querySelectorAll('[data-perm-action="approval"]');
+  for (var j = 0; j < approvalNodes.length; j++) {
+    seen[(approvalNodes[j].getAttribute("data-approval") || "")] = 1;
+  }
+  var confirmCard = document.querySelector("[data-perm-confirm]");
+  var bodyText = document.body.innerText || "";
+  return JSON.stringify({
+    present: !!table,
+    dims: dims,
+    dimCount: dims.length,
+    profile: kvValue("当前档位"),
+    pendingEmpty: !!document.querySelector('[data-perm-empty="pending"]'),
+    grantsEmpty: !!document.querySelector('[data-perm-empty="grants"]'),
+    decisionCount: approvalNodes.length,
+    approvalScopes: Object.keys(seen).sort().join(","),
+    hasRequestFullAccess: !!document.querySelector('[data-perm-action="request-full-access"]'),
+    confirmOpen: !!confirmCard,
+    confirmText: confirmCard ? (confirmCard.innerText || "").replace(/\s+/g, " ").slice(0, 400) : "",
+    // 风险清单在页面上常驻（§4.5.2 预览）；只有确认卡内的才算三要素，必须按卡内作用域数。
+    riskItems: confirmCard ? confirmCard.querySelectorAll(".owo-perm-risk li").length : 0,
+    pageRiskItems: document.querySelectorAll(".owo-perm-risk li").length,
+    durationOptions: confirmCard ? confirmCard.querySelectorAll('[data-perm-durations="1"] input').length : 0,
+    confirmHasScope: confirmCard ? /"filesystem"/.test(confirmCard.innerText || "") : false,
+    nonConfigurable: document.querySelectorAll("[data-perm-nonconfigurable]").length,
+    emptyStateMarks: document.querySelectorAll("[data-perm-empty]").length,
+    textLen: bodyText.length,
+    text: bodyText.slice(0, 1600)
+  });
+})()
+'@
+
+$clickPermissionsRail = @'
+(function () {
+  var btn = document.querySelector('[data-rail-target="permissions"]');
+  if (!btn) return "no-rail-button";
+  btn.click();
+  return "clicked";
+})()
+'@
+
+$clickPermAction = @'
+(function () {
+  var btn = document.querySelector('[data-perm-action="__PERM_ACTION__"]');
+  if (!btn) return "missing";
+  btn.click();
+  return "clicked";
+})()
+'@
+
+# 把某一维改成指定值并触发 change：完全访问确认卡只有在草稿真的含
+# 不受限维度时才会出现，直接用默认草稿点按钮等于点一个无效路径。
+$setPermDimension = @'
+(function () {
+  var sel = document.querySelector('select[name="perm-dimension-__PERM_DIM__"]');
+  if (!sel) return "missing-select";
+  sel.value = "__PERM_VALUE__";
+  sel.dispatchEvent(new Event("change", { bubbles: true }));
+  return sel.value;
+})()
+'@
+
+# 状态条权限段必须真的落在权限中心（§4.5 落地前它被临时降级到设置页）。
+$clickStatusBarPermission = @'
+(function () {
+  var seg = document.querySelector('[data-owo-status="permission"]');
+  if (!seg) return "no-segment";
+  seg.click();
+  return "clicked";
+})()
+'@
+
 # ---- 启动：真实壳（私有环境 + 验收模式 + 内嵌前端新鲜度门，全走共享原语）----
 $run = New-OwoAcceptanceRun -SdkRoot $sdkRoot -Scenario 'r4-ui' -Stamp $Stamp -PrepareWorkspace
 Write-Host "[r4-ui] 私有运行根=$($run.run_root)"
@@ -329,13 +436,24 @@ try {
     $null = Save-OwoEvidenceJson -Dir $EvidenceDir -Name 'ledger-boot.json' -InputObject $boot
 
     # ================= ① §4.3 全局状态条 =================
+    # 不能"五段一出现就取样"：后台段的 ready→可用 折叠比骨架渲染晚（实测抓到
+    # 第一帧 backend="检查中" 就把瞬时态当成结论）。这里等到后台段落定（或超时），
+    # 拿落定帧做断言；真坏的情况仍会在窗口内失败（不是把断言改成永不失败）。
     $bar = $null
-    $barDeadline = (Get-Date).AddSeconds(10)
+    $barReadyAt = $null
+    $barDeadline = (Get-Date).AddSeconds(24)
     while ((Get-Date) -lt $barDeadline) {
         $bar = Get-CdpJson -Port $cdpPort -Expression $exprStatusBar
-        if ($bar -and $bar.present -and $bar.count -eq 5) { break }
+        if ($bar -and $bar.present -and ($bar.count -eq 5)) {
+            $probeSeg = @($bar.segments | Where-Object { [string]$_.key -eq 'backend' })
+            if (($probeSeg.Count -gt 0) -and ([string]$probeSeg[0].value -match '可用')) {
+                $barReadyAt = Get-Date
+                break
+            }
+        }
         Start-Sleep -Milliseconds 400
     }
+    $barSettleNote = if ($null -ne $barReadyAt) { '已落定' } else { '未落定（保持超时前最后一帧）' }
     $null = Save-OwoEvidenceJson -Dir $EvidenceDir -Name 'status-bar.json' -InputObject $bar
     Add-Check '状态条容器存在且五段齐全（§4.3）' (($null -ne $bar) -and [bool]$bar.present -and $bar.count -eq 5) `
         "count=$($bar.count) present=$($bar.present) bar_height=$($bar.barHeight)"
@@ -363,7 +481,7 @@ try {
     Add-Check '每段都带中文用途提示（aria-label 非空）' `
         ((@($segAria | Where-Object { [int]$_ -gt 6 }).Count) -eq 5) "aria_lengths=$($segAria -join ',')"
     Add-Check '后台段反映核心就绪（ready → 可用）' ($byKey['backend'].value -match '可用') `
-        "backend=`"$($byKey['backend'].value)`" tone=$($byKey['backend'].tone)"
+        "backend=`"$($byKey['backend'].value)`" tone=$($byKey['backend'].tone) settle=$barSettleNote"
     Add-Check '工作区段显示已选项目名（预置工作区生效）' `
         ($byKey['workspace'].value -match 'project') "workspace=`"$($byKey['workspace'].value)`""
     $wsText = [string]$byKey['workspace'].value + ' ' + [string]$byKey['workspace'].title
@@ -476,6 +594,102 @@ try {
         ($modelSeg.value -match 'glm|GLM|bigmodel|ollama|本地') `
         "model=`"$($modelSeg.value)`""
     $null = Save-OwoEvidenceJson -Dir $EvidenceDir -Name 'status-bar-after-settings.json' -InputObject $barAfterSettings
+
+    # ================= ②.5 §4.5 权限中心（页面 + 按需加载 + 完全访问三要素）=================
+    # 先拿服务端事实（这一步自身会记一次台账，必须在台账基线之前做完），
+    # 再取基线，之后 DOM 侧只允许出现"渲染这一页"产生的那 1 次 overview。
+    $permFacts = $null
+    try {
+        $permFacts = Invoke-OwoCoreApi -Base $base -Path '/permissions/overview' -Token $token
+    } catch {
+        Add-Check '§4.5.1 服务端 /permissions/overview 可用' $false $_.Exception.Message
+    }
+    $factDims = @($permFacts.dimensions)
+    $factExpanded = @($permFacts.expanded)
+    Add-Check '§4.5.3 服务端给出四个维度（文件系统/命令/网络/持久化）' `
+        ((@($factDims | ForEach-Object { [string]$_.key }) -join ',') -eq 'filesystem,command,network,persistence') `
+        "keys=$(($factDims | ForEach-Object { $_.key }) -join ',')"
+    Add-Check '§4.5.1 每维摘要与来源由服务端给出（前端不重算）' `
+        ((Get-OwoCount @($factDims | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.summary) -or (-not @('profile','spec') -contains [string]$_.source) })) -eq 0) `
+        "sources=$(($factDims | ForEach-Object { "$($_.key):$($_.source)" }) -join ' ')"
+    Add-Check '§4.5.2 服务端预生成完全访问风险清单与四条展开规则（确认卡要素来自服务端）' `
+        (((Get-OwoCount @($permFacts.full_access.risk_notes)) -ge 4) -and ((Get-OwoCount $factExpanded) -eq 4) -and ($permFacts.grants_persisted -eq $true)) `
+        "risk_notes=$(Get-OwoCount @($permFacts.full_access.risk_notes)) expanded=$(Get-OwoCount $factExpanded) grants_persisted=$($permFacts.grants_persisted)"
+
+    # 台账是唯一 HTTP 真相：进出这一页的请求差值必须能对上，
+    # "看起来加载出来了"不代表没有偷偷轮询（本页禁止 setInterval）。
+    $ledgerBeforePerm = Get-OwoLedgerFacts -Base $base -Token $token -Label 'r45-before-permissions'
+    $null = Invoke-OwoCdpEval -Port $cdpPort -Expression $clickPermissionsRail -TimeoutSec 8
+    $perm = $null
+    $permDeadline = (Get-Date).AddSeconds(18)
+    while ((Get-Date) -lt $permDeadline) {
+        $perm = Get-CdpJson -Port $cdpPort -Expression $exprPermissionsPage -TimeoutSec 12
+        if ($perm -and $perm.present) { break }
+        Start-Sleep -Milliseconds 600
+    }
+    $null = Save-OwoEvidenceJson -Dir $EvidenceDir -Name 'permissions-page.json' -InputObject $perm
+    Add-Check '§4.5 权限中心可挂载并渲染出维度矩阵' `
+        (($null -ne $perm) -and [bool]$perm.present) `
+        "present=$($perm.present) text_len=$($perm.textLen)"
+    Add-Check '§4.5.3 四维矩阵齐备且每维都有生效值（不是空占位）' `
+        (([int]$perm.dimCount -eq 4) -and (@($perm.dims | Where-Object { [string]::IsNullOrWhiteSpace($_.effective) -or ($_.effective -eq '未知') }).Count -eq 0)) `
+        "dims=$(($perm.dims | ForEach-Object { "$($_.key)=$($_.effective)/$($_.source)" }) -join ' ')"
+    Add-Check '§4.5.1 服务端事实逐维落到 DOM（摘要与来源不是前端自造）' `
+        ((@($perm.dims | Where-Object { [string]::IsNullOrWhiteSpace($_.summary) -or [string]::IsNullOrWhiteSpace($_.source) -or ($_.source -eq '来源未标注') }).Count -eq 0) -and (@($perm.dims | ForEach-Object { $_.key }) -join ',' -eq '文件系统,命令执行,网络访问,授权有效期')) `
+        "sources=$(($perm.dims | ForEach-Object { $_.source }) -join ',') labels=$(($perm.dims | ForEach-Object { $_.key }) -join ',')"
+    Add-Check '§4.5 当前档位回显中文可读（不是裸枚举）' `
+        ($perm.profile -match '工作区|只读|自动|全') "profile=`"$($perm.profile)`""
+    Add-Check '§4.5 空列表走空态文案（不是 0 行假装有数据）' `
+        (([bool]$perm.pendingEmpty) -and ([bool]$perm.grantsEmpty)) `
+        "pending_empty=$($perm.pendingEmpty) grants_empty=$($perm.grantsEmpty) marks=$($perm.emptyStateMarks)"
+    # 完全访问走真路径：默认草稿不含不受限维度 → 点「申请」必须给出解释而非静默；
+    # 把命令/网络改成不受限后再点 → 确认卡出现，范围 + 时长 + 风险三要素齐备。
+    $null = Invoke-OwoCdpEval -Port $cdpPort -Expression ($clickPermAction.Replace('__PERM_ACTION__', 'request-full-access')) -TimeoutSec 8
+    $permBenign = Get-CdpJson -Port $cdpPort -Expression $exprPermissionsPage -TimeoutSec 12
+    Add-Check '§4.5.2 无需确认时明确告知原因，不留静默死控件' `
+        ((-not [bool]$permBenign.confirmOpen) -and ($permBenign.text -match '不含不受限')) `
+        "confirm_open=$($permBenign.confirmOpen) text_match=$($permBenign.text -match '不含不受限')"
+    foreach ($dim in 'command', 'network') {
+        $null = Invoke-OwoCdpEval -Port $cdpPort -TimeoutSec 8 -Expression (
+            $setPermDimension.Replace('__PERM_DIM__', $dim).Replace('__PERM_VALUE__', 'unrestricted'))
+    }
+    $null = Invoke-OwoCdpEval -Port $cdpPort -Expression ($clickPermAction.Replace('__PERM_ACTION__', 'request-full-access')) -TimeoutSec 8
+    $permConfirm = Get-CdpJson -Port $cdpPort -Expression $exprPermissionsPage -TimeoutSec 12
+    $null = Save-OwoEvidenceJson -Dir $EvidenceDir -Name 'permissions-full-access-confirm.json' -InputObject $permConfirm
+    Add-Check '§4.5.2 完全访问二次确认卡出现，且范围/时长/风险三要素齐备' `
+        (([bool]$permConfirm.confirmOpen) -and ([bool]$permConfirm.confirmHasScope) -and ([int]$permConfirm.riskItems -ge 1) -and ([int]$permConfirm.durationOptions -ge 2)) `
+        "scope=$($permConfirm.confirmHasScope) risks=$($permConfirm.riskItems) durations=$($permConfirm.durationOptions) text=$($permConfirm.confirmText)"
+    $null = Invoke-OwoCdpEval -Port $cdpPort -Expression ($clickPermAction.Replace('__PERM_ACTION__', 'cancel-confirm')) -TimeoutSec 8
+    $permCancelled = Get-CdpJson -Port $cdpPort -Expression $exprPermissionsPage -TimeoutSec 12
+    Add-Check '§4.5.2 取消二次确认不提交任何配置（卡收起且请求数不变）' `
+        ((-not [bool]$permCancelled.confirmOpen) -and ($permCancelled.text -notmatch '不含不受限')) `
+        "confirm_open_after_cancel=$($permCancelled.confirmOpen)"
+    $ledgerAfterPerm = Get-OwoLedgerFacts -Base $base -Token $token -Label 'r45-after-permissions'
+    $overviewCalls = @($ledgerAfterPerm.web_business_routes | Where-Object { $_ -match '/permissions/overview' }).Count
+    $permDelta = [int]$ledgerAfterPerm.web_business - [int]$ledgerBeforePerm.web_business
+    Add-Check '§4.5 权限中心按需加载：整页只发 1 次 overview，无周期轮询' `
+        (($overviewCalls -eq 1) -and ($permDelta -eq 1)) `
+        "overview_calls=$overviewCalls delta=$permDelta routes=$($ledgerAfterPerm.web_business_routes -join ',')"
+    $permLeaks = @(Test-NoForbiddenEcho -Text ([string]$perm.text))
+    Add-Check '§4.5 权限页文本不回显绝对路径/授权头/密钥形态' ($permLeaks.Count -eq 0) "hits=$($permLeaks -join ',')"
+    # 状态条权限段：§4.5 落地后必须直指权限中心（此前临时降级到设置页）。
+    $null = Invoke-OwoCdpEval -Port $cdpPort -Expression $clickStatusBarPermission -TimeoutSec 8
+    $permFromStatusBar = Get-CdpJson -Port $cdpPort -Expression $exprPermissionsPage -TimeoutSec 12
+    Add-Check '§4.3 状态条权限段直达权限中心（不再降级到设置页）' `
+        ([bool]($permFromStatusBar -and $permFromStatusBar.present)) "present=$($permFromStatusBar.present)"
+    if (-not $SkipScreenshots) {
+        $shotPerm = Join-Path $EvidenceDir 'r4-ui-permissions.png'
+        try {
+            $permWin = Get-OwoValidatedWindow -ProcessId $shellProc.Id -TimeoutSec 8 -RequireVisible
+            if (-not $permWin.ok) { throw "截图前窗口验证失败：$($permWin.fail_reasons -join ';')" }
+            $null = Save-OwoWindowShot -Hwnd $permWin.hwnd -Path $shotPerm
+            $permMetric = Test-OwoScreenshot -Path $shotPerm -ExpectedWidth $permWin.width -ExpectedHeight $permWin.height
+            Add-Check '权限中心截图像素级有效（§4.5 真机外观证据）' ([bool]$permMetric.ok) `
+                "$shotPerm（$($permWin.width)x$($permWin.height)） $(Get-OwoScreenshotMetricLine $permMetric)"
+        } catch {
+            Add-Check '权限中心截图像素级有效（§4.5 真机外观证据）' $false $_.Exception.Message
+        }
+    }
 
     # ================= ③ §4.10 三档窗口 =================
     if (-not $SkipScreenshots) {

@@ -1,0 +1,59 @@
+{
+    "id":  "binary-missing",
+    "note":  "§3.4：后台组件缺失 → core/binary_missing；动作=重新检查/打开诊断位置",
+    "kind":  "missing",
+    "expected_codes":  [
+                           "core/binary_missing"
+                       ],
+    "required_actions":  [
+                             "重新检查",
+                             "打开诊断位置"
+                         ],
+    "final_budget_sec":  15,
+    "known_gap":  "",
+    "executed":  true,
+    "failed_stage":  "",
+    "error_type":  "",
+    "error_message":  "",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-140540\\binary-missing",
+    "injected_sidecar":  "\u003cnone: 场景目录刻意不放 sidecar\u003e",
+    "sidecar_sha256":  "",
+    "launched_core":  "",
+    "shell_pid":  30840,
+    "window_at_sec":  0.6,
+    "actionable_at_sec":  1.4,
+    "error_at_sec":  5.6,
+    "error_code":  "core/binary_missing",
+    "error_card":  "本地核心服务暂不可用 核心服务未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新检查 打开诊断位置 技术详情",
+    "setup_guide_len":  0,
+    "details_folded":  true,
+    "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-final\\binary-missing\\fault-binary-missing-1280x720.png",
+    "screenshot_metric":  {
+                              "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-final\\binary-missing\\fault-binary-missing-1280x720.png",
+                              "bytes":  89190,
+                              "width":  1280,
+                              "height":  720,
+                              "non_black_ratio":  0.998183,
+                              "variance":  1126.245,
+                              "samples":  36864,
+                              "ok":  true,
+                              "fail_reasons":  [
+
+                                               ]
+                          },
+    "ui_final":  {
+                     "healthText":  "本地服务未连接",
+                     "routeText":  "项目 选择工作区、查看项目历史，并预览权限范围。 本地核心服务暂不可用 核心服务未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新检查 打开诊断位置 技术详情",
+                     "errorCard":  "本地核心服务暂不可用 核心服务未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新检查 打开诊断位置 技术详情",
+                     "setupGuide":  "",
+                     "composerVisible":  false,
+                     "actionable":  true,
+                     "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务未连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 不可用 工作区 project 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 项目 选择工作区、查看项目历史，并预览权限范围。 项目 选择工作区、查看项目历史，并预览权限范围。 本地核心服务暂不可用 核心服务未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新检查 打开诊断位置 技术详情"
+                 },
+    "cleanup":  {
+                    "shell_pid":  30840,
+                    "residual_procs":  0,
+                    "notes":  "Stop-OwoShellTree 已执行"
+                },
+    "terminal_budget_hit":  false
+}
