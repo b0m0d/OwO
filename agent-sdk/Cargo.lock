@@ -1801,6 +1801,7 @@ dependencies = [
  "owo-agent-eval-facade",
  "owo-agent-extensions",
  "owo-agent-kernel",
+ "owo-agent-mcp",
  "owo-agent-plugins",
  "owo-agent-protocol",
  "owo-agent-tool-safety",
@@ -1879,6 +1880,21 @@ dependencies = [
  "thiserror",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "owo-agent-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "owo-agent-core",
+ "owo-agent-plugins",
+ "owo-agent-tool-safety",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -31,6 +31,10 @@ owo-agent-contracts.workspace = true
 # team_strategy / artifact_pipeline / contract_worker / worker_profile 继续经 lib.rs 的
 # 同名别名模块使用 `crate::<模块>::` 路径，server/cli/集成测试/devtools 零改动。
 owo-agent-workswarm.workspace = true
+# MCP 宿主内核（M10）：mcp 已下沉到 owo-agent-mcp（零出边）。core 的 agent / tools /
+# tool_effects 继续经 lib.rs 的同名别名模块使用 `crate::mcp::` 路径；
+# 两台 MCP 假服务器与 mcp_tests 也随之迁走（`CARGO_BIN_EXE_*` 只在声明该 bin 的包内可用）。
+owo-agent-mcp.workspace = true
 # 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
 # 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
 # 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成
@@ -95,10 +99,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_Xps",
 ] }
 
-[[bin]]
-name = "owo-mcp-test-server"
-path = "src/bin/mcp_test_server.rs"
-
-[[bin]]
-name = "owo-mcp-http-test-server"
-path = "src/bin/mcp_http_test_server.rs"
+# MCP 的两台假服务器（`owo-mcp-test-server` / `owo-mcp-http-test-server`）连同
+# `tests/mcp_tests.rs` 已随 M10 一起迁到 owo-agent-mcp：`env!("CARGO_BIN_EXE_<name>")`
+# 只在声明该 bin 的包的集成测试里可用，且这两台服务器只服务于 MCP 这一条边界。
+# 产物路径不变（同一 workspace 共用 target/），`plugins/example-hello/manifest.json`
+# 里的 `../../target/debug/owo-mcp-test-server.exe` 继续有效。

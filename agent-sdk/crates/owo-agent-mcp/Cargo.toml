@@ -1,0 +1,48 @@
+[package]
+name = "owo-agent-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# MCP 宿主内核（M10）：指南 §4 目标结构里的 `tool-host/crates/mcp-host` 的第一段。
+#
+# 边界（见 docs/ARCH-MICROKERNEL.md §12）：
+#   * `mcp.rs` 的 `crate::` 出边实测为 **0**（M3 起它就在用 owo_agent_tool_safety 与
+#     owo_agent_plugins 的绝对路径，不再经 crate 根），因此搬迁无需任何倒置；
+#   * 入边（core 的 agent / tools / tool_effects，server 的 mcp_api，以及 MCP 集成
+#     测试）全部由 core 的同名别名模块 + 顶层 `pub use` 满足，调用方零改动；
+#   * **本 crate 不得依赖 owo-agent-core**（普通依赖）。MCP 客户端只认识
+#     tool-safety 的沙箱策略与 plugins 的 `McpServerConfig`。
+#
+# 本 crate 同时拥有 MCP 的两台测试用假服务器（stdio / http）与 MCP 集成测试：
+# 三者都只属于 MCP 这条边界，放在 core 里会让"改一次 MCP 传输"牵动整个核心编译单元。
+
+[dependencies]
+owo-agent-plugins.workspace = true
+owo-agent-tool-safety.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+# 内联全限定路径（`mcp.rs:285` 的 `tracing::info!`）不会出现在 `use` 行里，
+# 因此依赖清单必须按「use 行 + 内联全限定路径」两遍核（M5/M3 都踩过）。
+tracing.workspace = true
+
+# 集成测试要构造真实的 Agent / 工具注册表 / 权限策略 / 会话来验证 MCP 接线。
+# Cargo 的环检测只作用于普通依赖图，dev-dependency 边（core → mcp → core）不成环，
+# 也不会进入应用构建；与 core 对 owo-agent-eval-facade 的既有做法一致。
+[dev-dependencies]
+owo-agent-core.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+# 测试文件里用的是**内联**全限定路径（`uuid::Uuid::new_v4()`，5 处，用于隔离临时目录），
+# `use` 行扫描看不到——这就是 M5 记档的坑在本步第二次复现。
+uuid.workspace = true
+
+[[bin]]
+name = "owo-mcp-test-server"
+path = "src/bin/mcp_test_server.rs"
+
+[[bin]]
+name = "owo-mcp-http-test-server"
+path = "src/bin/mcp_http_test_server.rs"

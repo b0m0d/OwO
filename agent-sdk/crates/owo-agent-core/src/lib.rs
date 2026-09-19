@@ -28,7 +28,6 @@ pub mod goal;
 pub mod grant_store;
 pub mod learn;
 pub mod locate;
-pub mod mcp;
 pub mod mcp_health;
 pub mod memory;
 pub mod node_agent;
@@ -153,6 +152,24 @@ pub use owo_agent_contracts::{computer_task, context, plan, skill, skill_health}
 // （workswarm.rs 本体 4,328 行）仍留在 core，等 A2 统一 Daemon 落地后再动。
 // ---------------------------------------------------------------------------
 pub use owo_agent_workswarm::{project_space_store, team_benefit, workswarm_output};
+
+// ---------------------------------------------------------------------------
+// MCP 宿主内核（M10）兼容层：mcp 已下沉到独立 crate `owo-agent-mcp`，并连同它专属的
+// 两台假服务器（`owo-mcp-test-server` / `owo-mcp-http-test-server`）与 13 条 MCP
+// 集成测试一起走（`CARGO_BIN_EXE_*` 只在声明该 bin 的包内可用）。
+//
+// `mcp.rs` 自 M3/M7 起就不再用 `crate::` 相对路径（它直接引用
+// `owo_agent_tool_safety::` 与 `owo_agent_plugins::`），因此出边实测为 0，搬迁无需倒置。
+// 入边分两侧，全部由下面的别名模块满足：
+//   * crate 内：`crate::mcp::`（agent 的 McpRegistry/McpClient、tools、tool_effects）；
+//   * crate 外：`owo_agent_core::{mcp::McpServerConfig, McpClient, McpRegistry, McpTool}`
+//     （server 的 mcp_api 与 MCP 集成测试）。
+//
+// 这是指南 §4 目标结构 `tool-host/crates/mcp-host` 的第一段；`mcp_health`（熔断与
+// 限流）暂时留在 core，因为它的 `crate::tool_effects` 出边会与仍在 core 的
+// permissions / tools 成环，按 §12 的排序与 Tool Host 的 A4 分段落一起处理。
+// ---------------------------------------------------------------------------
+pub use owo_agent_mcp::mcp;
 
 pub use owo_agent_plugins::{plugin, McpServerConfig};
 

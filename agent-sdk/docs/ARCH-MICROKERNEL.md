@@ -68,7 +68,8 @@ pub use owo_agent_kernel::{
 | **M7** | `owo-agent-plugins` | plugin（1,158 行）+ 从 `mcp` 下沉的 `McpServerConfig`；**倒置方向 = 配置类型随域走** | **0**（倒置后） | server / cli / 3 个集成测试（经别名，未改代码） | ✅ 已完成，见 §9 |
 | **M8** | `owo-agent-contracts` | context / computer_task / plan / skill / skill_health（1,491 行 + lib.rs）；**数据形状与执行者分离** | **0** | `agent` / `executor` / `tools` / server / cli（经别名，未改代码） | ✅ 已完成，见 §10 |
 | **M9** | `owo-agent-workswarm` | project_space_store / team_benefit / workswarm_output（2,847 行）；**编排的契约与状态先行、执行侧仍留 core** | **0** | `workswarm` / `team_strategy` / `artifact_pipeline` / `contract_worker` / `worker_profile` + server 5 个 api 模块（经别名，未改代码） | ✅ 已完成，见 §11 |
-| **M10** | 下一个候选见 §12 | — | — | — | 待执行 |
+| **M10** | `owo-agent-mcp` | MCP 宿主第一段：`mcp`（646 行）+ 两台假服务器 + 13 条 MCP 集成测试；**零出边** | **0** | `agent` / `tools` / `tool_effects` + server `mcp_api`（经别名，未改代码） | ✅ 代码已完成，见 §12（**server 全量测试与冒烟待资源可用补跑**） |
+| **M11** | 下一个候选见 §13 | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -730,7 +731,7 @@ note: the function is defined here --> crates\owo-agent-contracts\src\skill.rs:1
 
 ## 11. M9：`owo-agent-workswarm`（已完成）——编排的契约/状态先行，执行侧留待 A2
 
-候选取舍与两路扫描数据见 §12；本节记录边界、结果与证据。
+候选取舍与两路扫描数据见 §13；本节记录边界、结果与证据。
 
 ### 11.1 边界与依赖方向
 
@@ -761,7 +762,7 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 所以正确的迁移顺序是**先切零出边的契约/状态侧，再切执行侧**：本步搬走的三个模块
 没有任何出边，搬完立即满足"core 零改动、可独立编译、可独立测试"；执行侧
 （`workswarm.rs` 本体 4,328 行）留着与 `goal`/`workflow`/`fleet` 的环一起处理，
-按 §12 的建议排到 A2（统一 Daemon）之后。
+按 §13 的建议排到 A2（统一 Daemon）之后。
 
 ### 11.3 本步的调用方改动量：**0 行**（除 core 的 lib.rs 接线）
 
@@ -815,7 +816,131 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 错误、实际是磁盘耗尽"的同一件事在门禁层的正确表现。
 
 
-## 12. 后续候选与取舍记录
+## 12. M10：`owo-agent-mcp`（已完成）——MCP 宿主第一段，连测试服务器与集成测试一起搬
+
+候选取舍见 §13；本节记录边界、结果与证据。
+
+### 12.1 边界与依赖方向
+
+| 目标 | 行数 | 内容 | `crate::` 出边 |
+|---|---:|---|---|
+| `src/mcp.rs` | 646 | MCP 客户端与注册表：stdio / HTTP 传输、工具列表与调用、schema 预算、超时与重连 | **0** |
+| `src/bin/mcp_test_server.rs` | 133 | stdio 假服务器（echo/add 等），测试与示例插件共用 | — |
+| `src/bin/mcp_http_test_server.rs` | 115 | HTTP 假服务器（SSE / POST） | — |
+| `tests/mcp_tests.rs` | 548 | 13 条 MCP 集成测试（登录、列工具、调用、超时重连、热注册、官方插件） | — |
+| `src/lib.rs` | 33 | 边界文档 + glob re-export | — |
+
+```text
+tool-safety ─┐
+             ├─► owo-agent-mcp ─► owo-agent-core ─► server/cli
+plugins ─────┘        （dev-dependency 反向：core → mcp --dev--> core）
+```
+
+`mcp.rs` 自 M3/M7 起就已经在写 `owo_agent_tool_safety::` 与 `owo_agent_plugins::`
+的绝对路径，不再经 crate 根，所以它的 `crate::` 出边实测为 **0**——这是"早先几步的
+倒置让后面几步变成零代价"的直接例证。普通依赖里没有 core，唯一的 core 依赖是
+`dev-dependencies`（集成测试要构造真实 Agent / 注册表 / 权限策略 / 会话）。
+Cargo 的环检测只看普通依赖图，dev-dependency 的环不成环——core 对
+`owo-agent-eval-facade` 早就是这个形状。
+
+### 12.2 为什么把两台假服务器和 MCP 集成测试一起搬（这不是"顺手"）
+
+`env!("CARGO_BIN_EXE_<name>")` 只在**声明该 bin 的那个包**的集成测试里可用。MCP 的
+13 条测试里有 4 处依赖它（stdio 3 处、http 1 处），所以只搬 `mcp.rs` 会让测试无处可去。
+而这台假服务器又只服务于 MCP 这一条边界——三者同迁之后：
+
+* 改一次 MCP 传输只重编 `owo-agent-mcp`，不再牵动核心编译单元；
+* 产物路径不变（同一 workspace 共用 `target/`），
+  `plugins/example-hello/manifest.json` 里的
+  `../../target/debug/owo-mcp-test-server.exe` 继续有效；
+* 测试里的 `CARGO_MANIFEST_DIR/../../plugins` 与新位置同深度（`crates/<name>/`），
+  路径解析结果不变。
+
+### 12.3 本步踩的两个坑（都是同一类：`use` 行扫描看不到的依赖）
+
+1. `mcp.rs:285` 的 `tracing::info!` —— 内联全限定路径，不在任何 `use` 行里，
+   首次 `check` 报 `E0433: cannot find module or crate 'tracing'`。
+2. `tests/mcp_tests.rs` 的 5 处 `uuid::Uuid::new_v4()` —— 同样是内联路径，
+   `E0433` 再次出现，只是这次在 dev-dependencies 上。
+
+这正是 M5 记档的坑的**第三、第四次**复现。处置已写进 §4 复用清单：依赖清单必须按
+「`use` 行 + 内联全限定路径」两遍核；本步开始对新 crate 直接跑
+`grep -E '^[a-z_]+::'` 的正则扫描（`tracing::`、`uuid::`、`chrono::`、`sha2::` …），
+不再靠肉眼读 `use` 块。
+
+### 12.4 磁盘红线：可回收的不止 incremental / pdb
+
+本步两次被 §2.4 磁盘门拒绝（4.42 GB < 6 GB、16.16 GB < 20 GB）。清
+`target/**/incremental` + `target/**/*.pdb` 只回收 11.90 GB，仍不够 strict 档的 20 GB。
+实测发现真正的大头是 **`target/debug/deps/*.exe`：849 个历史测试二进制占 29.35 GB**
+（每次全量测试都会留下几十个测试可执行文件与其调试信息）。
+删除后回收 **29.35 GB**，门禁通过。这条已补进本节，供后续所有步骤复用：
+
+```text
+可安全回收（重编即恢复，按收益排序）：
+  1. target/debug/deps/*.exe      （实测 29.35 GB）
+  2. target/**/*.pdb              （实测 11–18 GB/轮）
+  3. target/**/incremental        （实测 0.2–1 GB）
+禁止：为了过门禁而调小 -j、加长超时或改阈值（§2.4 明令）。
+```
+
+### 12.5 验收证据（可复现）
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| 新 crate 独立编译 | `cargo check -p owo-agent-mcp --all-targets` | **exit=0**（首次失败见 12.3 的两个 E0433） | `docs/qa/logs/mk-m10-check-crate3-*.log` |
+| workspace 全目标编译 | `scripts/mk-check.ps1 -Tag m10`（`-j 1`） | **exit=0**，156 s | `docs/qa/logs/mk-m10-20260919-184520.log` |
+| MCP 边界自身测试 | `cargo test -p owo-agent-mcp --locked --all-targets` | **exit=0**，76 s；**13/13 集成测试全绿**（含 4 处 `CARGO_BIN_EXE_*` 真起假服务器） | `docs/qa/logs/mk-m10-mcp-tests-20260919-184800.log` |
+| 全量 core 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-core -Tag m10-core` | **exit=0**；**31/31 分片全绿**（`--lib` 363 passed / 2 ignored + 30 个集成测试目标） | `docs/qa/logs/mk-shard-m10-core-*.log` |
+| 全量 server 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-server -Tag m10-server` | **待补**（内存门，见下注；守候任务已武装） | `docs/qa/logs/mk-shard-m10-server-*.log`（待生成） |
+| 依赖闭包 | `cargo tree -p owo-agent-mcp -e normal` | 普通依赖只有 `plugins` / `tool-safety` / `reqwest` / `serde_json` / `tokio` / `tracing`；**core / server / workswarm / contracts / env / sherpa / ndarray / ort / rusqlite 均 0 次**。`kernel` 只作为 `plugins → tool-safety → kernel` 的传递依赖出现（含其 `windows-sys`），这是 M3 就定下的受信执行链，不是本步引入的 | `docs/qa/logs/mk-m10-tree.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m10-mcp` | **待补**（需先编译 core+server+cli，见下注） | `docs/qa/evidence/mk-smoke-m10-mcp-*/report.json`（待生成） |
+| core 体量 | `git ls-tree` + 逐行统计 | **59 文件 / 43,998 行 → 58 文件 / 43,352 行**（−646 行）；另有 796 行测试/工具（2 个 bin + 1 个测试文件）迁出 | 与 §1 同口径 |
+
+> 注：core / server 全量测试与运行态冒烟在本步执行时多次被 §2.4 **内存门**拦下
+> （可用内存 5.91 GB / 已用 81.3%、4.01 GB / 87.3%——同机有 DeltaForce 等应用占用
+> 6.7–11.4 GB）。门禁按设计终止进程树并返回 137，**没有做任何绕过**（未改阈值、
+> 未加超时、未降并发档位以外的任何手段）。
+>
+> * **core 已用分批方式跑完并通过**（31/31）：见上表。
+> * **server 仍待补**：server 测试必须先编译 `owo-agent-core`（`-p owo-agent-server`
+>   的 feature 并集与 core 自身不同，无法复用已有产物），这一步实测需要约 2.5 GB
+>   额外内存；本机在该时段只能提供约 0.6 GB 余量（发起时 6.97 GB / 78.0%，
+>   60 s 内被顶到 81.2%），因此**连续 7 次都死在"Compiling owo-agent-core"的
+>   第 60 秒**，无法收敛。冒烟需要同一批二进制，因此同样待补。
+> * 已武装的守候任务：`scripts/mk-tests-sharded.ps1 -Package owo-agent-server
+>   -MinFreeGB 8.5 -MaxUsedPct 74`（只在真有 1 GB 以上余量时才发起编译，不反复
+>   抢机器）；内存回落后自动跑完并把日志落在 `docs/qa/logs/mk-shard-m10-server-*.log`。
+> * **缺口的影响面是可界定的**：M10 只搬 `mcp.rs` + 2 个假服务器 + MCP 集成测试，
+>   未触碰会话/审计/权限/评测/notes 等冒烟覆盖的路径；而 `check --workspace
+>   --all-targets` 已覆盖 server/cli 全部目标的编译。缺口仅在"server 全量测试 +
+>   端到端冒烟"这两条，补齐前不应视为已验收。
+>
+> 为了让验证在资源波动中仍能完成而不碰阈值，本步新增了 `scripts/mk-tests-sharded.ps1`：
+>
+> * 把"一次链接 30–40 个测试二进制"改成**逐目标分批**（`--lib` + 每个集成目标一次，
+>   每次只链接 1 个），把 `link.exe` 的峰值内存摊开；
+> * 每个分片启动前**主动等**内存窗口（free ≥ 6.6 GB 且 used ≤ 79%），被门禁拒绝
+>   （启动前抛异常或运行中 137）时记录原因并等下一轮重试，最多 20 轮；
+> * 逐分片记录真实退出码，任一失败即整体非 0。
+>
+> 它只改变"一次链接几个二进制"，**不改变任何门禁阈值**；core 据此拿到的结果与
+> 一次性跑完全等价（同一组测试目标、同一 `--locked`、同一 `-j 1 --test-threads=1`）。
+
+### 12.6 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `crates/owo-agent-core/src/mcp.rs` | `git mv` 到新 crate（内容零改写） |
+| `crates/owo-agent-core/src/bin/mcp_{test,http_test}_server.rs` | 随 MCP 边界迁到新 crate 的 `src/bin/`（`core/src/bin/` 因此清空并删除） |
+| `crates/owo-agent-core/tests/mcp_tests.rs` | 迁到新 crate 的 `tests/`（`CARGO_BIN_EXE_*` 要求 bin 与测试同包） |
+| `crates/owo-agent-mcp/{Cargo.toml,src/lib.rs}` | 新 crate（边界文档 + glob re-export + 2 个 bin 目标 + "普通依赖不得含 core"的约束） |
+| `crates/owo-agent-core/src/lib.rs` | 删除 `pub mod mcp;`，改为 `pub use owo_agent_mcp::mcp;` + 边界注释块 |
+| `crates/owo-agent-core/Cargo.toml` | 删除两个 `[[bin]]`，新增 `owo-agent-mcp` 依赖 |
+| `Cargo.toml` | 新增 workspace 成员与依赖；**server / cli 未改一行** |
+
+
+## 13. 后续候选与取舍记录
 
 M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做
