@@ -1,0 +1,45 @@
+[package]
+name = "owo-agent-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "OwO Agent 微内核（M0）：进程/工具/服务共享的最小稳定原语——错误、平台事件、能力卡、审计、凭据、CAS、存储加密、白名单、注入净化、租约、阶段预算"
+
+# 边界声明（微内核重构 · 顺序 0）：
+# 本 crate 是 agent-sdk 微内核化后的**依赖根**，只承载“被两个以上运行边界共同需要、
+# 且不绑定业务状态机”的稳定原语。它不依赖 owo-agent-core / owo-agent-server，
+# 也不依赖 ONNX、Sherpa 与任何 Agent loop 逻辑，因此新增普通 Agent 功能不会再触发
+# 本 crate 重编。
+#
+# 依赖刻意保持最小：任何新增依赖都必须能被“内核完整性”论证（见 docs/ARCH-MICROKERNEL.md）。
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+base64.workspace = true
+hmac = "0.12"
+aes-gcm = "0.10"
+rand = "0.8"
+
+# 平台事件与窗口/进程查询（frontmost app / 窗口枚举 / 截图 / 激活窗口）：
+# 仅 Foundation、UI_WindowsAndMessaging、UI_Input、System_Threading、Graphics_Gdi、
+# Storage_Xps 等轻量 feature；不得引入 Media_Ocr / UI_Accessibility / Graphics_Imaging
+# ——那些属于 Perception Worker（指南 §3 perception 行、§9 A3）。
+# 注：UI_Input 是 `activate_window` 使用 keybd_event/VK_MENU 所必需；缺它会编译失败
+# （实测：拆出后首次 `cargo test -p owo-agent-kernel` 即报 E0433，已补齐）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_DataExchange",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+] }

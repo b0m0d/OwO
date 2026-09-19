@@ -6,6 +6,11 @@ license.workspace = true
 
 [dependencies]
 owo-agent-protocol.workspace = true
+# 微内核（M0）：error/platform/capability/audit/credentials/cas_store/
+# storage_crypto/whitelist/injection/lease/deadline 已下沉到 owo-agent-kernel。
+# 本 crate 通过 lib.rs 的 `pub use owo_agent_kernel::*` + 别名模块保持原有公共 API，
+# 因此 server / cli / Tauri 壳 / 36 个集成测试的既有路径全部继续有效。
+owo-agent-kernel.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -8,7 +8,6 @@ pub mod agent;
 /// markdown）+ 交付元数据（media_type/file_name/sha256/size_bytes）+ 证据链。
 pub mod artifact_pipeline;
 pub mod assert;
-pub mod audit;
 pub mod audit_chain;
 pub mod automation;
 pub mod autoreview;
@@ -17,8 +16,6 @@ pub mod blackboard;
 /// `team_template_catalog_api`——目录只展示，安装幂等且不自动扩权）。
 pub mod builtin_team_templates;
 pub mod bus_store;
-pub mod capability;
-pub mod cas_store;
 /// ChangeSet（八期 · 二路）：执行前基线快照（内容进 CAS）+ 变更集合构建 + 安全恢复
 /// （逐文件哈希比对，用户改动 → conflicted 不覆盖）。
 pub mod change_set;
@@ -30,13 +27,10 @@ pub mod computer_task;
 pub mod computer_use;
 pub mod context;
 pub mod contract_worker;
-pub mod credentials;
 pub mod critic;
 pub mod dataset_builder;
-pub mod deadline;
 pub mod desktop_env;
 pub mod element_registry;
-pub mod error;
 pub mod eval;
 pub mod execution_target;
 pub mod executor;
@@ -47,9 +41,7 @@ pub mod fleet_transport;
 pub mod gateway;
 pub mod goal;
 pub mod grant_store;
-pub mod injection;
 pub mod learn;
-pub mod lease;
 pub mod locate;
 pub mod mcp;
 pub mod mcp_health;
@@ -65,7 +57,6 @@ pub mod perception;
 pub mod permission_spec;
 pub mod permissions;
 pub mod plan;
-pub mod platform;
 pub mod plugin;
 pub mod product_eval;
 /// WorkSwarm 真实团队评测适配器（文件位于 product_eval/ 目录下；
@@ -85,7 +76,6 @@ pub mod skill;
 pub mod skill_health;
 pub mod skill_pack;
 pub mod sqlite_store;
-pub mod storage_crypto;
 pub mod stt;
 pub mod subagent;
 /// 多 Agent 收益判定与默认队策略（十期 · 三路）：配对对照门槛 +
@@ -102,7 +92,6 @@ pub mod tools;
 pub mod trace;
 pub mod transition;
 pub mod vision;
-pub mod whitelist;
 pub mod window_template;
 pub mod worker_pool;
 /// 角色画像（七期 · 二路）：模板角色 → 工具面/只读/写白名单/回合上限/浏览器/命令，
@@ -113,6 +102,27 @@ pub mod workswarm;
 /// Worker 结构化输出契约（V1：结构化交付物 + critic 评审分离 + 一次定向修复）。
 pub mod workswarm_output;
 pub mod world_model;
+
+// ---------------------------------------------------------------------------
+// 微内核（M0）兼容层：以下模块的实现已下沉到独立 crate `owo-agent-kernel`。
+//
+// 依赖方向变为 `owo-agent-kernel ← owo-agent-core ← owo-agent-server ← owo-agent-cli`：
+// 内核只承载被多个运行边界共用的稳定原语（错误/平台/能力卡/审计/凭据/CAS/
+// 存储加密/白名单/注入净化/租约/阶段预算），不依赖 core，也不依赖 ONNX/Sherpa。
+//
+// 这里保留同名别名模块 + 下面的顶层 `pub use`，使 **既有路径全部继续有效**：
+//   * 块内相对路径 `crate::audit::AuditLog`（25 个 core 源文件使用）
+//   * 外部路径 `owo_agent_core::audit::AuditLog`、`owo_agent_core::AgentError`
+//     （server / cli / 36 个 core 集成测试使用）
+// 因此本次拆分对调用方是零改动，符合“每拆一个微内核后仍能完整运行”的验收要求。
+//
+// 迁移期结束后（指南 §9 A2/A4），这些别名应改为正式目录结构并在 §7 边界澄清后
+// 再删除；当前保留是有意为之，不是遗留耦合。
+// ---------------------------------------------------------------------------
+pub use owo_agent_kernel::{
+    audit, capability, cas_store, credentials, deadline, error, injection, lease, platform,
+    storage_crypto, whitelist,
+};
 
 pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};

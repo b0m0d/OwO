@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/owo-agent-protocol",
+    # 微内核（M0）：依赖根，只放被多个运行边界共用的稳定原语；core/server/cli 单向依赖它。
+    "crates/owo-agent-kernel",
     "crates/owo-agent-core",
     "crates/owo-agent-server",
     "crates/owo-agent-cli",
@@ -35,6 +37,7 @@ ed25519-dalek = "2"
 sha2 = "0.10"
 zip = "2"
 owo-agent-protocol = { path = "crates/owo-agent-protocol" }
+owo-agent-kernel = { path = "crates/owo-agent-kernel" }
 owo-agent-core = { path = "crates/owo-agent-core" }
 owo-agent-server = { path = "crates/owo-agent-server" }
 owo-build-info = { path = "crates/owo-build-info" }

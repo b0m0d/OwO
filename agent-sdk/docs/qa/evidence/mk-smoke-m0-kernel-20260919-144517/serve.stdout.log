@@ -1,0 +1,2 @@
+2026-09-19T06:45:17.349581Z  INFO owo_agent::commands::serve: owo-agent server listening on http://127.0.0.1:55054
+{"api_version":"0.7","build_id":"b6d5699587f01f797568cd9edbf05388697c63f9","event":"core_ready","instance_id":"","pid":56032,"port":55054}

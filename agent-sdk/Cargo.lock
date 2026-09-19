@@ -1785,6 +1785,7 @@ dependencies = [
  "hmac",
  "ndarray",
  "ort",
+ "owo-agent-kernel",
  "owo-agent-protocol",
  "png",
  "rand",
@@ -1803,6 +1804,23 @@ dependencies = [
  "windows-future",
  "windows-sys 0.59.0",
  "zip",
+]
+
+[[package]]
+name = "owo-agent-kernel"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "chrono",
+ "hmac",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

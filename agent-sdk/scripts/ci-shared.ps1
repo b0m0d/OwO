@@ -342,6 +342,10 @@ function Invoke-CiCargo {
         [ValidateSet('auto', 'normal', 'strict')][string]$PolicyMode = 'auto',
         # 允许显式指定 cargo 可执行文件（发布脚本用 $env:OWO_CARGO 覆盖；缺省走 PATH）。
         [string]$CargoExe = "",
+        # 需要真实退出码时使用：把 cargo 的退出码作为返回值输出，调用方不必依赖
+        # `$LASTEXITCODE`（后者只在原生命令结束时由 PowerShell 自动写入，经函数调用
+        # 后会丢失，实测会把 101 编译失败错报成 1）。
+        [switch]$PassThru,
         [switch]$SkipIdleGate
     )
     $mode = if ($PolicyMode -eq 'auto') { Get-CiRustPolicyMode } else { $PolicyMode }
@@ -351,12 +355,15 @@ function Invoke-CiCargo {
     if ($compiles) {
         $null = Assert-CiMemoryGate -Context $Label
         $disk = Assert-CiDiskGate -Mode $mode -Path $Cwd -Context $Label
-        if (-not $SkipIdleGate) { Assert-CiBuildIdle -Context $Label }
+        if (-not $SkipIdleGate) { $null = Assert-CiBuildIdle -Context $Label }
     }
     $safe = Protect-CiCargoArguments -Arguments $Arguments -Jobs $limits.jobs -TestThreads $limits.test_threads
     if ($compiles) {
         Write-Host ("    [§2.4] {0}：-j {1} / --test-threads {2}（{3}）" -f $Label, $limits.jobs, $limits.test_threads, $limits.reason)
-        New-CiFailureState
+        # 必须丢弃返回值：New-CiFailureState 会 return 布尔；若它留在输出流里，
+        # `-PassThru` 的 `return $code` 就变成 @($true, 101)，调用方拿到 "True 101"，
+        # 用 $code 去 exit 时会退化成 1，真实的 101（编译失败）被掩盖。实测踩过。
+        $null = New-CiFailureState
         $script:ciResourceApplied = @($script:ciResourceApplied) + @(
             "{0}={1}(-j {2}/--test-threads {3})" -f $Label, $limits.mode, $limits.jobs, $limits.test_threads
         )
@@ -369,9 +376,17 @@ function Invoke-CiCargo {
     $guardRunning = Test-CiCargoGuardRunning -Arguments $Arguments
     Invoke-CiLoggedCommand -Exe $exe -Arguments $safe -Cwd $Cwd -TimeoutSec $TimeoutSec `
         -HeartbeatSec $HeartbeatSec -LogFile $LogFile -Label $Label -MemoryGuard:$guardRunning
+    $code = $global:LASTEXITCODE
     if ($script:ciLastCommandResourceLimited) {
         # 资源保护触发：非零退出（红线 10），不允许记成通过。
         $global:LASTEXITCODE = 137
+        $code = 137
+    }
+    if ($PassThru) {
+        # 只返回标量退出码：即便上游还有别的东西混进输出流，也不能让调用方拿到
+        # @($true, 0) 这种数组（实测会把真实退出码掩盖成 1）。
+        if ($code -is [array]) { $code = [int]($code | Select-Object -Last 1) }
+        return [int]$code
     }
 }
 

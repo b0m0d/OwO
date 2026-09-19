@@ -273,12 +273,12 @@ fn long_running_process_respects_job_limits_via_wait() {
     assert_ne!(info.exit_code, 0, "CPU 时间超限进程必须非 0 退出");
 }
 
-// ---- R8 冒烟：DPAPI 存储加密（storage_crypto.rs，#[path] 独立编译验证） ----
-
-#[path = "../src/storage_crypto.rs"]
-mod storage_crypto;
-
-use storage_crypto::*;
+// ---- R8 冒烟：DPAPI 存储加密 ----
+// 微内核（M0）拆分后 storage_crypto 已下沉到 `owo-agent-kernel`。这里改为直接引用
+// 真实编译产物，而不是沿用 `#[path = "../src/storage_crypto.rs"]` 把源文件再编译
+// 一遍：后者既会在文件迁移后编译失败，也验证不到真正链接进二进制的那份实现。
+use owo_agent_kernel::storage_crypto;
+use owo_agent_kernel::storage_crypto::*;
 
 fn dpapi_available() -> bool {
     if !cfg!(target_os = "windows") {
