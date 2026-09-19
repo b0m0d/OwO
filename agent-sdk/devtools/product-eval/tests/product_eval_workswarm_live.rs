@@ -14,9 +14,11 @@
 //! ```
 //! 结果落盘于 `agent-sdk/scratch-eval-runs/live-workswarm/`（gitignored）。
 
-use owo_agent_core::product_eval::single_agent::SingleAgentExecutor;
-use owo_agent_core::product_eval::{load_suite, AgentMode, CaseExecutor, MatrixRunner, RunOptions};
-use owo_agent_core::{WorkSwarmExecutor, WorkSwarmExecutorConfig};
+use owo_agent_product_eval::product_eval::single_agent::SingleAgentExecutor;
+use owo_agent_product_eval::product_eval::{
+    load_suite, AgentMode, CaseExecutor, MatrixRunner, RunOptions,
+};
+use owo_agent_product_eval::workswarm_executor::{WorkSwarmExecutor, WorkSwarmExecutorConfig};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -36,7 +38,8 @@ async fn live_single_vs_workswarm_three_categories() {
     {
         panic!("live 对照需要 OPENAI_API_KEY 环境变量（凭据仅经环境注入）");
     }
-    let (provider, model) = owo_agent_core::product_eval::build_live_provider(None).unwrap();
+    let (provider, model) =
+        owo_agent_product_eval::product_eval::build_live_provider(None).unwrap();
     println!("live 对照模型：{model}");
 
     let suite_path = repo_path("../../evals/v1/suite.json");
@@ -100,9 +103,10 @@ async fn live_single_vs_workswarm_three_categories() {
             .await
             .unwrap();
 
-        let summarize = |label: &str, report: &owo_agent_core::product_eval::ProductEvalReport| {
-            for run in &report.runs {
-                println!(
+        let summarize =
+            |label: &str, report: &owo_agent_product_eval::product_eval::ProductEvalReport| {
+                for run in &report.runs {
+                    println!(
                     "[{label}] {} → {:?} wall={}ms model_calls={} retries={} tokens={:?} artifacts={:?} failed={:?} error={:?}",
                     run.key,
                     run.status,
@@ -114,8 +118,8 @@ async fn live_single_vs_workswarm_three_categories() {
                     run.failed_steps,
                     run.error
                 );
-            }
-        };
+                }
+            };
         summarize("single", &single_report);
         summarize("multi", &multi_report);
 

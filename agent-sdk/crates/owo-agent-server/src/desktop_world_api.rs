@@ -60,9 +60,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use owo_agent_core::dataset_builder::{
-    build_dataset, save_manifest, DatasetBuilderConfig, DatasetManifest,
-};
+// dataset_builder 属 ProductEval 开发工具包（M1 起位于 devtools/product-eval），
+// 经 owo-agent-eval-facade 暴露；core 自身不再持有它。
 use owo_agent_core::desktop_env::{
     EnvError, EnvRegistry, GroundedAction, LeaseProof, RewardParts, SuccessSpec, TaskSeed, Verdict,
     WorldStateV1,
@@ -75,6 +74,9 @@ use owo_agent_core::transition::{
 use owo_agent_core::world_model::{
     advise_candidates, aggregate_calibration, evaluate_prediction, CalibrationReport,
     GuiWorldModel, PredictionEvaluation, RuleWorldModel, WorldModelContext, WorldPrediction,
+};
+use owo_agent_eval_facade::dataset_builder::{
+    build_dataset, save_manifest, DatasetBuilderConfig, DatasetManifest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

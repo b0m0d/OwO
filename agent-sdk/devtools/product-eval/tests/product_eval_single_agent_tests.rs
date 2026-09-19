@@ -9,18 +9,18 @@ use owo_agent_core::audit::AuditLog;
 use owo_agent_core::element_registry::ElementRegistry;
 use owo_agent_core::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage, ToolCall};
 use owo_agent_core::permissions::{Approver, Decision, Policy};
-use owo_agent_core::product_eval::single_agent::{
+use owo_agent_core::session::Session;
+use owo_agent_core::skill::SkillRegistry;
+use owo_agent_core::tools::{Tool, ToolContext, ToolSpec};
+use owo_agent_product_eval::product_eval::single_agent::{
     ProductEvalApprover, ProductEvalScope, ScopeListDir, ScopeReadFile, ScopeRunCommand,
     ScopeSearchFiles, ScopeWriteFile, SingleAgentExecutor,
 };
-use owo_agent_core::product_eval::{
+use owo_agent_product_eval::product_eval::{
     load_suite, validate_suite, AgentMode, ArtifactChecker, CaseExecutor, EvalCategory,
     InputFixture, MatrixRunner, ProductEvalCase, ProductEvalReport, ProductEvalSuite,
     ReferenceDryExecutor, RunOptions, RunStatus, SuiteBundle, PRODUCT_EVAL_SCHEMA_VERSION,
 };
-use owo_agent_core::session::Session;
-use owo_agent_core::skill::SkillRegistry;
-use owo_agent_core::tools::{Tool, ToolContext, ToolSpec};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;

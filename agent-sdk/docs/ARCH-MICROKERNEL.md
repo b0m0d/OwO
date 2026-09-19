@@ -58,8 +58,9 @@ pub use owo_agent_kernel::{
 
 | 步骤 | 微内核 crate | 内容 | 出边 | 入边 | 状态 |
 |---|---|---|---:|---:|---|
-| **M0** | `owo-agent-kernel` | error/platform/capability/audit/credentials/cas_store/storage_crypto/whitelist/injection/lease/deadline（11 模块 6,604 行） | **0** | 25 个 core 源文件 | ✅ 已完成 |
-| **M1** | 下一个候选见 §3 | — | — | — | 待执行 |
+| **M0** | `owo-agent-kernel` | error/platform/capability/audit/credentials/cas_store/storage_crypto/whitelist/injection/lease/deadline（11 模块 6,604 行）+ 并入 `tool_args` | **0** | 25 个 core 源文件 | ✅ 已完成 |
+| **M1** | `devtools/product-eval`（独立 workspace）+ `owo-agent-eval-facade`（门面） | product_eval / eval / dataset_builder / product_eval_workswarm + 6 个集成测试（约 8.6k 行） | 7（必须依赖 core） | **0** | ✅ 已完成，见 §5 |
+| **M2** | 下一个候选见 §3 | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -246,10 +247,107 @@ M0 证明"零出边集合"已经用尽。后续每个候选都要在"搬运更�
 它们的出边最多（15 条），且互相引用。**在 §9 A2（统一 Daemon）落地前动它们，只会
 把环搬来搬去**；建议排到 A2/A7 之后。
 
-### M1 建议
+### M1 实际选择：B（ProductEval）
 
-按"收益 ÷ 风险"排序：**B（ProductEval，零入边 + feature 隔离，一步可验收）**
-→ A（Perception，需先写 ADR）→ C（Tool Host，按 §9 A4 分多步）→ D（推迟）。
+零入边 + 一步可验收，实际执行结果见 §5。**结论：环依赖比预估严重**——原来以为
+"optional dependency + feature" 足够，实际三条路都不成立，最终靠"独立 workspace +
+薄门面 crate"才落地。这条经验已写入 §4 的坑表。
+
+### M2 建议
+
+按"收益 ÷ 风险"排序：**A（Perception，SLO 收益最大，需先写 ADR）**
+→ C（Tool Host，按 §9 A4 分多步）→ D（推迟到 A2 之后）。
+
+---
+
+## 5. M1：`devtools/product-eval` + `owo-agent-eval-facade`（已完成）
+
+### 5.1 边界与依赖方向
+
+ProductEval 底座（`product_eval` 3,317 行 + `eval` + `dataset_builder` +
+`product_eval_workswarm` + 6 个集成测试，约 8.6k 行）整体迁出 core：
+
+```text
+server / cli ──► owo-agent-eval-facade ──► devtools/product-eval ──► owo-agent-core
+                                                  ▲
+                                                  └─ workspace 成员（独立解析，不回流）
+core 对 devtools 的依赖 = 0
+```
+
+* `devtools/product-eval/` 是**独立 workspace**（自带 `Cargo.lock` 与 `target/`），
+  对齐指南 §9 对它的定位：开发时加载、不进生产默认运行时、不拖累用户启动与 Rust 编译。
+* `crates/owo-agent-eval-facade` 是 workspace 成员里的薄门面（11 行代码 + 边界文档），
+  只做 `pub use owo_agent_product_eval::*;`，让 server/cli 继续用熟悉路径拿评测面。
+* **core 不再持有任何评测面**：`pub mod product_eval` / `pub use product_eval::*` /
+  `#[path = "product_eval/workswarm_executor.rs"]` 全部删除。
+
+### 5.2 为什么不能用 optional dependency + feature（三条路都实测撞环）
+
+| 尝试 | 结果 |
+|---|---|
+| product-eval 作为 workspace 成员 + core `optional` 依赖 + 成员写 `default-features = false` | Cargo 警告该开关被忽略（须写在 workspace 定义处），随后 `cyclic package dependency` |
+| 把 `default-features = false` 写到 workspace 定义处 | server/cli 需要评测面 → 打开 core 的 `product-eval` feature；**feature 是并集**，devtool 那条 core 边被重新点亮 → 再次成环 |
+| devtool 移出 `crates/`、加 workspace `exclude` | path 依赖仍被解析进同一个 package 实例 → 第三次成环 |
+| **最终**：devtool 成为独立 workspace + core 零依赖 + 门面 crate 承接消费方 | ✅ 成立，且方向更正确（受信运行时不依赖开发工具） |
+
+### 5.3 拆分暴露并修好的四个缺陷
+
+1. **`workswarm_executor` 从未真正成为模块**：core 用
+   `#[path = "product_eval/workswarm_executor.rs"] pub mod product_eval_workswarm;`
+   把它挂在 crate 根。搬到新 crate 后 `pub use product_eval::workswarm_executor` 直接
+   `E0432`（`no workswarm_executor in product_eval`）。已改为 `product_eval` 的正式子模块。
+2. **`required_string` 是 core 内的死代码**：它是 `owo-agent-core::tools` 的
+   `pub(crate)`，core 内部**零调用**，唯一真实使用者是开发工具包。已迁到内核
+   `owo_agent_kernel::tool_args::required_string`，core 侧改为 `use owo_agent_kernel::required_string;`
+   （涉及 `tools.rs` 7 处、`computer_use.rs` 9 处调用点）。**这正是"独立 crate 才能暴露的
+   隐式耦合"**：一个 `pub(crate)` 助手把内核原语寄生在 core 里，同时暴露了 core 用不到的
+   宽度。
+3. **两个 core 集成测试依赖开发工具面**：`transition_tests.rs` / `world_model_tests.rs`
+   原先 `use owo_agent_core::dataset_builder::…`。core 已不持有它，改为通过
+   **dev-dependency** 引门面（正常依赖仍为零；Cargo 的环检测不覆盖 dev 边）。
+4. **测试里写死的仓库相对深度会随目录搬迁失效**：
+   `CARGO_MANIFEST_DIR/../../evals/v1/suite.json` 在 `crates/owo-agent-core/tests`
+   下是对的，搬到 `devtools/product-eval/tests` 后少了（后来多了）一层。已按最终位置
+   校正为 `../../evals/...`，并实测 `Test-Path` 通过。
+
+### 5.4 验收证据（可复现）
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| workspace 全目标编译（含门面与 server/cli 重接线） | `scripts/mk-check.ps1 -Tag m1 -WithDevtool` | workspace **exit=0**（163 s）、devtool **exit=0**（32 s） | `docs/qa/logs/mk-m1-*.log` |
+| **全量 core 测试**（461 单测 + 36 集成测试文件） | `cargo test -p owo-agent-core --locked` | **exit=0**，330 s | `docs/qa/logs/mk-m1-core-tests-*.log` |
+| **全量 server 测试**（63 单测 + 40 个集成测试文件，含 `product_eval_api_tests`、`eval_gate_tests`、`route_contract_tests`） | `cargo test -p owo-agent-server --locked` | **exit=0**，326 s（首轮被 §2.4 红线 7 内存门以 137 中止，清内存后复跑通过） | `docs/qa/logs/mk-m1-server-tests2-*.log` |
+| **迁走的 ProductEval 测试在独立 workspace 全绿** | `cargo test --manifest-path devtools/product-eval/Cargo.toml` | **66 passed / 0 failed**（1 个真模型用例按设计 `--ignored`） | `docs/qa/logs/mk-m1-devtool-tests2-*.log` |
+| **运行态**：ProductEval 路由真实走通门面 | `scripts/mk-smoke.ps1 -Tag m1-product-eval3` | **15/15 PASS**；`POST /product-eval/runs` → 202 + `run_id`，轮询到 `completed`，进度 **20/20**，`metrics.runs_total=20` | `docs/qa/evidence/mk-smoke-m1-product-eval3-*/report.json` |
+| `cargo fmt --all`（两个 workspace） | 经 `Invoke-CiCargo` | 均 exit=0 | 会话记录 |
+
+运行态验收追加的两项（相对 M0 的 13 项）：
+
+```text
+[PASS] product_eval.create_run     status=202 run_id=eval-089acbadd3114a759c63f9c39747eac9
+[PASS] product_eval.run_completed  status=completed progress=20/20 metrics.runs_total=20
+```
+
+> 踩坑记录：ProductEval 运行态门**不能另起第二个服务实例**——`serve.rs` 用 pid 文件做
+> 单实例闸门，实测第二次启动直接报“检测到运行中的服务（pid=…）：请先停止该进程再启动”。
+> 现在改为单实例 + 把仓库 `evals/` 以目录联接挂进隔离工作区。
+
+### 5.5 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `Cargo.toml`（workspace） | 新增成员 `crates/owo-agent-eval-facade`；新增 `exclude = ["devtools/product-eval"]` 及环依赖说明 |
+| `crates/owo-agent-eval-facade/` | 新增门面 crate（`pub use owo_agent_product_eval::*`） |
+| `devtools/product-eval/` | 新增独立 workspace（`product_eval` / `eval` / `dataset_builder` / `workswarm_executor` + 6 个集成测试 + `.gitignore`） |
+| `crates/owo-agent-core/{Cargo.toml,src/lib.rs}` | 移除评测面与 `product-eval` feature；新增 dev-dependency 门面；删除 `required_string` 死代码 |
+| `crates/owo-agent-core/src/{tools,computer_use}.rs` | 改用 `owo_agent_kernel::required_string` |
+| `crates/owo-agent-core/tests/{transition,world_model}_tests.rs` | 改引门面 |
+| `crates/owo-agent-server/{Cargo.toml,src/{lib,eval_api,eval_gate,product_eval_api,desktop_world_api}.rs,tests/product_eval_api_tests.rs}` | 评测面来源改为 `owo_agent_eval_facade`（20 处） |
+| `crates/owo-agent-cli/{Cargo.toml,src/{commands/eval.rs,product_eval_cmd.rs}}` | 同上 |
+| `crates/owo-agent-kernel/src/{lib.rs,tool_args.rs}` | 新增 `tool_args` 模块（`required_string`） |
+| `scripts/mk-check.ps1` | 新增 `-WithDevtool`：把被排除的独立 workspace 纳入同一轮验证 |
+| `scripts/mk-smoke.ps1` | 新增 ProductEval 运行态门（路由 → 门面 → 开发工具全链） |
+| `docs/ARCH-MICROKERNEL.md` | 本文 §5 |
 
 ---
 
@@ -278,4 +376,9 @@ M0 证明"零出边集合"已经用尽。后续每个候选都要在"搬运更�
 | PowerShell 函数返回值混入输出流 | `-PassThru` 返回 `@($true, 101)` | 调用处 `$null = ...` 丢弃；`-PassThru` 再做标量兜底 |
 | `.ps1` 编辑后丢 UTF-8 BOM | `ci-gate -Step utf8` 会红 | 每次改完 `.ps1` 立即复查前三字节 `239,187,191` |
 | 无中间目录的相对日志路径 | `StreamWriter` 抛 `DirectoryNotFoundException` | 传绝对路径 |
+| **开发工具与运行时互相依赖** | `cyclic package dependency: <crate> depends on itself` | devtool 必须是**独立 workspace**；运行时对它的依赖为零；消费方经薄门面 crate 接入（详见 §5.2） |
+| `Exclude` 挡不住 path 依赖 | 已 exclude 仍报环 | exclude 只挡自动成员，不挡 `path =` 引用；真正的隔离要靠独立 workspace + 零反向依赖 |
+| workspace 级 `default-features = false` 也挡不住 | 已关默认 feature 仍报环 | Cargo feature 是**并集**，任一成员打开就重新点亮；不要指望用 feature 关掉一条会成环的边 |
+| 测试写死仓库相对深度 | 目录搬迁后 `suite.json 不存在` | 用最终位置校正 `CARGO_MANIFEST_DIR` 的相对层数，并在验收前用 `Test-Path` 实测解析结果 |
+| 服务端单实例闸门 | 第二次 `serve` 直接退出，无 `core_ready` | 同一轮验收只用**一个**服务实例；需要套件可见时把 `evals/` 联进隔离工作区 |
 | 构建卷空间不足 | `LNK1318 非意外的 PDB 错误: LIMIT`（看着像编译错误） | 先清 `target/**/incremental`、`target/**/*.pdb`（实测回收 25.9 GB） |

@@ -7,9 +7,10 @@
 //! 首次调用时写出到临时目录并保持常驻，页面状态跨工具调用不丢失。
 
 use crate::executor;
-use crate::tools::{required_string, resolve_session_path, ToolContext, ToolSpec};
+use crate::tools::{resolve_session_path, ToolContext, ToolSpec};
 use crate::Tool;
 use async_trait::async_trait;
+use owo_agent_kernel::required_string;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;

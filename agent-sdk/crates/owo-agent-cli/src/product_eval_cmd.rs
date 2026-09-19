@@ -9,14 +9,14 @@
 //! - `compare`：对照两份报告（单/多 Agent、不同批次），失败记录不参与任何剔除。
 
 use clap::{Args, Subcommand};
-use owo_agent_core::product_eval::{
+use owo_agent_eval_facade::product_eval::{
     build_freeze_json, build_live_provider, build_paired_report_json, compare_reports,
     format_mode_statistics, format_report_summary, format_validation, load_report, load_suite,
     resolve_suite_input, verify_freeze, AgentMode, ArtifactChecker, EvalCategory,
     GenerativeExecutor, MatrixRunner, PairedReportOptions, ReferenceDryExecutor, RunOptions,
     SingleAgentExecutor,
 };
-use owo_agent_core::product_eval_workswarm::WorkSwarmExecutor;
+use owo_agent_eval_facade::product_eval_workswarm::WorkSwarmExecutor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -192,7 +192,7 @@ fn run_validate(
     let suite_path = resolve_suite_input(suite.as_deref())?;
     let bundle = load_suite(&suite_path)?;
     println!("套件：{}（{}）", bundle.suite.name, suite_path.display());
-    let validation = owo_agent_core::product_eval::validate_suite(&bundle);
+    let validation = owo_agent_eval_facade::product_eval::validate_suite(&bundle);
     print!("{}", format_validation(&validation));
     let mut all_ok = validation.all_ok;
     // 冻结一致性校验：正式验收前必须通过（任务输入/检查器/权限/预算/模型/版本哈希未漂移）。
@@ -204,7 +204,7 @@ fn run_validate(
                 std::process::exit(1);
             }
         };
-        let freeze_json = owo_agent_core::product_eval::parse_freeze(&text)?;
+        let freeze_json = owo_agent_eval_facade::product_eval::parse_freeze(&text)?;
         let default_model = crate::support::resolve_model(None, None);
         let issues = verify_freeze(&bundle, &freeze_json, Some(&default_model));
         if issues.is_empty() {
@@ -230,7 +230,7 @@ fn run_freeze(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let suite_path = resolve_suite_input(suite.as_deref())?;
     let bundle = load_suite(&suite_path)?;
-    let validation = owo_agent_core::product_eval::validate_suite(&bundle);
+    let validation = owo_agent_eval_facade::product_eval::validate_suite(&bundle);
     if !validation.all_ok {
         print!("{}", format_validation(&validation));
         return Err("套件校验未通过：禁止冻结存在问题的任务集".into());
@@ -458,7 +458,7 @@ fn run_preflight(
     let mut needs_command_check = false;
     match &suite_loaded {
         Ok((suite_path, bundle)) => {
-            let validation = owo_agent_core::product_eval::validate_suite(bundle);
+            let validation = owo_agent_eval_facade::product_eval::validate_suite(bundle);
             println!(
                 "④ 套件：已加载（{}，{} 任务，校验 {}；{}）",
                 bundle.suite.name,
@@ -614,7 +614,7 @@ async fn run_matrix_cmd(
     println!("输出目录：{}（{}）", out_dir.display(), exec);
 
     let (executor, execution, model_label): (
-        Arc<dyn owo_agent_core::product_eval::CaseExecutor>,
+        Arc<dyn owo_agent_eval_facade::product_eval::CaseExecutor>,
         String,
         Option<String>,
     ) = if exec == "live" {

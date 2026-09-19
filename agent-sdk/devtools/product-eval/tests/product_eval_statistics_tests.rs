@@ -2,11 +2,13 @@
 //! Wilson 置信区间与分位数的 0 样本 / 全成功 / 全失败 / 样本不足边界，
 //! 单/多对照启用条件（成功率 +5% / 质量 +10% / 耗时 −30%）与 JSON 契约形状。
 
-use owo_agent_core::product_eval::{
+use owo_agent_product_eval::product_eval::{
     compare_mode_statistics, format_mode_comparison, format_mode_statistics, mode_statistics,
     percentile, report_statistics, wilson_interval, CI95_Z, SUFFICIENT_SAMPLE_SIZE,
 };
-use owo_agent_core::product_eval::{AgentMode, EvalCategory, MatrixKey, ProductEvalRun, RunStatus};
+use owo_agent_product_eval::product_eval::{
+    AgentMode, EvalCategory, MatrixKey, ProductEvalRun, RunStatus,
+};
 
 fn dummy_run(case_id: &str, mode: AgentMode, status: RunStatus, wall_ms: u64) -> ProductEvalRun {
     ProductEvalRun {

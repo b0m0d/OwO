@@ -15,17 +15,19 @@
 //! 工具失败、失败步骤、耗时与 token 用量（provider 快照差值）；取消/预算超限经
 //! 同一 abort 令牌收口——命中后 run_turn 在下一检查点停止，不再调用模型或工具。
 
-use crate::agent::{Agent, AgentConfig, TurnEvent};
-use crate::error::AgentError;
-use crate::gateway::{ModelProvider, TokenUsage};
-use crate::permissions::{Approver, Decision, PermissionRequest, Policy};
 use crate::product_eval::{
     in_scope, sanitize_rel_path, CaseExecutor, EvalCategory, ExecContext, ProductEvalCase,
     RawExecOutcome,
 };
-use crate::session::Session;
-use crate::tools::{required_string, Tool, ToolContext, ToolRegistry, ToolSpec};
+use owo_agent_core::agent::{Agent, AgentConfig, TurnEvent};
+use owo_agent_core::error::AgentError;
+use owo_agent_core::gateway::{ModelProvider, TokenUsage};
+use owo_agent_core::permissions::{Approver, Decision, PermissionRequest, Policy};
+use owo_agent_core::session::Session;
+use owo_agent_core::tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
+// 参数取用助手归属内核：它在 core 内是零调用的死代码，唯一真实使用者是本开发工具包。
 use async_trait::async_trait;
+use owo_agent_kernel::required_string;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -732,7 +734,7 @@ impl CaseExecutor for SingleAgentExecutor {
         // 评测白名单（allow_read/allow_write/allow_commands）是唯一授权源：
         // 切到 AutoReview 档位，使工作区内写也不自动放行，一律经
         // ProductEvalApprover 白名单审批，保证“未授权不落盘”可测。
-        policy.set_profile(crate::permissions::PermissionProfile::AutoReview);
+        policy.set_profile(owo_agent_core::permissions::PermissionProfile::AutoReview);
         // 回合上限 = 模型调用预算：预算内完成即产出总结；预算耗尽（无总结）按 Error 计。
         // compaction 会额外调用模型且不计入 ModelCall 事件，评测全程关闭以防预算失真。
         let config = AgentConfig {

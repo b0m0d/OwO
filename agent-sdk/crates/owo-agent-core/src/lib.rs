@@ -28,10 +28,8 @@ pub mod computer_use;
 pub mod context;
 pub mod contract_worker;
 pub mod critic;
-pub mod dataset_builder;
 pub mod desktop_env;
 pub mod element_registry;
-pub mod eval;
 pub mod execution_target;
 pub mod executor;
 pub mod experience_store;
@@ -58,11 +56,6 @@ pub mod permission_spec;
 pub mod permissions;
 pub mod plan;
 pub mod plugin;
-pub mod product_eval;
-/// WorkSwarm 真实团队评测适配器（文件位于 product_eval/ 目录下；
-/// 待 ProductEval 模块目录化后并入其模块树）。
-#[path = "product_eval/workswarm_executor.rs"]
-pub mod product_eval_workswarm;
 pub mod project_space_store;
 pub mod remote_step;
 pub mod sandbox;
@@ -124,6 +117,22 @@ pub use owo_agent_kernel::{
     storage_crypto, whitelist,
 };
 
+// ---------------------------------------------------------------------------
+// 开发工具（M1）：ProductEval 底座（product_eval / eval / dataset_builder /
+// product_eval_workswarm）**已整体迁出本 crate**，位于 `devtools/product-eval/`
+// （独立 workspace 的开发工具 crate）。
+//
+// 本 crate 对它的依赖为**零**：受信运行时不该依赖开发工具；而且任何反向依赖都会让
+// Cargo 报 `cyclic package dependency: owo-agent-core depends on itself`
+// （同 workspace、exclude、workspace 级 default-features=false 三种做法实测都不成立）。
+//
+// 评测面的消费方改为 `owo-agent-eval-facade`：
+//   server/cli ──► owo-agent-eval-facade ──► devtools/product-eval ──► core
+//
+// 因此这里不再有任何 product_eval / eval / dataset_builder 模块、别名或再导出。
+// 指南 §9 把 ProductEval 最终定位为 Python 开发工具（`devtools/eval/`），届时门面一并删除。
+// ---------------------------------------------------------------------------
+
 pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
@@ -168,10 +177,6 @@ pub use critic::{
     review_loop, ConsistencyReport, Critic, CriticConfig, CriticVerdict, ReadOnlyGate,
     ReviewOutcome, ReviewRound, SamplePair, ScriptedCritic,
 };
-pub use dataset_builder::{
-    build_dataset, load_manifest, save_manifest, BuildResult, DatasetBuilderConfig,
-    DatasetManifest, RejectReason, Rejection,
-};
 pub use desktop_env::{
     ActionKind, Assertion, DesktopEnv, EnvError, EnvLeaseRecord, EnvRegistry, FaultSpec,
     FieldChange, GroundedAction, LeaseProof, RewardParts, RiskLevel, SimAppKind, SimDesktopEnv,
@@ -183,7 +188,6 @@ pub use element_registry::{
     SceneElement, VisionGrounding,
 };
 pub use error::AgentError;
-pub use eval::{builtin_suite, eval_suite_path, run_suite, EvalCase, EvalReport, EvalSuite};
 /// A2 统一调度适配层（冻结接口）：显式执行目标 / 绑定 / 派发裁定。
 pub use execution_target::{
     dispatch_disposition, select_binding, BindingBudget, DispatchCancelRegistry, DispatchChannel,
@@ -259,23 +263,6 @@ pub use plugin::{
     MarketPluginEntry, MarketUpdateManifest, PluginInstallReport, PluginInstallState,
     PluginManager, PluginManifest, PluginReviewState, PluginSignature, PluginStateStore,
     PluginSubmission, VersionsJson,
-};
-/// V1-R1 产品评测底座：固定任务集 × 重复 × 单/多 Agent 对照。
-pub use product_eval::{
-    aggregate_metrics, aggregate_per_case, build_live_provider, compare_reports,
-    evaluate_checker_on_dir, evaluate_checker_on_map, filter_cases, format_report_summary,
-    format_validation, load_report, load_suite, parse_file_blocks, resolve_suite_input,
-    sanitize_rel_path, scope_matches, suite_hash, validate_case, validate_suite, AgentMode,
-    ArtifactChecker, CaseExecutor, CaseModeMetrics, EvalCategory, ExecContext, GenerativeExecutor,
-    InputFixture, MatrixKey, MatrixRunner, ProductEvalCase, ProductEvalError, ProductEvalMetrics,
-    ProductEvalReport, ProductEvalRun, ProductEvalSuite, RawExecOutcome, ReferenceDryExecutor,
-    RunOptions, RunStatus, SuiteBundle, SuiteDefaults, SuiteValidation, TaskValidation,
-    PRODUCT_EVAL_SCHEMA_VERSION,
-};
-/// WorkSwarm 真实团队评测适配器（V1-R2 多 Agent 对照执行器）。
-pub use product_eval_workswarm::{
-    ArtifactObservation, TeamRunObservation, WorkSwarmExecutor, WorkSwarmExecutorConfig,
-    WorkerObservation,
 };
 pub use project_space_store::{
     ProjectSpaceStoreBackend, ProjectSpaceStoreError, SqliteProjectSpaceStore,

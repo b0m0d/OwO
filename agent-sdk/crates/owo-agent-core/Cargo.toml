@@ -11,6 +11,10 @@ owo-agent-protocol.workspace = true
 # 本 crate 通过 lib.rs 的 `pub use owo_agent_kernel::*` + 别名模块保持原有公共 API，
 # 因此 server / cli / Tauri 壳 / 36 个集成测试的既有路径全部继续有效。
 owo-agent-kernel.workspace = true
+# 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
+# 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
+# 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成
+# Cargo 环。server/cli 通过 `owo-agent-eval-facade` 拿评测面。
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -33,6 +37,16 @@ chacha20poly1305 = "0.10"
 rand = "0.8"
 hmac = "0.12"
 regex = "1"
+
+# M1 起 core 不再有 product-eval feature：评测（product_eval / eval / dataset_builder /
+# product_eval_workswarm）整体位于 `devtools/product-eval/`，由 server/cli 经
+# `owo-agent-eval-facade` 使用。core 对开发工具的依赖为零，因此不需要任何 feature 开关，
+# 也不会因为 feature 并集与开发工具形成环。
+#
+# dev-dependencies 允许反向：Cargo 的环检测只作用于普通依赖图，dev-dependency 边
+# （core 的集成测试要构造 transition/world_model 数据集）不会成环，也不会进入应用构建。
+[dev-dependencies]
+owo-agent-eval-facade.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ndarray = "0.17"

@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+// 工具参数取用助手（M1）：归属内核 `tool_args`，本文件多处工具实现共用。
+use owo_agent_kernel::required_string;
 
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
@@ -371,13 +373,6 @@ impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
     }
-}
-
-pub(crate) fn required_string(args: &Value, key: &str) -> Result<String, String> {
-    args.get(key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| format!("参数缺少字符串字段：{key}"))
 }
 
 fn snapshot_key(path: &Path) -> String {

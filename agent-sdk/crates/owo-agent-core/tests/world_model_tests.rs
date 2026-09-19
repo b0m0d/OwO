@@ -8,7 +8,6 @@
 //! - 在 S1 任务中展示候选动作的不同预测结果；
 //! - 全链路：S1 rollout → TransitionStore → fork 对齐 → DatasetBuilder → RuleWorldModel。
 
-use owo_agent_core::dataset_builder::{build_dataset, DatasetBuilderConfig};
 use owo_agent_core::desktop_env::{
     ActionKind, DesktopEnv, GroundedAction, RiskLevel, SimAppKind, SimDesktopEnv, StateDelta,
     TaskSeed,
@@ -22,6 +21,7 @@ use owo_agent_core::world_model::{
     GuiWorldModel, ModelError, PredictionEvaluation, RuleWorldModel, RunMode, TransitionMeta,
     UnavailableWorldModel, WorldModelContext, WorldPrediction,
 };
+use owo_agent_eval_facade::dataset_builder::{build_dataset, DatasetBuilderConfig};
 use serde_json::json;
 use std::collections::HashMap;
 

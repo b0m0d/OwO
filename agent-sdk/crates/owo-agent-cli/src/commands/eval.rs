@@ -3,8 +3,8 @@
 use crate::support::resolve_model;
 use async_trait::async_trait;
 use clap::Args;
-use owo_agent_core::{builtin_suite, eval_suite_path, run_suite};
 use owo_agent_core::{ChatMessage, ModelOutput, ModelProvider, OpenAiCompatibleConfig, ToolSpec};
+use owo_agent_eval_facade::{builtin_suite, eval_suite_path, run_suite};
 use std::path::PathBuf;
 
 #[derive(Args)]

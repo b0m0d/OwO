@@ -12,9 +12,11 @@
 //! - `live`（生成式执行器）：经 [`ModelProvider`] 网关真实生成文件块，
 //!   受控落盘后过检，产出真实的墙钟/调用次数/token 统计。
 
-use crate::gateway::{ChatMessage, ModelOutput, ModelProvider, OpenAiCompatibleConfig, TokenUsage};
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
+use owo_agent_core::gateway::{
+    ChatMessage, ModelOutput, ModelProvider, OpenAiCompatibleConfig, TokenUsage,
+};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -2271,6 +2273,9 @@ impl MatrixRunner {
 
 /// 真实单 Agent 执行器（第一路）：经既有 Agent/工具/权限/Session 全链路执行任务。
 pub mod single_agent;
+// M1：原 core 用 `#[path = "product_eval/workswarm_executor.rs"]` 把它挂在 crate 根
+// （模块名 product_eval_workswarm）。迁移后成为 product_eval 的正式子模块。
+pub mod workswarm_executor;
 
 pub use single_agent::{
     ProductEvalApprover, ProductEvalScope, SingleAgentExecutor, TelemetrySnapshot,
@@ -2615,8 +2620,8 @@ pub fn build_live_provider(
         config.model = model.to_string();
     }
     let model = config.model.clone();
-    let provider =
-        crate::gateway::ResilientProvider::from_config(config).map_err(ProductEvalError)?;
+    let provider = owo_agent_core::gateway::ResilientProvider::from_config(config)
+        .map_err(ProductEvalError)?;
     Ok((Arc::new(provider), model))
 }
 

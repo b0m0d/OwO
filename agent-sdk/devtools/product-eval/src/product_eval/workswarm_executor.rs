@@ -24,21 +24,21 @@
 //! 采集 TeamRun 总耗时、各 Worker 模型调用/耗时、retry/Handoff/Artifact 版本、
 //! 失败 Worker 与失败步骤、token/费用汇总。取消令牌贯通 TeamRun 与所有 Worker。
 
-use crate::agent::{Agent, AgentConfig, TurnEvent};
-use crate::cas_store::CasStore;
-use crate::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage};
-use crate::goal::{Worker, WorkerRegistry};
-use crate::permissions::{AutoApprover, Policy};
-use crate::plan::StepStatus;
 use crate::product_eval::{AgentMode, CaseExecutor, EvalCategory, ExecContext, RawExecOutcome};
-use crate::project_space_store::{ProjectSpaceStoreBackend, SqliteProjectSpaceStore};
-use crate::session::Session;
-use crate::team_strategy::{TaskProfile, TeamPlan, TeamSelectionMode, TeamStrategyEngine};
-use crate::worker_profile::{WorkerProfile, PROFILE_MAX_TURNS_CAP};
-use crate::workswarm::{
+use async_trait::async_trait;
+use owo_agent_core::agent::{Agent, AgentConfig, TurnEvent};
+use owo_agent_core::cas_store::CasStore;
+use owo_agent_core::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage};
+use owo_agent_core::goal::{Worker, WorkerRegistry};
+use owo_agent_core::permissions::{AutoApprover, Policy};
+use owo_agent_core::plan::StepStatus;
+use owo_agent_core::project_space_store::{ProjectSpaceStoreBackend, SqliteProjectSpaceStore};
+use owo_agent_core::session::Session;
+use owo_agent_core::team_strategy::{TaskProfile, TeamPlan, TeamSelectionMode, TeamStrategyEngine};
+use owo_agent_core::worker_profile::{WorkerProfile, PROFILE_MAX_TURNS_CAP};
+use owo_agent_core::workswarm::{
     CreateTeamRequest, PhaseOutcome, RoleSpec, RoleWorker, SteerCommand, TeamCoordinator,
 };
-use async_trait::async_trait;
 use owo_agent_protocol::{Artifact, TeamMode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -339,7 +339,7 @@ impl Worker for EvalAgentWorker {
         );
         let system_prompt = format!(
             "{base_prompt}{budget_note}{}",
-            crate::workswarm_output::contract_system_prompt(self.is_critic)
+            owo_agent_core::workswarm_output::contract_system_prompt(self.is_critic)
         );
         let mut session = Session::new(&self.workspace, &self.model, Some(system_prompt));
         let started = Instant::now();
@@ -370,7 +370,7 @@ impl Worker for EvalAgentWorker {
                 let text = turn.final_text.unwrap_or_default();
                 // 七期一路：共享契约执行器（与生产 SubagentRunner 同一逻辑）；
                 // repairs 计数计入 stats（六期基线：修复一次即计，失败也计）。
-                match crate::contract_worker::enforce_worker_output_contract(
+                match owo_agent_core::contract_worker::enforce_worker_output_contract(
                     &self.provider,
                     &text,
                     self.is_critic,
@@ -455,9 +455,9 @@ impl WorkSwarmExecutor {
             .iter()
             .any(|path| path.to_ascii_lowercase().ends_with(".json"));
         let risk = if case.category == crate::product_eval::EvalCategory::Code {
-            crate::team_strategy::RiskLevel::Normal
+            owo_agent_core::team_strategy::RiskLevel::Normal
         } else {
-            crate::team_strategy::RiskLevel::Low
+            owo_agent_core::team_strategy::RiskLevel::Low
         };
         TaskProfile {
             category: Some(case.category.as_str().to_string()),
@@ -474,9 +474,13 @@ impl WorkSwarmExecutor {
     /// v1 套件无 structured 分类；`structured-extract-v1` 保留给显式模板请求。
     fn template_for_category(category: EvalCategory) -> Option<&'static str> {
         match category {
-            EvalCategory::Code => Some(crate::builtin_team_templates::CODE_CHANGE_V1),
-            EvalCategory::Research => Some(crate::builtin_team_templates::RESEARCH_BRIEF_V1),
-            EvalCategory::Document => Some(crate::builtin_team_templates::DOCUMENT_DELIVERY_V1),
+            EvalCategory::Code => Some(owo_agent_core::builtin_team_templates::CODE_CHANGE_V1),
+            EvalCategory::Research => {
+                Some(owo_agent_core::builtin_team_templates::RESEARCH_BRIEF_V1)
+            }
+            EvalCategory::Document => {
+                Some(owo_agent_core::builtin_team_templates::DOCUMENT_DELIVERY_V1)
+            }
         }
     }
 
@@ -589,7 +593,7 @@ impl WorkSwarmExecutor {
             SqliteProjectSpaceStore::open(&root.join("projects.db"))
                 .map_err(|e| ProductEvalError(format!("ProjectSpace 存储初始化失败：{e}")))?,
         );
-        let templates = Arc::new(crate::workswarm::TeamTemplateRegistry::new(
+        let templates = Arc::new(owo_agent_core::workswarm::TeamTemplateRegistry::new(
             root.join("templates"),
         ));
         // —— 自适应组队：策略引擎判定 single/team + 角色 DAG + 每角色调用预算 ——
@@ -607,7 +611,7 @@ impl WorkSwarmExecutor {
         if let Some(id) = template_id {
             // 安装内置模板进本单元格注册表（幂等落盘；与产品 catalog install 同一
             // 语义——未安装模板不参与匹配，必须先装再用）。
-            let descriptor = crate::builtin_team_templates::descriptor(id)
+            let descriptor = owo_agent_core::builtin_team_templates::descriptor(id)
                 .ok_or_else(|| ProductEvalError(format!("内置模板 {id} 缺失")))?;
             templates
                 .save_template(&descriptor.template)
@@ -1074,7 +1078,7 @@ impl WorkSwarmExecutor {
             ModelOutput::Text(text) => text,
             _ => return (broken.to_string(), 1, false),
         };
-        let cleaned = crate::workswarm_output::strip_code_fences(&text);
+        let cleaned = owo_agent_core::workswarm_output::strip_code_fences(&text);
         if serde_json::from_str::<serde_json::Value>(&cleaned).is_ok() {
             (cleaned, 1, true)
         } else {
@@ -1174,9 +1178,9 @@ pub fn agent_mode_label(mode: AgentMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::{ChatMessage, ModelOutput};
     use crate::product_eval::{ArtifactChecker, EvalCategory, InputFixture, ProductEvalCase};
-    use crate::tools::ToolSpec;
+    use owo_agent_core::gateway::{ChatMessage, ModelOutput};
+    use owo_agent_core::tools::ToolSpec;
     use std::collections::VecDeque;
     use std::path::Path;
 
@@ -1285,7 +1289,7 @@ mod tests {
         executor.config = WorkSwarmExecutorConfig {
             max_turns_per_worker: 6,
             max_retries_on_failure: 1,
-            selection: crate::team_strategy::TeamSelectionMode::ForceTeam,
+            selection: owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam,
         };
         executor
     }
@@ -1349,7 +1353,7 @@ mod tests {
         let strategy = observation.strategy.as_ref().expect("必须有策略观测");
         assert_eq!(
             strategy.template_id.as_deref(),
-            Some(crate::builtin_team_templates::DOCUMENT_DELIVERY_V1),
+            Some(owo_agent_core::builtin_team_templates::DOCUMENT_DELIVERY_V1),
             "strategy = {strategy:?}"
         );
         assert_eq!(
@@ -1540,20 +1544,20 @@ mod tests {
         );
         assert!(matches!(
             policy.decision(&escape),
-            crate::permissions::Decision::Deny
+            owo_agent_core::permissions::Decision::Deny
         ));
         // 工作区内写入：只读策略拒绝（Artifact 只能经 RoleWorker/CAS 登记）。
         let inside_write = policy.evaluate("write_file", &serde_json::json!({"path": "out/ok.md"}));
         assert!(matches!(
             policy.decision(&inside_write),
-            crate::permissions::Decision::Deny
+            owo_agent_core::permissions::Decision::Deny
         ));
         // 工作区内读取：策略放行（不 Deny；Ask 由 AutoApprover 放行）。
         let inside_read =
             policy.evaluate("read_file", &serde_json::json!({"path": "inputs/brief.md"}));
         assert!(!matches!(
             policy.decision(&inside_read),
-            crate::permissions::Decision::Deny
+            owo_agent_core::permissions::Decision::Deny
         ));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1568,9 +1572,9 @@ mod tests {
             EvalCategory::Document,
         ] {
             let case = eval_case("ws-roles", category);
-            let engine = crate::team_strategy::TeamStrategyEngine::default();
+            let engine = owo_agent_core::team_strategy::TeamStrategyEngine::default();
             let plan = engine.decide(
-                crate::team_strategy::TeamSelectionMode::ForceTeam,
+                owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam,
                 &WorkSwarmExecutor::profile_of(&case),
             );
             let roles = WorkSwarmExecutor::roles_from_plan(&case, &plan);
@@ -1595,19 +1599,19 @@ mod tests {
         // 十期 · 三路：multi 评测与产品同一条模板路径（模板 = 任务分类的固定映射）。
         assert_eq!(
             WorkSwarmExecutor::template_for_category(EvalCategory::Code),
-            Some(crate::builtin_team_templates::CODE_CHANGE_V1)
+            Some(owo_agent_core::builtin_team_templates::CODE_CHANGE_V1)
         );
         assert_eq!(
             WorkSwarmExecutor::template_for_category(EvalCategory::Research),
-            Some(crate::builtin_team_templates::RESEARCH_BRIEF_V1)
+            Some(owo_agent_core::builtin_team_templates::RESEARCH_BRIEF_V1)
         );
         assert_eq!(
             WorkSwarmExecutor::template_for_category(EvalCategory::Document),
-            Some(crate::builtin_team_templates::DOCUMENT_DELIVERY_V1)
+            Some(owo_agent_core::builtin_team_templates::DOCUMENT_DELIVERY_V1)
         );
         // 模板角色 DAG 完整性（产品 create_team_run 展开的输入必须合法）。
-        for id in crate::builtin_team_templates::CATALOG_IDS {
-            let d = crate::builtin_team_templates::descriptor(id)
+        for id in owo_agent_core::builtin_team_templates::CATALOG_IDS {
+            let d = owo_agent_core::builtin_team_templates::descriptor(id)
                 .unwrap_or_else(|| panic!("内置模板 {id} 缺失"));
             assert!(!d.template.roles.is_empty());
             assert_eq!(d.template.mode, owo_agent_protocol::TeamMode::Team);

@@ -292,27 +292,32 @@ impl AppState {
                 {
                     let workswarm_work_root = data_root.join("product_eval").join("workswarm");
                     Arc::new(move || {
-                        let (provider, model) = owo_agent_core::product_eval::build_live_provider(
-                            None,
-                        )
-                        .map_err(|e| {
-                            format!("live Provider 不可用（检查 OPENAI_API_KEY 等）：{}", e.0)
-                        })?;
-                        let single: Arc<dyn owo_agent_core::product_eval::CaseExecutor> =
-                            Arc::new(owo_agent_core::product_eval::SingleAgentExecutor::new(
-                                Arc::clone(&provider),
-                                model.clone(),
-                            ));
-                        let multi: Option<Arc<dyn owo_agent_core::product_eval::CaseExecutor>> =
-                            Some(Arc::new(
-                                // 第二路适配器以 crate 根模块名注册（物理文件 product_eval/workswarm_executor.rs，
-                                // #[path] 技巧见 core lib.rs——避免与第一路双写 product_eval.rs）。
-                                owo_agent_core::WorkSwarmExecutor::new(
+                        let (provider, model) =
+                            owo_agent_eval_facade::product_eval::build_live_provider(None)
+                                .map_err(|e| {
+                                    format!(
+                                        "live Provider 不可用（检查 OPENAI_API_KEY 等）：{}",
+                                        e.0
+                                    )
+                                })?;
+                        let single: Arc<dyn owo_agent_eval_facade::product_eval::CaseExecutor> =
+                            Arc::new(
+                                owo_agent_eval_facade::product_eval::SingleAgentExecutor::new(
                                     Arc::clone(&provider),
                                     model.clone(),
-                                    workswarm_work_root.clone(),
                                 ),
-                            ));
+                            );
+                        let multi: Option<
+                            Arc<dyn owo_agent_eval_facade::product_eval::CaseExecutor>,
+                        > = Some(Arc::new(
+                            // 第二路适配器以 crate 根模块名注册（物理文件 product_eval/workswarm_executor.rs，
+                            // #[path] 技巧见 core lib.rs——避免与第一路双写 product_eval.rs）。
+                            owo_agent_eval_facade::WorkSwarmExecutor::new(
+                                Arc::clone(&provider),
+                                model.clone(),
+                                workswarm_work_root.clone(),
+                            ),
+                        ));
                         Ok(Arc::new(product_eval_api::ModeDispatchExecutor::new(
                             Some(single),
                             multi,

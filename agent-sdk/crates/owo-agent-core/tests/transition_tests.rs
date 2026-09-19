@@ -4,15 +4,15 @@
 //! 覆盖完成标准：一次成功轨迹和一次注入弹窗导致的失败轨迹可以生成结构化差分、
 //! 失败类别、fork point 和可重放样本；数据构建器按文档清洗顺序过滤并给出拒绝原因。
 
-use owo_agent_core::dataset_builder::{
-    build_dataset, load_manifest, save_manifest, DatasetBuilderConfig, RejectReason,
-};
 use owo_agent_core::desktop_env::{ActionKind, GroundedAction, RewardParts, RiskLevel, StateDelta};
 use owo_agent_core::experience_store::{ExperienceKind, ExperienceStore, Outcome};
 use owo_agent_core::transition::{
     align_fork_point, annotate_fork_points, record_transition_experience, FailureClass,
     ForkDivergence, PrivacyScope, TransitionOutcome, TransitionStore, TransitionTraceV1,
     VerifierResult,
+};
+use owo_agent_eval_facade::dataset_builder::{
+    build_dataset, load_manifest, save_manifest, DatasetBuilderConfig, RejectReason,
 };
 use serde_json::json;
 

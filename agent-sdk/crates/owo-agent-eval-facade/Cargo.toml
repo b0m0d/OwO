@@ -1,0 +1,30 @@
+[package]
+name = "owo-agent-eval-facade"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "ProductEval 兼容门面：把 devtools/product-eval 的评测面以稳定的 owo_agent_core 风格路径暴露给 server/cli，隔离“开发工具包”与 user runtime 的 crate 依赖"
+
+# 边界声明（微内核重构 · M1）：
+# 存在理由只有一个——**打破一个真实的 crate 环**，而不是多包一层。
+#
+#   devtools/product-eval（开发工具）必须依赖 owo-agent-core（要真实跑 Agent/Turn/工具/权限）；
+#   server/cli 需要拿到评测面；如果让 core 反向依赖 devtools/product-eval，Cargo 立刻报
+#   `cyclic package dependency: owo-agent-core depends on itself`。
+#   实测排除了两种看似可行的做法：把 devtool 放进 workspace 的 `exclude`（path 依赖仍会
+#   被解析进同一 package 实例）、以及 workspace 级 `default-features = false`（feature 是
+#   并集，server/cli 一打开就又被点亮）。
+#
+# 所以依赖方向固定为：
+#
+#   server/cli ──► owo-agent-eval-facade ──► devtools/product-eval ──► owo-agent-core
+#                                                                          ▲
+#                                                                          └─ workspace 内
+#
+# core 对 devtools 的依赖为 **零**（这不是妥协，而是正确的方向：受信运行时不该依赖开发工具）。
+# 指南 §9 把 ProductEval 定为“Python 开发工具”，等 §9 A5 把评测整体搬到
+# `devtools/eval/`（Python）后，本门面随之删除，server/cli 改为调用 Python 工具。
+[dependencies]
+owo-agent-product-eval = { path = "../../devtools/product-eval" }

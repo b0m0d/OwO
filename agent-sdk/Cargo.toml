@@ -5,10 +5,31 @@ members = [
     # 微内核（M0）：依赖根，只放被多个运行边界共用的稳定原语；core/server/cli 单向依赖它。
     "crates/owo-agent-kernel",
     "crates/owo-agent-core",
+    # ProductEval 兼容门面（M1）：给 server/cli 提供评测面路径，同时让 core 对
+    # devtools/product-eval 的依赖保持为零，避免 crate 环。
+    "crates/owo-agent-eval-facade",
     "crates/owo-agent-server",
     "crates/owo-agent-cli",
     "crates/owo-build-info",
     "crates/owo-sim",
+]
+# 开发工具（M1）：ProductEval 底座在 `devtools/product-eval/`，**它是独立 workspace**
+# （自带 Cargo.lock 与 target/），因此这里用 exclude 明确拒绝把它拉进本 workspace。
+#
+# 为什么不能留在本 workspace（实测三次的 crate 环，不是图省事）：
+#   devtools/product-eval 必须依赖 owo-agent-core（要真实跑 Agent/Turn/工具/权限），
+#   而 server/cli 需要 core 转出的评测面 → core 必须反向依赖 product-eval。
+#   只要两者同处一个 workspace，Cargo 就按 feature 并集把 core 解析成同一个 package
+#   实例，稳定报 `cyclic package dependency: owo-agent-core depends on itself`。
+#   exclude + workspace 级 default-features=false 都试过，都不解决并集问题。
+#   独立 workspace 恰恰也是指南 §9 对它的要求：开发时加载、不进生产默认运行时、
+#   不拖累用户启动和 Rust 编译。
+#
+# 定向验证（不进默认 workspace 门禁；改动 core 公共面后必须手动跑一次）：
+#   cargo check --manifest-path devtools/product-eval/Cargo.toml --all-targets
+#   cargo test  --manifest-path devtools/product-eval/Cargo.toml -- --test-threads=2
+exclude = [
+    "devtools/product-eval",
 ]
 
 [workspace.package]
@@ -39,5 +60,6 @@ zip = "2"
 owo-agent-protocol = { path = "crates/owo-agent-protocol" }
 owo-agent-kernel = { path = "crates/owo-agent-kernel" }
 owo-agent-core = { path = "crates/owo-agent-core" }
+owo-agent-eval-facade = { path = "crates/owo-agent-eval-facade" }
 owo-agent-server = { path = "crates/owo-agent-server" }
 owo-build-info = { path = "crates/owo-build-info" }

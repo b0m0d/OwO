@@ -18,7 +18,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use owo_agent_core::product_eval::{
+use owo_agent_eval_facade::product_eval::{
     self, CaseExecutor, ExecContext, MatrixRunner, RawExecOutcome, ReferenceDryExecutor, RunOptions,
 };
 use serde::{Deserialize, Serialize};
@@ -91,10 +91,10 @@ struct RunHandle {
 struct CreateParams {
     suite: String,
     execution: String,
-    modes: Vec<owo_agent_core::product_eval::AgentMode>,
+    modes: Vec<owo_agent_eval_facade::product_eval::AgentMode>,
     mode_literals: Vec<String>,
     repetitions: u32,
-    category: Option<owo_agent_core::product_eval::EvalCategory>,
+    category: Option<owo_agent_eval_facade::product_eval::EvalCategory>,
     only: Option<String>,
 }
 
@@ -423,7 +423,7 @@ impl ModeDispatchExecutor {
 #[async_trait::async_trait]
 impl CaseExecutor for ModeDispatchExecutor {
     async fn execute<'ctx>(&self, ctx: &mut ExecContext<'ctx>) -> RawExecOutcome {
-        use owo_agent_core::product_eval::AgentMode as M;
+        use owo_agent_eval_facade::product_eval::AgentMode as M;
         let target = match ctx.mode {
             M::Single => self.single.as_ref(),
             M::Multi => self.multi.as_ref(),
@@ -513,8 +513,8 @@ fn parse_request(body: &Value) -> Result<CreateParams, (StatusCode, String)> {
             )
         })?;
         let mode = match literal {
-            "single" => owo_agent_core::product_eval::AgentMode::Single,
-            "workswarm" => owo_agent_core::product_eval::AgentMode::Multi,
+            "single" => owo_agent_eval_facade::product_eval::AgentMode::Single,
+            "workswarm" => owo_agent_eval_facade::product_eval::AgentMode::Multi,
             other => {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -549,7 +549,8 @@ fn parse_request(body: &Value) -> Result<CreateParams, (StatusCode, String)> {
 
     let category = match obj.get("category") {
         None | Some(Value::Null) => None,
-        Some(Value::String(s)) => match owo_agent_core::product_eval::EvalCategory::parse(s) {
+        Some(Value::String(s)) => match owo_agent_eval_facade::product_eval::EvalCategory::parse(s)
+        {
             Ok(c) => Some(c),
             Err(m) => return Err((StatusCode::BAD_REQUEST, m)),
         },

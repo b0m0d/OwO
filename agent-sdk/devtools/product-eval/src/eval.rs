@@ -1,10 +1,10 @@
 //! Evals：用固定任务集回归评测 Agent（成功率/耗时/输出断言）。
 
-use crate::agent::{Agent, AgentConfig};
-use crate::gateway::ModelProvider;
-use crate::permissions::{AutoApprover, Policy};
-use crate::session::Session;
-use crate::tools::ToolRegistry;
+use owo_agent_core::agent::{Agent, AgentConfig};
+use owo_agent_core::gateway::ModelProvider;
+use owo_agent_core::permissions::{AutoApprover, Policy};
+use owo_agent_core::session::Session;
+use owo_agent_core::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;

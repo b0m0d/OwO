@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 use owo_agent_core::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage};
-use owo_agent_core::product_eval::*;
 use owo_agent_core::tools::ToolSpec;
+use owo_agent_product_eval::product_eval::*;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -1192,7 +1192,7 @@ fn freeze_build_verify_and_drift_detection() {
 
 #[tokio::test]
 async fn batch_label_enforced_and_tags_recorded() {
-    use owo_agent_core::product_eval::SuiteDefaults;
+    use owo_agent_product_eval::product_eval::SuiteDefaults;
     let defaults = SuiteDefaults {
         repetitions: 1,
         ..Default::default()

@@ -8,13 +8,13 @@
 
 use async_trait::async_trait;
 use owo_agent_core::gateway::{ChatMessage, ModelOutput, ModelProvider};
-use owo_agent_core::product_eval::{
+use owo_agent_core::team_strategy::TeamSelectionMode;
+use owo_agent_product_eval::product_eval::{
     AgentMode, ArtifactChecker, CaseExecutor, EvalCategory, InputFixture, MatrixRunner,
     ProductEvalCase, ProductEvalSuite, ReferenceDryExecutor, RunOptions, RunStatus, SuiteBundle,
     SuiteDefaults, PRODUCT_EVAL_SCHEMA_VERSION,
 };
-use owo_agent_core::team_strategy::TeamSelectionMode;
-use owo_agent_core::{WorkSwarmExecutor, WorkSwarmExecutorConfig};
+use owo_agent_product_eval::workswarm_executor::{WorkSwarmExecutor, WorkSwarmExecutorConfig};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -173,7 +173,7 @@ fn workswarm_executor(root: &Path, provider: Arc<ScriptedProvider>) -> WorkSwarm
     executor
 }
 
-fn run_report(report: &owo_agent_core::product_eval::ProductEvalReport) {
+fn run_report(report: &owo_agent_product_eval::product_eval::ProductEvalReport) {
     for run in &report.runs {
         println!(
             "cell {} → {:?} wall={}ms calls={} retries={} artifacts={:?} failed={:?}",

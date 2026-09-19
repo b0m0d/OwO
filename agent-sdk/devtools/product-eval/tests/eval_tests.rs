@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use owo_agent_core::{
-    run_suite, ChatMessage, EvalCase, ModelOutput, ModelProvider, ToolCall, ToolSpec,
-};
+use owo_agent_core::{ChatMessage, ModelOutput, ModelProvider, ToolCall, ToolSpec};
+use owo_agent_product_eval::{run_suite, EvalCase};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -39,8 +38,8 @@ impl ModelProvider for KeywordProvider {
 
 #[tokio::test]
 async fn eval_suite_reports_pass_and_fail() {
-    let mut builtin = owo_agent_core::builtin_suite();
-    let mut suite = owo_agent_core::EvalSuite {
+    let mut builtin = owo_agent_product_eval::builtin_suite();
+    let mut suite = owo_agent_product_eval::EvalSuite {
         name: "test".to_string(),
         cases: builtin.cases.drain(..5).collect(),
     };
@@ -77,7 +76,7 @@ async fn eval_suite_reports_pass_and_fail() {
 
 #[test]
 fn builtin_suite_has_at_least_thirty_cases() {
-    assert!(owo_agent_core::builtin_suite().cases.len() >= 30);
+    assert!(owo_agent_product_eval::builtin_suite().cases.len() >= 30);
 }
 
 /// 脚本化 Provider：按序吐出工具调用/最终文本（验证 expected_files/expected_missing 语义）。
@@ -119,7 +118,7 @@ impl ModelProvider for ScriptedProvider {
 #[tokio::test]
 async fn expected_files_and_missing_are_enforced() {
     // ① 真实写文件 + expected_files → 通过
-    let mut suite = owo_agent_core::EvalSuite {
+    let mut suite = owo_agent_product_eval::EvalSuite {
         name: "files".to_string(),
         cases: vec![EvalCase {
             name: "real_write".to_string(),

@@ -118,7 +118,53 @@ try {
         Add-Check 'session.persisted_in_list' ($found -ge 1) "list 中匹配 $found 条"
     }
 
-    # 5) 内核原语真实参与的落盘证据
+    # 5) 开发工具（M1）真实走通：ProductEval 路由 → owo-agent-eval-facade → devtools/product-eval
+    #    reference 执行模式是确定性 dry 回放（零模型调用、零网络），适合做运行态门。
+    #    suite 只能按注册名（v1 → <workspace>/evals/v1/suite.json），所以把仓库 evals 以目录
+    #    联接挂进本轮隔离工作区。**不能另起第二个服务实例**：serve.rs 用 pid 文件做单实例
+    #    闸门，实测第二次启动直接报“检测到运行中的服务（pid=…）：请先停止该进程再启动”。
+    $repoEvals = Join-Path (Split-Path -Parent $PSScriptRoot) 'evals'
+    $wsEvals = Join-Path $ws 'evals'
+    $suiteVisible = $false
+    if (Test-Path -LiteralPath (Join-Path $repoEvals 'v1\suite.json')) {
+        try {
+            if (-not (Test-Path -LiteralPath $wsEvals)) {
+                $null = New-Item -ItemType Junction -Path $wsEvals -Target $repoEvals -ErrorAction Stop
+            }
+            $suiteVisible = Test-Path -LiteralPath (Join-Path $wsEvals 'v1\suite.json')
+        } catch {
+            try {
+                Copy-Item -LiteralPath $repoEvals -Destination $wsEvals -Recurse -Force -ErrorAction Stop
+                $suiteVisible = Test-Path -LiteralPath (Join-Path $wsEvals 'v1\suite.json')
+            } catch { $suiteVisible = $false }
+        }
+    }
+    if ($suiteVisible) {
+        try {
+            $peBody = @{ suite = 'v1'; execution = 'reference'; modes = @('single', 'workswarm'); repetitions = 1 } | ConvertTo-Json -Compress
+            $peResp = Invoke-WebRequest -Uri "$base/product-eval/runs" -Method Post -Headers $h -ContentType 'application/json' -Body $peBody -UseBasicParsing -TimeoutSec 30
+            $peJson = $peResp.Content | ConvertFrom-Json
+            Add-Check 'product_eval.create_run' ($peResp.StatusCode -eq 202 -and $peJson.run_id) "status=$($peResp.StatusCode) run_id=$($peJson.run_id)"
+            $done = $false; $detail = $null
+            $wait = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $wait) {
+                Start-Sleep -Milliseconds 700
+                $d = (Invoke-WebRequest -Uri "$base/product-eval/runs/$($peJson.run_id)" -Headers $h -UseBasicParsing -TimeoutSec 20).Content | ConvertFrom-Json
+                if ($d.status -in @('completed', 'failed', 'cancelled', 'interrupted')) { $detail = $d; $done = $true; break }
+            }
+            if ($done) {
+                Add-Check 'product_eval.run_completed' ($detail.status -eq 'completed') ("status=$($detail.status) progress=$($detail.progress.done)/$($detail.progress.total) metrics.runs_total=$($detail.report.metrics.runs_total)")
+            } else {
+                Add-Check 'product_eval.run_completed' $false '60s 内未到终态'
+            }
+        } catch {
+            Add-Check 'product_eval.create_run' $false $_.Exception.Message
+        }
+    } else {
+        Add-Check 'product_eval.suite_present' $false 'v1 套件未能在隔离工作区可见（跳过 ProductEval 运行态门）'
+    }
+
+    # 6) 内核原语真实参与的落盘证据
     $indexDb = Test-Path -LiteralPath (Join-Path $data 'index.db')
     $pidFile = Test-Path -LiteralPath (Join-Path $data 'server.pid')
     Add-Check 'data.index_db' $indexDb 'index.db 已建立（SqliteSessionStore/WAL）'

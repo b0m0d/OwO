@@ -12,7 +12,7 @@
 //! - 列表排序与进度字段；category 过滤。
 
 use axum::http::StatusCode;
-use owo_agent_core::product_eval::{CaseExecutor, ExecContext, RawExecOutcome};
+use owo_agent_eval_facade::product_eval::{CaseExecutor, ExecContext, RawExecOutcome};
 use owo_agent_server::product_eval_api::{router_with_hub, ProductEvalHub};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};

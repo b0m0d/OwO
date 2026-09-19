@@ -1,6 +1,6 @@
 //! Dataset Builder（T0，对应主开发技术文档 §5.12.3 数据清洗顺序）。
 //!
-//! 把 [`crate::transition::TransitionTraceV1`] 清洗为可版本化的训练数据集：
+//! 把 [`owo_agent_core::transition::TransitionTraceV1`] 清洗为可版本化的训练数据集：
 //!
 //! ```text
 //! 环境/任务版本有效 → 状态完整 → 动作目标在证据中 → 坐标位于目标框（若适用）
@@ -10,7 +10,7 @@
 //! 清洗只能过滤样本，不能篡改原始轨迹；产物为 [`DatasetManifest`]（统计 +
 //! 拒绝原因 + 样本清单 + 内容哈希），与原始轨迹分开保存。
 
-use crate::transition::{TransitionOutcome, TransitionTraceV1};
+use owo_agent_core::transition::{TransitionOutcome, TransitionTraceV1};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -159,7 +159,10 @@ fn evaluate_trace(
         });
     }
     // 3. 动作目标在证据中（声明了 target_id 的 GUI 动作）。
-    if matches!(trace.action.kind, crate::desktop_env::ActionKind::Gui) {
+    if matches!(
+        trace.action.kind,
+        owo_agent_core::desktop_env::ActionKind::Gui
+    ) {
         if let Some(target) = &trace.action.target_id {
             if !target.is_empty()
                 && !trace

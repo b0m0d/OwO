@@ -1,0 +1,45 @@
+[package]
+name = "owo-agent-product-eval"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+authors = ["OwO Agent SDK Team"]
+repository = ""
+publish = false
+description = "OwO Agent ProductEval 底座（开发工具，不进用户默认运行时）：固定任务集 × 重复 × 单/多 Agent 对照评测、统计、报告与数据集构建"
+
+# 独立 workspace 根：本目录有自己的 Cargo.lock 与 target/，不参与 agent-sdk 的
+# `cargo check --workspace`。
+#
+# 为什么必须独立（是 crate 环，不是图省事）：
+#   本 crate 必须依赖 owo-agent-core（要真实跑 Agent/Turn/工具/权限）；
+#   server/cli 需要 core 转出的评测面，于是 core 必须反向依赖本 crate。
+#   只要本 crate 与 core 处在**同一个 workspace**，Cargo 就把它解析成同一个 package
+#   实例并按 feature 并集求值，实测三次都报
+#   `cyclic package dependency: owo-agent-core depends on itself`
+#   （试过 exclude、试过 workspace 级 default-features=false，都不解决并集问题）。
+#   独立 workspace 后 core 引到的是独立解析的依赖实例，环消失；这也正是指南 §9 对
+#   它的定位——“开发时加载、不进生产默认运行时、不拖累用户启动和 Rust 编译”。
+#
+# 定向验证（不进默认 workspace 门禁；改动 core 公共面后必须手动跑）：
+#   cargo check --manifest-path devtools/product-eval/Cargo.toml --all-targets
+#   cargo test  --manifest-path devtools/product-eval/Cargo.toml -- --test-threads=2
+[workspace]
+
+[dependencies]
+owo-agent-core = { path = "../../crates/owo-agent-core" }
+owo-agent-kernel = { path = "../../crates/owo-agent-kernel" }
+owo-agent-protocol = { path = "../../crates/owo-agent-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+regex = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
