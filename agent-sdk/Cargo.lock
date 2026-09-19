@@ -1787,6 +1787,7 @@ dependencies = [
  "ndarray",
  "ort",
  "owo-agent-eval-facade",
+ "owo-agent-extensions",
  "owo-agent-kernel",
  "owo-agent-protocol",
  "png",
@@ -1813,6 +1814,23 @@ name = "owo-agent-eval-facade"
 version = "0.1.0"
 dependencies = [
  "owo-agent-product-eval",
+]
+
+[[package]]
+name = "owo-agent-extensions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "owo-agent-kernel",
+ "owo-agent-protocol",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

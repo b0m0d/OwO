@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::cas_store::CasStore;
+use owo_agent_kernel::cas_store::CasStore;
 
 /// 单文件内容快照上限：超过只「扫到」不存内容（被改后恢复按冲突处理）。
 pub const MAX_SNAPSHOT_FILE_BYTES: u64 = 8 * 1024 * 1024;

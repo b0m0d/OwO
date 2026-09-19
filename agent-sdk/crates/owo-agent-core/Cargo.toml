@@ -11,6 +11,10 @@ owo-agent-protocol.workspace = true
 # 本 crate 通过 lib.rs 的 `pub use owo_agent_kernel::*` + 别名模块保持原有公共 API，
 # 因此 server / cli / Tauri 壳 / 36 个集成测试的既有路径全部继续有效。
 owo-agent-kernel.workspace = true
+# Daemon 扩展内核（M2）：notes / automation / change_set / change_set_store / cloud_exec
+# 已下沉到 owo-agent-extensions（它只依赖 kernel，反向依赖为零）。core 通过 lib.rs 的
+# 同名别名模块 + 顶层 pub use 保持既有路径，server/cli 与集成测试零改动。
+owo-agent-extensions.workspace = true
 # 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
 # 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
 # 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成

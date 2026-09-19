@@ -9,20 +9,12 @@ pub mod agent;
 pub mod artifact_pipeline;
 pub mod assert;
 pub mod audit_chain;
-pub mod automation;
 pub mod autoreview;
 pub mod blackboard;
 /// 内置团队模板目录（六期第三路：四类稳定团队候选，安装后参与匹配；见
 /// `team_template_catalog_api`——目录只展示，安装幂等且不自动扩权）。
 pub mod builtin_team_templates;
 pub mod bus_store;
-/// ChangeSet（八期 · 二路）：执行前基线快照（内容进 CAS）+ 变更集合构建 + 安全恢复
-/// （逐文件哈希比对，用户改动 → conflicted 不覆盖）。
-pub mod change_set;
-/// ChangeSet 存储（八期 · 二路）：`<run_dir>/<team_id>-change-sets.json` upsert +
-/// 幂等决定状态机 + 批准门控（approved head 阻断）。
-pub mod change_set_store;
-pub mod cloud_exec;
 pub mod computer_task;
 pub mod computer_use;
 pub mod context;
@@ -45,7 +37,6 @@ pub mod mcp;
 pub mod mcp_health;
 pub mod memory;
 pub mod node_agent;
-pub mod notes;
 pub mod observe;
 pub mod ocr;
 #[cfg(target_os = "windows")]
@@ -112,6 +103,18 @@ pub mod world_model;
 // 迁移期结束后（指南 §9 A2/A4），这些别名应改为正式目录结构并在 §7 边界澄清后
 // 再删除；当前保留是有意为之，不是遗留耦合。
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Daemon 扩展内核（M2）兼容层：notes / automation / change_set / change_set_store /
+// cloud_exec 已下沉到独立 crate `owo-agent-extensions`。
+//
+// 该 crate 在 core 依赖图里是唯一「零入边 + 零出边」的成规模集合（Tarjan SCC 实测，
+// 见 docs/ARCH-MICROKERNEL.md §6）：它只依赖 owo-agent-kernel，core 内部没有模块引用
+// 它，消费者全在 server/cli 侧。因此这里保留同名别名模块 + 顶层 `pub use` 即可让
+// `owo_agent_core::{Notes, AutomationStore, ChangeSet, CloudTask, ...}` 与
+// `crate::notes::*` 等既有路径全部继续有效，调用方零改动，且不可能形成 crate 环。
+// ---------------------------------------------------------------------------
+pub use owo_agent_extensions::{automation, change_set, change_set_store, cloud_exec, notes};
+
 pub use owo_agent_kernel::{
     audit, capability, cas_store, credentials, deadline, error, injection, lease, platform,
     storage_crypto, whitelist,

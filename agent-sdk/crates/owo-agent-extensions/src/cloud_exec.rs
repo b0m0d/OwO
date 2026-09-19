@@ -15,7 +15,7 @@
 //! - 每个任务在工作区快照的隔离副本中执行，互不干扰，原工作区在显式 `apply_to` 前不被改动。
 //! - 提交/执行/取消/重试/回滚全程写审计日志。
 
-use crate::audit::AuditLog;
+use owo_agent_kernel::audit::AuditLog;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

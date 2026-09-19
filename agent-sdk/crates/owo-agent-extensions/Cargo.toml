@@ -1,0 +1,35 @@
+[package]
+name = "owo-agent-extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "OwO Agent Daemon 扩展内核（M2）：笔记、定时自动化、变更集与恢复、云端执行传输——零耦合，可选加载"
+
+# 边界声明（微内核重构 · 顺序 2）：
+#
+# 本 crate 的五个模块在 core 的依赖图里是**唯一一批“零入边 + 零出边”的成规模集合**
+# （用 Tarjan 强连通分量算出的结论，见 docs/ARCH-MICROKERNEL.md §6）。也就是说：
+#   * 出边为 0：它们不引用 core 的任何模块，只用到 owo-agent-kernel 的 cas_store / audit；
+#   * 入边为 0：core 内部没有任何模块引用它们（消费者全在 server/cli 侧）。
+# 因此搬迁后 core 只需保留同名别名 re-export，**不需要任何其它改动**，也不存在环。
+#
+# 指南相关性：notes / automation 属指南 §2.3 的 “Daemon 插件”（“插件接口足够，不必
+# 微服务化”）；change_set* 是 §2.4 第 4 条事务边界（写前快照/写入/diff/revert）的存储侧；
+# cloud_exec 属 §2.3 的 “Fleet/Cloud Exec ⇒ 可选扩展”。把它们放在同一个“扩展内核”里，
+# 是为了让 core 只依赖一条清晰的扩展边界，而不是继续在 core 内平铺五个独立子系统。
+#
+# 反向依赖必须为零：任何让本 crate 依赖 owo-agent-core 的改动都会形成 crate 环。
+[dependencies]
+owo-agent-kernel.workspace = true
+owo-agent-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest.workspace = true

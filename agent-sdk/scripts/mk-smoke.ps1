@@ -164,7 +164,27 @@ try {
         Add-Check 'product_eval.suite_present' $false 'v1 套件未能在隔离工作区可见（跳过 ProductEval 运行态门）'
     }
 
-    # 6) 内核原语真实参与的落盘证据
+    # 6) Daemon 扩展内核（M2）真实走通：notes 路由 → owo-agent-extensions::notes
+    #    这条路由的服务端处理函数直接调用迁出的 notes 模块（create/list/search 全链），
+    #    所以一次真实建笔记 + 搜索就同时证明了“别名 re-export 透明”与“运行时可用”。
+    try {
+        $noteTitle = "mk-smoke-$Tag"
+        $noteBody = @{ title = $noteTitle } | ConvertTo-Json -Compress
+        $nResp = Invoke-WebRequest -Uri "$base/notes" -Method Post -Headers $h -ContentType 'application/json' -Body $noteBody -UseBasicParsing -TimeoutSec 20
+        $nJson = $nResp.Content | ConvertFrom-Json
+        # create_note 的契约状态码是 201（CREATED），不是 200——首次写这个门时断言错成 200。
+        Add-Check 'extensions.notes_create' ($nResp.StatusCode -eq 201 -and $nJson.id) "status=$($nResp.StatusCode) id=$($nJson.id)"
+        # list_notes 返回 {count, notes:[...]} 对象信封，不是裸数组。
+        $nList = (Invoke-WebRequest -Uri "$base/notes" -Headers $h -UseBasicParsing -TimeoutSec 20).Content | ConvertFrom-Json
+        $nFound = @($nList.notes | Where-Object { $_.id -eq $nJson.id }).Count
+        Add-Check 'extensions.notes_list' ($nFound -ge 1) "count=$($nList.count) 命中=$nFound（notes 已迁至 owo-agent-extensions）"
+        $auto = Invoke-WebRequest -Uri "$base/automations" -Headers $h -UseBasicParsing -TimeoutSec 20
+        Add-Check 'extensions.automations_list' ($auto.StatusCode -eq 200) "status=$($auto.StatusCode) body=$($auto.Content.Substring(0, [Math]::Min(80, $auto.Content.Length)))"
+    } catch {
+        Add-Check 'extensions.notes_create' $false $_.Exception.Message
+    }
+
+    # 7) 内核原语真实参与的落盘证据
     $indexDb = Test-Path -LiteralPath (Join-Path $data 'index.db')
     $pidFile = Test-Path -LiteralPath (Join-Path $data 'server.pid')
     Add-Check 'data.index_db' $indexDb 'index.db 已建立（SqliteSessionStore/WAL）'
