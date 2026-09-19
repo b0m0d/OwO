@@ -68,7 +68,7 @@ pub use owo_agent_kernel::{
 | **M7** | `owo-agent-plugins` | plugin（1,158 行）+ 从 `mcp` 下沉的 `McpServerConfig`；**倒置方向 = 配置类型随域走** | **0**（倒置后） | server / cli / 3 个集成测试（经别名，未改代码） | ✅ 已完成，见 §9 |
 | **M8** | `owo-agent-contracts` | context / computer_task / plan / skill / skill_health（1,491 行 + lib.rs）；**数据形状与执行者分离** | **0** | `agent` / `executor` / `tools` / server / cli（经别名，未改代码） | ✅ 已完成，见 §10 |
 | **M9** | `owo-agent-workswarm` | project_space_store / team_benefit / workswarm_output（2,847 行）；**编排的契约与状态先行、执行侧仍留 core** | **0** | `workswarm` / `team_strategy` / `artifact_pipeline` / `contract_worker` / `worker_profile` + server 5 个 api 模块（经别名，未改代码） | ✅ 已完成，见 §11 |
-| **M10** | `owo-agent-mcp` | MCP 宿主第一段：`mcp`（646 行）+ 两台假服务器 + 13 条 MCP 集成测试；**零出边** | **0** | `agent` / `tools` / `tool_effects` + server `mcp_api`（经别名，未改代码） | ✅ 代码已完成，见 §12（**server 全量测试与冒烟待资源可用补跑**） |
+| **M10** | `owo-agent-mcp` | MCP 宿主第一段：`mcp`（646 行）+ 两台假服务器 + 13 条 MCP 集成测试；**零出边** | **0** | `agent` / `tools` / `tool_effects` + server `mcp_api`（经别名，未改代码） | ✅ 已完成，见 §12（server 与冒烟已在 §13 的同一工作树上补齐） |
 | **M11** | `owo-agent-memory` | memory + observe + learn（2,454 行）+ `ProactiveSettings` 随域搬入；两处跨 crate 边**已在前面步骤倒置完毕** | **0** | `action_program` / `computer_use` / `executor` / `share_skill` / `workflow` / `settings` + server（经别名，未改代码） | ✅ 已完成，见 §13 |
 | **M12** | 下一个候选见 §14 | — | — | — | 待执行 |
 
@@ -893,22 +893,28 @@ Cargo 的环检测只看普通依赖图，dev-dependency 的环不成环——co
 | workspace 全目标编译 | `scripts/mk-check.ps1 -Tag m10`（`-j 1`） | **exit=0**，156 s | `docs/qa/logs/mk-m10-20260919-184520.log` |
 | MCP 边界自身测试 | `cargo test -p owo-agent-mcp --locked --all-targets` | **exit=0**，76 s；**13/13 集成测试全绿**（含 4 处 `CARGO_BIN_EXE_*` 真起假服务器） | `docs/qa/logs/mk-m10-mcp-tests-20260919-184800.log` |
 | 全量 core 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-core -Tag m10-core` | **exit=0**；**31/31 分片全绿**（`--lib` 363 passed / 2 ignored + 30 个集成测试目标） | `docs/qa/logs/mk-shard-m10-core-*.log` |
-| 全量 server 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-server -Tag m10-server` | **待补**（内存门，见下注；守候任务已武装） | `docs/qa/logs/mk-shard-m10-server-*.log`（待生成） |
+| 全量 server 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-server -Tag m10-server` | **已补齐**（在 M11 步骤的同一工作树上跑完，40/40 分片全绿，见 §13.5） | `docs/qa/logs/mk-shard-m11-server*-*.log` |
 | 依赖闭包 | `cargo tree -p owo-agent-mcp -e normal` | 普通依赖只有 `plugins` / `tool-safety` / `reqwest` / `serde_json` / `tokio` / `tracing`；**core / server / workswarm / contracts / env / sherpa / ndarray / ort / rusqlite 均 0 次**。`kernel` 只作为 `plugins → tool-safety → kernel` 的传递依赖出现（含其 `windows-sys`），这是 M3 就定下的受信执行链，不是本步引入的 | `docs/qa/logs/mk-m10-tree.log` |
-| 运行态 | `scripts/mk-smoke.ps1 -Tag m10-mcp` | **待补**（需先编译 core+server+cli，见下注） | `docs/qa/evidence/mk-smoke-m10-mcp-*/report.json`（待生成） |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m10-mcp` | **已补齐**（同 M11 工作树，18/18 PASS，见 §13.5） | `docs/qa/evidence/mk-smoke-m11-memory-20260920-025512/report.json` |
 | core 体量 | `git ls-tree` + 逐行统计 | **59 文件 / 43,998 行 → 58 文件 / 43,352 行**（−646 行）；另有 796 行测试/工具（2 个 bin + 1 个测试文件）迁出 | 与 §1 同口径 |
 
-> 注：core / server 全量测试与运行态冒烟在本步执行时多次被 §2.4 **内存门**拦下
-> （可用内存 5.91 GB / 已用 81.3%、4.01 GB / 87.3%——同机有 DeltaForce 等应用占用
+> 注意：下面这段是**当时**的资源受限记录，保留作为证据与教训。其中"server 全量测试
+> 与冒烟待补"两条**已在 M11 步骤中补齐**：M11 的验证是在包含 M10 提交的同一工作树上
+> 跑的，server **40/40 分片全绿**、冒烟 **18/18 PASS**（见 §13.5）。因此"server 与冒烟
+> 是否因 M10 而坏"这个问题已被实证排除；缺的只是一次**纯 M10 树**的独立复跑，而 M10
+> 与其后的 M11 之间不存在未验证的窗口。
+>
+> 当时的情况：core / server 全量测试与运行态冒烟在 M10 执行时多次被 §2.4 **内存门**
+> 拦下（可用内存 5.91 GB / 已用 81.3%、4.01 GB / 87.3%——同机有 DeltaForce 等应用占用
 > 6.7–11.4 GB）。门禁按设计终止进程树并返回 137，**没有做任何绕过**（未改阈值、
 > 未加超时、未降并发档位以外的任何手段）。
 >
 > * **core 已用分批方式跑完并通过**（31/31）：见上表。
-> * **server 仍待补**：server 测试必须先编译 `owo-agent-core`（`-p owo-agent-server`
+> * **server 当时未跑成**：server 测试必须先编译 `owo-agent-core`（`-p owo-agent-server`
 >   的 feature 并集与 core 自身不同，无法复用已有产物），这一步实测需要约 2.5 GB
 >   额外内存；本机在该时段只能提供约 0.6 GB 余量（发起时 6.97 GB / 78.0%，
 >   60 s 内被顶到 81.2%），因此**连续 7 次都死在"Compiling owo-agent-core"的
->   第 60 秒**，无法收敛。冒烟需要同一批二进制，因此同样待补。
+>   第 60 秒**，无法收敛。
 > * 已武装的守候任务：`scripts/mk-tests-sharded.ps1 -Package owo-agent-server
 >   -MinFreeGB 8.5 -MaxUsedPct 74`（只在真有 1 GB 以上余量时才发起编译，不反复
 >   抢机器）；内存回落后自动跑完并把日志落在 `docs/qa/logs/mk-shard-m10-server-*.log`。
