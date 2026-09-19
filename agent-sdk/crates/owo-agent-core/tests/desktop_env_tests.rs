@@ -9,12 +9,13 @@
 //! - TaskSurface 适配器能力边界显式声明。
 
 use async_trait::async_trait;
-use owo_agent_core::computer_use::TaskSurface;
+// TaskSurface 契约已下沉内核（M5 依赖倒置）；core 仍 re-export，这里显式走内核。
 use owo_agent_core::desktop_env::{
     ActionKind, Assertion, DesktopEnv, EnvError, EnvRegistry, FaultSpec, GroundedAction,
     LeaseProof, RiskLevel, SimAppKind, SimDesktopEnv, SuccessSpec, SurfaceEnvAdapter, TaskSeed,
     Verdict,
 };
+use owo_agent_kernel::TaskSurface;
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------

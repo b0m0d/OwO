@@ -31,10 +31,10 @@
 
 use axum::body::Body;
 use axum::http::{header, Method, Request};
-use owo_agent_core::desktop_env::{GroundedAction, RiskLevel, StateDelta, WorldStateV1};
 use owo_agent_core::world_model::{
     GuiWorldModel, ModelError, PredictionEvaluation, WorldModelContext, WorldPrediction,
 };
+use owo_agent_env::desktop_env::{GroundedAction, RiskLevel, StateDelta, WorldStateV1};
 use owo_agent_server::{router_with_hub, DesktopWorldHub};
 use serde_json::{json, Value};
 use std::sync::Arc;

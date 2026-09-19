@@ -12,7 +12,7 @@
 //!   元素漂移（锚点漂移）与迟钝步骤（时序干扰）。
 //! - **环境注册表** [`EnvRegistry`]：环境实例 + [`ControllerLease`] 语义的单写租约
 //!   （token + epoch fencing），保证同一环境同一时刻只有一个写作者。
-//! - **兼容适配** [`SurfaceEnvAdapter`]：把既有 [`crate::computer_use::TaskSurface`]
+//! - **兼容适配** [`SurfaceEnvAdapter`]：把既有 [`owo_agent_kernel::TaskSurface`]
 //!   （SimTaskSurface/RealTaskSurface）适配为只读观测 + 动作注入的 DesktopEnv；
 //!   不支持的能力显式返回 [`EnvError::Unsupported`]，不伪造。
 //!
@@ -1942,7 +1942,7 @@ impl DesktopEnv for SimDesktopEnv {
 // TaskSurface 适配器：既有模拟面/真实面 → DesktopEnv（只读观测 + 动作注入）
 // ---------------------------------------------------------------------------
 
-/// 把既有 [`crate::computer_use::TaskSurface`] 适配为 DesktopEnv。
+/// 把既有 [`owo_agent_kernel::TaskSurface`] 适配为 DesktopEnv。
 ///
 /// 能力边界（显式声明，不伪造）：
 /// - `observe`：OCR 版面 → 场景元素；
@@ -1957,7 +1957,7 @@ pub struct SurfaceEnvAdapter<S> {
 
 impl<S> SurfaceEnvAdapter<S>
 where
-    S: crate::computer_use::TaskSurface + Send,
+    S: owo_agent_kernel::TaskSurface + Send,
 {
     pub fn new(surface: S, env_id: impl Into<String>) -> Self {
         Self {
@@ -1976,7 +1976,7 @@ where
 #[async_trait]
 impl<S> DesktopEnv for SurfaceEnvAdapter<S>
 where
-    S: crate::computer_use::TaskSurface + Send,
+    S: owo_agent_kernel::TaskSurface + Send,
 {
     fn env_id(&self) -> &str {
         &self.env_id

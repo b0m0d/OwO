@@ -17,6 +17,8 @@ description = "OwO Agent 微内核（M0）：进程/工具/服务共享的最小
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+# task_surface 的 `#[async_trait]`（保持与 core 既有实现的 ABI 兼容）。
+async-trait.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 uuid.workspace = true

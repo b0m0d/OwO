@@ -161,7 +161,7 @@ fn evaluate_trace(
     // 3. 动作目标在证据中（声明了 target_id 的 GUI 动作）。
     if matches!(
         trace.action.kind,
-        owo_agent_core::desktop_env::ActionKind::Gui
+        owo_agent_env::desktop_env::ActionKind::Gui
     ) {
         if let Some(target) = &trace.action.target_id {
             if !target.is_empty()

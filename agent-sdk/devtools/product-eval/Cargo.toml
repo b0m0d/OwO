@@ -29,6 +29,7 @@ description = "OwO Agent ProductEval 底座（开发工具，不进用户默认�
 [dependencies]
 owo-agent-core = { path = "../../crates/owo-agent-core" }
 owo-agent-kernel = { path = "../../crates/owo-agent-kernel" }
+owo-agent-env = { path = "../../crates/owo-agent-env" }
 owo-agent-protocol = { path = "../../crates/owo-agent-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

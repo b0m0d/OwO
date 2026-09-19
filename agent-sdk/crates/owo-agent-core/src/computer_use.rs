@@ -582,21 +582,9 @@ pub struct TaskReport {
     pub detail: String,
 }
 
-/// 感知闭环执行所需的桌面面抽象：感知（OCR 版面）与动作注入。
-///
-/// 运行环境用 [`SimTaskSurface`]（owo-sim-qq）；契约测试注入内存 Mock，
-/// 使闭环在无网络/无真实桌面时完整可测。
-#[async_trait::async_trait]
-pub trait TaskSurface: Send {
-    /// 当前前台应用标识（用于目标应用匹配）。
-    fn app(&self) -> String;
-    /// 当前 OCR 版面（screen_ocr 同构：lines 数组，每行 text/x/y/width/height/role_hint）。
-    async fn ocr(&mut self) -> Result<Value, String>;
-    async fn click(&mut self, x: i32, y: i32) -> Result<(), String>;
-    async fn type_text(&mut self, text: &str) -> Result<(), String>;
-    async fn key(&mut self, key: &str) -> Result<(), String>;
-    async fn launch(&mut self, target: &str) -> Result<(), String>;
-}
+// `TaskSurface` 契约已下沉到内核（M5 依赖倒置）：desktop_env 外迁需要它，
+// 而 desktop_env 若依赖 computer_use 就会成环。实现体仍在本模块。
+pub use owo_agent_kernel::TaskSurface;
 
 /// owo-sim-qq HTTP 模拟面（`OWO_SIM_QQ_URL` 指向模拟窗口）。
 #[derive(Debug)]

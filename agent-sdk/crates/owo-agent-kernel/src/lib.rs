@@ -17,6 +17,7 @@
 //! | [`capability`] | 能力卡与路由判定，属于“能力协商”原语而非 Agent 业务 |
 //! | [`audit`]、[`credentials`]、[`storage_crypto`]、[`cas_store`]、[`whitelist`] | 受信执行内核（Tool Host）与 Daemon 都必须共用的持久化/加密/审计原语 |
 //! | [`injection`] | 提示注入净化，是跨边界的安全工具函数 |
+//! | [`task_surface`] | 桌面交互面契约（`TaskSurface`）：M5 依赖倒置的产物，契约在内核、实现留在 core |
 //! | [`tool_args`] | 工具参数取用助手（原 core 内 `pub(crate)` 死代码的唯一真实使用者是开发工具包） |
 //! | [`lease`]、[`deadline`] | 租约与阶段预算，供多 Agent / 可观测性共用 |
 //!
@@ -49,6 +50,7 @@ pub mod injection;
 pub mod lease;
 pub mod platform;
 pub mod storage_crypto;
+pub mod task_surface;
 pub mod tool_args;
 pub mod whitelist;
 
@@ -70,5 +72,6 @@ pub use error::AgentError;
 pub use injection::{sanitize_tool_result, InjectionGuard, InjectionHit, InjectionSeverity};
 pub use lease::{Lease, LeaseConfig, LeaseError, LeaseManager};
 pub use platform::{capture_screen, clipboard_sequence, poll_foreground_app};
+pub use task_surface::TaskSurface;
 pub use tool_args::required_string;
 pub use whitelist::{AppTier, Whitelist, WhitelistEntry};

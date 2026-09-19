@@ -19,7 +19,6 @@ pub mod computer_use;
 pub mod context;
 pub mod contract_worker;
 pub mod critic;
-pub mod desktop_env;
 pub mod element_registry;
 pub mod execution_target;
 pub mod executor;
@@ -123,6 +122,20 @@ pub mod world_model;
 // 这里保留同名别名模块 + 顶层 pub use，使 `crate::sandbox::*`（mcp / plugin / tools）
 // 与 `owo_agent_core::audit_chain::*`（audit.rs、4 个集成测试）等既有路径全部继续有效。
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 环境内核（M5）兼容层：desktop_env 已下沉到独立 crate `owo-agent-env`。
+//
+// 本步是微内核重构里**第一次真正的依赖倒置**：desktop_env 的唯一出边
+// （`crate::computer_use::TaskSurface`，见 §1 判据）被下沉到内核
+// `owo_agent_kernel::task_surface`，因为 desktop_env 与 computer_use 不同迁，
+// 该边若不倒置就会在外迁后成环。实现体（Sim/RealTaskSurface）仍在 core。
+//
+// 这里保留同名别名模块 + 顶层 pub use，使 `crate::desktop_env::*`
+// （transition / world_model / computer_use）与 `owo_agent_core::desktop_env::*`
+// （server 的 desktop_world_api、集成测试）等既有路径全部继续有效。
+// ---------------------------------------------------------------------------
+pub use owo_agent_env::desktop_env;
+
 pub use owo_agent_tool_safety::{audit_chain, sandbox};
 
 pub use owo_agent_extensions::{automation, change_set, change_set_store, cloud_exec, notes};

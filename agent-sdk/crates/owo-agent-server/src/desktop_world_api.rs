@@ -62,10 +62,6 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 // dataset_builder 属 ProductEval 开发工具包（M1 起位于 devtools/product-eval），
 // 经 owo-agent-eval-facade 暴露；core 自身不再持有它。
-use owo_agent_core::desktop_env::{
-    EnvError, EnvRegistry, GroundedAction, LeaseProof, RewardParts, SuccessSpec, TaskSeed, Verdict,
-    WorldStateV1,
-};
 use owo_agent_core::experience_store::ExperienceStore;
 use owo_agent_core::transition::{
     record_transition_experience, FailureClass, PredictionRef, PrivacyScope, TransitionOutcome,
@@ -74,6 +70,10 @@ use owo_agent_core::transition::{
 use owo_agent_core::world_model::{
     advise_candidates, aggregate_calibration, evaluate_prediction, CalibrationReport,
     GuiWorldModel, PredictionEvaluation, RuleWorldModel, WorldModelContext, WorldPrediction,
+};
+use owo_agent_env::desktop_env::{
+    EnvError, EnvRegistry, GroundedAction, LeaseProof, RewardParts, SuccessSpec, TaskSeed, Verdict,
+    WorldStateV1,
 };
 use owo_agent_eval_facade::dataset_builder::{
     build_dataset, save_manifest, DatasetBuilderConfig, DatasetManifest,
@@ -647,7 +647,7 @@ pub struct CreateEnvResponse {
     pub env_id: String,
     pub env_version: String,
     /// 初始写租约凭证（写路径必须回带）。
-    pub lease: owo_agent_core::desktop_env::EnvLeaseRecord,
+    pub lease: owo_agent_env::desktop_env::EnvLeaseRecord,
     pub task: TaskSeed,
     /// 首帧观测（reset 后初始状态）。
     pub state: WorldStateV1,
@@ -744,7 +744,7 @@ pub struct JudgeEnvBody {
 /// 故障注入请求（写路径）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectFaultBody {
-    pub fault: owo_agent_core::desktop_env::FaultSpec,
+    pub fault: owo_agent_env::desktop_env::FaultSpec,
     pub lease: LeaseProof,
 }
 

@@ -11,6 +11,8 @@ owo-agent-core.workspace = true
 # dataset_builder）。core 自身不持有评测面：devtools/product-eval 反向依赖 core，
 # 若让 core 再依赖它会形成 Cargo 环（详见 crates/owo-agent-eval-facade/Cargo.toml）。
 owo-agent-eval-facade.workspace = true
+# 环境内核（M5）：desktop_env 现由 owo-agent-env 提供（/desktop-envs/* 路由）。
+owo-agent-env.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

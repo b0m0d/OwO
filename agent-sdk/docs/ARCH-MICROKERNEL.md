@@ -62,7 +62,9 @@ pub use owo_agent_kernel::{
 | **M1** | `devtools/product-eval`（独立 workspace）+ `owo-agent-eval-facade`（门面） | product_eval / eval / dataset_builder / product_eval_workswarm + 6 个集成测试（约 8.6k 行） | 7（必须依赖 core） | **0** | ✅ 已完成，见 §3 |
 | **M2** | `owo-agent-extensions` | notes / automation / change_set / change_set_store / cloud_exec（4,493 行） | **0** | **0** | ✅ 已完成，见 §5 |
 | **M3** | `owo-agent-tool-safety` | sandbox + audit_chain（2,694 行） | **0** | `mcp` / `plugin` / `tools` + 4 个集成测试 | ✅ 已完成，见 §6 |
-| **M4** | 下一个候选见 §7（SCC 数据已给出唯一可切方向） | — | — | — | 待执行 |
+| **M4** | （契约，非新 crate） | 三方事务边界契约测试（`execution_boundary_contract_tests.rs`，4 条） | — | — | ✅ 已完成，见 §8 M4 段 |
+| **M5** | `owo-agent-env` | desktop_env（2,442 行）；**首次真正的依赖倒置**：`TaskSurface` 下沉内核 | **0**（倒置后） | `transition` / `world_model` / server | ✅ 已完成，见 §7 |
+| **M6** | 下一个候选见 §8 | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -322,6 +324,7 @@ core 对 devtools 的依赖 = 0
 | 契约测试用"被沙箱管着的进程"做正面对照 | 对照恒失败（沙箱正确地拒绝绝对路径写入），断言空转 | 需要"证明某命令确实会写文件"时，必须用**裸进程**（`std::process::Command`）做对照；沙箱内只验证被约束后的行为 |
 | 在 `cmd /C` 里裸用 `&&` + 重定向 | exit=1，「语法不正确」 | 复合运算符与重定向混用会解析失败；拆成单条命令 |
 | 给不含空格的路径加引号传给 `cmd` | exit=1，「文件名、目录名或卷标语法不正确」 | temp_dir 路径不含空格时**不要加引号**，引号会被当字面量 |
+| 用 `use` 行扫描生成新 crate 的依赖清单 | 首次编译报 `E0433: cannot find module or crate chrono/uuid` | 依赖要按 **`use` 行**与**内联全限定路径**（`chrono::Utc::now()`、`uuid::Uuid::new_v4()`）各核一遍。M3 的 `sandbox` 恰好没有这类写法，所以这个坑到 M5 才暴露 |
 | 构建卷空间不足 | `LNK1318 非意外的 PDB 错误: LIMIT`（看着像编译错误） | 先清 `target/**/incremental`、`target/**/*.pdb`（M0–M3 共回收约 67 GB） |
 
 
@@ -454,7 +457,62 @@ ADR 原计划「先用注入式 `SandboxAuditSink` 打断环、再整体搬迁�
 | `cargo fmt --all` | 经 `Invoke-CiCargo` | exit=0 | 会话记录 |
 
 
-## 7. 后续候选与取舍记录
+## 7. M5：`owo-agent-env`（已完成）——首次真正的依赖倒置
+
+### 7.1 这一步与前几步的本质差别
+
+M0–M3 都是"找到零出边（或同迁）的集合整体搬走"。M5 不是：
+
+* `desktop_env`（2,442 行）的唯一出边是 `crate::computer_use::TaskSurface`；
+* `desktop_env` 与 `computer_use` **不同迁**（后者属 18 模块环团 `[16]`，留在 core）；
+* 因此按 §4 判据，这条边**必须倒置**，否则外迁后 `desktop_env → computer_use`
+  与 `core → desktop_env` 成环。
+
+倒置方式：把 `TaskSurface` 这个**纯 I/O 契约**下沉到内核
+（`owo-agent-kernel::task_surface`）。它只用到 `&str` / `i32` / `serde_json::Value`，
+不绑定任何业务类型——因此**没有**把"某个执行器的数据类型"带进内核（那正是 ADR-001
+里被否决的做法）。实现体 `SimTaskSurface` / `RealTaskSurface` 仍留在
+`owo-agent-core::computer_use`，内核只承载契约，并在 core 侧以
+`pub use owo_agent_kernel::TaskSurface;` 保持既有路径可用。
+
+倒置后 `desktop_env` 的 `crate::` 引用**实测为空集**，于是整体搬迁成为可能。
+
+### 7.2 验收证据
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| workspace 全目标编译 | `check --workspace --all-targets`（`-j 1`） | **exit=0**，166 s | `docs/qa/logs/mk-m5-check2-*.log` |
+| 全量 core 测试（含 desktop_env / TaskSurface 适配器契约） | `cargo test -p owo-agent-core --locked` | **exit=0**，372 s；`desktop_env_tests`(19) 与 `surface_adapter_observes_and_acts_but_declares_limits` 全绿 | `docs/qa/logs/mk-m5-core-tests-*.log` |
+| 全量 server 测试 | `cargo test -p owo-agent-server --locked -j 1 -- --test-threads=1` | **exit=0**，1,015 s（63 单测 + 40 集成测试文件全绿，含 `desktop_world_api_tests` 14 条） | `docs/qa/logs/mk-m5-server-tests-*.log` | `docs/qa/logs/mk-m5-server-tests-*.log` |
+| 依赖闭包 | `cargo tree -p owo-agent-env` | `owo-agent-core`/`owo-agent-server`/`sherpa`/`ndarray`/`rusqlite` 均 **0 次**；`owo-agent-*` 只有 kernel 与自身 | `docs/qa/logs/mk-m5-tree.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m5-env` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m5-env-*/report.json` |
+| 调用方改动 | `git status` | server 的 `desktop_world_api.rs`（3 处）与 devtool 的 `dataset_builder.rs`（1 处）改指新 crate；core 的 `transition`/`world_model` 走别名未改 | 会话记录 |
+| `cargo fmt --all` | 经 `Invoke-CiCargo` | exit=0 | 会话记录 |
+
+### 7.3 又一次被 `use` 扫描漏掉的依赖（新坑）
+
+新 crate 首次编译即报 3 个 `E0433`：`chrono::Utc::now()` / `chrono::Utc::now()
+.timestamp_millis()` / `uuid::Uuid::new_v4()` —— 这三处是**全限定内联路径**，
+基于 `use` 行扫描生成的依赖清单看不到它们。M3 的 `sandbox` 恰好没有这类写法，
+所以这个坑到 M5 才暴露。已写入 §4 坑表：**搬模块时依赖要按 `use` 行与内联全限定路径
+各核一遍**。
+
+### 7.4 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `Cargo.toml`（workspace） | 新增成员 `crates/owo-agent-env` + workspace 依赖 |
+| `crates/owo-agent-env/{Cargo.toml,src/lib.rs}` | 新 crate（边界文档 + desktop_env + 顶层再导出） |
+| `crates/owo-agent-core/src/desktop_env.rs` | `git mv` 到新 crate（0 处改动，文件原样） |
+| `crates/owo-agent-kernel/src/{lib.rs,task_surface.rs}` | 新增 `task_surface` 模块（依赖倒置产物） |
+| `crates/owo-agent-core/src/computer_use.rs` | trait 定义替换为 `pub use owo_agent_kernel::TaskSurface;` |
+| `crates/owo-agent-core/{Cargo.toml,src/lib.rs}` | 新增依赖 + 别名 re-export |
+| `crates/owo-agent-server/{Cargo.toml,src/desktop_world_api.rs,tests/desktop_world_api_tests.rs}` | 改指 `owo-agent_env::desktop_env` |
+| `devtools/product-eval/{Cargo.toml,src/dataset_builder.rs}` | 改指 `owo-agent_env::desktop_env` |
+| `crates/owo-agent-core/tests/desktop_env_tests.rs` | `TaskSurface` 显式走内核 |
+
+
+## 8. 后续候选与取舍记录
 
 M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做
