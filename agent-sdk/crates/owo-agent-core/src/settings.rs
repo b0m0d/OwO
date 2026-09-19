@@ -223,6 +223,12 @@ pub struct Settings {
     /// 缺省时由 Agent 默认为 workspace；read_only=true 等效 read_only 档）。
     #[serde(default)]
     pub permission_profile: Option<String>,
+    /// §4.5.3 结构化权限配置（权限中心提交；`None` = 只按档位走）。
+    ///
+    /// 与 `permission_profile` 同时存在时，档位是 spec 的下界投影：
+    /// `Policy::set_spec` 会把档位同步为 `nearest_profile()`，两者不会互相矛盾。
+    #[serde(default)]
+    pub permission_spec: Option<crate::permission_spec::PermissionSpec>,
     /// 额外危险命令片段（deny 优先）。
     #[serde(default)]
     pub deny_commands: Vec<String>,

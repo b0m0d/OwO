@@ -288,6 +288,12 @@ pub struct Policy {
     profile: std::sync::Arc<std::sync::Mutex<PermissionProfile>>,
     /// §5.4 有作用域、可撤销的授权记忆（用户审批选项生成；命中即放行）。
     grants: std::sync::RwLock<Option<std::sync::Arc<crate::grant_store::GrantStore>>>,
+    /// §4.5.3 结构化 profile（权限中心提交）。`None` = 没有显式结构化配置，
+    /// 判定完全按档位走（保持既有行为，老调用点零改动）。
+    ///
+    /// 这个维度层**只收紧不放宽**：`extra_denial` 只会给出 Deny；
+    /// 而且优先于 Read 放行与 grant 命中——显式拒绝维度不能被授权记忆绕过。
+    spec: std::sync::Arc<std::sync::Mutex<Option<crate::permission_spec::PermissionSpec>>>,
 }
 
 impl Policy {
@@ -309,6 +315,7 @@ impl Policy {
             read_only: Arc::new(AtomicBool::new(false)),
             profile: std::sync::Arc::new(std::sync::Mutex::new(PermissionProfile::Workspace)),
             grants: std::sync::RwLock::new(None),
+            spec: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -376,6 +383,42 @@ impl Policy {
             .lock()
             .map(|guard| *guard)
             .unwrap_or(PermissionProfile::ReadOnly)
+    }
+
+    /// §4.5.3 提交结构化 profile（权限中心唯一写入口）。
+    ///
+    /// **档位只会被推到只读，永远不会被这次提交放宽**：
+    /// - spec 三维全关（等价只读）→ 档位同步为 `ReadOnly`，让 settings 与运行时
+    ///   说的是同一件事，不留"档位写着 workspace、实际什么都干不了"的分裂真相；
+    /// - 其余情况**不动档位**。收紧由 [`decision`](Self::decision) 里的
+    ///   `extra_denial` 层直接生效——它是纯减法，能把 FullAccess 下的命令关掉，
+    ///   却不需要（也不应该）把用户的档位旋钮拧松。
+    ///
+    /// 为什么不做"取最近档位"的自动同步：`AutoReview` 在某些面比 `Workspace` 更严
+    /// （工作区内写也要过审批链），任何"按 spec 反推档位"都会把这类更严的档位降级，
+    /// 那正好违反"只收紧不放宽"。反推函数 [`crate::permission_spec::PermissionSpec::nearest_profile`]
+    /// 因此只用于"是否等价只读"这一个判断。
+    pub fn set_spec(&self, spec: crate::permission_spec::PermissionSpec) {
+        let forces_read_only = spec.nearest_profile() == PermissionProfile::ReadOnly
+            || self.profile() == PermissionProfile::ReadOnly;
+        if let Ok(mut current) = self.spec.lock() {
+            *current = Some(spec);
+        }
+        if forces_read_only {
+            self.set_profile(PermissionProfile::ReadOnly);
+        }
+    }
+
+    /// §4.5.3 当前结构化 profile（`None` = 未显式配置，判定只按档位走）。
+    pub fn spec(&self) -> Option<crate::permission_spec::PermissionSpec> {
+        self.spec.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    /// 清除结构化 profile（回到纯档位驱动；权限中心"恢复档位默认"用）。
+    pub fn clear_spec(&self) {
+        if let Ok(mut current) = self.spec.lock() {
+            *current = None;
+        }
     }
 
     /// 追加额外危险命令片段（deny 优先；写入基础列表，构造时静态）。
@@ -541,12 +584,21 @@ impl Policy {
 
     /// 工具执行前的最终判定（拒绝原因通过 request.reason 表达）。
     ///
-    /// §5.3/§5.4 判定顺序：deny 优先 → 等级档位（profile）→ 授权记忆（grant）→ ask。
+    /// §5.3/§5.4 判定顺序：deny 优先 → §4.5.3 维度收紧层 → 等级档位（profile）
+    /// → 授权记忆（grant）→ ask。
     /// grant 命中放行与 profile 档位叠加，但绝不越过 deny 规则（reason 以"拒绝"开头
     /// 恒为 Deny，false 优先）。
     pub fn decision(&self, request: &PermissionRequest) -> Decision {
         if request.reason.starts_with("拒绝") {
             return Decision::Deny;
+        }
+        // §4.5.3 维度收紧层：**必须**排在 Read 放行与 grant 命中之前——
+        // 用户在权限中心显式关掉某个维度时，"读操作默认放行"和"已授过的权限"
+        // 都不能把它绕回去，否则界面关了后端还在跑，就是假合规。
+        if let Some(spec) = self.spec() {
+            if spec.extra_denial(request).is_some() {
+                return Decision::Deny;
+            }
         }
         if request.level == Level::Read {
             return Decision::Allow;
@@ -822,5 +874,179 @@ mod tests {
         assert!(!read.is_destructive(), "只读操作可始终允许");
         let inject = Policy::new(".").evaluate("desktop_type", &json!({ "text": "hi" }));
         assert!(inject.is_destructive(), "注入不可逆，不允许始终允许");
+    }
+
+    /// §4.5.3 测试夹具：四个维度独立可设，scopes 留空。
+    fn spec(
+        filesystem: crate::permission_spec::FilesystemScope,
+        command: crate::permission_spec::RuleScope,
+        network: crate::permission_spec::RuleScope,
+    ) -> crate::permission_spec::PermissionSpec {
+        crate::permission_spec::PermissionSpec {
+            filesystem,
+            command,
+            network,
+            persistence: crate::permission_spec::PersistenceScope::Once,
+            scopes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dimension_deny_beats_grant_hit() {
+        // 用户在权限中心把「命令执行」关掉之后，先前授出去的 session 授权必须失效。
+        // 若判定顺序写错（grant 在前），这条会变成 Allow —— 界面显示"已拒绝"、
+        // 后端却继续执行命令，就是假合规。
+        use crate::grant_store::{GrantScope, GrantStore};
+        use crate::permission_spec::{FilesystemScope, RuleScope};
+
+        let store = std::sync::Arc::new(GrantStore::new());
+        let policy = Policy::new(".").with_grants(store.clone());
+        let probe = policy.evaluate("run_command", &json!({ "command": "ls -la" }));
+        let grant = store
+            .grant_from_scope(&probe, &policy.workspace_id(), GrantScope::Session)
+            .expect("session 生成 grant");
+        store.insert(grant);
+
+        // 对照：白名单档不接管命令 → 仍是 grant 命中放行。
+        policy.set_spec(spec(
+            FilesystemScope::WorkspaceWrite,
+            RuleScope::Allowlisted,
+            RuleScope::Deny,
+        ));
+        assert_eq!(
+            policy.decision(&probe),
+            Decision::Allow,
+            "未显式拒绝该维度时，grant 照常生效（收紧层不得改变既有行为）"
+        );
+
+        // 同一策略、同一 grant，只把命令维度改成 Deny → 必须立刻拒绝。
+        policy.set_spec(spec(
+            FilesystemScope::WorkspaceWrite,
+            RuleScope::Deny,
+            RuleScope::Deny,
+        ));
+        assert_eq!(
+            policy.decision(&probe),
+            Decision::Deny,
+            "维度显式拒绝优先于 grant 命中"
+        );
+        assert_eq!(
+            policy.profile(),
+            PermissionProfile::Workspace,
+            "工作区可写 + 命令拒绝不是全禁，档位不应升到只读"
+        );
+        assert_eq!(
+            store.list().len(),
+            1,
+            "拒绝不该顺手删掉授权记录（撤销是显式动作）"
+        );
+    }
+
+    #[test]
+    fn filesystem_none_denies_reads_too() {
+        // Read 级默认放行是既有语义；filesystem:none 是唯一能把「读」也关掉的面板，
+        // 所以收紧层必须排在 Read 放行之前。
+        use crate::permission_spec::{FilesystemScope, RuleScope};
+        let policy = Policy::new(".");
+        let read = policy.evaluate("read_file", &json!({ "path": "a.txt" }));
+        assert_eq!(policy.decision(&read), Decision::Allow);
+        policy.set_spec(spec(
+            FilesystemScope::None,
+            RuleScope::Deny,
+            RuleScope::Deny,
+        ));
+        assert_eq!(
+            policy.decision(&read),
+            Decision::Deny,
+            "文件系统=none 时连读取默认放行也要让位"
+        );
+        assert_eq!(
+            policy.profile(),
+            PermissionProfile::ReadOnly,
+            "三维全关时档位同步为只读（单一真相，不留分裂）"
+        );
+    }
+
+    #[test]
+    fn absent_spec_leaves_profile_semantics_untouched() {
+        // 回归护栏：没有结构化配置时（所有历史调用点与既有部署），判定必须
+        // 与引入 spec 之前逐条一致——否则这次改动就不是"只收紧不放宽"。
+        let policy = Policy::new(".");
+        assert!(policy.spec().is_none(), "默认无结构化配置");
+        let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
+        let exec = policy.evaluate("run_command", &json!({ "command": "ls" }));
+        let inject = policy.evaluate("desktop_type", &json!({ "text": "hi" }));
+        assert_eq!(policy.decision(&write), Decision::Allow);
+        assert_eq!(policy.decision(&exec), Decision::Ask);
+        assert_eq!(policy.decision(&inject), Decision::Ask);
+
+        policy.clear_spec();
+        assert_eq!(policy.decision(&write), Decision::Allow);
+        assert_eq!(policy.decision(&exec), Decision::Ask);
+        assert_eq!(
+            policy.decision(&inject),
+            Decision::Ask,
+            "clear_spec 不改变档位判定"
+        );
+    }
+
+    #[test]
+    fn read_only_is_an_upper_bound_spec_cannot_lift() {
+        // 只读模式必须是上界：提交一张"文件可写 + 命令不限"的结构化配置，
+        // 判定仍然是拒绝；档位也不会被抬回可写。这是本次改动唯一的放宽风险面。
+        use crate::permission_spec::{
+            FilesystemScope, PermissionSpec, PersistenceScope, RuleScope,
+        };
+        let policy = Policy::read_only(".");
+        let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
+        assert_eq!(policy.decision(&write), Decision::Deny);
+        policy.set_spec(PermissionSpec {
+            filesystem: FilesystemScope::WorkspaceWrite,
+            command: RuleScope::Unrestricted,
+            network: RuleScope::Unrestricted,
+            persistence: PersistenceScope::Workspace,
+            scopes: vec![],
+        });
+        assert_eq!(
+            policy.profile(),
+            PermissionProfile::ReadOnly,
+            "只读档不能因为 spec 更宽而被同步抬升"
+        );
+        assert!(policy.is_read_only(), "read_only 开关必须保持为真");
+        assert_eq!(
+            policy.decision(&write),
+            Decision::Deny,
+            "更宽的结构化配置不得让写入通过"
+        );
+    }
+
+    #[test]
+    fn spec_tightens_without_moving_the_profile_dial() {
+        // 收紧靠 extra_denial，不靠改档位：FullAccess 下关掉命令维度后，
+        // 判定立刻拒绝，但档位旋钮仍停留在人亲手选的位置（不会被这次提交拧松）。
+        use crate::permission_spec::{
+            FilesystemScope, PermissionSpec, PersistenceScope, RuleScope,
+        };
+        let policy = Policy::new(".");
+        policy.set_profile(PermissionProfile::FullAccess);
+        let exec = policy.evaluate("run_command", &json!({ "command": "ls" }));
+        assert_eq!(policy.decision(&exec), Decision::Allow, "全权档下执行放行");
+        policy.set_spec(PermissionSpec {
+            filesystem: FilesystemScope::WorkspaceWrite,
+            command: RuleScope::Deny,
+            network: RuleScope::Unrestricted,
+            persistence: PersistenceScope::Task,
+            scopes: vec![],
+        });
+        assert_eq!(
+            policy.decision(&exec),
+            Decision::Deny,
+            "命令维度关掉后必须拒绝"
+        );
+        assert_eq!(
+            policy.profile(),
+            PermissionProfile::FullAccess,
+            "档位不被这次提交改动（AutoReview 等更严档位同理，不会被降级）"
+        );
     }
 }

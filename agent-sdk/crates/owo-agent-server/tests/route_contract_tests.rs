@@ -191,6 +191,10 @@ fn sample_body(path: &str) -> Option<&'static str> {
         "/session" => Some(r#"{"workspace":".","model":"idle"}"#),
         "/session/{id}/turn" => Some(r#"{"prompt":"hi"}"#),
         "/permissions" => Some(r#"{"profile":"workspace"}"#),
+        // §4.5.3 结构化配置：给一份**合法且收紧**的 body（可达性测试要 200，不是 400）。
+        "/permissions/spec" => Some(
+            r#"{"spec":{"filesystem":"workspace_read","command":"allowlisted","network":"deny","persistence":"once","scopes":[]}}"#,
+        ),
         "/permissions/grants/revoke" => Some(r#"{"grant_id":"contract-no-such"}"#),
         "/session/{id}/permission/{request_id}" => Some(r#"{"allow":true}"#),
         "/plugins/{id}/enabled" => Some(r#"{"enabled":false}"#),
@@ -1293,6 +1297,15 @@ async fn mutation_routes_publish_exactly_one_domain_invalidate() {
             "POST",
             "/settings",
             settings_json,
+            InvalidateDomain::Settings,
+        ),
+        (
+            // §4.5.3 提交结构化权限配置会写 settings.json（档位/只读位/spec 三处），
+            // 因此它属于 Settings 领域失效；不另发一个 Permissions 领域，
+            // 那需要前端 INVALIDATE_HANDLERS 同步消费（尚未接入，先不制造无人消费的域）。
+            "POST",
+            "/permissions/spec",
+            serde_json::json!({"spec":{"filesystem":"workspace_read","command":"allowlisted","network":"deny","persistence":"once","scopes":[]}}),
             InvalidateDomain::Settings,
         ),
         (

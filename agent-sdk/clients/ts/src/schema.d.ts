@@ -2501,6 +2501,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/permissions/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["permissionsOverview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/permissions/spec": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["permissionsSetSpec"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/plugins": {
         parameters: {
             query?: never;
@@ -8910,13 +8942,77 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
-                    grant_id: string;
+                    all?: boolean;
+                    grant_id?: string;
+                    tool_id?: string;
                 };
             };
         };
         responses: {
-            /** @description 授权记忆已撤销 */
+            /** @description 授权记忆已撤销（grant/tool/workspace 三种粒度，返回条数） */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    permissionsOverview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description §4.5 权限中心总览：档位 + 结构化 spec + 四维生效判定 + 全局待审批 + 授权记忆 + 近期决定（服务端展开，前端不自行推导范围） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    permissionsSetSpec: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    confirm?: boolean;
+                    duration_secs?: number;
+                    spec: {
+                        /** @enum {string} */
+                        command: "deny" | "allowlisted" | "unrestricted";
+                        /** @enum {string} */
+                        filesystem: "none" | "workspace_read" | "workspace_write" | "custom";
+                        /** @enum {string} */
+                        network: "deny" | "allowlisted" | "unrestricted";
+                        /** @enum {string} */
+                        persistence: "once" | "task" | "workspace";
+                        /** @description 工作区相对字面量：path:… / host:… / command:… */
+                        scopes?: string[];
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description 结构化配置已写入并即时生效（只收紧；完全访问需 confirm + 时长） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation/failed | confirmation/required | conflict/read_only */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

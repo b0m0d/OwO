@@ -110,24 +110,7 @@ pub(super) async fn permissions_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let profile = state.agent.permission_profile();
-    let grants: Vec<Value> = state
-        .grants
-        .list()
-        .into_iter()
-        .map(|grant| {
-            json!({
-                "grant_id": grant.grant_id,
-                "tool_id": grant.tool_id,
-                "workspace_id": grant.workspace_id,
-                "path_scope": grant.path_scope.map(|path| path.to_string_lossy().into_owned()),
-                "host_scope": grant.host_scope,
-                "has_fingerprint": grant.argument_fingerprint.is_some(),
-                "created_at": grant.created_at.to_rfc3339(),
-                "expires_at": grant.expires_at.map(|at| at.to_rfc3339()),
-                "remaining_uses": grant.remaining_uses,
-            })
-        })
-        .collect();
+    let grants = grant_rows(&state.grants);
     Ok(Json(json!({
         "profile": profile.label(),
         "read_only": state.agent.permission_profile() == owo_agent_core::PermissionProfile::ReadOnly,
@@ -182,57 +165,409 @@ pub(super) async fn permissions_set_profile(
     })))
 }
 
-/// §5.4 授权记忆列表（与 permissions_status 同构；独立路由便于前端独立刷新）。
+/// §5.4 授权记忆列表（与 permissions_status / overview 同构；独立路由便于前端独立刷新）。
 pub(super) async fn grants_list(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let grants: Vec<Value> = state
-        .grants
-        .list()
-        .into_iter()
-        .map(|grant| {
-            json!({
-                "grant_id": grant.grant_id,
-                "tool_id": grant.tool_id,
-                "path_scope": grant.path_scope.map(|path| path.to_string_lossy().into_owned()),
-                "host_scope": grant.host_scope,
-                "expires_at": grant.expires_at.map(|at| at.to_rfc3339()),
-                "remaining_uses": grant.remaining_uses,
-            })
-        })
-        .collect();
+    let grants = grant_rows(&state.grants);
     Ok(Json(
         json!({ "grants": grants, "grant_count": grants.len() }),
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub(super) struct GrantRevokeRequest {
-    grant_id: String,
+    #[serde(default)]
+    grant_id: Option<String>,
+    #[serde(default)]
+    tool_id: Option<String>,
+    #[serde(default)]
+    all: bool,
 }
 
-/// §5.4 逐条撤销授权记忆（审计记录）。
+/// §5.4 / §4.5.2 撤销授权记忆，三种粒度（**级联撤销**）：
+///
+/// - `{grant_id}`：单条（既有契约，字面不变；不存在仍 404）；
+/// - `{tool_id}`：该工具的全部授权（工具下线/换实现时用）；
+/// - `{all:true}`：当前工作区全部长期授权（权限中心"撤销本工作区"）。
+///
+/// 三者互斥按上表优先级取第一个出现的字段；都不给 → 400（拒绝"空请求撤销全部"
+/// 这类误解，宁可比照失败也不放大作用面）。
 pub(super) async fn grants_revoke(
     State(state): State<Arc<AppState>>,
     Json(request): Json<GrantRevokeRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let removed = state.grants.revoke(&request.grant_id);
-    if !removed {
+    let workspace_id = state.workspace_id();
+    let (revoked, scope) = if let Some(grant_id) = request.grant_id.as_deref() {
+        if !state.grants.revoke(grant_id) {
+            return Err((StatusCode::NOT_FOUND, format!("授权记忆不存在：{grant_id}")));
+        }
+        (1usize, "grant")
+    } else if let Some(tool_id) = request.tool_id.as_deref() {
+        (state.grants.revoke_tool(tool_id), "tool")
+    } else if request.all {
+        (state.grants.revoke_workspace(&workspace_id), "workspace")
+    } else {
         return Err((
-            StatusCode::NOT_FOUND,
-            format!("授权记忆不存在：{}", request.grant_id),
+            StatusCode::BAD_REQUEST,
+            "撤销需要指定 grant_id、tool_id 或 all=true 之一".to_string(),
         ));
-    }
+    };
     if let Ok(mut audit) = state.agent.audit_log().lock() {
         audit.record(
             "permissions",
             "grant_revoke",
             None,
             Some(true),
-            format!("撤销授权记忆：{}", request.grant_id),
+            format!("撤销授权记忆：{scope} 共 {revoked} 条"),
         );
     }
-    Ok(Json(json!({ "ok": true, "revoked": request.grant_id })))
+    // `revoked` 语义从"被撤销的 grant_id 字符串"改为"条数"：前端要的是
+    // "撤销后还剩几条"的可断言数字，单条场景两者信息等价（grant_id 另原样回显）。
+    Ok(Json(json!({
+        "ok": true,
+        "revoked": revoked,
+        "scope": scope,
+        "grant_id": request.grant_id,
+        "remaining": state.grants.list().len(),
+    })))
+}
+
+/// 授权记忆行（`/permissions`、`/permissions/grants`、`/permissions/overview` 共用，
+/// 保证三处形状一致——同一事实不能有两个版本）。
+fn grant_rows(store: &owo_agent_core::grant_store::GrantStore) -> Vec<Value> {
+    store
+        .list()
+        .into_iter()
+        .map(|grant| {
+            json!({
+                "grant_id": grant.grant_id,
+                "tool_id": grant.tool_id,
+                "workspace_id": grant.workspace_id,
+                "scope": grant.scope,
+                "path_scope": grant.path_scope.map(|path| path.to_string_lossy().into_owned()),
+                "host_scope": grant.host_scope,
+                "has_fingerprint": grant.argument_fingerprint.is_some(),
+                "created_at": grant.created_at.to_rfc3339(),
+                "expires_at": grant.expires_at.map(|at| at.to_rfc3339()),
+                "remaining_uses": grant.remaining_uses,
+                "long_lived": grant.expires_at.is_none() && grant.remaining_uses.is_none(),
+            })
+        })
+        .collect()
+}
+
+/// §4.5 权限中心总览：档位 + 结构化配置 + 四维生效判定 + 待审批 + 授权记忆 + 近期决定。
+///
+/// 为什么这个聚合必须在服务端：§4.5.1 要页面显示"三个维度的实际范围"，而前端只有
+/// 档位名。让前端从 `workspace` 去猜"文件可写、命令询问"就是**在权限页面上编造范围**，
+/// 用户会照着它做授权决定。这里由 [`PermissionSpec::expand`] 给出唯一口径，
+/// 前端只做渲染（见 §4.8 的 render 层零判定）。
+pub(super) async fn permissions_overview(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    use owo_agent_core::permission_spec::PermissionSpec;
+    let profile = state.agent.permission_profile();
+    let read_only = state.agent.policy().is_read_only();
+    let stored = state.agent.policy().spec();
+    // 没有显式配置时按档位**如实投影**（投影不出来的落 custom），
+    // 而不是硬编码一套"看起来合理"的维度值。
+    let effective = stored
+        .clone()
+        .unwrap_or_else(|| PermissionSpec::from_profile(profile, !read_only));
+    let source = if stored.is_some() { "spec" } else { "profile" };
+    let rules = effective.expand();
+    let summary_of = |key: &str| {
+        rules
+            .iter()
+            .find(|rule| rule.id == key)
+            .map(|rule| rule.reason.clone())
+            .unwrap_or_default()
+    };
+    let dimensions = json!([
+        {
+            "key": "filesystem",
+            "label": "文件系统",
+            "effective": effective.filesystem.as_str(),
+            "source": source,
+            "configurable": true,
+            "summary": summary_of("filesystem"),
+        },
+        {
+            "key": "command",
+            "label": "命令执行",
+            "effective": effective.command.as_str(),
+            "source": source,
+            "configurable": true,
+            "summary": summary_of("command"),
+        },
+        {
+            "key": "network",
+            "label": "网络访问",
+            "effective": effective.network.as_str(),
+            "source": source,
+            "configurable": true,
+            "summary": summary_of("network"),
+        },
+        {
+            "key": "persistence",
+            "label": "授权有效期",
+            "effective": effective.persistence.as_str(),
+            "source": source,
+            "configurable": true,
+            "summary": summary_of("persistence"),
+        },
+    ]);
+    // 待审批动作：全局一份（此前只有会话 SSE 能看见，断线即失联）。
+    // 两个 map 分别取快照、不同时持两把锁——避免与 respond_permission 的加锁顺序互相卡住。
+    let session_of: std::collections::HashMap<String, String> = state
+        .pending_approval_sessions
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let waiting: Vec<(String, String, owo_agent_core::PermissionRequest)> = state
+        .pending_approvals
+        .lock()
+        .map(|guard| {
+            guard
+                .iter()
+                .map(|(id, (_sender, request))| (id.clone(), request.tool.clone(), request.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let pending: Vec<Value> = waiting
+        .into_iter()
+        .map(|(request_id, _tool, request)| {
+            let explain = owo_agent_core::permissions::describe_request(&request);
+            json!({
+                "request_id": request_id.clone(),
+                "session_id": session_of.get(&request_id).cloned(),
+                "tool": request.tool,
+                "level": level_label(&request),
+                "reason": request.reason,
+                "explain": explain,
+                "redacted_args": request.redacted_args.clone()
+                    .unwrap_or_else(|| owo_agent_core::permissions::redact_args(&request.args)),
+                "risk_note": request.risk_note,
+                // 「工作区长期」只对非破坏性动作开放（§5.4）；前端据此禁用第三/第四个选项。
+                "destructive": request.is_destructive(),
+            })
+        })
+        .collect();
+    let grants = grant_rows(&state.grants);
+    let recent_decisions: Vec<Value> = state
+        .agent
+        .audit_log()
+        .lock()
+        .map(|audit| {
+            audit
+                .entries
+                .iter()
+                .filter(|entry| entry.event.contains("permission"))
+                .rev()
+                .take(20)
+                .map(|entry| {
+                    json!({
+                        "ts": entry.ts,
+                        "session_id": entry.session_id,
+                        "tool": entry.tool,
+                        "approved": entry.approved,
+                        "detail": entry.detail,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let full_access_preview =
+        PermissionSpec::from_profile(owo_agent_core::PermissionProfile::FullAccess, true);
+    Ok(Json(json!({
+        "profile": profile.label(),
+        "read_only": read_only,
+        "spec": stored,
+        "effective_spec": effective,
+        "dimensions": dimensions,
+        "expanded": rules,
+        "pending": pending,
+        "pending_count": pending.len(),
+        "grants": grants,
+        "grant_count": grants.len(),
+        // §4.5.2 落盘事实：不落盘就没有"工作区长期"，界面上打了勾也是假的。
+        "grants_persisted": state.grants.persist_path().is_some(),
+        "recent_decisions": recent_decisions,
+        "full_access": {
+            "active": profile == owo_agent_core::PermissionProfile::FullAccess,
+            "requires_confirm": true,
+            "risk_notes": full_access_preview.risk_notes(),
+        },
+        "scope_literals": {
+            "filesystem": ["none", "workspace_read", "workspace_write", "custom"],
+            "command": ["deny", "allowlisted", "unrestricted"],
+            "network": ["deny", "allowlisted", "unrestricted"],
+            "persistence": ["once", "task", "workspace"],
+            "approval": ["once", "task", "workspace"]
+        },
+    })))
+}
+
+/// 审批请求的动作级别标签（小写稳定字面量，前端与测试都按它断言）。
+fn level_label(request: &owo_agent_core::PermissionRequest) -> &'static str {
+    match request.level {
+        owo_agent_core::permissions::Level::Read => "read",
+        owo_agent_core::permissions::Level::Write => "write",
+        owo_agent_core::permissions::Level::Execute => "execute",
+        owo_agent_core::permissions::Level::Inject => "inject",
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct SpecRequest {
+    spec: owo_agent_core::permission_spec::PermissionSpec,
+    #[serde(default)]
+    confirm: bool,
+    /// 完全访问的**时长**（秒）。指南要求"范围 + 时长 + 风险"三要素齐了才允许提交。
+    #[serde(default)]
+    duration_secs: Option<i64>,
+}
+
+/// 完全访问允许的最长时长（8 小时）：到期后由人重新确认，不接受"永久完全访问"。
+const FULL_ACCESS_MAX_SECS: i64 = 8 * 3600;
+
+/// §4.5.3 提交结构化权限配置（权限中心唯一写入口）。
+///
+/// 三道闸：
+/// 1. **字面量校验**：serde 直接拒未知值（`validation/failed`），不做静默降级；
+/// 2. **只收紧不放宽**：spec 只能把档位往严的方向同步（`Policy::set_spec` 里
+///    只读档是上界），因此这里显式拒绝"在只读模式下开放写入"；
+/// 3. **完全访问三要素**：命令或网络任一 `unrestricted` 时，必须带 `confirm=true`
+///    与 `duration_secs`（1..=8h），并把风险清单回给前端做二次确认展示。
+pub(super) async fn permissions_set_spec(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SpecRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let bad_request = |code: &str, message: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "error": { "code": code, "message": message },
+            })),
+        )
+    };
+    let spec = request.spec;
+    if spec.filesystem == owo_agent_core::permission_spec::FilesystemScope::Custom
+        && spec.scopes.is_empty()
+    {
+        return Err(bad_request(
+            "validation/failed",
+            "filesystem=custom 必须给出至少一条 path: 范围；空范围等于没配置".to_string(),
+        ));
+    }
+    for scope in &spec.scopes {
+        let known = scope.starts_with("path:")
+            || scope.starts_with("host:")
+            || scope.starts_with("command:");
+        if !known {
+            return Err(bad_request(
+                "validation/failed",
+                format!("未知范围前缀：{scope}（应为 path: / host: / command:）"),
+            ));
+        }
+        if scope.contains("..") || std::path::Path::new(scope).is_absolute() {
+            return Err(bad_request(
+                "validation/failed",
+                format!("范围必须是工作区相对字面量，不得含 .. 或绝对路径：{scope}"),
+            ));
+        }
+    }
+    let unrestricted = spec.command == owo_agent_core::permission_spec::RuleScope::Unrestricted
+        || spec.network == owo_agent_core::permission_spec::RuleScope::Unrestricted;
+    if unrestricted {
+        if !request.confirm {
+            return Err(bad_request(
+                "confirmation/required",
+                "命令或网络设为 unrestricted 属完全访问，必须显式 confirm=true 并给出时长"
+                    .to_string(),
+            ));
+        }
+        match request.duration_secs {
+            Some(secs) if (60..=FULL_ACCESS_MAX_SECS).contains(&secs) => {}
+            Some(secs) => {
+                return Err(bad_request(
+                    "validation/failed",
+                    format!("完全访问时长需在 60..{FULL_ACCESS_MAX_SECS} 秒之间，收到 {secs}"),
+                ))
+            }
+            None => {
+                return Err(bad_request(
+                    "confirmation/required",
+                    "完全访问必须带 duration_secs（时长上限 8 小时，到期后重新确认）".to_string(),
+                ))
+            }
+        }
+    }
+    let nearest = spec.nearest_profile();
+    // 两件事必须分开判，混成一个条件就会把闸门写死：
+    // - **上界**：只读档（Plan 模式）下提交任何"非只读等价"的 spec 一律拒绝。
+    //   运行时确实不会立刻放宽（`Policy::set_spec` 守得住档位），但这份配置会
+    //   落进 settings.json，用户一退出只读模式就自动生效——那是他没确认过的授权。
+    // - **收紧**：spec 等价只读时，把档位与 settings.read_only 一起推到只读，
+    //   让"界面写着 workspace、实际什么都干不了"这种分裂真相不出现。
+    if state.agent.policy().is_read_only() && nearest != owo_agent_core::PermissionProfile::ReadOnly
+    {
+        return Err(bad_request(
+            "conflict/read_only",
+            "当前为只读模式，无法保存更宽的结构化配置；请先退出只读档位再提交（只读等价的收紧配置可以直接存）"
+                .to_string(),
+        ));
+    }
+    let forces_read_only = nearest == owo_agent_core::PermissionProfile::ReadOnly;
+    let effective_profile = if forces_read_only {
+        owo_agent_core::PermissionProfile::ReadOnly
+    } else {
+        state.agent.permission_profile()
+    };
+    let mut settings = owo_agent_core::Settings::load(&state.workspace);
+    settings.read_only = forces_read_only;
+    if forces_read_only {
+        settings.permission_profile = None;
+    } else {
+        settings.permission_profile = Some(effective_profile.label().to_string());
+    }
+    settings.permission_spec = Some(spec.clone());
+    if let Err(error) = settings.save(&state.workspace) {
+        return Err(bad_request("storage/not_writable", error));
+    }
+    state.agent.policy().set_spec(spec.clone());
+    let expanded = spec.expand();
+    let denials_added = expanded.iter().filter(|rule| rule.effect == "deny").count();
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "permissions",
+            "spec",
+            None,
+            Some(true),
+            format!(
+                "权限中心提交结构化配置：filesystem={} command={} network={} persistence={} scopes={}（档位同步为 {}）",
+                spec.filesystem.as_str(),
+                spec.command.as_str(),
+                spec.network.as_str(),
+                spec.persistence.as_str(),
+                spec.scopes.len(),
+                effective_profile.label(),
+            ),
+        );
+    }
+    owo_agent_server::event_stream::hub()
+        .publish_invalidate(owo_agent_server::event_stream::InvalidateDomain::Settings);
+    Ok(Json(json!({
+        "ok": true,
+        "spec": spec,
+        "expanded": expanded,
+        "profile": state.agent.permission_profile().label(),
+        "denials_added": denials_added,
+        "duration_secs": if unrestricted { request.duration_secs } else { None },
+        "note": "已写入 settings.json 并即时生效；只收紧维度已接入判定链",
+    })))
 }
 
 /// 通用设置保存：写入 settings.json 并应用运行时设置（数据出境、STT、主动建议、白名单）。
@@ -258,6 +593,12 @@ pub(super) async fn settings_update(
         {
             state.agent.set_permission_profile(profile);
         }
+    }
+    // §4.5.3 结构化配置跟着 settings 一起恢复；缺省时清除运行时 spec，
+    // 避免"文件里已删掉、进程里还在收紧"的两套真相。
+    match settings.permission_spec.clone() {
+        Some(spec) => state.agent.policy().set_spec(spec),
+        None => state.agent.policy().clear_spec(),
     }
     if let Some(model) = &settings.model {
         if !model.trim().is_empty() {

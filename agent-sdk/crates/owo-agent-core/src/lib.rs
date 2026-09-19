@@ -62,6 +62,7 @@ pub mod ocr;
 pub mod onnx_ocr;
 pub mod paddle_ocr;
 pub mod perception;
+pub mod permission_spec;
 pub mod permissions;
 pub mod plan;
 pub mod platform;

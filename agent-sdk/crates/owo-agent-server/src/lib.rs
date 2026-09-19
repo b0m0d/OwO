@@ -216,9 +216,13 @@ impl AppState {
             whitelist.upsert(entry);
         }
         let elements = Arc::new(Mutex::new(owo_agent_core::ElementRegistry::new()));
-        // §5.3/§5.4：授权记忆与权限档位 —— server 全局一份，Agent 的 Policy 共享引用，
+        // §5.4 授权记忆 —— server 全局一份，Agent 的 Policy 共享引用，
         // 审批卡选项写入的 Grant 在下一请求即命中；profile 从 settings 恢复。
-        let grants = Arc::new(owo_agent_core::grant_store::GrantStore::new());
+        // §4.5.2「工作区长期」必须跨重启有效，所以长期授权落 `<data_root>/grants.json`
+        // （tmp→rename 原子写；坏文件改名 *.json.bad 保留现场）。有期限的授权不写盘。
+        let grants = Arc::new(owo_agent_core::grant_store::GrantStore::persisting(
+            data_root.join("grants.json"),
+        ));
         let mut agent = agent;
         agent.set_elements(elements.clone());
         agent.set_grants(Arc::clone(&grants));
@@ -228,6 +232,11 @@ impl AppState {
             .and_then(owo_agent_core::PermissionProfile::parse)
         {
             agent.set_permission_profile(profile);
+        }
+        // §4.5.3 结构化配置必须在档位**之后**恢复：`set_spec` 会把档位同步为 spec 的
+        // 最近不放宽投影，顺序反过来等于用 settings 里的旧档位盖掉本次的收紧决定。
+        if let Some(spec) = settings.permission_spec.clone() {
+            agent.policy().set_spec(spec);
         }
         // X03/R3（§8.2）：本地 API bearer token **每次启动换发**并覆盖写盘（+ ACL）；
         // 写盘失败降级为内存 token。旧代际 bearer 因此在新进程上必然 401。
@@ -528,6 +537,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/permissions/grants/revoke",
             post(settings_api::grants_revoke),
+        )
+        // §4.5 权限中心：服务端聚合总览 + 结构化配置写入（前端不自行推导范围）。
+        .route(
+            "/permissions/overview",
+            get(settings_api::permissions_overview),
+        )
+        .route(
+            "/permissions/spec",
+            post(settings_api::permissions_set_spec),
         )
         .route("/whitelist", get(whitelist_api::whitelist_list))
         .route("/whitelist/manage", post(whitelist_api::whitelist_manage))
@@ -938,7 +956,9 @@ async fn openapi_spec() -> Json<Value> {
             "/settings/provider-test": { "post": { "operationId": "settingsProviderTest", "responses": { "200": { "description": "provider self-diagnosis (R3 §3.4): stable code provider/not_configured|endpoint_reachable|endpoint_unreachable + masked endpoint; no secrets, no model calls (TCP probe only)" } } } },
             "/permissions": { "get": { "operationId": "permissionsStatus", "responses": { "200": { "description": "当前权限档位 + 授权记忆（脱敏）" } } }, "post": { "operationId": "permissionsSetProfile", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "profile": { "type": "string", "enum": ["read_only", "workspace", "auto_review", "full_access", "custom"] } }, "required": ["profile"] } } } }, "responses": { "200": { "description": "profile 已切换" } } } },
             "/permissions/grants": { "get": { "operationId": "grantsList", "responses": { "200": { "description": "授权记忆列表（脱敏）" } } } },
-            "/permissions/grants/revoke": { "post": { "operationId": "grantsRevoke", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "grant_id": { "type": "string" } }, "required": ["grant_id"] } } } }, "responses": { "200": { "description": "授权记忆已撤销" } } } },
+            "/permissions/grants/revoke": { "post": { "operationId": "grantsRevoke", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "grant_id": { "type": "string" }, "tool_id": { "type": "string" }, "all": { "type": "boolean" } } } } } }, "responses": { "200": { "description": "授权记忆已撤销（grant/tool/workspace 三种粒度，返回条数）" } } } },
+            "/permissions/overview": { "get": { "operationId": "permissionsOverview", "responses": { "200": { "description": "§4.5 权限中心总览：档位 + 结构化 spec + 四维生效判定 + 全局待审批 + 授权记忆 + 近期决定（服务端展开，前端不自行推导范围）" } } } },
+            "/permissions/spec": { "post": { "operationId": "permissionsSetSpec", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "spec": permission_spec_schema(), "confirm": { "type": "boolean" }, "duration_secs": { "type": "integer" } }, "required": ["spec"] } } } }, "responses": { "200": { "description": "结构化配置已写入并即时生效（只收紧；完全访问需 confirm + 时长）" }, "400": { "description": "validation/failed | confirmation/required | conflict/read_only" } } } },
             "/whitelist": { "get": { "operationId": "whitelistList", "responses": { "200": { "description": "whitelist entries" } } } },
             "/session/{id}/context": { "get": { "operationId": "sessionContext", "parameters": [path_param("id")], "responses": { "200": { "description": "context stats: messages/tokens/budget/compaction/rules" } } } },
             "/skills/health": { "get": { "operationId": "skillsHealth", "responses": { "200": { "description": "flow skill health overview" } } } },
@@ -1504,6 +1524,26 @@ async fn openapi_spec() -> Json<Value> {
 
 fn path_param(name: &str) -> Value {
     serde_json::json!({ "name": name, "in": "path", "required": true, "schema": { "type": "string" } })
+}
+
+/// §4.5.3 结构化权限配置的 OpenAPI 片段（`/permissions/spec` 与快照共用）。
+///
+/// 四组字面量在这里**只声明一次**，与 `owo_agent_core::permission_spec` 的
+/// serde 表、`/permissions/overview` 的 `scope_literals` 以及前端 domain 层
+/// 必须一致；改词表时三处一起改（`wire_literals_match_guide` 与
+/// `route_contract_tests` 会把不一致判红）。
+fn permission_spec_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "filesystem": { "type": "string", "enum": ["none", "workspace_read", "workspace_write", "custom"] },
+            "command": { "type": "string", "enum": ["deny", "allowlisted", "unrestricted"] },
+            "network": { "type": "string", "enum": ["deny", "allowlisted", "unrestricted"] },
+            "persistence": { "type": "string", "enum": ["once", "task", "workspace"] },
+            "scopes": { "type": "array", "items": { "type": "string" }, "description": "工作区相对字面量：path:… / host:… / command:…" }
+        },
+        "required": ["filesystem", "command", "network", "persistence"]
+    })
 }
 
 // （§12：to_session_info/load_session 与会话元数据处理器已外移至 session_api.rs）

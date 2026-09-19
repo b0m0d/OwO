@@ -11,7 +11,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::permissions::PermissionRequest;
@@ -27,6 +27,16 @@ pub enum GrantScope {
     OneHour,
     /// 始终允许此只读动作（无到期；仅限宿主验证只读级工具）。
     AlwaysReadOnly,
+    /// §4.5.2「本任务」：审批卡四动作之一。
+    ///
+    /// 实现上等同于 `Session`（8h / 50 次，**不落盘**）。之所以单列一个变体
+    /// 而不是直接复用 `Session`：字面量要和指南与前端对齐，且未来若给 Grant
+    /// 加 run/task id，只需改这一处的有效期，不必再动前端与契约。
+    Task,
+    /// §4.5.2「工作区长期」：无到期、跨进程保留，只能在权限中心显式撤销。
+    /// 与 `AlwaysReadOnly` 的区别是它不预设"只读"——因此 `Workspace::as_str()`
+    /// 出现在授权列表里时，前端必须连同 `tool_id` 与参数指纹一起展示。
+    Workspace,
 }
 
 impl GrantScope {
@@ -36,7 +46,25 @@ impl GrantScope {
             GrantScope::Session => "session",
             GrantScope::OneHour => "one_hour",
             GrantScope::AlwaysReadOnly => "always_readonly",
+            GrantScope::Task => "task",
+            GrantScope::Workspace => "workspace",
         }
+    }
+
+    /// 人类可读标签（审批卡与权限中心共用；口径见指南 §4.5.2）。
+    pub fn label(self) -> &'static str {
+        match self {
+            GrantScope::Once => "仅本次",
+            GrantScope::Session | GrantScope::Task => "本任务",
+            GrantScope::OneHour => "一小时内",
+            GrantScope::AlwaysReadOnly => "只读长期",
+            GrantScope::Workspace => "工作区长期",
+        }
+    }
+
+    /// 是否会跨进程重启保留（§4.5.2「工作区长期」的唯一落盘判据）。
+    pub fn persists(self) -> bool {
+        matches!(self, GrantScope::AlwaysReadOnly | GrantScope::Workspace)
     }
 
     pub fn parse(value: &str) -> Option<Self> {
@@ -45,6 +73,8 @@ impl GrantScope {
             "session" => Some(Self::Session),
             "one_hour" => Some(Self::OneHour),
             "always_readonly" => Some(Self::AlwaysReadOnly),
+            "task" => Some(Self::Task),
+            "workspace" => Some(Self::Workspace),
             _ => None,
         }
     }
@@ -65,6 +95,12 @@ pub struct Grant {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub remaining_uses: Option<u32>,
+    /// §4.5.2 生成该授权时的审批选项字面量（`GrantScope::as_str`）。
+    ///
+    /// 只为展示与撤销而存在——判定仍然只看工具/工作区/路径/主机/参数指纹，
+    /// 不让标签参与安全决策。旧数据缺此字段按 `None` 处理（不猜范围）。
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 impl Grant {
@@ -85,6 +121,7 @@ impl Grant {
             created_at: Utc::now(),
             expires_at,
             remaining_uses: Some(10),
+            scope: None,
         }
     }
 }
@@ -179,6 +216,8 @@ pub struct GrantStore {
     inner: RwLock<BTreeMap<String, Vec<Grant>>>,
     /// 单工具最多持有 grant 数（超出时丢弃最旧的）。
     per_tool_cap: usize,
+    /// §4.5.2「工作区长期」落盘路径；`None` = 纯内存（测试与嵌入式用法零副作用）。
+    persist_path: RwLock<Option<PathBuf>>,
 }
 
 impl Default for GrantStore {
@@ -186,8 +225,30 @@ impl Default for GrantStore {
         Self {
             inner: RwLock::new(BTreeMap::new()),
             per_tool_cap: 16,
+            persist_path: RwLock::new(None),
         }
     }
+}
+
+/// 落盘文件（`<data_root>/grants.json`）。版本不认识的条目一律不加载。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GrantsFile {
+    version: u32,
+    grants: Vec<Grant>,
+}
+
+/// 当前落盘格式版本。
+const GRANTS_FILE_VERSION: u32 = 1;
+/// 落盘条目上限：长期授权本应是少数，超限直接不写（保留既有条目，绝不静默丢新的）。
+const GRANTS_PERSIST_CAP: usize = 128;
+
+/// 是否属于"跨进程长期"授权：无到期且无次数上限。
+///
+/// 判据刻意只看有效期字段、不看 `scope` 标签——老数据没有标签也能被正确对待，
+/// 而"本任务/此会话"这类有期限授权就算被写进文件也一定会在加载时过期作废，
+/// 双保险不依赖任何一侧的自觉。
+fn is_long_lived(grant: &Grant) -> bool {
+    grant.expires_at.is_none() && grant.remaining_uses.is_none()
 }
 
 impl GrantStore {
@@ -195,7 +256,65 @@ impl GrantStore {
         Self::default()
     }
 
-    pub fn insert(&self, grant: Grant) {
+    /// §4.5.2 开一个带落盘的存储：先加载长期授权（顺带清过期），再挂上路径。
+    /// 文件不存在是正常态（首次启动）；JSON 损坏则改名为 `*.bad` 保留现场后按空启动。
+    pub fn persisting(path: impl Into<PathBuf>) -> Self {
+        let store = Self::new();
+        let path = path.into();
+        store.load_from(&path);
+        if let Ok(mut current) = store.persist_path.write() {
+            *current = Some(path);
+        }
+        store
+    }
+
+    /// 落盘路径（权限中心展示"长期授权是否会跨重启保留"）。
+    pub fn persist_path(&self) -> Option<PathBuf> {
+        self.persist_path
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    fn load_from(&self, path: &Path) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return; // 首次启动：没有文件不是错误。
+        };
+        let parsed = match serde_json::from_str::<GrantsFile>(&text) {
+            Ok(file) if file.version == GRANTS_FILE_VERSION => file,
+            Ok(file) => {
+                Self::quarantine(path, &format!("不支持的 grants 版本 {}", file.version));
+                return;
+            }
+            Err(_) => {
+                Self::quarantine(path, "grants.json 无法解析");
+                return;
+            }
+        };
+        let mut loaded = 0usize;
+        for grant in parsed.grants {
+            if existing_expired(&grant) {
+                continue; // 重启即清过期，不落进内存再等惰性清理。
+            }
+            self.insert_memory(grant);
+            loaded += 1;
+        }
+        if loaded > 0 {
+            tracing::info!("§4.5.2 已从磁盘恢复 {loaded} 条长期授权");
+        }
+    }
+
+    /// 坏文件改名保留（`grants.json.bad`），便于排障时看清"授权为何消失了"。
+    fn quarantine(path: &Path, reason: &str) {
+        let bad = path.with_extension("json.bad");
+        match std::fs::rename(path, &bad) {
+            Ok(()) => tracing::warn!("{reason}，已改名保留 {} 后按空启动", bad.display()),
+            Err(error) => tracing::warn!("{reason}，且改名失败（{error}），本次按空启动"),
+        }
+    }
+
+    /// 内存写入（不含落盘副作用）：insert 与加载共用，避免加载时反向触发写盘。
+    fn insert_memory(&self, grant: Grant) {
         if let Ok(mut inner) = self.inner.write() {
             let bucket = inner.entry(grant.tool_id.clone()).or_default();
             // 容量守卫：先淘汰过期/用尽的，再超出则丢弃最旧。
@@ -207,6 +326,71 @@ impl GrantStore {
             }
             bucket.push(grant);
         }
+    }
+
+    /// 把当前长期授权原子写回磁盘（tmp → rename）。
+    ///
+    /// 失败只记 warn，绝不向上抛：权限判定不该因为"记住授权失败"而中断，
+    /// 但也不能静默——否则用户以为勾了长期、重启后却发现每次都要审批。
+    fn persist_now(&self) {
+        let Some(path) = self.persist_path() else {
+            return;
+        };
+        let mut long_lived: Vec<Grant> = self.list().into_iter().filter(is_long_lived).collect();
+        if long_lived.len() > GRANTS_PERSIST_CAP {
+            tracing::warn!(
+                "长期授权 {} 条超过落盘上限 {}，本次不写入（请撤销部分授权）",
+                long_lived.len(),
+                GRANTS_PERSIST_CAP
+            );
+            return;
+        }
+        long_lived.sort_by(|a, b| a.grant_id.cmp(&b.grant_id));
+        let file = GrantsFile {
+            version: GRANTS_FILE_VERSION,
+            grants: long_lived,
+        };
+        let tmp = path.with_extension("json.tmp");
+        // 整体写成一个小闭包：任何一步失败都要清掉半成品，且不会抛给调用方
+        // （权限判定不能因为"记住授权失败"而中断）。
+        let write = || -> std::io::Result<()> {
+            std::fs::write(&tmp, serde_json::to_vec_pretty(&file)?)?;
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+            std::fs::rename(&tmp, &path)
+        };
+        if let Err(error) = write() {
+            tracing::warn!("长期授权落盘失败（{}）：{error}", path.display());
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    pub fn insert(&self, grant: Grant) {
+        let long_lived = is_long_lived(&grant);
+        self.insert_memory(grant);
+        // 只有会跨重启的授权需要落盘；有期限的写进去也会在加载时作废，
+        // 因此不写，避免每次审批都产生磁盘副作用。
+        if long_lived {
+            self.persist_now();
+        }
+    }
+
+    /// §4.5.2 按工作区批量撤销（"撤销本工作区全部长期授权"）。返回撤销条数。
+    pub fn revoke_workspace(&self, workspace_id: &str) -> usize {
+        let mut removed = 0;
+        if let Ok(mut inner) = self.inner.write() {
+            for bucket in inner.values_mut() {
+                let before = bucket.len();
+                bucket.retain(|grant| grant.workspace_id != workspace_id);
+                removed += before - bucket.len();
+            }
+            inner.retain(|_, bucket| !bucket.is_empty());
+        }
+        if removed > 0 {
+            self.persist_now();
+        }
+        removed
     }
 
     /// 命中并消费：返回匹配的 Grant（复制），同时递减 remaining_uses。
@@ -251,29 +435,42 @@ impl GrantStore {
         false
     }
 
-    /// 撤销单条授权；返回是否确实撤销。
+    /// 撤销单条授权；返回是否确实撤销（成功后同步刷新落盘文件）。
     pub fn revoke(&self, grant_id: &str) -> bool {
+        let mut removed = false;
         if let Ok(mut inner) = self.inner.write() {
             for bucket in inner.values_mut() {
                 if let Some(index) = bucket.iter().position(|grant| grant.grant_id == grant_id) {
                     bucket.remove(index);
-                    return true;
+                    removed = true;
+                    break;
                 }
             }
+            inner.retain(|_, bucket| !bucket.is_empty());
         }
-        false
+        if removed {
+            self.persist_now();
+        }
+        removed
     }
 
-    /// 撤销某工具全部授权（工具卸载时清理）。
+    /// 撤销某工具全部授权（工具卸载/权限中心"按工具撤销"时清理）。
     pub fn revoke_tool(&self, tool_id: &str) -> usize {
-        if let Ok(mut inner) = self.inner.write() {
-            let removed = inner
-                .remove(tool_id)
-                .map(|bucket| bucket.len())
-                .unwrap_or(0);
-            return removed;
+        let removed = {
+            if let Ok(mut inner) = self.inner.write() {
+                inner
+                    .remove(tool_id)
+                    .map(|bucket| bucket.len())
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        };
+        if removed > 0 {
+            // 必须在写锁释放之后再落盘：persist_now 内部要拿读锁。
+            self.persist_now();
         }
-        0
+        removed
     }
 
     /// 全部未过期 grant 快照（设置页展示；可逐条撤销）。
@@ -293,16 +490,24 @@ impl GrantStore {
 
     /// 清理过期条目；返回清理数量。
     pub fn prune_expired(&self) -> usize {
-        if let Ok(mut inner) = self.inner.write() {
-            let mut removed = 0;
-            for bucket in inner.values_mut() {
-                let before = bucket.len();
-                bucket.retain(|grant| !existing_expired(grant));
-                removed += before - bucket.len();
+        let removed = {
+            if let Ok(mut inner) = self.inner.write() {
+                let mut removed = 0;
+                for bucket in inner.values_mut() {
+                    let before = bucket.len();
+                    bucket.retain(|grant| !existing_expired(grant));
+                    removed += before - bucket.len();
+                }
+                inner.retain(|_, bucket| !bucket.is_empty());
+                removed
+            } else {
+                0
             }
-            return removed;
+        };
+        if removed > 0 {
+            self.persist_now();
         }
-        0
+        removed
     }
 
     /// 由审批选项生成 Grant（scope=Once 返回 None，不生成）。
@@ -345,13 +550,18 @@ impl GrantStore {
                 GrantScope::Session => Some(Utc::now() + Duration::hours(8)),
                 GrantScope::OneHour => Some(Utc::now() + Duration::hours(1)),
                 GrantScope::AlwaysReadOnly => None,
+                GrantScope::Task => Some(Utc::now() + Duration::hours(8)),
+                GrantScope::Workspace => None,
             },
             remaining_uses: match scope {
                 GrantScope::Once => None,
                 GrantScope::Session => Some(50),
                 GrantScope::OneHour => Some(50),
                 GrantScope::AlwaysReadOnly => None,
+                GrantScope::Task => Some(50),
+                GrantScope::Workspace => None,
             },
+            scope: Some(scope.as_str().to_string()),
         })
     }
 }
@@ -546,5 +756,122 @@ mod tests {
             "容量必须有上限：{}",
             store.list().len()
         );
+    }
+
+    fn temp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("owo-grants-{tag}-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn task_scope_is_session_lifetime_but_never_persisted() {
+        // §4.5.2「本任务」= 进程内会话级：字面量对齐指南，有效期对齐 Session，
+        // 关键是它不得写进 grants.json——重启后还认得"本任务"就是假语义。
+        let path = temp_path("task");
+        let store = GrantStore::persisting(&path);
+        let req = request("write_file", json!({ "path": "a.txt" }), Level::Write);
+        let grant = store
+            .grant_from_scope(&req, "ws-1", GrantScope::Task)
+            .expect("task 生成 grant");
+        let uses = grant.remaining_uses;
+        let expiry = grant.expires_at;
+        store.insert(grant);
+        assert_eq!(uses, Some(50), "本任务授权沿用会话级次数");
+        assert!(expiry.is_some(), "本任务授权必须有到期时间");
+        assert!(store.consume(&req, "ws-1").is_some(), "当次进程内命中免问");
+        assert!(
+            !path.exists(),
+            "有期限授权不该产生落盘副作用（文件存在说明跨重启会被恢复）"
+        );
+    }
+
+    #[test]
+    fn workspace_scope_survives_restart() {
+        // 这是"工作区长期"能进权限中心的唯一前提：不落盘就是假承诺。
+        let path = temp_path("workspace");
+        let store = GrantStore::persisting(&path);
+        let req = request("read_file", json!({ "path": "a.txt" }), Level::Read);
+        let grant = store
+            .grant_from_scope(&req, "ws-1", GrantScope::Workspace)
+            .expect("workspace 生成 grant");
+        let id = grant.grant_id.clone();
+        store.insert(grant);
+        assert!(path.exists(), "长期授权必须写盘");
+        drop(store);
+
+        let revived = GrantStore::persisting(&path);
+        assert_eq!(revived.list().len(), 1, "重启后恢复且只有一条");
+        assert_eq!(revived.list()[0].grant_id, id, "同一张授权，不是新发的");
+        assert_eq!(
+            revived.list()[0].scope.as_deref(),
+            Some("workspace"),
+            "范围标签随授权一起恢复，权限中心才能如实展示"
+        );
+        assert!(
+            revived.consume(&req, "ws-1").is_some(),
+            "恢复出来的长期授权要真的能免问"
+        );
+        // 只删自己写的那一个文件：path.parent() 是 %TEMP% 本身，绝不可整体删除。
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn corrupt_grants_file_is_quarantined() {
+        // 坏文件不能把 server 启动卡住，也不能静默吞掉授权——改名保留现场。
+        let path = temp_path("corrupt");
+        std::fs::write(&path, b"{ this is not json").expect("写入坏文件");
+        let store = GrantStore::persisting(&path);
+        assert!(store.list().is_empty(), "坏文件按空启动");
+        assert!(
+            path.with_extension("json.bad").exists(),
+            "原文必须保留为 *.json.bad 供排障"
+        );
+    }
+
+    #[test]
+    fn revoke_tool_and_workspace_cascades_are_scoped() {
+        let store = GrantStore::new();
+        for (tool, workspace) in [
+            ("read_file", "ws-1"),
+            ("read_file", "ws-2"),
+            ("write_file", "ws-1"),
+        ] {
+            let req = request(tool, json!({ "path": "a.txt" }), Level::Read);
+            let grant = store
+                .grant_from_scope(&req, workspace, GrantScope::Workspace)
+                .unwrap();
+            store.insert(grant);
+        }
+        assert_eq!(store.list().len(), 3);
+        assert_eq!(
+            store.revoke_tool("read_file"),
+            2,
+            "按工具撤销跨工作区（工具本身没了）"
+        );
+        assert_eq!(store.list().len(), 1, "另一工具的授权不受牵连");
+        assert_eq!(
+            store.revoke_workspace("ws-1"),
+            1,
+            "按工作区撤销只清本工作区"
+        );
+        assert!(store.list().is_empty());
+        assert_eq!(store.revoke_workspace("ws-1"), 0, "重复撤销是幂等的");
+    }
+
+    #[test]
+    fn new_scope_literals_and_labels() {
+        assert_eq!(GrantScope::parse("task"), Some(GrantScope::Task));
+        assert_eq!(GrantScope::parse("workspace"), Some(GrantScope::Workspace));
+        assert_eq!(GrantScope::Task.as_str(), "task");
+        assert_eq!(GrantScope::Workspace.label(), "工作区长期");
+        assert_eq!(GrantScope::Task.label(), "本任务", "与审批卡四动作同词");
+        assert!(GrantScope::Workspace.persists());
+        assert!(!GrantScope::Task.persists());
+        assert!(!GrantScope::Session.persists());
+        // 旧客户端字面量必须继续可用（词表切换不能丢授权意图）。
+        assert_eq!(
+            GrantScope::parse("always_readonly"),
+            Some(GrantScope::AlwaysReadOnly)
+        );
+        assert_eq!(GrantScope::parse("forever"), None, "未知识别仍是 None");
     }
 }
