@@ -1,7 +1,7 @@
 //! 工作区设置：`<workspace>/settings.json`（默认模型/只读/危险命令/MCP 服务器/v0.4 配置组）。
 
-use crate::mcp::McpServerConfig;
 use crate::whitelist::WhitelistEntry;
+use owo_agent_plugins::McpServerConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;

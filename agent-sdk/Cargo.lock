@@ -1790,6 +1790,7 @@ dependencies = [
  "owo-agent-eval-facade",
  "owo-agent-extensions",
  "owo-agent-kernel",
+ "owo-agent-plugins",
  "owo-agent-protocol",
  "owo-agent-tool-safety",
  "png",
@@ -1866,6 +1867,20 @@ dependencies = [
  "thiserror",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "owo-agent-plugins"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
+ "owo-agent-tool-safety",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
 ]
 
 [[package]]

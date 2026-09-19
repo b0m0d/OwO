@@ -232,7 +232,7 @@ pub fn trusted_readonly_count() -> usize {
 /// 仅当服务器实际暴露同名工具时登记（并记录当前 schema hash 指纹）。
 /// 连接注册前调用；未列出的工具不受影响。
 pub fn declare_trusted_from_config(
-    config: &crate::mcp::McpServerConfig,
+    config: &owo_agent_plugins::McpServerConfig,
     tools: &[crate::mcp::McpTool],
 ) -> usize {
     if config.trusted_readonly.is_empty() {

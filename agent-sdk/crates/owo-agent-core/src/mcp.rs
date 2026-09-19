@@ -1,7 +1,6 @@
 //! MCP（Model Context Protocol）客户端：stdio 与 HTTP 双传输，JSON-RPC 2.0。
 
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,75 +10,16 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::oneshot;
 
-use crate::sandbox::{
+// McpServerConfig 属插件域（M7 外迁）；这里 `pub use` 使
+// `owo_agent_core::mcp::McpServerConfig` 路径继续有效（mcp_tests 等仍用它）。
+pub use owo_agent_plugins::McpServerConfig;
+
+use owo_agent_tool_safety::{
     default_manager as default_sandbox_manager, FileScope, IsolationLevel, JobGuard, NetworkPolicy,
     SandboxCommand, SandboxPolicy,
 };
 
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-
-fn default_transport() -> String {
-    "stdio".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerConfig {
-    pub name: String,
-    /// "stdio" 或 "http"
-    #[serde(default = "default_transport")]
-    pub transport: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// HTTP 传输时的端点 URL
-    #[serde(default)]
-    pub url: Option<String>,
-    /// stdio 单次请求超时（毫秒）；未配置时读 OWO_MCP_STDIO_TIMEOUT_MS，再默认 15s。
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
-    /// 网络白名单（R9：HTTP 传输静态扫描 allowlist；非空时 URL host 必须命中，
-    /// 空 = 不校验，兼容既有配置）。
-    #[serde(default)]
-    pub network_allowlist: Vec<String>,
-    /// §5.2 宿主可信只读声明：管理员显式列出的「工具名」清单。连接注册时按
-    /// `server + tool + 当前 schema hash` 校验；schema/版本变化后自动失效
-    /// （hash 不一致即退回 Execute 询问）。空 = 无任何工具获可信只读。
-    #[serde(default)]
-    pub trusted_readonly: Vec<String>,
-}
-
-impl McpServerConfig {
-    pub fn stdio(name: impl Into<String>, command: impl Into<String>, args: Vec<String>) -> Self {
-        Self {
-            name: name.into(),
-            transport: "stdio".to_string(),
-            command: command.into(),
-            args,
-            url: None,
-            timeout_ms: None,
-            network_allowlist: Vec::new(),
-            trusted_readonly: Vec::new(),
-        }
-    }
-
-    pub fn http(name: impl Into<String>, url: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            transport: "http".to_string(),
-            command: String::new(),
-            args: Vec::new(),
-            url: Some(url.into()),
-            timeout_ms: None,
-            network_allowlist: Vec::new(),
-            trusted_readonly: Vec::new(),
-        }
-    }
-
-    /// 是否把该工具声明为宿主可信只读（按工具名）。
-    pub fn is_trusted_readonly_tool(&self, tool_name: &str) -> bool {
-        self.trusted_readonly.iter().any(|name| name == tool_name)
-    }
-}
 
 /// URL host 提取（去协议/路径/端口，小写）。
 fn url_host(url: &str) -> Option<String> {

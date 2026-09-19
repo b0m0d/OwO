@@ -43,7 +43,6 @@ pub mod perception;
 pub mod permission_spec;
 pub mod permissions;
 pub mod plan;
-pub mod plugin;
 pub mod project_space_store;
 pub mod remote_step;
 pub mod scene;
@@ -132,6 +131,16 @@ pub mod workswarm_output;
 // （transition / world_model / computer_use）与 `owo_agent_core::desktop_env::*`
 // （server 的 desktop_world_api、集成测试）等既有路径全部继续有效。
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 插件内核（M7）兼容层：plugin 已下沉到独立 crate `owo-agent-plugins`；
+// 同时 core 的 `mcp` 从它反向引用 `McpServerConfig`（插件清单的 mcp 字段类型）。
+//
+// 这里保留同名别名模块 + 顶层 pub use，使 `crate::plugin::*` 与
+// `owo_agent_core::{PluginManager, PluginManifest, McpServerConfig, ...}` 等既有路径
+// 全部继续有效（server / cli 与 3 个集成测试因此零改动）。
+// ---------------------------------------------------------------------------
+pub use owo_agent_plugins::{plugin, McpServerConfig};
+
 pub use owo_agent_env::{desktop_env, experience_store, transition, world_model};
 
 pub use owo_agent_tool_safety::{audit_chain, sandbox};
@@ -260,7 +269,8 @@ pub use learn::{
     SuggestionAction,
 };
 pub use lease::{Lease, LeaseConfig, LeaseError, LeaseManager};
-pub use mcp::{McpClient, McpRegistry, McpServerConfig, McpTool};
+pub use mcp::{McpClient, McpRegistry, McpTool};
+// McpServerConfig 现属插件域（owo-agent-plugins），由下面的 plugin 别名转出。
 pub use node_agent::{NodeAgent, NodeStatus};
 pub use notes::{
     add_block, append_child, block_text, doc_title, doc_to_md, generate_mixed_doc, get_block,

@@ -65,7 +65,8 @@ pub use owo_agent_kernel::{
 | **M4** | （契约，非新 crate） | 三方事务边界契约测试（`execution_boundary_contract_tests.rs`，4 条） | — | — | ✅ 已完成，见 §8 M4 段 |
 | **M5** | `owo-agent-env` | desktop_env（2,442 行）；**首次真正的依赖倒置**：`TaskSurface` 下沉内核 | **0**（倒置后） | `transition` / `world_model` / server | ✅ 已完成，见 §7 |
 | **M6** | `owo-agent-env`（扩容） | transition + world_model + experience_store（1,710 行）；与 `desktop_env` 同迁，无需倒置 | **0** | `fleet` / `goal` / `node_agent`（经别名，未改代码） | ✅ 已完成，见 §8 |
-| **M7** | 下一个候选见 §9 | — | — | — | 待执行 |
+| **M7** | `owo-agent-plugins` | plugin（1,158 行）+ 从 `mcp` 下沉的 `McpServerConfig`；**倒置方向 = 配置类型随域走** | **0**（倒置后） | server / cli / 3 个集成测试（经别名，未改代码） | ✅ 已完成，见 §9 |
+| **M8** | 下一个候选见 §10 | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -327,6 +328,7 @@ core 对 devtools 的依赖 = 0
 | 给不含空格的路径加引号传给 `cmd` | exit=1，「文件名、目录名或卷标语法不正确」 | temp_dir 路径不含空格时**不要加引号**，引号会被当字面量 |
 | 用 `use` 行扫描生成新 crate 的依赖清单 | 首次编译报 `E0433: cannot find module or crate chrono/uuid` | 依赖要按 **`use` 行**与**内联全限定路径**（`chrono::Utc::now()`、`uuid::Uuid::new_v4()`）各核一遍。M3 的 `sandbox` 恰好没有这类写法，所以这个坑到 M5 才暴露 |
 | 手写 `pub use x::{符号表}` 做迁移再导出 | 首次编译报 E0432（符号名抄错） | 迁移类再导出一律用**glob**（`pub use x::*;`），让公共面等价性由编译器证明；M2 用 glob 所以没暴露，M6 手写就立刻撞上 |
+| 搬类型时只确认了顶层 `pub use` | `owo_agent_core::mcp::McpServerConfig` 报 E0603（private）；或遗留 `use crate::mcp::X` 报 E0432 | **顶层 `pub use` 与 `模块::类型` 是两条不同路径**，搬类型后要逐个确认都仍可解析：在源模块写 `pub use <新crate>::X;`，并清掉指向已搬走路径的旧 `use` |
 | 构建卷空间不足 | `LNK1318 非意外的 PDB 错误: LIMIT`（看着像编译错误） | 先清 `target/**/incremental`、`target/**/*.pdb`（M0–M3 共回收约 67 GB） |
 
 
@@ -570,7 +572,84 @@ E0432**（`canonical_trace_bytes`、`classify_failure`、`trace_hash`、`Transit
 | `Cargo.lock` / core 的 `Cargo.toml` | 无新增外部依赖 |
 
 
-## 9. 后续候选与取舍记录
+## 9. M7：`owo-agent-plugins`（已完成）——配置类型随域走
+
+### 9.1 为什么选 `plugin`
+
+M7 三个候选（`workflow` 1,461 / `memory+observe` 825 / `plugin` 1,158）**都是零入边**
+——core 内部没人引用它们，消费者全在 server/cli 侧。差别在出边：
+
+| 候选 | 出边 | 需倒置的边 |
+|---|---|---|
+| `plugin` | **1**：`mcp`（只需 `McpServerConfig`） | 1 条类型边 |
+| `memory+observe` | 1：`learn` | `learn`（1,629 行）也不同迁 → 得连带搬 |
+| `workflow` | 4：`action_program`、`assert`、`learn`、`skill_health` | 4 条 |
+
+`plugin` 的代价最小且判据最干净，故选它。
+
+### 9.2 本步的倒置方向：**配置类型随域走**，不是塞进内核
+
+迁移前 `plugin` 的唯一出边是 `crate::mcp::McpServerConfig`。`mcp`（MCP 运行时客户端）
+留在 core，所以这条边必须倒置。但方向不是「把类型下沉内核」，理由很直接：
+
+> `McpServerConfig` 是**插件清单里的一个字段**
+>（`PluginManifest.mcp: Option<McpServerConfig>`），由插件 manifest 解析而来。
+> 它本来就属于插件域，不属于内核。
+
+所以正确做法是让它**随插件一起外迁**，再让 core 的 `mcp.rs` 反向引用它。
+实测 `mcp.rs` 对 `plugin` **没有**反向依赖，倒置后无环。
+
+这与 ADR-001 里被否决的「把 `SandboxAuditEvent` 下沉内核」正好形成对照——
+判据不是「谁更好拿」，而是**这个类型在概念上属于谁**。已写入 §4 复用清单。
+
+### 9.3 顺带改善：插件内核不再牵连 zip / rusqlite
+
+`plugin.rs` 实测**不直接使用** `zip` 或 `rusqlite`（`zip` 只在 core 的 `share_skill`
+里），所以新 crate 的依赖闭包是：
+
+```text
+owo-agent-plugins ──► owo-agent-tool-safety ──► owo-agent-kernel
+                      + serde/serde_json/sha2/base64/chrono/uuid/ed25519-dalek
+```
+
+`cargo tree` 实测：`owo-agent-core` / `owo-agent-server` / `sherpa` / `ndarray` /
+`rusqlite` / `zip` 出现次数**全部为 0**。对指南 §10「普通改动不触发原生重链」是又一处改善。
+
+### 9.4 本次修的两个自身错误（都已记档）
+
+1. **`plugin.rs` 里遗留 `use crate::mcp::McpServerConfig;`**：类型搬走后该路径失效，
+   首次编译报 `E0432: could not find mcp in the crate root`。改为 `crate::McpServerConfig`
+   （定义已在本 crate 根）。
+2. **`core::mcp::McpServerConfig` 一度不可达**：`mcp_tests.rs` 用
+   `owo_agent_core::mcp::{McpClient, McpServerConfig}`，而我在 `mcp.rs` 里写的是私有
+   `use`，报 `E0603: struct is private`。改为 `pub use owo_agent_plugins::McpServerConfig;`，
+   让 `core::mcp::` 路径继续可用；同时删掉因类型外迁而不再使用的 `serde` 导入。
+
+教训（已入坑表）：**搬类型时，所有既有路径别名都要逐个确认是否仍可解析**——
+顶层 `pub use` 与 `模块::类型` 是两条不同的路径。
+
+### 9.5 验收证据
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| workspace 全目标编译 | `check --workspace --all-targets`（`-j 1`） | **exit=0**，56 s | `docs/qa/logs/mk-m7-check3-*.log` |
+| 全量 core 测试 | `cargo test -p owo-agent-core --locked` | **exit=0**，306 s；`plugin_lifecycle_tests`(17)、`mcp_tests`(13)、`os_sandbox_integration_tests`(25，含 `plugin_http_mcp_egress_rejected_and_audited` / `plugin_zip_slip_entry_rejected` / `plugin_revocation_blocks_load_and_audits`) 全绿 | `docs/qa/logs/mk-m7-core-tests-*.log` |
+| 全量 server 测试 | `cargo test -p owo-agent-server --locked -j 1 -- --test-threads=1` | **exit=0**，942 s（63 单测 + 40 集成测试文件全绿，含 `plugin_market_api_tests` 16 条） | `docs/qa/logs/mk-m7-server-tests-*.log` |
+| 依赖闭包 | `cargo tree -p owo-agent-plugins` | core/server/sherpa/ndarray/rusqlite/zip 均 **0 次**；`owo-agent-*` 只有 kernel + tool-safety + 自身 | `docs/qa/logs/mk-m7-tree.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m7-plugins` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m7-plugins-*/report.json` |
+
+### 9.6 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `crates/owo-agent-core/src/plugin.rs` | `git mv` 到新 crate；`crate::sandbox::` → `owo_agent_tool_safety::`（1 处 use 块 + 2 处内联），`crate::mcp::McpServerConfig` → `crate::McpServerConfig` |
+| `crates/owo-agent-plugins/{Cargo.toml,src/lib.rs}` | 新 crate（边界文档 + plugin + 从 mcp 下沉的 `McpServerConfig`） |
+| `crates/owo-agent-core/src/mcp.rs` | 删除 `McpServerConfig` 定义与 `default_transport`；改为 `pub use owo_agent_plugins::McpServerConfig;`；删无用 serde 导入 |
+| `crates/owo-agent-core/src/{lib.rs,agent.rs,settings.rs,tool_effects.rs}` | 别名 re-export + 3 处 `McpServerConfig` 改指 `owo_agent_plugins` |
+| `Cargo.toml` / core 的 `Cargo.toml` | 新增成员与依赖；**server/cli 未改**（走别名） |
+
+
+## 10. 后续候选与取舍记录
 
 M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做

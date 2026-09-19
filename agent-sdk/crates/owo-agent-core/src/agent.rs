@@ -200,7 +200,7 @@ impl Agent {
     /// 热连接 MCP 服务器并注册工具（插件启用/热添加）；返回工具数。
     pub async fn connect_mcp_server(
         &self,
-        config: &crate::mcp::McpServerConfig,
+        config: &owo_agent_plugins::McpServerConfig,
     ) -> Result<usize, String> {
         let client = crate::mcp::McpClient::connect(config).await?;
         let tools = client.tools();

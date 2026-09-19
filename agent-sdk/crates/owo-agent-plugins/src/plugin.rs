@@ -2,7 +2,7 @@
 //!
 //! M4b 市场治理：签名分发、静态扫描、versions.json 兼容选择、安装/更新/回滚。
 
-use crate::mcp::McpServerConfig;
+use crate::McpServerConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -309,7 +309,7 @@ fn sandbox_gate_for_mcp(
     mcp: &McpServerConfig,
     egress_enabled: bool,
 ) -> Result<(), String> {
-    use crate::sandbox::{
+    use owo_agent_tool_safety::{
         default_manager, FileScope, IsolationLevel, NetworkPolicy, SandboxCommand, SandboxPolicy,
     };
     let reject_and_audit = |detail: String| -> Result<(), String> {
@@ -861,7 +861,7 @@ pub fn extract_dependencies(entry_content: Option<&str>) -> Option<Vec<String>> 
 
 /// 插件拒绝审计（R10）：经全局沙箱管理器记录 PluginRejected 事件（可汇入审计链）。
 fn record_plugin_rejection(manifest: &PluginManifest, detail: String) {
-    let manager = crate::sandbox::default_manager();
+    let manager = owo_agent_tool_safety::default_manager();
     let mut manager = manager
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
