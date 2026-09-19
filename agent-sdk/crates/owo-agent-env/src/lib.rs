@@ -29,6 +29,15 @@
 //! 本 crate 不依赖 core / server / ONNX / Sherpa。
 
 pub mod desktop_env;
+pub mod experience_store;
+pub mod transition;
+pub mod world_model;
+
+// 用 glob 而非手写符号表：首次编译实测手写列表会写错符号名（E0432），
+// glob 让迁移后的公共面与拆分前**完全等价**，由编译器验证（与 owo-agent-extensions 同做法）。
+pub use experience_store::*;
+pub use transition::*;
+pub use world_model::*;
 
 // 顶层再导出：与拆分前 `owo-agent-core` 的公共面保持 1:1。
 pub use desktop_env::{

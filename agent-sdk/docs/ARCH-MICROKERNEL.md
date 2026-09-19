@@ -64,7 +64,8 @@ pub use owo_agent_kernel::{
 | **M3** | `owo-agent-tool-safety` | sandbox + audit_chain（2,694 行） | **0** | `mcp` / `plugin` / `tools` + 4 个集成测试 | ✅ 已完成，见 §6 |
 | **M4** | （契约，非新 crate） | 三方事务边界契约测试（`execution_boundary_contract_tests.rs`，4 条） | — | — | ✅ 已完成，见 §8 M4 段 |
 | **M5** | `owo-agent-env` | desktop_env（2,442 行）；**首次真正的依赖倒置**：`TaskSurface` 下沉内核 | **0**（倒置后） | `transition` / `world_model` / server | ✅ 已完成，见 §7 |
-| **M6** | 下一个候选见 §8 | — | — | — | 待执行 |
+| **M6** | `owo-agent-env`（扩容） | transition + world_model + experience_store（1,710 行）；与 `desktop_env` 同迁，无需倒置 | **0** | `fleet` / `goal` / `node_agent`（经别名，未改代码） | ✅ 已完成，见 §8 |
+| **M7** | 下一个候选见 §9 | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -325,6 +326,7 @@ core 对 devtools 的依赖 = 0
 | 在 `cmd /C` 里裸用 `&&` + 重定向 | exit=1，「语法不正确」 | 复合运算符与重定向混用会解析失败；拆成单条命令 |
 | 给不含空格的路径加引号传给 `cmd` | exit=1，「文件名、目录名或卷标语法不正确」 | temp_dir 路径不含空格时**不要加引号**，引号会被当字面量 |
 | 用 `use` 行扫描生成新 crate 的依赖清单 | 首次编译报 `E0433: cannot find module or crate chrono/uuid` | 依赖要按 **`use` 行**与**内联全限定路径**（`chrono::Utc::now()`、`uuid::Uuid::new_v4()`）各核一遍。M3 的 `sandbox` 恰好没有这类写法，所以这个坑到 M5 才暴露 |
+| 手写 `pub use x::{符号表}` 做迁移再导出 | 首次编译报 E0432（符号名抄错） | 迁移类再导出一律用**glob**（`pub use x::*;`），让公共面等价性由编译器证明；M2 用 glob 所以没暴露，M6 手写就立刻撞上 |
 | 构建卷空间不足 | `LNK1318 非意外的 PDB 错误: LIMIT`（看着像编译错误） | 先清 `target/**/incremental`、`target/**/*.pdb`（M0–M3 共回收约 67 GB） |
 
 
@@ -512,7 +514,63 @@ M0–M3 都是"找到零出边（或同迁）的集合整体搬走"。M5 不是�
 | `crates/owo-agent-core/tests/desktop_env_tests.rs` | `TaskSurface` 显式走内核 |
 
 
-## 8. 后续候选与取舍记录
+## 8. M6：桌面世界模型栈并入 `owo-agent-env`（已完成）
+
+### 8.1 为什么这一组能整体搬
+
+M5 已把 `desktop_env` 放进 `owo-agent-env`。剩余的桌面世界模型栈三件套正好只依赖它：
+
+| 模块 | 行数 | 出边 |
+|---|---:|---|
+| `transition` | 506 | `desktop_env`（同 crate）+ `experience_store`（同组） |
+| `world_model` | 663 | `desktop_env`（同 crate）+ `transition`（同组） |
+| `experience_store` | 541 | **无** |
+
+三者合 1,710 行，搬进 `owo-agent-env` 后 `crate::` 引用全部落在同 crate 内，
+**无需任何倒置**。据 §4 判据：`desktop_env` 与它们**同迁**（已是 env 成员），
+故不存在跨 crate 边。
+
+### 8.2 这次调用方基本没动
+
+`experience_store` 在 core 内被 `fleet` / `goal` / `node_agent` 引用，`transition` 被
+`desktop_env` 引用——但 core 保留了同名别名 re-export，所以**这些都没改**。
+server 的 `desktop_world_api.rs` 与 devtool 的 `dataset_builder.rs` 也照旧经
+`owo_agent_core::transition` / `world_model` / `experience_store` 使用，同样未动。
+
+**本次只改了 6 个文件**：`Cargo.lock`、core 的 `Cargo.toml` 与 `lib.rs`、
+env 的 `lib.rs`，以及 3 个 `git mv`。这是 re-export 策略迄今最省的一次。
+
+### 8.3 又一次被手写符号表坑到（新坑）
+
+我在 env 的 `lib.rs` 里手写了三块 `pub use x::{...}` 符号表，**首次编译就报 4 个
+E0432**（`canonical_trace_bytes`、`classify_failure`、`trace_hash`、`TransitionError`
+并不存在）。M2 的 `owo-agent-extensions` 用的是 glob，所以没暴露这个问题。
+
+处置：改为 `pub use experience_store::*;` 等三行 glob —— 让迁移后的公共面与拆分前
+**完全等价**并由编译器验证，而不是靠人肉抄符号名。已写入 §4 坑表。
+
+### 8.4 验收证据
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| workspace 全目标编译 | `check --workspace --all-targets`（`-j 1`） | **exit=0**，155 s | `docs/qa/logs/mk-m6-check2-*.log` |
+| 全量 core 测试 | `cargo test -p owo-agent-core --locked` | **exit=0**，302 s；`transition_tests`(10)、`world_model_tests`(8)、`goal_plan_tests`(13，含 `experience_store_records_step_and_goal_outcomes`) 全绿 | `docs/qa/logs/mk-m6-core-tests-*.log` |
+| 全量 server 测试 | `cargo test -p owo-agent-server --locked -j 1 -- --test-threads=1` | **exit=0**，948 s（63 单测 + 40 集成测试文件全绿） | `docs/qa/logs/mk-m6-server-tests-*.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m6-env` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m6-env-*/report.json` |
+| 依赖闭包 | `cargo tree -p owo-agent-env` | `owo-agent-core`/`owo-agent-server`/`sherpa`/`ndarray`/`rusqlite` 均 **0 次**；`owo-agent-*` 仍只有 kernel 与自身 | `docs/qa/logs/mk-m6-tree.log` |
+| 调用方改动 | `git status` | 仅 6 个文件（见 §8.2） | 会话记录 |
+
+### 8.5 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `crates/owo-agent-core/src/{transition,world_model,experience_store}.rs` | `git mv` 到 `owo-agent-env`（三份文件原样未改） |
+| `crates/owo-agent-env/src/lib.rs` | 注册三个模块 + glob 再导出 |
+| `crates/owo-agent-core/src/lib.rs` | 删除三个 `pub mod`，env 别名行扩为四个模块 |
+| `Cargo.lock` / core 的 `Cargo.toml` | 无新增外部依赖 |
+
+
+## 9. 后续候选与取舍记录
 
 M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做

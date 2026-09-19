@@ -22,7 +22,6 @@ pub mod critic;
 pub mod element_registry;
 pub mod execution_target;
 pub mod executor;
-pub mod experience_store;
 pub mod fleet;
 pub mod fleet_node_protocol;
 pub mod fleet_transport;
@@ -71,7 +70,6 @@ pub mod team_strategy;
 pub mod tool_effects;
 pub mod tools;
 pub mod trace;
-pub mod transition;
 pub mod vision;
 pub mod window_template;
 pub mod worker_pool;
@@ -82,7 +80,6 @@ pub mod workflow;
 pub mod workswarm;
 /// Worker 结构化输出契约（V1：结构化交付物 + critic 评审分离 + 一次定向修复）。
 pub mod workswarm_output;
-pub mod world_model;
 
 // ---------------------------------------------------------------------------
 // 微内核（M0）兼容层：以下模块的实现已下沉到独立 crate `owo-agent-kernel`。
@@ -123,7 +120,8 @@ pub mod world_model;
 // 与 `owo_agent_core::audit_chain::*`（audit.rs、4 个集成测试）等既有路径全部继续有效。
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// 环境内核（M5）兼容层：desktop_env 已下沉到独立 crate `owo-agent-env`。
+// 环境内核（M5/M6）兼容层：desktop_env / transition / world_model / experience_store
+// 已下沉到独立 crate `owo-agent-env`。
 //
 // 本步是微内核重构里**第一次真正的依赖倒置**：desktop_env 的唯一出边
 // （`crate::computer_use::TaskSurface`，见 §1 判据）被下沉到内核
@@ -134,7 +132,7 @@ pub mod world_model;
 // （transition / world_model / computer_use）与 `owo_agent_core::desktop_env::*`
 // （server 的 desktop_world_api、集成测试）等既有路径全部继续有效。
 // ---------------------------------------------------------------------------
-pub use owo_agent_env::desktop_env;
+pub use owo_agent_env::{desktop_env, experience_store, transition, world_model};
 
 pub use owo_agent_tool_safety::{audit_chain, sandbox};
 
