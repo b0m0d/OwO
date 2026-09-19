@@ -40,7 +40,6 @@ pub mod paddle_ocr;
 pub mod perception;
 pub mod permission_spec;
 pub mod permissions;
-pub mod project_space_store;
 pub mod remote_step;
 pub mod scene;
 pub mod schema_budget;
@@ -52,12 +51,6 @@ pub mod skill_pack;
 pub mod sqlite_store;
 pub mod stt;
 pub mod subagent;
-/// 多 Agent 收益判定与默认队策略（十期 · 三路）：配对对照门槛 +
-/// model/template/task_set/strategy_version 四元组绑定 + 过期/样本 gate。
-/// 本行为三路新增模块登记（认领见 AGENTS-COORD 十期三路；一路收口可复核保留）。
-pub mod team_benefit;
-/// 模板级 Prompt 编译器与上下文字节预算（八期 · 一路：角色专属 Prompt +
-/// 截断记录；新增模块登记见 AGENTS-COORD 八期一路留言）。
 pub mod team_prompt;
 /// 自适应组队策略引擎（R3 第一路：single/team/auto 判定 + 可展示理由）。
 pub mod team_strategy;
@@ -72,8 +65,6 @@ pub mod worker_pool;
 pub mod worker_profile;
 pub mod workflow;
 pub mod workswarm;
-/// Worker 结构化输出契约（V1：结构化交付物 + critic 评审分离 + 一次定向修复）。
-pub mod workswarm_output;
 
 // ---------------------------------------------------------------------------
 // 微内核（M0）兼容层：以下模块的实现已下沉到独立 crate `owo-agent-kernel`。
@@ -144,6 +135,24 @@ pub mod workswarm_output;
 // （server / cli / 多个集成测试）等既有路径全部继续有效。
 // ---------------------------------------------------------------------------
 pub use owo_agent_contracts::{computer_task, context, plan, skill, skill_health};
+
+// ---------------------------------------------------------------------------
+// 编排内核（M9）兼容层：project_space_store / team_benefit / workswarm_output
+// 已下沉到独立 crate `owo-agent-workswarm`（只依赖 protocol，反向依赖为零）。
+//
+// 三个模块的 `crate::` 出边实测为 0（含 `crate::{a,b}` 块与 `super::` 扫描），
+// 因此整体搬迁不需要任何依赖倒置。入边分两侧，全部由下面的别名模块满足：
+//   * crate 内：`crate::project_space_store::`（workswarm）、
+//     `crate::team_benefit::`（team_strategy / workswarm）、
+//     `crate::workswarm_output::`（artifact_pipeline / contract_worker /
+//     worker_profile / workswarm）；
+//   * crate 外：`owo_agent_core::{project_space_store,workswarm_output}::*`
+//     （server 的 5 个 api 模块与集成测试、devtools/product-eval）。
+//
+// 这是指南 §3「extensions/workswarm 默认关闭、可选加载」的前置条件：执行侧
+// （workswarm.rs 本体 4,328 行）仍留在 core，等 A2 统一 Daemon 落地后再动。
+// ---------------------------------------------------------------------------
+pub use owo_agent_workswarm::{project_space_store, team_benefit, workswarm_output};
 
 pub use owo_agent_plugins::{plugin, McpServerConfig};
 

@@ -67,7 +67,8 @@ pub use owo_agent_kernel::{
 | **M6** | `owo-agent-env`（扩容） | transition + world_model + experience_store（1,710 行）；与 `desktop_env` 同迁，无需倒置 | **0** | `fleet` / `goal` / `node_agent`（经别名，未改代码） | ✅ 已完成，见 §8 |
 | **M7** | `owo-agent-plugins` | plugin（1,158 行）+ 从 `mcp` 下沉的 `McpServerConfig`；**倒置方向 = 配置类型随域走** | **0**（倒置后） | server / cli / 3 个集成测试（经别名，未改代码） | ✅ 已完成，见 §9 |
 | **M8** | `owo-agent-contracts` | context / computer_task / plan / skill / skill_health（1,491 行 + lib.rs）；**数据形状与执行者分离** | **0** | `agent` / `executor` / `tools` / server / cli（经别名，未改代码） | ✅ 已完成，见 §10 |
-| **M9** | 下一个候选见 §12 | — | — | — | 待执行 |
+| **M9** | `owo-agent-workswarm` | project_space_store / team_benefit / workswarm_output（2,847 行）；**编排的契约与状态先行、执行侧仍留 core** | **0** | `workswarm` / `team_strategy` / `artifact_pipeline` / `contract_worker` / `worker_profile` + server 5 个 api 模块（经别名，未改代码） | ✅ 已完成，见 §11 |
+| **M10** | 下一个候选见 §12 | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -727,7 +728,94 @@ note: the function is defined here --> crates\owo-agent-contracts\src\skill.rs:1
 | `Cargo.toml` / core 的 `Cargo.toml` | 新增 workspace 成员与依赖；**server/cli/集成测试未改**（走别名） |
 
 
-## 11. 后续候选与取舍记录
+## 11. M9：`owo-agent-workswarm`（已完成）——编排的契约/状态先行，执行侧留待 A2
+
+候选取舍与两路扫描数据见 §12；本节记录边界、结果与证据。
+
+### 11.1 边界与依赖方向
+
+| 模块 | 行数 | 内容 | `crate::` 出边 |
+|---|---:|---|---|
+| `project_space_store` | 1,162 | WorkSwarm 项目空间持久化（`ProjectSpaceStore` trait + SQLite 实现） | **0** |
+| `team_benefit` | 1,285 | 组队收益判定（配对对照 → 冻结门槛 → `TeamPolicy`/`PolicyGate`，纯函数 + serde） | **0** |
+| `workswarm_output` | 400 | Worker 结构化输出契约 V1（`WorkerOutputV1` 解析/校验） | **0** |
+| `lib.rs` | 35 | 边界文档 + glob re-export | — |
+
+```text
+owo-agent-protocol ← owo-agent-workswarm ← owo-agent-core ← server/cli
+```
+
+新 crate 的依赖闭包实测只有 `owo-agent-protocol` 与
+`async-trait / chrono / rusqlite / serde / serde_json / thiserror / uuid`，
+**对 core 的依赖为零**——否则 core → workswarm 的既有边会变成 crate 环。
+`rusqlite` 与 core 同版本同 feature（`bundled`），Cargo 复用同一份编译产物。
+
+### 11.2 为什么这一步值得做：它是"可选加载"的物理前置条件
+
+指南 §3 把 `workswarm.rs`、`goal.rs`、`workflow.rs`、`team_*` 定档为
+`extensions/workswarm/`（默认关闭、通过插件 API 注册能力）。但**只要编排代码与 core
+同处一个编译单元，"可选加载"就物理上无法实现**——M1 §3.2 已经用三种做法实测过：
+optional dependency + feature 会被 workspace 成员并集重新点亮，`exclude` 挡不住
+`path =` 引用，最后只能靠独立 workspace + 零反向依赖。
+
+所以正确的迁移顺序是**先切零出边的契约/状态侧，再切执行侧**：本步搬走的三个模块
+没有任何出边，搬完立即满足"core 零改动、可独立编译、可独立测试"；执行侧
+（`workswarm.rs` 本体 4,328 行）留着与 `goal`/`workflow`/`fleet` 的环一起处理，
+按 §12 的建议排到 A2（统一 Daemon）之后。
+
+### 11.3 本步的调用方改动量：**0 行**（除 core 的 lib.rs 接线）
+
+| 引用方 | 原路径 | 是否改动 |
+|---|---|---|
+| core `workswarm.rs` | `crate::project_space_store::`、`crate::team_benefit::`、`crate::workswarm_output::` | 否 |
+| core `team_strategy.rs` | `crate::team_benefit::` | 否 |
+| core `artifact_pipeline.rs` / `contract_worker.rs` / `worker_profile.rs` | `crate::workswarm_output::` | 否 |
+| server（`workswarm_api` / `artifact_delivery_api` / `artifact_review_api` / `artifact_rework_api` / `human_inbox_api`） | `owo_agent_core::project_space_store::` | 否 |
+| `devtools/product-eval`（独立 workspace） | `owo_agent_core::workswarm_output::` | 否 |
+| core 的 5 个集成测试 + server 的 2 个集成测试 | `owo_agent_core::{project_space_store,workswarm_output}::` | 否 |
+
+唯一需要说明的"看不见的改动"是 `#[derive(serde::Serialize)]` 这类**内联全限定路径**：
+本步三个模块实测没有 `chrono`/`uuid`/`serde_json` 的 `use` 行以外的依赖，但
+`project_space_store` 里有 6 处 `chrono::Utc::now()`、1 处 `uuid::Uuid::new_v4()`、
+5 处 `#[tokio::test]`，都是 `use` 行扫描看不到的（M5 的坑），所以新 manifest
+必须按"`use` 行 + 内联全限定路径"两遍核（见 §4 复用清单）。
+
+### 11.4 验收证据（可复现）
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| 新 crate 独立编译 | `cargo check -p owo-agent-workswarm --all-targets` | **exit=0**，15 s（不依赖 core，也不需要 ORT 之外的 native 链） | `docs/qa/logs/mk-m9-check-20260919-182459.log` |
+| workspace 全目标编译 | `scripts/mk-check.ps1 -Tag m9`（`-j 1`） | **exit=0**，147 s | `docs/qa/logs/mk-m9-20260919-182518.log` |
+| 新 crate 自身测试 | `cargo test -p owo-agent-workswarm --locked --all-targets` | **exit=0**，42 条全绿（project_space_store 6 / team_benefit 25 / workswarm_output 11） | `docs/qa/logs/mk-m9-workswarm-tests-20260919-183259.log` |
+| 全量 core 测试 | `cargo test -p owo-agent-core --locked` | **exit=0**，300 s；`workswarm_tests`(15)、`workswarm_recovery_tests`(7)、`workswarm_responsiveness_tests`(4)、`team_strategy_tests`(13)、`artifact_review_tests` 全绿 | `docs/qa/logs/mk-m9-core-tests-20260919-182753.log` |
+| 全量 server 测试 | `cargo test -p owo-agent-server --locked` | **exit=0**，471 s（`workswarm_api_tests` 16、`workswarm_recovery_api_tests` 4、`workswarm_progress_api_tests` 2、`artifact_*`/`human_inbox`/`project_workspace` 全绿） | `docs/qa/logs/mk-m9-server-tests-20260919-183332.log` |
+| 依赖闭包 | `cargo tree -p owo-agent-workswarm` | 顶层只有 protocol + async-trait/chrono/rusqlite/serde/serde_json/thiserror/uuid；core/server/kernel/tool-safety/sherpa/ndarray/ort/windows/reqwest **0 次** | `docs/qa/logs/mk-m9-tree.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m9-workswarm` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m9-workswarm-*/report.json` |
+| core 体量 | `git ls-tree` + 逐行统计 | **62 文件 / 46,836 行 → 59 文件 / 43,998 行**（−2,838 行）；新 crate 4 文件 / 2,882 行 | 与 §1 / §10 同口径 |
+
+> 注意 core 的 lib 单测条数由 407 降到 365：这不是测试变少，而是
+> `project_space_store`/`team_benefit`/`workswarm_output` 的 42 条单测**随代码一起
+> 搬到了新 crate**（见上表第 3 行，42 条全绿）。总条数守恒。
+
+### 11.5 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `crates/owo-agent-core/src/{project_space_store,team_benefit,workswarm_output}.rs` | `git mv` 到新 crate（3 个 rename，**内容零改写**） |
+| `crates/owo-agent-workswarm/{Cargo.toml,src/lib.rs}` | 新 crate（边界文档 + 3 模块 + glob re-export + "不得依赖 core"的 manifest 约束） |
+| `crates/owo-agent-core/src/lib.rs` | 删除 3 个 `pub mod` 与它们的文档注释，改为 `pub use owo_agent_workswarm::{project_space_store, team_benefit, workswarm_output};` + 边界注释块 |
+| `Cargo.toml` / core 的 `Cargo.toml` | 新增 workspace 成员与依赖；**server / cli / 集成测试 / devtools 未改一行** |
+
+### 11.6 本步遇到的资源红线（不是代码问题，但记档）
+
+新 crate 第一次 `check` 被 §2.4 磁盘门直接拒绝：`卷 T: 仅剩 2.74 GB，normal 档要求 ≥ 6 GB`。
+原因是 M8 的 server 全量测试（40+ 个测试二进制链接）把 PDB 写满。按门禁提示清
+`target/**/incremental` + `target/**/*.pdb` 回收 **17.66 GB** 后重跑通过。
+**没有绕过门禁**（禁止调小并发或加长超时）——这是 §4 坑表里那条"LNK1318 看着像编译
+错误、实际是磁盘耗尽"的同一件事在门禁层的正确表现。
+
+
+## 12. 后续候选与取舍记录
 
 M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做

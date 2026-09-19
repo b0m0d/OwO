@@ -1,0 +1,40 @@
+[package]
+name = "owo-agent-workswarm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 编排内核（M9）：WorkSwarm 的**契约与状态**部分——项目空间持久化、组队收益判定、
+# Worker 结构化输出契约。
+#
+# 边界（见 docs/ARCH-MICROKERNEL.md §11）：
+#   * 三个模块的 `crate::` 出边实测为 **0**（含 `crate::{a,b}` 块与 `super::` 扫描），
+#     因此搬迁不需要任何依赖倒置；
+#   * 入边全部在 core 内部（workswarm / team_strategy / artifact_pipeline /
+#     contract_worker / worker_profile）与 core 之外（server / cli / 集成测试 /
+#     devtools/product-eval）——core 保留同名别名模块 + 顶层 `pub use` 即可满足，
+#     调用方零改动；
+#   * **本 crate 不得依赖 owo-agent-core**：它只依赖 owo-agent-protocol。否则
+#     core → workswarm 的既有边会变成 crate 环。
+#
+# 为什么先切这一层：指南 §3 把 `workswarm.rs`/`goal.rs`/`workflow.rs`/`team_*` 定档为
+# `extensions/workswarm/`（默认关闭、可选加载）。在编排代码与 core 同处一个编译单元时，
+# "可选加载"物理上无法实现（M1 §3.2 实测：feature 关不住一条会成环的边）。因此先把
+# **零出边**的契约/状态部分切成独立 crate，作为后续把执行侧（workswarm.rs 本体）
+# 变成可选扩展的前置条件。
+
+[dependencies]
+owo-agent-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+# 与 owo-agent-core 使用同一版本与同一 feature（bundled），Cargo 复用同一份编译产物，
+# 不增加构建负担；ProjectSpaceStore 的 SQLite 实现需要它。
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+# 仅测试用（`#[tokio::test]` 驱动 async store 契约）。
+tokio.workspace = true
