@@ -404,6 +404,9 @@ M0/M2 已把 core 里"能结构性地切下来"的部分用完：**§5 的 SCC �
 
 ### M3 唯一可切方向：Tool-Safety 内核（`audit_chain` + `sandbox`）
 
+> 设计与决定已落 ADR：**`docs/adr/ADR-001-tool-safety-kernel.md`**（含环的处置方案、
+> 命名取舍、8 条验收标准，以及"不做的事"）。本节只留摘要。
+
 依据 §5.1 的 SCC 结果，`[8] audit_chain + sandbox`（2,694 行）是**唯一一个"零出边"的
 成规模分量**，且它们的出边只有内核（`audit_chain` → `credentials`/`storage_crypto`，
 `sandbox` → 无），入边只有 `mcp` 与 `plugin`（可 re-export 满足）。这正是指南 §2.2
