@@ -319,6 +319,9 @@ core 对 devtools 的依赖 = 0
 | 验收门自己写错契约导致的假红 | `POST /notes` 返回 201 但断言 200；`GET /notes` 断言裸数组但实际是 `{count, notes}` | 写运行态断言前先读服务端 handler 与请求/响应结构，不要凭直觉 |
 | 用"入边/出边计数"选边界 | 反复撞 `cyclic package dependency` | 改用 **Tarjan SCC + 分量 DAG**：只有"零出边 + 零入边"的分量才能零代价切走（见 §5.1） |
 | 把"模块互相引用"直接当成"必须接口倒置" | 多写一堆不必要的 sink/trait | 先问**这条边搬迁后是否跨越 crate 边界**：① 列出出边 ② 判断目标是否与它**同迁** ③ 只有"不同迁且目标反向引用它"的边才是真环。M3 实测 `audit_chain ↔ sandbox` 同迁一 crate → 零倒置（见 §6.1） |
+| 契约测试用"被沙箱管着的进程"做正面对照 | 对照恒失败（沙箱正确地拒绝绝对路径写入），断言空转 | 需要"证明某命令确实会写文件"时，必须用**裸进程**（`std::process::Command`）做对照；沙箱内只验证被约束后的行为 |
+| 在 `cmd /C` 里裸用 `&&` + 重定向 | exit=1，「语法不正确」 | 复合运算符与重定向混用会解析失败；拆成单条命令 |
+| 给不含空格的路径加引号传给 `cmd` | exit=1，「文件名、目录名或卷标语法不正确」 | temp_dir 路径不含空格时**不要加引号**，引号会被当字面量 |
 | 构建卷空间不足 | `LNK1318 非意外的 PDB 错误: LIMIT`（看着像编译错误） | 先清 `target/**/incremental`、`target/**/*.pdb`（M0–M3 共回收约 67 GB） |
 
 
@@ -457,9 +460,30 @@ M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做
 **真正的依赖倒置或整组搬迁**，不能再指望"搬文件 + re-export"零代价推进。
 
-### M4 优先级 0（不是新 crate，而是补契约缺口）
+### M4 优先级 0（**已完成**）：三方事务边界契约测试
 
-**三方事务边界契约测试**——M3 把它留成了最大未闭合风险点（见 `docs/adr/ADR-001-tool-safety-kernel.md` §7.5）：
+M3 把这条边界切成了三份（`change_set*` 在 extensions、`sandbox` 在 tool-safety、
+实际写入在 core 的 `executor`/`tools`），交接点此前**没有任何专门测试**。已补
+`crates/owo-agent-core/tests/execution_boundary_contract_tests.rs`，4 条测试全绿：
+
+| 契约 | 断言 |
+|---|---|
+| 拒绝即不执行 | deny 名单命中 → 返回错误且**不进入 spawn**；工作区零文件产物。并用**裸进程**跑同一命令体做反向对照，证明该命令确实会写文件（否则断言是空转） |
+| 拒绝必留收据 | 被拒绝的执行必须产生明确拒绝语义的沙箱事件（`SpawnRejected` / `UnsupportedIsolation`），且这些收据能汇入 `AuditChain` 并通过 `verify()` |
+| 允许即可观测 | 真实 Job 内执行的写文件命令，其产物能被 `change_set::file_hash` 观察到（基线 None → 现在有哈希），与 `WorkspaceBaseSnapshot` 的"新建"判定一致 |
+| 失败不半写 | 非 0 退出的命令不得留下最终产物 |
+
+写这组测试本身踩了三个坑（都已记入 §4 坑表的同类条目）：
+① 用**沙箱内**的命令做"会写文件"的对照 → 被沙箱正确地挡下（绝对路径写入被拒），对照失效；
+   必须用裸进程做对照。
+② `a && b` 与重定向混用在 `cmd` 里解析失败。
+③ 给**不含空格**的路径加引号，`cmd` 把引号当字面量 →「文件名、目录名或卷标语法不正确」。
+
+服务端侧的 `full_loop`（tracker → change_set → revert）仍由
+`owo-agent-server/tests/v1_execution_safety_tests.rs` 覆盖；core 层这组补的是它下面的
+沙箱与文件系统这一层。
+
+
 `change_set*`（extensions，快照/恢复状态机）＋ `sandbox`（tool-safety，执行隔离与审计收据）
 ＋ core 的 `executor`/`tools`（实际写入）共同承担指南 §2.4 第 4 条，但三者交接点**没有任何
 专门测试**。必须先补：

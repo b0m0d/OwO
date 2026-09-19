@@ -189,15 +189,20 @@ M3 的实际教训应写进 §4 的复用清单：
 | 7 | 运行态 | `mk-smoke.ps1 -Tag m3-tool-safety` **18/18 PASS**，含审计事件落盘与无孤儿进程 |
 | 8 | 资源合规 | 全部 cargo 经 `Invoke-CiCargo`；完整档 `-j 1`。server 全量测试 995 s（含冷链），为本次最长单项 |
 
-### 7.5 仍未闭合的缺口（下一轮第一件事）
+### 7.5 三方事务边界的缺口：**已闭合**
 
-§6 末尾点明的**三方事务边界契约测试**仍未补。当前状态：
+§6 末尾点明的三方事务边界契约测试，已在 M4 补齐：
+`crates/owo-agent-core/tests/execution_boundary_contract_tests.rs`（4 条，全绿）：
 
-* `change_set` / `change_set_store`（extensions）负责快照与恢复状态机；
-* `sandbox`（tool-safety）负责执行隔离与审计收据；
-* core 的 `executor` / `tools` 负责实际写入。
+1. **拒绝即不执行**：deny 名单命中 → 返回错误、不进入 spawn、工作区零文件产物；
+   并用**裸进程**跑同一命令体做反向对照，证明该命令确实会写文件（避免断言空转）。
+2. **拒绝必留收据**：被拒绝的执行必须产生明确拒绝语义的沙箱事件，且能汇入
+   `AuditChain` 并通过 `verify()`。
+3. **允许即可观测**：真实 Job 内写出的文件能被 `change_set::file_hash` 观察到
+   （基线 `None` → 有哈希），与 `WorkspaceBaseSnapshot` 的"新建"判定一致。
+4. **失败不半写**：非 0 退出的命令不得留下最终产物。
 
-三者的交接点**没有一条专门的契约测试**来断言"拒绝执行的命令不得产生任何文件变更、
-且必须留下审计收据；被接受的命令其变更必须能被 change_set 捕获并可 revert"。
-这是指南 §2.4 第 4 条的直接要求，也是本重构目前最大的未闭合风险点。
+服务端侧的 `full_loop`（tracker → change_set → revert）仍由
+`owo-agent-server/tests/v1_execution_safety_tests.rs` 覆盖；core 这组补的是它下面的
+沙箱与文件系统这一层。指南 §2.4 第 4 条由此在两层都有断言。
 
