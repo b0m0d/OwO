@@ -9,6 +9,9 @@ members = [
     # 这五个模块在 core 依赖图里是唯一「零入边 + 零出边」的成规模集合（见 §6），
     # 因此搬迁结构性安全。
     "crates/owo-agent-extensions",
+    # 受信执行内核（M3）：sandbox + audit_chain。SCC 分析里唯一零出边的成规模分量；
+    # 两者互相引用但同处本 crate，不跨 crate 边界，故无需接口倒置。
+    "crates/owo-agent-tool-safety",
     # ProductEval 兼容门面（M1）：给 server/cli 提供评测面路径，同时让 core 对
     # devtools/product-eval 的依赖保持为零，避免 crate 环。
     "crates/owo-agent-eval-facade",
@@ -64,6 +67,7 @@ zip = "2"
 owo-agent-protocol = { path = "crates/owo-agent-protocol" }
 owo-agent-kernel = { path = "crates/owo-agent-kernel" }
 owo-agent-extensions = { path = "crates/owo-agent-extensions" }
+owo-agent-tool-safety = { path = "crates/owo-agent-tool-safety" }
 owo-agent-core = { path = "crates/owo-agent-core" }
 owo-agent-eval-facade = { path = "crates/owo-agent-eval-facade" }
 owo-agent-server = { path = "crates/owo-agent-server" }

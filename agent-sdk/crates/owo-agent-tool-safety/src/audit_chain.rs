@@ -10,8 +10,8 @@
 //!
 //! 哈希依赖 `sha2`（工作区既有依赖），HMAC 就地实现，**不引入新依赖**。
 
-use crate::credentials::CredentialStore;
 use crate::sandbox::SandboxAuditLog;
+use owo_agent_kernel::credentials::CredentialStore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -440,14 +440,14 @@ pub fn export_encrypted_to_file(
     dek: &[u8; 32],
 ) -> Result<(), AuditChainError> {
     let json = serde_json::to_vec(export)?;
-    crate::storage_crypto::encrypt_file_envelope_with_dek(path, &json, dek)
+    owo_agent_kernel::storage_crypto::encrypt_file_envelope_with_dek(path, &json, dek)
         .map_err(|error| AuditChainError::Invalid(format!("审计导出加密失败：{error}")))?;
     Ok(())
 }
 
 /// 从加密文件加载导出（R10：校验信封格式 + 显式解密错误）。
 pub fn load_encrypted_export(path: &Path, dek: &[u8; 32]) -> Result<AuditExport, AuditChainError> {
-    let plain = crate::storage_crypto::decrypt_file_envelope_with_dek(path, dek)
+    let plain = owo_agent_kernel::storage_crypto::decrypt_file_envelope_with_dek(path, dek)
         .map_err(|error| AuditChainError::Invalid(format!("审计导出解密失败：{error}")))?;
     let export: AuditExport = serde_json::from_slice(&plain)?;
     Ok(export)

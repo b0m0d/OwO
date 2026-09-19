@@ -1,12 +1,19 @@
-# ADR-001：抽出 Tool-Safety 内核（`audit_chain` + `sandbox`）并打断 2-模块环
+# ADR-001：抽出 Tool-Safety 内核（`audit_chain` + `sandbox`）
 
-> 状态：**已决定，待实施**（M3）
+> 状态：**已实施**（M3，提交见 §7「实施结果」）
 > 日期：2026-09-19
 > 依据：`builGoal/Agent-SDK-后续任务实施指南-2026-09-18.md` §2.2（受信执行内核）、
 > §2.4（不可拆散的事务边界）、§9 A4（抽取 Tool Host）、§13（Tool Host 权限不可绕过）；
 > 事实基线：`docs/ARCH-MICROKERNEL.md` §5.1 的 SCC 分析。
 > 前置：M0（`owo-agent-kernel`）、M1（`devtools/product-eval` + `eval-facade`）、
 > M2（`owo-agent-extensions`）均已完成并验收。
+
+> **实施结论（先说结果）**：原计划「先做接口倒置消除环、再整体搬迁」中的**前半步不必要**。
+> 实测确认 `audit_chain ↔ sandbox` 的相互引用**只发生在这一对模块内部**，而两个模块是
+> 一起搬进同一个新 crate 的，因此该边**不再跨越任何 crate 边界**，无需倒置。
+> 实际实施 = 只做「整体搬迁 + 别名 re-export」，零接口改动、零调用方改动。
+> 详见 §7；下面 §1–§6 保留当时的分析与决定，作为决策记录。
+
 
 ---
 
@@ -133,3 +140,64 @@ Tool Host 是一个**独立 workspace 的进程**（含 policy/grant/approval/ex
   迁完 M3 后要明确：**快照与恢复的状态机在 extensions，执行的隔离与审计在 tool-safety，
   实际文件写入仍在 core 的 executor/tools** —— 三者的交接点必须有测试覆盖，
   否则就是"把一个事务边界切成了三份"。这是 M3 之后第一个要补的契约测试。
+
+---
+
+## 7. 实施结果（M3 已完成）
+
+### 7.1 实际做了什么（比 ADR 原计划更简单）
+
+| 计划（§4） | 实际 |
+|---|---|
+| 先用注入式 `SandboxAuditSink` 打断环（方案 A） | **不做**。实测环只在 `audit_chain` 与 `sandbox` 之间，两者同迁一个 crate 后该边不再跨 crate 边界，倒置纯属多余改动 |
+| 再整体搬迁（方案 C） | ✅ 做了：`git mv` 两个模块到 `crates/owo-agent-tool-safety/` |
+| core 保留别名 re-export | ✅ 做了：`pub use owo_agent_tool_safety::{audit_chain, sandbox};` |
+
+代价面比预期小得多：`audit_chain.rs` 只需把 3 处内核引用改指
+（`crate::credentials` → `owo_agent_kernel::credentials`；`crate::storage_crypto` ×2 同理），
+`sandbox.rs` **一行未改**。
+
+### 7.2 为什么原判断偏保守
+
+ADR §2 把"两个模块互相引用"直接当成"必须倒置"，没有先问一个更基本的问题：
+**这条边在搬迁后是否会跨越 crate 边界？** 只有当两个模块被分到不同 crate 时才需要倒置。
+M3 的实际教训应写进 §4 的复用清单：
+
+> 判定"是否需要接口倒置"的正确顺序是：
+> ① 列出该模块的全部出边；② 判断这些目标是否与它**同迁**；
+> ③ 只有"不同迁、且目标反向引用它"的边，才是必须倒置的真环。
+
+### 7.3 额外发现（有价值，值得记）
+
+`docs/ARCH-MICROKERNEL.md` §5.1 的分量清单把 `[8] audit_chain + sandbox` 记为"零出边
+（对 core）"，但更精确的事实是：`sandbox` 的 Windows 部分是**裸 FFI**
+（`extern "system"` + `#[link(name = "kernel32"/"advapi32"/"ntdll")]`），
+**完全不使用 `windows` / `windows-sys` crate**。这意味着新 crate 的依赖闭包只有
+`owo-agent-kernel` + serde/serde_json/chrono/uuid/sha2/thiserror，连 Windows 绑定依赖都不需要。
+对指南 §10「普通 Agent 改动不触发原生重链」是直接利好。
+
+### 7.4 验收证据
+
+| # | 标准（§5） | 结果 |
+|---|---|---|
+| 1 | 环不再跨 crate | `sandbox` 只剩 `crate::audit_chain`、`audit_chain` 只剩 `crate::sandbox`；两者同 crate，无跨边界环 |
+| 2 | 新 crate 零反向依赖 | `cargo tree -p owo-agent-tool-safety`：`owo-agent-core` / `owo-agent-server` / `sherpa` / `ndarray` / `rusqlite` 出现 **0 次**；`owo-agent-*` 只出现 kernel 与自身 |
+| 3 | 调用方零改动 | `git status`：`mcp.rs` / `plugin.rs` / `tools.rs` / server / cli **全部未改动** |
+| 4 | 编译 | `check --workspace --all-targets` exit=0（157 s，`Invoke-CiCargo -j 1`） |
+| 5 | 安全契约不回归 | `cargo test -p owo-agent-core` exit=0（320 s）；`sandbox_tests`(26)、`os_sandbox_integration_tests`(25)、`production_security_contract_tests`(12)、`audit_chain` 篡改矩阵全绿 |
+| 6 | 审计链语义不变 | 同上——`audit_chain_detects_any_tampering`、`encrypted_audit_export_restore_and_tamper_rejected`、`audit_export_never_leaks_managed_key_or_secret`、`audit_managed_key_reuses_and_verifies_across_restart`、`sandbox_event_kind_labels_for_audit_chain` 全部通过 |
+| 7 | 运行态 | `mk-smoke.ps1 -Tag m3-tool-safety` **18/18 PASS**，含审计事件落盘与无孤儿进程 |
+| 8 | 资源合规 | 全部 cargo 经 `Invoke-CiCargo`；完整档 `-j 1`。server 全量测试 995 s（含冷链），为本次最长单项 |
+
+### 7.5 仍未闭合的缺口（下一轮第一件事）
+
+§6 末尾点明的**三方事务边界契约测试**仍未补。当前状态：
+
+* `change_set` / `change_set_store`（extensions）负责快照与恢复状态机；
+* `sandbox`（tool-safety）负责执行隔离与审计收据；
+* core 的 `executor` / `tools` 负责实际写入。
+
+三者的交接点**没有一条专门的契约测试**来断言"拒绝执行的命令不得产生任何文件变更、
+且必须留下审计收据；被接受的命令其变更必须能被 change_set 捕获并可 revert"。
+这是指南 §2.4 第 4 条的直接要求，也是本重构目前最大的未闭合风险点。
+

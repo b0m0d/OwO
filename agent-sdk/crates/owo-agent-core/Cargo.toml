@@ -15,6 +15,10 @@ owo-agent-kernel.workspace = true
 # 已下沉到 owo-agent-extensions（它只依赖 kernel，反向依赖为零）。core 通过 lib.rs 的
 # 同名别名模块 + 顶层 pub use 保持既有路径，server/cli 与集成测试零改动。
 owo-agent-extensions.workspace = true
+# 受信执行内核（M3）：sandbox + audit_chain 已下沉到 owo-agent-tool-safety
+# （只依赖 kernel，反向依赖为零）。core 通过 lib.rs 的同名别名模块 + 顶层 pub use
+# 保持既有路径，mcp / plugin / tools 与 4 个相关集成测试零改动。
+owo-agent-tool-safety.workspace = true
 # 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
 # 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
 # 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成

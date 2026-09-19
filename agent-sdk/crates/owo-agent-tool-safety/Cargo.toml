@@ -1,0 +1,39 @@
+[package]
+name = "owo-agent-tool-safety"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "OwO Agent 受信执行内核（M3）：OS 级执行沙箱（Job Object/AppContainer/资源上限）+ 防篡改 HMAC 审计链"
+
+# 边界声明（微内核重构 · 顺序 3）：
+#
+# 本 crate 承载指南 §2.2 的**受信执行内核**与 §2.4 第 3 条事务边界
+# （“权限判定、capability、执行和审计收据必须同属一个拥有者”）：
+#   * sandbox     —— OS 级隔离与执行（Windows Job Object / 低完整性令牌 / AppContainer、
+#                    CPU/内存/进程数上限、kill-on-close 防孤儿、egress/插件拒绝记账）；
+#   * audit_chain —— append-only + 分段 HMAC-SHA256 的防篡改审计链（锚点可离线校验）。
+#
+# 依据 docs/ARCH-MICROKERNEL.md §5.1 的 SCC 分析：`audit_chain + sandbox`（2,694 行）
+# 是 core 依赖图里**唯一一个零出边的成规模分量**，入边只有 mcp / plugin（可 re-export
+# 满足），因此搬迁结构性安全。设计与决定见 docs/adr/ADR-001-tool-safety-kernel.md。
+#
+# 关于两者之间的“环”：`audit_chain` 认识 `SandboxAuditLog`（把沙箱事件写成审计记录），
+# `sandbox` 认识 `AuditChain`（`SandboxManager::drain_into_chain`）—— 在 core 内是合法的
+# 模块级互引。**搬迁后两者同处本 crate，这条边不再跨越任何 crate 边界，因此不需要
+# ADR-001 原计划的接口倒置**（实测确认；ADR 已按此更新）。本 crate 对外只依赖内核，
+# 反向依赖为零：任何让本 crate 依赖 owo-agent-core 的改动都会形成 crate 环。
+#
+# 注意（命名）：本 crate **不是**指南 §4 的 `services/tool-host`。后者是独立 workspace 的
+# 进程，含 policy / grant / approval / executor / mcp-host 五组能力；本 crate 目前只含
+# “沙箱执行 + 审计收据”，故用 tool-safety 之名，避免名不副实。§9 A4 抽取 Tool Host 时，
+# 本 crate 应成为其 executor/收据子集。
+[dependencies]
+owo-agent-kernel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

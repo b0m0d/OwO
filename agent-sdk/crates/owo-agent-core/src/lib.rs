@@ -8,7 +8,6 @@ pub mod agent;
 /// markdown）+ 交付元数据（media_type/file_name/sha256/size_bytes）+ 证据链。
 pub mod artifact_pipeline;
 pub mod assert;
-pub mod audit_chain;
 pub mod autoreview;
 pub mod blackboard;
 /// 内置团队模板目录（六期第三路：四类稳定团队候选，安装后参与匹配；见
@@ -49,7 +48,6 @@ pub mod plan;
 pub mod plugin;
 pub mod project_space_store;
 pub mod remote_step;
-pub mod sandbox;
 pub mod scene;
 pub mod schema_budget;
 pub mod session;
@@ -113,6 +111,20 @@ pub mod world_model;
 // `owo_agent_core::{Notes, AutomationStore, ChangeSet, CloudTask, ...}` 与
 // `crate::notes::*` 等既有路径全部继续有效，调用方零改动，且不可能形成 crate 环。
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 受信执行内核（M3）兼容层：sandbox 与 audit_chain 已下沉到独立 crate
+// `owo-agent-tool-safety`（指南 §2.2 受信执行内核 + §2.4 第 3 条审计收据）。
+//
+// 该 crate 是 core 依赖图里唯一零出边的成规模分量（ARCH §5.1 的 SCC 分析），
+// 只依赖 owo-agent-kernel，反向依赖为零。两者在 core 内原本互相引用
+// （audit_chain 认识 SandboxAuditLog；sandbox 的 drain_into_chain 认识 AuditChain），
+// 搬迁后同处一个 crate，该边不再跨越 crate 边界，因此**无需接口倒置**。
+//
+// 这里保留同名别名模块 + 顶层 pub use，使 `crate::sandbox::*`（mcp / plugin / tools）
+// 与 `owo_agent_core::audit_chain::*`（audit.rs、4 个集成测试）等既有路径全部继续有效。
+// ---------------------------------------------------------------------------
+pub use owo_agent_tool_safety::{audit_chain, sandbox};
+
 pub use owo_agent_extensions::{automation, change_set, change_set_store, cloud_exec, notes};
 
 pub use owo_agent_kernel::{

@@ -61,7 +61,8 @@ pub use owo_agent_kernel::{
 | **M0** | `owo-agent-kernel` | error/platform/capability/audit/credentials/cas_store/storage_crypto/whitelist/injection/lease/deadline（11 模块 6,604 行）+ 并入 `tool_args` | **0** | 25 个 core 源文件 | ✅ 已完成 |
 | **M1** | `devtools/product-eval`（独立 workspace）+ `owo-agent-eval-facade`（门面） | product_eval / eval / dataset_builder / product_eval_workswarm + 6 个集成测试（约 8.6k 行） | 7（必须依赖 core） | **0** | ✅ 已完成，见 §3 |
 | **M2** | `owo-agent-extensions` | notes / automation / change_set / change_set_store / cloud_exec（4,493 行） | **0** | **0** | ✅ 已完成，见 §5 |
-| **M3** | 下一个候选见 §6（SCC 数据已给出唯一可切方向） | — | — | — | 待执行 |
+| **M3** | `owo-agent-tool-safety` | sandbox + audit_chain（2,694 行） | **0** | `mcp` / `plugin` / `tools` + 4 个集成测试 | ✅ 已完成，见 §6 |
+| **M4** | 下一个候选见 §7（SCC 数据已给出唯一可切方向） | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -317,7 +318,8 @@ core 对 devtools 的依赖 = 0
 | 服务端单实例闸门 | 第二次 `serve` 直接退出，无 `core_ready` | 同一轮验收只用**一个**服务实例；需要套件可见时把 `evals/` 联进隔离工作区 |
 | 验收门自己写错契约导致的假红 | `POST /notes` 返回 201 但断言 200；`GET /notes` 断言裸数组但实际是 `{count, notes}` | 写运行态断言前先读服务端 handler 与请求/响应结构，不要凭直觉 |
 | 用"入边/出边计数"选边界 | 反复撞 `cyclic package dependency` | 改用 **Tarjan SCC + 分量 DAG**：只有"零出边 + 零入边"的分量才能零代价切走（见 §5.1） |
-| 构建卷空间不足 | `LNK1318 非意外的 PDB 错误: LIMIT`（看着像编译错误） | 先清 `target/**/incremental`、`target/**/*.pdb`（M0–M2 共回收约 55 GB） |
+| 把"模块互相引用"直接当成"必须接口倒置" | 多写一堆不必要的 sink/trait | 先问**这条边搬迁后是否跨越 crate 边界**：① 列出出边 ② 判断目标是否与它**同迁** ③ 只有"不同迁且目标反向引用它"的边才是真环。M3 实测 `audit_chain ↔ sandbox` 同迁一 crate → 零倒置（见 §6.1） |
+| 构建卷空间不足 | `LNK1318 非意外的 PDB 错误: LIMIT`（看着像编译错误） | 先清 `target/**/incremental`、`target/**/*.pdb`（M0–M3 共回收约 67 GB） |
 
 
 ## 5. M2：`owo-agent-extensions`（已完成）
@@ -396,34 +398,86 @@ diff 和 revert"保持在同一拥有者内。本 crate **只承载快照与恢�
 | `crates/owo-agent-server`、`crates/owo-agent-cli` | **未改动** |
 
 
-## 6. 后续候选与取舍记录
 
-M0/M2 已把 core 里"能结构性地切下来"的部分用完：**§5 的 SCC 分析证明，整个 core 只剩
-那 5 个模块同时满足零入边 + 零出边**。因此 M3 起必须做**真正的依赖倒置或整组搬迁**，
-不能再指望"搬文件 + re-export"零代价推进。下面按 SCC 数据给出唯一可切方向与取舍。
+---
 
-### M3 唯一可切方向：Tool-Safety 内核（`audit_chain` + `sandbox`）
+## 6. M3：`owo-agent-tool-safety`（已完成）
 
-> 设计与决定已落 ADR：**`docs/adr/ADR-001-tool-safety-kernel.md`**（含环的处置方案、
-> 命名取舍、8 条验收标准，以及"不做的事"）。本节只留摘要。
+设计与决定见 **`docs/adr/ADR-001-tool-safety-kernel.md`**；本节是摘要 + 与 ADR 的差异。
 
-依据 §5.1 的 SCC 结果，`[8] audit_chain + sandbox`（2,694 行）是**唯一一个"零出边"的
-成规模分量**，且它们的出边只有内核（`audit_chain` → `credentials`/`storage_crypto`，
-`sandbox` → 无），入边只有 `mcp` 与 `plugin`（可 re-export 满足）。这正是指南 §2.2
-的**受信执行内核**（"Policy 与 Executor 必须在同一受信边界"）与 §13 的
-"Tool Host 权限不可绕过"。
+### 6.1 结果：比 ADR 原计划简单一半
 
-**唯一阻塞点（实测）**：`audit_chain.rs` 第 14 行 `use crate::sandbox::SandboxAuditLog;`
-而 `sandbox.rs` 第 637 行 `chain: &mut crate::audit_chain::AuditChain` —— 两者**互相引用**，
-是一个 2 模块真环。可选处置：
+ADR 原计划「先用注入式 `SandboxAuditSink` 打断环、再整体搬迁」。实测发现**前半步不必要**：
 
-1. **回调/观察者倒置**（推荐）：`sandbox` 的审计汇出改为接收一个
-   `&mut dyn SandboxAuditSink`（或闭包），由 core 侧传入 `AuditChain` 的适配器。
-   这样 `sandbox` 不再依赖 `audit_chain`，两者可同迁一 crate，且不扩大内核 API。
-2. 把 `SandboxAuditEvent` 等类型下沉内核，环也消失；代价是内核开始承载"沙箱"概念，
-   与 §2.2 的边界划分相悖。
+* `audit_chain` 与 `sandbox` 的相互引用**只发生在这一对内部**
+  （`audit_chain.rs:14 use crate::sandbox::SandboxAuditLog`；
+  `sandbox.rs:637 chain: &mut crate::audit_chain::AuditChain`）；
+* 两个模块是**一起**搬进同一个新 crate 的 → 该边不再跨越任何 crate 边界 → 无需倒置。
 
-无论哪种，**必须先写 ADR 再动手**（这是本重构第一次做依赖倒置，不是搬文件）。
+实际实施 = `git mv` 两个模块 + core 保留别名 re-export，**零接口改动、零调用方改动**。
+代价面：`audit_chain.rs` 只改 3 处内核引用（`crate::credentials` / `crate::storage_crypto` ×2
+→ `owo_agent_kernel::*`），`sandbox.rs` **一行未改**。
+
+### 6.2 由此修正的判断规则（已写入 §4 复用清单）
+
+原 ADR 把"两个模块互相引用"直接等同于"必须接口倒置"，漏问了一个更基本的问题：
+**这条边在搬迁后是否会跨越 crate 边界？** 正确顺序是：
+
+```text
+① 列出该模块的全部出边；
+② 判断这些目标是否与它「同迁」；
+③ 只有「不同迁、且目标反向引用它」的边，才是必须倒置的真环。
+```
+
+### 6.3 额外发现：tool-safety 连 Windows 绑定依赖都不需要
+
+`sandbox` 的 Windows 部分是**裸 FFI**（`extern "system"` + `#[link(name =
+"kernel32"/"advapi32"/"ntdll")]`，共 3 个 extern 块），**完全不使用 `windows` /
+`windows-sys`**（core 里用这两个 crate 的其实是 `executor.rs`(31 处) / `ocr.rs`(4) /
+`accessibility.rs`(4)）。因此新 crate 的依赖闭包只有
+`owo-agent-kernel` + serde / serde_json / chrono / uuid / sha2 / thiserror —— 对指南 §10
+「普通 Agent 改动不触发原生重链」是直接利好。
+
+### 6.4 验收证据
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| workspace 全目标编译 | `check --workspace --all-targets`（`-j 1`） | **exit=0**，157 s | `docs/qa/logs/mk-m3-check-*.log` |
+| 全量 core 测试（含全部安全契约） | `cargo test -p owo-agent-core --locked` | **exit=0**，320 s；`sandbox_tests`(26)、`os_sandbox_integration_tests`(25)、`production_security_contract_tests`(12) 与 audit_chain 篡改矩阵全绿 | `docs/qa/logs/mk-m3-core-tests-*.log` |
+| 全量 server 测试 | `cargo test -p owo-agent-server --locked -j 1 -- --test-threads=1` | **exit=0**，995 s（63 单测 + 40 集成测试文件全绿） | `docs/qa/logs/mk-m3-server-tests-*.log` |
+| 依赖闭包 | `cargo tree -p owo-agent-tool-safety` | `owo-agent-core`/`owo-agent-server`/`sherpa`/`ndarray`/`rusqlite`/`windows` 均 **0 次**；`owo-agent-*` 只有 kernel 与自身 | `docs/qa/logs/mk-m3-tree.log` |
+| 调用方零改动 | `git status` | `mcp.rs` / `plugin.rs` / `tools.rs` / server / cli **未改动** | 会话记录 |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m3-tool-safety` | **18/18 PASS**（含审计事件落盘、无孤儿进程） | `docs/qa/evidence/mk-smoke-m3-tool-safety-*/report.json` |
+| `cargo fmt --all` | 经 `Invoke-CiCargo` | exit=0 | 会话记录 |
+
+
+## 7. 后续候选与取舍记录
+
+M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
+只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做
+**真正的依赖倒置或整组搬迁**，不能再指望"搬文件 + re-export"零代价推进。
+
+### M4 优先级 0（不是新 crate，而是补契约缺口）
+
+**三方事务边界契约测试**——M3 把它留成了最大未闭合风险点（见 `docs/adr/ADR-001-tool-safety-kernel.md` §7.5）：
+`change_set*`（extensions，快照/恢复状态机）＋ `sandbox`（tool-safety，执行隔离与审计收据）
+＋ core 的 `executor`/`tools`（实际写入）共同承担指南 §2.4 第 4 条，但三者交接点**没有任何
+专门测试**。必须先补：
+
+```text
+① 被沙箱拒绝的命令 → 工作区零文件变更 + 必须留下审计收据；
+② 被接受的命令 → 变更必须能被 change_set 捕获，且 revert 能精确还原；
+③ 拒绝/失败路径不得产生"半写"（写了但没有 change_set 记录）。
+```
+
+### M4 候选方向（都要先做倒置或整组搬迁）
+
+下面按"收益 ÷ 代价"排序，全部依据 §5.1 的分量数据：
+
+* **候选 A：Perception Worker**（指南 §9 A3，SLO 收益最大，代价也最大）
+* **候选 B：Tool主机其余部分**（policy / grant / approval，指南 §9 A4）
+* **候选 C：Fleet / WorkSwarm / Workflow**（指南 §1.3 已定档"暂停新增、可选加载"）
+* **候选 D：`desktop_env`**（2,442 行，唯一出边 `computer_use`，入边 2）
 
 ### 候选 A：Perception Worker（指南 §9 A3，SLO 收益最大，但最贵）
 

@@ -1790,6 +1790,7 @@ dependencies = [
  "owo-agent-extensions",
  "owo-agent-kernel",
  "owo-agent-protocol",
+ "owo-agent-tool-safety",
  "png",
  "rand",
  "regex",
@@ -1902,6 +1903,19 @@ dependencies = [
  "tracing",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "owo-agent-tool-safety"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "owo-agent-kernel",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
