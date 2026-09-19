@@ -26,12 +26,9 @@ pub mod fleet_transport;
 pub mod gateway;
 pub mod goal;
 pub mod grant_store;
-pub mod learn;
 pub mod locate;
 pub mod mcp_health;
-pub mod memory;
 pub mod node_agent;
-pub mod observe;
 pub mod ocr;
 #[cfg(target_os = "windows")]
 pub mod onnx_ocr;
@@ -170,6 +167,21 @@ pub use owo_agent_workswarm::{project_space_store, team_benefit, workswarm_outpu
 // permissions / tools 成环，按 §12 的排序与 Tool Host 的 A4 分段落一起处理。
 // ---------------------------------------------------------------------------
 pub use owo_agent_mcp::mcp;
+
+// ---------------------------------------------------------------------------
+// 记忆/观察/学习内核（M11）兼容层：memory / observe / learn 已下沉到独立 crate
+// `owo-agent-memory`，并把它唯一的域配置 `ProactiveSettings` 一起带走
+// （core 的 settings.rs 用 `pub use` 转出，`Settings.proactive` 字段类型不变）。
+//
+// 三个模块之间的边（memory ↔ observe、observe → learn）**同迁**，不跨 crate；
+// 跨 crate 的两条边在前面步骤已经倒置完毕（platform→kernel M0、skill_health→contracts M8），
+// 本步只把路径改成绝对形式。因此入边全部由下面的别名模块满足：
+//   * crate 内：`crate::learn::`（action_program / computer_use / executor /
+//     share_skill / workflow）、`crate::observe::`、`crate::memory::`；
+//   * crate 外：`owo_agent_core::{memory, observe, learn}::*`（server 的 memory_graph_api
+//     与集成测试）。
+// ---------------------------------------------------------------------------
+pub use owo_agent_memory::{learn, memory, observe};
 
 pub use owo_agent_plugins::{plugin, McpServerConfig};
 

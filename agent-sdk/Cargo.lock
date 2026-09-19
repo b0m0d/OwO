@@ -1802,6 +1802,7 @@ dependencies = [
  "owo-agent-extensions",
  "owo-agent-kernel",
  "owo-agent-mcp",
+ "owo-agent-memory",
  "owo-agent-plugins",
  "owo-agent-protocol",
  "owo-agent-tool-safety",
@@ -1894,6 +1895,18 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "owo-agent-memory"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "owo-agent-contracts",
+ "owo-agent-kernel",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

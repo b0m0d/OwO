@@ -19,6 +19,12 @@ param(
     # 单个分片在门禁拒绝后的最大重试轮数（每轮等 -RetrySleepSec 秒）
     [int]$MaxRetriesPerShard = 20,
     [int]$RetrySleepSec = 45,
+    # 分片用的门禁档位：strict（-j 1，且要求磁盘 ≥20 GB）或 normal（-j 2，磁盘 ≥6 GB）。
+    # 两种档位下都显式传 `-j 1`，所以并发上限始终是 1；档位只影响**磁盘门阈值**。
+    # 实测：strict 档在构建把卷压到 20 GB 以下时会持续拒绝启动（而这与内存无关）。
+    [ValidateSet('normal', 'strict')][string]$PolicyMode = 'strict',
+    # 跳过已通过的分片（同一包分批续跑时用），例如 -Skip route_contract_tests,slo_tests
+    [string[]]$Skip = @(),
     [switch]$SkipLib
 )
 
@@ -56,6 +62,13 @@ if (Test-Path -LiteralPath $testsDir) {
         $shards.Add([pscustomobject]@{ Kind = 'test'; Name = [IO.Path]::GetFileNameWithoutExtension($_.Name) })
     }
 }
+if ($Skip.Count -gt 0) {
+    $before = $shards.Count
+    $kept = @($shards | Where-Object { $Skip -notcontains $_.Name })
+    $shards = New-Object System.Collections.Generic.List[object]
+    $kept | ForEach-Object { $shards.Add($_) }
+    Write-Host ("[shard] 按 -Skip 跳过 {0} 个分片（{1} → {2}）" -f ($before - $shards.Count), $before, $shards.Count)
+}
 
 $logDir = Join-Path $root 'docs\qa\logs'
 if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
@@ -75,7 +88,7 @@ foreach ($shard in $shards) {
     for ($attempt = 1; $attempt -le $MaxRetriesPerShard; $attempt++) {
         [void](Wait-ForRoom $shard.Name)
         try {
-            $code = Invoke-CiCargo -Arguments $cargoArgs -Cwd $root -Label $label -PolicyMode strict -LogFile $log -HeartbeatSec 60 -PassThru
+            $code = Invoke-CiCargo -Arguments $cargoArgs -Cwd $root -Label $label -PolicyMode $PolicyMode -LogFile $log -HeartbeatSec 60 -PassThru
         } catch {
             # 门禁在**启动前**拒绝时是抛异常（不是返回 137）；磁盘门与内存门都走这条。
             # 只把门禁拒绝当作"等待后重试"，其它异常原样抛出——否则真实失败会被吞成等待。

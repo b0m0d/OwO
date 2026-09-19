@@ -6,9 +6,11 @@
 //! - 学习样本默认掩码，消息内容不采样；录制可暂停、可一键清空。
 //! - 主动建议默认仅提示，不执行。
 
-use crate::settings::ProactiveSettings;
-use crate::skill_health::{FailureMode, SkillHealth, SkillHealthStore, SkillState};
+// M11：ProactiveSettings 随本域搬入（配置类型随域走，见 §9.2）；
+// skill_health 已在 M8 下沉到 owo-agent-contracts，这里改走绝对路径。
+use crate::proactive_settings::ProactiveSettings;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use owo_agent_contracts::skill_health::{FailureMode, SkillHealth, SkillHealthStore, SkillState};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;

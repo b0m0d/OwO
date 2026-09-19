@@ -255,7 +255,7 @@ pub struct DesktopSnapshot {
 
 /// 采样当前桌面状态（无前台窗口时 app_id/title_hash 为 None）。
 pub fn sample_desktop() -> DesktopSnapshot {
-    let (app_id, title) = crate::platform::poll_foreground_app().unwrap_or_default();
+    let (app_id, title) = owo_agent_kernel::platform::poll_foreground_app().unwrap_or_default();
     DesktopSnapshot {
         app_id: if app_id.is_empty() {
             None
@@ -267,7 +267,7 @@ pub fn sample_desktop() -> DesktopSnapshot {
         } else {
             Some(value_hash(&serde_json::json!(title)))
         },
-        clipboard_seq: crate::platform::clipboard_sequence(),
+        clipboard_seq: owo_agent_kernel::platform::clipboard_sequence(),
     }
 }
 

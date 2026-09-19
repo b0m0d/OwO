@@ -69,7 +69,8 @@ pub use owo_agent_kernel::{
 | **M8** | `owo-agent-contracts` | context / computer_task / plan / skill / skill_health（1,491 行 + lib.rs）；**数据形状与执行者分离** | **0** | `agent` / `executor` / `tools` / server / cli（经别名，未改代码） | ✅ 已完成，见 §10 |
 | **M9** | `owo-agent-workswarm` | project_space_store / team_benefit / workswarm_output（2,847 行）；**编排的契约与状态先行、执行侧仍留 core** | **0** | `workswarm` / `team_strategy` / `artifact_pipeline` / `contract_worker` / `worker_profile` + server 5 个 api 模块（经别名，未改代码） | ✅ 已完成，见 §11 |
 | **M10** | `owo-agent-mcp` | MCP 宿主第一段：`mcp`（646 行）+ 两台假服务器 + 13 条 MCP 集成测试；**零出边** | **0** | `agent` / `tools` / `tool_effects` + server `mcp_api`（经别名，未改代码） | ✅ 代码已完成，见 §12（**server 全量测试与冒烟待资源可用补跑**） |
-| **M11** | 下一个候选见 §13 | — | — | — | 待执行 |
+| **M11** | `owo-agent-memory` | memory + observe + learn（2,454 行）+ `ProactiveSettings` 随域搬入；两处跨 crate 边**已在前面步骤倒置完毕** | **0** | `action_program` / `computer_use` / `executor` / `share_skill` / `workflow` / `settings` + server（经别名，未改代码） | ✅ 已完成，见 §13 |
+| **M12** | 下一个候选见 §14 | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -731,7 +732,7 @@ note: the function is defined here --> crates\owo-agent-contracts\src\skill.rs:1
 
 ## 11. M9：`owo-agent-workswarm`（已完成）——编排的契约/状态先行，执行侧留待 A2
 
-候选取舍与两路扫描数据见 §13；本节记录边界、结果与证据。
+候选取舍与两路扫描数据见 §14；本节记录边界、结果与证据。
 
 ### 11.1 边界与依赖方向
 
@@ -762,7 +763,7 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 所以正确的迁移顺序是**先切零出边的契约/状态侧，再切执行侧**：本步搬走的三个模块
 没有任何出边，搬完立即满足"core 零改动、可独立编译、可独立测试"；执行侧
 （`workswarm.rs` 本体 4,328 行）留着与 `goal`/`workflow`/`fleet` 的环一起处理，
-按 §13 的建议排到 A2（统一 Daemon）之后。
+按 §14 的建议排到 A2（统一 Daemon）之后。
 
 ### 11.3 本步的调用方改动量：**0 行**（除 core 的 lib.rs 接线）
 
@@ -818,7 +819,7 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 
 ## 12. M10：`owo-agent-mcp`（已完成）——MCP 宿主第一段，连测试服务器与集成测试一起搬
 
-候选取舍见 §13；本节记录边界、结果与证据。
+候选取舍见 §14；本节记录边界、结果与证据。
 
 ### 12.1 边界与依赖方向
 
@@ -940,7 +941,94 @@ Cargo 的环检测只看普通依赖图，dev-dependency 的环不成环——co
 | `Cargo.toml` | 新增 workspace 成员与依赖；**server / cli 未改一行** |
 
 
-## 13. 后续候选与取舍记录
+## 13. M11：`owo-agent-memory`（已完成）——前几步的倒置在这里兑现
+
+候选取舍见 §14；本节记录边界、结果与证据。
+
+### 13.1 边界与依赖方向
+
+| 模块 | 行数 | 内容 | 跨 crate 出边 |
+|---|---:|---|---|
+| `learn` | 1,631 | 操作学习与主动建议：录制/泛化/动作图/流程技能包/`ProactiveEngine` | 0（改路径后） |
+| `observe` | 576 | 桌面观察：`DesktopSnapshot` / `Observation` / `MemoryStore` | 0（改路径后） |
+| `memory` | 249 | 语义记忆存储：JSONL 持久化 + 剪枝 + 检索 | 0 |
+| `proactive_settings` | 82 | 主动建议的域配置 `ProactiveSettings`（**从 core 的 settings.rs 随域搬入**） | 0 |
+| `lib.rs` | 35 | 边界文档 + glob re-export | — |
+
+```text
+kernel(M0) ─┐
+            ├─► owo-agent-memory ─► owo-agent-core ─► server/cli
+contracts(M8)┘        （core 侧 action_program/computer_use/executor/
+                       share_skill/workflow 都引用 learn）
+```
+
+### 13.2 这一步为什么几乎不用改动搬迁代码：倒置是**前面**做的
+
+三个模块搬迁前只有三条跨模块引用，全部在更早的步骤里已经处理完毕：
+
+| 原路径 | 何时处理 | 本步动作 |
+|---|---|---|
+| `crate::platform::poll_foreground_app()` / `clipboard_sequence()`（observe 2 处） | **M0** 把 `platform` 下沉到 `owo-agent-kernel` | 改成 `owo_agent_kernel::platform::`（2 行） |
+| `crate::skill_health::{FailureMode, SkillHealth, ...}`（learn） | **M8** 把 `skill_health` 下沉到 `owo-agent-contracts` | 改成 `owo_agent_contracts::skill_health::`（1 行） |
+| `crate::settings::ProactiveSettings`（learn） | 本步按 **M7 的规则**处理 | 类型本身随域搬进本 crate（见 13.3） |
+
+三个模块之间的边（`memory ↔ observe`、`observe → learn`）属于 §5.1 意义上的**真环**，
+但它们**同迁一个 crate**，边不再跨 crate 边界，因此同样零倒置——与 M3 的
+`sandbox ↔ audit_chain` 是同一条判据（§6.1）。
+
+### 13.3 `ProactiveSettings`：第二次应用"配置类型随域走"
+
+M7 把 `McpServerConfig` 从 core 的 `mcp.rs` 搬到消费它的插件域，这次是同一个形状：
+
+* **消费方决定归属**：`learn::ProactiveEngine::new(ProactiveSettings)` 与
+  `apply_settings(ProactiveSettings)` 是这个类型唯一的行为性用法；
+  core 的 `Settings` 只是把它当字段聚合（`pub proactive: ProactiveSettings`）。
+* **处理方式**：类型 + `impl Default` + 6 个 `#[serde(default = "...")]` 用的
+  默认值函数一起搬进 `owo-agent-memory::proactive_settings`；core 的 `settings.rs`
+  改成 `pub use owo_agent_memory::ProactiveSettings;`。
+* **调用方零改动**：`owo_agent_core::settings::ProactiveSettings`（含
+  `owo_agent_core::settings::Settings { proactive, .. }` 的字段类型）全部照旧。
+* 一个必须记下的细节：`#[serde(default = "path")]` 的 path **在类型定义处解析**，
+  所以默认值函数必须随类型一起搬。`default_true` 在 core 的 settings.rs 里还被另外
+  两个结构体用着，于是本 crate 自备一份等价实现（82 行里有 5 行是它）——
+  这是有意的小重复，避免为一行布尔默认值在两侧 crate 之间造反向依赖。
+
+### 13.5 验收证据（可复现）
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| 新 crate 独立编译 | `cargo check -p owo-agent-memory --all-targets` | **exit=0**，5 s | `docs/qa/logs/mk-m11-check-crate-*.log` |
+| workspace 全目标编译 | `cargo check --workspace --all-targets`（`-j 1`） | **exit=0**，178 s（同时更新锁文件：新增成员） | `docs/qa/logs/mk-m11-check-ws-*.log` |
+| 新 crate 自身测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-memory -Tag m11-memory` | **exit=0**，**27/27 通过**（从 core 随代码搬来的单测） | `docs/qa/logs/mk-shard-m11-memory-lib-*.log` |
+| 全量 core 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-core -Tag m11-core` | **exit=0**，**31/31 分片全绿**（`--lib` 336 passed / 2 ignored + 30 个集成目标） | `docs/qa/logs/mk-shard-m11-core-*.log` |
+| 全量 server 测试 | 分批两次：`-Tag m11-server`（strict 档 27 分片）+ `-Tag m11-server-b -Skip <已过 27 个>`（normal 档 13 分片） | **exit=0，40/40 分片全绿**（`--lib` 63 + 39 个集成目标） | `docs/qa/logs/mk-shard-m11-server*-*.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m11-memory` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m11-memory-20260920-025512/report.json` |
+| core 体量 | `git ls-tree` + 逐行统计 | **58 文件 / 43,352 行 → 53 文件 / 40,630 行**（−2,722 行）；新 crate 5 文件 / 2,573 行 | 与 §1 同口径 |
+
+> 单测条数守恒核对：core `--lib` 由 363 降到 **336**（−27），新 crate 恰好 **27**；
+> 测试没被删掉，只是随代码一起搬了家。
+
+> server 分两批的原因（如实记录）：第一批 27 个分片用 `-PolicyMode strict`（该档要求
+> 磁盘 ≥20 GB）；构建把卷压到 19.72 GB 后，strict 档的**磁盘门**开始持续拒绝启动剩余
+> 分片（这与内存无关，日志里表现为"启动前被资源门拒绝"连续重试）。剩余 13 个分片改用
+> `-PolicyMode normal`（磁盘 ≥6 GB）续跑，并用新增的 `-Skip` 参数跳过已通过的 27 个。
+> 两批都**显式传了 `-j 1 -- --test-threads=1`**；门禁的注入逻辑是"只降不升"
+> （`scripts/ci-shared.ps1:284-290` 的 `[Math]::Min($foundJobs, $Jobs)`），
+> 因此两批的实际并发都是 1。**门禁阈值本身没有被改动。**
+
+### 13.6 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `crates/owo-agent-core/src/{memory,observe,learn}.rs` | `git mv` 到新 crate；`observe.rs` 2 处 `crate::platform::` → `owo_agent_kernel::platform::`；`learn.rs` 2 行 use 改路径（settings → 本 crate，skill_health → contracts） |
+| `crates/owo-agent-memory/src/proactive_settings.rs` | 新文件：`ProactiveSettings` + `impl Default` + 7 个 serde 默认值函数（含随类型搬来的 6 个） |
+| `crates/owo-agent-core/src/settings.rs` | 删除 `ProactiveSettings` 定义与 `impl Default`、6 个只有它用的 `default_*`；改为 `pub use owo_agent_memory::ProactiveSettings;` |
+| `crates/owo-agent-core/src/lib.rs` | 删除 3 个 `pub mod`，改为 `pub use owo_agent_memory::{learn, memory, observe};` + 边界注释块 |
+| `crates/owo-agent-memory/{Cargo.toml,src/lib.rs}` | 新 crate（边界文档 + glob re-export + "不得依赖 core"的约束） |
+| `Cargo.toml` / core 的 `Cargo.toml` | 新增 workspace 成员与依赖；**server / cli / 集成测试未改一行** |
+
+
+## 14. 后续候选与取舍记录
 
 M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做

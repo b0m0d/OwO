@@ -62,38 +62,13 @@ impl Default for ExploreSettings {
     }
 }
 
-/// 主动建议阈值配置（v0.4 D24，默认仅提示不执行）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProactiveSettings {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_weekly_threshold")]
-    pub weekly_threshold: u32,
-    #[serde(default = "default_daily_threshold")]
-    pub daily_threshold: u32,
-    #[serde(default = "default_similarity")]
-    pub similarity: f64,
-    #[serde(default = "default_cooldown_hours")]
-    pub cooldown_hours: u32,
-    #[serde(default = "default_daily_cap")]
-    pub daily_cap: u32,
-    #[serde(default = "default_auto_silence_days")]
-    pub auto_silence_days: u32,
-}
-
-impl Default for ProactiveSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            weekly_threshold: 5,
-            daily_threshold: 3,
-            similarity: 0.9,
-            cooldown_hours: 24,
-            daily_cap: 3,
-            auto_silence_days: 30,
-        }
-    }
-}
+/// 主动建议阈值配置（v0.4 D24）。
+///
+/// M11：类型已随它的域（主动建议引擎 `owo_agent_memory::learn::ProactiveEngine`）
+/// 搬到 `owo-agent-memory`；这里用 `pub use` 转出，因此
+/// `owo_agent_core::settings::ProactiveSettings` 与 `Settings { proactive, .. }`
+/// 的字段类型都保持不变，调用方零改动（§9.2「配置类型随域走」）。
+pub use owo_agent_memory::ProactiveSettings;
 
 /// 技能包分享/导入配置（v0.4 D26）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,30 +112,6 @@ fn default_action_budget() -> u32 {
 
 fn default_max_duration() -> u64 {
     600
-}
-
-fn default_weekly_threshold() -> u32 {
-    5
-}
-
-fn default_daily_threshold() -> u32 {
-    3
-}
-
-fn default_similarity() -> f64 {
-    0.9
-}
-
-fn default_cooldown_hours() -> u32 {
-    24
-}
-
-fn default_daily_cap() -> u32 {
-    3
-}
-
-fn default_auto_silence_days() -> u32 {
-    30
 }
 
 fn default_share_format() -> String {

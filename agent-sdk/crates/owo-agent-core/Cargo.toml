@@ -35,6 +35,11 @@ owo-agent-workswarm.workspace = true
 # tool_effects 继续经 lib.rs 的同名别名模块使用 `crate::mcp::` 路径；
 # 两台 MCP 假服务器与 mcp_tests 也随之迁走（`CARGO_BIN_EXE_*` 只在声明该 bin 的包内可用）。
 owo-agent-mcp.workspace = true
+# 记忆/观察/学习内核（M11）：memory / observe / learn 已下沉到 owo-agent-memory。
+# core 的 action_program / computer_use / executor / share_skill / workflow 与
+# server 的 memory_graph_api 继续经 lib.rs 的同名别名模块使用既有路径。
+# ProactiveSettings 随域搬到该 crate，core 的 settings.rs 用 pub use 转出。
+owo-agent-memory.workspace = true
 # 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
 # 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
 # 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成

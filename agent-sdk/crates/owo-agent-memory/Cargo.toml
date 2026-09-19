@@ -1,0 +1,33 @@
+[package]
+name = "owo-agent-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 记忆 / 观察 / 学习内核（M11）。
+#
+# 边界（见 docs/ARCH-MICROKERNEL.md §13）：
+#   * 三个模块之间的边（memory ↔ observe、observe → learn）**同迁**，不跨 crate，
+#     因此都不需要倒置；
+#   * 真正跨 crate 的两条边都已在前面的步骤里倒置完毕：
+#       `crate::platform::`      → owo-agent-kernel::platform（M0 下沉）
+#       `crate::skill_health::`  → owo-agent-contracts::skill_health（M8 下沉）
+#     本步只需把这两处路径改成绝对路径（§13 记录）；
+#   * 唯一残留的 `crate::settings::ProactiveSettings` 按 M7 定下的规则处理：
+#     **配置类型随域走**——该类型是主动建议引擎的配置，本步把它从 core 的
+#     settings.rs 搬到本 crate（proactive_settings），core 侧 `pub use` 转出，
+#     `owo_agent_core::settings::ProactiveSettings` 与 `Settings.proactive` 均不变。
+#
+# **本 crate 不得依赖 owo-agent-core**：core 依赖本 crate（action_program /
+# computer_use / executor / share_skill / workflow 都引用 learn），反向的普通依赖
+# 会立刻成环。
+
+[dependencies]
+owo-agent-kernel.workspace = true
+owo-agent-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+# 内联全限定路径（`uuid::Uuid::new_v4()`，learn.rs 4 处 / chrono::Utc::now() 多处的
+# 同类问题）不会出现在 `use` 行里，依赖清单按「use 行 + 内联全限定路径」两遍核。
+uuid.workspace = true
