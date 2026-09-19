@@ -1772,6 +1772,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "owo-agent-contracts"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "owo-agent-core"
 version = "0.1.0"
 dependencies = [
@@ -1786,6 +1796,7 @@ dependencies = [
  "hmac",
  "ndarray",
  "ort",
+ "owo-agent-contracts",
  "owo-agent-env",
  "owo-agent-eval-facade",
  "owo-agent-extensions",

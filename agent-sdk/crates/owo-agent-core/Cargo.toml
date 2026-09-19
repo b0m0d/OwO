@@ -24,6 +24,8 @@ owo-agent-tool-safety.workspace = true
 owo-agent-env.workspace = true
 # 插件内核（M7）：plugin 已下沉；McpServerConfig 随插件外迁后由 core 反向引用。
 owo-agent-plugins.workspace = true
+# 共享契约内核（M8）：context/computer_task/plan/skill/skill_health 已下沉。
+owo-agent-contracts.workspace = true
 # 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
 # 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
 # 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成

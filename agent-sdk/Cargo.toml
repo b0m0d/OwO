@@ -12,7 +12,11 @@ members = [
     # 受信执行内核（M3）：sandbox + audit_chain。SCC 分析里唯一零出边的成规模分量；
     # 两者互相引用但同处本 crate，不跨 crate 边界，故无需接口倒置。
     "crates/owo-agent-tool-safety",
-    # 环境内核（M5）：desktop_env。本步做了真正的依赖倒置（TaskSurface 下沉内核）。
+    # 共享契约内核（M8）：context/computer_task/plan/skill/skill_health——最轻的依赖根
+    # （连 windows-sys/async-trait 都不带，只有 serde/chrono/uuid）。
+    "crates/owo-agent-contracts",
+    # 环境内核（M5）：desktop_env + transition/world_model/experience_store（M6）。
+    # M5 做了真正的依赖倒置（TaskSurface 下沉内核）。
     "crates/owo-agent-env",
     # 插件内核（M7）：plugin + 从 mcp 下沉的 McpServerConfig。
     "crates/owo-agent-plugins",
@@ -73,6 +77,7 @@ owo-agent-kernel = { path = "crates/owo-agent-kernel" }
 owo-agent-extensions = { path = "crates/owo-agent-extensions" }
 owo-agent-tool-safety = { path = "crates/owo-agent-tool-safety" }
 owo-agent-env = { path = "crates/owo-agent-env" }
+owo-agent-contracts = { path = "crates/owo-agent-contracts" }
 owo-agent-plugins = { path = "crates/owo-agent-plugins" }
 owo-agent-core = { path = "crates/owo-agent-core" }
 owo-agent-eval-facade = { path = "crates/owo-agent-eval-facade" }

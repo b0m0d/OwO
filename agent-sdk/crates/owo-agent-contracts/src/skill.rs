@@ -118,7 +118,12 @@ impl SkillRegistry {
     }
 }
 
-pub(crate) fn parse_frontmatter(content: &str) -> (Option<String>, String, String) {
+/// 解析技能正文的 frontmatter（`---` 包裹段），返回 `(name, description, body)`。
+///
+/// M8 拆分说明：原为 `pub(crate)`，但它的真实使用者除了本模块还有 core 的
+/// `skill_pack`（解析技能包里的 SKILL.md）。搬到独立 crate 后 `pub(crate)` 不再
+/// 可见，故升为 `pub` —— 它是纯解析函数、无 `crate::` 依赖，本就属于契约层。
+pub fn parse_frontmatter(content: &str) -> (Option<String>, String, String) {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
         return (None, String::new(), content.to_string());

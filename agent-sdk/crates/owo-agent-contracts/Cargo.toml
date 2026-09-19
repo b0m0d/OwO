@@ -1,0 +1,45 @@
+[package]
+name = "owo-agent-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "OwO Agent 共享契约内核（M8）：项目规则、ComputerTask 数据与状态机、计划 DAG、技能清单与技能健康度——零出边的自包含数据契约"
+
+# 边界声明（微内核重构 · 顺序 8）：
+#
+# 本 crate 承载 core 里五块**零出边、零外部重依赖**的自包含数据契约：
+#
+# | 模块 | 行数 | 内容 |
+# |---|---:|---|
+# | `context` | 32 | 项目规则（AGENTS.md 等）加载 |
+# | `computer_task` | 541 | ComputerTask 数据模型与状态机（含敏感 UI 关键词纯函数） |
+# | `plan` | 440 | 计划 DAG：校验、拓扑波次、持久化 |
+# | `skill` | 226 | 技能清单解析（frontmatter + 正文）与发现 |
+# | `skill_health` | 247 | 技能健康度与失败模式记录 |
+#
+# 选它们的判据与 M2 相同：**出边为 0**（不引用 core 任何模块，`crate::` 引用实测为空集），
+# 因此可独立编译；入边由 core 的别名 re-export 满足，调用方零改动。
+# 它们的共同性质是"纯数据 + 纯函数契约"——没有业务状态机、没有 I/O 之外的副作用、
+# 不依赖 ONNX/Sherpa/rusqlite，故命名为 contracts。
+#
+# 与指南的关系：指南 §4 的目标结构里有 `packages/contracts`（协议与生成类型的单一来源）。
+# 本 crate 是**进程内**的契约层（Rust 类型），与 §5.1 的 Session/Turn/Item 协议契约互补：
+# 协议契约管跨进程线格式（当前在 `owo-agent-protocol`），本 crate 管进程内共享的数据契约。
+#
+# ## 依赖方向
+#
+# ```text
+# owo-agent-core ──► owo-agent-contracts        （零依赖根，比 kernel 更轻）
+# ```
+#
+# 本 crate 不依赖 kernel / core / server / ONNX / Sherpa / rusqlite——
+# 它是整个 workspace 里**最轻的依赖根**（只有 serde 系）。
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# 注：chrono（plan / skill_health）与 uuid（skill）是以**全限定内联路径**使用的，
+# 基于 `use` 行扫描的清单会漏掉——M5 已踩过同类坑，这里预先列全。
+chrono.workspace = true
+uuid.workspace = true

@@ -14,9 +14,7 @@ pub mod blackboard;
 /// `team_template_catalog_api`——目录只展示，安装幂等且不自动扩权）。
 pub mod builtin_team_templates;
 pub mod bus_store;
-pub mod computer_task;
 pub mod computer_use;
-pub mod context;
 pub mod contract_worker;
 pub mod critic;
 pub mod element_registry;
@@ -42,7 +40,6 @@ pub mod paddle_ocr;
 pub mod perception;
 pub mod permission_spec;
 pub mod permissions;
-pub mod plan;
 pub mod project_space_store;
 pub mod remote_step;
 pub mod scene;
@@ -51,8 +48,6 @@ pub mod session;
 pub mod settings;
 pub mod share;
 pub mod share_skill;
-pub mod skill;
-pub mod skill_health;
 pub mod skill_pack;
 pub mod sqlite_store;
 pub mod stt;
@@ -139,6 +134,17 @@ pub mod workswarm_output;
 // `owo_agent_core::{PluginManager, PluginManifest, McpServerConfig, ...}` 等既有路径
 // 全部继续有效（server / cli 与 3 个集成测试因此零改动）。
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 共享契约内核（M8）兼容层：context / computer_task / plan / skill / skill_health
+// 已下沉到独立 crate `owo-agent-contracts`（零依赖根，比 kernel 更轻）。
+//
+// 这五个模块的 `crate::` 引用实测为空集，故整体搬迁无需任何倒置。
+// 这里保留同名别名模块 + 下面既有的顶层 `pub use`，使
+// `crate::plan::*`（workswarm / goal）与 `owo_agent_core::Plan / SkillRegistry / ...`
+// （server / cli / 多个集成测试）等既有路径全部继续有效。
+// ---------------------------------------------------------------------------
+pub use owo_agent_contracts::{computer_task, context, plan, skill, skill_health};
+
 pub use owo_agent_plugins::{plugin, McpServerConfig};
 
 pub use owo_agent_env::{desktop_env, experience_store, transition, world_model};
