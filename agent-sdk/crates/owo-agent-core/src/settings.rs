@@ -6,37 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// 语音输入配置（v0.4 D20，默认 SenseVoice-Small 本地转写）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SttSettings {
-    #[serde(default = "default_stt_model")]
-    pub model: String,
-    /// SenseVoice 语言（auto / zh / en / ja / ko / yue），可用 OWO_STT_LANGUAGE 覆盖。
-    #[serde(default = "default_stt_language")]
-    pub language: String,
-    /// 是否启用逆文本规范化（ITN），可用 OWO_STT_ITN 覆盖。
-    #[serde(default = "default_true")]
-    pub itn: bool,
-    #[serde(default = "default_false")]
-    pub enable_high_accuracy: bool,
-    #[serde(default)]
-    pub hotwords: Vec<String>,
-    #[serde(default = "default_latency_budget")]
-    pub latency_budget_ms: u64,
-}
-
-impl Default for SttSettings {
-    fn default() -> Self {
-        Self {
-            model: "SenseVoice-Small".to_string(),
-            language: "auto".to_string(),
-            itn: true,
-            enable_high_accuracy: false,
-            hotwords: Vec::new(),
-            latency_budget_ms: 2000,
-        }
-    }
-}
+/// 语音输入配置（v0.4 D20）。
+///
+/// M14：类型已随它的域（感知内核 `owo_agent_perception::stt::LocalStt`）搬到
+/// `owo-agent-perception`；这里用 `pub use` 转出，因此
+/// `owo_agent_core::settings::SttSettings` 与 `Settings { stt, .. }` 的字段类型
+/// 都保持不变，调用方零改动（§9.2「配置类型随域走」，M7/M11 之后的第三次应用）。
+pub use owo_agent_perception::SttSettings;
 
 /// 受限自主探索配置（v0.4 D23，默认 S0 隔离虚拟机层）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,24 +58,12 @@ pub struct SkillsSettings {
     pub disabled: Vec<String>,
 }
 
-fn default_stt_model() -> String {
-    "SenseVoice-Small".to_string()
-}
-
-fn default_stt_language() -> String {
-    "auto".to_string()
-}
-
 fn default_false() -> bool {
     false
 }
 
 fn default_true() -> bool {
     true
-}
-
-fn default_latency_budget() -> u64 {
-    2000
 }
 
 fn default_explore_tier() -> String {

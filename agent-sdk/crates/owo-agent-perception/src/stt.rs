@@ -3,7 +3,8 @@
 //! 模型目录：`<data>/models/stt/<settings.stt.model>/`（model.int8.onnx + tokens.txt），
 //! 由 `scripts/download-stt-model.ps1` 下载；模型未就绪时返回明确错误，不静默降级云端。
 
-use crate::settings::SttSettings;
+// M14：SttSettings 随本域从 core 的 settings.rs 搬入（配置类型随域走，见 §9.2 / ADR-002）。
+use crate::stt_settings::SttSettings;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 

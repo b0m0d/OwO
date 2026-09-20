@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn ocr_is_callable_and_never_panics() {
         // 4x4 空白 BMP：无文字时应返回 None；有 OCR 语言包也不会崩溃。
-        if let Some(bmp) = crate::platform::capture_screen_region(4, 4) {
+        if let Some(bmp) = owo_agent_kernel::platform::capture_screen_region(4, 4) {
             let _ = ocr_bmp(&bmp);
         }
     }

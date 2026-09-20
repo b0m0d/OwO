@@ -1,7 +1,6 @@
 //! OwO Agent SDK 核心库（M1）：
 //! Agent loop、工具注册表、权限审批、会话、审计、模型网关。
 
-pub mod accessibility;
 pub mod action_program;
 pub mod agent;
 /// Artifact 校验与交付管线（七期 · 第三路）：格式门控（json/csv/research/
@@ -17,7 +16,6 @@ pub mod bus_store;
 pub mod computer_use;
 pub mod contract_worker;
 pub mod critic;
-pub mod element_registry;
 pub mod execution_target;
 pub mod executor;
 pub mod fleet;
@@ -25,30 +23,21 @@ pub mod fleet_node_protocol;
 pub mod fleet_transport;
 pub mod gateway;
 pub mod goal;
-pub mod locate;
 pub mod node_agent;
-pub mod ocr;
 #[cfg(target_os = "windows")]
-pub mod onnx_ocr;
-pub mod paddle_ocr;
-pub mod perception;
 pub mod remote_step;
-pub mod scene;
 pub mod schema_budget;
 pub mod session;
 pub mod settings;
 pub mod share;
 pub mod skill_pack;
 pub mod sqlite_store;
-pub mod stt;
 pub mod subagent;
 pub mod team_prompt;
 /// 自适应组队策略引擎（R3 第一路：single/team/auto 判定 + 可展示理由）。
 pub mod team_strategy;
 pub mod tools;
 pub mod trace;
-pub mod vision;
-pub mod window_template;
 pub mod worker_pool;
 /// 角色画像（七期 · 二路）：模板角色 → 工具面/只读/写白名单/回合上限/浏览器/命令，
 /// 画像驱动子代理执行器（注册表面即权限边界）。
@@ -192,6 +181,27 @@ pub use owo_agent_memory::{learn, memory, observe, share_skill};
 // 与集成测试）全部由下面的别名模块满足，调用方零改动。
 // ---------------------------------------------------------------------------
 pub use owo_agent_policy::{grant_store, mcp_health, permission_spec, permissions, tool_effects};
+
+// ---------------------------------------------------------------------------
+// 感知内核（M14，ADR-002）兼容层：accessibility / ocr / onnx_ocr / paddle_ocr / stt /
+// vision / scene / locate / element_registry / window_template 已下沉到独立 crate
+// `owo-agent-perception`（11 模块 5,870 行）。
+//
+// 群组内所有 `crate::` 引用都落在群组内部，**零倒置**；唯一逃逸边是
+// `stt → settings::SttSettings`，按「配置类型随域走」（M7/M11 之后的第三次）把该类型
+// 一起搬走，core 的 settings.rs 用 `pub use` 转出。群组内对 platform 的引用改为
+// `owo_agent_kernel::platform::*`（M0 已下沉）。
+//
+// 这一步的**目的**是把 ORT/Sherpa/ndarray/windows-sys 从 core 的依赖与链接里摘出去：
+// 迁移前 core 的每个测试二进制都要静态链接 ONNX（单目标 8–16 s、73 个 exe 共 2.68 GB）。
+//
+// 入边（executor / action_program / assert / computer_use + server 的 perception_api /
+// locate_api / desktop_api / workflow_backend）全部由下面的别名模块满足，调用方零改动。
+// ---------------------------------------------------------------------------
+pub use owo_agent_perception::{
+    accessibility, element_registry, locate, ocr, onnx_ocr, paddle_ocr, perception, scene, stt,
+    vision, window_template,
+};
 
 pub use owo_agent_plugins::{plugin, McpServerConfig};
 

@@ -122,7 +122,7 @@ pub async fn capture_vision_bmp() -> Result<(Vec<u8>, String), String> {
             .to_vec();
         return Ok((bytes, "sim".to_string()));
     }
-    let bytes = crate::platform::capture_screen().ok_or("屏幕截图失败")?;
+    let bytes = owo_agent_kernel::platform::capture_screen().ok_or("屏幕截图失败")?;
     Ok((bytes, "desktop".to_string()))
 }
 

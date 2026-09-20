@@ -72,7 +72,8 @@ pub use owo_agent_kernel::{
 | **M11** | `owo-agent-memory` | memory + observe + learn（2,454 行）+ `ProactiveSettings` 随域搬入；两处跨 crate 边**已在前面步骤倒置完毕** | **0** | `action_program` / `computer_use` / `executor` / `share_skill` / `workflow` / `settings` + server（经别名，未改代码） | ✅ 已完成，见 §13 |
 | **M12** | `owo-agent-policy` | permissions + permission_spec + grant_store + tool_effects（3,068 行）+ 工具命名契约随域下沉 | **0** | `agent` / `tools` / `subagent` / `autoreview` / `settings` + server 权限中心（经别名，未改代码） | ✅ 已完成，见 §14 |
 | **M13** | `owo-agent-policy` + `owo-agent-memory`（归位） | `mcp_health`（532）→ policy、`share_skill`（246）→ memory；出边目标已在 M11/M12 变成 crate | **0** | `agent` / `tools` + server（经别名，未改代码） | ✅ 已完成，见 §15 |
-| **M14** | 下一个候选见 §16（建议 Perception Worker，先写 ADR） | — | — | — | 待执行 |
+| **M14** | `owo-agent-perception` | UIA / OCR / STT / 视觉 / 场景 / 定位（11 模块 5,870 行）；先写 ADR-002；STT 做成可选 feature | **0**（仅 1 条配置类型随域走） | `executor` / `action_program` / `assert` / `computer_use` + server 5 个 api（经别名，未改代码） | ✅ 已完成，见 §17（ADR-002 §2.1 记录了"切边界≠降成本"的实测更正） |
+| **M15** | `owo-agent-workflow` + `owo-agent-executor`（候选） | workflow / action_program / assert / executor（4,244 行）——**已实测为完全闭合集**，出边全部指向已抽出的 crate | 待实施 | — | ⏳ 待执行（见 §18） |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -734,7 +735,7 @@ note: the function is defined here --> crates\owo-agent-contracts\src\skill.rs:1
 
 ## 11. M9：`owo-agent-workswarm`（已完成）——编排的契约/状态先行，执行侧留待 A2
 
-候选取舍与两路扫描数据见 §16；本节记录边界、结果与证据。
+候选取舍与两路扫描数据见 §18；本节记录边界、结果与证据。
 
 ### 11.1 边界与依赖方向
 
@@ -765,7 +766,7 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 所以正确的迁移顺序是**先切零出边的契约/状态侧，再切执行侧**：本步搬走的三个模块
 没有任何出边，搬完立即满足"core 零改动、可独立编译、可独立测试"；执行侧
 （`workswarm.rs` 本体 4,328 行）留着与 `goal`/`workflow`/`fleet` 的环一起处理，
-按 §16 的建议排到 A2（统一 Daemon）之后。
+按 §18 的建议排到 A2（统一 Daemon）之后。
 
 ### 11.3 本步的调用方改动量：**0 行**（除 core 的 lib.rs 接线）
 
@@ -821,7 +822,7 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 
 ## 12. M10：`owo-agent-mcp`（已完成）——MCP 宿主第一段，连测试服务器与集成测试一起搬
 
-候选取舍见 §16；本节记录边界、结果与证据。
+候选取舍见 §18；本节记录边界、结果与证据。
 
 ### 12.1 边界与依赖方向
 
@@ -951,7 +952,7 @@ Cargo 的环检测只看普通依赖图，dev-dependency 的环不成环——co
 
 ## 13. M11：`owo-agent-memory`（已完成）——前几步的倒置在这里兑现
 
-候选取舍见 §16；本节记录边界、结果与证据。
+候选取舍见 §18；本节记录边界、结果与证据。
 
 ### 13.1 边界与依赖方向
 
@@ -1038,7 +1039,7 @@ M7 把 `McpServerConfig` 从 core 的 `mcp.rs` 搬到消费它的插件域，这
 
 ## 14. M12：`owo-agent-policy`（已完成）——Tool Host 的判定侧，与"权限不可绕过"的第一段
 
-候选取舍见 §16；本节记录边界、结果与证据。
+候选取舍见 §18；本节记录边界、结果与证据。
 
 ### 14.1 边界与依赖方向
 
@@ -1125,7 +1126,7 @@ M8 撞到的是 `pub(crate)` 跨 crate 后"不可见"（编译错误 `E0603`）�
 
 ## 15. M13：两个"归位"模块（已完成）——前两步的利息
 
-候选取舍见 §16；本节记录边界、结果与证据。
+候选取舍见 §18；本节记录边界、结果与证据。
 
 ### 15.1 这一步为什么几乎免费：出边目标刚被搬成了 crate
 
@@ -1177,7 +1178,88 @@ M8 撞到的是 `pub(crate)` 跨 crate 后"不可见"（编译错误 `E0603`）�
 | 调用方 | **0 行改动**（`agent` / `tools` / server 全部走别名） |
 
 
-## 16. 后续候选与取舍记录
+## 17. M14：`owo-agent-perception`（已完成）——边界拿到了，成本没降（如实记录）
+
+候选取舍见 §18；本节记录边界、结果与证据。
+
+### 17.1 边界与结果
+
+| 模块 | 行数 | 说明 |
+|---|---:|---|
+| `onnx_ocr` | 1,217 | ONNX Runtime 文字检测 + 识别 |
+| `scene` | 800 | 场景图（UIA/OCR/视觉三源融合、稳定 id） |
+| `perception` | 704 | 感知层 L0–L3 + 情境快照 |
+| `vision` | 662 | 视觉通道（截图 → VLM 描述/定位/校验） |
+| `locate` | 531 | 元素定位（稳定 id/名称/上下文/历史与模板先验） |
+| `element_registry` | 527 | 元素注册表（跨帧稳定 id） |
+| `paddle_ocr` | 389 | 云端 PaddleOCR 通道 |
+| `ocr` | 372 | OCR 抽象与行分组 |
+| `window_template` | 296 | 窗口模板 ROI |
+| `stt` | 214 | 本地语音（Sherpa-ONNX，**可选 feature**） |
+| `accessibility` | 158 | UIA 无障碍树 |
+| `stt_settings` | 92 | `SttSettings` 随域搬入（M7/M11 之后第三次「配置类型随域走」） |
+| `lib.rs` | 42 | 边界文档 + glob re-export |
+| **合计** | **6,008** | 13 文件 |
+
+唯一逃逸边 `stt → settings::SttSettings` 按配置类型随域走解决；群组内对 `platform::*`
+的引用改为 `owo_agent_kernel::platform::*`（M0 已下沉）。**调用方零改动。**
+
+### 17.2 验收证据（可复现）
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| workspace 全目标编译 | `cargo check --workspace --all-targets` | **exit=0**；0 条 `dead_code`/`unused`（首次带 3 条，来自随迁移失去调用方的 `default_stt_*`，已清） | `docs/qa/logs/mk-m14-check-ws3-*.log` |
+| 新 crate 自身测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-perception -Tag m14-perception` | **exit=0**，**66 passed / 1 ignored** | `docs/qa/logs/mk-shard-m14-perception-*.log` |
+| 全量 core 测试 | `... -Package owo-agent-core -Tag m14-core` | **exit=0**，**31/31 分片全绿**；`--lib` **274 → 208**（−66，与随迁条数**精确对上**） | `docs/qa/logs/mk-shard-m14-core-*.log` |
+| 全量 server 测试 | `... -Package owo-agent-server -Tag m14-server` | **exit=0**，**40/40 分片全绿** | `docs/qa/logs/mk-shard-m14-server-*.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m14-perception` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m14-perception-20260920-135006/report.json` |
+| 依赖方向 | `cargo tree -p owo-agent-perception -e normal` | **core 出现 0 次**（感知不依赖权威运行时）；含 ort / ndarray / windows / reqwest / png | 本节 17.3 |
+| STT 可关 | `cargo tree -p owo-agent-perception --no-default-features` | 输出中**无 sherpa-onnx** | 本节 17.3 |
+| core 体量 | 逐行统计 | **47 文件 / 36,787 行 → 36 文件 / 30,891 行**（−5,896 行，−16%） | 与 §1 同口径 |
+
+### 17.3 收益的诚实清单（ADR-002 §2.1 的结论）
+
+| 项 | 结论 | 实测 |
+|---|---|---|
+| core 测试二进制不再链接 ONNX | ❌ **不成立** | `ort ← owo-agent-perception ← owo-agent-core`；exe **73→72 个、2.68→2.71 GB、中位数 28.7→30.5 MB** |
+| 改 core 不再重编 ORT/Sherpa | ❌ **不算本步收益** | 迁移前它们就是独立 crate，任何时刻改 core 都不重编它们 |
+| perception 可独立编译测试 | ✅ | 只编 6,008 行 + 1 个测试目标（90 s），不牵动 core 的 30 个测试目标 |
+| STT 可整块关闭 | ✅ | `--no-default-features` 无 sherpa-onnx |
+| core 源码变轻 | ✅ | −5,896 行（−16%） |
+| A3 Worker 的前置就绪 | ✅ | perception 闭包中 core 出现 0 次 |
+
+**教训：切边界 ≠ 降成本。** 判断某次拆分的成本收益，必须先问"**消费方在哪一侧**"：
+只要 core 的 `executor`/`computer_use` 仍进程内调用感知，ORT 就一定留在链接链上。
+
+### 17.4 本步踩的坑（第 4 次同一类，已用工具根治）
+
+依赖清单前 4 步都靠"`use` 行 + 人工维护的内联路径词表"，于是 M5 漏 chrono/uuid、
+M10 漏 tracing/uuid、M13 漏 thiserror、**M14 漏 tokio/tracing/windows-future**。
+本步新增 `scripts/mk-deps-scan.ps1` 用机械方法取代词表：
+
+```text
+扫文件里所有 `ident::`（剥注释）→ 与 Cargo.lock 的真实包名取交集 → 与 manifest 已声明项比对
+```
+
+它当场就报出 10 项未声明（含被 doc 注释误报的项，剥注释后收敛到 9 项真实缺失）。
+另有一处只有编译器能发现：`ocr.rs` 里 `IAsyncOperation::await` 需要 `windows-future`
+提供 Future 实现——这不是 `use` 行，而是 **trait 来源**，因此脚本末尾仍写明
+"不能替代编译器，feature 与 trait 来源要靠 check 兜底"。
+
+### 17.5 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `crates/owo-agent-core/src/{perception,ocr,onnx_ocr,paddle_ocr,stt,vision,scene,locate,element_registry,window_template,accessibility}.rs` | `git mv` 到新 crate；4 个文件共 6 处 `crate::platform::` → `owo_agent_kernel::platform::`；`stt.rs` 1 行 use 改指本 crate |
+| `crates/owo-agent-perception/{Cargo.toml,src/lib.rs}` | 新 crate（分组 feature + 边界文档 + glob re-export） |
+| `crates/owo-agent-perception/src/stt_settings.rs` | 新文件：`SttSettings` + `impl Default` + 5 个 serde 默认值函数 |
+| `crates/owo-agent-core/src/settings.rs` | 删除 `SttSettings` 与 3 个只被它使用的 `default_*`；改为 `pub use owo_agent_perception::SttSettings;` |
+| `crates/owo-agent-core/Cargo.toml` | **移除 ndarray / ort / sherpa-onnx / windows-future / windows-sys / png**；`windows` feature 从 9 项收到 6 项 |
+| `crates/owo-agent-core/src/lib.rs` | 删 11 个 `pub mod`，加一条别名 re-export（35 个 `pub mod` 剩余） |
+| `scripts/mk-deps-scan.ps1` | 新增：机械依赖扫描（根治词表漏项） |
+
+
+## 18. 后续候选与取舍记录
 
 M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做
@@ -1316,6 +1398,27 @@ M12 之后 core 剩 49 文件 / 37,567 行。把"出边全部逃向已迁出的 
 | `computer_use` | 2,355 | 1 | 12 条，含 `executor`/`tools`/`vision` | ❌ 最后 |
 | `trace` / `session` / `goal` | 163 / 663 / 1,639 | 0 / 7 / 4 | 多条指向 core 内部 | ❌ 属"总线型"，更可能留在 core 或被 Daemon 收编 |
 
+### M15 候选的实测结论（M14 之后重新扫描）
+
+M14 之后 core 剩 **36 文件 / 30,891 行**。重新扫描得到一组**完全闭合集**：
+
+| 模块 | 行数 | `crate::` 出边 | 指向 |
+|---|---:|---|---|
+| `workflow` | 1,461 | `action_program`、`assert`、`audit`、`learn`、`skill_health` | 前两个同迁；后三个已是 kernel/memory/contracts |
+| `action_program` | 902 | `assert`、`executor`、`learn`、`ocr`、`perception`、`scene`、`UiNode` | 同迁 + memory + **perception（M14 已抽出）** |
+| `assert` | 525 | `ocr`、`perception`、`scene`、`UiNode` | 全部指向 **perception（M14 已抽出）** |
+| `executor` | 1,356 | `accessibility`、`element_registry`、`locate`、`ocr`、`scene`、`learn`、`platform` | 全部指向 perception / memory / kernel |
+| **合计** | **4,244** | — | **零 core 内部逃逸** |
+
+因此 M15 可以整体搬迁，推荐拆成两个 crate（域名分开，且 `executor` 将来要进
+`tool-host/crates/executor`）：
+
+* `owo-agent-workflow` = `workflow` + `action_program` + `assert`（2,888 行，依赖 executor）；
+* `owo-agent-executor` = `executor`（1,356 行，依赖 perception + memory + kernel）。
+
+搬完之后 core 只剩 ~26,600 行，剩余的都是"总线型"模块（`agent` / `tools` / `computer_use` /
+`session` / `goal` / `fleet` / `workswarm` / `worker_pool` / `trace` …），它们被多个域同时引用，
+按 §9 A4 的分段逐步处理，或最终被 Daemon 收编。
 结论（M13 的具体建议）：
 
 1. ~~**M13 = 两个"归位"小步合并**~~ ✅ 已完成（见 §15）：778 行、零倒置、零新依赖。

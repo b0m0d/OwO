@@ -45,6 +45,13 @@ owo-agent-memory.workspace = true
 # subagent / autoreview / settings 与 server 的权限中心继续经 lib.rs 的同名别名模块使用
 # 既有路径；工具命名契约 sanitize_tool_name 随之迁走，tools.rs 用 pub(crate) use 反向引用。
 owo-agent-policy.workspace = true
+# 感知内核（M14，ADR-002）：accessibility / ocr / onnx_ocr / paddle_ocr / stt / vision /
+# scene / locate / element_registry / window_template 已下沉到 owo-agent-perception。
+# core 的 executor / action_program / assert / computer_use 与 server 的 perception_api /
+# locate_api / desktop_api 继续经 lib.rs 的同名别名模块使用既有路径。
+# SttSettings 亦随域搬入，settings.rs 用 pub use 转出。
+# 本 crate 因此不再依赖 ort / sherpa-onnx / ndarray / windows-sys / png。
+owo-agent-perception.workspace = true
 # 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
 # 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
 # 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成
@@ -65,7 +72,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 ed25519-dalek.workspace = true
 sha2.workspace = true
 zip = "2"
-png = "0.17"
 aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
 rand = "0.8"
@@ -83,30 +89,18 @@ regex = "1"
 owo-agent-eval-facade.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-ndarray = "0.17"
+# M14（ADR-002）把感知群组（UIA / OCR / STT / 视觉 / 场景 / 定位）整体迁到
+# `owo-agent-perception` 之后，这里的重依赖只剩 `windows`（executor.rs 需要 UIA 元素类型、
+# SendInput 与 SetCursorPos）与 `futures`。**已移除**：ndarray / ort / sherpa-onnx /
+# windows-future / windows-sys —— 这正是本步的目的：core 的测试二进制不再静态链接 ONNX。
 futures = "0.3"
-ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
-sherpa-onnx = "1.13"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
-    "Graphics_Imaging",
-    "Media_Ocr",
-    "Storage_Streams",
     "Win32_System_Com",
     "Win32_UI_Accessibility",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
-] }
-windows-future = { version = "0.2", features = ["std"] }
-windows-sys = { version = "0.59", features = [
-    "Win32_Foundation",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Threading",
-    "Win32_System_DataExchange",
-    "Win32_Graphics_Gdi",
-    "Win32_Storage_Xps",
 ] }
 
 # MCP 的两台假服务器（`owo-mcp-test-server` / `owo-mcp-http-test-server`）连同

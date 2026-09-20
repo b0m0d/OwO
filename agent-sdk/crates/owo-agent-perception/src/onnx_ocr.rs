@@ -1173,7 +1173,7 @@ mod tests {
             ("输入消息\n发送", "输入消息\n发送"),
         ];
         for (rendered, expected) in cases {
-            let Some(bmp) = crate::platform::render_text_bmp(rendered, 36) else {
+            let Some(bmp) = owo_agent_kernel::platform::render_text_bmp(rendered, 36) else {
                 eprintln!("跳过：GDI 文本渲染不可用");
                 return;
             };

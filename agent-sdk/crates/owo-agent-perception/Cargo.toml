@@ -1,0 +1,64 @@
+[package]
+name = "owo-agent-perception"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 感知内核（M14，ADR-002）：UIA / OCR / STT / 视觉 / 场景融合 / 元素定位。
+#
+# 边界（见 docs/adr/ADR-002-perception-kernel.md 与 ARCH-MICROKERNEL.md §17）：
+#   * 11 个模块 5,870 行整体同迁；群组内所有 `crate::` 引用都落在群组内部；
+#   * 对外的唯一逃逸边是 `stt → settings::SttSettings`，按 M7/M11 已用过两次的规则
+#     「配置类型随域走」把该类型一起搬进来（core 侧 `pub use` 转出）；
+#   * 群组内对 `platform::*` 的引用改为绝对路径 `owo_agent_kernel::platform::*`（M0 已下沉）；
+#   * **不得依赖 owo-agent-core**：core 依赖本 crate（executor / action_program / assert /
+#     computer_use 与 server 的 perception_api / locate_api / desktop_api 都引用感知面）。
+#
+# 本 crate 存在的意义（ADR-002 §2）：把 ORT / Sherpa / ndarray / windows 从 core 的依赖与
+# **链接**里摘出去。迁移前实测：core 的 30 个集成测试目标每个都要静态链接 ORT/Sherpa，
+# 单目标链接 8–16 s，`target/debug/deps/*.exe` 累积 2.68 GB。
+
+[features]
+default = ["stt"]
+# STT（Sherpa-ONNX）做成可选：群组内没有任何模块引用 `stt`，只有 server 通过 core 的
+# re-export 用它（`owo_agent_core::LocalStt`）。关掉它即可完全不解析 sherpa-onnx。
+# ADR-002 §3.1 说明：更细的 `ocr`/`cloud` 分组需要给 `ocr.rs`/`vision.rs` 内部加 cfg
+# 分支（那是行为保持的重构，不是搬迁），本步不做，留到需要时单独一步。
+stt = ["dep:sherpa-onnx"]
+
+[dependencies]
+owo-agent-kernel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+# 下面这几个是"内联/隐式"依赖，`use` 行扫描查不到（本步实测踩到，第四次）：
+#   tokio          → perception.rs 的 mpsc 通道、paddle_ocr 的重试 sleep、vision 的 #[tokio::test]
+#   tracing        → onnx_ocr.rs / paddle_ocr.rs 的降级日志（内联 `tracing::warn!`）
+#   windows-future → ocr.rs 里 `IAsyncOperation::await` 需要它提供 Future 实现（不是 use 行，是 trait 来源）
+# 为此新增 scripts/mk-deps-scan.ps1：机械扫描 `ident::` 根并与 Cargo.lock 的包名取交集，
+# 不再依赖人工维护的词表。
+tokio.workspace = true
+tracing.workspace = true
+windows-future = { version = "0.2", features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+png = "0.17"
+ndarray = "0.17"
+ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
+sherpa-onnx = { version = "1.13", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+futures = "0.3"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

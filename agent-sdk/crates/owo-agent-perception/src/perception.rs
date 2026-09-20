@@ -285,13 +285,16 @@ impl SituationStore {
 
     /// L2 按需采集：抓取真实屏幕到内存环形缓冲（不落盘、用后即毁）。
     pub fn begin_capture_from_screen(&mut self) -> Result<CaptureMeta, String> {
-        self.begin_capture_bytes(crate::platform::capture_screen().ok_or("屏幕截图失败")?)
+        self.begin_capture_bytes(
+            owo_agent_kernel::platform::capture_screen().ok_or("屏幕截图失败")?,
+        )
     }
 
     /// L2 按需采集：抓取指定区域（测试/预览用）。
     pub fn begin_capture_region(&mut self, width: i32, height: i32) -> Result<CaptureMeta, String> {
         self.begin_capture_bytes(
-            crate::platform::capture_screen_region(width, height).ok_or("屏幕截图失败")?,
+            owo_agent_kernel::platform::capture_screen_region(width, height)
+                .ok_or("屏幕截图失败")?,
         )
     }
 
@@ -421,7 +424,7 @@ impl SituationStore {
     pub fn refresh_from_platform(&mut self) -> Option<ForegroundApp> {
         #[cfg(target_os = "windows")]
         {
-            let (id, title) = crate::platform::poll_foreground_app()?;
+            let (id, title) = owo_agent_kernel::platform::poll_foreground_app()?;
             let unchanged = self
                 .foreground
                 .as_ref()

@@ -1794,8 +1794,6 @@ dependencies = [
  "futures",
  "futures-util",
  "hmac",
- "ndarray",
- "ort",
  "owo-agent-contracts",
  "owo-agent-env",
  "owo-agent-eval-facade",
@@ -1803,12 +1801,12 @@ dependencies = [
  "owo-agent-kernel",
  "owo-agent-mcp",
  "owo-agent-memory",
+ "owo-agent-perception",
  "owo-agent-plugins",
  "owo-agent-policy",
  "owo-agent-protocol",
  "owo-agent-tool-safety",
  "owo-agent-workswarm",
- "png",
  "rand",
  "regex",
  "reqwest",
@@ -1816,14 +1814,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "sherpa-onnx",
  "thiserror",
  "tokio",
  "tracing",
  "uuid",
  "windows",
- "windows-future",
- "windows-sys 0.59.0",
  "zip",
 ]
 
@@ -1910,6 +1905,29 @@ dependencies = [
  "serde_json",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "owo-agent-perception"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "futures-util",
+ "ndarray",
+ "ort",
+ "owo-agent-kernel",
+ "png",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sherpa-onnx",
+ "tokio",
+ "tracing",
+ "uuid",
+ "windows",
+ "windows-future",
 ]
 
 [[package]]

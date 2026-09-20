@@ -1,6 +1,6 @@
 # ADR-002：抽出感知（Perception）内核，并把"按需 Worker"推迟到 Daemon 之后
 
-* 状态：**已决定，待实施（M14）**
+* 状态：**已实施（M14）** —— 但 §2.1 记录了实施中发现的、与原计划不符的一条重要更正
 * 日期：2026-09-20
 * 相关：指南 §2.2 / §3（`ocr.rs`、`onnx_ocr.rs`、`stt.rs`、`accessibility.rs`、`vision.rs` → Perception Worker）、
   §9 A3（Perception Worker 是独立 workspace）、§10（资源红线：普通 Agent 改动不得触发 ONNX 编译）、
@@ -42,13 +42,46 @@
 
 ## 2. 问题
 
-1. core 现在直接依赖 `ort`、`sherpa-onnx`、`ndarray`、`png`、`windows`，于是
+1. core 直接依赖 `ort`、`sherpa-onnx`、`ndarray`、`png`、`windows`，于是
    **core 的 30 个集成测试二进制每一个都要静态链接 ORT/Sherpa**。本会话实测：
    每次分片测试都要重新链接 8–16 s，`target/debug/deps/*.exe` 累积到 **29.35 GB**。
-2. 指南 §10 的红线是"普通 Agent 改动不得触发 ONNX 编译"。当前只要动 core 一行，
-   上述链接成本就会重复支付。
+2. 指南 §10 的红线是"普通 Agent 改动不得触发 ONNX 编译"。
 3. 指南 §3 要求 `ocr.rs`/`onnx_ocr.rs`/`stt.rs`/`accessibility.rs`/`vision.rs` 归
    Perception Worker，§9 A3 要求它成为**独立 workspace**。
+
+### 2.1 实施中的更正（2026-09-20，实施后回填，必须读）
+
+计划里我写的是"切出去之后 core 的测试二进制不再链接 ONNX"。**这个断言是错的**，
+实施后实测：`cargo tree -p owo-agent-core -e normal -i ort` 显示
+
+```text
+ort v2.0.0-rc.13
+└── owo-agent-perception
+    └── owo-agent-core
+```
+
+原因：core 的 `executor` / `computer_use` / `action_program` / `assert` **仍在进程内
+调用感知**，所以 core 依然依赖本 crate，链接链上依然有 ORT/Sherpa。
+
+**实施后逐项实测，本步的真实收益与"不是收益的东西"如下（这一段是本 ADR 最重要的部分）**：
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| core 测试二进制不再链接 ONNX | ❌ **不成立** | `cargo tree -p owo-agent-core -i ort` → `ort ← owo-agent-perception ← owo-agent-core`；实测 exe 体积 **73 → 72 个、2.68 → 2.71 GB、中位数 28.7 → 30.5 MB**，基本持平 |
+| "改 core 不再重编 ORT/Sherpa" | ❌ **不算本步收益** | 迁移前 ort/sherpa 本来就是独立 crate，改 core 也不会重编它们。这条在任何时候都成立，与本步无关 |
+| perception 可独立编译与测试 | ✅ **成立（真收益）** | `cargo test -p owo-agent-perception` 只编译 6,008 行感知代码 + 1 个测试目标（90 s），完全不牵动 core 的 30 个集成测试目标 |
+| STT 可整块关掉 | ✅ **成立** | `cargo tree -p owo-agent-perception --no-default-features` 的输出里**没有 sherpa-onnx**（ort/ndarray/windows 仍在，见下） |
+| core 源码体量下降 | ✅ **成立** | 47 文件 / 36,787 行 → **36 文件 / 30,891 行**（−5,896 行，−16%） |
+| 边界就绪（§9 A3 Worker 的前置） | ✅ **成立** | `cargo tree -p owo-agent-perception` 中 **core 出现 0 次**，即感知不依赖权威运行时——它已经可以独立成进程 |
+
+**结论：本步拿到的是"边界 + 独立可测 + core 变轻"，不是"链接/磁盘节省"**。
+后者的前提是"谁还在进程内用被切出去的东西"——只要 core 的 `executor`/`computer_use`
+仍进程内调用感知，ORT 就必然留在链接链上。要真正拿到它，需要 §9 A3 的按需 Worker，
+或者把 `executor`/`computer_use` 也搬走（§9 A4 分段）。
+**这条教训比本步的收益更值钱：切边界 ≠ 降成本，必须先问"消费方在哪一侧"。**
+
+这条更正写在这里而不是悄悄改掉原文，是因为它是本步最重要的事实：**边界切干净 ≠ 成本下降**，
+成本下降取决于"谁还在进程内用被切出去的东西"。
 
 ## 3. 决策
 
@@ -86,8 +119,10 @@
 
 ## 5. 后果
 
-* **正面**：core 的依赖面从"含 ORT/Sherpa/ndarray/windows"变成"纯逻辑 + SQLite + HTTP"；
-  core 的 30 个测试二进制不再链接 ONNX，链接时间与磁盘占用应显著下降（M14 验收里量化）。
+* **正面（已获得）**：编译单元隔离——改 perception 不再重编 core，改 core 不再重编
+  ORT/Sherpa 这些上游 crate；感知成为可独立演进的编译边界。
+* **未获得（见 §2.1）**：core 的测试二进制仍链接 ONNX，链接时间与磁盘占用**与迁移前持平**。
+  原计划里"显著下降"的预期**不成立**；要拿到它必须做 §9 A3 的按需 Worker。
 * **正面**：感知成为可独立演进的边界（UIA/OCR/VLM 的迭代不再牵动 core 编译单元）。
 * **负面**：多一次 `git mv` 级别的代码移动；server 仍依赖新 crate（`perception_api` 等），
   因此 **server 的测试二进制仍会链接 ORT**——真正的"按需"要到 A2/A3 之后。
@@ -99,17 +134,20 @@
 
 ```text
 1. cargo check --workspace --all-targets            exit=0，且 0 条 dead_code/unused warning
-2. cargo tree -p owo-agent-core                     ort / sherpa-onnx / ndarray / windows 均 0 次
-3. cargo tree -p owo-agent-perception               含 ort/sherpa/windows，且不含 owo-agent-core
-4. 新 crate 自身测试                                 全绿（onnx_ocr/vision/scene/locate/element_registry/
+2. cargo tree -p owo-agent-perception              含 ort/sherpa/windows，且不含 owo-agent-core
+   ※ 原第 2 条写的是"core 闭包里 ort/sherpa 为 0 次"——**该条已作废**（见 §2.1：
+     core 仍进程内使用感知，ort 必然在闭包里）。改为核验"新 crate 不反向依赖 core"。
+3. 新 crate 自身测试                                 全绿（onnx_ocr/vision/scene/locate/element_registry/
                                                     window_template/accessibility 的单测随迁）
-5. core 全量测试（分批 31 分片）                     全绿；lib 条数减少 = 随迁条数（逐条对上）
-6. server 全量测试（分批 40 分片）                   全绿
-7. scripts/mk-smoke.ps1                             18/18 PASS
-8. core 链接成本对比                                 记录 core 测试目标单次链接耗时中位数 与
-                                                    target/debug/deps/*.exe 总体积的"迁移前/后"
+4. core 全量测试（分批 31 分片）                     全绿；lib 条数减少 = 随迁条数（逐条对上）
+5. server 全量测试（分批 40 分片）                   全绿
+6. scripts/mk-smoke.ps1                             18/18 PASS
+7. 编译单元隔离（本步真实收益）                      记录"改 perception 不重编 core /
+                                                    改 core 不重编 ort|sherpa"的实测证据
+8. 链接成本（本步**未**获得，如实记录）              记录 core 测试二进制体积与链接耗时实测值，
+                                                    并标注"与迁移前持平，待 §9 A3 Worker 才改善"
 9. 文档                                             ARCH-MICROKERNEL.md 新增 §17（M14），
-                                                    本 ADR 状态改为"已实施"
+                                                    本 ADR 状态改为"已实施"，并保留 §2.1 更正
 ```
 
 ## 7. 实施顺序（M14 内部）
