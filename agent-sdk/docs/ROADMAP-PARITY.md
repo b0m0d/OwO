@@ -48,6 +48,10 @@
 | G9 | **会话恢复/检查点** | rewind/fork/undo/redo 有；**CLI 已有 `resume`**（`cli/src/handlers.rs:494`，repl/tui 都有入口） | ✅ 重开进程继续上次会话，含待审批项与未完成任务 | 已具备，需补"待办恢复"的验证 | 端到端：中断→重启→`resume`→上下文与待审批项都恢复 |
 | G10 | **审批体验** | 审批中心 + grants 有 | ✅ 审批可"一次性/本会话/本 workspace/永久"分级，且**拒绝也要留收据并回灌模型** | 已基本具备，需产品化 | 现有测试 + UI 走查 |
 | G11 | **成本/配额透明** | usage 四维 + 预算 + 硬停（402）、评测成本单价可选 | ✅ 每个 turn 可见 token/成本，超预算前预警 | 已基本具备 | 现有 `usage_tests`（6 条）+ 报告字段 |
+| G12 | **编辑器内集成（Hermes 类 agent IDE 的核心）** | **完全没有**：全仓无 VS Code/JetBrains 扩展工程、无 LSP（858 个源文件里 `vscode`/`language.server` 只有 9 处无关命中）。现有形态是「CLI/TUI + Tauri 桌面 + Web 控制台」 | ✅ 编辑器内：选中区/光标上下文作为输入、内联 diff 与逐 hunk 接受/拒绝、诊断信息回灌 | **整块缺失**（最大差距） | 先做 G7（薄客户端）→ 再做扩展；验收：在 VS Code 里选中一段代码→让 agent 改→逐 hunk 审阅→接受后文件落盘可撤销 |
+| G13 | **变更审阅（per-hunk）** | 服务端已有 `change_set`（写前快照/diff/revert）+ artifact review 状态机；Web UI 有 diff 渲染（`workswarm/format.js` 19 处、`workswarm/render.js` 55 处） | ✅ 逐 hunk 接受/拒绝，拒绝可回灌模型让其改法 | 服务端已具备，UI 只到"整份审阅" | 契约测试落在 `change_set`；UI 侧端到端 |
+| G14 | **代码库索引/符号检索** | 只有文本搜索（`search_files`）+ 语义记忆；无符号级索引 | ✅ 符号/引用级检索，大仓库下可控延迟 | 缺失 | 索引构建时间与查询延迟基准；命中率对照文本搜索 |
+| G15 | **光标/选区上下文协议** | 无（没有编辑器就谈不上） | ✅ 客户端把 active file / selection / diagnostics 作为结构化上下文随请求上传 | 依赖 G12 | 协议契约测试（context envelope 的字段与上限） |
 
 ---
 
@@ -64,6 +68,13 @@
    core 已经从 64,701 行降到 36,787 行，Daemon 边界比 M0 时清晰得多）。
 5. **W5 差异化放大**：把桌面自动化 + 权限规格 + 审计/SLO 做成对外可卖的能力
    （不是"对齐 Codex"，而是"Codex 没有的东西"）。
+6. **W6 编辑器内集成**（对标 Hermes 的关键一步，**前置是 W4 完成**）：
+   G12 编辑器扩展 → G15 编辑器上下文协议 → G13 逐 hunk 审阅。
+   顺序理由：扩展必须是**薄客户端**——如果在扩展里再起一套 runtime，就会踩
+   指南 §2.4 第 6 条（壳对子进程的生命周期）与 §0.1（只能有一个权威 Daemon）。
+   验收形态：在 VS Code 里选中一段代码 → 要求 agent 改 → 内联看到 diff →
+   逐 hunk 接受/拒绝 → 接受的写盘、拒绝的回灌模型换改法；
+   同时开编辑器与桌面 UI，**不产生第二套 runtime**（源码搜索 + 运行时 pid 证据）。
 
 ---
 
@@ -81,16 +92,21 @@
 
 ---
 
-## 5. 待确认（阻塞第 2 节"目标"列的几行）
+## 5. 对标基准（已确认）与顺序
 
-1. **"hames" 指哪个产品？** 已识别 `dsh`=DeepSeek Harness、`codex`=OpenAI Codex；
-   `hames` 待确认（候选：Claude Code / Hermes / Cline 类 IDE 宿主 / 其它）。
-   它决定 G8/G9/G10 的具体形态（例如 IDE 集成 vs 纯 CLI）。
-2. **顺序确认**：是否按"先拆分收口（M14 Perception Worker 等）再做 W1–W5"？
-   本文默认按此顺序——理由是拆分每收一步，后面的模块级优化就少一层
-   `crate::` 纠缠（M13 已经证明：被依赖的域先搬走，后来者是零成本）。
+**对标基准**（2026-09-20 确认）：
 
-### 5.1 已核查结论（2026-09-20，避免重复讨论）
+* **DSH**（DeepSeek Harness）：CLI + TUI + Web GUI 的宿主形态，工具面/子代理/目标/后台作业。
+* **Hermes**：**agent IDE 类工具** —— 核心是"编辑器内的 agent"。这决定了 G12–G15
+  （编辑器集成、逐 hunk 审阅、索引、编辑器上下文协议）是**必做项而不是可选项**，
+  且它们的前置是 G7（薄客户端 + 单一 Daemon）。
+* **Codex**（OpenAI）：CLI + IDE 扩展 + 沙箱/审批模式；其补丁式编辑（G1）与
+  指令文件（G5，已具备根目录部分）是共同下限。
+
+**顺序**：默认按"先拆分收口（M14 Perception Worker 等）→ 再 W1–W6"。理由是拆分每收一步，
+后面的模块级优化就少一层 `crate::` 纠缠（M13 已证明：被依赖的域先搬走，后来者是零成本）。
+
+### 5.1 已核查结论（避免重复讨论）
 
 | 曾经担心的 | 核查结论 | 证据 |
 |---|---|---|
@@ -98,6 +114,8 @@
 | 会话能不能跨进程续跑？ | **能**：CLI 有 `resume`（repl / tui / handlers 三处入口） | `crates/owo-agent-cli/src/handlers.rs:494` |
 | 模型能自己起 goal/workflow 吗？ | **不能**（模型可见工具面里没有这些工具名）——这是 G4 的真实差距 | 全仓扫 `name: "<tool>"` 无 goal/workflow/plan 匹配 |
 | 插件能不能带 UI 入口？ | **声明层已允许**（能力卡 `kind ∈ {ui,cli,http}`），渲染层待核 | `crates/owo-agent-server/src/capabilities.rs:50` |
+| 有没有编辑器扩展 / LSP？ | **没有**。858 个源文件里 `vscode`/`language.server`/`lsp` 仅 9 处无关命中（在白名单与前台应用识别里），也没有 VS Code/JetBrains 扩展目录 | `desktop/`、`clients/`、`crates/` 目录扫描 |
+| Web UI 到什么程度？ | 是一个**功能完整的控制台**（15 个面板：workswarm 3,779 行 / eval 1,158 / action-center 1,027 / project-launcher 931 / project-history 679 / observability 537 …），但它是"控制台"不是"编辑器" | `desktop/web/panels/`、`desktop/web/core/` |
 
 ---
 
