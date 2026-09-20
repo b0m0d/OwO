@@ -71,7 +71,8 @@ pub use owo_agent_kernel::{
 | **M10** | `owo-agent-mcp` | MCP 宿主第一段：`mcp`（646 行）+ 两台假服务器 + 13 条 MCP 集成测试；**零出边** | **0** | `agent` / `tools` / `tool_effects` + server `mcp_api`（经别名，未改代码） | ✅ 已完成，见 §12（server 与冒烟已在 §13 的同一工作树上补齐） |
 | **M11** | `owo-agent-memory` | memory + observe + learn（2,454 行）+ `ProactiveSettings` 随域搬入；两处跨 crate 边**已在前面步骤倒置完毕** | **0** | `action_program` / `computer_use` / `executor` / `share_skill` / `workflow` / `settings` + server（经别名，未改代码） | ✅ 已完成，见 §13 |
 | **M12** | `owo-agent-policy` | permissions + permission_spec + grant_store + tool_effects（3,068 行）+ 工具命名契约随域下沉 | **0** | `agent` / `tools` / `subagent` / `autoreview` / `settings` + server 权限中心（经别名，未改代码） | ✅ 已完成，见 §14 |
-| **M13** | 下一个候选见 §15 | — | — | — | 待执行 |
+| **M13** | `owo-agent-policy` + `owo-agent-memory`（归位） | `mcp_health`（532）→ policy、`share_skill`（246）→ memory；出边目标已在 M11/M12 变成 crate | **0** | `agent` / `tools` + server（经别名，未改代码） | ✅ 已完成，见 §15 |
+| **M14** | 下一个候选见 §16（建议 Perception Worker，先写 ADR） | — | — | — | 待执行 |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -733,7 +734,7 @@ note: the function is defined here --> crates\owo-agent-contracts\src\skill.rs:1
 
 ## 11. M9：`owo-agent-workswarm`（已完成）——编排的契约/状态先行，执行侧留待 A2
 
-候选取舍与两路扫描数据见 §15；本节记录边界、结果与证据。
+候选取舍与两路扫描数据见 §16；本节记录边界、结果与证据。
 
 ### 11.1 边界与依赖方向
 
@@ -764,7 +765,7 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 所以正确的迁移顺序是**先切零出边的契约/状态侧，再切执行侧**：本步搬走的三个模块
 没有任何出边，搬完立即满足"core 零改动、可独立编译、可独立测试"；执行侧
 （`workswarm.rs` 本体 4,328 行）留着与 `goal`/`workflow`/`fleet` 的环一起处理，
-按 §15 的建议排到 A2（统一 Daemon）之后。
+按 §16 的建议排到 A2（统一 Daemon）之后。
 
 ### 11.3 本步的调用方改动量：**0 行**（除 core 的 lib.rs 接线）
 
@@ -820,7 +821,7 @@ optional dependency + feature 会被 workspace 成员并集重新点亮，`exclu
 
 ## 12. M10：`owo-agent-mcp`（已完成）——MCP 宿主第一段，连测试服务器与集成测试一起搬
 
-候选取舍见 §15；本节记录边界、结果与证据。
+候选取舍见 §16；本节记录边界、结果与证据。
 
 ### 12.1 边界与依赖方向
 
@@ -950,7 +951,7 @@ Cargo 的环检测只看普通依赖图，dev-dependency 的环不成环——co
 
 ## 13. M11：`owo-agent-memory`（已完成）——前几步的倒置在这里兑现
 
-候选取舍见 §15；本节记录边界、结果与证据。
+候选取舍见 §16；本节记录边界、结果与证据。
 
 ### 13.1 边界与依赖方向
 
@@ -1037,7 +1038,7 @@ M7 把 `McpServerConfig` 从 core 的 `mcp.rs` 搬到消费它的插件域，这
 
 ## 14. M12：`owo-agent-policy`（已完成）——Tool Host 的判定侧，与"权限不可绕过"的第一段
 
-候选取舍见 §15；本节记录边界、结果与证据。
+候选取舍见 §16；本节记录边界、结果与证据。
 
 ### 14.1 边界与依赖方向
 
@@ -1122,7 +1123,61 @@ M8 撞到的是 `pub(crate)` 跨 crate 后"不可见"（编译错误 `E0603`）�
 | `Cargo.toml` / core 的 `Cargo.toml` | 新增 workspace 成员与依赖；**server / cli / 集成测试未改一行** |
 
 
-## 15. 后续候选与取舍记录
+## 15. M13：两个"归位"模块（已完成）——前两步的利息
+
+候选取舍见 §16；本节记录边界、结果与证据。
+
+### 15.1 这一步为什么几乎免费：出边目标刚被搬成了 crate
+
+| 模块 | 行数 | 出边 | 出边目标现在在哪 | 本步动作 |
+|---|---:|---|---|---|
+| `mcp_health` | 532 | `crate::tool_effects::EffectClass` | **M12 已随 `owo-agent-policy` 下沉** | `git mv`，**内容零改写** |
+| `share_skill` | 246 | `crate::learn::{...}` | **M11 已随 `owo-agent-memory` 下沉** | `git mv` + manifest 加 `zip` |
+
+两个模块的 `crate::` 引用搬迁后**都落在新 crate 内部**，因此不需要改一行代码、
+不需要任何倒置。这是 M11/M12 留下的利息：**先把被依赖的域搬走，后来者就变成零成本**。
+
+### 15.2 域名归属：为什么不各开一个新 crate
+
+* `mcp_health` → **`owo-agent-policy`**：它的判定依据是**效应类别**（只读可重试、
+  写与执行不重试），与 `tool_effects`/`permissions` 是同一套判定语义。
+  **不能放进 `owo-agent-mcp`**：`policy → mcp` 这条依赖已经存在（`McpTool`），反向会成环。
+* `share_skill` → **`owo-agent-memory`**：它导出/导入的是 `learn` 的动作图与流程技能包，
+  与学习域同一个数据形状族。
+
+### 15.3 本步的新坑：内联路径扫描的**词表不全**
+
+`mcp_health.rs:77` 用 `#[derive(thiserror::Error)]`（内联全限定路径），而当时的扫描词表
+只有 `owo_agent_*/serde/chrono/uuid/sha2/zip/...`，**没有 thiserror** → 首次 `check`
+报 `E0433`。处置：把 `thiserror`/`futures`/`once_cell`/`parking_lot` 补进词表，
+并在 `owo-agent-policy` 的 manifest 里记档。§4 复用清单的"查可见性"一条同步改成
+"用**完整词表**正则扫一遍"，不再依赖记忆。
+
+### 15.4 验收证据（可复现）
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| workspace 全目标编译 | `cargo check --workspace --all-targets` | **exit=0**，96 s；**0 条 `dead_code`/`unused` warning**（M12 的教训生效） | `docs/qa/logs/mk-m13-check-ws2-*.log` |
+| `owo-agent-policy` 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-policy -Tag m13-policy` | **exit=0**，**59/59**（51 → 59，+8 = `mcp_health` 单测随迁） | `docs/qa/logs/mk-shard-m13-policy-*.log` |
+| `owo-agent-memory` 测试 | `... -Package owo-agent-memory -Tag m13-memory` | **exit=0**，**32/32**（27 → 32，+5 = `share_skill` 单测随迁） | `docs/qa/logs/mk-shard-m13-memory-*.log` |
+| 全量 core 测试 | `... -Package owo-agent-core -Tag m13-core` | **exit=0**，**31/31 分片全绿**；`--lib` **287 → 274**（−13 = 8 + 5，逐条对上） | `docs/qa/logs/mk-shard-m13-core-*.log` |
+| 全量 server 测试 | `... -Package owo-agent-server -Tag m13-server` | **exit=0**，**40/40 分片全绿** | `docs/qa/logs/mk-shard-m13-server-*.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m13-relocate` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m13-relocate-20260920-040022/report.json` |
+| core 体量 | 逐行统计 | **49 文件 / 37,567 行 → 47 文件 / 36,787 行**（−780 = 532 + 246 + 接线） | 与 §1 同口径 |
+
+### 15.5 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `crates/owo-agent-core/src/mcp_health.rs` | `git mv` 到 `owo-agent-policy/src/`（**内容零改写**） |
+| `crates/owo-agent-core/src/share_skill.rs` | `git mv` 到 `owo-agent-memory/src/`（**内容零改写**） |
+| `crates/owo-agent-policy/{src/lib.rs,Cargo.toml}` | 加 `pub mod mcp_health` + re-export；manifest 补 `thiserror`（内联 derive 路径） |
+| `crates/owo-agent-memory/{src/lib.rs,Cargo.toml}` | 加 `pub mod share_skill` + re-export；manifest 补 `zip`（`.owskill` 包读写） |
+| `crates/owo-agent-core/src/lib.rs` | 删 2 个 `pub mod`，并入两条别名 re-export |
+| 调用方 | **0 行改动**（`agent` / `tools` / server 全部走别名） |
+
+
+## 16. 后续候选与取舍记录
 
 M0–M3 已把 core 里"能结构性地零代价切下来"的部分用完：**§5.1 的 SCC 分析证明，整个 core
 只有那 7 个模块满足零入边 + 零出边（M2 切 5 个、M3 切 2 个）**。因此 M4 起必须做
@@ -1249,8 +1304,8 @@ M12 之后 core 剩 49 文件 / 37,567 行。把"出边全部逃向已迁出的 
 
 | 模块 | 行数 | 入边 | 出边（`crate::`） | 能否立刻搬 |
 |---|---:|---:|---|---|
-| `mcp_health` | 532 | 2 | `tool_effects` —— **M12 后已是 `owo-agent-policy`** | ✅ 可归位（域名=MCP 工具健康/熔断，按效应类别判可重试） |
-| `share_skill` | 246 | 0 | `learn` —— **M11 后已是 `owo-agent-memory`** | ✅ 可归位（技能包分享/导入属学习域） |
+| ~~`mcp_health`~~ | 532 | 2 | `tool_effects` | ✅ **M13 已完成**（归位到 `owo-agent-policy`，见 §15） |
+| ~~`share_skill`~~ | 246 | 0 | `learn` | ✅ **M13 已完成**（归位到 `owo-agent-memory`，见 §15） |
 | `accessibility` | 158 | 5 | **无** | ⚠️ 能搬，但域名是 Perception（指南 §3），建议随 Perception 一步走，避免二次搬迁 |
 | `schema_budget` | 253 | 1 | `tools`（仍在 core） | ❌ 等 `tools` |
 | `workflow` | 1,461 | 0 | `action_program`、`assert`（仍在 core） | ❌ 等 `action_program`/`assert` |
@@ -1263,10 +1318,7 @@ M12 之后 core 剩 49 文件 / 37,567 行。把"出边全部逃向已迁出的 
 
 结论（M13 的具体建议）：
 
-1. **M13 = 两个"归位"小步合并**：`mcp_health` → `owo-agent-policy`（新增 0 依赖，
-   `policy → mcp` 的方向已存在，不成环）、`share_skill` → `owo-agent-memory`
-   （只需 memory 依赖）。合计 778 行、零倒置、零新依赖——它们的出边目标**在 M11/M12
-   里刚好已经被搬成了 crate**，所以这一步是前两步的利息。
+1. ~~**M13 = 两个"归位"小步合并**~~ ✅ 已完成（见 §15）：778 行、零倒置、零新依赖。
 2. **M14 = Perception Worker**：唯一能兑现指南 §10"普通 Agent 改动不触发 ONNX 编译"
    的一步，也是 §1 判据里"5 条出边全是双向边"的那个真环。必须先写 ADR（倒置 vs 整组
    搬迁），并且它必须是**独立 workspace**（§3.2 已实测：feature 关不住会成环的边）。

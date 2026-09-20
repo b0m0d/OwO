@@ -10,6 +10,7 @@
 //! | [`grant_store`] | 授权凭证存储：`GrantStore` / `GrantScope`，指纹稳定、按 workspace/host/任务域生效、可撤销、可过期 |
 //! | [`tool_effects`] | 工具效应声明与矩阵：`EffectClass` / `ToolEffect`，内置矩阵 + MCP 注解降级 + 未声明即拒绝 |
 //! | [`tool_names`] | 工具命名契约（`sanitize_tool_name`）：效应表按名字查表，命名必须与执行侧同源 |
+//! | [`mcp_health`] | MCP 工具的健康与熔断：`McpHealthTracker` / `McpHealthConfig`，按**效应类别**判定可重试（只读可重试、写与执行不重试）+ 限流 + 半开探针（M13 从 core 归位：它唯一的出边就是 `tool_effects`，而 `tool_effects` 已随本 crate 下沉） |
 //!
 //! 边界（见 `docs/ARCH-MICROKERNEL.md` §14）：
 //!
@@ -25,6 +26,7 @@
 //! 纯逻辑 + serde + 哈希 + 授权凭证文件，不需要内核原语，依赖面越小越好。
 
 pub mod grant_store;
+pub mod mcp_health;
 pub mod permission_spec;
 pub mod permissions;
 pub mod tool_effects;
@@ -32,6 +34,7 @@ pub mod tool_names;
 
 // 迁移期约定（与 M0–M11 一致）：用 glob 再导出，让公共面等价性由编译器证明。
 pub use grant_store::*;
+pub use mcp_health::*;
 pub use permission_spec::*;
 pub use permissions::*;
 pub use tool_effects::*;

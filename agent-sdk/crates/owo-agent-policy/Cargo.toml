@@ -31,5 +31,8 @@ chrono.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 # 以下两个只在**内联全限定路径**里出现（`tracing::warn!` 5 处、
-# `std::sync::atomic` 等），`use` 行扫描看不到——M5/M10 都踩过，这里直接核过。
+# `#[derive(thiserror::Error)]` 在 mcp_health.rs:77 等），`use` 行扫描看不到——
+# M5/M10 都踩过，M13 又踩了一次：扫描词表里当时没有 thiserror。现已把
+# thiserror / futures / once_cell / parking_lot 一并加进扫描词表。
 tracing.workspace = true
+thiserror.workspace = true

@@ -8,6 +8,7 @@
 //! | [`observe`] | 桌面观察：`DesktopSnapshot` / `Observation` / `MemoryStore`，把前台应用与剪贴板变化记成可检索的观察 |
 //! | [`learn`] | 操作学习与主动建议：录制/泛化/动作图/流程技能包/`ProactiveEngine` |
 //! | [`proactive_settings`] | 主动建议的域配置 `ProactiveSettings`（M11 从 core 的 settings.rs 随域搬入） |
+//! | [`share_skill`] | 技能包分享与导入：`.owskill` 包的导出/校验/导入（M13 从 core 归位：它唯一的出边就是 `learn`，而 `learn` 已随本 crate 下沉） |
 //!
 //! 边界（见 `docs/ARCH-MICROKERNEL.md` §13）：
 //!
@@ -27,9 +28,11 @@ pub mod learn;
 pub mod memory;
 pub mod observe;
 pub mod proactive_settings;
+pub mod share_skill;
 
 // 迁移期约定（与 M0–M10 一致）：用 glob 再导出，让公共面等价性由编译器证明。
 pub use learn::*;
 pub use memory::*;
 pub use observe::*;
 pub use proactive_settings::*;
+pub use share_skill::*;

@@ -31,3 +31,5 @@ chrono.workspace = true
 # 内联全限定路径（`uuid::Uuid::new_v4()`，learn.rs 4 处 / chrono::Utc::now() 多处的
 # 同类问题）不会出现在 `use` 行里，依赖清单按「use 行 + 内联全限定路径」两遍核。
 uuid.workspace = true
+# M13：share_skill（技能包分享/导入）随学习域迁入，它用 zip 读写 `.owskill` 包。
+zip.workspace = true

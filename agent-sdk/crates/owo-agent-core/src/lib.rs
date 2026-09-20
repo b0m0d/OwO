@@ -26,7 +26,6 @@ pub mod fleet_transport;
 pub mod gateway;
 pub mod goal;
 pub mod locate;
-pub mod mcp_health;
 pub mod node_agent;
 pub mod ocr;
 #[cfg(target_os = "windows")]
@@ -39,7 +38,6 @@ pub mod schema_budget;
 pub mod session;
 pub mod settings;
 pub mod share;
-pub mod share_skill;
 pub mod skill_pack;
 pub mod sqlite_store;
 pub mod stt;
@@ -177,7 +175,7 @@ pub use owo_agent_mcp::mcp;
 //   * crate 外：`owo_agent_core::{memory, observe, learn}::*`（server 的 memory_graph_api
 //     与集成测试）。
 // ---------------------------------------------------------------------------
-pub use owo_agent_memory::{learn, memory, observe};
+pub use owo_agent_memory::{learn, memory, observe, share_skill};
 
 // ---------------------------------------------------------------------------
 // 受信策略内核（M12）兼容层：permissions / permission_spec / grant_store / tool_effects
@@ -193,7 +191,7 @@ pub use owo_agent_memory::{learn, memory, observe};
 // 入边（agent / tools / subagent / autoreview / settings + server 的 permissions_center_api
 // 与集成测试）全部由下面的别名模块满足，调用方零改动。
 // ---------------------------------------------------------------------------
-pub use owo_agent_policy::{grant_store, permission_spec, permissions, tool_effects};
+pub use owo_agent_policy::{grant_store, mcp_health, permission_spec, permissions, tool_effects};
 
 pub use owo_agent_plugins::{plugin, McpServerConfig};
 
