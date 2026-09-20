@@ -52,6 +52,10 @@ owo-agent-policy.workspace = true
 # SttSettings 亦随域搬入，settings.rs 用 pub use 转出。
 # 本 crate 因此不再依赖 ort / sherpa-onnx / ndarray / windows-sys / png。
 owo-agent-perception.workspace = true
+# UI 执行内核（M15）：executor 已下沉；core 的 action_program / computer_use 经别名使用。
+owo-agent-executor.workspace = true
+# 工作流内核（M15）：workflow / action_program / assert 已下沉；server 的 workflow_api 经别名使用。
+owo-agent-workflow.workspace = true
 # 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
 # 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
 # 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成

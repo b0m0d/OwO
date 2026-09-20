@@ -3,10 +3,10 @@
 //! 核心是“语义锚点 → 动作 → 验证”的图遍历，通过 `UiActionSource` 抽象，
 //! Windows 实现走 UI Automation + SendInput；测试用脚本化假源覆盖全部逻辑。
 
-use crate::learn::{ActionGraph, ActionType, SemanticAnchor};
-use crate::locate::{locate, AnchorQuery};
-use crate::scene::{Evidence, EvidenceSource, GraphElement, SceneGraph};
-use crate::ElementRegistry;
+use owo_agent_memory::learn::{ActionGraph, ActionType, SemanticAnchor};
+use owo_agent_perception::locate::{locate, AnchorQuery};
+use owo_agent_perception::scene::{Evidence, EvidenceSource, GraphElement, SceneGraph};
+use owo_agent_perception::ElementRegistry;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -329,9 +329,9 @@ fn parent_matches(anchor: &SemanticAnchor, ancestors: &[String]) -> bool {
 /// OCR 文本锚点兜底：UIA 找不到时，用屏幕 OCR（Media.Ocr 同步路径）定位文本中心。
 #[cfg(target_os = "windows")]
 fn ocr_anchor_fallback(anchor: &SemanticAnchor) -> Option<(i32, i32)> {
-    let bmp = crate::platform::capture_screen()?;
-    let summary = crate::ocr::ocr_bmp_detailed(&bmp).ok()?;
-    let lines = crate::ocr::group_ocr_lines(&summary.boxes);
+    let bmp = owo_agent_kernel::platform::capture_screen()?;
+    let summary = owo_agent_perception::ocr::ocr_bmp_detailed(&bmp).ok()?;
+    let lines = owo_agent_perception::ocr::group_ocr_lines(&summary.boxes);
     find_ocr_anchor_point(&lines, &anchor.name)
 }
 
@@ -396,7 +396,7 @@ pub(crate) fn locate_anchor_point(
 
 /// 在 OCR 行中找包含目标文本的首行中心（纯函数，供 OCR 锚点兜底与单测使用）。
 pub(crate) fn find_ocr_anchor_point(
-    lines: &[crate::ocr::OcrLine],
+    lines: &[owo_agent_perception::ocr::OcrLine],
     name: &str,
 ) -> Option<(i32, i32)> {
     let line = lines
@@ -507,10 +507,11 @@ impl UiActionSource for WindowsUiaSource {
             return Ok(value.contains(expected));
         }
         if let Some(expected) = predicate.strip_prefix("ui:") {
-            let nodes = crate::accessibility::foreground_ui_tree(8, 500).unwrap_or_default();
+            let nodes =
+                owo_agent_perception::accessibility::foreground_ui_tree(8, 500).unwrap_or_default();
             return Ok(nodes.iter().any(|node| node.name.contains(expected)));
         }
-        let title = crate::platform::foreground_title();
+        let title = owo_agent_kernel::platform::foreground_title();
         Ok(title
             .map(|title| title.contains(predicate))
             .unwrap_or(false))
@@ -644,7 +645,9 @@ unsafe fn click_element(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn send_unicode(text: &str) -> Result<(), String> {
+/// 注入 Unicode 文本。**M15 提权为 `pub`**：调用方 `computer_use` 仍在 core，
+/// 跨 crate 后 `pub(crate)` 不可达（与 M8/M12/M14 同型的可见性收缩）。
+pub fn send_unicode(text: &str) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY,
     };
@@ -687,7 +690,9 @@ pub(crate) fn send_unicode(text: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn send_shortcut(combo: &str) -> Result<(), String> {
+/// 发送组合键。**M15 提权为 `pub`**：调用方 `computer_use` 仍在 core，
+/// 跨 crate 后 `pub(crate)` 不可达（与 M8/M12/M14 同型的可见性收缩）。
+pub fn send_shortcut(combo: &str) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
@@ -710,7 +715,9 @@ pub(crate) fn send_shortcut(combo: &str) -> Result<(), String> {
 
 /// 主动启动应用或打开 URL（不依赖应用已在前台）。
 #[cfg(target_os = "windows")]
-pub(crate) fn launch_target(target: &str) -> Result<(), String> {
+/// 启动/激活外部目标（exe 或 URL）。**M15 提权为 `pub`**：调用方 `computer_use` 仍在 core，
+/// 跨 crate 后 `pub(crate)` 不可达（与 M8/M12/M14 同型的可见性收缩）。
+pub fn launch_target(target: &str) -> Result<(), String> {
     if target.trim().is_empty() {
         return Err("启动目标为空".to_string());
     }
@@ -739,7 +746,10 @@ fn is_direct_launch(target: &str) -> bool {
         || std::path::Path::new(trimmed).is_file()
 }
 
-pub(crate) fn parse_click_at(text: &str) -> Result<(i32, i32), String> {
+/// 解析 `click_at` 动作坐标（`"x,y"`）。**M15 提权为 `pub`**：调用方
+/// `action_program::parse_click_at` 已随工作流内核迁出本 crate，
+/// `pub(crate)` 跨 crate 后不可达（与 M8/M12/M14 记档的可见性收缩同型）。
+pub fn parse_click_at(text: &str) -> Result<(i32, i32), String> {
     let mut parts = text.split(',');
     let x = parts
         .next()
@@ -757,7 +767,9 @@ pub(crate) fn parse_click_at(text: &str) -> Result<(i32, i32), String> {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
+/// 在屏幕坐标处左键点击。**M15 提权为 `pub`**：调用方 `computer_use` 仍在 core，
+/// 跨 crate 后 `pub(crate)` 不可达（与 M8/M12/M14 同型的可见性收缩）。
+pub fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
     };
@@ -785,7 +797,9 @@ pub(crate) fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
 }
 
 /// 在屏幕坐标处滚动鼠标滚轮（delta 为正向上、负向下，一格 120）。
-pub(crate) fn scroll_at_screen(x: i32, y: i32, delta: i32) -> Result<(), String> {
+/// 在屏幕坐标处滚动。**M15 提权为 `pub`**：调用方 `computer_use` 仍在 core，
+/// 留在 `pub(crate)` 会变成新 crate 内的死代码（本步 `check` 的 dead_code 警告）。
+pub fn scroll_at_screen(x: i32, y: i32, delta: i32) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
     };
@@ -933,8 +947,8 @@ impl WindowsUiaSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element_registry::{ElementRegistry, SceneElement};
-    use crate::learn::{ActionGraph, ActionType, SemanticAnchor};
+    use owo_agent_memory::learn::{ActionGraph, ActionType, SemanticAnchor};
+    use owo_agent_perception::element_registry::{ElementRegistry, SceneElement};
 
     struct ScriptedSource {
         find_ok: bool,
@@ -1230,7 +1244,7 @@ mod tests {
 
     #[test]
     fn find_ocr_anchor_point_returns_center_and_none() {
-        use crate::ocr::OcrLine;
+        use owo_agent_perception::ocr::OcrLine;
         let lines = vec![
             OcrLine {
                 text: "发送".into(),

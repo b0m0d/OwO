@@ -73,7 +73,8 @@ pub use owo_agent_kernel::{
 | **M12** | `owo-agent-policy` | permissions + permission_spec + grant_store + tool_effects（3,068 行）+ 工具命名契约随域下沉 | **0** | `agent` / `tools` / `subagent` / `autoreview` / `settings` + server 权限中心（经别名，未改代码） | ✅ 已完成，见 §14 |
 | **M13** | `owo-agent-policy` + `owo-agent-memory`（归位） | `mcp_health`（532）→ policy、`share_skill`（246）→ memory；出边目标已在 M11/M12 变成 crate | **0** | `agent` / `tools` + server（经别名，未改代码） | ✅ 已完成，见 §15 |
 | **M14** | `owo-agent-perception` | UIA / OCR / STT / 视觉 / 场景 / 定位（11 模块 5,870 行）；先写 ADR-002；STT 做成可选 feature | **0**（仅 1 条配置类型随域走） | `executor` / `action_program` / `assert` / `computer_use` + server 5 个 api（经别名，未改代码） | ✅ 已完成，见 §17（ADR-002 §2.1 记录了"切边界≠降成本"的实测更正） |
-| **M15** | `owo-agent-workflow` + `owo-agent-executor`（候选） | workflow / action_program / assert / executor（4,244 行）——**已实测为完全闭合集**，出边全部指向已抽出的 crate | 待实施 | — | ⏳ 待执行（见 §18） |
+| **M15** | `owo-agent-executor` + `owo-agent-workflow` | executor（1,356）；workflow + action_program + assert（2,888）；**零倒置闭合集** | **0** | `computer_use` / `goal` / server `workflow_api`（经别名，未改代码） | ✅ 已完成，见 §19 |
+| **M16** | 剩余均为"总线型"模块（见 §18 末段） | agent / tools / computer_use / session / goal / fleet / workswarm / worker_pool / trace | — | — | ⏳ 待评估（多数应按 §9 A4 分段或留在 core） |
 
 ### 实测耦合数据（用于选序，不是估计）
 
@@ -1258,6 +1259,62 @@ M10 漏 tracing/uuid、M13 漏 thiserror、**M14 漏 tokio/tracing/windows-futur
 | `crates/owo-agent-core/src/lib.rs` | 删 11 个 `pub mod`，加一条别名 re-export（35 个 `pub mod` 剩余） |
 | `scripts/mk-deps-scan.ps1` | 新增：机械依赖扫描（根治词表漏项） |
 
+
+## 19. M15：`owo-agent-executor` + `owo-agent-workflow`（已完成）——零倒置的闭合集
+
+候选取舍见 §18；本节记录边界、结果与证据。
+
+### 19.1 边界与结果
+
+| 新 crate | 模块 | 行数 | 说明 |
+|---|---|---:|---|
+| `owo-agent-executor` | `executor` | 1,391 | 动作落地：UIA 定位、键鼠注入、窗口激活、屏幕捕获取词；`ExecReport`/`ExecStep` |
+| `owo-agent-workflow` | `workflow` / `action_program` / `assert` | 2,917 | 工作流 DSL（校验/编译/审批/检查点回滚）、动作程序运行时（控制流/变量/断言）、断言 |
+| **合计** | 4 模块 | **4,308** | 13 个源文件 |
+
+**这是零倒置搬迁**：4 个模块的出边**全部**指向已抽出的 crate
+（`memory`/`perception`/`kernel`/`contracts`），搬迁只需把 33 处相对路径改成绝对路径；
+模块之间互相引用的边（`workflow → action_program/assert`、`action_program → assert`）
+**同迁一个 crate**，因此也不跨 crate 边界。
+
+依赖方向：`workflow → executor → {perception, memory, kernel}`，与指南 §4 的分工一致
+（workflow 属 extensions，executor 属 tool-host）。
+
+### 19.2 本步修的 6 处可见性收缩（同一模式第 5、6 次）
+
+`check` 一次报出 6 处，全部是"`pub(crate)` 的调用方被搬走或被留在 core"：
+
+| 条目 | 症状 |
+|---|---|
+| `parse_click_at` | `E0603: function is private`（调用方 `action_program` 迁到 workflow crate） |
+| `scroll_at_screen` | `dead_code`（调用方 `computer_use` 留在 core） |
+| `click_at_screen` / `launch_target` / `send_shortcut` / `send_unicode` | 同类（core 的 `computer_use` 依赖它们） |
+
+后 4 个是我在修第 1 个之后**主动扫描**发现的（"新 crate 里的 `pub(crate)` 条目是否被 core 引用"），
+没有等编译器逐个报。处置统一为提权 `pub` + doc 注释。
+
+### 19.3 验收证据（可复现）
+
+| 验收项 | 命令 | 结果 | 证据 |
+|---|---|---|---|
+| workspace 全目标编译 | `cargo check --workspace --all-targets` | **exit=0**，100 s；0 条 `dead_code`/`unused` | `docs/qa/logs/mk-m15-check-ws2-*.log` |
+| `owo-agent-executor` 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-executor -Tag m15-executor` | **exit=0**，**14/14** | `docs/qa/logs/mk-shard-m15-executor-lib-*.log` |
+| `owo-agent-workflow` 测试 | `... -Package owo-agent-workflow -Tag m15-workflow` | **exit=0**，**18/18** | `docs/qa/logs/mk-shard-m15-workflow-lib-*.log` |
+| 全量 core 测试 | `... -Package owo-agent-core -Tag m15-core` | **exit=0**，**31/31 分片全绿**；`--lib` **208 → 176**（−32 = 14 + 18，精确对上） | `docs/qa/logs/mk-shard-m15-core-*.log` |
+| 全量 server 测试 | `... -Package owo-agent-server -Tag m15-server` | **exit=0**，**40/40 分片全绿** | `docs/qa/logs/mk-shard-m15-server-*.log` |
+| 运行态 | `scripts/mk-smoke.ps1 -Tag m15-exec-workflow` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m15-exec-workflow-*/report.json` |
+| core 体量 | 逐行统计 | **36 文件 / 30,891 行 → 32 文件 / 26,655 行**（−4,236 行） | 与 §1 同口径 |
+
+### 19.4 改动文件
+
+| 文件 | 变更 |
+|---|---|
+| `crates/owo-agent-core/src/executor.rs` | `git mv` 到 `owo-agent-executor`；13 处路径改绝对（memory/perception/kernel）；6 个函数提权 `pub` |
+| `crates/owo-agent-core/src/{workflow,action_program,assert}.rs` | `git mv` 到 `owo-agent-workflow`；20 处路径改绝对（executor/memory/perception/kernel/contracts） |
+| `crates/owo-agent-executor/{Cargo.toml,src/lib.rs}` | 新 crate（边界文档 + glob re-export） |
+| `crates/owo-agent-workflow/{Cargo.toml,src/lib.rs}` | 新 crate（边界文档 + glob re-export） |
+| `crates/owo-agent-core/src/lib.rs` | 删 4 个 `pub mod`（35 → 31），加 2 条别名 re-export |
+| `Cargo.toml` / core 的 `Cargo.toml` | 新增 workspace 成员与依赖；**server / cli / 集成测试未改一行** |
 
 ## 18. 后续候选与取舍记录
 

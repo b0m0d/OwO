@@ -6,11 +6,11 @@
 //! 旧线性 `graph.json` 自动转换为 `Vec<Step>` 兼容。
 
 use crate::assert::{describe, verify_assertion_full, Assertion};
-use crate::executor::{parse_click_at, ExecReport, ExecStep, UiActionSource};
-use crate::learn::{ActionGraph, ActionType, SemanticAnchor};
-use crate::ocr::OcrSummary;
-use crate::perception::SituationSnapshot;
-use crate::scene::SceneGraph;
+use owo_agent_executor::{parse_click_at, ExecReport, ExecStep, UiActionSource};
+use owo_agent_memory::learn::{ActionGraph, ActionType, SemanticAnchor};
+use owo_agent_perception::ocr::OcrSummary;
+use owo_agent_perception::perception::SituationSnapshot;
+use owo_agent_perception::scene::SceneGraph;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -490,9 +490,9 @@ fn sensitive_anchor(anchor: &SemanticAnchor) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocr::OcrBox;
-    use crate::perception::{ForegroundApp, UiContext};
-    use crate::scene::SceneGraph;
+    use owo_agent_perception::ocr::OcrBox;
+    use owo_agent_perception::perception::{ForegroundApp, UiContext};
+    use owo_agent_perception::scene::SceneGraph;
 
     struct FakeSource {
         find_ok: bool,
@@ -580,7 +580,7 @@ mod tests {
                 accessible: true,
                 ui_tree: ui_names
                     .iter()
-                    .map(|name| crate::UiNode {
+                    .map(|name| owo_agent_perception::UiNode {
                         name: name.to_string(),
                         control_type: 50_000,
                         class: "Button".to_string(),

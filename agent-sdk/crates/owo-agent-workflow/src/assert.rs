@@ -4,9 +4,9 @@
 //! 而不是让视觉模型回答“是否清空”（VL 会把占位符当成未清空）。
 //! 静默观察时对“操作后 1–3s 状态 diff”做统计，自动生成默认断言并随技能存储。
 
-use crate::ocr::OcrSummary;
-use crate::perception::SituationSnapshot;
-use crate::scene::SceneGraph;
+use owo_agent_perception::ocr::OcrSummary;
+use owo_agent_perception::perception::SituationSnapshot;
+use owo_agent_perception::scene::SceneGraph;
 use serde::{Deserialize, Serialize};
 
 /// 结构化断言单元：可评估、可学、可存的验证单元。
@@ -217,7 +217,7 @@ fn verify_uia_exists(
         .ui_context
         .as_ref()
         .ok_or_else(|| "缺少 L1 无障碍 UI 树，无法评估 UiaExists".to_string())?;
-    let role_matches = |node: &crate::UiNode| -> bool {
+    let role_matches = |node: &owo_agent_perception::UiNode| -> bool {
         match role {
             Some(role) => {
                 let role = role.to_lowercase();
@@ -312,9 +312,9 @@ fn verify_state_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocr::OcrBox;
-    use crate::perception::{ForegroundApp, UiContext};
-    use crate::scene::SceneGraph;
+    use owo_agent_perception::ocr::OcrBox;
+    use owo_agent_perception::perception::{ForegroundApp, UiContext};
+    use owo_agent_perception::scene::SceneGraph;
 
     fn snapshot(title: &str) -> SituationSnapshot {
         SituationSnapshot {
@@ -459,7 +459,7 @@ mod tests {
             window: "qq".to_string(),
             active_view: "main".to_string(),
             accessible: true,
-            ui_tree: vec![crate::UiNode {
+            ui_tree: vec![owo_agent_perception::UiNode {
                 name: "发送".to_string(),
                 control_type: 50_000,
                 class: "Button".to_string(),

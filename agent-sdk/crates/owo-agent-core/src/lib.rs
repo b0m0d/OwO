@@ -1,12 +1,10 @@
 //! OwO Agent SDK 核心库（M1）：
 //! Agent loop、工具注册表、权限审批、会话、审计、模型网关。
 
-pub mod action_program;
 pub mod agent;
 /// Artifact 校验与交付管线（七期 · 第三路）：格式门控（json/csv/research/
 /// markdown）+ 交付元数据（media_type/file_name/sha256/size_bytes）+ 证据链。
 pub mod artifact_pipeline;
-pub mod assert;
 pub mod autoreview;
 pub mod blackboard;
 /// 内置团队模板目录（六期第三路：四类稳定团队候选，安装后参与匹配；见
@@ -17,7 +15,6 @@ pub mod computer_use;
 pub mod contract_worker;
 pub mod critic;
 pub mod execution_target;
-pub mod executor;
 pub mod fleet;
 pub mod fleet_node_protocol;
 pub mod fleet_transport;
@@ -42,7 +39,6 @@ pub mod worker_pool;
 /// 角色画像（七期 · 二路）：模板角色 → 工具面/只读/写白名单/回合上限/浏览器/命令，
 /// 画像驱动子代理执行器（注册表面即权限边界）。
 pub mod worker_profile;
-pub mod workflow;
 pub mod workswarm;
 
 // ---------------------------------------------------------------------------
@@ -198,6 +194,18 @@ pub use owo_agent_policy::{grant_store, mcp_health, permission_spec, permissions
 // 入边（executor / action_program / assert / computer_use + server 的 perception_api /
 // locate_api / desktop_api / workflow_backend）全部由下面的别名模块满足，调用方零改动。
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 执行/工作流内核（M15）兼容层：executor 已下沉到 `owo-agent-executor`，
+// workflow / ction_program / ssert 已下沉到 `owo-agent-workflow`。
+//
+// 三个模块互相引用且同迁一个 crate，外加 executor 也是"出边全部指向已抽出 crate"
+// 的模块，因此本步是**零倒置**搬迁（只把相对路径改成绝对路径）。
+// 入边（computer_use / goal / server 的 workflow_api / workflow_backend 与集成测试）
+// 全部由下面的别名模块满足，调用方零改动。
+// ---------------------------------------------------------------------------
+pub use owo_agent_executor::executor;
+pub use owo_agent_workflow::{action_program, assert, workflow};
+
 pub use owo_agent_perception::{
     accessibility, element_registry, locate, ocr, onnx_ocr, paddle_ocr, perception, scene, stt,
     vision, window_template,

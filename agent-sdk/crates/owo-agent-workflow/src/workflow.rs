@@ -12,9 +12,9 @@
 //! - 状态机：Pending → Running → WaitingApproval → Succeeded / Failed / Aborted。
 
 use crate::action_program::{ActionProgram, ProgramNode};
-use crate::audit::AuditLog;
-use crate::learn::{ActionType, SemanticAnchor};
-use crate::skill_health::{SkillHealthStore, SkillState};
+use owo_agent_contracts::skill_health::{SkillHealthStore, SkillState};
+use owo_agent_kernel::audit::AuditLog;
+use owo_agent_memory::learn::{ActionType, SemanticAnchor};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};

@@ -1797,6 +1797,7 @@ dependencies = [
  "owo-agent-contracts",
  "owo-agent-env",
  "owo-agent-eval-facade",
+ "owo-agent-executor",
  "owo-agent-extensions",
  "owo-agent-kernel",
  "owo-agent-mcp",
@@ -1806,6 +1807,7 @@ dependencies = [
  "owo-agent-policy",
  "owo-agent-protocol",
  "owo-agent-tool-safety",
+ "owo-agent-workflow",
  "owo-agent-workswarm",
  "rand",
  "regex",
@@ -1842,6 +1844,17 @@ name = "owo-agent-eval-facade"
 version = "0.1.0"
 dependencies = [
  "owo-agent-product-eval",
+]
+
+[[package]]
+name = "owo-agent-executor"
+version = "0.1.0"
+dependencies = [
+ "owo-agent-kernel",
+ "owo-agent-memory",
+ "owo-agent-perception",
+ "serde",
+ "windows",
 ]
 
 [[package]]
@@ -2027,6 +2040,20 @@ dependencies = [
  "sha2",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "owo-agent-workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "owo-agent-contracts",
+ "owo-agent-executor",
+ "owo-agent-kernel",
+ "owo-agent-memory",
+ "owo-agent-perception",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,36 @@
+[package]
+name = "owo-agent-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# UI 执行内核（M15）：指南 §4 目标结构 `tool-host/crates/executor` 的代码边界。
+#
+# 边界（见 docs/ARCH-MICROKERNEL.md §19）：
+#   * `executor.rs` 的 `crate::` 出边**全部指向已抽出的 crate**，因此搬迁只需把
+#     相对路径改成绝对路径（13 处），零倒置：
+#       learn          → owo-agent-memory（M11）
+#       locate/scene/ocr/accessibility/element_registry/ElementRegistry → owo-agent-perception（M14）
+#       platform       → owo-agent-kernel（M0）
+#   * **不得依赖 owo-agent-core**：core 依赖本 crate（`action_program` / `computer_use` 等）。
+#
+# 职责：把"已批准的动作"真正落到 Windows 上——UIA 元素定位、键鼠注入、窗口激活、
+# 屏幕捕获取词，并把每一步的结果收敛成 `ExecReport`/`ExecStep` 供调用方与审计使用。
+# 它**不做**权限判定（那是 owo-agent-policy 的事），只接受调用方已裁决的动作。
+
+[dependencies]
+owo-agent-kernel.workspace = true
+owo-agent-memory.workspace = true
+owo-agent-perception.workspace = true
+serde.workspace = true
+
+# 内联路径扫描（scripts/mk-deps-scan.ps1）实测：本 crate 还引用 windows（UIA/COM/注入）。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

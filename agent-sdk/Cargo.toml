@@ -36,6 +36,10 @@ members = [
     # 感知内核（M14，ADR-002）：UIA / OCR / STT / 视觉 / 场景融合 / 定位（11 模块 5,870 行）。
     # 它的存在意义是把 ORT/Sherpa/ndarray/windows 从 core 的依赖与链接里摘出去。
     "crates/owo-agent-perception",
+    # UI 执行内核（M15）：指南 §4 tool-host/crates/executor 的代码边界。
+    "crates/owo-agent-executor",
+    # 工作流/动作程序内核（M15）：workflow + action_program + assert。
+    "crates/owo-agent-workflow",
     # ProductEval 兼容门面（M1）：给 server/cli 提供评测面路径，同时让 core 对
     # devtools/product-eval 的依赖保持为零，避免 crate 环。
     "crates/owo-agent-eval-facade",
@@ -100,6 +104,8 @@ owo-agent-mcp = { path = "crates/owo-agent-mcp" }
 owo-agent-memory = { path = "crates/owo-agent-memory" }
 owo-agent-policy = { path = "crates/owo-agent-policy" }
 owo-agent-perception = { path = "crates/owo-agent-perception" }
+owo-agent-executor = { path = "crates/owo-agent-executor" }
+owo-agent-workflow = { path = "crates/owo-agent-workflow" }
 owo-agent-core = { path = "crates/owo-agent-core" }
 owo-agent-eval-facade = { path = "crates/owo-agent-eval-facade" }
 owo-agent-server = { path = "crates/owo-agent-server" }
