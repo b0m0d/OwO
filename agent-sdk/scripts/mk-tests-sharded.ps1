@@ -19,6 +19,10 @@ param(
     # 单个分片在门禁拒绝后的最大重试轮数（每轮等 -RetrySleepSec 秒）
     [int]$MaxRetriesPerShard = 20,
     [int]$RetrySleepSec = 45,
+    # 单个分片的墙钟上限（分钟）。M15 实测过一次"心跳存活但 1h43m 零输出"的卡死：
+    # 心跳只能证明门禁进程活着，不能证明**测试进程**还活着，所以必须有硬超时。
+    # 超时（exit 124）与门禁拒绝（exit 137）一样按"失败尝试"处理并重试。
+    [int]$ShardTimeoutMin = 20,
     # 分片用的门禁档位：strict（-j 1，且要求磁盘 ≥20 GB）或 normal（-j 2，磁盘 ≥6 GB）。
     # 两种档位下都显式传 `-j 1`，所以并发上限始终是 1；档位只影响**磁盘门阈值**。
     # 实测：strict 档在构建把卷压到 20 GB 以下时会持续拒绝启动（而这与内存无关）。
@@ -87,7 +91,19 @@ foreach ($shard in $shards) {
     $code = 1
     for ($attempt = 1; $attempt -le $MaxRetriesPerShard; $attempt++) {
         [void](Wait-ForRoom $shard.Name)
+        $attemptLog = $log
         try {
+            # M15 教训：一次分片曾"心跳存活但 1h43m 零输出"——心跳只能证明门禁还活着，
+            # 不能证明**测试进程**还活着。因此每个分片必须有墙钟上限：
+            # 超时即杀掉整个进程树、记为一次失败尝试并重试，绝不无限等。
+            # 【重要，M15 实测结论】**不要**用 Start-Job 给分片包超时。
+            #   症状：包装后每个分片都"零输出超时"（日志文件不存在、系统里没有任何
+            #         cargo/rustc/link 进程），而**同一个测试直接单跑 3 秒通过**。
+            #         Windows PowerShell 5.1 的 Start-Job 依赖命名管道做作业传输，
+            #         在本机受限环境下会静默挂住 —— 这属于工具层故障，不是产品缺陷。
+            #   因此保持**直接调用**（唯一被验证过的路径）。人工排查卡死时用下面这段：
+            #     $busy = Get-Process cargo,rustc,link; $sz = (Get-Item $log).Length
+            #     $sz -le 0 → cargo 没起来（多为并行 lane 抢 target/ 锁）；否则是测试自身阻塞
             $code = Invoke-CiCargo -Arguments $cargoArgs -Cwd $root -Label $label -PolicyMode $PolicyMode -LogFile $log -HeartbeatSec 60 -PassThru
         } catch {
             # 门禁在**启动前**拒绝时是抛异常（不是返回 137）；磁盘门与内存门都走这条。
@@ -99,8 +115,8 @@ foreach ($shard in $shards) {
                 throw
             }
         }
-        if ($code -eq 137) {
-            Write-Host ("[shard] {0} 被资源门拒绝/终止（exit 137），第 {1} 轮；等待后重试" -f $shard.Name, $attempt)
+        if ($code -eq 137 -or $code -eq 124) {
+            Write-Host ("[shard] {0} exit={1}（137=资源门 / 124=卡死超时），第 {2} 轮；等待后重试" -f $shard.Name, $code, $attempt)
             Start-Sleep -Seconds $RetrySleepSec
             continue
         }

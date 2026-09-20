@@ -1,0 +1,16 @@
+警告：缺少 OPENAI_API_KEY 环境变量（或设置 OPENAI_BASE_URL 指向本地兼容端点）——模型提供商降级为未配置（serve 继续提供诊断/设置/会话）
+{"level":"info","msg":"文件日志已启用（8MB×5 轮转，内容经统一脱敏）","target":"server","ts":"2026-09-20T12:59:19.666942400+00:00"}
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-20T12:59:19.670420700+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/health","source":"other","status":200,"target":"http","trace_id":"7127485261b14e3c80b44af8","ts":"2026-09-20T12:59:20.149321200+00:00"}
+{"duration_ms":1,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":401,"target":"http","trace_id":"99058f5b83124986b6b872a0","ts":"2026-09-20T12:59:20.224410+00:00"}
+{"duration_ms":5,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"c3f7ab74c3d240ed8282669e","ts":"2026-09-20T12:59:20.278982400+00:00"}
+{"duration_ms":1,"level":"info","method":"GET","msg":"request","route_template":"/server/status","source":"other","status":200,"target":"http","trace_id":"db321a850980490e9fb82ae8","ts":"2026-09-20T12:59:20.312020500+00:00"}
+{"duration_ms":22,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"22c533d18f1f4c42a674c5f9","ts":"2026-09-20T12:59:20.434502400+00:00"}
+{"duration_ms":2,"level":"info","method":"GET","msg":"request","route_template":"/session/{id}","source":"other","status":200,"target":"http","trace_id":"5af01fd909ef40e1b64ff990","ts":"2026-09-20T12:59:20.475162100+00:00"}
+{"duration_ms":2,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"e6f6c6b682ef41f7a82f8323","ts":"2026-09-20T12:59:20.513179100+00:00"}
+{"duration_ms":47,"level":"info","method":"POST","msg":"request","route_template":"/product-eval/runs","source":"other","status":202,"target":"http","trace_id":"2cf9c8a44080419fa2a82912","ts":"2026-09-20T12:59:20.632409800+00:00"}
+{"duration_ms":19,"level":"info","method":"GET","msg":"request","route_template":"/product-eval/runs/{id}","source":"other","status":200,"target":"http","trace_id":"8a0f8ebb2b8d4d53b416feba","ts":"2026-09-20T12:59:21.408356700+00:00"}
+{"duration_ms":2,"level":"info","method":"GET","msg":"request","route_template":"/product-eval/runs/{id}","source":"other","status":200,"target":"http","trace_id":"dee23327d9224b408a3e37d9","ts":"2026-09-20T12:59:22.165563+00:00"}
+{"duration_ms":45,"level":"info","method":"POST","msg":"request","route_template":"/notes","source":"other","status":201,"target":"http","trace_id":"461a41280b6f4005b10d089f","ts":"2026-09-20T12:59:22.290903100+00:00"}
+{"duration_ms":1,"level":"info","method":"GET","msg":"request","route_template":"/notes","source":"other","status":200,"target":"http","trace_id":"2fe2603c5f8847cdb0f4e270","ts":"2026-09-20T12:59:22.326755+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/automations","source":"other","status":200,"target":"http","trace_id":"a10c1ccce8ee4572808c172a","ts":"2026-09-20T12:59:22.385118900+00:00"}

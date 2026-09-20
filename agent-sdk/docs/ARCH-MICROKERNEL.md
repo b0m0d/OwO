@@ -1301,7 +1301,7 @@ M10 漏 tracing/uuid、M13 漏 thiserror、**M14 漏 tokio/tracing/windows-futur
 | `owo-agent-executor` 测试 | `scripts/mk-tests-sharded.ps1 -Package owo-agent-executor -Tag m15-executor` | **exit=0**，**14/14** | `docs/qa/logs/mk-shard-m15-executor-lib-*.log` |
 | `owo-agent-workflow` 测试 | `... -Package owo-agent-workflow -Tag m15-workflow` | **exit=0**，**18/18** | `docs/qa/logs/mk-shard-m15-workflow-lib-*.log` |
 | 全量 core 测试 | `... -Package owo-agent-core -Tag m15-core` | **exit=0**，**31/31 分片全绿**；`--lib` **208 → 176**（−32 = 14 + 18，精确对上） | `docs/qa/logs/mk-shard-m15-core-*.log` |
-| 全量 server 测试 | `... -Package owo-agent-server -Tag m15-server` | **exit=0**，**40/40 分片全绿** | `docs/qa/logs/mk-shard-m15-server-*.log` |
+| 全量 server 测试 | 三批续跑（`m15-server` 13 + `m15-server-b` 13 + `m15-server-d` 14，用 `-Skip` 跳过已过项） | **exit=0，40/40 分片全绿**（`goal_api_tests` 另经直接复跑 32/32 验证） | `docs/qa/logs/mk-shard-m15-server*.log`、`mk-m15-goal-api-repro.log` |
 | 运行态 | `scripts/mk-smoke.ps1 -Tag m15-exec-workflow` | **18/18 PASS** | `docs/qa/evidence/mk-smoke-m15-exec-workflow-*/report.json` |
 | core 体量 | 逐行统计 | **36 文件 / 30,891 行 → 32 文件 / 26,655 行**（−4,236 行） | 与 §1 同口径 |
 
@@ -1315,6 +1315,28 @@ M10 漏 tracing/uuid、M13 漏 thiserror、**M14 漏 tokio/tracing/windows-futur
 | `crates/owo-agent-workflow/{Cargo.toml,src/lib.rs}` | 新 crate（边界文档 + glob re-export） |
 | `crates/owo-agent-core/src/lib.rs` | 删 4 个 `pub mod`（35 → 31），加 2 条别名 re-export |
 | `Cargo.toml` / core 的 `Cargo.toml` | 新增 workspace 成员与依赖；**server / cli / 集成测试未改一行** |
+### 19.5 工具层卡死排查（如实记录，含一条失败的改进）
+
+server 全量验收中途出现两次"分片零输出、长时间无结果"（`goal_api_tests` 1h43m、
+`project_workspace_api_tests` 两次 20min）。排查过程与结论：
+
+| 观察 | 证据 | 结论 |
+|---|---|---|
+| 卡死那次日志 **0 字节**（历次成功 987 B） | `mk-shard-m15-server-goal_api_tests-*.log` 0 B | 进程**没产出任何输出**，不是测试逻辑死锁 |
+| 系统里没有本 lane 的 cargo/rustc/link/git/测试进程 | `Get-Process` 清点 | 没有孤儿占锁 |
+| 同一测试**直接单跑** | `goal_api_tests` 32/32 in 8.27 s；`project_workspace_api_tests` 3/3 in 1.65 s | **测试本身没问题** |
+| 只有走"分批器包一层 Start-Job + Wait-Job 做超时"时才必现 | 改动后 14 个分片**全部**零输出超时；回退直调后立刻全绿 | **是工具层故障**：Windows PowerShell 5.1 的 `Start-Job` 依赖命名管道做作业传输，在本机受限环境下会静默挂住 |
+
+处置：**放弃用 Start-Job 实现分片超时**（该参数已删除，避免"看起来有超时其实没有"的误导），
+把这条结论写进 `scripts/mk-tests-sharded.ps1` 的注释里，并保留人工排查判据：
+
+```text
+卡死时：日志 0 字节 + 无构建进程 → cargo 没起来（多为并行 lane 抢 target/ 锁）
+        日志有内容            → 测试自身阻塞（此时才需要看测试代码）
+```
+
+教训：**"我加的保护"本身可能是故障源**。给工具加超时的第一次尝试反而把 14 个正常分片
+变成超时失败；判断依据只能是"同一输入换路径重跑"的对照，而不是日志里的话。
 
 ## 18. 后续候选与取舍记录
 

@@ -1,0 +1,104 @@
+﻿{
+    "tag":  "m15-exec-workflow",
+    "started_at":  "2026-09-20T12:59:19.3521356Z",
+    "work_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-mk-smoke-m15-exec-workflow-20260920-205919",
+    "evidence_dir":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\mk-smoke-m15-exec-workflow-20260920-205919",
+    "checks":  [
+                   {
+                       "check":  "daemon.core_ready",
+                       "pass":  true,
+                       "detail":  "core_ready 行已输出"
+                   },
+                   {
+                       "check":  "http.health_public",
+                       "pass":  true,
+                       "detail":  "status=200 healthy=True stage=ready"
+                   },
+                   {
+                       "check":  "http.unauthenticated_401",
+                       "pass":  true,
+                       "detail":  "GET /sessions without token -\u003e 401"
+                   },
+                   {
+                       "check":  "data.auth_token_written",
+                       "pass":  true,
+                       "detail":  "auth/token 存在=True（未打印内容）"
+                   },
+                   {
+                       "check":  "http.sessions_list",
+                       "pass":  true,
+                       "detail":  "status=200 body=[]"
+                   },
+                   {
+                       "check":  "http.server_status_readable",
+                       "pass":  true,
+                       "detail":  "read_only=False warn="
+                   },
+                   {
+                       "check":  "session.create",
+                       "pass":  true,
+                       "detail":  "status=200 id=fae50f1d-deeb-435a-981e-fdcaae36ce45"
+                   },
+                   {
+                       "check":  "session.read_back",
+                       "pass":  true,
+                       "detail":  "status=200 len=405"
+                   },
+                   {
+                       "check":  "session.persisted_in_list",
+                       "pass":  true,
+                       "detail":  "list 中匹配 1 条"
+                   },
+                   {
+                       "check":  "product_eval.create_run",
+                       "pass":  true,
+                       "detail":  "status=202 run_id=eval-f2c70232e59a4f839565d71003d94a19"
+                   },
+                   {
+                       "check":  "product_eval.run_completed",
+                       "pass":  true,
+                       "detail":  "status=completed progress=20/20 metrics.runs_total=20"
+                   },
+                   {
+                       "check":  "extensions.notes_create",
+                       "pass":  true,
+                       "detail":  "status=201 id=a97688dc-3b0a-4138-b008-2982edcb00c0"
+                   },
+                   {
+                       "check":  "extensions.notes_list",
+                       "pass":  true,
+                       "detail":  "count=1 命中=1（notes 已迁至 owo-agent-extensions）"
+                   },
+                   {
+                       "check":  "extensions.automations_list",
+                       "pass":  true,
+                       "detail":  "status=200 body=[]"
+                   },
+                   {
+                       "check":  "data.index_db",
+                       "pass":  true,
+                       "detail":  "index.db 已建立（SqliteSessionStore/WAL）"
+                   },
+                   {
+                       "check":  "data.server_pid",
+                       "pass":  true,
+                       "detail":  "server.pid 已建立"
+                   },
+                   {
+                       "check":  "audit.event_emitted",
+                       "pass":  true,
+                       "detail":  "server_start 审计事件已写入（owo-agent-kernel::audit 参与运行）"
+                   },
+                   {
+                       "check":  "process.no_orphan",
+                       "pass":  true,
+                       "detail":  "残留进程=False"
+                   }
+               ],
+    "ok":  true,
+    "port":  6227,
+    "pid":  68764,
+    "api_version":  "0.7",
+    "build_id":  "3f4bb0310d07606dd484556a453c8cdbca056963",
+    "finished_at":  "2026-09-20T12:59:24.5032962Z"
+}
