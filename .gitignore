@@ -71,8 +71,13 @@ tmp_path_keys.txt
 /agent-sdk/docs/qa/evidence/**/*.db-shm
 /agent-sdk/docs/qa/evidence/**/*.sqlite
 /agent-sdk/docs/qa/evidence/**/*.sqlite3
-# 构建出的可执行体一律不入库（含安装目录副本、卸载器、随包 rg.exe）
+# 构建出的可执行体一律不入库（含安装目录副本与卸载器）
 *.exe
+# 例外：随包 ripgrep 是**固定版本 + 哈希校验的第三方随包件**，不是本仓库构建产物。
+# core 的 external_tools.rs 固定 14.1.1 与 SHA256，tools.rs 的 search_files 找不到它
+# 就直接报错（"随包 ripgrep 不可用"），因此必须入库，否则干净 checkout 搜索功能不可用。
+!/agent-sdk/tools/rg/*
+!agent-sdk/tools/rg/**
 # docs/qa 下两份安装目录快照与独立 rg 副本（安装产物，非证据）
 /agent-sdk/docs/qa/p6-current-install-*/
 /agent-sdk/docs/qa/p6-ripgrep-install-*/
