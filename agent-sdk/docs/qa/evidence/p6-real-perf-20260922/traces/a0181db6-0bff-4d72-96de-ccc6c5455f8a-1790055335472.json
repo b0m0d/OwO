@@ -1,0 +1,446 @@
+{
+  "session_id": "a0181db6-0bff-4d72-96de-ccc6c5455f8a",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-search-1000-rg\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请使用 search_files 工具查找工作区中所有文件名包含 file-0777 的文件，然后简要说明找到的结果。",
+  "started_at": "2026-09-22T05:35:26.985474400+00:00",
+  "duration_ms": 8486,
+  "steps": 1,
+  "final_text": "使用 search_files 搜索文件名关键字 `file-0777` 后，结果如下：\n\n- **找到 1 个匹配文件**：`file-0777.txt`（位于工作区根目录）\n\n搜索是通过随包的 ripgrep（v14.1.1）按文件名关键字递归匹配完成的，工作区中没有其他文件名包含 `file-0777` 的文件。如需查看该文件的内容，告诉我即可。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_69a5dda8d9134e18b4640ea9",
+      "tool": "search_files"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_69a5dda8d9134e18b4640ea9",
+      "tool": "search_files",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "使用"
+    },
+    {
+      "type": "token_delta",
+      "delta": " search"
+    },
+    {
+      "type": "token_delta",
+      "delta": "_files"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "名"
+    },
+    {
+      "type": "token_delta",
+      "delta": "关键字"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 后"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "结果"
+    },
+    {
+      "type": "token_delta",
+      "delta": "如下"
+    },
+    {
+      "type": "token_delta",
+      "delta": "：\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": " **"
+    },
+    {
+      "type": "token_delta",
+      "delta": "找到"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "匹配"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "**"
+    },
+    {
+      "type": "token_delta",
+      "delta": "："
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": ".txt"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "位于"
+    },
+    {
+      "type": "token_delta",
+      "delta": "工作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "区"
+    },
+    {
+      "type": "token_delta",
+      "delta": "根"
+    },
+    {
+      "type": "token_delta",
+      "delta": "目录"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "是通过"
+    },
+    {
+      "type": "token_delta",
+      "delta": "随"
+    },
+    {
+      "type": "token_delta",
+      "delta": "包"
+    },
+    {
+      "type": "token_delta",
+      "delta": "的"
+    },
+    {
+      "type": "token_delta",
+      "delta": " rip"
+    },
+    {
+      "type": "token_delta",
+      "delta": "grep"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "v"
+    },
+    {
+      "type": "token_delta",
+      "delta": "14"
+    },
+    {
+      "type": "token_delta",
+      "delta": "."
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": "."
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）"
+    },
+    {
+      "type": "token_delta",
+      "delta": "按"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "名"
+    },
+    {
+      "type": "token_delta",
+      "delta": "关键字"
+    },
+    {
+      "type": "token_delta",
+      "delta": "递"
+    },
+    {
+      "type": "token_delta",
+      "delta": "归"
+    },
+    {
+      "type": "token_delta",
+      "delta": "匹配"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "工作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "区"
+    },
+    {
+      "type": "token_delta",
+      "delta": "中没有"
+    },
+    {
+      "type": "token_delta",
+      "delta": "其他"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "名"
+    },
+    {
+      "type": "token_delta",
+      "delta": "包含"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "如"
+    },
+    {
+      "type": "token_delta",
+      "delta": "需"
+    },
+    {
+      "type": "token_delta",
+      "delta": "查看"
+    },
+    {
+      "type": "token_delta",
+      "delta": "该"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "的内容"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "告诉我"
+    },
+    {
+      "type": "token_delta",
+      "delta": "即可。"
+    },
+    {
+      "type": "final",
+      "text": "使用 search_files 搜索文件名关键字 `file-0777` 后，结果如下：\n\n- **找到 1 个匹配文件**：`file-0777.txt`（位于工作区根目录）\n\n搜索是通过随包的 ripgrep（v14.1.1）按文件名关键字递归匹配完成的，工作区中没有其他文件名包含 `file-0777` 的文件。如需查看该文件的内容，告诉我即可。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1541,
+    "completion_tokens": 228,
+    "total_tokens": 1769
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 4691,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 27,
+      "target": "search_files",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 3762,
+      "target": "",
+      "first_token_ms": 2017
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "search_1000_files"
+}

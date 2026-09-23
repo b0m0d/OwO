@@ -113,10 +113,18 @@ function Assert-LedgerBuckets {
 function CommitOf([string]$line) { return ([regex]::Match($line, 'commit=(\S+)')).Groups[1].Value }
 
 . (Join-Path $PSScriptRoot "stage-desktop-sidecar.ps1")
+# SidecarExe 既可指向 debug 也可指向 release；暂存配置必须与实际验收
+# 产物一致。此前这里固定使用 debug，导致传入 release 路径时仍把旧 debug
+# core 放进私有 bin，commit 相同的情况下会形成难以发现的假绿。
+$stageConfiguration = if ($SidecarExe -match '(?i)[\\/]target[\\/]release[\\/]owo-agent\.exe$') {
+    'release'
+} else {
+    'debug'
+}
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'   # 子进程正常 stderr 不得被当成终止错误
 try {
-    $staged = Stage-OwoDesktopSidecar -Configuration debug -Quiet
+    $staged = Stage-OwoDesktopSidecar -Configuration $stageConfiguration -Quiet
 } finally {
     $ErrorActionPreference = $prevEap
 }
@@ -146,6 +154,7 @@ Save-Json @{
     sidecar_version_line = $coreIdentity
     shell_exe            = $ShellExe
     sidecar_exe          = $SidecarExe
+    stage_configuration  = $stageConfiguration
     staged_sha256        = $staged.sha256
     bin_dir              = $binDir
     launched_core        = $launchedCore

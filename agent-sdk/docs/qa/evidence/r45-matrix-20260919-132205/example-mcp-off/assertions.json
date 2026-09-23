@@ -1,0 +1,6 @@
+{
+    "scenario":  "example-mcp-off",
+    "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+    "pass":  false,
+    "detail":  "executed=false failed_stage=inject error_type=ItemNotFoundException message=Cannot find path \u0027psdrive\u0027 because it does not exist."
+}

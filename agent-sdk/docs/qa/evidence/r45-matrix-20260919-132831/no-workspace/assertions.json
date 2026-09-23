@@ -1,0 +1,56 @@
+[
+    {
+        "scenario":  "no-workspace",
+        "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+        "pass":  true,
+        "detail":  "hwnd=5899942 owner=55724 t=0.5s fail="
+    },
+    {
+        "scenario":  "no-workspace",
+        "name":  "DOM 事实通道（WebView2 CDP）建立",
+        "pass":  true,
+        "detail":  "requested=46805 effective=46805"
+    },
+    {
+        "scenario":  "no-workspace",
+        "name":  "10s 内界面可操作（无永久 loading）",
+        "pass":  true,
+        "detail":  "t=1.9s health=\"连接中…\""
+    },
+    {
+        "scenario":  "no-workspace",
+        "name":  "业务引导终态：配置引导页可见（非错误卡、非白屏）",
+        "pass":  true,
+        "detail":  "setupGuide=320 字 errorCard=0 字 actionable=True t=1.9s"
+    },
+    {
+        "scenario":  "no-workspace",
+        "name":  "引导页提供全部契约动作（选择项目工作区)",
+        "pass":  true,
+        "detail":  "missing="
+    },
+    {
+        "scenario":  "no-workspace",
+        "name":  "引导页提供可操作动作",
+        "pass":  true,
+        "detail":  "body=O OwO Agent 本地优先 当前工作区 本地项目 ☾ 连接中… 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 检查中 工作区 未选择 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 首次配置 选择项目工作区与模型提供商后即可开始使用。 1 · 选择项目工作区 选择存放项目文件的目录。没有工作区时不会启用任何文件工具；核心程序安装目录只用于运行，不与你的项目混在一起。 尚未选择项目工作区：请选择目录后启用文件工具 项目目录 选择目录… 由原生目录选择器设定，不需要手输完整路径。 使用此目录 2 · 选择模型提供商 核心就绪前先确认模型连接：选择云端、本地 Ollama 或稍后配置。密钥始终只存在于系统环境变量，应用不会读取或保存密钥本身。 云端端点（缺省 BigModel） 模型名（缺省按提供商） 云端（OpenAI 兼容） 本地 Ollama 稍后配置 当前：未显式选择（OPENAI_API_KEY + 内置云端端点） · 就绪 打开模型设置 测试连接 保存并应用"
+    },
+    {
+        "scenario":  "no-workspace",
+        "name":  "故障面截图（重获窗口 + 五重有效性）",
+        "pass":  true,
+        "detail":  "size=1280x720 bytes=84522 non_black_ratio=0.998183 variance=901.3071 samples=36864"
+    },
+    {
+        "scenario":  "no-workspace",
+        "name":  "可观测性底线：按契约不拉起 core，故不要求 core 日志（状态由壳承担）",
+        "pass":  true,
+        "detail":  "logDir=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132842\\no-workspace\\data\\LocalAppData\\OwO\\Agent\\logs 无 desktop-core-*.log（no_workspace 预期）"
+    },
+    {
+        "scenario":  "no-workspace",
+        "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+        "pass":  true,
+        "detail":  "stages=ok"
+    }
+]

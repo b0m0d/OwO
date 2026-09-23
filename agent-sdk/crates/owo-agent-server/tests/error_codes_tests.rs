@@ -38,6 +38,12 @@ fn known_codes_map_to_http_statuses() {
         ("storage/not_found/not_retryable", 404),
         ("tool/not_found/not_retryable", 404),
         ("tool/execution_failed/retryable", 502),
+        // P3.10：审批过期 / 沙箱拒绝 / 执行超时 / revert 冲突 / capability 缺失。
+        ("permission/approval_expired/not_retryable", 403),
+        ("tool/sandbox_refused/not_retryable", 403),
+        ("tool/execution_timeout/retryable", 504),
+        ("storage/revert_conflict/not_retryable", 409),
+        ("tool/capability_missing/not_retryable", 403),
         ("internal/unexpected/retryable", 500),
     ];
     for (code_str, expected_status) in cases {

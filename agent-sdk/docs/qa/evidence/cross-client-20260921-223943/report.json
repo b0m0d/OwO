@@ -1,0 +1,80 @@
+{
+    "schema":  "owo-cross-client/1",
+    "tag":  "cross-client",
+    "finished_at":  "2026-09-21T14:40:00.6917960Z",
+    "work_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-cross-client-20260921-223943",
+    "evidence":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\cross-client-20260921-223943",
+    "checks":  [
+                   {
+                       "check":  "cli.autostart_daemon",
+                       "pass":  true,
+                       "detail":  "spawned pid=40148 port=61107（turn exit=）"
+                   },
+                   {
+                       "check":  "cli.autostart_cleanup",
+                       "pass":  true,
+                       "detail":  "pid=40148 已停止"
+                   },
+                   {
+                       "check":  "real_turn.credential_present",
+                       "pass":  true,
+                       "detail":  "OPENAI_API_KEY 已注入（不回显）"
+                   },
+                   {
+                       "check":  "daemon.core_ready",
+                       "pass":  true,
+                       "detail":  "core_ready 已输出"
+                   },
+                   {
+                       "check":  "http.create_session_A",
+                       "pass":  true,
+                       "detail":  "id=dc94bb1f-fa96-4a63-a213-0cecf3b40e74"
+                   },
+                   {
+                       "check":  "cli.turn_reused_same_daemon",
+                       "pass":  true,
+                       "detail":  "sessions 1 -\u003e 2（CLI turn exit=0，模型未配置不影响会话创建）"
+                   },
+                   {
+                       "check":  "cli.real_turn_final_text",
+                       "pass":  true,
+                       "detail":  "final_text=你好（CLI 经共享客户端消费 Daemon SSE）"
+                   },
+                   {
+                       "check":  "shared.sessions_visible_to_both",
+                       "pass":  true,
+                       "detail":  "HTTP 会话 dc94bb1f-fa96-4a63-a213-0cecf3b40e74 在共享会话列表中"
+                   },
+                   {
+                       "check":  "repl.daemon_mode",
+                       "pass":  true,
+                       "detail":  "daemon REPL 含 新会话/工作区（--daemon 经共享客户端）"
+                   },
+                   {
+                       "check":  "repl.daemon_session_shared",
+                       "pass":  true,
+                       "detail":  "REPL /new 后共享会话数 2 -\u003e 3"
+                   },
+                   {
+                       "check":  "client.example_connects",
+                       "pass":  true,
+                       "detail":  "client 输出：connected base_url=http://127.0.0.1:39461 healthy=true api_version=0.7 build_id=fc8251d42aa192715fa9f3208585802fa87d88ef pid=Some(31832) port=Some(39461)\r"
+                   },
+                   {
+                       "check":  "client.sees_same_sessions",
+                       "pass":  true,
+                       "detail":  "client sessions=3 daemon sessions=3"
+                   },
+                   {
+                       "check":  "daemon.status_matches",
+                       "pass":  true,
+                       "detail":  "status 行：Daemon 运行中：pid=31832 port=39461 api=0.7 build=fc8251d42aa192715fa9f3208585802fa87d88ef instance=\u0027\u0027 data_root=data-a180ac050095 started_at=2026-09-21T14:39:52Z\r"
+                   },
+                   {
+                       "check":  "daemon.stop_graceful",
+                       "pass":  true,
+                       "detail":  "pid=31832 存活=False"
+                   }
+               ],
+    "ok":  true
+}

@@ -1,8 +1,8 @@
 // §12.3 CLI 拆分批次五：repl 交互域（自 main.rs 机械外移，零行为变化）。
 // Repl 主循环：会话/审批/恢复/子命令；审批者与共享 stdin 经 crate::support 显式引用。
 
-use crate::commands::turn::EventPrinter;
 use crate::support::*;
+use crate::ui_output::EventPrinter;
 use clap::Args;
 use colored::Colorize;
 use owo_agent_core::permissions::{Approver, AutoApprover};
@@ -33,6 +33,9 @@ pub(crate) struct ReplArgs {
     /// 覆盖数据目录（默认 %LOCALAPPDATA%\OwO\Agent 或 OWO_AGENT_DATA）
     #[arg(long)]
     pub(crate) data_dir: Option<PathBuf>,
+    /// 使用旧本地 REPL（迁移期对照；默认走唯一 Daemon 客户端，不再本地建 Agent/SQLite/MCP）。
+    #[arg(long)]
+    pub(crate) local: bool,
 }
 
 mod handlers;
@@ -62,6 +65,11 @@ pub(crate) struct Repl {
 
 impl Repl {
     pub(crate) async fn run(args: ReplArgs) -> Result<(), Box<dyn std::error::Error>> {
+        // P1 §4.1：**默认**走唯一 Daemon 客户端（无本地 Agent/SQLite/MCP）；
+        // `--local` 保留旧本地 REPL 一个发布周期，供未迁移命令对照。
+        if !args.local {
+            return crate::commands::repl_daemon::run(args).await;
+        }
         let workspace = args.workspace.canonicalize()?;
         let settings = Settings::load(&workspace);
         apply_egress_setting(&settings);
@@ -170,7 +178,7 @@ impl Repl {
             };
             match rl.readline(&prompt) {
                 Ok(line) => {
-                    let line = line.trim().to_string();
+                    let line = normalize_input_line(&line);
                     if line.is_empty() {
                         continue;
                     }
@@ -215,7 +223,7 @@ impl Repl {
             if read == 0 {
                 break;
             }
-            let line = line.trim().to_string();
+            let line = normalize_input_line(&line);
             if line.is_empty() {
                 continue;
             }

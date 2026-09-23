@@ -403,6 +403,22 @@ async function refreshSettings() {
     const modelSelect = $("settingsModel");
     modelSelect.replaceChildren(new Option(model || "未配置", model));
     modelSelect.value = model;
+    const toolCapabilities = settings.tool_capabilities || {};
+    const capabilityControls = [
+      ["toolCapDesktopObservation", "desktop_observation"],
+      ["toolCapDesktopControl", "desktop_control"],
+      ["toolCapBrowser", "browser"],
+    ];
+    for (const [elementId, key] of capabilityControls) {
+      const control = $(elementId);
+      if (control && control.dataset.dirty !== "true") {
+        control.checked = toolCapabilities[key] === true;
+      }
+    }
+    const activeTools = Array.isArray(runtime.active_tool_names) ? runtime.active_tool_names : [];
+    $("toolCapabilityStatus").textContent = activeTools.length
+      ? `当前运行中的工具（${activeTools.length}）：${activeTools.join("、")}。下方变更保存后需重启核心服务。`
+      : "当前运行中的工具清单暂不可用；下方变更保存后需重启核心服务。";
     $("runtimeProvider").textContent = runtime.provider || "未知提供商";
     $("runtimeEndpoint").textContent = `${runtime.endpoint_kind === "local" ? "本地兼容接口" : "云端兼容接口"} · ${runtime.credential_source || "未知凭据来源"}`;
     $("runtimeCredential").textContent = runtime.credential_source === "environment" ? "系统环境变量" : (runtime.credential_source || "未配置");
@@ -424,7 +440,9 @@ async function refreshSettings() {
         stt: settings.stt,
         proactive: settings.proactive,
         egress: settings.egress,
-        usage: settings.usage,
+      usage: settings.usage,
+      tool_capabilities: settings.tool_capabilities,
+      active_tool_names: runtime.active_tool_names,
       },
       null,
       2
@@ -540,14 +558,23 @@ function enableResize(handleId, variable, min, max, fromRight = false) {
 }
 enableResize("sidebarResize", "--session-width", 220, 460);
 enableResize("rightResize", "--inspect-width", 260, 520, true);
+// R10：原「显示工具与设置」折叠开关已移除（工具/开发者分区改由设置页子页承载）。
+// 函数保留为 no-op 兼容旧调用点：`#toggleTools` 不存在时不得抛错（裸 addEventListener
+// 会在 boot 阶段炸掉整个脚本，界面全白）。
 function setToolsVisible(visible) {
-  document.body.classList.toggle("show-tools", visible);
-  $("toggleTools").setAttribute("aria-expanded", String(visible));
-  $("toggleTools").textContent = visible ? "收起工具与设置" : "显示工具与设置";
+  document.body.classList.toggle("show-tools", !!visible);
+  const toggle = $("toggleTools");
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", String(!!visible));
+    toggle.textContent = visible ? "收起工具与设置" : "显示工具与设置";
+  }
 }
-$("toggleTools").addEventListener("click", () => {
-  setToolsVisible(!document.body.classList.contains("show-tools"));
-});
+const legacyToolsToggle = $("toggleTools");
+if (legacyToolsToggle) {
+  legacyToolsToggle.addEventListener("click", () => {
+    setToolsVisible(!document.body.classList.contains("show-tools"));
+  });
+}
 
 // §12-12 开发者模式：MCP 原始配置 / Trace / Eval / 插件等内部能力分区
 // 默认对普通用户隐藏，由明确开关启用并持久化（跨会话记忆）。
@@ -576,10 +603,22 @@ const ROUTE_META = {
   artifacts: { title: "产物与待办", description: "处理 Human、Artifact 评审和 ChangeSet，再交付最终结果。" },
   // §4.5 统一权限中心：档位与实际范围、待审批、已授权与撤销、完全访问风险拆解。
   permissions: { title: "权限中心", description: "查看生效范围与来源，处理审批、撤销授权，并管理完全访问的风险与时长。" },
+  // R10：模型一级入口（用户反馈"找不到模型切换/自定义地址与名称"）。
+  model: { title: "模型", description: "切换服务提供方，设置自定义接口地址（base_url）与模型名称。" },
   settings: { title: "设置", description: "查看实际生效的模型连接、权限、用量和存储状态。" },
 };
 
-function setSettingsLocation(inRoute) {
+/// R10：模型页与设置页共用同一个 #settingsSection 容器（同一份 DOM，避免两套
+/// 表单状态互相漂移），差异只在显示哪些块：
+/// - model 页：只显示模型卡 + 工具能力 + 用量（最常改的三件事）；
+/// - settings 页：全部子页（模型与数据 / 工具与自动化 / 开发者选项）。
+function setModelPageMode(on) {
+  document.body.classList.toggle("route-model", !!on);
+  // 老 CSS 用 settings-open 控制侧栏收起动作；模型页借用同一语义（都是全幅设置面）。
+  document.body.classList.toggle("settings-open", !!on);
+}
+
+function setSettingsLocation(inRoute, withTools) {
   const settings = $("settingsSection");
   const tools = $("toolsPanel");
   if (!settings) return;
@@ -588,7 +627,10 @@ function setSettingsLocation(inRoute) {
   if (target && settings.parentElement !== target) target.appendChild(settings);
   // §12-12 工具与高级系统并入设置路由：路由内作为可展开的工具子页随设置移动，
   // 聊天态回到侧栏折叠容器（普通用户默认只看技能/子代理/自动化/白名单）。
-  if (tools && target && tools.parentElement !== target) target.appendChild(tools);
+  // R10：模型页只借用 settingsSection，不接管 toolsPanel（否则模型页又会
+  // 被"一堆参数"淹没——这正是用户投诉的形态）。
+  const toolsTarget = withTools && inRoute ? target : sidebar;
+  if (tools && toolsTarget && tools.parentElement !== toolsTarget) toolsTarget.appendChild(tools);
 }
 
 function navigate(route) {
@@ -636,6 +678,13 @@ function renderSettingsTabs(content) {
 function initGlobalStatusBar() {
   const root = $("globalStatusBar");
   if (!root) return;
+  // R12：状态条在 HTML 里位于 #main 内部，而设置/模型页会把 #main 收起（内容容器
+  // 换成侧栏/内容区），于是状态条被一起藏掉、甚至在别的路由里挤进窄侧栏被裁切
+  // （实测截图：五个状态块横着塞进 280px 的侧栏）。把它挪到 body 直属位置，
+  // 生命周期与"哪条路由在用哪个容器"解耦：聊天页照常居中显示，非聊天页由 CSS 收起。
+  if (root.parentElement !== document.body) {
+    document.body.insertBefore(root, document.body.firstChild);
+  }
   if (!window.OwoStatusBar || typeof window.OwoStatusBar.mount !== "function") {
     root.textContent = "状态条视图未加载";
     return;
@@ -678,6 +727,7 @@ function renderRoute(route) {
   const isChat = route === "chat";
   document.body.classList.toggle("route-chat", isChat);
   document.body.classList.remove("tools-open", "settings-open", "settings-tab-tools", "settings-tab-dev");
+  setModelPageMode(route === "model");
   document.querySelectorAll("[data-rail-target]").forEach((button) => {
     button.classList.toggle("active", button.dataset.railTarget === route);
   });
@@ -701,13 +751,26 @@ function renderRoute(route) {
   if (window.OwoPanels && window.OwoPanels.workswarm && window.OwoPanels.workswarm.dispose) {
     window.OwoPanels.workswarm.dispose();
   }
-  // Preserve the movable settings section before resetting the route body.
-  // This matters when navigating settings -> any other first-level page.
+  // ⚠ 顺序是硬约束（2026-09-22 实测踩到并修）：`replaceChildren()` 会把**刚搬进去
+  // 的** #settingsSection 一起删掉，节点于是从文档里彻底消失——现象就是"模型页/
+  // 设置页完全空白"，而且因为节点没了，后续 refreshUsage/refreshSettings 全在对
+  // null 赋值（真机栈：refreshUsage → app.js usagePanel textContent）。
+  // 正确顺序：先把节点搬回侧栏（脱离内容区）→ 清空内容区 → 再按需搬进来。
   setSettingsLocation(false);
   content.replaceChildren();
   setSettingsLocation(route === "settings");
   $("routeHeader").innerHTML = `<div><h2>${esc(meta.title)}</h2><p>${esc(meta.description)}</p></div>`;
+  if (route === "model") {
+    // R10：模型页 = 同容器的"模型"视图（无子页签，避免再次把参数堆给用户）。
+    setModelPageMode(true);
+    if (window.OwoSettings && typeof window.OwoSettings.refresh === "function") window.OwoSettings.refresh();
+    if (!serviceReady) return;
+    refreshUsage();
+    return;
+  }
   if (route === "settings") {
+    setModelPageMode(false);
+    document.body.classList.add("settings-open");
     renderSettingsTabs(content);
     if (!serviceReady) return;
     refreshSettings();
@@ -750,6 +813,16 @@ window.owoRouter = window.OwoRouter
   : null;
 for (const button of document.querySelectorAll("[data-rail-target]")) {
   button.addEventListener("click", () => navigate(button.dataset.railTarget));
+}
+// R10：侧栏底部「设置与诊断」按钮（取代原先需要先展开工具面板才能看到的入口）。
+const openSettingsButton = $("openSettingsBtn");
+if (openSettingsButton) {
+  openSettingsButton.addEventListener("click", () => navigate("settings"));
+}
+// R10：模型设置面板（模型切换 / 自定义地址与模型名）随壳一起初始化；
+// 表单状态只读壳 IPC，不占用首屏 HTTP 预算。
+if (window.OwoSettings && typeof window.OwoSettings.init === "function") {
+  window.OwoSettings.init();
 }
 $("workspace").addEventListener("change", () => {
   const workspace = $("workspace").value.trim();
@@ -867,16 +940,29 @@ $("settingsSave").addEventListener("click", async () => {
   try {
     const settings = JSON.parse($("settingsEditor").value);
     settings.model = $("settingsModel").value;
+    settings.tool_capabilities = {
+      desktop_observation: $("toolCapDesktopObservation").checked,
+      desktop_control: $("toolCapDesktopControl").checked,
+      browser: $("toolCapBrowser").checked,
+    };
     const resp = await api("/settings", {
       method: "POST",
       body: JSON.stringify(settings),
     });
     addMessage("system", `设置已保存：${(resp && resp.note) || "ok"}`);
+    for (const elementId of ["toolCapDesktopObservation", "toolCapDesktopControl", "toolCapBrowser"]) {
+      $(elementId).dataset.dirty = "false";
+    }
     await refreshSettings();
   } catch (error) {
     addMessage("system", `设置保存失败：${error.message || error}`);
   }
 });
+for (const elementId of ["toolCapDesktopObservation", "toolCapDesktopControl", "toolCapBrowser"]) {
+  $(elementId).addEventListener("change", () => {
+    $(elementId).dataset.dirty = "true";
+  });
+}
 $("storageBackupBtn").addEventListener("click", () => storageBackup());
 $("storageExportBtn").addEventListener("click", () => storageExport());
 $("storageRestoreBtn").addEventListener("click", () => $("storageRestoreFile").click());

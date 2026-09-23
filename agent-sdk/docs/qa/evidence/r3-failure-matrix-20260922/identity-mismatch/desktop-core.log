@@ -1,0 +1,4 @@
+[runtime] launching core: C:\Users\23843\AppData\Local\Temp\owo-desktop-acceptance\20260922-122254\identity-mismatch\owo-agent.exe (acceptance=true)
+[provider] 未选择模型提供商（Unset）：core 就绪但模型调用暂不可用，请在设置中选择云端或本地 Ollama
+{"api_version":"0.7","build_id":"faultstub0000","event":"core_ready","instance_id":"foreign-instance-not-this-window","pid":35216,"port":1}
+[runtime] ready 行身份校验失败：port=1 instance_ok=false（该行可能不属于本次启动）

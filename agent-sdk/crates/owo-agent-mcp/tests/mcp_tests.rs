@@ -1,17 +1,23 @@
 use async_trait::async_trait;
-use owo_agent_core::audit::AuditLog;
 use owo_agent_core::mcp::{McpClient, McpServerConfig};
-use owo_agent_core::permissions::Policy;
+use owo_agent_core::permissions::{AutoApprover, Policy};
 use owo_agent_core::session::Session;
-use owo_agent_core::skill::SkillRegistry;
-use owo_agent_core::tools::{ToolContext, ToolRegistry};
-use owo_agent_core::{ChatMessage, ModelOutput, ModelProvider, ToolSpec};
+use owo_agent_core::tools::ToolRegistry;
+use owo_agent_core::{
+    Agent, AgentConfig, ChatMessage, ModelOutput, ModelProvider, ToolCall, ToolSpec,
+};
 use serde_json::json;
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 /// 进程生命周期测试专用 Provider：不参与推理。
 struct IdleProvider;
+
+struct ScriptedProvider {
+    outputs: Mutex<VecDeque<ModelOutput>>,
+}
 
 #[async_trait]
 impl ModelProvider for IdleProvider {
@@ -22,6 +28,37 @@ impl ModelProvider for IdleProvider {
     ) -> Result<ModelOutput, String> {
         Err("IdleProvider 不应被调用".to_string())
     }
+}
+
+#[async_trait]
+impl ModelProvider for ScriptedProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        self.outputs
+            .lock()
+            .map_err(|_| "脚本输出锁中毒".to_string())?
+            .pop_front()
+            .ok_or_else(|| "脚本输出耗尽".to_string())
+    }
+}
+
+fn scripted_tool_call(name: &str, args: serde_json::Value) -> Arc<dyn ModelProvider> {
+    Arc::new(ScriptedProvider {
+        outputs: Mutex::new(
+            vec![
+                ModelOutput::ToolCalls(vec![ToolCall {
+                    id: "mcp-call-1".to_string(),
+                    name: name.to_string(),
+                    arguments: args,
+                }]),
+                ModelOutput::Text("工具调用完成".to_string()),
+            ]
+            .into(),
+        ),
+    })
 }
 
 fn test_config() -> McpServerConfig {
@@ -100,34 +137,42 @@ async fn mcp_tools_are_registered_and_callable() {
         McpClient::connect(&test_config()).await.unwrap(),
     ));
     let tools = client.lock().await.tools();
-    let mut registry = ToolRegistry::new();
-    registry.register_mcp_tools("test", Arc::clone(&client), tools);
-
-    let specs = registry.specs();
-    assert!(specs.iter().any(|spec| spec.name == "test_echo"));
-
     let workspace =
         std::env::temp_dir().join(format!("owo-mcp-registry-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&workspace).unwrap();
+    let agent = Agent::new(
+        scripted_tool_call("test_echo", json!({ "text": "ok" })),
+        ToolRegistry::empty(),
+        Policy::new(&workspace),
+        AgentConfig::default(),
+    );
+    agent.register_mcp_tools("test", Arc::clone(&client), tools);
+    assert!(agent
+        .visible_tool_specs()
+        .iter()
+        .any(|spec| spec.name == "test_echo"));
+
     let mut session = Session::new(&workspace, "mock".to_string(), None);
-    let audit = Arc::new(std::sync::Mutex::new(AuditLog::default()));
-    let policy = Policy::new(&workspace);
-    let skills = SkillRegistry::default();
-    let elements = Arc::new(std::sync::Mutex::new(owo_agent_core::ElementRegistry::new()));
-    let mut context = ToolContext {
-        workspace: &workspace,
-        policy: &policy,
-        session: &mut session,
-        audit: &audit,
-        subagent: None,
-        skills: &skills,
-        elements: &elements,
-    };
-    let result = registry
-        .execute("test_echo", &mut context, json!({ "text": "ok" }))
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "调用 MCP echo",
+            &AutoApprover { allow: true },
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
         .await
         .unwrap();
-    assert_eq!(result["text"], "ok");
+    assert_eq!(outcome.final_text.as_deref(), Some("工具调用完成"));
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        owo_agent_core::TurnEvent::ToolResult { tool, ok: true, .. } if tool == "test_echo"
+    )));
+    let audit = agent.audit_log();
+    assert!(audit.lock().unwrap().entries.iter().any(|entry| {
+        entry.tool.as_deref() == Some("test_echo") && entry.approved == Some(true)
+    }));
+    let _ = agent.shutdown_all_mcp().await;
     let _ = std::fs::remove_dir_all(&workspace);
 }
 
@@ -266,10 +311,7 @@ async fn agent_hot_register_mcp_tools_after_construction() {
         Default::default(),
     ));
     let before: Vec<String> = agent
-        .registry()
-        .read()
-        .unwrap()
-        .specs()
+        .visible_tool_specs()
         .into_iter()
         .map(|spec| spec.name)
         .collect();
@@ -283,10 +325,7 @@ async fn agent_hot_register_mcp_tools_after_construction() {
     agent.register_mcp_tools("test", Arc::clone(&client), tools);
 
     let after: Vec<String> = agent
-        .registry()
-        .read()
-        .unwrap()
-        .specs()
+        .visible_tool_specs()
         .into_iter()
         .map(|spec| spec.name)
         .collect();
@@ -297,10 +336,7 @@ async fn agent_hot_register_mcp_tools_after_construction() {
     assert!(removed > 0);
     agent.set_tool_prefix_enabled("test_", false);
     let final_specs: Vec<String> = agent
-        .registry()
-        .read()
-        .unwrap()
-        .specs()
+        .visible_tool_specs()
         .into_iter()
         .map(|spec| spec.name)
         .collect();
@@ -490,7 +526,7 @@ async fn mcp_small_schema_kept_as_is_and_no_full_copy() {
     let _ = client.lock().await.shutdown().await;
 }
 
-/// P1 延迟加载：压缩注册 + 工具调用仍可用（骨架不阻塞执行）。
+/// P1 延迟加载：压缩后的 schema 仍能经 Agent 权限入口实际调用 MCP 工具。
 #[tokio::test]
 async fn mcp_compacted_tool_still_callable() {
     let big_schema = json!({
@@ -507,8 +543,15 @@ async fn mcp_compacted_tool_still_callable() {
     let client = Arc::new(tokio::sync::Mutex::new(
         McpClient::connect(&test_config()).await.unwrap(),
     ));
-    let mut registry = ToolRegistry::new();
-    registry.register_mcp_tools(
+    let workspace = std::env::temp_dir().join(format!("owo-mcp-compact-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let agent = Agent::new(
+        scripted_tool_call("comp-test_echo", json!({ "text": "延迟加载" })),
+        ToolRegistry::empty(),
+        Policy::new(&workspace),
+        AgentConfig::default(),
+    );
+    agent.register_mcp_tools(
         "comp-test",
         Arc::clone(&client),
         vec![owo_agent_core::McpTool {
@@ -518,31 +561,44 @@ async fn mcp_compacted_tool_still_callable() {
             annotations: None,
         }],
     );
-    let workspace = std::env::temp_dir().join(format!("owo-mcp-compact-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&workspace).unwrap();
+    let visible = agent
+        .visible_tool_specs()
+        .into_iter()
+        .find(|spec| spec.name == "comp-test_echo")
+        .expect("压缩后工具仍注册");
+    assert!(visible.description.contains("schema 已压缩"));
+    assert!(owo_agent_core::tools::schema_bytes(&visible.input_schema) <= 2048);
+
     let mut session = Session::new(&workspace, "mock".to_string(), None);
-    let audit = Arc::new(std::sync::Mutex::new(AuditLog::default()));
-    let policy = Policy::new(&workspace);
-    let skills = SkillRegistry::default();
-    let elements = Arc::new(std::sync::Mutex::new(owo_agent_core::ElementRegistry::new()));
-    let mut context = ToolContext {
-        workspace: &workspace,
-        policy: &policy,
-        session: &mut session,
-        audit: &audit,
-        subagent: None,
-        skills: &skills,
-        elements: &elements,
-    };
-    let result = registry
-        .execute(
-            "comp-test_echo",
-            &mut context,
-            json!({ "text": "延迟加载" }),
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "调用压缩 schema MCP 工具",
+            &AutoApprover { allow: true },
+            &AtomicBool::new(false),
+            &mut |_| {},
         )
         .await
         .unwrap();
-    assert_eq!(result["text"], "延迟加载");
+    assert_eq!(outcome.final_text.as_deref(), Some("工具调用完成"));
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        owo_agent_core::TurnEvent::ToolResult { tool, ok: true, .. } if tool == "comp-test_echo"
+    )));
+    let audit = agent.audit_log();
+    let receipt = audit
+        .lock()
+        .unwrap()
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.event == "tool_receipt" && entry.tool.as_deref() == Some("comp-test_echo")
+        })
+        .cloned()
+        .expect("MCP 工具经 Agent 入口执行必须留下 tool_receipt");
+    assert_eq!(receipt.approved, Some(true));
+    assert!(receipt.detail.contains("args_sha256"));
+    assert!(receipt.detail.contains("tool_version"));
+    let _ = agent.shutdown_all_mcp().await;
     let _ = std::fs::remove_dir_all(&workspace);
-    let _ = client.lock().await.shutdown().await;
 }

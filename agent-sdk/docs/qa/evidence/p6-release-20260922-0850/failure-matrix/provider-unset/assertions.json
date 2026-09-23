@@ -1,0 +1,56 @@
+[
+    {
+        "scenario":  "provider-unset",
+        "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+        "pass":  true,
+        "detail":  "hwnd=853990 owner=33064 t=0.5s fail="
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "DOM 事实通道（WebView2 CDP）建立",
+        "pass":  true,
+        "detail":  "requested=32961 effective=32961"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "10s 内界面可操作（无永久 loading）",
+        "pass":  true,
+        "detail":  "t=1.1s health=\"连接中…\""
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "业务引导终态：配置引导页可见（非错误卡、非白屏）",
+        "pass":  true,
+        "detail":  "setupGuide=419 字 errorCard=0 字 actionable=True t=1.1s"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "引导页提供全部契约动作（打开模型设置/测试连接)",
+        "pass":  true,
+        "detail":  "missing="
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "引导页提供可操作动作",
+        "pass":  true,
+        "detail":  "body=O OwO Agent 本地优先 当前工作区 本地项目 ☾ 连接中… 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 检查中 工作区 project 模型 unset · 未配置 权限 点按查看 当前任务 空闲 首次配置 选择项目工作区与模型提供商后即可开始使用。 1 · 选择项目工作区 选择存放项目文件的目录。没有工作区时不会启用任何文件工具；核心程序安装目录只用于运行，不与你的项目混在一起。 项目目录 选择目录… 由原生目录选择器设定，不需要手输完整路径。 使用此目录 已保存的工作区：C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-083006\\provider-unset\\data\\project 2 · 选择模型提供商 核心就绪前先确认模型连接：选择云端、本地 Ollama 或稍后配置。密钥始终只存在于系统环境变量，应用不会读取或保存密钥本身。 云端端点（缺省 BigModel） 模型名（缺省按提供商） 云端（OpenAI 兼容） 本地 Ollama 稍后配置 当前：未配置 · provider/not_configured（模型暂不可用，选择提供商后即可开始） 打开模型设置 测试连接 保存并应用"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "引导页呈现稳定错误码（provider/not_configured)",
+        "pass":  true,
+        "detail":  "guide_has_code=True"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+        "pass":  true,
+        "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-083006\\provider-unset\\owo-agent.exe sha256=CB357EC8ACF8EE7E2F167BDA7EECF05E0C7C48452CFD188E06F7416B3C15E6A3"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+        "pass":  true,
+        "detail":  "stages=ok"
+    }
+]

@@ -161,20 +161,44 @@
     const providerUnset = shellCode === "provider/not_configured";
     const card = document.createElement("section");
     card.className = "setup-card";
+    // R10（2026-09-22）：端点与模型名原本只在选中"云端"单选框时才显示，默认隐藏
+    // 导致用户根本看不到"自定义地址/名称"这一项。现在默认可见（云端/本地都适用），
+    // 并给出与设置页同源的常用预设，两处口径一致。
+    const presetOptions = (global.OwoProviderPresets && typeof global.OwoProviderPresets.presets === "function"
+      ? global.OwoProviderPresets.presets()
+      : []).filter(function (preset) {
+      return preset.baseUrl;
+    });
     card.innerHTML =
       "<h3>2 · 选择模型提供商</h3>" +
-      "<p>核心就绪前先确认模型连接：选择云端、本地 Ollama 或稍后配置。" +
-      "密钥始终只存在于系统环境变量，应用不会读取或保存密钥本身。</p>" +
+      "<p>确认模型连接：可选云端（OpenAI 兼容）、本地 Ollama，或稍后配置。" +
+      "接口地址与模型名都可以自定义，也可以直接改 <code>config.json</code> 里的 " +
+      "<code>model</code> 段（设置页「模型」有「定位」按钮直接选中该文件）。</p>" +
+      "<p class=\"sub\">密钥有两条路径：填在 config.json 的 <code>model.api_key</code>，" +
+      "或放在环境变量（缺省 <code>OPENAI_API_KEY</code>）。应用不会把密钥回传到界面，也不写日志。</p>" +
+      (presetOptions.length
+        ? '<div class="model-presets" data-role="presets">' +
+          presetOptions
+            .map(function (preset) {
+              return (
+                '<button type="button" class="model-preset" data-preset="' + esc(preset.id) + '">' +
+                esc(preset.label) +
+                "</button>"
+              );
+            })
+            .join("") +
+          "</div>"
+        : "") +
       '<form data-role="provider-form">' +
-      '<label data-role="fields-cloud" hidden>云端端点（缺省 BigModel）</label>' +
-      '<input data-role="base-url" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4" hidden />' +
-      '<label data-role="fields-model" hidden>模型名（缺省按提供商）</label>' +
-      '<input data-role="model" type="text" placeholder="glm-5.3-flash" hidden />' +
       '<div class="setup-row">' +
       '<label><input type="radio" name="provider-mode" value="cloud" /> 云端（OpenAI 兼容）</label>' +
       '<label><input type="radio" name="provider-mode" value="ollama" /> 本地 Ollama</label>' +
       '<label><input type="radio" name="provider-mode" value="unset" /> 稍后配置</label>' +
       "</div>" +
+      '<label data-role="fields-cloud">接口地址（base_url，可自定义）</label>' +
+      '<input data-role="base-url" type="text" spellcheck="false" placeholder="https://open.bigmodel.cn/api/paas/v4" />' +
+      '<label data-role="fields-model">模型名称（可自定义）</label>' +
+      '<input data-role="model" type="text" spellcheck="false" placeholder="glm-5.3-flash" />' +
       '<p class="sub" data-role="status">读取提供商状态…</p>' +
       // §3.4「provider 未配置」契约动作：打开模型设置 / 测试连接（TCP 层探测，不发真实请求）。
       '<div class="inline">' +
@@ -190,13 +214,38 @@
     const model = card.querySelector('[data-role="model"]');
     const status = card.querySelector('[data-role="status"]');
 
+    // 预设按钮与设置页同源（config/provider-presets.js）；这里只回填字段，
+    // 不做保存——用户必须显式点「保存并应用」，避免误点就重启核心。
+    card.querySelectorAll("[data-preset]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const preset = presetOptions.filter(function (item) {
+          return item.id === button.dataset.preset;
+        })[0];
+        if (!preset) return;
+        baseUrl.value = preset.baseUrl || "";
+        model.value = preset.model || "";
+        const radio = form.querySelector(
+          'input[name="provider-mode"][value="' + (preset.id === "ollama" ? "ollama" : "cloud") + '"]'
+        );
+        if (radio) radio.checked = true;
+        syncFields();
+        showMessage(
+          form,
+          "已填入 " + preset.label + "（" + preset.baseUrl + "）" +
+            (preset.keyEnv ? "，点击「保存并应用」生效；密钥请放在环境变量 " + preset.keyEnv : "，本地端点无需密钥"),
+          true
+        );
+      });
+    });
+
     function syncFields() {
       const mode = form.querySelector('input[name="provider-mode"]:checked');
-      const show = mode && mode.value === "cloud";
-      baseUrl.hidden = !show;
-      model.hidden = !show;
-      card.querySelector('[data-role="fields-cloud"]').hidden = !show;
-      card.querySelector('[data-role="fields-model"]').hidden = !show;
+      const selected = mode ? mode.value : "cloud";
+      // 未配置态（unset）才禁用这两项；云端与本地都允许改地址/模型名。
+      const editable = selected !== "unset";
+      baseUrl.disabled = !editable;
+      model.disabled = !editable;
+      card.classList.toggle("setup-fields-muted", !editable);
     }
     form.querySelectorAll('input[name="provider-mode"]').forEach(function (radio) {
       radio.addEventListener("change", syncFields);
@@ -269,12 +318,27 @@
       event.preventDefault();
       const modeNode = form.querySelector('input[name="provider-mode"]:checked');
       const mode = modeNode ? modeNode.value : "unset";
+      // R10：地址与模型名对云端/本地都可编辑（此前只对 cloud 提交，本地模式
+      // 用户改的地址会被静默丢弃）。
+      const customizable = mode === "cloud" || mode === "ollama";
+      const baseUrlValue = customizable ? baseUrl.value.trim() : "";
+      const modelValue = customizable ? model.value.trim() : "";
+      if (mode === "cloud" && (!baseUrlValue || !/^https?:\/\//.test(baseUrlValue))) {
+        showMessage(form, "云端模式必须填写以 http:// 或 https:// 开头的接口地址", false);
+        baseUrl.focus();
+        return;
+      }
+      if (customizable && !modelValue) {
+        showMessage(form, "请填写模型名称（例如 glm-5.3-flash）", false);
+        model.focus();
+        return;
+      }
       setBusy(form, true);
       showMessage(form, "正在保存并重启核心…", false);
       invoke("set_provider", {
         mode: mode,
-        base_url: mode === "cloud" ? baseUrl.value.trim() : "",
-        model: mode === "cloud" ? model.value.trim() : "",
+        base_url: baseUrlValue,
+        model: modelValue,
       }).then(function (result) {
         if (result && result.ok) {
           form.dataset.done = "1";

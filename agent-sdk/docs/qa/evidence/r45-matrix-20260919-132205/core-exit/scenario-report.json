@@ -1,0 +1,59 @@
+{
+    "id":  "core-exit",
+    "note":  "§3.4：sidecar 早退 → core/exited（协议行之前退出即判早退，不再烧成超时）",
+    "kind":  "exit",
+    "expected_codes":  [
+                           "core/exited"
+                       ],
+    "required_actions":  [
+                             "重启后台",
+                             "查看诊断"
+                         ],
+    "final_budget_sec":  15,
+    "known_gap":  "",
+    "executed":  true,
+    "failed_stage":  "",
+    "error_type":  "",
+    "error_message":  "",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-exit",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-exit\\owo-agent.exe",
+    "sidecar_sha256":  "06AF05D593B8DCFE6FDDBF6087A8A67E75387FADDD6B070FC2062F9228B74B68",
+    "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-exit\\owo-agent.exe",
+    "shell_pid":  28048,
+    "window_at_sec":  0.5,
+    "actionable_at_sec":  1.8,
+    "error_at_sec":  11.6,
+    "error_code":  "core/exited",
+    "error_card":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重启后台 查看诊断 技术详情",
+    "setup_guide_len":  0,
+    "details_folded":  true,
+    "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\core-exit\\fault-core-exit-1280x720.png",
+    "screenshot_metric":  {
+                              "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\core-exit\\fault-core-exit-1280x720.png",
+                              "bytes":  77649,
+                              "width":  1280,
+                              "height":  720,
+                              "non_black_ratio":  0.998183,
+                              "variance":  912.7399,
+                              "samples":  36864,
+                              "ok":  true,
+                              "fail_reasons":  [
+
+                                               ]
+                          },
+    "ui_final":  {
+                     "healthText":  "本地服务未连接",
+                     "routeText":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重启后台 查看诊断 技术详情",
+                     "errorCard":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重启后台 查看诊断 技术详情",
+                     "setupGuide":  "",
+                     "composerVisible":  false,
+                     "actionable":  true,
+                     "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务未连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 失败 工作区 project 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 服务连接 正在等待本地核心服务恢复。 本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重启后台 查看诊断 技术详情"
+                 },
+    "cleanup":  {
+                    "shell_pid":  28048,
+                    "residual_procs":  0,
+                    "notes":  "Stop-OwoShellTree 已执行"
+                },
+    "terminal_budget_hit":  false
+}

@@ -5,9 +5,10 @@
 
 use crate::audit::AuditEntry;
 use crate::error::AgentError;
-use crate::session::{Session, SessionStore, SnapshotEntry};
+use crate::session::{Session, SessionStore, SnapshotEntry, TurnEventRecord};
 use crate::storage_crypto::{decrypt_file_envelope, encrypt_file_envelope, StorageCryptoError};
-use rusqlite::{params, Connection, OpenFlags};
+use owo_agent_protocol::SseEvent;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -48,6 +49,8 @@ pub struct Migration {
 /// 顺序迁移表：任何 schema 变更都必须以新条目显式注册（禁止隐式 ALTER）。
 /// v1：sessions 列补齐（此前为运行时逐列探测的隐式 ALTER，R8 收敛为注册迁移）。
 /// v2：M4.2 会话级模型路由（`model_override` 列）。
+/// v3：持久化 turn event 及每会话单调序号。
+/// v4：普通 ToolHost 文件执行收据（基线/结果哈希与撤销状态）。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -78,6 +81,47 @@ pub const MIGRATIONS: &[Migration] = &[
             if !columns.iter().any(|existing| existing == "model_override") {
                 conn.execute_batch("ALTER TABLE sessions ADD COLUMN model_override TEXT")
                     .map_err(sqlite_error)?;
+            }
+            Ok(())
+        },
+    },
+    Migration {
+        version: 3,
+        name: "session turn events 持久化与单调 seq",
+        run: |conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS turn_event_cursors (
+                     session_id TEXT PRIMARY KEY,
+                     last_seq INTEGER NOT NULL CHECK(last_seq >= 0)
+                 );
+                 CREATE TABLE IF NOT EXISTS turn_events (
+                     session_id TEXT NOT NULL,
+                     seq INTEGER NOT NULL CHECK(seq > 0),
+                     turn_id TEXT NOT NULL,
+                     created_at TEXT NOT NULL,
+                     payload_json TEXT NOT NULL,
+                     PRIMARY KEY(session_id, seq)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_turn_events_turn
+                     ON turn_events(session_id, turn_id, seq);",
+            )
+            .map_err(sqlite_error)?;
+            Ok(())
+        },
+    },
+    Migration {
+        version: 4,
+        name: "session execution receipts 持久化",
+        run: |conn| {
+            let columns = table_columns(conn, "sessions")?;
+            if !columns
+                .iter()
+                .any(|existing| existing == "execution_receipts_json")
+            {
+                conn.execute_batch(
+                    "ALTER TABLE sessions ADD COLUMN execution_receipts_json TEXT NOT NULL DEFAULT '[]'",
+                )
+                .map_err(sqlite_error)?;
             }
             Ok(())
         },
@@ -133,6 +177,7 @@ fn base_schema() -> &'static str {
          system_prompt TEXT,
          messages_json TEXT NOT NULL,
          snapshots_json TEXT NOT NULL,
+         execution_receipts_json TEXT NOT NULL DEFAULT '[]',
          created_at TEXT NOT NULL,
          updated_at TEXT NOT NULL,
          parent_id TEXT,
@@ -249,16 +294,24 @@ impl SqliteSessionStore {
 
     /// 清空会话与审计，返回 (会话数, 审计数)。
     pub fn clear_all(&self) -> Result<(usize, usize), AgentError> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|_| AgentError::Session("SQLite 锁中毒".into()))?;
-        let sessions = conn
+        let transaction = conn.transaction().map_err(sqlite_error)?;
+        let sessions = transaction
             .execute("DELETE FROM sessions", [])
             .map_err(sqlite_error)?;
-        let audit = conn
+        let audit = transaction
             .execute("DELETE FROM audit", [])
             .map_err(sqlite_error)?;
+        transaction
+            .execute("DELETE FROM turn_events", [])
+            .map_err(sqlite_error)?;
+        transaction
+            .execute("DELETE FROM turn_event_cursors", [])
+            .map_err(sqlite_error)?;
+        transaction.commit().map_err(sqlite_error)?;
         Ok((sessions, audit))
     }
 
@@ -293,15 +346,16 @@ impl SqliteSessionStore {
         conn.execute(
             "INSERT INTO sessions (
                  id, workspace, model, system_prompt, messages_json, snapshots_json,
-                 created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json,
-                 title, archived, pinned, model_override
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 execution_receipts_json, created_at, updated_at, parent_id, fork_point,
+                 redo_json, message_redo_json, title, archived, pinned, model_override
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                  workspace=excluded.workspace,
                  model=excluded.model,
                  system_prompt=excluded.system_prompt,
                  messages_json=excluded.messages_json,
                  snapshots_json=excluded.snapshots_json,
+                 execution_receipts_json=excluded.execution_receipts_json,
                  updated_at=excluded.updated_at,
                  parent_id=excluded.parent_id,
                  fork_point=excluded.fork_point,
@@ -318,6 +372,7 @@ impl SqliteSessionStore {
                 session.system_prompt,
                 serde_json::to_string(&session.messages).map_err(json_error)?,
                 serde_json::to_string(&session.snapshots).map_err(json_error)?,
+                serde_json::to_string(&session.execution_receipts).map_err(json_error)?,
                 session.created_at,
                 session.updated_at,
                 session.parent_id,
@@ -338,8 +393,8 @@ impl SqliteSessionStore {
         let row = conn
             .query_row(
                 "SELECT id, workspace, model, system_prompt, messages_json, snapshots_json,
-                        created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json,
-                        title, archived, pinned, model_override
+                        execution_receipts_json, created_at, updated_at, parent_id, fork_point,
+                        redo_json, message_redo_json, title, archived, pinned, model_override
                  FROM sessions WHERE id = ?1",
                 [id],
                 |row| {
@@ -352,14 +407,15 @@ impl SqliteSessionStore {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<i64>>(9)?,
-                        row.get::<_, String>(10)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
                         row.get::<_, String>(11)?,
-                        row.get::<_, Option<String>>(12)?,
-                        row.get::<_, bool>(13)?,
+                        row.get::<_, String>(12)?,
+                        row.get::<_, Option<String>>(13)?,
                         row.get::<_, bool>(14)?,
-                        row.get::<_, Option<String>>(15)?,
+                        row.get::<_, bool>(15)?,
+                        row.get::<_, Option<String>>(16)?,
                     ))
                 },
             )
@@ -377,16 +433,17 @@ impl SqliteSessionStore {
             messages: serde_json::from_str(&row.4).map_err(json_error)?,
             snapshots: serde_json::from_str::<HashMap<String, SnapshotEntry>>(&row.5)
                 .map_err(json_error)?,
-            created_at: row.6,
-            updated_at: row.7,
-            parent_id: row.8,
-            fork_point: row.9.map(|point| point as usize),
-            redo_stack: serde_json::from_str(&row.10).map_err(json_error)?,
-            message_redo_stack: serde_json::from_str(&row.11).map_err(json_error)?,
-            title: row.12,
-            archived: row.13,
-            pinned: row.14,
-            model_override: row.15,
+            execution_receipts: serde_json::from_str(&row.6).map_err(json_error)?,
+            created_at: row.7,
+            updated_at: row.8,
+            parent_id: row.9,
+            fork_point: row.10.map(|point| point as usize),
+            redo_stack: serde_json::from_str(&row.11).map_err(json_error)?,
+            message_redo_stack: serde_json::from_str(&row.12).map_err(json_error)?,
+            title: row.13,
+            archived: row.14,
+            pinned: row.15,
+            model_override: row.16,
         })
     }
 }
@@ -446,6 +503,103 @@ impl SessionStore for SqliteSessionStore {
             .lock()
             .map_err(|_| AgentError::Session("SQLite 锁中毒".into()))?;
         Self::save_locked(&conn, session)
+    }
+
+    fn append_turn_event(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        payload: &SseEvent,
+    ) -> Result<TurnEventRecord, AgentError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| AgentError::Session("SQLite 锁中毒".into()))?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        let last_seq = transaction
+            .query_row(
+                "SELECT last_seq FROM turn_event_cursors WHERE session_id = ?1",
+                [session_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .unwrap_or(0);
+        let seq = last_seq
+            .checked_add(1)
+            .ok_or_else(|| AgentError::Session("回合事件 seq 已耗尽".into()))?;
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let payload_json = serde_json::to_string(payload)
+            .map_err(|error| AgentError::Session(format!("回合事件编码失败：{error}")))?;
+        transaction
+            .execute(
+                "INSERT INTO turn_event_cursors(session_id, last_seq) VALUES (?1, ?2)
+                 ON CONFLICT(session_id) DO UPDATE SET last_seq = excluded.last_seq",
+                params![session_id, seq],
+            )
+            .map_err(sqlite_error)?;
+        transaction
+            .execute(
+                "INSERT INTO turn_events(session_id, seq, turn_id, created_at, payload_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![session_id, seq, turn_id, created_at, payload_json],
+            )
+            .map_err(sqlite_error)?;
+        transaction.commit().map_err(sqlite_error)?;
+        Ok(TurnEventRecord {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            seq: seq as u64,
+            created_at,
+            payload: payload.clone(),
+        })
+    }
+
+    fn turn_events_after(
+        &self,
+        session_id: &str,
+        turn_id: Option<&str>,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<TurnEventRecord>, AgentError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AgentError::Session("SQLite 锁中毒".into()))?;
+        let after_seq = i64::try_from(after_seq)
+            .map_err(|_| AgentError::Session("回合事件 seq 超出 SQLite 范围".into()))?;
+        let limit = limit.clamp(1, 1000) as i64;
+        let mut statement = conn
+            .prepare(
+                "SELECT session_id, turn_id, seq, created_at, payload_json
+                 FROM turn_events
+                 WHERE session_id = ?1 AND seq > ?2 AND (?3 IS NULL OR turn_id = ?3)
+                 ORDER BY seq ASC LIMIT ?4",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map(params![session_id, after_seq, turn_id, limit], |row| {
+                let payload_json: String = row.get(4)?;
+                let payload = serde_json::from_str(&payload_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        payload_json.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                let seq: i64 = row.get(2)?;
+                Ok(TurnEventRecord {
+                    session_id: row.get(0)?,
+                    turn_id: row.get(1)?,
+                    seq: seq as u64,
+                    created_at: row.get(3)?,
+                    payload,
+                })
+            })
+            .map_err(sqlite_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)
     }
 
     fn list(&self) -> Vec<String> {
@@ -742,20 +896,20 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("owo-sqlite-migrate-{}.db", uuid::Uuid::new_v4()));
         let store = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(store.migration_status().schema_version, 2);
+        assert_eq!(store.migration_status().schema_version, 4);
         assert!(store.migration_status().pending.is_empty());
         assert!(!store.is_read_only());
         drop(store);
         // 再次打开：无新迁移应用，schema_version 保持。
         let reopened = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(reopened.migration_status().schema_version, 2);
+        assert_eq!(reopened.migration_status().schema_version, 4);
         assert!(reopened.migration_status().applied.is_empty());
         assert!(!reopened.is_read_only());
         let conn = Connection::open(&path).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 4);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
@@ -790,6 +944,8 @@ mod tests {
             vec![
                 "v1: sessions 列补齐（message_redo_json/title/archived/pinned）",
                 "v2: sessions 列补齐（model_override：M4.2 会话级模型路由）",
+                "v3: session turn events 持久化与单调 seq",
+                "v4: session execution receipts 持久化",
             ]
         );
         let mut session = store.create(Path::new("."), "mock", None).unwrap();
@@ -827,11 +983,79 @@ mod tests {
     }
 
     #[test]
+    fn turn_events_have_session_monotonic_seq_and_survive_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("owo-sqlite-events-{}.db", uuid::Uuid::new_v4()));
+        let store = SqliteSessionStore::open(&path).unwrap();
+        let session_a = store.create(Path::new("."), "mock", None).unwrap();
+        let session_b = store.create(Path::new("."), "mock", None).unwrap();
+
+        let first = store
+            .append_turn_event(
+                &session_a.id,
+                "turn-a",
+                &SseEvent::TokenDelta {
+                    delta: "hel".to_string(),
+                },
+            )
+            .unwrap();
+        let second = store
+            .append_turn_event(
+                &session_a.id,
+                "turn-a",
+                &SseEvent::TokenDelta {
+                    delta: "lo".to_string(),
+                },
+            )
+            .unwrap();
+        let independent = store
+            .append_turn_event(
+                &session_b.id,
+                "turn-b",
+                &SseEvent::Final {
+                    text: "other session".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!((first.seq, second.seq, independent.seq), (1, 2, 1));
+        drop(store);
+
+        let reopened = SqliteSessionStore::open(&path).unwrap();
+        let replay = reopened
+            .turn_events_after(&session_a.id, Some("turn-a"), 1, 10)
+            .unwrap();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].seq, 2);
+        assert_eq!(replay[0].turn_id, "turn-a");
+        assert!(matches!(
+            replay[0].payload,
+            SseEvent::TokenDelta { ref delta } if delta == "lo"
+        ));
+        let next_turn = reopened
+            .append_turn_event(
+                &session_a.id,
+                "turn-next",
+                &SseEvent::Progress {
+                    message: "next turn".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            next_turn.seq, 3,
+            "sequence continues across turns in a session"
+        );
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
     fn clear_wipes_sessions_and_audit_and_integrity_ok() {
         let path =
             std::env::temp_dir().join(format!("owo-sqlite-clear-{}.db", uuid::Uuid::new_v4()));
         let store = SqliteSessionStore::open(&path).unwrap();
-        store.create(Path::new("."), "mock", None).unwrap();
+        let session = store.create(Path::new("."), "mock", None).unwrap();
         let entry = AuditEntry {
             ts: "2026-08-11T00:00:00Z".to_string(),
             session_id: "s1".to_string(),
@@ -841,10 +1065,30 @@ mod tests {
             detail: "d".to_string(),
         };
         store.append_audit(&[entry]).unwrap();
+        store
+            .append_turn_event(
+                &session.id,
+                "turn-clear",
+                &SseEvent::Final {
+                    text: "clear me".to_string(),
+                },
+            )
+            .unwrap();
         assert_eq!(store.counts(), (1, 1));
         assert_eq!(store.integrity_check().unwrap(), "ok");
         assert_eq!(store.clear_all().unwrap(), (1, 1));
         assert_eq!(store.counts(), (0, 0));
+        let conn = store.conn.lock().unwrap();
+        let event_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_events", [], |row| row.get(0))
+            .unwrap();
+        let cursor_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_event_cursors", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!((event_count, cursor_count), (0, 0));
+        drop(conn);
         assert_eq!(
             store.integrity_check().unwrap(),
             "ok",

@@ -232,37 +232,82 @@ async function refreshSessionsImpl(selectId) {
   list.innerHTML = "";
   const renderSession = (session, depth) => {
     const li = document.createElement("li");
+    li.className = "owo-session-card";
     if (session.id === selectId) {
-      li.className = "active";
+      li.className += " active";
       state.sessionId = session.id;
     }
     const badges = [];
     if (session.pinned) badges.push("📌");
     if (session.archived) badges.push("🗄");
     const updated = (session.updated_at || session.created_at || "").slice(0, 19).replace("T", " ");
+    // R12（2026-09-22 用户截图反馈）：原来 7 个操作按钮（继续/重命名/置顶/归档/
+    // fork/回退/重做）常显在每张会话卡上，窄侧栏里中文被挤成逐字竖排（截图里
+    // "重命名"竖着排），而且列表整体像按钮墙。改成 codex 风格：
+    // 卡片本身点一下 = 打开会话；其余 6 个低频操作收进 "…" 弹层，点开才出现。
     li.innerHTML = `
-      <div style="margin-left:${depth * 14}px">
-        <strong>${esc(session.title || session.id.slice(0, 12))} ${badges.join(" ")}</strong>
-        <span class="sub">${esc(session.model)} ｜ ${esc(updated)}</span>
-        <div class="inline">
-          <button data-act="open">继续</button>
-          <button data-act="rename">重命名</button>
-          <button data-act="pin">${session.pinned ? "取消置顶" : "置顶"}</button>
-          <button data-act="archive">${session.archived ? "取消归档" : "归档"}</button>
-          <button data-act="fork">fork</button>
-          <button data-act="rewind">回退</button>
-          <button data-act="redo">重做</button>
+      <div class="owo-session-body" style="margin-left:${depth * 14}px">
+        <div class="owo-session-head">
+          <div class="owo-session-text">
+            <strong class="owo-session-title">${esc(session.title || session.id.slice(0, 12))} ${badges.join(" ")}</strong>
+            <span class="sub owo-session-meta">${esc(session.model)} ｜ ${esc(updated)}</span>
+          </div>
+          <button type="button" class="owo-session-more" data-act="menu"
+            aria-haspopup="menu" aria-expanded="false" title="更多操作">⋯</button>
+        </div>
+        <div class="owo-session-menu" role="menu" hidden>
+          <button type="button" role="menuitem" data-act="rename">重命名…</button>
+          <button type="button" role="menuitem" data-act="pin">${session.pinned ? "取消置顶" : "置顶"}</button>
+          <button type="button" role="menuitem" data-act="archive">${session.archived ? "取消归档" : "归档"}</button>
+          <button type="button" role="menuitem" data-act="fork">分叉子会话…</button>
+          <button type="button" role="menuitem" data-act="rewind">回退…</button>
+          <button type="button" role="menuitem" data-act="redo">重做</button>
         </div>
       </div>`;
-    for (const button of li.querySelectorAll("button")) {
+
+    const menu = li.querySelector(".owo-session-menu");
+    const moreButton = li.querySelector(".owo-session-more");
+
+    function closeMenu() {
+      if (!menu) return;
+      menu.hidden = true;
+      if (moreButton) moreButton.setAttribute("aria-expanded", "false");
+    }
+    function toggleMenu(event) {
+      if (event) event.stopPropagation();
+      if (!menu) return;
+      const next = menu.hidden;
+      // 同一时刻只允许一个会话菜单展开（列表里堆多个弹层会互相遮挡）。
+      for (const other of document.querySelectorAll(".owo-session-menu")) {
+        if (other !== menu) other.hidden = true;
+      }
+      menu.hidden = !next;
+      if (moreButton) moreButton.setAttribute("aria-expanded", String(next));
+    }
+    if (moreButton) {
+      moreButton.addEventListener("click", toggleMenu);
+    }
+    // 点空白处/按 Esc 关菜单（弹层不该"粘"在界面上）。
+    if (!window.__owoSessionMenuDismiss) {
+      window.__owoSessionMenuDismiss = true;
+      document.addEventListener("click", () => {
+        for (const other of document.querySelectorAll(".owo-session-menu")) other.hidden = true;
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          for (const other of document.querySelectorAll(".owo-session-menu")) other.hidden = true;
+        }
+      });
+    }
+    // 菜单内部点击不应冒泡到卡片（否则会顺手打开会话）。
+    if (menu) menu.addEventListener("click", (event) => event.stopPropagation());
+
+    for (const button of li.querySelectorAll("[data-act]")) {
       button.addEventListener("click", async (event) => {
         event.stopPropagation();
         const act = button.dataset.act;
+        if (act === "menu") return; // 由 toggleMenu 处理
         try {
-          if (act === "open") {
-            await selectSession(session.id);
-            return;
-          }
           if (act === "rename") {
             const title = window.prompt("新标题：", session.title || "");
             if (title === null) return;
@@ -303,6 +348,8 @@ async function refreshSessionsImpl(selectId) {
           await refreshSessions(selectId || state.sessionId);
         } catch (error) {
           addMessage("system", `操作失败：${friendlyError(error, { resource: true })}`);
+        } finally {
+          closeMenu();
         }
       });
     }
@@ -391,13 +438,7 @@ async function newSession() {
 // ---------- 对话（SSE） ----------
 
 function parseSseBlock(block) {
-  let event = "message";
-  let data = "";
-  for (const line of block.split("\n")) {
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) data += line.slice(5).trim();
-  }
-  return { event, data };
+  return window.OwoTurnSse.parseBlock(block);
 }
 
 async function sendPrompt() {
@@ -417,30 +458,28 @@ async function sendPrompt() {
   let assistantText = "";
   let finished = false;
   let reader = null;
+  const sessionId = state.sessionId;
+  let turnId = null;
+  let lastSeq = 0;
+  let turnFailure = null;
 
   state.reading = true;
   state.abortController = new AbortController();
   $("abortBtn").disabled = false;
   try {
-    const response = await apiClient.stream(`/session/${state.sessionId}/turn`, {
+    const response = await apiClient.stream(`/session/${sessionId}/turn`, {
       method: "POST",
       json: { prompt, attachments },
       signal: state.abortController.signal,
     });
+    turnId = response.headers.get("x-owo-turn-id");
     if (!response.body) throw new Error("服务未返回流式响应");
     reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
 
-    const handleBlock = (block) => {
-      const { event, data } = parseSseBlock(block);
-      if (!data) return;
-      let payload;
-      try {
-        payload = JSON.parse(data);
-      } catch (_) {
-        return;
-      }
+    const handlePayload = (event, payload) => {
+      if (!payload || typeof payload !== "object") return;
       switch (event) {
         case "token_delta":
           assistantText += payload.delta || "";
@@ -450,6 +489,10 @@ async function sendPrompt() {
           break;
         case "progress":
           addMessage("system", `[${payload.message || "处理中"}]`);
+          if (typeof payload.message === "string" &&
+              (payload.message.startsWith("turn failed:") || payload.message.startsWith("session save failed:"))) {
+            turnFailure = payload.message;
+          }
           break;
         case "tool_use":
           addMessage("tool", `▶ ${payload.tool}`, "工具调用");
@@ -476,6 +519,22 @@ async function sendPrompt() {
       }
     };
 
+    const handleBlock = (block) => {
+      const { event, id, data } = parseSseBlock(block);
+      if (!data) return;
+      let payload;
+      try {
+        payload = JSON.parse(data);
+      } catch (_) {
+        return;
+      }
+      const parsedSeq = id == null ? NaN : Number(id);
+      if (Number.isSafeInteger(parsedSeq) && parsedSeq > lastSeq) {
+        lastSeq = parsedSeq;
+      }
+      handlePayload(event, payload);
+    };
+
     const consumeBlocks = (text, flush) => {
       const blocks = text.split(/\r?\n\r?\n/);
       const remainder = flush ? "" : blocks.pop() || "";
@@ -483,17 +542,56 @@ async function sendPrompt() {
       return remainder;
     };
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        buffer += decoder.decode();
-        if (buffer.trim()) consumeBlocks(buffer, true);
-        buffer = "";
-        break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          buffer += decoder.decode();
+          if (buffer.trim()) consumeBlocks(buffer, true);
+          buffer = "";
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        buffer = consumeBlocks(buffer, false);
       }
-      buffer += decoder.decode(value, { stream: true });
-      buffer = consumeBlocks(buffer, false);
+    } catch (streamError) {
+      if (!turnId || streamError.name === "AbortError") throw streamError;
     }
+    if (!turnId && !finished) {
+      throw new Error("服务端没有提供回合恢复标识，无法确认本次结果是否完整。");
+    }
+    if (!finished && turnId) {
+      let replayActive = true;
+      while (!finished && replayActive) {
+        const page = await apiClient.get(
+          window.OwoTurnSse.replayPath(sessionId, turnId, lastSeq),
+          { signal: state.abortController.signal },
+        );
+        const records = window.OwoTurnSse.eventsAfterCursor(page, turnId, lastSeq);
+        for (const record of records) {
+          const seq = Number(record.seq);
+          if (Number.isSafeInteger(seq)) lastSeq = Math.max(lastSeq, seq);
+          handlePayload(record.payload && record.payload.type, record.payload);
+          if (finished) break;
+        }
+        replayActive = Boolean(page && page.active);
+        if (!replayActive && !finished) {
+          if (page && page.state === "interrupted") {
+            throw new Error("回合在写入完成结果前中断；已保留已收到的部分内容。");
+          }
+          if (page && page.state === "failed" && !turnFailure) {
+            throw new Error("回合执行失败，但服务端没有提供失败详情。");
+          }
+          if (page && page.state === "completed") {
+            throw new Error("服务端报告回合已完成，但重放中缺少最终结果。");
+          }
+        }
+        if (!finished && replayActive && !records.length) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+      }
+    }
+    if (turnFailure && !finished) throw new Error(turnFailure);
     if (!finished && !assistantText) streaming.remove();
     hideApproval();
     // §4.3 状态条判据：正常收尾=已完成（中断/失败在 catch 里各自归类）。

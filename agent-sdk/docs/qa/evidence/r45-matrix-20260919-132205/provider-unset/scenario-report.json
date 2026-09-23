@@ -1,0 +1,38 @@
+{
+    "id":  "provider-unset",
+    "note":  "§3.4：provider 未配置 → core 正常运行 + 模型配置引导（R3-BUG-05 错误归因已修）",
+    "kind":  "healthy",
+    "expected_codes":  [
+                           "provider/not_configured"
+                       ],
+    "required_actions":  [
+                             "打开模型设置",
+                             "测试连接"
+                         ],
+    "final_budget_sec":  20,
+    "known_gap":  "",
+    "executed":  false,
+    "failed_stage":  "inject",
+    "error_type":  "ItemNotFoundException",
+    "error_message":  "Cannot find path \u0027psdrive\u0027 because it does not exist.",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\provider-unset",
+    "injected_sidecar":  "",
+    "sidecar_sha256":  "",
+    "launched_core":  "",
+    "shell_pid":  0,
+    "window_at_sec":  -1,
+    "actionable_at_sec":  -1,
+    "error_at_sec":  -1,
+    "error_code":  "",
+    "error_card":  "",
+    "setup_guide_len":  0,
+    "details_folded":  false,
+    "screenshot":  "",
+    "screenshot_metric":  null,
+    "ui_final":  null,
+    "cleanup":  {
+                    "shell_pid":  0,
+                    "residual_procs":  0,
+                    "notes":  ""
+                }
+}

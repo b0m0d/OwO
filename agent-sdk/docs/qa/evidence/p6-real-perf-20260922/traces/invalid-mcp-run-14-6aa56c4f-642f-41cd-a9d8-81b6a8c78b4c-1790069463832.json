@@ -1,0 +1,51 @@
+{
+  "session_id": "6aa56c4f-642f-41cd-a9d8-81b6a8c78b4c",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-invalid-mcp\\runs\\run-14\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请只回答：服务已启动。",
+  "started_at": "2026-09-22T09:31:01.498073100+00:00",
+  "duration_ms": 2333,
+  "steps": 0,
+  "final_text": "服务已启动。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "服务"
+    },
+    {
+      "type": "token_delta",
+      "delta": "已"
+    },
+    {
+      "type": "token_delta",
+      "delta": "启动。"
+    },
+    {
+      "type": "final",
+      "text": "服务已启动。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 723,
+    "completion_tokens": 46,
+    "total_tokens": 769
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 2331,
+      "target": "",
+      "first_token_ms": 2289
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "invalid_mcp_startup"
+}

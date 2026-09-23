@@ -723,6 +723,32 @@ pub struct BuildInfo {
     pub built_at: String,
 }
 
+/// 指南 §2.3：Daemon 发现描述符（`<data_root>/runtime/daemon.json` 的唯一契约）。
+///
+/// 由 Daemon 在端口绑定后**原子替换**写入；CLI / TUI / 桌面壳经 `owo-agent-client`
+/// 读取并校验 PID、`instance_id`、`/health`、API 版本与 build 兼容性。
+/// **token 绝不写入本文件**（认证仍走权限受控的 `auth/token` 或桌面配对）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonDescriptor {
+    /// 服务进程 pid（用于存活校验与 stale 恢复）。
+    pub pid: u32,
+    /// 实际监听端口（`--port 0` 时为系统分配的临时端口）。
+    pub port: u16,
+    /// 桌面壳注入的实例身份（开发模式为空串）。
+    #[serde(default)]
+    pub instance_id: String,
+    /// HTTP 契约版本（与 `/health.api_version`、`OWO_API_VERSION` 同源）。
+    pub api_version: String,
+    /// 构建标识（build-info.json 的 git_commit；缺失时 "unknown"）。
+    #[serde(default)]
+    pub build_id: String,
+    /// 启动时刻 RFC3339（UTC `Z`）。
+    pub started_at: String,
+    /// 数据根标识（脱敏；仅用于诊断区分，不暴露绝对路径）。
+    #[serde(default)]
+    pub data_root: String,
+}
+
 /// SSE 事件协议版本（R10：所有 SSE 事件帧 data 统一携带 `v` 字段）。
 /// 变更策略：破坏性事件结构变更 → 递增版本并登记 RFC 注释（弃用期 ≥2 个 minor）。
 pub const SSE_PROTOCOL_VERSION: u32 = 1;
@@ -772,6 +798,36 @@ pub enum SseEvent {
     Compaction {
         summary: String,
     },
+}
+
+/// Durable turn event. `seq` is strictly increasing within its session and is the replay cursor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnEventRecord {
+    pub session_id: String,
+    pub turn_id: String,
+    pub seq: u64,
+    pub created_at: String,
+    pub payload: SseEvent,
+}
+
+/// Durable replay endpoint state. `interrupted` means the process no longer owns the turn and
+/// no completed/failed terminal event was persisted before it stopped.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnReplayState {
+    Active,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+/// Bounded replay response returned by GET /session/{id}/turn/events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnEventReplayPage {
+    pub events: Vec<TurnEventRecord>,
+    pub active: bool,
+    pub state: TurnReplayState,
+    pub next_after_seq: u64,
 }
 
 #[cfg(test)]

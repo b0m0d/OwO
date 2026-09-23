@@ -1,0 +1,322 @@
+{
+  "session_id": "5a931ace-af21-4785-86fe-5e57099b86b7",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-search-1000-rg\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请使用 search_files 工具查找工作区中所有文件名包含 file-0777 的文件，然后简要说明找到的结果。",
+  "started_at": "2026-09-22T05:33:41.103505200+00:00",
+  "duration_ms": 13386,
+  "steps": 1,
+  "final_text": "搜索完成，结果如下：\n\n**找到 1 个匹配文件：**\n- `file-0777.txt`（位于工作区根目录）\n\n这是工作区中唯一一个文件名包含 `file-0777` 的文件，是一个纯文本文件。如果你需要查看它的具体内容，告诉我即可。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_246df22f998946debfca2080",
+      "tool": "search_files"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_246df22f998946debfca2080",
+      "tool": "search_files",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "结果"
+    },
+    {
+      "type": "token_delta",
+      "delta": "如下"
+    },
+    {
+      "type": "token_delta",
+      "delta": "：\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "**"
+    },
+    {
+      "type": "token_delta",
+      "delta": "找到"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "匹配"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "："
+    },
+    {
+      "type": "token_delta",
+      "delta": "**\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": ".txt"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "位于"
+    },
+    {
+      "type": "token_delta",
+      "delta": "工作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "区"
+    },
+    {
+      "type": "token_delta",
+      "delta": "根"
+    },
+    {
+      "type": "token_delta",
+      "delta": "目录"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "这是"
+    },
+    {
+      "type": "token_delta",
+      "delta": "工作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "区"
+    },
+    {
+      "type": "token_delta",
+      "delta": "中"
+    },
+    {
+      "type": "token_delta",
+      "delta": "唯一"
+    },
+    {
+      "type": "token_delta",
+      "delta": "一个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "名"
+    },
+    {
+      "type": "token_delta",
+      "delta": "包含"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "是一个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "纯"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文本"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "如果你"
+    },
+    {
+      "type": "token_delta",
+      "delta": "需要"
+    },
+    {
+      "type": "token_delta",
+      "delta": "查看"
+    },
+    {
+      "type": "token_delta",
+      "delta": "它的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "具体"
+    },
+    {
+      "type": "token_delta",
+      "delta": "内容"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "告诉我"
+    },
+    {
+      "type": "token_delta",
+      "delta": "即可。"
+    },
+    {
+      "type": "final",
+      "text": "搜索完成，结果如下：\n\n**找到 1 个匹配文件：**\n- `file-0777.txt`（位于工作区根目录）\n\n这是工作区中唯一一个文件名包含 `file-0777` 的文件，是一个纯文本文件。如果你需要查看它的具体内容，告诉我即可。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1541,
+    "completion_tokens": 252,
+    "total_tokens": 1793
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 4771,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 25,
+      "target": "search_files",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 8582,
+      "target": "",
+      "first_token_ms": 7349
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "search_1000_files"
+}

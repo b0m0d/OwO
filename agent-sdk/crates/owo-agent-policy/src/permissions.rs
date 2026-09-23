@@ -37,7 +37,7 @@ pub enum Decision {
 pub enum PermissionProfile {
     /// 只允许宿主验证的只读操作。
     ReadOnly,
-    /// 工作区内普通读写自动允许；执行、联网、UI 控制、越界和破坏性操作询问。
+    /// 工作区内只读默认允许；写入首次审批，执行、联网、UI 控制、越界和破坏性操作询问。
     Workspace,
     /// 审批 Agent 可以收紧或代批「可代批」操作，但不能突破 OS 沙箱与 deny 规则。
     AutoReview,
@@ -283,8 +283,8 @@ pub struct Policy {
     /// 运行时追加的危险命令片段（热生效，与基础列表合并判断）。
     runtime_deny: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     read_only: Arc<AtomicBool>,
-    /// §5.3 权限档位（默认 Workspace：工作区内普通读写自动允许，
-    /// 执行/联网/UI 控制/越界/破坏性操作询问）。
+    /// §5.3 权限档位（默认 Workspace：工作区内只读默认允许，首次写入/执行/联网/
+    /// UI 控制/越界/破坏性操作询问；审批后由有作用域 Grant 记忆）。
     profile: std::sync::Arc<std::sync::Mutex<PermissionProfile>>,
     /// §5.4 有作用域、可撤销的授权记忆（用户审批选项生成；命中即放行）。
     grants: std::sync::RwLock<Option<std::sync::Arc<crate::grant_store::GrantStore>>>,
@@ -616,15 +616,10 @@ impl Policy {
             }
         }
         match self.profile() {
-            // Workspace：工作区内普通写自动允许（reason 含"工作区内"），
-            // 执行/注入/联网/UI 控制仍询问；越界已在 evaluate 阶段拒绝。
-            PermissionProfile::Workspace => {
-                if request.level == Level::Write && request.reason.contains("工作区内") {
-                    Decision::Allow
-                } else {
-                    Decision::Ask
-                }
-            }
+            // Workspace：工作区内写入也必须首次审批；审批卡生成的有作用域 Grant
+            // 已在上方命中后直接放行。执行/注入/联网/UI 控制仍询问；越界已在
+            // evaluate 阶段拒绝。
+            PermissionProfile::Workspace => Decision::Ask,
             // AutoReview：审批 Agent 可收紧或代批「可代批」操作——工作区内写
             // 不自动放行，一律进入审批链（reviewer 代批 / 人工审批），否则收紧
             // 无从生效；执行/注入照旧询问。
@@ -722,11 +717,11 @@ mod tests {
     }
 
     #[test]
-    fn default_workspace_profile_auto_allows_workspace_writes() {
-        // §5.3 Workspace（默认）：工作区内普通读写自动允许。
+    fn default_workspace_profile_asks_for_workspace_writes() {
+        // 指南 §4.5：工作区内写入首次必须审批；后续由 Grant 命中放行。
         let policy = Policy::new(".");
         let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
-        assert_eq!(policy.decision(&write), Decision::Allow);
+        assert_eq!(policy.decision(&write), Decision::Ask);
     }
 
     #[test]
@@ -807,14 +802,14 @@ mod tests {
     #[test]
     fn runtime_policy_settings_take_effect_without_rebuilding() {
         let policy = Policy::new(".");
-        // 默认 Workspace：工作区内写自动允许。切 ReadOnly 后拒绝，切回恢复。
+        // 默认 Workspace：工作区内写首次询问。切 ReadOnly 后拒绝，切回恢复询问。
         let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
-        assert_eq!(policy.decision(&write), Decision::Allow);
+        assert_eq!(policy.decision(&write), Decision::Ask);
 
         policy.set_read_only_runtime(true);
         assert_eq!(policy.decision(&write), Decision::Deny);
         policy.set_read_only_runtime(false);
-        assert_eq!(policy.decision(&write), Decision::Allow);
+        assert_eq!(policy.decision(&write), Decision::Ask);
 
         policy.replace_runtime_deny(&["danger-now".to_string()]);
         let denied = policy.evaluate("run_command", &json!({ "command": "danger-now" }));
@@ -972,19 +967,19 @@ mod tests {
 
     #[test]
     fn absent_spec_leaves_profile_semantics_untouched() {
-        // 回归护栏：没有结构化配置时（所有历史调用点与既有部署），判定必须
-        // 与引入 spec 之前逐条一致——否则这次改动就不是"只收紧不放宽"。
+        // 回归护栏：没有结构化配置时仍遵循默认档位；工作区写入首次询问，
+        // 只读默认放行，执行与注入询问。
         let policy = Policy::new(".");
         assert!(policy.spec().is_none(), "默认无结构化配置");
         let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
         let exec = policy.evaluate("run_command", &json!({ "command": "ls" }));
         let inject = policy.evaluate("desktop_type", &json!({ "text": "hi" }));
-        assert_eq!(policy.decision(&write), Decision::Allow);
+        assert_eq!(policy.decision(&write), Decision::Ask);
         assert_eq!(policy.decision(&exec), Decision::Ask);
         assert_eq!(policy.decision(&inject), Decision::Ask);
 
         policy.clear_spec();
-        assert_eq!(policy.decision(&write), Decision::Allow);
+        assert_eq!(policy.decision(&write), Decision::Ask);
         assert_eq!(policy.decision(&exec), Decision::Ask);
         assert_eq!(
             policy.decision(&inject),

@@ -1,0 +1,168 @@
+{
+    "schema":  "owo-mk-smoke/2",
+    "tag":  "p0-real",
+    "mode":  "basic",
+    "identity_only":  false,
+    "started_at":  "2026-09-21T12:38:30.1663756Z",
+    "finished_at":  "2026-09-21T12:38:35.0992757Z",
+    "source":  {
+                   "commit":  "fc8251d42aa192715fa9f3208585802fa87d88ef",
+                   "dirty":  true
+               },
+    "binary":  {
+                   "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\target\\debug\\owo-agent.exe",
+                   "sha256":  "ee48d15e3af8d8c4a9bb681f386a7ae4ca07f15f04c8296c9d16564124ce6c45",
+                   "bytes":  78976000,
+                   "mtime":  "2026-09-21T12:36:32.4833267Z",
+                   "version":  "0.1.0",
+                   "commit":  "fc8251d42aa192715fa9f3208585802fa87d88ef",
+                   "dirty":  "true",
+                   "built_at":  "2026-09-21T12:33:36Z",
+                   "api_version":  "0.7",
+                   "version_line":  "owo-agent 0.1.0 api=0.7 commit=fc8251d42aa192715fa9f3208585802fa87d88ef dirty=true built_at=2026-09-21T12:33:36Z source=compiled"
+               },
+    "build":  {
+                  "performed":  false,
+                  "policy":  "normal",
+                  "exit_code":  null
+              },
+    "identity":  {
+                     "ok":  true,
+                     "reason":  "commit=fc8251d42aa192715fa9f3208585802fa87d88ef dirty=true"
+                 },
+    "checks":  [
+                   {
+                       "check":  "binary.identity_matches_head",
+                       "pass":  true,
+                       "detail":  "commit=fc8251d42aa192715fa9f3208585802fa87d88ef dirty=true",
+                       "evidence":  "identity"
+                   },
+                   {
+                       "check":  "daemon.core_ready",
+                       "pass":  true,
+                       "detail":  "core_ready 行已输出",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "daemon.runtime_build_id_matches_head",
+                       "pass":  true,
+                       "detail":  "core_ready.build_id=fc8251d42aa192715fa9f3208585802fa87d88ef HEAD=fc8251d42aa192715fa9f3208585802fa87d88ef",
+                       "evidence":  "identity"
+                   },
+                   {
+                       "check":  "http.health_public",
+                       "pass":  true,
+                       "detail":  "status=200 healthy=True stage=ready",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "http.unauthenticated_401",
+                       "pass":  true,
+                       "detail":  "GET /sessions without token -\u003e 401",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "data.auth_token_written",
+                       "pass":  true,
+                       "detail":  "auth/token 存在=True（未打印内容）",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "http.sessions_list",
+                       "pass":  true,
+                       "detail":  "status=200 body=[]",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "http.server_status_readable",
+                       "pass":  true,
+                       "detail":  "read_only=False warn=",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "session.create",
+                       "pass":  true,
+                       "detail":  "status=200 id=5db5bd18-e7b7-4d25-9fee-4c0b82bb28de",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "session.read_back",
+                       "pass":  true,
+                       "detail":  "status=200 len=395",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "session.persisted_in_list",
+                       "pass":  true,
+                       "detail":  "list 中匹配 1 条",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "product_eval.create_run",
+                       "pass":  true,
+                       "detail":  "status=202 run_id=eval-46797f32b6554df48acfbe31bcd02a08",
+                       "evidence":  "reference"
+                   },
+                   {
+                       "check":  "product_eval.run_completed",
+                       "pass":  true,
+                       "detail":  "status=completed progress=20/20 metrics.runs_total=20",
+                       "evidence":  "reference"
+                   },
+                   {
+                       "check":  "extensions.notes_create",
+                       "pass":  true,
+                       "detail":  "status=201 id=62af5a81-ae80-49e9-815a-86f14036a44b",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "extensions.notes_list",
+                       "pass":  true,
+                       "detail":  "count=1 命中=1（notes 已迁至 owo-agent-extensions）",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "extensions.automations_list",
+                       "pass":  true,
+                       "detail":  "status=200 body=[]",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "data.index_db",
+                       "pass":  true,
+                       "detail":  "index.db 已建立（SqliteSessionStore/WAL）",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "data.server_pid",
+                       "pass":  true,
+                       "detail":  "server.pid 已建立",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "audit.event_emitted",
+                       "pass":  true,
+                       "detail":  "server_start 审计事件已写入（owo-agent-kernel::audit 参与运行）",
+                       "evidence":  "harness"
+                   },
+                   {
+                       "check":  "process.no_orphan",
+                       "pass":  true,
+                       "detail":  "残留进程=False",
+                       "evidence":  "harness"
+                   }
+               ],
+    "real_turn":  {
+                      "requested":  false,
+                      "status":  "not_requested"
+                  },
+    "started":  true,
+    "work_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-mk-smoke-p0-real-20260921-203830",
+    "evidence_dir":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\mk-smoke-p0-real-20260921-203830",
+    "ok":  true,
+    "exit_code":  0,
+    "port":  16217,
+    "pid":  33392,
+    "api_version":  "0.7",
+    "build_id":  "fc8251d42aa192715fa9f3208585802fa87d88ef"
+}

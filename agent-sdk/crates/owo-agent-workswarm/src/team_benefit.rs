@@ -10,6 +10,7 @@
 //! - 成功率提高 ≥ **5 个百分点**（multi.success_rate − single.success_rate ≥ 0.05）；
 //! - 或 盲评质量提高 ≥ **10%**（multi.quality ≥ single.quality × 1.10）；
 //! - 或 墙钟耗时降低 ≥ **30%**（multi.mean_wall_ms ≤ single.mean_wall_ms × 0.70）。
+//!
 //! 任一命中即 `eligible = true`。
 //!
 //! 保守性保证：

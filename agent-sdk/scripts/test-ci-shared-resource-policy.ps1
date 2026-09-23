@@ -158,6 +158,21 @@ $resKeys = if ($sum.resources) { ($sum.resources.PSObject.Properties.Name -join 
 Add-Result 'summary.resources 必须带构建卷余量（盘满导致的失败要能被事后归因）' `
     ($null -ne $sum.resources.disk_at_write) "keys=$resKeys"
 
+# ---- P0：分片墙钟硬超时（mk-tests-sharded 依赖的执行器路径） --------------------------
+# mk-tests-sharded 把 -ShardTimeoutMin 落成 Invoke-CiCargo -TimeoutSec；这里直接验证
+# 底层 Invoke-CiLoggedCommand 的超时确实：① 到时返回 124；② 杀掉整棵进程树。
+# 用一个 60s 睡眠进程 + 3s 超时做离线负例，秒级完成，不需要 cargo。
+$timeoutCode = 0
+try {
+    Invoke-CiLoggedCommand -Exe 'powershell' -Arguments @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60') `
+        -TimeoutSec 3 -HeartbeatSec 1 -Label 'timeout-selftest' | Out-Null
+    $timeoutCode = $global:LASTEXITCODE
+} catch { $timeoutCode = -1 }
+Add-Result '超时门：墙钟超时返回 124（不无限等）' ($timeoutCode -eq 124) "exit=$timeoutCode"
+$sleepLeft = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'Start-Sleep -Seconds 60' }).Count
+Add-Result '超时门：进程树被 taskkill /T 终止（无残留睡眠进程）' ($sleepLeft -eq 0) "残留睡眠进程=$sleepLeft"
+
 $fail = @($results | Where-Object { -not $_.ok })
 Write-Host ("[selftest] {0}/{1} 通过" -f (@($results).Count - $fail.Count), @($results).Count)
 if ($fail.Count -gt 0) { exit 1 }

@@ -1,0 +1,70 @@
+{
+    "present":  true,
+    "count":  5,
+    "segments":  [
+                     {
+                         "key":  "backend",
+                         "tag":  "BUTTON",
+                         "value":  "检查中",
+                         "tone":  "muted",
+                         "target":  "settings",
+                         "title":  "后台：检查中（核心服务状态 · 点击进入设置与诊断）",
+                         "aria":  "后台：检查中（核心服务状态 · 点击进入设置与诊断）",
+                         "width":  80,
+                         "height":  24,
+                         "focusable":  true
+                     },
+                     {
+                         "key":  "workspace",
+                         "tag":  "BUTTON",
+                         "value":  "project",
+                         "tone":  "ok",
+                         "target":  "projects",
+                         "title":  "工作区：project（…\\r4-ui\\project · 当前项目与读写范围 · 点击进入工作区）",
+                         "aria":  "工作区：project（…\\r4-ui\\project · 当前项目与读写范围 · 点击进入工作区）",
+                         "width":  95,
+                         "height":  24,
+                         "focusable":  true
+                     },
+                     {
+                         "key":  "model",
+                         "tag":  "BUTTON",
+                         "value":  "环境变量凭据 · 内置端点",
+                         "tone":  "ok",
+                         "target":  "settings",
+                         "title":  "模型：环境变量凭据 · 内置端点（未显式选择提供商：core 正在用 OPENAI_API_KEY + 内置云端端点工作，可在设置里明确选择 · 提供商与模型 · 点击进入设置）",
+                         "aria":  "模型：环境变量凭据 · 内置端点（未显式选择提供商：core 正在用 OPENAI_API_KEY + 内置云端端点工作，可在设置里明确选择 · 提供商与模型 · 点击进入设置）",
+                         "width":  167,
+                         "height":  24,
+                         "focusable":  true
+                     },
+                     {
+                         "key":  "permission",
+                         "tag":  "BUTTON",
+                         "value":  "点按查看",
+                         "tone":  "muted",
+                         "target":  "permissions",
+                         "title":  "权限：点按查看（权限中心会给出实际范围与撤销入口 · 权限档位与待审批 · 点击进入权限中心）",
+                         "aria":  "权限：点按查看（权限中心会给出实际范围与撤销入口 · 权限档位与待审批 · 点击进入权限中心）",
+                         "width":  91,
+                         "height":  24,
+                         "focusable":  true
+                     },
+                     {
+                         "key":  "task",
+                         "tag":  "BUTTON",
+                         "value":  "空闲",
+                         "tone":  "muted",
+                         "target":  "chat",
+                         "title":  "当前任务：空闲（任务进展 · 点击进入会话）",
+                         "aria":  "当前任务：空闲（任务进展 · 点击进入会话）",
+                         "width":  91,
+                         "height":  24,
+                         "focusable":  true
+                     }
+                 ],
+    "barRight":  962,
+    "barHeight":  39,
+    "innerWidth":  1280,
+    "bodyClass":  "has-global-status-bar route-chat"
+}

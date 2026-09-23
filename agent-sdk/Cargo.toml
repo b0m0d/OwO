@@ -44,6 +44,9 @@ members = [
     # devtools/product-eval 的依赖保持为零，避免 crate 环。
     "crates/owo-agent-eval-facade",
     "crates/owo-agent-server",
+    # 唯一共享客户端（P1，指南 §7.1）：discovery/auth/http/sse/sessions/turns/
+    # approvals/diagnostics。**只依赖 protocol**，禁止依赖 core/server/sqlite/mcp。
+    "crates/owo-agent-client",
     "crates/owo-agent-cli",
     "crates/owo-build-info",
     "crates/owo-sim",
@@ -109,4 +112,5 @@ owo-agent-workflow = { path = "crates/owo-agent-workflow" }
 owo-agent-core = { path = "crates/owo-agent-core" }
 owo-agent-eval-facade = { path = "crates/owo-agent-eval-facade" }
 owo-agent-server = { path = "crates/owo-agent-server" }
+owo-agent-client = { path = "crates/owo-agent-client" }
 owo-build-info = { path = "crates/owo-build-info" }

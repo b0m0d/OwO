@@ -5,7 +5,7 @@
 //!    `spec`（人写的）、`effective_spec`（投影补全的）与 `dimensions`（渲染口径）；
 //! 2. 结构化配置**只收紧不放宽**，且完全访问必须"范围 + 时长 + 风险"三要素齐；
 //! 3. 撤销要能级联（单条 / 按工具 / 按工作区），且"工作区长期"必须真的落盘。
-use owo_agent_core::permissions::{Level, PermissionRequest, Policy};
+use owo_agent_core::permissions::{Decision, Level, PermissionRequest, Policy};
 use owo_agent_core::sqlite_store::SqliteSessionStore;
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::Agent;
@@ -142,6 +142,103 @@ async fn overview_expands_dimensions_server_side() {
         "审批动作词表由服务端下发，前后端共用一张表"
     );
     assert!(body["full_access"]["risk_notes"].as_array().unwrap().len() >= 4);
+}
+
+#[tokio::test]
+async fn approval_actions_apply_grant_scope_and_keep_inject_one_shot() {
+    let (state, temp) = test_state().await;
+    for (scope, allow, expected_grant_scope) in [
+        (Some("once"), true, None),
+        (Some("task"), true, Some("task")),
+        (Some("workspace"), true, Some("workspace")),
+        (None, false, None),
+    ] {
+        let request = PermissionRequest::new(
+            "write_file",
+            json!({ "path": format!("{scope:?}.txt") }),
+            Level::Write,
+            "契约测试",
+        );
+        let request_id = request.request_id.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        state
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .insert(request_id.clone(), (sender, request));
+        state
+            .pending_approval_sessions
+            .lock()
+            .unwrap()
+            .insert(request_id.clone(), "session-p3".to_string());
+
+        let body = if allow {
+            json!({ "allow": true, "scope": scope })
+        } else {
+            json!({ "allow": false })
+        };
+        let (status, response) = send_json(
+            &state,
+            "POST",
+            &format!("/session/session-p3/permission/{request_id}"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, 200, "审批响应应成功：{response}");
+        assert_eq!(
+            receiver.await.unwrap(),
+            if allow {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            }
+        );
+        let grants = state.grants.list();
+        match expected_grant_scope {
+            Some(expected) => assert!(
+                grants
+                    .iter()
+                    .any(|grant| grant.scope.as_deref() == Some(expected)),
+                "{expected} 选择必须生成对应 Grant"
+            ),
+            None => assert_eq!(
+                grants.len(),
+                if scope == Some("once") { 0 } else { 2 },
+                "一次性允许或拒绝不得新增长期授权"
+            ),
+        }
+    }
+    assert!(temp.path().join("grants.json").exists());
+
+    let request = PermissionRequest::new(
+        "desktop_key",
+        json!({ "key": "enter" }),
+        Level::Inject,
+        "高风险注入动作",
+    );
+    let request_id = request.request_id.clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    state
+        .pending_approvals
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), (sender, request));
+    state
+        .pending_approval_sessions
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), "session-p3".to_string());
+    let before = state.grants.list().len();
+    let (status, response) = send_json(
+        &state,
+        "POST",
+        &format!("/session/session-p3/permission/{request_id}"),
+        Some(json!({ "allow": true, "scope": "workspace" })),
+    )
+    .await;
+    assert_eq!(status, 200, "单次审批可放行但不得记为 Grant：{response}");
+    assert_eq!(receiver.await.unwrap(), Decision::Allow);
+    assert_eq!(state.grants.list().len(), before, "Inject 不得生成持久授权");
 }
 
 #[tokio::test]

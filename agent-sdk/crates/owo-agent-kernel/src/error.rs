@@ -10,6 +10,8 @@ pub enum AgentError {
     Gateway(String),
     #[error("session error: {0}")]
     Session(String),
+    #[error("revert conflict: current files differ from the recorded write: {paths:?}")]
+    RevertConflict { paths: Vec<String> },
     #[error("tool error: {0}")]
     Tool(String),
     #[error("agent aborted by user")]

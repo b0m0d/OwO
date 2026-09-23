@@ -21,7 +21,10 @@ param(
     [int]$RetrySleepSec = 45,
     # 单个分片的墙钟上限（分钟）。M15 实测过一次"心跳存活但 1h43m 零输出"的卡死：
     # 心跳只能证明门禁进程活着，不能证明**测试进程**还活着，所以必须有硬超时。
-    # 超时（exit 124）与门禁拒绝（exit 137）一样按"失败尝试"处理并重试。
+    # P0 修复：本参数以前是"虚假参数"（声明了却从未传给 cargo 执行器）。现在它真实
+    # 落成 Invoke-CiCargo -TimeoutSec：超时由外部监督线程触发 `taskkill /PID <cargo> /T /F`
+    # 终止**整棵进程树**（cargo→rustc→link→测试可执行文件）并保留日志，返回 124。
+    # 超时（124）与门禁拒绝（137）一样按"失败尝试"处理并重试，绝不无限等。
     [int]$ShardTimeoutMin = 20,
     # 分片用的门禁档位：strict（-j 1，且要求磁盘 ≥20 GB）或 normal（-j 2，磁盘 ≥6 GB）。
     # 两种档位下都显式传 `-j 1`，所以并发上限始终是 1；档位只影响**磁盘门阈值**。
@@ -89,22 +92,21 @@ foreach ($shard in $shards) {
     $log = Join-Path $logDir ("mk-{0}-{1}.log" -f $label, $stamp)
 
     $code = 1
+    $reason = 'failed'
     for ($attempt = 1; $attempt -le $MaxRetriesPerShard; $attempt++) {
         [void](Wait-ForRoom $shard.Name)
-        $attemptLog = $log
+        # P0：分片墙钟硬超时（唯一已实现的可靠路径）。
+        #   * 为什么不用 Start-Job 包超时：M15 实测 Start-Job 在本机受限环境下会因
+        #     命名管道作业传输静默挂住——每个分片"零输出超时"，而同一测试单跑 3 秒通过。
+        #     那是工具层故障，不是产品缺陷。
+        #   * 因此超时交给 ci-shared 的 Invoke-CiLoggedCommand：它在本进程内 500ms 轮询，
+        #     到时 `taskkill /T /F` 杀整棵树（cargo/rustc/link/测试进程），日志保留，
+        #     退出码 124；运行中内存越线则 137。心跳只证明门禁进程活着，超时才能证明
+        #     测试进程是否已经卡死——两者互补，不可互相替代。
+        #   人工排查卡死时看：`Get-Process cargo,rustc,link` 与分片日志大小；
+        #     日志为空多为 cargo 没起来（并行 lane 抢 target/ 锁），否则是测试自身阻塞。
         try {
-            # M15 教训：一次分片曾"心跳存活但 1h43m 零输出"——心跳只能证明门禁还活着，
-            # 不能证明**测试进程**还活着。因此每个分片必须有墙钟上限：
-            # 超时即杀掉整个进程树、记为一次失败尝试并重试，绝不无限等。
-            # 【重要，M15 实测结论】**不要**用 Start-Job 给分片包超时。
-            #   症状：包装后每个分片都"零输出超时"（日志文件不存在、系统里没有任何
-            #         cargo/rustc/link 进程），而**同一个测试直接单跑 3 秒通过**。
-            #         Windows PowerShell 5.1 的 Start-Job 依赖命名管道做作业传输，
-            #         在本机受限环境下会静默挂住 —— 这属于工具层故障，不是产品缺陷。
-            #   因此保持**直接调用**（唯一被验证过的路径）。人工排查卡死时用下面这段：
-            #     $busy = Get-Process cargo,rustc,link; $sz = (Get-Item $log).Length
-            #     $sz -le 0 → cargo 没起来（多为并行 lane 抢 target/ 锁）；否则是测试自身阻塞
-            $code = Invoke-CiCargo -Arguments $cargoArgs -Cwd $root -Label $label -PolicyMode $PolicyMode -LogFile $log -HeartbeatSec 60 -PassThru
+            $code = Invoke-CiCargo -Arguments $cargoArgs -Cwd $root -Label $label -PolicyMode $PolicyMode -LogFile $log -HeartbeatSec 60 -TimeoutSec ($ShardTimeoutMin * 60) -PassThru
         } catch {
             # 门禁在**启动前**拒绝时是抛异常（不是返回 137）；磁盘门与内存门都走这条。
             # 只把门禁拒绝当作"等待后重试"，其它异常原样抛出——否则真实失败会被吞成等待。
@@ -116,19 +118,37 @@ foreach ($shard in $shards) {
             }
         }
         if ($code -eq 137 -or $code -eq 124) {
+            $reason = if ($code -eq 137) { 'resource_limited' } else { 'timeout' }
             Write-Host ("[shard] {0} exit={1}（137=资源门 / 124=卡死超时），第 {2} 轮；等待后重试" -f $shard.Name, $code, $attempt)
             Start-Sleep -Seconds $RetrySleepSec
             continue
         }
+        $reason = if ($code -eq 0) { 'passed' } else { 'failed' }
         break
     }
-    Write-Host ("[shard] {0,-34} exit={1}" -f $shard.Name, $code)
-    $results += [pscustomobject]@{ shard = $shard.Name; exit = $code; log = $log }
+    Write-Host ("[shard] {0,-34} exit={1} reason={2}" -f $shard.Name, $code, $reason)
+    $results += [pscustomobject]@{ shard = $shard.Name; exit = $code; reason = $reason; log = $log }
 }
 
 "--- 汇总（{0}）" -f $Package
-$results | ForEach-Object { "  {0,-34} exit={1}" -f $_.shard, $_.exit }
+$results | ForEach-Object { "  {0,-34} exit={1} reason={2}" -f $_.shard, $_.exit, $_.reason }
 $failed = @($results | Where-Object { $_.exit -ne 0 })
 "  分片总数={0} 失败={1}" -f $results.Count, $failed.Count
+# §9.3：报告真实退出码 + 失败原因（资源门/超时/测试失败可区分），不隐藏跳过项。
+$summary = [ordered]@{
+    schema      = 'owo-sharded-tests/1'
+    package     = $Package
+    tag         = $Tag
+    finished_at = (Get-Date).ToUniversalTime().ToString('o')
+    policy_mode = $PolicyMode
+    timeout_min = $ShardTimeoutMin
+    total       = $results.Count
+    failed      = $failed.Count
+    ok          = ($failed.Count -eq 0)
+    shards      = @($results | ForEach-Object { [ordered]@{ shard = $_.shard; exit = $_.exit; reason = $_.reason; log = $_.log } })
+}
+$summaryPath = Join-Path $logDir ("sharded-summary-{0}-{1}.json" -f $Package, $stamp)
+[System.IO.File]::WriteAllText($summaryPath, (ConvertTo-Json -InputObject $summary -Depth 5) + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+"  报告={0}" -f $summaryPath
 if ($failed.Count -gt 0) { exit 1 }
 exit 0

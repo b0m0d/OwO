@@ -744,6 +744,12 @@ details > *:not(summary) { margin-top: 8px; }
 }
 .settings-card span, .settings-card small { display: block; color: var(--muted); font-size: 11px; }
 .settings-card strong { display: block; margin: 5px 0 2px; color: var(--text); }
+.tool-capabilities-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 10px; margin: 10px 0 6px; }
+.tool-capability-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2, transparent); color: var(--text); cursor: pointer; }
+.tool-capability-card > span { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.tool-capability-card input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.tool-capability-card small { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.tool-capability-status { margin: 4px 0 14px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .json-fallback { display: none; }
 
 body.settings-open #sidebar {
@@ -752,16 +758,30 @@ body.settings-open #sidebar {
   padding: 38px clamp(30px, 7vw, 116px);
   background: var(--surface);
 }
-body.settings-open #sidebar section:not(:last-child),
+/* R10（2026-09-22 UI 整理）：`#settingsSection` 与 `#toolsPanel` 已可搬进路由内容区，
+   侧栏里只剩工作区 / 任务 / 技能 / 子代理 / 底部设置入口。
+   ⚠ `#settingsSection` 必须显式豁免：在模型页它**仍挂在侧栏里**（模型页只借用它、
+   不搬走），而它本身就是 `#sidebar > section`。实测：这条 `!important` 规则特异性
+   高于 `body.route-model #settingsSection { display:block !important }`，于是模型页
+   一片空白（present=true 但 display=none、0x0）。 */
+body.settings-open #sidebar > section:not(#settingsSection),
+body.settings-open #sidebar .owo-sidebar-foot,
 body.settings-open #sidebar .tools-toggle { display: none !important; }
-body.settings-open #sidebar section:last-child { display: block; max-width: 980px; margin: auto; }
 body.settings-open main, body.settings-open #right, body.settings-open .resize-handle { display: none; }
 body.settings-open #sidebar h2 { display: none; }
-body.settings-open #sidebar section:last-child > .inline,
-body.settings-open #sidebar section:last-child > h3,
-body.settings-open #sidebar section:last-child > #serverStatusPanel,
-body.settings-open #sidebar section:last-child > #storageResult,
-body.settings-open #sidebar section:last-child > a { margin-top: 14px; }
+/* ⚠ 选择器不得带 `#sidebar` 祖先：该节点是**可搬动的**（侧栏 ↔ 路由内容区），
+   搬进 #routeContent 后带 #sidebar 的组合选择器就不再匹配，设置/模型页于是
+   什么都看不见（实测：present=true 但 visible=false、w/h 全 0）。按"状态类 +
+   节点"匹配，与它当前挂在谁下面无关。 */
+body.settings-open #settingsSection { display: block; width: 100%; max-width: 980px; margin: auto; }
+/* 设置/模型页把内容区当画布：主轴方向与内边距由这里统一，避免两块布局抢位置。 */
+body.settings-open #routeView { display: flex; flex-direction: column; min-height: 0; }
+body.settings-open #routeContent { display: block; }
+body.settings-open #settingsSection > .inline,
+body.settings-open #settingsSection > h3,
+body.settings-open #settingsSection > #serverStatusPanel,
+body.settings-open #settingsSection > #storageResult,
+body.settings-open #settingsSection > a { margin-top: 14px; }
 
 body.tools-open #sidebar {
   grid-column: 2/7;
@@ -775,6 +795,7 @@ body.tools-open #sidebar {
 }
 body.tools-open #sidebar > section:first-child,
 body.tools-open #sidebar > section:nth-child(2),
+body.tools-open #sidebar .owo-sidebar-foot,
 body.tools-open #sidebar .tools-toggle { display: none !important; }
 body.tools-open #toolsPanel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; grid-column: 1/-1; }
 body.tools-open #toolsPanel section {
@@ -1260,8 +1281,44 @@ body.tools-open #sidebar h2 { color: var(--text); font-size: 13px; letter-spacin
 .setup-card button { margin-top: 12px; }
 .setup-message { font-size: 13px; }
 .setup-message.ok { color: var(--ok, #2e8b57); }
-body:not(.route-chat) #sidebar, body:not(.route-chat) #right, body:not(.route-chat) #sidebarResize, body:not(.route-chat) #rightResize { display: none; }
-body:not(.route-chat) main { grid-column: 2 / 7; }
+/* R12（2026-09-22 用户反馈"模型页/设置页空白"的真根因）：这条规则原本表达
+   "非聊天页把侧栏收起来，主区铺满"。但设置/模型页的内容节点 `#settingsSection`
+   仍然**挂在侧栏里**（模型页只借用它、不搬走），于是"隐藏侧栏"把整页内容一起
+   藏了——实测 computed：aside#sidebar display:none、#settingsSection display:none，
+   而它自己的规则明明是 display:block !important（祖先 none 优先于后代 !important）。
+   正确语义：非聊天页把侧栏当**页面容器**铺满，而不是让它消失。
+   模型/设置页因此变成"左侧导轨 + 内容"，不再依赖 main（main 里只剩 routeView，
+   而 routeView 在模型页是空的）。 */
+body:not(.route-chat) #sidebar {
+  display: block;
+  grid-column: 1 / -1;
+  width: 100%;
+  max-width: none;
+  padding: 18px clamp(22px, 6vw, 96px) 40px;
+  overflow-y: auto;
+}
+body:not(.route-chat) #right,
+body:not(.route-chat) #sidebarResize,
+body:not(.route-chat) #rightResize { display: none; }
+/* 模型页：内容容器就是侧栏（设置节点挂在它下面），main 会只剩空壳 → 收起。 */
+body.route-model main { display: none; }
+body.route-model #sidebar {
+  display: block;
+  grid-column: 1 / -1;
+  width: 100%;
+  max-width: none;
+  padding: 18px clamp(22px, 6vw, 96px) 40px;
+  overflow-y: auto;
+}
+/* 设置页：内容在 routeContent 里（含子页签），所以侧栏恢复窄栏、main 接管剩余列。
+   ⚠ 反过来（两者都 grid-column:1/-1）会让 main 的高度算成 0，设置页同样空白——
+   实测：main display:none 时 #routeContent 量到 0x0。 */
+body.settings-open:not(.route-model) #sidebar {
+  display: block;
+  grid-column: 1 / 2;
+  overflow-y: auto;
+}
+body.settings-open:not(.route-model) main { display: flex; grid-column: 2 / -1; }
 body:not(.route-chat) main > #contextBar, body:not(.route-chat) main > #approvalBar, body:not(.route-chat) main > #messages, body:not(.route-chat) main > #chatForm { display: none; }
 body:not(.route-chat) #settingsSection { display: block !important; max-width: 980px; margin: 0 auto; }
 body:not(.route-chat) #settingsSection h2 { display: none; }
@@ -1333,4 +1390,302 @@ body.route-chat main { grid-column: 4; }
 @media (max-width: 1280px) {
   .owo-perm-table { font-size: 11px; }
   .owo-perm-kv span { min-width: 72px; }
+}
+
+/* ===== R10（2026-09-22）模型配置卡 + 侧栏整理 =====
+   用户反馈两个具体问题：① 左侧工作区"一堆参数、格式错乱"；② "找不到模型切换、
+   自定义模型地址和名称"。前者靠把 10 个工具/开发表单区移入设置页子页解决，
+   后者靠把模型配置提到一级导航（左栏「模型」）并把 base_url / 模型名变成
+   常显字段解决。以下样式与既有设置卡（.settings-card/.settings-grid）同族，
+   沿用同一组 CSS 变量，不再引入第二套视觉语言。 */
+
+.owo-sidebar-skills,
+.owo-sidebar-subagent { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 6px; }
+.owo-skill-list { max-height: 200px; overflow-y: auto; }
+
+.owo-sidebar-foot {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.owo-sidebar-settings {
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--raised);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.owo-sidebar-settings:hover { border-color: var(--accent); color: var(--accent); }
+
+.model-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  padding: 18px;
+  margin-bottom: 16px;
+}
+.model-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.model-card-head strong { display: block; font-size: 17px; color: var(--text); }
+.model-card-head .sub { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+.model-card-idle { opacity: 0.72; }
+
+.model-presets { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.model-preset {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.model-preset:hover { border-color: var(--accent); color: var(--accent); }
+
+.model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+.model-grid .field-label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.model-grid input,
+.model-grid select { width: 100%; min-width: 0; }
+
+.model-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.model-hint { font-size: 12px; color: var(--muted); }
+.model-hint.ok { color: var(--green); }
+.model-hint.bad { color: var(--yellow); }
+
+/* 模型页：只显示模型相关块，其余设置块留给「设置」页，避免又一次参数堆砌。 */
+body.route-model #settingsSection > h2,
+body.route-model #settingsSection > h3,
+body.route-model #settingsSection > #settingsPreview,
+body.route-model #settingsSection > #settingsEditor,
+body.route-model #settingsSection > #settingsSave,
+body.route-model #settingsSection > #serverStatusPanel,
+body.route-model #settingsSection > #diagnosticsLedger,
+body.route-model #settingsSection > #storageResult,
+body.route-model #settingsSection > #openapiLink,
+body.route-model #settingsSection > a { display: none !important; }
+body.route-model .tool-capabilities-grid,
+body.route-model #toolCapabilityStatus { display: none !important; }
+body.route-model .settings-tabs { display: none !important; }
+
+/* R10：引导页提供商卡的字段说明与"未配置"态弱化（地址/模型名默认可见）。 */
+.setup-fields-muted input { opacity: 0.55; }
+.setup-card .model-presets { margin: 4px 0 10px; }
+
+/* R11：模型配置卡里的密钥行与配置文件路径提示。 */
+.key-row { display: flex; gap: 6px; align-items: center; }
+.key-row input { flex: 1 1 auto; min-width: 0; }
+.key-toggle {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.key-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.model-file-hint { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.model-file-hint code {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--raised);
+  font-size: 11px;
+}
+.link-button {
+  margin-left: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* R11（2026-09-22 用户截图反馈）：引导页"选择模型提供商"的三个单选按钮排版错乱。
+   根因：`.setup-card label { display:block }` 与 `.setup-row label { display:inline-flex }`
+   同特异性、靠文件顺序决胜；而 flex 行没有 nowrap，中文标签被压缩到逐字换行
+   （截图里"稍后配置"竖着排）。这里显式用分段控件语义重写：等宽、居中、不换行、
+   选中态有明确视觉。 */
+.setup-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: stretch;
+}
+.setup-card .setup-row label,
+.setup-row label {
+  display: inline-flex;
+  flex: 1 1 150px;
+  min-width: 0;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.setup-row label:hover { border-color: var(--accent); }
+.setup-row label:has(input[type="radio"]:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.setup-row label input[type="radio"] { flex: 0 0 auto; margin: 0; }
+.setup-row label:nth-of-type(1) { margin-top: 0; }
+/* 未选提供方时两个字段仍可见但弱化（不是隐藏——隐藏会让用户找不到自定义项）。 */
+.setup-fields-muted label,
+.setup-fields-muted input { opacity: 0.55; }
+
+/* R10/R11：设置与模型页把 #settingsSection 搬进 #routeContent（DOM 搬动），
+   而旧的显示规则只覆盖了"还在侧栏里"的分支（body.settings-open #sidebar ...）。
+   搬到内容区之后必须显式给显示规则，否则整块内容不可见（实测现象：模型页/设置页空白）。
+
+   ⚠ 特异性必须压过历史遗留的 `body.settings-open #sidebar > section { … !important }`
+   （ID 数 1）：那条规则本意是"设置面展开时收起侧栏里的普通区块"，但 #settingsSection
+   本身就是 `#sidebar > section`，于是被一起藏掉。实测两种写法都赢不了它：
+     - `body:not(.route-chat) #settingsSection`（ID 数 1、更早出现）→ 输
+     - `body.route-model #settingsSection`（ID 数 1、!important）→ 输
+   因此这里按**实际 DOM 位置 + 同层语境**写，特异性 (1 id, 2 class)：(1 id, 0 class)
+   和 (1 id, 1 class) 的写法实测都被压过（浏览器 CSS.getMatchedStylesForNode 的
+   matchedCSSRules 顺序即权威证据）。 */
+body.settings-open #sidebar > section#settingsSection,
+body.route-model #sidebar > section#settingsSection,
+body.route-model #routeView #routeContent > #settingsSection,
+body:not(.route-chat) #routeView #routeContent > #settingsSection {
+  display: block !important;
+  width: 100%;
+  max-width: 980px;
+  margin: 0 auto;
+}
+body.route-model #routeView,
+body.route-model #routeContent,
+body.settings-open.route-model #routeContent { display: flex; flex-direction: column; }
+
+/* ===== R12（2026-09-22 用户截图反馈）会话卡片：常显按钮墙 → codex 风格 "…" 弹层 =====
+   原状态：每张卡片上 7 个按钮（继续/重命名/置顶/归档/fork/回退/重做）常显，
+   窄侧栏里中文被压成逐字竖排（截图"重命名"竖着排）。现在卡片主体即"打开"，
+   其余低频操作收进 ⋯ 弹层。这里的关键是**不允许任何一处再断字**。 */
+.owo-session-card { position: relative; }
+.owo-session-card .owo-session-body { position: relative; }
+.owo-session-head { display: flex; align-items: flex-start; gap: 6px; }
+.owo-session-text { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; }
+.owo-session-title {
+  display: block;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.owo-session-meta {
+  display: block;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
+.owo-session-more {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  line-height: 1;
+  font-size: 16px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.owo-session-card:hover .owo-session-more { border-color: var(--border); background: var(--raised); color: var(--text); }
+.owo-session-more[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); background: var(--raised); }
+.owo-session-menu {
+  position: absolute;
+  top: 30px;
+  right: 0;
+  z-index: 30;
+  min-width: 132px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow, 0 8px 24px rgba(0, 0, 0, .18));
+}
+.owo-session-menu[hidden] { display: none !important; }
+.owo-session-menu button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;   /* 菜单项绝不换行/断字 */
+  cursor: pointer;
+}
+.owo-session-menu button:hover { background: var(--raised); color: var(--accent); }
+
+/* R12：全局状态条搬到 body 直属后，非聊天页把它收起（设置/模型页不需要它），
+   聊天页恢复"居中显示"（原先它靠 main 的网格定位，脱离后需要显式声明）。 */
+body:not(.route-chat) #globalStatusBar { display: none; }
+body.route-chat #globalStatusBar {
+  grid-column: 2 / 7;
+  margin: 8px 0 0;
+  padding: 0 12px;
+}
+/* R12：设置页的左栏与路由内容区对齐（避免 280px 窄栏旁留一条空带）。
+   设置页内容本身在 #routeContent 里，侧栏只提供"返回聊天"的导航。 */
+body.settings-open:not(.route-model) #sidebar { padding: 10px 10px 18px; }
+
+/* R13：模型可调参数（上下文窗口/输出上限/温度/超时）与"从文件重载"。 */
+.model-advanced {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2, var(--raised));
+}
+.model-advanced > summary { cursor: pointer; color: var(--text); font-size: 13px; }
+.model-advanced .model-grid { margin-top: 10px; }
+.model-advanced .hint { margin: 8px 0 0; font-size: 11px; color: var(--muted); }
+.model-advanced code {
+  padding: 1px 5px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--surface); font-size: 11px;
 }

@@ -1,29 +1,25 @@
 //! OpenCode 式全屏 TUI（ratatui + crossterm）。
+//!
+//! P1（指南 §8 P1 第 4 条）：**状态完全来自 Daemon 事件流**——本模块不再
+//! `Agent::new` / `SqliteSessionStore::open` / `connect_mcp_clients`，不持有第二套
+//! Session/Agent/SQLite/MCP。会话、回合、权限、工具、审计全部由 Daemon 持有，
+//! TUI 只是 `AgentClient` 的事件消费者（由 `tests/turn_path_guard_tests.rs` 守卫）。
 
-use crate::support::{
-    apply_disabled_skills, build_agent_with_mcp, builtin_skills_root, connect_mcp_clients,
-    display_path, ensure_data_root, load_mcp_configs, resolve_model, save_mcp_configs,
-    AGENTS_TEMPLATE,
-};
-use async_trait::async_trait;
+use crate::support::{display_path, ensure_daemon_client, ensure_data_root, AGENTS_TEMPLATE};
+use crate::ui_output::parse_approval_response;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
-use owo_agent_core::session::{Session, SessionStore};
-use owo_agent_core::{
-    discover_plugins, export_html, export_markdown, install_builtin_packages, list_traces,
-    load_trace, save_trace, Agent, McpClient, McpServerConfig, PluginManifest, Settings,
-    SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent, TurnOutcome,
-};
+use owo_agent_client::AgentClient;
+use owo_agent_protocol::{FileDiff, PermissionResponse, SseEvent};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(clap::Args)]
@@ -47,53 +43,18 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let workspace = args.workspace.canonicalize()?;
-    let settings = Settings::load(&workspace);
-    crate::support::apply_egress_setting(&settings);
-    let model = resolve_model(args.model, settings.model.as_deref());
+    let root = ensure_data_root(args.data_dir.clone(), &workspace);
+    let client = runtime.block_on(ensure_daemon_client(&root, &workspace))?;
+    let settings = load_tui_settings(&root, &workspace);
     let read_only = args.agent == "plan" || settings.read_only;
-    let root = ensure_data_root(args.data_dir, &workspace);
-    let store = SqliteSessionStore::open(&root.join("index.db"))?;
-    let mut mcp_configs = load_mcp_configs(&root);
-    for server in settings.mcp_servers.clone() {
-        if !mcp_configs.iter().any(|config| config.name == server.name) {
-            mcp_configs.push(server);
-        }
-    }
-    let discovered_plugins = discover_plugins(&workspace, &root);
-    let plugin_state = owo_agent_core::PluginStateStore::new(Some(root.join("plugin_state.json")));
-    let enabled_plugins =
-        owo_agent_core::plugin::discover_enabled_plugins(&workspace, &root, &plugin_state);
-    crate::support::merge_plugin_mcp(&enabled_plugins, &mut mcp_configs);
-    let plugins: Vec<PluginManifest> = discovered_plugins
-        .into_iter()
-        .map(|(_, manifest)| manifest)
-        .collect();
-    let mcp_clients = runtime.block_on(connect_mcp_clients(&mcp_configs));
-    let _ = install_builtin_packages(&builtin_skills_root(), &root);
-    let mut skills = SkillRegistry::discover(&workspace, &root);
-    apply_disabled_skills(&mut skills, &settings);
-    let agent = Arc::new(build_agent_with_mcp(
-        &workspace,
-        &model,
-        read_only,
-        &mcp_clients,
-        &skills,
-        &settings.deny_commands,
-    )?);
     let mut app = TuiApp::new(
+        client,
         workspace,
-        model,
+        args.model.clone(),
         read_only,
         args.no_approval,
-        root,
-        store,
-        agent,
-        mcp_configs,
-        mcp_clients,
-        skills,
-        settings,
-        plugins,
-        0,
+        settings.theme.as_deref(),
+        &settings.keybinds,
     );
     let terminal = ratatui::init();
     let result = app.run(&runtime, terminal);
@@ -102,53 +63,72 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-type PendingApprovals = Arc<Mutex<HashMap<String, Sender<Decision>>>>;
-
-struct TuiApprover {
-    pending: PendingApprovals,
+/// TUI 本地设置（只取主题/键位/只读，避免依赖 core `Settings`）。
+#[derive(Default, serde::Deserialize)]
+struct TuiSettings {
+    #[serde(default)]
+    theme: Option<String>,
+    #[serde(default)]
+    keybinds: HashMap<String, String>,
+    #[serde(default)]
+    read_only: bool,
 }
 
-#[async_trait]
-impl Approver for TuiApprover {
-    async fn decide(&self, request: &PermissionRequest) -> Decision {
-        let (tx, rx) = mpsc::channel();
-        if let Ok(mut map) = self.pending.lock() {
-            map.insert(request.request_id.clone(), tx);
+fn load_tui_settings(root: &Path, workspace: &Path) -> TuiSettings {
+    let mut settings = TuiSettings::default();
+    for path in [
+        root.join("settings.json"),
+        workspace.join(".owo").join("settings.json"),
+    ] {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<TuiSettings>(&text) else {
+            continue;
+        };
+        if parsed.theme.is_some() {
+            settings.theme = parsed.theme;
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(300);
-        loop {
-            if let Ok(decision) = rx.try_recv() {
-                return decision;
-            }
-            if std::time::Instant::now() >= deadline {
-                if let Ok(mut map) = self.pending.lock() {
-                    map.remove(&request.request_id);
-                }
-                return Decision::Deny;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        settings.keybinds.extend(parsed.keybinds);
+        settings.read_only |= parsed.read_only;
     }
+    settings
+}
+
+/// 待审批请求（来自 SSE `permission_request`）。
+struct ApprovalInfo {
+    tool: String,
+    reason: String,
+    level: String,
+}
+
+/// 回合结束摘要。
+struct TurnSummary {
+    steps: usize,
+    final_text: Option<String>,
+    diff_count: usize,
 }
 
 enum TuiMsg {
-    Event(TurnEvent),
-    Finished(Result<TurnOutcome, String>, Box<Session>),
-    SubagentFinished(Result<String, String>, bool),
+    Event(SseEvent),
+    Approval {
+        info: ApprovalInfo,
+        responder: tokio::sync::oneshot::Sender<PermissionResponse>,
+    },
+    Finished(Result<TurnSummary, String>),
 }
 
 struct TuiApp {
+    client: AgentClient,
     workspace: PathBuf,
-    model: String,
+    model: Option<String>,
     read_only: bool,
     no_approval: bool,
-    data_root: PathBuf,
-    store: SqliteSessionStore,
-    session: Option<Session>,
-    agent: Arc<Agent>,
-    abort: Arc<AtomicBool>,
-    pending: PendingApprovals,
-    pending_order: Vec<String>,
+    session_id: Option<String>,
+    approval: Option<(
+        ApprovalInfo,
+        tokio::sync::oneshot::Sender<PermissionResponse>,
+    )>,
     event_rx: Option<Receiver<TuiMsg>>,
     input: String,
     transcript: Vec<(String, Style)>,
@@ -159,47 +139,29 @@ struct TuiApp {
     running: bool,
     status: String,
     should_exit: bool,
-    mcp_configs: Vec<McpServerConfig>,
-    mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
-    skills: SkillRegistry,
-    settings: Settings,
-    plugins: Vec<PluginManifest>,
-    audit_flushed: usize,
+    abort: Arc<AtomicBool>,
     theme: Theme,
     keybinds: HashMap<String, KeyEvent>,
 }
 
 impl TuiApp {
-    #[allow(clippy::too_many_arguments)]
     fn new(
+        client: AgentClient,
         workspace: PathBuf,
-        model: String,
+        model: Option<String>,
         read_only: bool,
         no_approval: bool,
-        data_root: PathBuf,
-        store: SqliteSessionStore,
-        agent: Arc<Agent>,
-        mcp_configs: Vec<McpServerConfig>,
-        mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
-        skills: SkillRegistry,
-        settings: Settings,
-        plugins: Vec<PluginManifest>,
-        audit_flushed: usize,
+        theme_name: Option<&str>,
+        keybinds: &HashMap<String, String>,
     ) -> Self {
-        let theme = theme(settings.theme.as_deref());
-        let keybinds = build_keybinds(&settings.keybinds);
         Self {
+            client,
             workspace,
             model,
             read_only,
             no_approval,
-            data_root,
-            store,
-            session: None,
-            agent,
-            abort: Arc::new(AtomicBool::new(false)),
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            pending_order: Vec::new(),
+            session_id: None,
+            approval: None,
             event_rx: None,
             input: String::new(),
             transcript: vec![(
@@ -214,14 +176,9 @@ impl TuiApp {
             running: false,
             status: "就绪".to_string(),
             should_exit: false,
-            mcp_configs,
-            mcp_clients,
-            skills,
-            settings,
-            plugins,
-            audit_flushed,
-            theme,
-            keybinds,
+            abort: Arc::new(AtomicBool::new(false)),
+            theme: theme(theme_name),
+            keybinds: build_keybinds(keybinds),
         }
     }
 
@@ -240,7 +197,7 @@ impl TuiApp {
                 }
             }
             self.drain_events();
-            if self.running && self.pending_order.is_empty() {
+            if self.running && self.approval.is_none() {
                 self.status = "回合进行中（Ctrl+C 中止）".to_string();
             }
         }
@@ -249,14 +206,9 @@ impl TuiApp {
 
     fn shutdown(&mut self, runtime: &tokio::runtime::Runtime) {
         self.abort.store(true, Ordering::Relaxed);
-        if let Some(session) = &self.session {
-            let _ = self.store.save(session);
+        if let Some(id) = self.session_id.clone() {
+            let _ = runtime.block_on(self.client.cancel_turn(&id));
         }
-        runtime.block_on(async {
-            for (_, client) in &self.mcp_clients {
-                let _ = client.lock().await.shutdown().await;
-            }
-        });
     }
 
     fn draw(&self, frame: &mut Frame) {
@@ -271,6 +223,7 @@ impl TuiApp {
             ])
             .split(area);
 
+        let model_label = self.model.as_deref().unwrap_or("（默认）");
         let title = Line::from(vec![
             Span::styled(
                 " OwO Agent ",
@@ -285,7 +238,7 @@ impl TuiApp {
                 Style::default().fg(Color::DarkGray),
             ),
             Span::raw(" | "),
-            Span::styled(&self.model, Style::default().fg(Color::Blue)),
+            Span::styled(model_label, Style::default().fg(Color::Blue)),
             Span::raw(" | "),
             Span::styled(
                 if self.read_only { "plan" } else { "build" },
@@ -361,6 +314,14 @@ impl TuiApp {
             chunks[2],
         );
 
+        let status_text = if let Some((info, _)) = &self.approval {
+            format!(
+                "审批：{}（{}）{}——y 仅本次 / t 本任务 / w 工作区长期 / n 拒绝",
+                info.tool, info.level, info.reason
+            )
+        } else {
+            self.status.clone()
+        };
         let status_line = Line::from(vec![
             Span::styled(" Tab ", Style::default().fg(self.theme.accent)),
             Span::raw("模式 "),
@@ -368,7 +329,7 @@ impl TuiApp {
             Span::raw("中止/退出 "),
             Span::styled(" PgUp/PgDn ", Style::default().fg(self.theme.accent)),
             Span::raw("滚动 | "),
-            Span::styled(&self.status, Style::default().fg(Color::Yellow)),
+            Span::styled(status_text, Style::default().fg(Color::Yellow)),
         ]);
         frame.render_widget(Paragraph::new(status_line), chunks[3]);
     }
@@ -395,15 +356,23 @@ impl TuiApp {
         if key.kind != KeyEventKind::Press {
             return Ok(false);
         }
-        if self.running {
+        if self.approval.is_some() {
             match key.code {
-                KeyCode::Char('y' | 'Y') => self.respond_approval(true),
-                KeyCode::Char('n' | 'N') => self.respond_approval(false),
-                _ if self.matches("abort", &key) => {
-                    self.abort.store(true, Ordering::Relaxed);
-                    self.push_system("正在中止当前回合…".to_string(), yellow());
-                }
+                KeyCode::Char('y' | 'Y') => self.respond_approval("once"),
+                KeyCode::Char('t' | 'T') => self.respond_approval("task"),
+                KeyCode::Char('w' | 'W') => self.respond_approval("workspace"),
+                KeyCode::Char('n' | 'N') => self.respond_approval("deny"),
                 _ => {}
+            }
+            return Ok(false);
+        }
+        if self.running {
+            if self.matches("abort", &key) {
+                self.abort.store(true, Ordering::Relaxed);
+                if let Some(id) = self.session_id.clone() {
+                    let _ = runtime.block_on(self.client.cancel_turn(&id));
+                }
+                self.push_system("正在中止当前回合…".to_string(), yellow());
             }
             return Ok(false);
         }
@@ -461,12 +430,11 @@ impl TuiApp {
         if line.is_empty() {
             return Ok(());
         }
-        if let Some(query) = line.strip_prefix("@explore ") {
-            self.run_at_subagent(runtime, query, true)?;
-            return Ok(());
-        }
-        if let Some(task) = line.strip_prefix("@subagent ") {
-            self.run_at_subagent(runtime, task, false)?;
+        if line.starts_with("@explore ") || line.starts_with("@subagent ") {
+            self.push_system(
+                "子代理命令尚未迁移到 daemon 模式（用 --local 使用旧 REPL）".to_string(),
+                yellow(),
+            );
             return Ok(());
         }
         if let Some(command) = line.strip_prefix('/') {
@@ -477,300 +445,25 @@ impl TuiApp {
         Ok(())
     }
 
-    fn run_at_subagent(
-        &mut self,
-        runtime: &tokio::runtime::Runtime,
-        prompt: &str,
-        read_only: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.running {
-            self.push_system("当前已有任务运行中，请等待完成".to_string(), yellow());
-            return Ok(());
-        }
-        let workspace = self.workspace.clone();
-        let model = self.model.clone();
-        let agent = Arc::clone(&self.agent);
-        let prompt = prompt.to_string();
-        let (tx, rx) = mpsc::channel::<TuiMsg>();
-        self.event_rx = Some(rx);
-        self.running = true;
-        self.status = if read_only {
-            "只读探索进行中…".to_string()
-        } else {
-            "通用子代理进行中…".to_string()
-        };
-        runtime.spawn(async move {
-            let result = agent
-                .run_subagent(&workspace, &model, &prompt, read_only)
-                .await
-                .map_err(|error| error.to_string());
-            let _ = tx.send(TuiMsg::SubagentFinished(result, read_only));
-        });
-        Ok(())
-    }
-
-    fn start_turn(&mut self, runtime: &tokio::runtime::Runtime, prompt: &str) {
-        if self.session.is_none() {
-            match self.store.create(&self.workspace, &self.model, None) {
-                Ok(session) => {
-                    let id = session.id.clone();
-                    self.session = Some(session);
-                    self.push_system(format!("新会话：{id}"), green());
-                }
-                Err(error) => {
-                    self.push_system(format!("创建会话失败：{error}"), red());
-                    return;
-                }
-            }
-        }
-        let mut session = self.session.take().expect("session created");
-        self.abort.store(false, Ordering::Relaxed);
-        self.pending_order.clear();
-        self.scroll = 0;
-        self.running = true;
-        self.status = "调用模型…".to_string();
-        self.streaming.clear();
-        self.push_line(format!("▶ {prompt}"), cyan());
-
-        let agent = Arc::clone(&self.agent);
-        let abort = Arc::clone(&self.abort);
-        let pending = Arc::clone(&self.pending);
-        let (tx, rx) = mpsc::channel::<TuiMsg>();
-        self.event_rx = Some(rx);
-        let no_approval = self.no_approval;
-        let prompt_owned = prompt.to_string();
-        runtime.spawn(async move {
-            let approver = if no_approval {
-                Box::new(owo_agent_core::permissions::AutoApprover { allow: true })
-                    as Box<dyn Approver>
-            } else {
-                Box::new(TuiApprover { pending }) as Box<dyn Approver>
+    fn respond_approval(&mut self, action: &str) {
+        if let Some((info, responder)) = self.approval.take() {
+            let response = parse_approval_response(action);
+            let message = match response.scope.as_deref() {
+                Some("once") => "已允许（仅本次）",
+                Some("task") => "已允许（本任务）",
+                Some("workspace") => "已允许（工作区长期）",
+                _ => "已拒绝",
             };
-            let mut on_event = |event: &TurnEvent| {
-                let _ = tx.send(TuiMsg::Event(event.clone()));
-            };
-            let outcome = agent
-                .run_turn(
-                    &mut session,
-                    &prompt_owned,
-                    approver.as_ref(),
-                    &abort,
-                    &mut on_event,
-                )
-                .await;
-            let result = outcome.map_err(|error| error.to_string());
-            let _ = tx.send(TuiMsg::Finished(result, Box::new(session)));
-        });
-    }
-
-    fn drain_events(&mut self) {
-        while let Some(message) = self.next_event() {
-            match message {
-                Some(TuiMsg::Event(event)) => self.push_event(event),
-                Some(TuiMsg::Finished(result, session)) => {
-                    self.running = false;
-                    self.event_rx = None;
-                    self.session = Some(*session);
-                    if let Some(session) = &self.session {
-                        let _ = self.store.save(session);
-                    }
-                    match result {
-                        Ok(outcome) => {
-                            let steps = outcome.steps;
-                            let final_text = outcome.final_text.clone();
-                            if let Some(session) = &self.session {
-                                let trace = TraceRecord::from_outcome(session, &outcome);
-                                let _ = save_trace(&self.data_root.join("traces"), &trace);
-                            }
-                            self.flush_audit();
-                            let changed = self
-                                .session
-                                .as_ref()
-                                .map(|session| session.diff().len())
-                                .unwrap_or(0);
-                            self.push_system(
-                                format!(
-                                    "✓ 完成：工具 {steps} 步，改动 {changed} 个文件（/diff 查看，/undo 回滚）"
-                                ),
-                                green(),
-                            );
-                            if let Some(text) = &final_text {
-                                self.push_line("── 结果 ──".to_string(), bold());
-                                self.push_line(text.clone(), default());
-                            }
-                            self.status = "就绪".to_string();
-                        }
-                        Err(error) => {
-                            self.flush_audit();
-                            self.push_system(format!("回合失败：{error}"), red());
-                            self.status = "出错".to_string();
-                        }
-                    }
-                }
-                Some(TuiMsg::SubagentFinished(result, read_only)) => {
-                    self.running = false;
-                    self.event_rx = None;
-                    match result {
-                        Ok(text) => self.push_system(
-                            format!(
-                                "{}：{text}",
-                                if read_only {
-                                    "探索结果"
-                                } else {
-                                    "子代理结果"
-                                }
-                            ),
-                            if read_only { cyan() } else { green() },
-                        ),
-                        Err(error) => {
-                            self.push_system(format!("子代理失败：{error}"), red());
-                            self.status = "出错".to_string();
-                        }
-                    }
-                    if self.status != "出错" {
-                        self.status = "就绪".to_string();
-                    }
-                }
-                None => break,
-            }
-        }
-    }
-
-    /// 从事件通道取下一条消息；通道断开时标记回合结束并返回 None。
-    fn next_event(&mut self) -> Option<Option<TuiMsg>> {
-        let rx = self.event_rx.as_ref()?;
-        match rx.try_recv() {
-            Ok(message) => Some(Some(message)),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                self.running = false;
-                self.event_rx = None;
-                self.pending_order.clear();
-                self.status = "回合通道已断开".to_string();
-                self.push_system(
-                    "回合通道已断开，当前回合未能返回结果，请重试".to_string(),
-                    red(),
-                );
-                None
-            }
-        }
-    }
-
-    fn push_event(&mut self, event: TurnEvent) {
-        match event {
-            TurnEvent::ModelCall => {
-                self.flush_streaming();
-                self.push_system("↻ 调用模型…".to_string(), dim());
-            }
-            TurnEvent::TokenDelta { delta } => {
-                self.streaming.push_str(&delta);
-            }
-            TurnEvent::Compaction { summary } => {
-                self.flush_streaming();
-                self.push_system(format!("✦ 上下文已压缩：{summary}"), yellow());
-            }
-            TurnEvent::PermissionRequest(request) => {
-                self.flush_streaming();
-                self.pending_order.push(request.request_id.clone());
-                self.push_line(
-                    format!(
-                        "审批：需要 {} 权限执行 {}（{}）— 按 y 允许 / n 拒绝",
-                        request.level.label(),
-                        request.tool,
-                        request.reason
-                    ),
-                    yellow(),
-                );
-                self.status = "等待审批（y/n）".to_string();
-            }
-            TurnEvent::ToolStart { tool, .. } => {
-                self.flush_streaming();
-                self.push_line(format!("▶ {tool} …"), blue());
-            }
-            TurnEvent::ToolResult {
-                tool, ok, error, ..
-            } => {
-                self.flush_streaming();
-                if ok {
-                    self.push_line(format!("✔ {tool}"), green());
-                } else {
-                    self.push_line(
-                        format!("✘ {tool}：{}", error.unwrap_or_else(|| "未知错误".into())),
-                        red(),
-                    );
-                }
-            }
-            TurnEvent::Final { text } => {
-                if self.streaming.is_empty() {
-                    self.push_line("── 结果 ──".to_string(), bold());
-                    self.push_line(text, default());
-                } else {
-                    self.flush_streaming();
-                }
-            }
-        }
-    }
-
-    fn flush_streaming(&mut self) {
-        if !self.streaming.is_empty() {
-            let text = std::mem::take(&mut self.streaming);
-            self.push_line(text, default());
-        }
-    }
-
-    fn flush_audit(&mut self) {
-        let audit_entries = self
-            .agent
-            .audit_log()
-            .lock()
-            .map(|guard| guard.entries.clone())
-            .unwrap_or_default();
-        if audit_entries.len() <= self.audit_flushed {
-            return;
-        }
-        if self
-            .store
-            .append_audit(&audit_entries[self.audit_flushed..])
-            .is_ok()
-        {
-            self.audit_flushed = audit_entries.len();
-        }
-    }
-
-    fn respond_approval(&mut self, allow: bool) {
-        let Some(request_id) = self.pending_order.pop() else {
-            return;
-        };
-        let sent = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|mut map| map.remove(&request_id))
-            .map(|tx| {
-                tx.send(if allow {
-                    Decision::Allow
-                } else {
-                    Decision::Deny
-                })
-                .is_ok()
-            })
-            .unwrap_or(false);
-        if sent {
-            self.push_system(
-                if allow {
-                    "→ 已允许".to_string()
-                } else {
-                    "→ 已拒绝".to_string()
-                },
-                if allow { green() } else { red() },
-            );
+            let style = if response.allow { green() } else { red() };
+            let tool = info.tool;
+            let _ = responder.send(response);
+            self.push_system(format!("{message}：{tool}"), style);
             self.status = "执行中…".to_string();
         }
     }
 
     fn toggle_mode(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.read_only = !self.read_only;
-        self.rebuild_agent()?;
         self.push_system(
             if self.read_only {
                 "已切换 plan（只读）".to_string()
@@ -779,19 +472,6 @@ impl TuiApp {
             },
             yellow(),
         );
-        Ok(())
-    }
-
-    fn rebuild_agent(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.audit_flushed = 0;
-        self.agent = Arc::new(build_agent_with_mcp(
-            &self.workspace,
-            &self.model,
-            self.read_only,
-            &self.mcp_clients,
-            &self.skills,
-            &self.settings.deny_commands,
-        )?);
         Ok(())
     }
 
@@ -807,99 +487,67 @@ impl TuiApp {
                 self.should_exit = true;
                 self.status = "正在退出…".to_string();
             }
-            "new" => {
-                if let Some(session) = &self.session {
-                    let _ = self.store.save(session);
-                }
-                let session = self.store.create(&self.workspace, &self.model, None)?;
-                let id = session.id.clone();
-                self.session = Some(session);
-                self.push_system(format!("新会话：{id}"), green());
-            }
-            "sessions" => {
-                let ids = self.store.list();
-                if ids.is_empty() {
-                    self.push_system("暂无会话（/new 创建）".to_string(), dim());
-                } else {
-                    for id in ids {
-                        if let Ok(session) = self.store.load(&id) {
-                            let active = self
-                                .session
-                                .as_ref()
-                                .map(|current| current.id == id)
-                                .unwrap_or(false);
-                            let mut badges = String::new();
-                            if session.pinned {
-                                badges.push_str(" 📌");
-                            }
-                            if session.archived {
-                                badges.push_str(" 🗄");
-                            }
-                            self.push_line(
-                                format!(
-                                    "{}{}{}  model={}  msgs={}  updated={}",
-                                    if active { "▶ " } else { "  " },
-                                    session.display_title(),
-                                    badges,
-                                    session.model,
-                                    session.messages.len(),
-                                    session.updated_at,
-                                ),
-                                if active { green() } else { default() },
-                            );
-                        }
-                    }
-                }
-            }
+            "new" => self.new_session(runtime, parts.next())?,
+            "sessions" => self.list_sessions(runtime),
             "resume" => {
-                let id = parts.next().ok_or("用法：/resume <会话ID>")?;
-                let session = self.store.load(id)?;
-                self.session = Some(session);
-                self.push_system(format!("已恢复会话：{id}"), green());
+                let id = parts.next().ok_or("用法：/resume <会话ID>")?.to_string();
+                self.resume_session(runtime, &id)?;
             }
             "model" => match parts.next() {
                 Some(model) => {
-                    self.model = model.to_string();
-                    self.rebuild_agent()?;
+                    self.model = Some(model.to_string());
+                    if let Some(id) = self.session_id.clone() {
+                        let _ = runtime.block_on(self.client.session_set_model(&id, Some(model)));
+                    }
                     self.push_system(format!("模型已切换：{model}"), green());
                 }
-                None => self.push_system(format!("当前模型：{}", self.model), dim()),
+                None => self.push_system(
+                    format!("当前模型：{}", self.model.as_deref().unwrap_or("（默认）")),
+                    dim(),
+                ),
             },
-            "diff" => self.refresh_diff(),
+            "diff" => self.refresh_diff(runtime),
             "undo" | "revert" => {
-                let Some(session) = &mut self.session else {
-                    self.push_system("暂无会话".to_string(), dim());
-                    return Ok(());
-                };
-                let restored = runtime.block_on(session.revert())?;
-                let _ = self.store.save(session);
-                if restored.is_empty() {
-                    self.push_system("没有可回滚的改动".to_string(), dim());
+                if let Some(id) = self.session_id.clone() {
+                    match runtime.block_on(self.client.session_revert(&id)) {
+                        Ok(_) => self.push_system("已回滚本次会话全部写操作".to_string(), green()),
+                        Err(error) => self.push_system(format!("回滚失败：{error}"), red()),
+                    }
                 } else {
-                    self.push_system(format!("已回滚：{}", restored.join(", ")), green());
+                    self.push_system("暂无会话".to_string(), dim());
                 }
             }
-            "mcp" => self.handle_mcp(command, runtime)?,
-            "skills" => match parts.next() {
-                Some("reload") => {
-                    self.reload_skills()?;
-                }
-                _ => self.list_skills(),
-            },
-            "fork" => self.fork_session(parts.next())?,
+            "fork" => self.fork_session(runtime, parts.next())?,
             "rewind" => {
-                let keep = parts.next().ok_or("用法：/rewind <保留消息数>")?;
-                self.rewind_session(keep, runtime)?;
+                let keep = parts
+                    .next()
+                    .ok_or("用法：/rewind <保留消息数>")?
+                    .to_string();
+                self.rewind_session(runtime, &keep)?;
             }
-            "redo" => self.redo_session()?,
-            "undo-msg" => self.undo_message(parts.next())?,
-            "redo-msg" => self.redo_message()?,
-            "tree" => self.show_tree(),
-            "share" => self.share_session(parts.next())?,
-            "traces" => self.list_traces(),
-            "trace" => self.show_trace(parts.next())?,
-            "settings" => self.show_settings(),
-            "plugins" => self.list_plugins(),
+            "redo" => {
+                if let Some(id) = self.session_id.clone() {
+                    match runtime.block_on(self.client.session_redo(&id)) {
+                        Ok(_) => self.push_system("已恢复最近一次 rewind".to_string(), green()),
+                        Err(error) => self.push_system(format!("恢复失败：{error}"), red()),
+                    }
+                } else {
+                    self.push_system("暂无会话".to_string(), dim());
+                }
+            }
+            "tree" => self.show_tree(runtime),
+            "traces" => self.print_json(runtime, "轨迹", "/traces"),
+            "trace" => {
+                if let Some(index) = parts.next() {
+                    self.print_json(runtime, "轨迹", &format!("/traces/{index}"));
+                } else {
+                    self.push_system("用法：/trace <序号>（/traces 查看）".to_string(), dim());
+                }
+            }
+            "settings" => self.print_json(runtime, "设置", "/settings"),
+            "plugins" => self.print_json(runtime, "插件", "/plugins"),
+            "skills" => self.print_json(runtime, "技能", "/skills"),
+            "mcp" => self.print_json(runtime, "MCP", "/mcp"),
             "theme" => self.set_theme(parts.next()),
             "keybinds" => self.show_keybinds(),
             "plan" => {
@@ -926,282 +574,137 @@ impl TuiApp {
                 }
             }
             "clear" => self.transcript.clear(),
+            "share" | "export" | "undo-msg" | "redo-msg" => self.push_system(
+                format!("/{command} 尚未迁移到 daemon 模式（用 --local）"),
+                yellow(),
+            ),
             other => self.push_system(format!("未知命令：/{other}（/help 查看）"), red()),
         }
         Ok(())
     }
 
-    fn list_skills(&mut self) {
-        let skills: Vec<(String, String)> = self
-            .agent
-            .skills()
-            .list()
-            .iter()
-            .map(|skill| (skill.name.clone(), skill.description.clone()))
-            .collect();
-        if skills.is_empty() {
-            self.push_system(
-                format!(
-                    "暂无技能（放置到 {}/skills 或 .agents/skills/，每技能一个含 SKILL.md 的目录）",
-                    display_path(&self.data_root)
-                ),
-                dim(),
-            );
-            return;
+    fn new_session(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        model: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let model = model.map(str::to_string).or_else(|| self.model.clone());
+        let workspace = self.workspace.to_string_lossy().to_string();
+        match runtime.block_on(self.client.create_session_with_model(&workspace, model)) {
+            Ok(session) => {
+                self.session_id = Some(session.id.clone());
+                self.push_system(format!("新会话：{}", session.id), green());
+            }
+            Err(error) => self.push_system(format!("创建会话失败：{error}"), red()),
         }
-        for (name, description) in skills {
-            self.push_line(format!("{name}：{description}"), default());
-        }
-    }
-
-    fn reload_skills(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.skills = SkillRegistry::discover(&self.workspace, &self.data_root);
-        self.rebuild_agent()?;
-        self.push_system(
-            format!("已重新加载 {} 个技能", self.skills.list().len()),
-            green(),
-        );
         Ok(())
     }
 
-    fn fork_session(&mut self, index: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(current) = &self.session else {
+    fn list_sessions(&mut self, runtime: &tokio::runtime::Runtime) {
+        match runtime.block_on(self.client.list_sessions()) {
+            Ok(sessions) => {
+                if sessions.is_empty() {
+                    self.push_system("暂无会话（/new 创建）".to_string(), dim());
+                    return;
+                }
+                for session in sessions {
+                    let active = self.session_id.as_deref() == Some(session.id.as_str());
+                    let mut badges = String::new();
+                    if session.pinned {
+                        badges.push_str(" 📌");
+                    }
+                    if session.archived {
+                        badges.push_str(" 🗄");
+                    }
+                    self.push_line(
+                        format!(
+                            "{}{}{}  model={}  updated={}",
+                            if active { "▶ " } else { "  " },
+                            session.title.unwrap_or_else(|| session.id.clone()),
+                            badges,
+                            session.model,
+                            session.updated_at,
+                        ),
+                        if active { green() } else { default() },
+                    );
+                }
+            }
+            Err(error) => self.push_system(format!("读取会话失败：{error}"), red()),
+        }
+    }
+
+    fn resume_session(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match runtime.block_on(self.client.get_session(id)) {
+            Ok(session) => {
+                self.session_id = Some(session.id.clone());
+                self.push_system(format!("已恢复会话：{}", session.id), green());
+            }
+            Err(error) => self.push_system(format!("恢复失败：{error}"), red()),
+        }
+        Ok(())
+    }
+
+    fn fork_session(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        index: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(id) = self.session_id.clone() else {
             self.push_system("暂无会话".to_string(), dim());
             return Ok(());
         };
-        let index = match index {
-            Some(value) => value.parse().map_err(|_| "消息序号需为数字".to_string())?,
-            None => current.messages.len().saturating_sub(1),
-        };
-        let child = current.fork(index);
-        self.store.save(&child)?;
-        let id = child.id.clone();
-        self.session = Some(child);
-        self.push_system(
-            format!("已创建子会话 {id}（消息 {index} 处 fork）"),
-            green(),
-        );
+        let index: usize = index
+            .unwrap_or("0")
+            .parse()
+            .map_err(|_| "消息序号需为数字")?;
+        match runtime.block_on(self.client.session_fork(&id, index)) {
+            Ok(child) => {
+                self.push_system(format!("已创建子会话 {}", child.id), green());
+                self.session_id = Some(child.id);
+            }
+            Err(error) => self.push_system(format!("fork 失败：{error}"), red()),
+        }
         Ok(())
     }
 
     fn rewind_session(
         &mut self,
-        keep: &str,
         runtime: &tokio::runtime::Runtime,
+        keep: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(session) = &mut self.session else {
+        let Some(id) = self.session_id.clone() else {
             self.push_system("暂无会话".to_string(), dim());
             return Ok(());
         };
-        let keep: usize = keep.parse().map_err(|_| "保留消息数需为数字".to_string())?;
-        if keep < session.messages.len() {
-            runtime.block_on(session.revert())?;
-        }
-        let removed = session.rewind(keep);
-        self.store.save(session)?;
-        self.push_system(
-            format!(
-                "已回退到 {keep} 条消息（移除 {} 条，/redo 可恢复）",
-                removed.len()
-            ),
-            yellow(),
-        );
-        Ok(())
-    }
-
-    fn redo_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(session) = &mut self.session else {
-            self.push_system("暂无会话".to_string(), dim());
-            return Ok(());
-        };
-        let restored = session.redo().map(|tail| tail.len()).unwrap_or(0);
-        self.store.save(session)?;
-        if restored == 0 {
-            self.push_system("没有可恢复的历史".to_string(), dim());
-        } else {
-            self.push_system(format!("已恢复 {restored} 条消息"), green());
+        let keep: usize = keep.parse().map_err(|_| "保留消息数需为数字")?;
+        match runtime.block_on(self.client.session_rewind(&id, keep)) {
+            Ok(_) => self.push_system(format!("已回退到 {keep} 条消息（/redo 可恢复）"), yellow()),
+            Err(error) => self.push_system(format!("回退失败：{error}"), red()),
         }
         Ok(())
     }
 
-    fn undo_message(&mut self, count: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(session) = &mut self.session else {
+    fn show_tree(&mut self, runtime: &tokio::runtime::Runtime) {
+        let Some(id) = self.session_id.clone() else {
             self.push_system("暂无会话".to_string(), dim());
-            return Ok(());
-        };
-        let count = match count {
-            Some(value) => value.parse().map_err(|_| "数量需为数字".to_string())?,
-            None => 1,
-        };
-        let removed = session.undo_message(count);
-        match removed {
-            Some(messages) => {
-                self.store.save(session)?;
-                self.push_system(
-                    format!("已撤销 {} 条消息（/redo-msg 恢复）", messages.len()),
-                    yellow(),
-                );
-            }
-            None => self.push_system("没有可撤销的消息".to_string(), dim()),
-        }
-        Ok(())
-    }
-
-    fn redo_message(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(session) = &mut self.session else {
-            self.push_system("暂无会话".to_string(), dim());
-            return Ok(());
-        };
-        let restored = session.redo_message().map(|tail| tail.len()).unwrap_or(0);
-        self.store.save(session)?;
-        if restored == 0 {
-            self.push_system("没有可恢复的消息".to_string(), dim());
-        } else {
-            self.push_system(format!("已恢复 {restored} 条消息"), green());
-        }
-        Ok(())
-    }
-
-    fn show_tree(&mut self) {
-        let mut lines = Vec::new();
-        for id in self.store.list() {
-            if let Ok(session) = self.store.load(&id) {
-                let active = self
-                    .session
-                    .as_ref()
-                    .map(|current| current.id == id)
-                    .unwrap_or(false);
-                let parent = session
-                    .parent_id
-                    .clone()
-                    .unwrap_or_else(|| "(根)".to_string());
-                let fork = session
-                    .fork_point
-                    .map(|point| point.to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                lines.push(format!(
-                    "{}{} parent={} fork@{} msgs={}",
-                    if active { "▶ " } else { "  " },
-                    id,
-                    parent,
-                    fork,
-                    session.messages.len()
-                ));
-            }
-        }
-        if lines.is_empty() {
-            self.push_system("暂无会话".to_string(), dim());
-        } else {
-            for line in lines {
-                self.push_line(line, default());
-            }
-        }
-    }
-
-    fn share_session(&mut self, format: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(session) = &self.session else {
-            self.push_system("暂无会话".to_string(), dim());
-            return Ok(());
-        };
-        let format = format.unwrap_or("md");
-        let shares = self.data_root.join("shares");
-        std::fs::create_dir_all(&shares)?;
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
-        let path = match format {
-            "html" => shares.join(format!("{}-{stamp}.html", session.id)),
-            _ => shares.join(format!("{}-{stamp}.md", session.id)),
-        };
-        let content = match format {
-            "html" => export_html(session),
-            _ => export_markdown(session),
-        };
-        std::fs::write(&path, content)?;
-        self.push_system(format!("已导出会话分享：{}", display_path(&path)), green());
-        Ok(())
-    }
-
-    fn list_traces(&mut self) {
-        let traces = list_traces(&self.data_root.join("traces"));
-        if traces.is_empty() {
-            self.push_system("暂无 trace（完成回合后自动记录）".to_string(), dim());
             return;
-        }
-        let mut lines = Vec::new();
-        for (index, path) in traces.iter().enumerate() {
-            if let Ok(trace) = load_trace(path) {
-                let preview: String = trace.prompt.chars().take(40).collect();
-                lines.push(format!(
-                    "{index}: steps={} {}ms final={} {}",
-                    trace.steps,
-                    trace.duration_ms,
-                    trace.final_text.is_some(),
-                    preview
-                ));
+        };
+        self.print_json(runtime, "会话树", &format!("/session/{id}/children"));
+    }
+
+    fn print_json(&mut self, runtime: &tokio::runtime::Runtime, label: &str, path: &str) {
+        match runtime.block_on(self.client.get_json::<serde_json::Value>(path)) {
+            Ok(value) => {
+                let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+                for line in text.lines() {
+                    self.push_line(format!("[{label}] {line}"), default());
+                }
             }
-        }
-        for line in lines {
-            self.push_line(line, default());
-        }
-    }
-
-    fn show_trace(&mut self, index: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let index: usize = index
-            .ok_or("用法：/trace <序号>（/traces 查看）")?
-            .parse()?;
-        let traces = list_traces(&self.data_root.join("traces"));
-        let path = traces
-            .get(index)
-            .ok_or_else(|| format!("trace 序号越界（共 {} 条）", traces.len()))?;
-        let trace = load_trace(path)?;
-        let content = serde_json::to_string_pretty(&trace)?;
-        for line in content.lines() {
-            self.push_line(line.to_string(), default());
-        }
-        Ok(())
-    }
-
-    fn show_settings(&mut self) {
-        let content = serde_json::to_string_pretty(&self.settings).unwrap_or_default();
-        for line in content.lines() {
-            self.push_line(line.to_string(), default());
-        }
-    }
-
-    fn list_plugins(&mut self) {
-        if self.plugins.is_empty() {
-            self.push_system(
-                "未加载插件（放置到 <workspace>/.owo/plugins/ 或 <data>/plugins/）".to_string(),
-                dim(),
-            );
-            return;
-        }
-        let mut lines = Vec::new();
-        for manifest in &self.plugins {
-            let tool_count = self
-                .mcp_clients
-                .iter()
-                .find(|(name, _)| name == &manifest.id)
-                .and_then(|(_, client)| client.try_lock().ok())
-                .map(|guard| guard.tools().len())
-                .unwrap_or(0);
-            lines.push(format!(
-                "{} v{}（{}）——{}，{} 个工具",
-                manifest.name,
-                manifest.version,
-                manifest.id,
-                if manifest.description.is_empty() {
-                    "无描述".to_string()
-                } else {
-                    manifest.description.clone()
-                },
-                tool_count
-            ));
-        }
-        for line in lines {
-            self.push_line(line, default());
+            Err(error) => self.push_system(format!("[{label}] 读取失败：{error}"), red()),
         }
     }
 
@@ -1212,148 +715,28 @@ impl TuiApp {
     }
 
     fn show_keybinds(&mut self) {
-        let mut lines = Vec::new();
-        let mut actions: Vec<&String> = self.keybinds.keys().collect();
-        actions.sort();
-        for action in actions {
-            if let Some(key) = self.keybinds.get(action) {
-                lines.push(format!("{action} = {}", format_key(key)));
-            }
-        }
+        let mut lines: Vec<String> = self
+            .keybinds
+            .iter()
+            .map(|(action, key)| format!("{action} = {}", format_key(key)))
+            .collect();
+        lines.sort();
         for line in lines {
             self.push_line(line, default());
         }
     }
 
-    fn handle_mcp(
-        &mut self,
-        command: &str,
-        runtime: &tokio::runtime::Runtime,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let rest = command.trim_start_matches("mcp").trim_start().to_string();
-        let mut parts = rest.split_whitespace();
-        match parts.next() {
-            Some("add") => {
-                let name = parts
-                    .next()
-                    .ok_or("用法：/mcp add <名称> <命令> [参数...]")?
-                    .to_string();
-                let command_line: Vec<&str> = parts.collect();
-                let config = if matches!(command_line.first().copied(), Some("http" | "https")) {
-                    let url = command_line
-                        .get(1)
-                        .copied()
-                        .ok_or("HTTP MCP 用法：/mcp add <名称> http <URL>")?;
-                    McpServerConfig::http(&name, url)
-                } else {
-                    let command = command_line.first().ok_or("缺少 MCP 服务器命令")?;
-                    McpServerConfig::stdio(
-                        &name,
-                        *command,
-                        command_line[1..]
-                            .iter()
-                            .map(|arg| arg.to_string())
-                            .collect(),
-                    )
-                };
-                match runtime.block_on(McpClient::connect(&config)) {
-                    Ok(client) => {
-                        let tool_count = client.tools().len();
-                        self.mcp_clients
-                            .push((name.clone(), Arc::new(tokio::sync::Mutex::new(client))));
-                        self.mcp_configs.push(config);
-                        save_mcp_configs(&self.data_root, &self.mcp_configs);
-                        self.rebuild_agent()?;
-                        self.push_system(
-                            format!("已添加 MCP {name}（{tool_count} 个工具）"),
-                            green(),
-                        );
-                    }
-                    Err(error) => self.push_system(format!("MCP {name} 连接失败：{error}"), red()),
-                }
-            }
-            Some("list") => {
-                if self.mcp_clients.is_empty() {
-                    self.push_system(
-                        "未配置 MCP 服务器（/mcp add <名称> <命令>）".to_string(),
-                        dim(),
-                    );
-                } else {
-                    let mut lines = Vec::new();
-                    for (name, client) in &self.mcp_clients {
-                        let transport = self
-                            .mcp_configs
-                            .iter()
-                            .find(|config| config.name == *name)
-                            .map(|config| config.transport.as_str())
-                            .unwrap_or("stdio");
-                        let tool_names = match client.try_lock() {
-                            Ok(guard) => guard
-                                .tools()
-                                .into_iter()
-                                .map(|tool| tool.name)
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                            Err(_) => "（忙碌）".to_string(),
-                        };
-                        lines.push(format!("{name}（{transport}）：{tool_names}"));
-                    }
-                    for line in lines {
-                        self.push_line(line, default());
-                    }
-                }
-            }
-            Some("remove") => {
-                let name = parts.next().ok_or("用法：/mcp remove <名称>")?;
-                if let Some(position) = self
-                    .mcp_clients
-                    .iter()
-                    .position(|(existing, _)| existing == name)
-                {
-                    let (_, client) = self.mcp_clients.remove(position);
-                    let _ = runtime.block_on(async { client.lock().await.shutdown().await });
-                }
-                self.mcp_configs.retain(|config| config.name != name);
-                save_mcp_configs(&self.data_root, &self.mcp_configs);
-                self.rebuild_agent()?;
-                self.push_system(format!("已移除 MCP 服务器：{name}"), green());
-            }
-            _ => self.push_system(
-                "用法：/mcp add <名称> <命令> [参数...] | /mcp list | /mcp remove <名称>"
-                    .to_string(),
-                dim(),
-            ),
-        }
-        Ok(())
-    }
-
-    fn refresh_diff(&mut self) {
-        let mut lines = vec![("当前会话没有未回滚的改动".to_string(), dim())];
-        let mut active = false;
-        if let Some(session) = &self.session {
-            let diffs = session.diff();
-            if !diffs.is_empty() {
-                lines.clear();
-                active = true;
-                for diff in diffs {
-                    lines.push((format!("● {}", diff.path), cyan()));
-                    if let Some(before) = diff.before {
-                        for line in before.lines() {
-                            lines.push((format!("- {line}"), red()));
-                        }
-                    } else {
-                        lines.push(("(新建文件)".to_string(), green()));
-                    }
-                    if let Some(after) = diff.after {
-                        for line in after.lines() {
-                            lines.push((format!("+ {line}"), green()));
-                        }
-                    } else {
-                        lines.push(("(已删除)".to_string(), red()));
-                    }
-                }
-            }
-        }
+    fn refresh_diff(&mut self, runtime: &tokio::runtime::Runtime) {
+        let diffs = self
+            .session_id
+            .clone()
+            .map(|id| {
+                runtime
+                    .block_on(self.client.session_diff(&id))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let (lines, active) = build_diff_panel(&diffs);
         self.diff_view = lines;
         self.show_diff_panel = active;
         if active {
@@ -1363,18 +746,14 @@ impl TuiApp {
     }
 
     fn push_status(&mut self) {
-        let session_info = self.session.as_ref().map(|session| {
-            (
-                session.id.clone(),
-                session.messages.len(),
-                session.diff().len(),
-            )
-        });
         self.push_line(
             format!("工作区：{}", display_path(&self.workspace)),
             default(),
         );
-        self.push_line(format!("模型：{}", self.model), default());
+        self.push_line(
+            format!("模型：{}", self.model.as_deref().unwrap_or("（默认）")),
+            default(),
+        );
         self.push_line(
             format!(
                 "模式：{}",
@@ -1386,38 +765,23 @@ impl TuiApp {
             ),
             default(),
         );
-        match session_info {
-            Some((id, messages, diffs)) => {
-                self.push_line(format!("会话：{id}"), default());
-                self.push_line(format!("消息数：{messages}"), default());
-                self.push_line(format!("未回滚改动：{diffs}"), default());
-            }
+        match &self.session_id {
+            Some(id) => self.push_line(format!("会话：{id}"), default()),
             None => self.push_line("会话：无（任务时自动创建）".to_string(), dim()),
         }
-        let audit_count = match self.agent.audit_log().lock() {
-            Ok(guard) => guard.entries.len(),
-            Err(_) => 0,
-        };
-        self.push_line(format!("审计记录：{audit_count} 条"), default());
     }
 
     fn push_help(&mut self) {
         for line in [
             "直接输入文字 发起任务",
-            "@explore / @subagent  直呼子代理",
             "/new /sessions /resume <id>  会话管理",
             "/fork [序号] /rewind <条数> /redo /tree  会话分支/回退/恢复/树",
-            "/undo-msg [n] /redo-msg  消息级撤销/重做",
-            "/share [html]  导出会话分享",
             "/traces /trace <n>  回合轨迹",
-            "/settings  查看 settings.json",
-            "/plugins  列出已加载插件",
+            "/settings /plugins /skills /mcp  服务端状态",
             "/theme [dark|light] /keybinds  主题与键位",
             "/model [名称]  查看/切换模型",
             "/plan /build  切换只读/执行模式（或 Tab）",
             "/diff（d 差异视图）/undo  查看改动 / 回滚",
-            "/mcp add/list/remove  MCP 服务器",
-            "/skills  列出已加载技能",
             "/status /init /clear",
             "/exit 退出（或 Ctrl+C）",
         ] {
@@ -1432,6 +796,238 @@ impl TuiApp {
     fn push_system(&mut self, text: String, style: Style) {
         self.push_line(text, style);
     }
+
+    fn start_turn(&mut self, runtime: &tokio::runtime::Runtime, prompt: &str) {
+        if self.session_id.is_none() {
+            if let Err(error) = self.new_session(runtime, None) {
+                self.push_system(format!("创建会话失败：{error}"), red());
+                return;
+            }
+        }
+        let Some(session_id) = self.session_id.clone() else {
+            return;
+        };
+        self.abort.store(false, Ordering::Relaxed);
+        self.scroll = 0;
+        self.running = true;
+        self.status = "调用模型…".to_string();
+        self.streaming.clear();
+        self.push_line(format!("▶ {prompt}"), cyan());
+
+        let client = self.client.clone();
+        let no_approval = self.no_approval;
+        let prompt_owned = prompt.to_string();
+        let (tx, rx) = mpsc::channel::<TuiMsg>();
+        self.event_rx = Some(rx);
+        runtime.spawn(async move {
+            let result =
+                run_turn_task(client, session_id, prompt_owned, tx.clone(), no_approval).await;
+            let _ = tx.send(TuiMsg::Finished(result));
+        });
+    }
+
+    fn drain_events(&mut self) {
+        while let Some(message) = self.next_event() {
+            match message {
+                Some(TuiMsg::Event(event)) => self.push_event(event),
+                Some(TuiMsg::Approval { info, responder }) => {
+                    self.status = format!("审批：{}", info.tool);
+                    self.approval = Some((info, responder));
+                }
+                Some(TuiMsg::Finished(result)) => {
+                    self.running = false;
+                    self.event_rx = None;
+                    self.approval = None;
+                    match result {
+                        Ok(summary) => {
+                            if !self.streaming.is_empty() {
+                                let text = std::mem::take(&mut self.streaming);
+                                self.push_line(text, default());
+                            }
+                            if let Some(text) = &summary.final_text {
+                                self.push_line("── 结果 ──".to_string(), bold());
+                                self.push_line(text.clone(), default());
+                            }
+                            self.push_system(
+                                format!(
+                                    "✓ 完成：工具 {} 步，改动 {} 个文件（/diff 查看，/undo 回滚）",
+                                    summary.steps, summary.diff_count
+                                ),
+                                green(),
+                            );
+                            self.status = "就绪".to_string();
+                        }
+                        Err(error) => {
+                            self.push_system(format!("回合失败：{error}"), red());
+                            self.status = "出错".to_string();
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+
+    fn next_event(&mut self) -> Option<Option<TuiMsg>> {
+        let receiver = self.event_rx.as_ref()?;
+        match receiver.try_recv() {
+            Ok(message) => Some(Some(message)),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.push_system("回合通道已断开".to_string(), red());
+                self.running = false;
+                self.event_rx = None;
+                Some(None)
+            }
+        }
+    }
+
+    fn push_event(&mut self, event: SseEvent) {
+        match event {
+            SseEvent::TokenDelta { delta } => {
+                self.streaming.push_str(&delta);
+            }
+            SseEvent::Final { .. } => {}
+            SseEvent::Progress { message } => {
+                if !self.streaming.is_empty() {
+                    let text = std::mem::take(&mut self.streaming);
+                    self.push_line(text, default());
+                }
+                self.push_line(format!("  ↻ {message}"), cyan());
+            }
+            SseEvent::ToolUse { tool, .. } => {
+                if !self.streaming.is_empty() {
+                    let text = std::mem::take(&mut self.streaming);
+                    self.push_line(text, default());
+                }
+                self.push_line(format!("  ▶ {tool} …"), blue());
+            }
+            SseEvent::ToolResult {
+                tool, ok, error, ..
+            } => {
+                if !self.streaming.is_empty() {
+                    let text = std::mem::take(&mut self.streaming);
+                    self.push_line(text, default());
+                }
+                if ok {
+                    self.push_line(format!("  ✔ {tool}"), green());
+                } else {
+                    self.push_line(
+                        format!("  ✘ {tool}：{}", error.as_deref().unwrap_or("未知错误")),
+                        red(),
+                    );
+                }
+            }
+            SseEvent::Compaction { summary } => {
+                self.push_line(format!("  ✦（上下文已压缩：{summary}）"), yellow());
+            }
+            SseEvent::PermissionRequest { .. } => {}
+        }
+    }
+}
+
+/// 回合执行任务：消费 Daemon SSE，权限请求经 UI 决策后回传服务端。
+async fn run_turn_task(
+    client: AgentClient,
+    session_id: String,
+    prompt: String,
+    tx: mpsc::Sender<TuiMsg>,
+    no_approval: bool,
+) -> Result<TurnSummary, String> {
+    let mut stream = client
+        .open_turn(&session_id, &prompt)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut steps = 0usize;
+    let mut final_text = None;
+    while let Some(event) = stream.next_event().await {
+        let event = event.map_err(|error| error.to_string())?;
+        match &event {
+            SseEvent::TokenDelta { .. } => {
+                let _ = tx.send(TuiMsg::Event(event.clone()));
+            }
+            SseEvent::Final { text } => {
+                final_text = Some(text.clone());
+                let _ = tx.send(TuiMsg::Event(event.clone()));
+            }
+            SseEvent::PermissionRequest {
+                request_id,
+                tool,
+                reason,
+                level,
+                ..
+            } => {
+                let response = if no_approval {
+                    PermissionResponse {
+                        allow: true,
+                        remember: None,
+                        scope: Some("once".to_string()),
+                    }
+                } else {
+                    let (responder, receiver) = tokio::sync::oneshot::channel();
+                    let info = ApprovalInfo {
+                        tool: tool.clone(),
+                        reason: reason.clone(),
+                        level: level.clone().unwrap_or_else(|| "unknown".to_string()),
+                    };
+                    let _ = tx.send(TuiMsg::Approval { info, responder });
+                    tokio::time::timeout(Duration::from_secs(300), receiver)
+                        .await
+                        .ok()
+                        .and_then(|result| result.ok())
+                        .unwrap_or_else(|| parse_approval_response("deny"))
+                };
+                let _ = client
+                    .respond_permission(&session_id, request_id, &response)
+                    .await;
+            }
+            SseEvent::ToolResult { .. } => {
+                steps += 1;
+                let _ = tx.send(TuiMsg::Event(event.clone()));
+            }
+            _ => {
+                let _ = tx.send(TuiMsg::Event(event.clone()));
+            }
+        }
+    }
+    let diff_count = client
+        .session_diff(&session_id)
+        .await
+        .map(|diffs| diffs.len())
+        .unwrap_or(0);
+    Ok(TurnSummary {
+        steps,
+        final_text,
+        diff_count,
+    })
+}
+
+/// 由 `FileDiff` 列表构造差异面板（纯函数，可离线单测）。
+fn build_diff_panel(diffs: &[FileDiff]) -> (Vec<(String, Style)>, bool) {
+    if diffs.is_empty() {
+        return (vec![("当前会话没有未回滚的改动".to_string(), dim())], false);
+    }
+    let mut lines = Vec::new();
+    for diff in diffs {
+        lines.push((format!("● {}", diff.path), cyan()));
+        match &diff.before {
+            Some(before) => {
+                for line in before.lines() {
+                    lines.push((format!("- {line}"), red()));
+                }
+            }
+            None => lines.push(("(新建文件)".to_string(), green())),
+        }
+        match &diff.after {
+            Some(after) => {
+                for line in after.lines() {
+                    lines.push((format!("+ {line}"), green()));
+                }
+            }
+            None => lines.push(("(已删除)".to_string(), red())),
+        }
+    }
+    (lines, true)
 }
 
 #[derive(Clone, Copy)]
@@ -1572,54 +1168,72 @@ fn bold() -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use owo_agent_client::ClientConfig;
 
     fn test_app() -> TuiApp {
-        std::env::set_var("OPENAI_API_KEY", "test");
-        std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9");
-        std::env::set_var("OPENAI_MODEL", "mock");
-        let workspace = std::env::temp_dir();
-        let store = SqliteSessionStore::open(
-            &std::env::temp_dir().join(format!("owo-tui-test-{}.db", uuid::Uuid::new_v4())),
-        )
-        .unwrap();
-        let agent = Arc::new(crate::support::build_agent(&workspace, "mock", false).unwrap());
+        // 渲染测试不发请求；用一个不可达地址构造 client 即可。
+        let client = AgentClient::new(ClientConfig::new("http://127.0.0.1:1", None)).unwrap();
         TuiApp::new(
-            workspace,
-            "mock".to_string(),
+            client,
+            std::env::temp_dir(),
+            Some("mock".to_string()),
             false,
             true,
-            std::env::temp_dir().join("owo-tui-test-root"),
-            store,
-            agent,
-            Vec::new(),
-            Vec::new(),
-            SkillRegistry::default(),
-            Settings::default(),
-            Vec::new(),
-            0,
+            None,
+            &HashMap::new(),
         )
     }
 
-    #[test]
-    fn permission_request_queues_approval_and_responds() {
-        let mut app = test_app();
-        let request = PermissionRequest::new(
-            "write_file",
-            serde_json::json!({ "path": "a.txt" }),
-            owo_agent_core::permissions::Level::Write,
-            "测试",
-        );
-        let (tx, rx) = mpsc::channel();
-        app.pending
-            .lock()
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap()
-            .insert(request.request_id.clone(), tx);
-        app.pending_order.push(request.request_id.clone());
+    }
 
-        app.respond_approval(true);
+    #[test]
+    fn approval_responder_receives_decision() {
+        let mut app = test_app();
+        let (responder, mut receiver) = tokio::sync::oneshot::channel();
+        app.approval = Some((
+            ApprovalInfo {
+                tool: "write_file".to_string(),
+                reason: "测试".to_string(),
+                level: "write".to_string(),
+            },
+            responder,
+        ));
 
-        assert_eq!(rx.try_recv().unwrap(), Decision::Allow);
-        assert!(app.pending_order.is_empty());
+        app.respond_approval("task");
+
+        assert!(app.approval.is_none());
+        let response = receiver.try_recv().expect("应收到决策");
+        assert!(response.allow);
+        assert_eq!(response.scope.as_deref(), Some("task"));
+    }
+
+    #[test]
+    fn approval_shortcut_w_selects_workspace_scope() {
+        let mut app = test_app();
+        let (responder, mut receiver) = tokio::sync::oneshot::channel();
+        app.approval = Some((
+            ApprovalInfo {
+                tool: "write_file".to_string(),
+                reason: "测试".to_string(),
+                level: "write".to_string(),
+            },
+            responder,
+        ));
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+            &test_runtime(),
+        )
+        .expect("应处理快捷键");
+
+        let response = receiver.try_recv().expect("应收到决策");
+        assert!(response.allow);
+        assert_eq!(response.scope.as_deref(), Some("workspace"));
     }
 
     #[test]
@@ -1653,38 +1267,25 @@ mod tests {
     }
 
     #[test]
-    fn refresh_diff_builds_panel_and_activates_view() {
-        let mut app = test_app();
-        let workspace = std::env::temp_dir().join(format!("owo-tui-diff-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let path = workspace.join("a.txt");
-        std::fs::write(&path, "after").unwrap();
-        let mut session = Session::new(&workspace, "mock", None);
-        let key = path.to_string_lossy().replace('\\', "/");
-        session.snapshots.insert(
-            key,
-            owo_agent_core::session::SnapshotEntry {
-                original_b64: Some("YmVmb3Jl".to_string()),
-            },
-        );
-        app.session = Some(session);
-        app.refresh_diff();
-        assert!(app.show_diff_panel);
-        assert!(app.diff_view.iter().any(|(text, _)| text.contains("after")));
-        assert!(app
-            .diff_view
-            .iter()
-            .any(|(text, _)| text.contains("before")));
-        let _ = std::fs::remove_dir_all(&workspace);
+    fn diff_panel_builds_from_file_diffs() {
+        let diffs = vec![FileDiff {
+            path: "a.txt".to_string(),
+            before: Some("before".to_string()),
+            after: Some("after".to_string()),
+        }];
+        let (lines, active) = build_diff_panel(&diffs);
+        assert!(active);
+        assert!(lines.iter().any(|(text, _)| text.contains("after")));
+        assert!(lines.iter().any(|(text, _)| text.contains("before")));
+        let (empty_lines, empty_active) = build_diff_panel(&[]);
+        assert!(!empty_active);
+        assert!(empty_lines[0].0.contains("没有未回滚"));
     }
 
     #[test]
     fn windows_release_and_repeat_events_do_not_double_input() {
         let mut app = test_app();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = test_runtime();
         let press =
             KeyEvent::new_with_kind(KeyCode::Char('你'), KeyModifiers::NONE, KeyEventKind::Press);
         let release = KeyEvent::new_with_kind(
@@ -1713,10 +1314,7 @@ mod tests {
     #[test]
     fn exit_command_requests_clean_shutdown_instead_of_process_exit() {
         let mut app = test_app();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = test_runtime();
 
         app.handle_command("exit", &runtime).unwrap();
 
@@ -1743,13 +1341,6 @@ mod tests {
     }
 
     /// 任务 11 快照矩阵：TUI 渲染离线快照（TestBackend，无需真实终端）。
-    /// 覆盖 (read_only × show_diff_panel × running × streaming) 四维组合的
-    /// 关键渲染契约：标题模式芯片、输入框提示、流式指示符、状态行。
-    ///
-    /// §5.3 快照提取修正：中文宽字符在 TestBackend 中占两个 cell（主格 +
-    /// 续格），简单拼接全部 cell 会把续格内容一并拼入，制造"空 闲"式假象。
-    /// 现按行读取 buffer，用 unicode-width（与 ratatui 同源宽度口径）按
-    /// 符号显示宽度推进列游标并跳过续格；保留换行；只去除行尾空白。
     fn snapshot_cells(terminal: &Terminal<ratatui::backend::TestBackend>) -> String {
         use unicode_width::UnicodeWidthStr;
         let buffer = terminal.backend().buffer();
@@ -1760,7 +1351,6 @@ mod tests {
             let mut x = area.left();
             while x < area.right() {
                 let symbol: &str = buffer[(x, y)].symbol();
-                // 宽度至少按 1 计，防止零宽符号造成死循环。
                 let width = symbol.width().max(1) as u16;
                 row.push_str(symbol);
                 x += width;
@@ -1786,7 +1376,6 @@ mod tests {
         assert!(cells.contains("输入（build）"), "build 输入提示缺失");
         assert!(cells.contains("就绪"), "状态行缺失");
         assert!(cells.contains("会话"), "会话面板标题缺失");
-        // §5.3：快照按行保留换行，断言可区分标题 / 正文 / 输入框 / 状态栏。
         let rows: Vec<&str> = cells.split('\n').collect();
         assert_eq!(rows.len(), 24, "80×24 快照应恰好 24 行");
         assert!(rows[0].contains("○ 空闲"), "模式芯片必须位于标题行");
@@ -1825,7 +1414,6 @@ mod tests {
         assert!(!cells.contains("新 增"), "不得出现宽字符续格伪影");
     }
 
-    /// §5.3 快照矩阵：120×30 大视口（标题不截断、边框行齐全）。
     #[test]
     fn snapshot_wide_viewport_120x30_keeps_title_and_status_rows() {
         let mut app = test_app();
@@ -1839,12 +1427,10 @@ mod tests {
             "流式指示符在场"
         );
         assert!(rows[29].contains("滚动"), "状态栏位于最后一行");
-        // 行尾空白已去除、行内空格保留。
         assert!(rows.iter().all(|r| !r.ends_with(' ')), "行尾空白必须去除");
         assert!(rows[0].contains(" | "), "标题行内分隔空格必须保留");
     }
 
-    /// §5.3 快照矩阵：中文输入经宽字符提取后原样成行（不再"字 间 插 空"）。
     #[test]
     fn snapshot_chinese_input_renders_without_cell_artifacts() {
         let mut app = test_app();
@@ -1857,7 +1443,6 @@ mod tests {
         assert!(!cells.contains("你 好"), "不得出现宽字符续格伪影");
     }
 
-    /// §5.3 快照矩阵：长工作区路径在 80 列标题中安全截断，不拖垮其余行。
     #[test]
     fn snapshot_long_workspace_path_truncates_title_only() {
         let long_root = std::env::temp_dir().join(format!("owo-tui-长路径-{}", "目录".repeat(24)));
@@ -1874,7 +1459,6 @@ mod tests {
             title_display_width <= 80,
             "标题行显示宽度不得越界，实际 {title_display_width}"
         );
-        // 截断只影响标题；输入框与状态栏照常渲染。
         assert!(cells.contains("输入（build）"), "长路径不得破坏输入框");
         assert!(rows[23].contains("Tab"), "长路径不得破坏状态栏");
     }

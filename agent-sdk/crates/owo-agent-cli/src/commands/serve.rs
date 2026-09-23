@@ -85,7 +85,30 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
         workspace.clone(),
     ));
     // R8：强杀恢复——陈旧 pid 文件清理；检测到存活实例则显式拒绝双开。
-    if let Some(recovery) = owo_agent_server::shutdown::recover_force_kill(&root)? {
+    //
+    // R10（2026-09-22 桌面端"连不上"根因）：桌面壳换工作区/换提供商时会先请旧核心
+    // 优雅退出、再立刻拉起新核心，两者必然有毫秒到数秒的重叠；旧实例在途回合
+    // drain 上限是 30s，期间 pid 文件一直存在。此前这里**一次判死**，于是壳拉起的
+    // 新核心秒退，日志留下 Error: 检测到运行中的服务（pid=…），用户看到的是
+    // "服务明明在跑、界面却连不上"。桌面上下文下改为有界等待上一代退出再继续：
+    // 这不是放松双开保护（CLI 语义不变），而是把"上一代正在退"识别成等待而非冲突。
+    let mut recovery = owo_agent_server::shutdown::recover_force_kill(&root);
+    if desktop_ctx {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
+        while let Err(ref reason) = recovery {
+            if reason.contains("检测到运行中的服务") && std::time::Instant::now() < deadline {
+                tracing::warn!("上一代核心仍在退出（{reason}），等待其退出后继续启动");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                recovery = owo_agent_server::shutdown::recover_force_kill(&root);
+                continue;
+            }
+            if reason.contains("检测到运行中的服务") {
+                tracing::error!("等待上一代核心退出超时（40s），按双开冲突拒绝启动");
+            }
+            break;
+        }
+    }
+    if let Some(recovery) = recovery? {
         tracing::warn!(
             "检测到强杀残留（pid={:?}），已清理 pid 文件并恢复干净状态",
             recovery.stale_pid
@@ -121,6 +144,8 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
         owo_agent_server::close_server_file_logging();
         // process::exit 不执行 Drop，显式清理 pid 文件（强杀残留仍由 recover_force_kill 兜底）。
         let _ = std::fs::remove_file(shutdown_root.join("server.pid"));
+        // §2.3：同样显式清理发现文件，避免留下"指向已退出实例"的陈旧发现。
+        let _ = std::fs::remove_file(owo_agent_server::discovery::descriptor_path(&shutdown_root));
         tracing::info!("审计已 flush，服务退出");
         std::process::exit(0);
     });
@@ -172,6 +197,28 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
     );
     use std::io::Write as _;
     let _ = std::io::stdout().flush();
+    // §2.3：端口绑定后原子写入 `<data_root>/runtime/daemon.json`，让 CLI/TUI/桌面壳
+    // 能发现并复用**同一** Daemon（而不是各自另起实例）。句柄存活到服务退出；
+    // 优雅关闭路径另行显式删除（process::exit 不跑 Drop）。
+    let descriptor = owo_agent_protocol::DaemonDescriptor {
+        pid: std::process::id(),
+        port: bound.port(),
+        instance_id: std::env::var("OWO_DESKTOP_INSTANCE_ID")
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        api_version: owo_agent_server::OWO_API_VERSION.to_string(),
+        build_id: resolve_build_id(),
+        started_at: owo_agent_server::discovery::now_rfc3339(),
+        data_root: owo_agent_server::discovery::mask_data_root(&root),
+    };
+    let _discovery_file = match owo_agent_server::discovery::write_descriptor(&root, &descriptor) {
+        Ok(file) => Some(file),
+        Err(error) => {
+            tracing::warn!("写入发现文件失败（客户端将无法自动发现本实例）：{error}");
+            None
+        }
+    };
     let result = axum::serve(listener, app).await;
     // 服务退出：终止全部 MCP stdio 子进程，不留孤儿进程。
     let shutdown_errors = state.agent.shutdown_all_mcp().await;

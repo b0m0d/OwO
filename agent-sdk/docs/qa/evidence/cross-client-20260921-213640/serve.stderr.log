@@ -1,0 +1,13 @@
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-21T13:36:41.282428800+00:00"}
+{"duration_ms":3,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"3565c64100e64c5482b4feb0","ts":"2026-09-21T13:36:41.680359400+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"4854865302204f8d92791200","ts":"2026-09-21T13:36:41.724186400+00:00"}
+{"duration_ms":2,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"6877e2649cdc44b1b929d582","ts":"2026-09-21T13:36:41.802122900+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/turn","source":"other","status":200,"target":"http","trace_id":"ad4a39c808ab49f1ad16f67c","ts":"2026-09-21T13:36:41.805036800+00:00"}
+{"level":"error","msg":"回合执行失败","session_id":"2377e626-03f0-4c99-96e5-b5eef2a3a356","target":"agent","ts":"2026-09-21T13:36:41.812013900+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/session/{id}/diff","source":"other","status":200,"target":"http","trace_id":"0e8f2e70fb1a47ccac546d2d","ts":"2026-09-21T13:36:41.816030300+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"4079caa47a34435bb5f01f8e","ts":"2026-09-21T13:36:41.828763600+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/health","source":"other","status":200,"target":"http","trace_id":"a318d3bb66584a7c967519b5","ts":"2026-09-21T13:36:42.407410+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"3d39a6e9aecb4597abe90dbc","ts":"2026-09-21T13:36:42.410766600+00:00"}
+{"active_turns":0,"level":"warn","msg":"收到优雅关闭请求（需二次确认）","target":"server","trace_id":"7e8a2aa24e934628bbc5d88c","ts":"2026-09-21T13:36:42.537722600+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/server/shutdown","source":"other","status":200,"target":"http","trace_id":"7e8a2aa24e934628bbc5d88c","ts":"2026-09-21T13:36:42.538385200+00:00"}
+{"action":"server_stop","detail":"len=16 hash=8c8ef0e0","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-21T13:36:42.541711900+00:00"}

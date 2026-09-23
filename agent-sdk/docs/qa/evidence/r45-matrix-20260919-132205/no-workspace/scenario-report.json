@@ -1,0 +1,37 @@
+{
+    "id":  "no-workspace",
+    "note":  "§3.4：未选工作区 → 工作区引导（workspace/required），动作=选择文件夹",
+    "kind":  "healthy",
+    "expected_codes":  [
+                           "workspace/required"
+                       ],
+    "required_actions":  [
+                             "选择项目工作区"
+                         ],
+    "final_budget_sec":  20,
+    "known_gap":  "",
+    "executed":  false,
+    "failed_stage":  "inject",
+    "error_type":  "ItemNotFoundException",
+    "error_message":  "Cannot find path \u0027psdrive\u0027 because it does not exist.",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\no-workspace",
+    "injected_sidecar":  "",
+    "sidecar_sha256":  "",
+    "launched_core":  "",
+    "shell_pid":  0,
+    "window_at_sec":  -1,
+    "actionable_at_sec":  -1,
+    "error_at_sec":  -1,
+    "error_code":  "",
+    "error_card":  "",
+    "setup_guide_len":  0,
+    "details_folded":  false,
+    "screenshot":  "",
+    "screenshot_metric":  null,
+    "ui_final":  null,
+    "cleanup":  {
+                    "shell_pid":  0,
+                    "residual_procs":  0,
+                    "notes":  ""
+                }
+}

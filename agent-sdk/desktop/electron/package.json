@@ -1,0 +1,14 @@
+{
+  "name": "owo-agent-electron",
+  "private": true,
+  "version": "0.1.0",
+  "description": "OwO Agent 桌面客户端（Electron + Vue）：前端从磁盘加载，改 UI 不需要重新编译",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "electron . --dev"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

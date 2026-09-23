@@ -1,0 +1,30 @@
+{
+  "kind": "desktop-tool-approval-golden",
+  "business_status": "passed",
+  "harness_status": "interrupted_after_business_assertions_during_cleanup",
+  "provider": "local deterministic OpenAI-compatible mock",
+  "release": {
+    "core_sha256": "14E10DE780EE00C298ECD493F508248966CD19C78FC3732E9341775FA5929128",
+    "shell_sha256": "BE619FAC9F6C4F594EF2FB4480BF2A393D04B065D846B9DB0E2B7937E17A9977",
+    "installer_sha256": "F0F661448F1E5BF05DB6FE580BD5F73E53A8D44BEF438A9E6B2EBBFABE3015DE"
+  },
+  "desktop": {
+    "session_created": true,
+    "turn_route_status": 200,
+    "approval_visible": true,
+    "approval_clicked": true,
+    "permission_route_status": 200,
+    "tool": "write_file",
+    "file_content": "cli golden content\\n",
+    "diff_route_statuses": [
+      200,
+      200
+    ],
+    "diff_ui_contains_file": true,
+    "revert_route_status": 200,
+    "file_absent_after_revert": true
+  },
+  "evidence_log": "desktop-core-20260725.log",
+  "run_root": "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-122500\\tool-approval",
+  "note": "业务断言均由当前 release WebView 与 sidecar 日志/隔离文件事实完成；仅通用清理阶段未正常返回，未影响业务结果。"
+}

@@ -1303,41 +1303,54 @@ impl ModelProvider for ResilientProvider {
         let mut errors: Vec<String> = Vec::new();
         let mut retriable_seen = false;
         for provider in self.providers() {
-            // 空闲看门狗/网络失败自动重连或降级：整条消息重试（已发增量无法撤回，
-            // 但避免静默失败；预算/出境类错误不降级）。
+            // §4.2 真流式（F-02 修复）：增量**立即**回调给调用方，不再"缓存整条成功后回放"。
+            // 约束：一旦已有增量发出，重试或降级都会产生重复内容，因此此时只失败、
+            // 不重试也不降级（显式报错，绝不静默重复）。未产生任何增量时保持原有重试/降级。
             let mut attempt = 0;
             let outcome = loop {
-                let mut deltas: Vec<String> = Vec::new();
-                let mut forward = |delta: String| deltas.push(delta);
-                let mut forward_mut: &mut (dyn FnMut(String) + Send) = &mut forward;
-                match provider
-                    .complete_stream_with_model(model, messages, tools, &mut forward_mut)
-                    .await
-                {
+                let mut emitted = false;
+                let result = {
+                    let mut forward = |delta: String| {
+                        emitted = true;
+                        on_delta(delta);
+                    };
+                    provider
+                        .complete_stream_with_model(model, messages, tools, &mut forward)
+                        .await
+                };
+                match result {
                     Ok(output) => {
-                        // 整条成功后才回放增量，避免重试造成重复内容。
-                        for delta in deltas {
-                            on_delta(delta);
-                        }
                         self.breaker.record_success();
                         return Ok(output);
                     }
                     Err(error) => {
+                        if emitted {
+                            // 已输出部分内容：不重试、不降级，避免重复。
+                            break (error, false, true);
+                        }
                         let retriable = is_retriable(&error, &self.retry);
                         if !retriable || attempt >= self.retry.max_retries {
-                            break (error, retriable);
+                            break (error, retriable, false);
                         }
                         tokio::time::sleep(self.retry.delay_for(attempt)).await;
                         attempt += 1;
                     }
                 }
             };
-            errors.push(outcome.0);
-            retriable_seen = retriable_seen || outcome.1;
-            if !outcome.1 {
+            let (error, retriable, partial) = outcome;
+            if partial {
+                errors.push(format!(
+                    "{error}（流式中断：已输出部分内容，不再重试以免重复）"
+                ));
+                break;
+            }
+            errors.push(error);
+            retriable_seen = retriable_seen || retriable;
+            if !retriable {
                 break;
             }
         }
+        let _ = retriable_seen;
         self.breaker.record_failure();
         Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
@@ -1420,6 +1433,7 @@ fn consume_stream_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
 
     /// 环境变量依赖的网关测试串行执行，避免并行设置互相干扰。
     static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
@@ -1743,7 +1757,6 @@ mod tests {
     /// M4.2：ResilientProvider 主链/failover 全链透传请求级模型覆盖。
     #[tokio::test]
     async fn resilient_chain_forwards_model_override() {
-        use std::sync::Mutex as StdMutex;
         struct Recording {
             seen: StdMutex<Vec<Option<String>>>,
         }
@@ -1898,5 +1911,132 @@ mod tests {
                 std::env::set_var(name, value);
             }
         }
+    }
+
+    // ---- §4.2 F-02 真流式契约（回归守卫） --------------------------------------------
+
+    /// 可编程流式 Provider：可"先吐增量再失败"，用于证明增量是**立即**转发而非整条缓存回放。
+    struct StreamingMock {
+        deltas: Vec<String>,
+        /// 前 N 次调用直接失败（不产生任何增量）。
+        fail_first: usize,
+        /// 产生增量后是否失败（用于验证"已发增量后不再重试"）。
+        fail_after_emit: bool,
+        calls: StdMutex<usize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for StreamingMock {
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            self.complete_with_model(None, messages, tools).await
+        }
+        async fn complete_with_model(
+            &self,
+            _model: Option<&str>,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            Ok(ModelOutput::Text("ok".to_string()))
+        }
+        async fn complete_stream_with_model(
+            &self,
+            _model: Option<&str>,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+            on_delta: &mut (dyn FnMut(String) + Send),
+        ) -> Result<ModelOutput, String> {
+            let call = {
+                let mut calls = self.calls.lock().unwrap_or_else(|p| p.into_inner());
+                *calls += 1;
+                *calls
+            };
+            if call <= self.fail_first {
+                // 连接类错误 → 可重试（见 is_retriable）。
+                return Err("模型请求失败：连接被重置".to_string());
+            }
+            for delta in &self.deltas {
+                on_delta(delta.clone());
+            }
+            if self.fail_after_emit {
+                return Err("模型请求失败：连接被重置".to_string());
+            }
+            Ok(ModelOutput::Text(self.deltas.concat()))
+        }
+    }
+
+    fn fast_retry(max_retries: usize) -> RetryPolicy {
+        RetryPolicy {
+            max_retries,
+            base_delay_ms: 1,
+            max_delay_ms: 1,
+            retry_429: true,
+            retry_network: true,
+        }
+    }
+
+    /// F-02 回归：Provider 吐了增量后失败——增量必须已经**立即**到达调用方，
+    /// 且因"已输出"而不再重试（否则重试会重复内容）。旧实现（整条缓存成功后回放）
+    /// 会得到 0 个增量，本测试必红。
+    #[tokio::test]
+    async fn resilient_streams_deltas_immediately_and_does_not_retry_after_emit() {
+        let mock = Arc::new(StreamingMock {
+            deltas: vec!["你".to_string(), "好".to_string()],
+            fail_first: 0,
+            fail_after_emit: true,
+            calls: StdMutex::new(0),
+        });
+        let resilient = ResilientProvider::new(
+            Arc::clone(&mock) as Arc<dyn ModelProvider>,
+            Vec::new(),
+            CircuitBreaker::default(),
+            fast_retry(3),
+        );
+        let mut got = Vec::new();
+        let result = resilient
+            .complete_stream(&[], &[], &mut |delta| got.push(delta))
+            .await;
+        assert!(result.is_err(), "流式中断必须显式返回错误");
+        assert_eq!(
+            got,
+            vec!["你".to_string(), "好".to_string()],
+            "增量必须立即转发（真流式），而非整条缓存后回放"
+        );
+        assert_eq!(
+            *mock.calls.lock().unwrap_or_else(|p| p.into_inner()),
+            1,
+            "已输出增量后不得重试（否则重复内容）"
+        );
+    }
+
+    /// 未产生任何增量时仍保留重试：第一次连接失败、第二次成功吐增量。
+    #[tokio::test]
+    async fn resilient_still_retries_before_any_delta() {
+        let mock = Arc::new(StreamingMock {
+            deltas: vec!["A".to_string()],
+            fail_first: 1,
+            fail_after_emit: false,
+            calls: StdMutex::new(0),
+        });
+        let resilient = ResilientProvider::new(
+            Arc::clone(&mock) as Arc<dyn ModelProvider>,
+            Vec::new(),
+            CircuitBreaker::default(),
+            fast_retry(2),
+        );
+        let mut got = Vec::new();
+        resilient
+            .complete_stream(&[], &[], &mut |delta| got.push(delta))
+            .await
+            .expect("第二次应成功");
+        assert_eq!(got, vec!["A".to_string()]);
+        assert_eq!(
+            *mock.calls.lock().unwrap_or_else(|p| p.into_inner()),
+            2,
+            "未产生增量前应重试一次"
+        );
     }
 }

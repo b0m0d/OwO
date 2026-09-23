@@ -24,8 +24,18 @@ pub(super) async fn settings_get(
     let settings = owo_agent_core::Settings::load(&state.workspace);
     let mut value = serde_json::to_value(&settings)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let active_tools = state
+        .agent
+        .visible_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
     if let Some(object) = value.as_object_mut() {
-        object.insert("runtime".to_string(), effective_runtime_config(&settings));
+        let mut runtime = effective_runtime_config(&settings);
+        if let Some(runtime) = runtime.as_object_mut() {
+            runtime.insert("active_tool_names".to_string(), json!(active_tools));
+        }
+        object.insert("runtime".to_string(), runtime);
     }
     Ok(Json(value))
 }
@@ -635,7 +645,7 @@ pub(super) async fn settings_update(
         .publish_invalidate(owo_agent_server::event_stream::InvalidateDomain::Settings);
     Ok(Json(json!({
         "ok": true,
-        "note": "已写入 settings.json 并应用运行时设置（模型对新回合即时生效）",
+        "note": "已写入 settings.json 并应用运行时设置；模型对新回合即时生效，tool_capabilities 在重启 Daemon 后生效",
         "runtime": effective_runtime_config(&settings),
     })))
 }

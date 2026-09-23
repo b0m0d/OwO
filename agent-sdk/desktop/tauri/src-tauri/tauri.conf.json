@@ -45,6 +45,14 @@
     "targets": ["nsis"],
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "externalBin": ["binaries/owo-agent"],
+    "resources": {
+      "../../../tools/rg/rg.exe": "tools/rg/rg.exe",
+      "../../../tools/rg/manifest.json": "tools/rg/manifest.json",
+      "../../../tools/rg/COPYING": "tools/rg/COPYING",
+      "../../../tools/rg/LICENSE-MIT": "tools/rg/LICENSE-MIT",
+      "../../../tools/rg/UNLICENSE": "tools/rg/UNLICENSE",
+      "../../../tools/rg/README.md": "tools/rg/README.md"
+    },
     "windows": {
       "nsis": {
         "languages": ["SimpChinese", "English"],

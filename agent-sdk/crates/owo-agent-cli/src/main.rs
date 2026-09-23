@@ -47,6 +47,8 @@ enum Commands {
     Turn(commands::turn::TurnArgs),
     /// 启动本地 HTTP API 服务
     Serve(commands::serve::ServeArgs),
+    /// Daemon 生命周期（P1：status/stop，经 discovery + 共享客户端）
+    Daemon(commands::daemon::DaemonArgs),
     /// 进入交互式终端（默认命令）
     Repl(commands::repl::ReplArgs),
     /// 进入全屏 TUI（OpenCode 风格）
@@ -106,11 +108,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent: "build".to_string(),
             no_approval: false,
             data_dir: None,
+            local: false,
         }))?,
         Some(Commands::Turn(args)) => {
             run_async(commands::turn::run_turn(args, cli.output, cli.permissions))?
         }
         Some(Commands::Serve(args)) => run_async(commands::serve::run_serve(args))?,
+        Some(Commands::Daemon(args)) => run_async(commands::daemon::run_daemon_cmd(args))?,
         Some(Commands::Repl(args)) => run_async(commands::repl::Repl::run(args))?,
         Some(Commands::Tui(args)) => tui::run(args)?,
         Some(Commands::Init(args)) => commands::serve::run_init(args)?,

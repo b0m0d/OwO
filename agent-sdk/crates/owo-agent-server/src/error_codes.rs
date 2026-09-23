@@ -110,6 +110,11 @@ impl ErrorCode {
             "unavailable" => (503, Some(5_000)),
             "timeout" => (504, Some(2_000)),
             "denied" => (403, None),
+            "approval_expired" => (403, None),
+            "sandbox_refused" => (403, None),
+            "capability_missing" => (403, None),
+            "execution_timeout" => (504, Some(2_000)),
+            "revert_conflict" => (409, None),
             "missing_credentials" => (401, None),
             "invalid_input" => (400, None),
             "conflict" => (409, None),
@@ -147,6 +152,12 @@ fn known_table() -> &'static DomainMap {
         insert("gateway", "timeout", 504, Some(2_000), true);
         insert("gateway", "circuit_open", 503, Some(30_000), true);
         insert("permission", "denied", 403, None, false);
+        // P3.10：审批过期 / 沙箱拒绝 / 执行超时 / revert 冲突——统一结构化，UI 按码给下一步。
+        insert("permission", "approval_expired", 403, None, false);
+        insert("tool", "sandbox_refused", 403, None, false);
+        insert("tool", "execution_timeout", 504, Some(2_000), true);
+        insert("storage", "revert_conflict", 409, None, false);
+        insert("tool", "capability_missing", 403, None, false);
         insert("auth", "missing_credentials", 401, None, false);
         insert("validation", "invalid_input", 400, None, false);
         insert("validation", "conflict", 409, None, false);

@@ -1,0 +1,14 @@
+{
+    "present":  true,
+    "readOnly":  true,
+    "ariaReadonly":  "true",
+    "inputMode":  "native",
+    "buttonMode":  "native",
+    "buttonLabel":  "选择目录…",
+    "buttonDisabled":  false,
+    "buttonFocusable":  true,
+    "hint":  "桌面版由原生目录选择器设定，不需要手输完整路径。",
+    "moduleReady":  true,
+    "nativeAvailable":  true,
+    "command":  "choose_project_directory"
+}

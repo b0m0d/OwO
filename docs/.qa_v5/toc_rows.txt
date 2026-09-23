@@ -1,0 +1,59 @@
+Heading 1	项目摘要	4
+Heading 1	第一章 真实问题与项目机会	5
+Heading 2	1.1 一个发生在输入时刻的真实矛盾	5
+Heading 2	1.2 项目洞察	5
+Heading 2	1.3 输入时刻作为原生入口的技术依据	6
+Heading 2	1.4 项目边界与价值主张	7
+Heading 1	第二章 用户需求与验证设计	8
+Heading 2	2.1 首批用户与高频任务	8
+Heading 2	2.2 用户研究方法	9
+Heading 2	2.3 核心验证指标与决策门	9
+Heading 1	第三章 产品方案与体验闭环	11
+Heading 2	3.1 产品总体形态	11
+Heading 2	3.2 核心验证场景	12
+Heading 2	3.3 交互与执行决策	12
+Heading 2	3.4 返回原处机制	13
+Heading 1	第四章 核心技术与创新机制	14
+Heading 2	4.1 核心创新一 意图胶囊与最小情境机制	14
+Heading 2	4.2 核心创新二 三维任务决策与受控自治升级	16
+Heading 2	4.3 协作机制 版本化成果契约与自适应组队	17
+Heading 2	4.4 关键工程体系 返回原处与策略验证恢复	17
+Heading 2	4.5 核心机制的扩展 跨设备能力节点	17
+Heading 2	4.6 核心机制验证	18
+Heading 1	第五章 安全伦理与数据治理	19
+Heading 2	5.1 输入法场景的安全原则	19
+Heading 2	5.2 数据生命周期	19
+Heading 2	5.3 安全控制与发布门槛	19
+Heading 1	第六章 市场空间与竞争定位	21
+Heading 2	6.1 行业机会与目标市场	21
+Heading 2	6.2 市场进入规模	21
+Heading 2	6.3 竞争格局	22
+Heading 2	6.4 核心竞争力	23
+Heading 1	第七章 商业模式与市场进入	23
+Heading 2	7.1 商业模式	23
+Heading 2	7.2 市场进入路径	24
+Heading 2	7.3 获客、转化与留存	24
+Heading 2	7.4 从个人版到团队版的转化	25
+Heading 2	7.5 产品版本与单位经济	25
+Heading 1	第八章 研发验证与实施路径	26
+Heading 2	8.1 研发原则	26
+Heading 2	8.2 前期工程基础与团队能力证据	3
+Heading 2	8.3 二十四个月路线与阶段决策门	3
+Heading 2	8.4 关键指标体系	3
+Heading 2	8.5 知识产权与成果计划	3
+Heading 1	第九章 团队协作与人才培养	3
+Heading 2	9.1 团队结构	3
+Heading 2	9.2 成员能力成长	3
+Heading 2	9.3 协作与质量机制	3
+Heading 1	第十章 财务规划与资源配置	3
+Heading 2	10.1 财务假设与测算基础	3
+Heading 2	10.2 三年经营预测	3
+Heading 2	10.3 资源需求与首轮配置	3
+Heading 1	第十一章 风险管理	3
+Heading 2	11.1 关键风险与应对	3
+Heading 2	11.2 阶段决策与调整机制	3
+Heading 1	第十二章 社会价值与发展愿景	3
+Heading 2	12.1 知识工作的直接价值	3
+Heading 2	12.2 可信人工智能与数字包容	3
+Heading 2	12.3 发展愿景	3
+Heading 1	参考资料	3

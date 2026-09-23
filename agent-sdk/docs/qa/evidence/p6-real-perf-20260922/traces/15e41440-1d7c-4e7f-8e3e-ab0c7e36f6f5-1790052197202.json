@@ -1,0 +1,286 @@
+{
+  "session_id": "15e41440-1d7c-4e7f-8e3e-ab0c7e36f6f5",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-read-100kb\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请使用 read_file 工具读取工作区中的 perf-100kb.txt，不要只凭猜测；然后用一句话说明文件大小和开头内容。",
+  "started_at": "2026-09-22T04:43:08.856626300+00:00",
+  "duration_ms": 8345,
+  "steps": 1,
+  "final_text": "已实际读取 `perf-100kb.txt`（完整内容较大，工具输出已截断存为 artifact）：该文件大小为 **102,400 字节（恰好 100 KB）**，开头内容是一长串连续重复的字符 \"AAAAAAAA...\"。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_5976396632e5450b9bd4ad5a",
+      "tool": "read_file"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_5976396632e5450b9bd4ad5a",
+      "tool": "read_file",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "已"
+    },
+    {
+      "type": "token_delta",
+      "delta": "实际"
+    },
+    {
+      "type": "token_delta",
+      "delta": "读取"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "perf"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "100"
+    },
+    {
+      "type": "token_delta",
+      "delta": "kb"
+    },
+    {
+      "type": "token_delta",
+      "delta": ".txt"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完整"
+    },
+    {
+      "type": "token_delta",
+      "delta": "内容"
+    },
+    {
+      "type": "token_delta",
+      "delta": "较大"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "工具"
+    },
+    {
+      "type": "token_delta",
+      "delta": "输出"
+    },
+    {
+      "type": "token_delta",
+      "delta": "已"
+    },
+    {
+      "type": "token_delta",
+      "delta": "截"
+    },
+    {
+      "type": "token_delta",
+      "delta": "断"
+    },
+    {
+      "type": "token_delta",
+      "delta": "存"
+    },
+    {
+      "type": "token_delta",
+      "delta": "为"
+    },
+    {
+      "type": "token_delta",
+      "delta": " artifact"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）："
+    },
+    {
+      "type": "token_delta",
+      "delta": "该"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "大小"
+    },
+    {
+      "type": "token_delta",
+      "delta": "为"
+    },
+    {
+      "type": "token_delta",
+      "delta": " **"
+    },
+    {
+      "type": "token_delta",
+      "delta": "102"
+    },
+    {
+      "type": "token_delta",
+      "delta": ","
+    },
+    {
+      "type": "token_delta",
+      "delta": "400"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 字"
+    },
+    {
+      "type": "token_delta",
+      "delta": "节"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "恰好"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "100"
+    },
+    {
+      "type": "token_delta",
+      "delta": " KB"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）"
+    },
+    {
+      "type": "token_delta",
+      "delta": "**"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "开头"
+    },
+    {
+      "type": "token_delta",
+      "delta": "内容"
+    },
+    {
+      "type": "token_delta",
+      "delta": "是一"
+    },
+    {
+      "type": "token_delta",
+      "delta": "长"
+    },
+    {
+      "type": "token_delta",
+      "delta": "串"
+    },
+    {
+      "type": "token_delta",
+      "delta": "连续"
+    },
+    {
+      "type": "token_delta",
+      "delta": "重复"
+    },
+    {
+      "type": "token_delta",
+      "delta": "的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "字符"
+    },
+    {
+      "type": "token_delta",
+      "delta": " \""
+    },
+    {
+      "type": "token_delta",
+      "delta": "AAAAAAAA"
+    },
+    {
+      "type": "token_delta",
+      "delta": "...\""
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "final",
+      "text": "已实际读取 `perf-100kb.txt`（完整内容较大，工具输出已截断存为 artifact）：该文件大小为 **102,400 字节（恰好 100 KB）**，开头内容是一长串连续重复的字符 \"AAAAAAAA...\"。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 7845,
+    "completion_tokens": 157,
+    "total_tokens": 8002
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 1753,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 1,
+      "target": "read_file",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 6585,
+      "target": "",
+      "first_token_ms": 5076
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "read_100kb_file"
+}

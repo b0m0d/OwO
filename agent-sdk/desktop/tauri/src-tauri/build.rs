@@ -143,6 +143,49 @@ fn check_bundled_sidecar(manifest_dir: &Path, target: &str, profile: &str, api_v
     }
 }
 
+/// 随包只读外部工具的构建期门禁。
+///
+/// `search_files` 的实现依赖固定版本 ripgrep；如果资源目录缺文件，开发构建
+/// 也应尽早失败，不能等用户安装后才退化成“工具不可用”。Tauri 的 resources
+/// 映射负责复制，下面的门禁负责保证输入完整。
+fn check_bundled_external_tools(root: &Path, manifest_dir: &Path) {
+    let tool_dir = root.join("tools").join("rg");
+    let required = [
+        "rg.exe",
+        "manifest.json",
+        "COPYING",
+        "LICENSE-MIT",
+        "UNLICENSE",
+        "README.md",
+    ];
+    for name in required {
+        let path = tool_dir.join(name);
+        assert!(
+            path.is_file(),
+            "随包 ripgrep 资源缺失：{}（请恢复 agent-sdk\\tools\\rg 完整发行目录）",
+            path.display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            path.to_string_lossy().replace('\\', "/")
+        );
+    }
+    let manifest = std::fs::read_to_string(tool_dir.join("manifest.json"))
+        .expect("读取随包 ripgrep manifest.json 失败");
+    assert!(
+        manifest.contains("\"version\": \"14.1.1\""),
+        "随包 ripgrep 版本清单不是受支持的 14.1.1"
+    );
+    assert!(
+        manifest.contains("F162B54DE2ADFC72D78ADB1DBADA2DEDDA111AE0A5E2F6E9500F4F909664C5D2"),
+        "随包 ripgrep SHA-256 清单不匹配"
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("tauri.conf.json").to_string_lossy().replace('\\', "/")
+    );
+}
+
 fn main() {
     let root = repo_root();
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -195,5 +238,6 @@ fn main() {
         &std::env::var("PROFILE").unwrap_or_default(),
         &version,
     );
+    check_bundled_external_tools(&root, &manifest_dir);
     tauri_build::build()
 }

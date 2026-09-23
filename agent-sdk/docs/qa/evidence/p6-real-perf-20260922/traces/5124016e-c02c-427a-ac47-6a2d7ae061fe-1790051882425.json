@@ -1,0 +1,271 @@
+{
+  "session_id": "5124016e-c02c-427a-ac47-6a2d7ae061fe",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-short-text\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请用大约 60 个字介绍你自己，并说明你能做什么。",
+  "started_at": "2026-09-22T04:37:52.447295900+00:00",
+  "duration_ms": 9978,
+  "steps": 0,
+  "final_text": "我是 OwO Agent，由 OwO Agent SDK 驱动的智能助手。我能读写文件、执行命令、探索代码库，还可调用浏览器、Word、Excel、PDF 等技能，或委派子代理并行工作，帮你自动化完成开发、办公与数据处理等各类任务。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我是"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Ow"
+    },
+    {
+      "type": "token_delta",
+      "delta": "O"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Agent"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "由"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Ow"
+    },
+    {
+      "type": "token_delta",
+      "delta": "O"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Agent"
+    },
+    {
+      "type": "token_delta",
+      "delta": " SDK"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "驱"
+    },
+    {
+      "type": "token_delta",
+      "delta": "动的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "智能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "助手"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "读写"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "执行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命令"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "探索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "代码"
+    },
+    {
+      "type": "token_delta",
+      "delta": "库"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "还可"
+    },
+    {
+      "type": "token_delta",
+      "delta": "调用"
+    },
+    {
+      "type": "token_delta",
+      "delta": "浏览器"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "Word"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "Excel"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "PDF"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "等"
+    },
+    {
+      "type": "token_delta",
+      "delta": "技能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "或"
+    },
+    {
+      "type": "token_delta",
+      "delta": "委"
+    },
+    {
+      "type": "token_delta",
+      "delta": "派"
+    },
+    {
+      "type": "token_delta",
+      "delta": "子"
+    },
+    {
+      "type": "token_delta",
+      "delta": "代理"
+    },
+    {
+      "type": "token_delta",
+      "delta": "并行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "工作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "帮你"
+    },
+    {
+      "type": "token_delta",
+      "delta": "自动化"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "开发"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "办公"
+    },
+    {
+      "type": "token_delta",
+      "delta": "与"
+    },
+    {
+      "type": "token_delta",
+      "delta": "数据处理"
+    },
+    {
+      "type": "token_delta",
+      "delta": "等各类"
+    },
+    {
+      "type": "token_delta",
+      "delta": "任务。"
+    },
+    {
+      "type": "final",
+      "text": "我是 OwO Agent，由 OwO Agent SDK 驱动的智能助手。我能读写文件、执行命令、探索代码库，还可调用浏览器、Word、Excel、PDF 等技能，或委派子代理并行工作，帮你自动化完成开发、办公与数据处理等各类任务。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 719,
+    "completion_tokens": 185,
+    "total_tokens": 904
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 9976,
+      "target": "",
+      "first_token_ms": 8453
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "short_text_conversation"
+}

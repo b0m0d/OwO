@@ -23,7 +23,7 @@ use std::time::Duration;
 use std::os::windows::process::CommandExt as _;
 
 use crate::core_supervisor::{self, parse_fatal_line, parse_ready_line};
-use crate::provider::{self, ProviderConfig};
+use crate::provider::{self, ModelConfig};
 
 /// 由 build.rs 从核心服务的 OWO_API_VERSION 单一源码读取。
 pub const CORE_API_VERSION: &str = env!("OWO_CORE_API_VERSION");
@@ -39,6 +39,29 @@ pub const RESTART_DELAYS: [Duration; 3] = [
 const READY_LINE_TIMEOUT: Duration = Duration::from_secs(25);
 /// 优雅关闭：graceful 请求后的进程退出宽限。
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// `CREATE_NO_WINDOW`（winbase.h）。核心是控制台程序（`serve` 子命令），
+/// 若按默认方式 spawn，Windows 会为它**新建或继承一个控制台**：
+/// 1. 桌面壳是 GUI 子系统（`windows_subsystem = "windows"`），于是每次启动都
+///    在屏幕上弹出一个黑框 cmd 窗口——用户视角是"这程序怎么还开命令行"；
+/// 2. 更严重的是那个控制台的生命周期绑在壳上：用户一关窗口，控制台关闭事件
+///    会把子进程一起带走，"关掉界面服务就停"的根因就在这里。
+/// 该标志让子进程既不弹窗、也不拥有可见控制台，只保留被 piped 的 stdout/stderr。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// 核心 stdout 的稳定早退错误串：`serve` 在数据目录发现**存活**的 pid 文件时
+/// 拒绝双开（`owo-agent-server/src/shutdown.rs::recover_force_kill`）。
+/// 桌面壳换工作区/换提供商时会先关旧核心再拉新核心，两者存在毫秒级重叠——
+/// 这不属于"启动失败"，而是"上一代还在退"，必须重试而不是落错误页。
+const CORE_ALREADY_RUNNING_MARKER: &str = "检测到运行中的服务";
+
+/// pid 冲突（上一代核心尚未退干净）的重试预算。
+/// 上限对齐核心优雅关闭的在途回合 drain 上限（30s）+ 余量：核心收到
+/// `/server/shutdown` 后最多等 30s 才落盘退出，期间 pid 文件一直存在。
+const PID_CONFLICT_RETRIES: u8 = 60;
+const PID_CONFLICT_BACKOFF: Duration = Duration::from_millis(600);
+const PID_CONFLICT_MAX_TOTAL: Duration = Duration::from_secs(40);
 
 /// §4.3 稳定错误码 + 用户可操作文案（壳的启动诊断页直接消费）。
 /// R3-B（指南 §3.4 契约冻结）：八故障场景的错误码为唯一事实源——
@@ -56,6 +79,8 @@ pub enum CoreError {
     NoWorkspace,
     /// §3.4：数据目录不可写（核心启动期 `core_fatal code=storage/not_writable`）。
     StorageNotWritable,
+    /// 上一代核心尚未退干净时拒绝双开（可重试的瞬时事实，不是故障）。
+    PidConflict,
 }
 
 impl CoreError {
@@ -70,6 +95,7 @@ impl CoreError {
             // `core/no_workspace` 把"业务引导"错归因为"核心故障层"）。
             CoreError::NoWorkspace => "workspace/required",
             CoreError::StorageNotWritable => "storage/not_writable",
+            CoreError::PidConflict => "core/pid_conflict",
         }
     }
 
@@ -82,6 +108,9 @@ impl CoreError {
             CoreError::ExitedUnexpectedly => "后台意外退出：可重启后台或查看诊断日志",
             CoreError::NoWorkspace => "尚未选择项目工作区",
             CoreError::StorageNotWritable => "存储错误：数据目录不可写，请更换数据目录或修复权限",
+            CoreError::PidConflict => {
+                "上一份后台服务仍在退出，已自动重试；若持续出现请点重连或重启程序"
+            }
         }
     }
 
@@ -141,7 +170,7 @@ pub struct CoreRuntime {
     /// §4.6：当前项目工作区（数据目录持久化的“最近项目”；None = NoWorkspace）。
     workspace: Arc<Mutex<Option<PathBuf>>>,
     /// §4.8：用户显式选择的模型提供商（数据目录持久化；密钥不落盘）。
-    provider_cfg: Arc<Mutex<ProviderConfig>>,
+    provider_cfg: Arc<Mutex<ModelConfig>>,
     /// R3-B（§3.4 终态可见性）：最近一次启动失败的 `(稳定码, 用户文案)`。
     /// 必须独立于 CoreState 存活：失败后监督线程会立刻进 Starting/Restarting 退避
     /// 重试，而那两个状态本身不带码——真机故障矩阵实测（core-exit / core-hang /
@@ -162,7 +191,7 @@ impl CoreRuntime {
             bearer: Arc::new(Mutex::new(None)),
             child_pid: Arc::new(Mutex::new(None)),
             workspace: Arc::new(Mutex::new(load_saved_workspace())),
-            provider_cfg: Arc::new(Mutex::new(provider::load_provider_config())),
+            provider_cfg: Arc::new(Mutex::new(provider::load_config().model)),
             last_error: Arc::new(Mutex::new(None)),
         }
     }
@@ -184,7 +213,7 @@ impl CoreRuntime {
             bearer: Arc::new(Mutex::new(None)),
             child_pid: Arc::new(Mutex::new(None)),
             workspace: Arc::new(Mutex::new(workspace)),
-            provider_cfg: Arc::new(Mutex::new(provider::load_provider_config())),
+            provider_cfg: Arc::new(Mutex::new(provider::load_config().model)),
             last_error: Arc::new(Mutex::new(None)),
         }
     }
@@ -330,23 +359,26 @@ impl CoreRuntime {
         )
     }
 
-    /// §4.8 当前显式提供商配置（深拷贝供命令层读取）。
-    pub fn provider_config(&self) -> ProviderConfig {
+    /// §4.8/R11 当前模型配置（来自 `config.json` 的 `model` 段；深拷贝供命令层读取）。
+    pub fn model_config(&self) -> ModelConfig {
         self.provider_cfg
             .lock()
             .map(|guard| guard.clone())
-            .unwrap_or_else(|_| ProviderConfig::unset())
+            .unwrap_or_default()
     }
 
-    /// §4.8 更新提供商选择并持久化（不在此处重启；命令层持 Arc 触发）。
-    pub fn set_provider(&self, config: &ProviderConfig) -> Result<(), String> {
-        provider::save_provider_config(config)?;
+    /// §4.8/R11 更新模型配置并写回 `config.json`（不在此处重启；命令层持 Arc 触发）。
+    pub fn set_model_config(&self, model: &ModelConfig) -> Result<(), String> {
+        // 读改写而不是整体覆盖：保住文件里的未知字段（用户手写内容不得被抹掉）。
+        let mut file = provider::load_config();
+        file.model = model.clone();
+        provider::save_config(&file)?;
         {
             let mut guard = self
                 .provider_cfg
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *guard = config.clone();
+            *guard = model.clone();
         }
         Ok(())
     }
@@ -354,6 +386,10 @@ impl CoreRuntime {
     /// 监督主循环：spawn → 就绪判定 → Ready → 等待退出 →（意外退出）退避重启。
     fn supervise(self: Arc<Self>, generation: u64) {
         let mut attempt: u8 = 0;
+        // pid 冲突（上一代核心未退）单独计数：它是**重启竞态**，不是启动失败，
+        // 用它自己的预算与退避重试，不得走"3 次意外退出"预算直接落 Failed。
+        let mut pid_conflicts: u8 = 0;
+        let mut pid_conflict_deadline: Option<std::time::Instant> = None;
         loop {
             if self.shutdown_requested.load(Ordering::SeqCst) {
                 self.set_state(CoreState::Stopped);
@@ -365,10 +401,26 @@ impl CoreRuntime {
                 return;
             }
             self.set_state(CoreState::Starting { attempt });
+            // §2.3 规则 5：已有可复用 Daemon（CLI 启动、无桌面实例身份）时**复用**，
+            // 不再另起第二个 DB writer；复用的实例退出后再由本代自行拉起核心。
+            if let Some(reused) = self.try_reuse_existing_core() {
+                let reason = self.wait_reused_exit(reused.pid, generation);
+                if self.shutdown_requested.load(Ordering::SeqCst) {
+                    self.set_state(CoreState::Stopped);
+                    return;
+                }
+                if self.generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                self.set_state(CoreState::Restarting { attempt, reason });
+                continue;
+            }
             match self.launch_once() {
                 Ok((connection, generation_handle)) => {
                     // 成功就绪：清掉上一代的陈旧故障码，避免诊断面继续呈现旧故障。
                     self.clear_failure();
+                    pid_conflicts = 0;
+                    pid_conflict_deadline = None;
                     self.set_state(CoreState::Ready(connection));
                     let reason = wait_for_exit(&generation_handle, generation, &self.generation);
                     if self.shutdown_requested.load(Ordering::SeqCst) {
@@ -407,6 +459,36 @@ impl CoreRuntime {
                         self.set_state(CoreState::NoWorkspace);
                         return;
                     }
+                    // §4.4/R3-BUG：上一代核心还在优雅退出时，新核心会因存活 pid 文件
+                    // 拒绝双开并秒退。这不是故障而是重启竞态——真机实测（换工作区、
+                    // 换提供商）表现为"界面上明明显示服务在跑，新核心却连拉两次都起不来，
+                    // 界面直接落错误页"。此处按独立预算重试，不占用意外退出预算。
+                    if failure == CoreError::PidConflict {
+                        let deadline = *pid_conflict_deadline
+                            .get_or_insert_with(|| std::time::Instant::now() + PID_CONFLICT_MAX_TOTAL);
+                        if pid_conflicts < PID_CONFLICT_RETRIES
+                            && std::time::Instant::now() < deadline
+                        {
+                            pid_conflicts += 1;
+                            append_log_line(
+                                &self.log_path(),
+                                &format!(
+                                    "[runtime] 上一代核心仍在退出，{:.0}ms 后重试（第 {pid_conflicts}/{PID_CONFLICT_RETRIES} 次）",
+                                    PID_CONFLICT_BACKOFF.as_secs_f64() * 1000.0
+                                ),
+                            );
+                            self.set_state(CoreState::Restarting {
+                                attempt: pid_conflicts,
+                                reason: "上一代后台服务正在退出，正在自动重连…".to_string(),
+                            });
+                            std::thread::sleep(PID_CONFLICT_BACKOFF);
+                            continue;
+                        }
+                        append_log_line(
+                            &self.log_path(),
+                            "[runtime] pid 冲突重试预算用尽：上一代核心始终未退出",
+                        );
+                    }
                     self.record_failure(failure);
                     self.set_state(CoreState::Failed {
                         code: failure.code(),
@@ -417,6 +499,47 @@ impl CoreRuntime {
                 }
             }
         }
+    }
+
+    /// §2.3 规则 5：若已有可复用 Daemon（无桌面实例身份的 CLI 实例），直接复用。
+    /// 带实例身份的是另一个桌面实例的核心——不复用（避免跨实例串台）。
+    fn try_reuse_existing_core(self: &Arc<Self>) -> Option<ReusableCore> {
+        let root = effective_data_root()?;
+        let reused = discover_reusable_core(&root)?;
+        if !reused.instance_id.is_empty() {
+            return None;
+        }
+        self.bootstrap_bearer(reused.port);
+        self.clear_failure();
+        append_log_line(
+            &self.log_path(),
+            &format!(
+                "[runtime] 复用已有 Daemon（§2.3 规则 5）：pid={} port={} build={}",
+                reused.pid, reused.port, reused.build_id
+            ),
+        );
+        self.set_state(CoreState::Ready(CoreConnection {
+            pid: reused.pid,
+            port: reused.port,
+            api_version: reused.api_version.clone(),
+            build_id: reused.build_id.clone(),
+            instance_id: reused.instance_id.clone(),
+        }));
+        Some(reused)
+    }
+
+    /// 复用期间等待外部 Daemon 退出（或被本代取代/关闭）。
+    fn wait_reused_exit(&self, pid: u32, generation: u64) -> String {
+        while process_alive(pid) {
+            if self.shutdown_requested.load(Ordering::SeqCst) {
+                return "关闭请求".to_string();
+            }
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return "运行时被手动重试取代".to_string();
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        "复用的 Daemon 已退出".to_string()
     }
 
     /// 拉起一次核心并完成就绪判定（ready 行 → /health 实例校验 → 引导 bearer）。
@@ -472,7 +595,8 @@ impl CoreRuntime {
             .arg(&workspace)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let provider_cfg = self.provider_config();
+        apply_no_console_window(&mut command);
+        let provider_cfg = self.model_config();
         apply_core_env(
             &mut command,
             &self.pairing,
@@ -490,8 +614,9 @@ impl CoreRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pid);
         let stdout = generation.take_stdout();
         let stderr = generation.take_stderr();
-        spawn_log_thread(stdout, &self.pairing, &log, Some(ready_tx));
-        spawn_log_thread(stderr, &self.pairing, &log, None);
+        let conflict_flag = generation.conflict_flag();
+        spawn_log_thread(stdout, &self.pairing, &log, Some(ready_tx), Some(conflict_flag));
+        spawn_log_thread(stderr, &self.pairing, &log, None, None);
 
         // 就绪判定：等本次代际的协议行取得实际端口（--port 0 由系统分配）。
         let ready = wait_ready_line(&ready_rx, &generation);
@@ -564,6 +689,17 @@ impl CoreRuntime {
             ReadyOutcome::Exited => {
                 // R3-B（§3.4）：早退是独立终态 `core/exited`（15s 级），不再烧完
                 // 两轮超时伪装成"握手超时"——错误归因决定用户能否自助修复。
+                // 例外：pid 冲突（上一代核心还在退）是可重试的**瞬时**事实，
+                // 归成 core/exited 会把一次正常重启判成故障（真机实测：换工作区/
+                // 换提供商后壳连拉两次都撞上旧 pid，界面直接落错误页）。
+                if generation.saw_pid_conflict() {
+                    append_log_line(
+                        &log,
+                        "[runtime] core 因上一代仍在退出而拒绝启动（pid 冲突，可重试）",
+                    );
+                    generation.wait_exit_within(Duration::from_millis(2_000));
+                    return Err(CoreError::PidConflict);
+                }
                 append_log_line(
                     &log,
                     "[runtime] core 早退：ready 行之前进程已退出（core/exited）",
@@ -582,7 +718,7 @@ impl CoreRuntime {
                     .arg(&workspace)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
-                let provider_cfg = self.provider_config();
+                let provider_cfg = self.model_config();
                 apply_core_env(
                     &mut command,
                     &self.pairing,
@@ -598,8 +734,15 @@ impl CoreRuntime {
                     .child_pid
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(fallback_pid);
-                spawn_log_thread(fallback_generation.take_stdout(), &self.pairing, &log, None);
-                spawn_log_thread(fallback_generation.take_stderr(), &self.pairing, &log, None);
+                let fallback_conflict = fallback_generation.conflict_flag();
+                spawn_log_thread(
+                    fallback_generation.take_stdout(),
+                    &self.pairing,
+                    &log,
+                    None,
+                    Some(fallback_conflict),
+                );
+                spawn_log_thread(fallback_generation.take_stderr(), &self.pairing, &log, None, None);
                 core_supervisor::wait_for_instance(
                     fallback_port,
                     &self.instance_id,
@@ -698,6 +841,8 @@ pub struct ChildGeneration {
     watch: Option<std::thread::JoinHandle<()>>,
     stdout: Option<std::process::ChildStdout>,
     stderr: Option<std::process::ChildStderr>,
+    /// stdout 上是否出现过 pid 冲突错误串（由日志线程置位）。
+    conflict_flag: Arc<AtomicBool>,
 }
 
 impl ChildGeneration {
@@ -719,7 +864,18 @@ impl ChildGeneration {
             watch,
             stdout,
             stderr,
+            conflict_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// 与日志线程共享的 pid 冲突标志（日志线程写入，判定方只读）。
+    fn conflict_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.conflict_flag)
+    }
+
+    /// 本代 stdout 是否报过 pid 冲突（上一代核心未退干净）。
+    fn saw_pid_conflict(&self) -> bool {
+        self.conflict_flag.load(Ordering::SeqCst)
     }
 
     fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
@@ -824,6 +980,84 @@ fn kill_process_tree(pid: u32) {
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .output();
+}
+
+/// §2.3 规则 5：可复用的已有 Daemon（CLI 或另一壳启动）。
+#[derive(Debug, Clone)]
+pub struct ReusableCore {
+    pub pid: u32,
+    pub port: u16,
+    pub api_version: String,
+    pub build_id: String,
+    pub instance_id: String,
+}
+
+/// 读取 `<data_root>/runtime/daemon.json`：进程存活 + API 版本一致才可复用。
+///
+/// 为什么必须校验 API 版本：连到旧协议实例会让 WebView 拿到不兼容响应（静默空壳）。
+fn discover_reusable_core(data_root: &Path) -> Option<ReusableCore> {
+    let path = data_root.join("runtime").join("daemon.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let pid = value.get("pid")?.as_u64()? as u32;
+    let port = value.get("port")?.as_u64()? as u16;
+    let api_version = value.get("api_version")?.as_str()?.to_string();
+    if api_version != owo_build_info::API_VERSION {
+        return None;
+    }
+    if !process_alive(pid) {
+        return None;
+    }
+    Some(ReusableCore {
+        pid,
+        port,
+        api_version,
+        build_id: value
+            .get("build_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        instance_id: value
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+/// 进程存活探测（Windows：OpenProcess；其他：kill(pid, 0)）。
+/// 独立实现，避免为单点检查给桌面壳引入新的 windows-sys feature。
+fn process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        type WinHandle = *mut core::ffi::c_void;
+        unsafe extern "system" {
+            fn OpenProcess(
+                dw_desired_access: u32,
+                b_inherit_handle: i32,
+                dw_process_id: u32,
+            ) -> WinHandle;
+            fn GetLastError() -> u32;
+            fn SetLastError(dw_err_code: u32);
+            fn CloseHandle(h_object: WinHandle) -> i32;
+        }
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        unsafe { SetLastError(0) };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+        }
+        unsafe { CloseHandle(handle) };
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        unsafe { kill(pid as i32, 0) == 0 }
+    }
 }
 
 /// R3（§8.3）：`--version` 输出是否携带**可用构建身份**。
@@ -1026,7 +1260,7 @@ fn apply_core_env(
     command: &mut Command,
     pairing: &str,
     instance: &str,
-    provider_cfg: &ProviderConfig,
+    provider_cfg: &ModelConfig,
     log_path: &std::path::Path,
 ) {
     let dev_auth = std::env::var("OWO_DESKTOP_DEV_AUTH")
@@ -1044,13 +1278,19 @@ fn apply_core_env(
         "OWO_DESKTOP_RELEASE",
         if cfg!(debug_assertions) { "0" } else { "1" },
     );
-    if let Some(local) = local_appdata() {
-        let default_root = local.join("OwO").join("Agent").join("data");
-        // §3.4 动作「更换数据目录」：用户显式改选过的数据根优先生效。
-        let effective = load_data_root_override().unwrap_or(default_root);
+    if let Some(effective) = effective_data_root() {
         command.env("OWO_AGENT_DATA", effective);
     }
     crate::provider::apply_provider_env(command, provider_cfg, log_path);
+    // 把"本次实际生效的模型配置"落一行日志：排障时不必再从核心报错反推端点。
+    crate::provider::log_effective_config(log_path, provider_cfg);
+}
+
+/// 核心使用的有效数据根：用户改选指针优先，否则 `<LOCALAPPDATA>\OwO\Agent\data`。
+/// 与 `apply_core_env` 同源，供"发现已有 Daemon"复用同一条路径口径。
+fn effective_data_root() -> Option<PathBuf> {
+    let default_root = local_appdata()?.join("OwO").join("Agent").join("data");
+    Some(load_data_root_override().unwrap_or(default_root))
 }
 
 fn local_appdata() -> Option<PathBuf> {
@@ -1062,11 +1302,24 @@ fn local_appdata() -> Option<PathBuf> {
 /// §4.3 日志线程：把子进程 stdout/stderr 逐行写入当日日志（先脱敏）；
 /// stdout 线程若解析到 `core_ready` 行，把该行（原始 Value）发送到本次代际的
 /// ready channel——就绪信号与日志落盘完全分离，旧代迟到行不污染新代。
+/// 让子进程不弹控制台窗口、也不依附于壳的控制台（见 `CREATE_NO_WINDOW` 注释）。
+fn apply_no_console_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
 fn spawn_log_thread<R: Read + Send + 'static>(
     pipe: Option<R>,
     pairing: &str,
     log_path: &std::path::Path,
     ready_tx: Option<mpsc::Sender<Value>>,
+    conflict_flag: Option<Arc<AtomicBool>>,
 ) {
     let Some(pipe) = pipe else {
         return;
@@ -1081,6 +1334,13 @@ fn spawn_log_thread<R: Read + Send + 'static>(
                 match line {
                     Ok(line) => {
                         append_log_line(&log_path, &redact(&line, &pairing));
+                        // pid 冲突串同时落 stdout 与 stderr；任一路置位即算冲突，
+                        // 判定方据此把"早退"归成可重试事实而不是 core/exited。
+                        if line.contains(CORE_ALREADY_RUNNING_MARKER) {
+                            if let Some(flag) = &conflict_flag {
+                                flag.store(true, Ordering::SeqCst);
+                            }
+                        }
                         if let Some(tx) = &ready_tx {
                             if let Some(value) = parse_ready_line(&line) {
                                 let _ = tx.send(value);
@@ -1363,9 +1623,9 @@ fn free_port() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        core_server_path, load_data_root_override, pick_current_core, redact,
-        save_data_root_override, version_output_has_build_identity, workspace_state_path,
-        CoreError, CoreRuntime, CoreState, ProviderConfig, RESTART_DELAYS,
+        core_server_path, discover_reusable_core, load_data_root_override, pick_current_core,
+        process_alive, redact, save_data_root_override, version_output_has_build_identity,
+        workspace_state_path, CoreError, CoreRuntime, CoreState, ModelConfig, RESTART_DELAYS,
     };
     use std::path::PathBuf;
     use std::time::Duration;
@@ -1445,6 +1705,7 @@ mod tests {
         assert_eq!(CoreError::ExitedUnexpectedly.code(), "core/exited");
         assert_eq!(CoreError::NoWorkspace.code(), "workspace/required");
         assert_eq!(CoreError::StorageNotWritable.code(), "storage/not_writable");
+        assert_eq!(CoreError::PidConflict.code(), "core/pid_conflict");
         assert_eq!(
             CoreError::from_fatal_code("storage/not_writable"),
             CoreError::StorageNotWritable,
@@ -1725,20 +1986,73 @@ mod tests {
     }
 
     #[test]
-    fn provider_choice_persists_and_reloads() {
+    fn model_choice_persists_to_config_file_and_reloads() {
         with_isolated_data_dir(|| {
             let runtime = std::sync::Arc::new(CoreRuntime::new("pairing".into(), "inst".into()));
-            let config = ProviderConfig {
-                mode: crate::provider::ProviderMode::Ollama,
-                base_url: None,
-                model: Some("qwen2.5".into()),
+            let model = ModelConfig {
+                provider: crate::provider::ProviderMode::Ollama,
+                name: Some("qwen2.5".into()),
+                ..ModelConfig::default()
             };
-            runtime.set_provider(&config).expect("合法配置可保存");
+            runtime.set_model_config(&model).expect("合法配置可保存");
             let reloaded = CoreRuntime::new("pairing".into(), "inst".into());
-            let restored = reloaded.provider_config();
-            assert_eq!(restored.mode, config.mode);
-            assert_eq!(restored.model.as_deref(), Some("qwen2.5"));
+            let restored = reloaded.model_config();
+            assert_eq!(restored.provider, model.provider);
+            assert_eq!(restored.name.as_deref(), Some("qwen2.5"));
             assert_eq!(restored.effective_base_url(), "http://127.0.0.1:11434/v1");
+            // R11：配置必须落在独立配置文件里（用户要能像 codex/opencode 那样手改）。
+            let config_path = crate::provider::config_path().expect("配置路径");
+            let text = std::fs::read_to_string(&config_path).expect("config.json 必须存在");
+            assert!(text.contains("\"model\""), "配置要有 model 段：{text}");
+            assert!(text.contains("qwen2.5"), "模型名必须写进文件：{text}");
         });
+    }
+
+    /// §2.3 规则 5：发现文件校验——存活 + API 版本一致才复用。
+    #[test]
+    fn discover_reusable_core_requires_live_pid_and_matching_api_version() {
+        let dir = std::env::temp_dir().join(format!(
+            "owo-core-disc-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join("runtime")).unwrap();
+        let path = dir.join("runtime").join("daemon.json");
+        let write = |pid: u32, api: &str| {
+            let payload = serde_json::json!({
+                "pid": pid,
+                "port": 4096,
+                "instance_id": "",
+                "api_version": api,
+                "build_id": "abc",
+                "started_at": "2026-09-21T00:00:00Z",
+                "data_root": "x",
+            });
+            std::fs::write(&path, payload.to_string()).unwrap();
+        };
+
+        write(std::process::id(), owo_build_info::API_VERSION);
+        let found = discover_reusable_core(&dir).expect("存活 + 版本一致应可复用");
+        assert_eq!(found.pid, std::process::id());
+        assert_eq!(found.port, 4096);
+
+        write(std::process::id(), "9.9");
+        assert!(
+            discover_reusable_core(&dir).is_none(),
+            "API 版本不一致必须拒绝复用"
+        );
+
+        write(0, owo_build_info::API_VERSION);
+        assert!(discover_reusable_core(&dir).is_none(), "死 pid 必须拒绝");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn process_alive_detects_self_and_rejects_zero() {
+        assert!(process_alive(std::process::id()), "自身进程必须判为存活");
+        assert!(!process_alive(0), "pid 0 必须判为不存活");
     }
 }

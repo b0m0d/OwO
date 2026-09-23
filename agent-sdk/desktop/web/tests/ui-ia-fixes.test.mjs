@@ -151,10 +151,18 @@ test("§12-13 自由文本改约束控件：自动化三态 / MCP 传输切换 /
   assert.match(app, /function refreshWorkspaceCandidates\(\)/, "最近项目候选必须可刷新");
   // settings 原始 JSON 编辑保持 json-fallback 兜底（普通模式不裸露）。
   assert.match(index, /id="settingsEditor" class="json-fallback"/, "原始 JSON 编辑器必须保持在无 JS 兜底层");
+  for (const id of ["toolCapDesktopObservation", "toolCapDesktopControl", "toolCapBrowser"]) {
+    assert.match(index, new RegExp(`id="${id}" type="checkbox"`), `能力设置页缺少显式开关 ${id}`);
+  }
+  assert.match(index, /id="toolCapabilityStatus"[^>]*aria-live="polite"/, "能力设置要报告当前运行状态");
+  assert.match(app, /settings\.tool_capabilities = \{/, "保存设置必须提交能力开关状态");
+  assert.match(app, /runtime\.active_tool_names/, "页面必须展示服务端报告的当前活跃工具");
+  assert.match(app, /control\.dataset\.dirty !== "true"/, "刷新不得覆盖尚未保存的用户选择");
   const css = read("../style.css");
   assert.match(css, /\.chip-group/, "chips 容器样式");
   assert.match(css, /\.chip\.selected/, "chips 选中态样式");
   assert.match(css, /\.auto-group\[hidden\]/, "受控表单隐藏规则");
+  assert.match(css, /\.tool-capabilities-grid/, "可选 Agent 工具能力卡片必须有响应式布局");
 });
 
 // §5.1.5 模块边界守卫：同一函数不得同时在 app.js 和 app-domain.js 定义，
@@ -193,4 +201,99 @@ test("§12-12 工具与高级系统移入路由化设置页 + 开发者模式门
   assert.match(css, /section\[data-dev\] \{ display: none; \}/, "普通模式必须隐藏开发者分区");
   assert.match(css, /\.settings-tabs/, "设置子页标签样式必须存在");
   assert.match(css, /body:not\(\.route-chat\)\.settings-tab-tools #toolsPanel/, "工具子页必须只显示普通工具分区");
+});
+
+// R10（2026-09-22 用户反馈）："左侧工作区有一堆参数" 与 "找不到模型切换、
+// 自定义模型地址和名称"。前者要求工具/开发者表单区不再挂在侧栏常显位置，
+// 后者要求模型配置成为一级入口且地址/模型名默认可见。以下断言锁住这两个意图，
+// 防止后续重构把入口又藏回去（真机上是"功能存在但用户找不到"＝等效缺失）。
+test("R10 侧栏瘦身：工具/开发者分区不再挤在侧栏常显位置", () => {
+  const index = read("../index.html");
+  // 侧栏里只允许保留工作区/任务/技能/子代理四个常显区块 + 底部设置入口；
+  // toolsPanel 内部的重型表单区不在此列（它们默认隐藏，只在设置页/开发者模式出现）。
+  const sidebar = index.match(/<aside id="sidebar">[\s\S]*?<div id="toolsPanel"/)[0];
+  const sidebarSections = sidebar.match(/<section/g) || [];
+  assert.ok(sidebarSections.length <= 4,
+    `侧栏常显区块必须收敛到 ≤4（当前 ${sidebarSections.length}）`);
+  assert.match(sidebar, /id="openSettingsBtn"/, "侧栏必须有不依赖折叠开关的设置入口");
+  assert.ok(!/id="toggleTools"/.test(index), "旧的「显示工具与设置」折叠开关不得再出现");
+  // 工具面板仍在（设置页与开发者模式依赖它），但默认不可见。
+  assert.match(index, /<div id="toolsPanel" class="tools-panel">/);
+  const css = read("../style.css");
+  assert.match(css, /#toolsPanel \{ display: none; \}/, "工具面板默认必须隐藏");
+  assert.match(css, /\.owo-sidebar-settings/, "侧栏设置入口必须有样式");
+});
+
+test("R12 会话卡片：低频操作收进 ⋯ 弹层，卡片上不再堆按钮", () => {
+  const domain = read("../app-domain.js");
+  // 卡片主体点一下就是"打开会话"，不该再有一个常显的"继续"按钮。
+  assert.ok(!/data-act="open"/.test(domain), "会话卡片不得再有常显的「继续」按钮");
+  assert.match(domain, /class="owo-session-more"[\s\S]{0,120}data-act="menu"/, "必须有 ⋯ 菜单触发器");
+  assert.match(domain, /class="owo-session-menu"[\s\S]*?role="menu"/, "必须有 role=menu 的弹层");
+  for (const act of ["rename", "pin", "archive", "fork", "rewind", "redo"]) {
+    assert.ok(domain.includes(`data-act="${act}"`), `弹层里必须有 ${act} 操作`);
+  }
+  // 弹层默认隐藏 + 点空白/Esc 关闭（否则会"粘"在界面上）。
+  assert.match(domain, /class="owo-session-menu" role="menu" hidden/, "弹层必须默认 hidden");
+  assert.match(domain, /addEventListener\("keydown"[\s\S]{0,200}Escape/, "Esc 必须能关掉弹层");
+  const css = read("../style.css");
+  // 窄侧栏里中文被压成逐字竖排就是缺这几条：关键元素一律 nowrap + 省略。
+  assert.match(css, /\.owo-session-menu button \{[\s\S]*?white-space: nowrap;/, "菜单项不得换行断字");
+  assert.match(css, /\.owo-session-title \{[\s\S]*?text-overflow: ellipsis;/, "标题必须省略号截断而非换行");
+});
+
+test("R13 模型参数全部文件驱动：地址/模型名/上下文/输出/温度/超时 都不写死", () => {
+  const index = read("../index.html");
+  const panel = read("../views/settings-panel.view.js");
+  // 用户明确要求"模型服务地址、模型名称、上下文等全都通过文件随时更改，不能写死"。
+  for (const id of ["settingsBaseUrl", "settingsModelName", "settingsContextWindow",
+                    "settingsMaxOutput", "settingsTemperature", "settingsTimeout",
+                    "settingsKeepRecent", "settingsCompaction"]) {
+    assert.ok(index.includes(`id="${id}"`), `必须提供可编辑字段：${id}`);
+  }
+  // 模型名必须是自由输入（能写下任意模型），而不是只有固定选项。
+  assert.match(index, /id="settingsModelName"[^>]*type="text"/, "模型名必须是文本输入（不得只有固定下拉）");
+  assert.match(index, /id="modelReloadBtn"/, "必须有「从文件重载」（手改 config.json 后不必重开应用）");
+  // 面板要把可调参数一起提交，并把配置里的模型清单变成建议项。
+  assert.match(panel, /context_window:/, "保存时必须提交上下文窗口");
+  assert.match(panel, /max_output_tokens:/, "保存时必须提交输出上限");
+  assert.match(panel, /temperature:/, "保存时必须提交温度");
+  assert.match(panel, /timeout_secs:/, "保存时必须提交超时");
+  assert.match(panel, /reload_model_config/, "必须调用壳的重载命令");
+  assert.match(panel, /Array\.isArray\(state\.models\)/, "配置里的模型清单必须变成界面建议项");
+  // 壳侧：配置文件 schema 必须带这些字段（含用户可维护的模型清单）。
+  const rust = read("../../tauri/src-tauri/src/provider.rs");
+  for (const field of ["context_window", "max_output_tokens", "keep_recent", "compaction", "pub models: Vec<String>"]) {
+    assert.ok(rust.includes(field), `provider.rs 必须支持字段：${field}`);
+  }
+  // 核心侧：可调参数要能被消费（否则保存了也不生效）。
+  const agent = read("../../../crates/owo-agent-core/src/agent.rs");
+  for (const envName of ["OWO_MODEL_CONTEXT_WINDOW", "OWO_MODEL_MAX_OUTPUT_TOKENS", "OWO_MODEL_TEMPERATURE", "OWO_AGENT_KEEP_RECENT"]) {
+    assert.ok(agent.includes(envName), `核心必须消费 ${envName}`);
+  }
+});
+
+test("R10 模型配置：一级入口 + 自定义地址/模型名默认可见 + 会话级切换", () => {
+  const index = read("../index.html");
+  const app = read("../app.js");
+  assert.match(index, /data-rail-target="model"/, "左栏必须有一级「模型」入口");
+  assert.match(index, /id="settingsBaseUrl"/, "必须提供自定义接口地址（base_url）输入框");
+  assert.match(index, /id="settingsModelName"/, "必须提供自定义模型名输入框");
+  assert.match(index, /id="modelApplyBtn"/, "必须有显式保存按钮（改完不点不生效）");
+  assert.match(index, /id="sessionModelCard"/, "必须提供会话级模型切换卡");
+  assert.match(index, /views\/settings-panel\.view\.js/, "模型面板脚本必须挂载");
+  assert.match(app, /model: \{ title: "模型"/, "模型必须是一级路由");
+  assert.match(app, /route === "model"/, "模型路由必须有独立渲染分支");
+  // 状态条「模型」段直达模型页（此前落在设置页，用户找不到）。
+  const statusBar = read("../views/status-bar.view.js");
+  assert.match(statusBar, /key: "model", label: "模型", target: "model"/, "状态条模型段必须直达模型页");
+  // 引导页：地址与模型名默认可见（不再 hidden 到选中云端才出现）。
+  const setup = read("../views/setup-guide.view.js");
+  assert.ok(!/data-role="base-url"[^>]*hidden/.test(setup),
+    "引导页的接口地址不得默认隐藏（这正是用户看不到自定义项的形态）");
+  assert.ok(!/data-role="model"[^>]*hidden/.test(setup), "引导页的模型名不得默认隐藏");
+  // 预设唯一事实源，且本地端点走动态端口拼接（lint 禁止渲染脚本硬编码本机 URL）。
+  const presets = read("../config/provider-presets.js");
+  assert.match(presets, /ollamaBaseUrl/, "本地 Ollama 端点必须由函数生成（禁止渲染脚本硬编码）");
+  assert.ok(!/apiUrl = "http:\/\/127\.0\.0\.1:11434/.test(presets), "端点必须拼接端口常量而非整串字面量");
 });

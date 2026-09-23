@@ -9,10 +9,12 @@
 //! 2. 断言 `/openapi.json` 登记了契约快照全部路径与 lib.rs 实际注册的全部路由。
 //! 3. 真实 HTTP 服务启动 smoke（防 Router 构建 panic）。
 
+use base64::Engine as _;
 use owo_agent_core::permissions::Policy;
 use owo_agent_core::sqlite_store::SqliteSessionStore;
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::Agent;
+use owo_agent_protocol::SseEvent;
 use owo_agent_server::build_router;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -106,6 +108,131 @@ impl owo_agent_core::gateway::ModelProvider for IdleProvider {
         _tools: &[owo_agent_core::ToolSpec],
     ) -> Result<owo_agent_core::ModelOutput, String> {
         Err("IdleProvider 不应被调用".to_string())
+    }
+}
+
+/// 可让 HTTP 流消费者落后的确定性 Provider；每个 delta 后让出执行权，确保取消分支可运行。
+struct BurstProvider {
+    emitted: Arc<std::sync::atomic::AtomicUsize>,
+    limit: usize,
+}
+
+#[async_trait::async_trait]
+impl owo_agent_core::gateway::ModelProvider for BurstProvider {
+    async fn complete(
+        &self,
+        _messages: &[owo_agent_core::ChatMessage],
+        _tools: &[owo_agent_core::ToolSpec],
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        Ok(owo_agent_core::ModelOutput::Text("complete".to_string()))
+    }
+
+    async fn complete_stream(
+        &self,
+        _messages: &[owo_agent_core::ChatMessage],
+        _tools: &[owo_agent_core::ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        for _ in 0..self.limit {
+            on_delta("x".repeat(8 * 1024));
+            self.emitted
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tokio::task::yield_now().await;
+        }
+        Ok(owo_agent_core::ModelOutput::Text("complete".to_string()))
+    }
+}
+
+/// 在已发送一个增量后模拟 Provider 中途断流，用于验证实际 turn/SSE/持久回放故障路径。
+struct DisconnectAfterDeltaProvider;
+
+#[async_trait::async_trait]
+impl owo_agent_core::gateway::ModelProvider for DisconnectAfterDeltaProvider {
+    async fn complete(
+        &self,
+        _messages: &[owo_agent_core::ChatMessage],
+        _tools: &[owo_agent_core::ToolSpec],
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        Err("非流式路径不应被调用".to_string())
+    }
+
+    async fn complete_stream(
+        &self,
+        _messages: &[owo_agent_core::ChatMessage],
+        _tools: &[owo_agent_core::ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        on_delta("partial-before-disconnect".to_string());
+        Err("synthetic provider disconnect".to_string())
+    }
+}
+
+/// 在慢客户端的有界队列溢出边界附近完成一批大增量，再返回 Provider 断流错误。
+/// 不在循环中 yield：故障注入本身不依赖调度时序；事件仍逐个持久化，供测试验证回放。
+struct BurstThenDisconnectProvider {
+    emitted: Arc<std::sync::atomic::AtomicUsize>,
+    completed: Arc<std::sync::atomic::AtomicBool>,
+    delta_count: usize,
+    delta_bytes: usize,
+}
+
+#[async_trait::async_trait]
+impl owo_agent_core::gateway::ModelProvider for BurstThenDisconnectProvider {
+    async fn complete(
+        &self,
+        _messages: &[owo_agent_core::ChatMessage],
+        _tools: &[owo_agent_core::ToolSpec],
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        Err("非流式路径不应被调用".to_string())
+    }
+
+    async fn complete_stream(
+        &self,
+        _messages: &[owo_agent_core::ChatMessage],
+        _tools: &[owo_agent_core::ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        for _ in 0..self.delta_count {
+            on_delta("x".repeat(self.delta_bytes));
+            self.emitted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.completed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Err("synthetic provider disconnect after burst".to_string())
+    }
+}
+
+/// 首轮请求一个受审批保护的文件写入，第二轮结束对话。
+struct ApprovedWriteThenFinalProvider {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl owo_agent_core::gateway::ModelProvider for ApprovedWriteThenFinalProvider {
+    async fn complete(
+        &self,
+        _messages: &[owo_agent_core::ChatMessage],
+        _tools: &[owo_agent_core::ToolSpec],
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        use std::sync::atomic::Ordering;
+
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(owo_agent_core::ModelOutput::ToolCalls(vec![
+                owo_agent_core::gateway::ToolCall {
+                    id: "write-1".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": "approved-output.txt",
+                        "content": "approved content\n"
+                    }),
+                },
+            ]))
+        } else {
+            Ok(owo_agent_core::ModelOutput::Text(
+                "write complete".to_string(),
+            ))
+        }
     }
 }
 
@@ -528,6 +655,964 @@ async fn all_contract_endpoints_are_reachable() {
         failed.is_empty(),
         "契约路径不可达（404/405）：\n{}",
         failed.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn turn_event_replay_filters_by_turn_and_resumes_after_session_seq() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let session = state.store.create(&state.workspace, "idle", None).unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session.id.clone(), session.clone());
+    state
+        .store
+        .append_turn_event(
+            &session.id,
+            "turn-one",
+            &SseEvent::TokenDelta {
+                delta: "first".to_string(),
+            },
+        )
+        .unwrap();
+    state
+        .store
+        .append_turn_event(
+            &session.id,
+            "turn-one",
+            &SseEvent::Final {
+                text: "complete".to_string(),
+            },
+        )
+        .unwrap();
+    state
+        .store
+        .append_turn_event(
+            &session.id,
+            "turn-two",
+            &SseEvent::TokenDelta {
+                delta: "other turn".to_string(),
+            },
+        )
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "GET",
+            &format!(
+                "/session/{}/turn/events?turn_id=turn-one&after_seq=1&limit=10",
+                session.id
+            ),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["events"].as_array().unwrap().len(), 1);
+    assert_eq!(body["events"][0]["seq"], serde_json::json!(2));
+    assert_eq!(body["events"][0]["turn_id"], "turn-one");
+    assert_eq!(body["events"][0]["payload"]["type"], "final");
+    assert_eq!(body["active"], false);
+    assert_eq!(body["state"], "completed");
+    assert_eq!(body["next_after_seq"], 2);
+
+    state
+        .active_turn_ids
+        .lock()
+        .unwrap()
+        .insert(session.id.clone(), "turn-live".to_string());
+    let live_response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "GET",
+            &format!(
+                "/session/{}/turn/events?turn_id=turn-live&after_seq=0&limit=10",
+                session.id
+            ),
+            None,
+        ))
+        .await
+        .unwrap();
+    let live_bytes = axum::body::to_bytes(live_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let live: serde_json::Value = serde_json::from_slice(&live_bytes).unwrap();
+    assert_eq!(live["active"], true);
+    assert_eq!(live["state"], "active");
+
+    state.active_turn_ids.lock().unwrap().remove(&session.id);
+    let interrupted_response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "GET",
+            &format!(
+                "/session/{}/turn/events?turn_id=turn-live&after_seq=0&limit=10",
+                session.id
+            ),
+            None,
+        ))
+        .await
+        .unwrap();
+    let interrupted_bytes = axum::body::to_bytes(interrupted_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let interrupted: serde_json::Value = serde_json::from_slice(&interrupted_bytes).unwrap();
+    assert_eq!(interrupted["active"], false);
+    assert_eq!(interrupted["state"], "interrupted");
+
+    state
+        .store
+        .append_turn_event(
+            &session.id,
+            "turn-failed",
+            &SseEvent::Progress {
+                message: "turn failed: provider disconnected".to_string(),
+            },
+        )
+        .unwrap();
+    let failed_response = app
+        .oneshot(request(
+            &state,
+            "GET",
+            &format!(
+                "/session/{}/turn/events?turn_id=turn-failed&after_seq=0&limit=10",
+                session.id
+            ),
+            None,
+        ))
+        .await
+        .unwrap();
+    let failed_bytes = axum::body::to_bytes(failed_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let failed: serde_json::Value = serde_json::from_slice(&failed_bytes).unwrap();
+    assert_eq!(failed["active"], false);
+    assert_eq!(failed["state"], "failed");
+}
+
+#[tokio::test]
+async fn session_revert_conflict_returns_structured_409_and_preserves_user_edit() {
+    let (state, _temp) = test_state().await;
+    let path = state.workspace.join("user-edited.txt");
+    std::fs::write(&path, "user's later edit").unwrap();
+    let mut session = state.store.create(&state.workspace, "idle", None).unwrap();
+    session.snapshots.insert(
+        path.to_string_lossy().replace('\\', "/"),
+        owo_agent_core::session::SnapshotEntry {
+            original_b64: Some(base64::engine::general_purpose::STANDARD.encode("before")),
+            expected_after_sha256: Some(owo_agent_core::CasStore::hash_of(b"agent version")),
+        },
+    );
+    state.store.save(&session).unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session.id.clone(), session.clone());
+
+    let response = build_router(Arc::clone(&state))
+        .oneshot(request(
+            &state,
+            "POST",
+            &format!("/session/{}/revert", session.id),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["error"]["code"],
+        "storage/revert_conflict/not_retryable"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "user's later edit",
+        "拒绝冲突撤销时不得覆盖用户新内容"
+    );
+}
+
+#[tokio::test]
+async fn slow_http_turn_client_triggers_bounded_queue_overflow_and_cancels_provider() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(BurstProvider {
+        emitted: Arc::clone(&emitted),
+        limit: 1024,
+    });
+    let agent = Agent::new(
+        provider,
+        ToolRegistry::new(),
+        Policy::new(&workspace),
+        Default::default(),
+    );
+    let store = SqliteSessionStore::open(&workspace.join("index.db")).unwrap();
+    let state = Arc::new(owo_agent_server::AppState::new(
+        agent,
+        store,
+        workspace.join("traces"),
+        temp.path().to_path_buf(),
+        workspace.clone(),
+    ));
+    let session = state.store.create(&workspace, "idle", None).unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session.id.clone(), session.clone());
+
+    let app = build_router(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    let token = state.auth_token.token().to_string();
+    let before = client
+        .get(format!("{base}/metrics/runtime"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["turn_sse"]["slow_consumers_total"]
+        .as_u64()
+        .unwrap();
+
+    // 收到 headers 后故意不读取 response body，模拟网络可连但消费端停滞。
+    let response = client
+        .post(format!("{base}/session/{}/turn", session.id))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({"prompt":"bounded slow-client probe"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let turn_id = response
+        .headers()
+        .get("x-owo-turn-id")
+        .expect("turn response must expose replay identity")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let after = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let value = client
+                .get(format!("{base}/metrics/runtime"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            let slow = value["turn_sse"]["slow_consumers_total"].as_u64().unwrap();
+            if slow > before {
+                break slow;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("不读取 HTTP SSE body 应触发有界队列慢消费者指标");
+    assert!(after > before);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while emitted.load(Ordering::Relaxed) >= 1024 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("队列过载后 Agent 应取消 Provider 流，而不是消费完整个 burst");
+    assert!(emitted.load(Ordering::Relaxed) < 1024);
+
+    drop(response);
+    let recovered = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let page = client
+                .get(format!(
+                    "{base}/session/{}/turn/events?turn_id={turn_id}&after_seq=0&limit=512",
+                    session.id
+                ))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            if page["state"] != "active" {
+                break page;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("慢消费者触发取消后应持久化可补拉的回合终态");
+    assert_eq!(recovered["state"], "failed");
+    assert!(
+        recovered["events"].as_array().unwrap().iter().any(|event| {
+            event["payload"]["type"] == "token_delta"
+                && event["payload"]["delta"]
+                    .as_str()
+                    .is_some_and(|delta| !delta.is_empty())
+        }),
+        "断线补拉至少应恢复一个已产生的部分增量"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn concurrent_slow_http_turn_clients_each_replay_failed_state() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    const CONNECTIONS: usize = 4;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        Arc::new(BurstProvider {
+            emitted: Arc::clone(&emitted),
+            limit: 1024,
+        }),
+        ToolRegistry::new(),
+        Policy::new(&workspace),
+        Default::default(),
+    );
+    let store = SqliteSessionStore::open(&workspace.join("index.db")).unwrap();
+    let state = Arc::new(owo_agent_server::AppState::new(
+        agent,
+        store,
+        workspace.join("traces"),
+        temp.path().to_path_buf(),
+        workspace.clone(),
+    ));
+    let mut session_ids = Vec::with_capacity(CONNECTIONS);
+    for index in 0..CONNECTIONS {
+        let session = state
+            .store
+            .create(&workspace, &format!("multi-slow-{index}"), None)
+            .unwrap();
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(session.id.clone(), session.clone());
+        session_ids.push(session.id);
+    }
+
+    let app = build_router(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    let token = state.auth_token.token().to_string();
+    let before = client
+        .get(format!("{base}/metrics/runtime"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["turn_sse"]["slow_consumers_total"]
+        .as_u64()
+        .unwrap();
+
+    // Each request reads headers but intentionally retains the body, so all four
+    // connections are simultaneously live slow consumers.
+    let mut requests = tokio::task::JoinSet::new();
+    for session_id in &session_ids {
+        let client = client.clone();
+        let base = base.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        requests.spawn(async move {
+            let response = client
+                .post(format!("{base}/session/{session_id}/turn"))
+                .bearer_auth(token)
+                .json(&serde_json::json!({"prompt":"four concurrent slow clients"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let turn_id = response
+                .headers()
+                .get("x-owo-turn-id")
+                .expect("turn response must expose replay identity")
+                .to_str()
+                .unwrap()
+                .to_string();
+            (session_id, turn_id, response)
+        });
+    }
+    let mut responses = Vec::with_capacity(CONNECTIONS);
+    while let Some(result) = requests.join_next().await {
+        responses.push(result.unwrap());
+    }
+    assert_eq!(responses.len(), CONNECTIONS);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let value = client
+                .get(format!("{base}/metrics/runtime"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            let slow = value["turn_sse"]["slow_consumers_total"].as_u64().unwrap();
+            if slow >= before + CONNECTIONS as u64 {
+                break slow;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("四个并发慢读连接都应触发有界队列背压");
+    assert!(emitted.load(Ordering::Relaxed) < CONNECTIONS * 1024);
+
+    let replay_keys: Vec<(String, String)> = responses
+        .iter()
+        .map(|(session_id, turn_id, _)| (session_id.clone(), turn_id.clone()))
+        .collect();
+    drop(responses);
+    for (session_id, turn_id) in replay_keys {
+        let replay = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let page = client
+                    .get(format!(
+                        "{base}/session/{session_id}/turn/events?turn_id={turn_id}&after_seq=0&limit=512"
+                    ))
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap();
+                if page["state"] != "active" {
+                    break page;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("每个并发慢读回合都应持久化终态");
+        assert_eq!(replay["state"], "failed");
+        assert!(replay["events"].as_array().unwrap().iter().any(|event| {
+            event["payload"]["type"] == "token_delta"
+                && event["payload"]["delta"]
+                    .as_str()
+                    .is_some_and(|delta| !delta.is_empty())
+        }));
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn provider_disconnect_after_delta_is_persisted_as_failed_and_replayable() {
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let agent = Agent::new(
+        Arc::new(DisconnectAfterDeltaProvider),
+        ToolRegistry::new(),
+        Policy::new(&workspace),
+        Default::default(),
+    );
+    let store = SqliteSessionStore::open(&workspace.join("index.db")).unwrap();
+    let state = Arc::new(owo_agent_server::AppState::new(
+        agent,
+        store,
+        workspace.join("traces"),
+        temp.path().to_path_buf(),
+        workspace.clone(),
+    ));
+    let session = state
+        .store
+        .create(&workspace, "disconnect-test", None)
+        .unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session.id.clone(), session.clone());
+
+    let app = build_router(Arc::clone(&state));
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            &format!("/session/{}/turn", session.id),
+            Some(r#"{"prompt":"exercise provider disconnect"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let turn_id = response
+        .headers()
+        .get("x-owo-turn-id")
+        .expect("turn response must expose replay identity")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(response.into_body(), 1024 * 1024),
+    )
+    .await
+    .expect("provider failure must close the SSE stream")
+    .unwrap();
+    let sse = String::from_utf8_lossy(&body);
+    assert!(
+        sse.contains("event: token_delta"),
+        "partial delta must reach SSE: {sse}"
+    );
+    assert!(
+        sse.contains("partial-before-disconnect"),
+        "the already-produced text must be preserved: {sse}"
+    );
+    assert!(
+        sse.contains("turn failed:"),
+        "provider failure must be surfaced before stream close: {sse}"
+    );
+
+    let replay = app
+        .oneshot(request(
+            &state,
+            "GET",
+            &format!(
+                "/session/{}/turn/events?turn_id={turn_id}&after_seq=0&limit=20",
+                session.id
+            ),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(replay.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let replay: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(replay["active"], false);
+    assert_eq!(replay["state"], "failed");
+    let events = replay["events"].as_array().expect("events page");
+    assert!(events.iter().any(|event| {
+        event["payload"]["type"] == "token_delta"
+            && event["payload"]["delta"] == "partial-before-disconnect"
+    }));
+    assert!(events.iter().any(|event| {
+        event["payload"]["type"] == "progress"
+            && event["payload"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("turn failed:"))
+    }));
+}
+
+#[tokio::test]
+async fn slow_http_consumer_and_provider_disconnect_preserve_failed_turn_replay() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicBool::new(false));
+    let agent = Agent::new(
+        Arc::new(BurstThenDisconnectProvider {
+            emitted: Arc::clone(&emitted),
+            completed: Arc::clone(&completed),
+            delta_count: 160,
+            delta_bytes: 8 * 1024,
+        }),
+        ToolRegistry::new(),
+        Policy::new(&workspace),
+        Default::default(),
+    );
+    let store = SqliteSessionStore::open(&workspace.join("index.db")).unwrap();
+    let state = Arc::new(owo_agent_server::AppState::new(
+        agent,
+        store,
+        workspace.join("traces"),
+        temp.path().to_path_buf(),
+        workspace.clone(),
+    ));
+    let session = state
+        .store
+        .create(&workspace, "combined-fault", None)
+        .unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session.id.clone(), session.clone());
+
+    let app = build_router(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    let token = state.auth_token.token().to_string();
+    let before = client
+        .get(format!("{base}/metrics/runtime"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["turn_sse"]["slow_consumers_total"]
+        .as_u64()
+        .unwrap();
+
+    // Read headers, then leave the SSE body untouched while the provider crosses the
+    // queue byte bound and returns its own disconnect error.
+    let response = client
+        .post(format!("{base}/session/{}/turn", session.id))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({"prompt":"combined slow-client and provider fault"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let turn_id = response
+        .headers()
+        .get("x-owo-turn-id")
+        .expect("turn response must expose replay identity")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let value = client
+                .get(format!("{base}/metrics/runtime"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            if value["turn_sse"]["slow_consumers_total"]
+                .as_u64()
+                .is_some_and(|slow| slow > before)
+                && completed.load(Ordering::SeqCst)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("慢消费者队列溢出和 Provider 断流均应实际发生");
+    assert_eq!(emitted.load(Ordering::SeqCst), 160);
+
+    drop(response);
+    let replay = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let page = client
+                .get(format!(
+                    "{base}/session/{}/turn/events?turn_id={turn_id}&after_seq=0&limit=256",
+                    session.id
+                ))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            if page["state"] != "active" {
+                break page;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("组合故障后 turn 应持久化终态");
+    assert_eq!(replay["state"], "failed");
+    let events = replay["events"]
+        .as_array()
+        .expect("persisted replay events");
+    assert!(events.iter().any(|event| {
+        event["payload"]["type"] == "token_delta"
+            && event["payload"]["delta"]
+                .as_str()
+                .is_some_and(|delta| !delta.is_empty())
+    }));
+    assert!(events.iter().any(|event| {
+        event["payload"]["type"] == "progress"
+            && event["payload"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("turn failed:"))
+    }));
+    server.abort();
+}
+
+#[tokio::test]
+async fn approved_write_diff_and_revert_close_the_server_golden_path() {
+    use http_body_util::BodyExt;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let policy = Policy::new(&workspace);
+    policy.set_profile(owo_agent_core::permissions::PermissionProfile::AutoReview);
+    let agent = Agent::new(
+        Arc::new(ApprovedWriteThenFinalProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }),
+        ToolRegistry::new(),
+        policy,
+        Default::default(),
+    );
+    let store = SqliteSessionStore::open(&workspace.join("index.db")).unwrap();
+    let state = Arc::new(owo_agent_server::AppState::new(
+        agent,
+        store,
+        workspace.join("traces"),
+        temp.path().to_path_buf(),
+        workspace.clone(),
+    ));
+    let session = state.store.create(&workspace, "golden-path", None).unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session.id.clone(), session.clone());
+
+    let app = build_router(Arc::clone(&state));
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            &format!("/session/{}/turn", session.id),
+            Some(r#"{"prompt":"write a file"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let mut body = response.into_body();
+    let mut received_sse = String::new();
+    let mut pending_sse = String::new();
+    let mut permission_request_id = None;
+    while permission_request_id.is_none() {
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .expect("write turn should request approval")
+            .unwrap_or_else(|| {
+                panic!("SSE closed before approval request; received so far: {received_sse}")
+            })
+            .unwrap();
+        if let Ok(data) = frame.into_data() {
+            let chunk = String::from_utf8_lossy(&data);
+            received_sse.push_str(&chunk);
+            pending_sse.push_str(&chunk);
+            while let Some(end) = pending_sse.find("\n\n") {
+                let event = pending_sse[..end].to_string();
+                pending_sse.drain(..end + 2);
+                for line in event.lines() {
+                    let Some(data) = line.strip_prefix("data: ") else {
+                        continue;
+                    };
+                    let Ok(payload) = serde_json::from_str::<serde_json::Value>(data) else {
+                        continue;
+                    };
+                    if payload["type"] == "permission_request" {
+                        permission_request_id = payload["request_id"].as_str().map(str::to_owned);
+                        break;
+                    }
+                }
+                if permission_request_id.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+    let permission_request_id = permission_request_id.unwrap();
+    let approval = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            &format!("/session/{}/permission/{permission_request_id}", session.id),
+            Some(r#"{"allow":true,"scope":"once"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(approval.status(), axum::http::StatusCode::OK);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(frame) = body.frame().await {
+            let frame = frame.expect("turn SSE must not fail after approval");
+            if let Ok(data) = frame.into_data() {
+                received_sse.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    })
+    .await
+    .expect("approved tool turn should complete");
+    assert!(received_sse.contains("permission_request"));
+    assert!(received_sse.contains("tool_use"));
+    assert!(received_sse.contains("tool_result"));
+    assert!(received_sse.contains("write complete"));
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("approved-output.txt")).unwrap(),
+        "approved content\n"
+    );
+
+    let diff = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "GET",
+            &format!("/session/{}/diff", session.id),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(diff.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(diff.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let diff: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(diff.as_array().unwrap().iter().any(|entry| {
+        entry["path"] == "approved-output.txt"
+            && entry["after"] == "approved content\n"
+            && entry["before"].is_null()
+    }));
+
+    let persisted = state.store.load(&session.id).unwrap();
+    let receipt_id = persisted
+        .execution_receipts
+        .last()
+        .map(|receipt| receipt.receipt_id.clone())
+        .expect("approved write should persist an execution receipt");
+    let receipt_body = format!(r#"{{"receipt_id":"{receipt_id}"}}"#);
+
+    // 用户在 Agent 写入后继续编辑：撤销必须报告冲突且保留用户内容。
+    std::fs::write(workspace.join("approved-output.txt"), "user's later edit\n").unwrap();
+    let conflict = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            &format!("/session/{}/revert", session.id),
+            Some(&receipt_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), axum::http::StatusCode::CONFLICT);
+    let bytes = axum::body::to_bytes(conflict.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let conflict: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        conflict["error"]["code"],
+        "storage/revert_conflict/not_retryable"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("approved-output.txt")).unwrap(),
+        "user's later edit\n"
+    );
+
+    // 将文件恢复到 Agent 写入版本后，原操作可安全重试。
+    std::fs::write(workspace.join("approved-output.txt"), "approved content\n").unwrap();
+    let reverted = app
+        .oneshot(request(
+            &state,
+            "POST",
+            &format!("/session/{}/revert", session.id),
+            Some(&receipt_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reverted.status(), axum::http::StatusCode::OK);
+    assert!(!workspace.join("approved-output.txt").exists());
+}
+
+#[tokio::test]
+async fn turn_replay_openapi_documents_identity_and_terminal_state() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let response = app
+        .oneshot(request(&state, "GET", "/openapi.json", None))
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+        .await
+        .unwrap();
+    let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_str(CONTRACT_SNAPSHOT).unwrap();
+    assert_eq!(
+        spec["paths"]["/session/{id}/turn"]["post"]["responses"]["200"]["headers"]["x-owo-turn-id"]
+            ["schema"]["type"],
+        "string"
+    );
+    assert_eq!(
+        spec["paths"]["/session/{id}/turn/events"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/TurnEventReplayPage"
+    );
+    assert_eq!(
+        spec["components"]["schemas"]["TurnEventReplayPage"]["properties"]["state"]["enum"],
+        serde_json::json!(["active", "completed", "failed", "interrupted"])
+    );
+    assert_eq!(
+        snapshot["paths"]["/session/{id}/turn"]["post"]["responses"]["200"]["headers"]
+            ["x-owo-turn-id"],
+        spec["paths"]["/session/{id}/turn"]["post"]["responses"]["200"]["headers"]["x-owo-turn-id"]
+    );
+    assert_eq!(
+        snapshot["paths"]["/session/{id}/turn/events"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"],
+        spec["paths"]["/session/{id}/turn/events"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]
+    );
+    assert_eq!(
+        snapshot["components"]["schemas"]["TurnEventReplayPage"],
+        spec["components"]["schemas"]["TurnEventReplayPage"]
     );
 }
 
@@ -981,6 +2066,32 @@ async fn auth_token_desktop_pairing_is_documented_and_cors_allowed() {
     );
 }
 
+/// 桌面 WebView 必须能读取回合响应头中的恢复 ID；仅由 CORS 放行请求仍不够。
+#[tokio::test]
+async fn cors_exposes_turn_id_for_stream_recovery() {
+    use axum::http::{header, Method, Request};
+
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/health")
+        .header(header::ORIGIN, "tauri://localhost")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let exposed = response
+        .headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(
+        exposed.contains("x-owo-turn-id"),
+        "CORS must expose x-owo-turn-id to the desktop webview; got {exposed:?}"
+    );
+}
+
 /// §3.1：事件流不再匿名——`/events/stream` 与全部资源型事件流均要求 Bearer。
 /// 匿名 → 401（正常 JSON 错误体）；错误 token → 401；有效 token → 进入处理器
 /// （/events/stream 直接 200 SSE；资源型路径对不存在 id 为 404，但绝不是 401）。
@@ -1285,6 +2396,30 @@ async fn mutation_routes_publish_exactly_one_domain_invalidate() {
         .await
         .unwrap();
     let settings_json: serde_json::Value = serde_json::from_slice(&settings_bytes).unwrap();
+    assert_eq!(
+        settings_json["tool_capabilities"],
+        serde_json::json!({
+            "desktop_observation": false,
+            "desktop_control": false,
+            "browser": false,
+        }),
+        "旧/默认工作区不得隐式启用可选工具能力"
+    );
+    let active_tools = settings_json["runtime"]["active_tool_names"]
+        .as_array()
+        .expect("runtime 必须报告当前真实工具面");
+    for required in ["read_file", "write_file", "run_command", "use_skill"] {
+        assert!(
+            active_tools.iter().any(|name| name == required),
+            "最小工具面缺少基础工具 {required}"
+        );
+    }
+    for optional in ["screen_ocr", "desktop_click", "browser_navigate"] {
+        assert!(
+            !active_tools.iter().any(|name| name == optional),
+            "可选工具 {optional} 不应在默认 Agent 暴露"
+        );
+    }
 
     let matrix: Vec<(&str, &str, serde_json::Value, InvalidateDomain)> = vec![
         (

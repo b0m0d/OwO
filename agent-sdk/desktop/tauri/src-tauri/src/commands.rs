@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::core_runtime::{CoreRuntime, CoreState};
-use crate::provider::{ProviderConfig, ProviderMode, ProviderStatus};
+use crate::provider::{ProviderMode, ProviderStatus};
 
 fn state_to_value(state: &CoreState, log_path: &std::path::Path) -> Value {
     match state {
@@ -101,13 +101,20 @@ pub fn retry_core_start(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Valu
 }
 
 /// 打开日志目录（资源管理器），供用户自助排障。
+/// `explorer` 是控制台无关的 GUI 程序，但仍显式加 `CREATE_NO_WINDOW`：
+/// 否则从桌面壳（GUI 子系统）里 spawn 会在个别环境下带出一个瞬态控制台黑框。
 #[tauri::command]
 pub fn open_core_logs(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Value {
     let path = runtime.log_path();
     if let Some(dir) = path.parent() {
-        let _ = std::process::Command::new("explorer")
-            .arg(dir.as_os_str())
-            .spawn();
+        let mut command = std::process::Command::new("explorer");
+        command.arg(dir.as_os_str());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            command.creation_flags(0x0800_0000);
+        }
+        let _ = command.spawn();
     }
     json!({ "opened": path.to_string_lossy() })
 }
@@ -156,25 +163,271 @@ pub fn set_workspace(path: String, runtime: State<'_, std::sync::Arc<CoreRuntime
     }
 }
 
-// ---- §4.8 提供商 ----
-
-/// 提供商状态（§4.8：展示名称/主机/模型/联网状态，永不返回密钥）：
-/// `{ provider, baseUrl, model, keyConfigured, ready }`。
+/// R11：在资源管理器里定位模型配置文件（用户要手改 `config.json` 时少找半天路径）。
+/// 用 `explorer /select,` 高亮文件本身；不带文件时退化为打开所在目录。
 #[tauri::command]
-pub fn get_provider_status(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Value {
-    let config = runtime.provider_config();
-    let status: ProviderStatus = crate::provider::provider_status(&config);
+pub fn reveal_model_config() -> Value {
+    let Some(path) = crate::provider::config_path() else {
+        return json!({ "ok": false, "error": "无法确定配置路径" });
+    };
+    if !path.is_file() {
+        // 文件还没生成（用户没保存过配置）：至少把目录打开，并说明情况。
+        if let Some(dir) = path.parent() {
+            let _ = crate::commands::open_path_in_explorer(dir, false);
+            return json!({
+                "ok": true,
+                "created": false,
+                "path": path.to_string_lossy(),
+                "detail": "配置文件尚未生成：在设置页点一次「保存并重启核心」即可创建",
+            });
+        }
+        return json!({ "ok": false, "error": "配置目录不存在" });
+    }
+    let opened = crate::commands::open_path_in_explorer(&path, true);
     json!({
-        "provider": status.mode.as_str(),
-        "baseUrl": status.base_url,
-        "model": status.model,
-        "keyConfigured": status.key_configured,
-        "ready": status.ready,
+        "ok": opened,
+        "created": true,
+        "path": path.to_string_lossy(),
     })
 }
 
-/// §3.4/§4.7 动作 `choose_data_directory`：存储错误（storage/not_writable）后
-/// 用原生目录对话框改选数据根——写指针后受控重启核心。只改目录选择，不触碰凭据。
+/// 打开目录/定位文件（`create_no_window` 避免 GUI 壳里弹瞬态控制台）。
+pub(crate) fn open_path_in_explorer(path: &std::path::Path, select: bool) -> bool {
+    let mut command = std::process::Command::new("explorer");
+    if select {
+        // explorer 的 /select 参数要求 `/select,<path>` 这种单参数形式。
+        command.arg(format!("/select,{}", path.display()));
+    } else {
+        command.arg(path.as_os_str());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(0x0800_0000);
+    }
+    command.spawn().is_ok()
+}
+
+// ---- §4.8 / R11 模型配置（独立 config.json） ----
+
+/// 模型配置状态（§4.8：展示提供方/端点/模型名/凭据来源，**永不返回密钥本体**）：
+/// `{ provider, baseUrl, model, keyConfigured, keySource, keyMasked, keyEnv, ready, configPath }`。
+#[tauri::command]
+pub fn get_provider_status(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Value {
+    let model = runtime.model_config();
+    let status: ProviderStatus = crate::provider::provider_status(&model);
+    json!({
+        "provider": status.provider,
+        "baseUrl": status.base_url,
+        "model": status.model,
+        "keyConfigured": status.key_configured,
+        // 密钥只回来源与掩码：前端据此显示"已配置（来自配置文件 sk-a…mnop）"，
+        // 但拿不到可用凭据（浏览器侧/XSS 都偷不走）。
+        "keySource": status.key_source,
+        "keyMasked": status.key_masked,
+        "keyEnv": status.key_env,
+        "ready": status.ready,
+        "configPath": status.config_path,
+        // 用户维护的模型清单 + 可调参数（界面据此建议/回填；None 表示用核心默认）。
+        "models": status.models,
+        "contextWindow": status.context_window,
+        "maxOutputTokens": status.max_output_tokens,
+        "temperature": status.temperature,
+        "timeoutSecs": status.timeout_secs,
+        "keepRecent": status.keep_recent,
+        "compaction": status.compaction,
+    })
+}
+
+/// R11：保存模型配置到独立配置文件（codex/opencode 风格的 `config.json`）。
+///
+/// 参数语义（关键：空值 ≠ 清空，避免前端"没传字段"把用户已存的密钥抹掉）：
+/// - `mode`：提供方；`base_url` / `model`：地址与模型名（空白视作"用默认"）；
+/// - `api_key`：`Some("")` 显式清空；`Some("sk-…")` 覆盖；`None` 保持原样；
+/// - `api_key_env`：同上（指向环境变量的名字）。
+/// 保存成功后受控重启核心，让新配置经环境变量注入生效。
+///
+/// 可调参数（context_window / max_output_tokens / temperature / timeout_secs /
+/// keep_recent / compaction）全部**可选**：`None` = 保持文件里现有值；`Some("")`
+/// 或 `Some(0)` = 清除该字段（回到核心默认）。界面与手改文件因此共用同一份语义。
+#[tauri::command]
+pub fn set_model_config(
+    mode: String,
+    runtime: State<'_, std::sync::Arc<CoreRuntime>>,
+    base_url: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+    api_key_env: Option<String>,
+    context_window: Option<String>,
+    max_output_tokens: Option<String>,
+    temperature: Option<String>,
+    timeout_secs: Option<String>,
+    keep_recent: Option<String>,
+    compaction: Option<String>,
+    models: Option<Vec<String>>,
+) -> Value {
+    let Some(provider_mode) = ProviderMode::parse(&mode) else {
+        return json!({ "ok": false, "error": format!("未知模型提供方：{mode}") });
+    };
+    // 读改写：保住文件里的未知字段与未提交字段（用户可能手写过注释性字段）。
+    let mut config = runtime.model_config();
+    config.provider = provider_mode;
+    config.base_url = base_url
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    config.name = model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(key) = api_key {
+        let key = key.trim().to_string();
+        config.api_key = if key.is_empty() { None } else { Some(key) };
+    }
+    if let Some(env_name) = api_key_env {
+        let env_name = env_name.trim().to_string();
+        config.api_key_env = if env_name.is_empty() { None } else { Some(env_name) };
+    }
+    // 数值型可调参数：空串/0/非法值 = 清除（回到核心默认），而不是写一个会坏事的值。
+    fn parse_positive(value: Option<String>) -> Option<u64> {
+        value
+            .map(|raw| raw.trim().to_string())
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|parsed| *parsed > 0)
+    }
+    if let Some(raw) = context_window.as_ref() {
+        config.context_window = parse_positive(Some(raw.clone()));
+    }
+    if let Some(raw) = max_output_tokens.as_ref() {
+        config.max_output_tokens = parse_positive(Some(raw.clone()));
+    }
+    if let Some(raw) = timeout_secs.as_ref() {
+        config.timeout_secs = parse_positive(Some(raw.clone()));
+    }
+    if let Some(raw) = keep_recent.as_ref() {
+        config.keep_recent = parse_positive(Some(raw.clone()));
+    }
+    if let Some(raw) = temperature.as_ref() {
+        config.temperature = raw
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && (0.0..=2.0).contains(value));
+    }
+    if let Some(raw) = compaction.as_ref() {
+        config.compaction = match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        };
+    }
+    if let Some(list) = models {
+        // 去重保序；空串丢弃（手改文件时常见的尾随逗号/空行产物）。
+        let mut cleaned: Vec<String> = Vec::new();
+        for item in list {
+            let name = item.trim().to_string();
+            if !name.is_empty() && !cleaned.contains(&name) {
+                cleaned.push(name);
+            }
+        }
+        config.models = cleaned;
+    }
+    if let Err(error) = crate::provider::validate(&config) {
+        return json!({ "ok": false, "error": error });
+    }
+    match runtime.set_model_config(&config) {
+        Ok(()) => {
+            if runtime.is_running() {
+                runtime.retry();
+            } else {
+                runtime.start();
+            }
+            let status = crate::provider::provider_status(&runtime.model_config());
+            json!({
+                "ok": true,
+                "provider": status.provider,
+                "baseUrl": status.base_url,
+                "model": status.model,
+                "keyConfigured": status.key_configured,
+                "keySource": status.key_source,
+                "keyMasked": status.key_masked,
+                "keyEnv": status.key_env,
+                "ready": status.ready,
+                "configPath": status.config_path,
+                "models": status.models,
+                "contextWindow": status.context_window,
+                "maxOutputTokens": status.max_output_tokens,
+                "temperature": status.temperature,
+                "timeoutSecs": status.timeout_secs,
+                "keepRecent": status.keep_recent,
+                "compaction": status.compaction,
+            })
+        }
+        Err(error) => json!({ "ok": false, "error": error }),
+    }
+}
+
+/// 从磁盘**重新读取** `config.json` 并生效（不重启应用）。
+///
+/// 用户的核心诉求是"全都通过文件随时更改"：手改文件之后不该被迫重开应用、
+/// 更不该重新编译。这条命令把"改文件 → 点一下 → 生效"闭环补齐：
+/// 重新解析文件 → 更新壳内内存配置 → 受控重启核心（新环境变量随之注入）。
+#[tauri::command]
+pub fn reload_model_config(runtime: State<'_, std::sync::Arc<CoreRuntime>>) -> Value {
+    let path = crate::provider::config_path();
+    let file = crate::provider::load_config();
+    if let Some(path) = path.as_ref() {
+        if !path.is_file() {
+            return json!({
+                "ok": false,
+                "error": format!("配置文件不存在：{}（先在设置页保存一次即可创建）", path.display()),
+                "configPath": path.to_string_lossy(),
+            });
+        }
+    }
+    let model = file.model.clone();
+    if let Err(error) = runtime.set_model_config(&model) {
+        return json!({ "ok": false, "error": error });
+    }
+    if runtime.is_running() {
+        runtime.retry();
+    } else {
+        runtime.start();
+    }
+    let status = crate::provider::provider_status(&runtime.model_config());
+    json!({
+        "ok": true,
+        "reloaded": true,
+        "configPath": status.config_path,
+        "provider": status.provider,
+        "baseUrl": status.base_url,
+        "model": status.model,
+        "keyConfigured": status.key_configured,
+        "keySource": status.key_source,
+        "keyMasked": status.key_masked,
+        "keyEnv": status.key_env,
+        "ready": status.ready,
+        "models": status.models,
+        "contextWindow": status.context_window,
+        "maxOutputTokens": status.max_output_tokens,
+        "temperature": status.temperature,
+        "timeoutSecs": status.timeout_secs,
+        "keepRecent": status.keep_recent,
+        "compaction": status.compaction,
+    })
+}
+
+/// 兼容旧调用点（引导页/旧前端）：语义等价于 `set_model_config`，但仅传
+/// mode/base_url/model —— 密钥字段一律不动（旧前端没有密钥输入框）。
+#[tauri::command]
+pub fn set_provider(
+    mode: String,
+    runtime: State<'_, std::sync::Arc<CoreRuntime>>,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> Value {
+    set_model_config(mode, runtime, base_url, model, None, None, None, None, None, None, None, None, None)
+}
+
+
 #[tauri::command]
 pub async fn choose_data_directory(
     runtime: State<'_, std::sync::Arc<CoreRuntime>>,
@@ -247,49 +500,6 @@ fn runtime_state_value(runtime: &CoreRuntime) -> Value {
         }
     }
     value
-}
-/// 更新提供商选择（mode: cloud|ollama|unset；baseUrl/model 可选覆盖）。
-/// 保存成功后受控重启 core 使新环境生效。
-#[tauri::command]
-pub fn set_provider(
-    mode: String,
-    runtime: State<'_, std::sync::Arc<CoreRuntime>>,
-    base_url: Option<String>,
-    model: Option<String>,
-) -> Value {
-    let Some(provider_mode) = ProviderMode::parse(&mode) else {
-        return json!({ "ok": false, "error": format!("未知提供商模式：{mode}") });
-    };
-    let mut config = match provider_mode {
-        ProviderMode::Cloud => ProviderConfig::cloud(),
-        ProviderMode::Ollama => ProviderConfig::ollama(),
-        ProviderMode::Unset => ProviderConfig::unset(),
-    };
-    if let Some(value) = base_url.filter(|value| !value.trim().is_empty()) {
-        config.base_url = Some(value);
-    }
-    if let Some(value) = model.filter(|value| !value.trim().is_empty()) {
-        config.model = Some(value);
-    }
-    match runtime.set_provider(&config) {
-        Ok(()) => {
-            if runtime.is_running() {
-                runtime.retry();
-            } else {
-                runtime.start();
-            }
-            let status = crate::provider::provider_status(&runtime.provider_config());
-            json!({
-                "ok": true,
-                "provider": status.mode.as_str(),
-                "baseUrl": status.base_url,
-                "model": status.model,
-                "keyConfigured": status.key_configured,
-                "ready": status.ready,
-            })
-        }
-        Err(error) => json!({ "ok": false, "error": error }),
-    }
 }
 
 #[cfg(test)]

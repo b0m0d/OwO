@@ -1,0 +1,16 @@
+[runtime] launching core: C:\Users\23843\AppData\Local\Temp\owo-desktop-acceptance\20260919-132842\example-mcp-off\owo-agent.exe (acceptance=true)
+[provider] 未选择模型提供商（Unset）：core 就绪但模型调用暂不可用，请在设置中选择云端或本地 Ollama
+2026-09-19T05:29:47.013457Z  WARN owo_agent_server: 文件日志初始化失败（仅落 stderr）：系统找不到指定的路径。 (os error 3)
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-19T05:29:47.014049900+00:00"}
+2026-09-19T05:29:47.039406Z  INFO owo_agent::commands::serve: owo-agent server listening on http://127.0.0.1:4606
+{"api_version":"0.7","build_id":"585d17871bb40fa187e8ac622c58288bcdbf619a","event":"core_ready","instance_id":"6a7578a8edbe4e8e9ba6778e8f12d291","pid":24144,"port":4606}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/health","source":"shell","status":200,"target":"http","trace_id":"7a098a36f59b489e90fc2d4a","ts":"2026-09-19T05:29:47.047513800+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/auth/token","source":"shell","status":200,"target":"http","trace_id":"2e55fd954090472593f5d691","ts":"2026-09-19T05:29:47.051329200+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/health","source":"web","status":200,"target":"http","trace_id":"653c5ed646d64877a3383666","ts":"2026-09-19T05:29:47.178910900+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/health","source":"web","status":200,"target":"http","trace_id":"f6a48040140b4e2a90f4aa55","ts":"2026-09-19T05:29:47.184691300+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/events/stream","source":"web","status":200,"target":"http","trace_id":"255875e4c3e043368a02fcbf","ts":"2026-09-19T05:29:47.188820100+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"web","status":200,"target":"http","trace_id":"e944bbc5c84740bb9df32411","ts":"2026-09-19T05:29:47.194447100+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/skills","source":"web","status":200,"target":"http","trace_id":"37f8def5d0b047d798def4d5","ts":"2026-09-19T05:29:47.195286100+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/project/rules","source":"web","status":200,"target":"http","trace_id":"6957200d95f946289411bed0","ts":"2026-09-19T05:29:47.198397800+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/whitelist","source":"web","status":200,"target":"http","trace_id":"1eb81c3b982d4e85ae51b48d","ts":"2026-09-19T05:29:47.200406400+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/mcp","source":"probe","status":200,"target":"http","trace_id":"8dbd6b63b5e9430996e51634","ts":"2026-09-19T05:29:48.293238500+00:00"}

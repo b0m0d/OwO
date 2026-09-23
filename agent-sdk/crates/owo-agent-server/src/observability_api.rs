@@ -55,6 +55,8 @@ pub struct RuntimeMetrics {
     queue_depth: AtomicU64,
     events_published: AtomicU64,
     events_dropped: AtomicU64,
+    turn_sse_slow_consumers: AtomicU64,
+    turn_sse_disconnects: AtomicU64,
 }
 
 impl Default for RuntimeMetrics {
@@ -67,6 +69,8 @@ impl Default for RuntimeMetrics {
             queue_depth: AtomicU64::new(0),
             events_published: AtomicU64::new(0),
             events_dropped: AtomicU64::new(0),
+            turn_sse_slow_consumers: AtomicU64::new(0),
+            turn_sse_disconnects: AtomicU64::new(0),
         }
     }
 }
@@ -131,6 +135,22 @@ pub fn record_events(published: u64, dropped: u64) {
     });
 }
 
+/// Record a turn SSE client whose bounded queue overflowed and caused the turn to abort.
+pub fn record_turn_sse_slow_consumer() {
+    with_runtime(|metrics| {
+        metrics
+            .turn_sse_slow_consumers
+            .fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Record a turn SSE client disconnect observed by the event producer.
+pub fn record_turn_sse_disconnect() {
+    with_runtime(|metrics| {
+        metrics.turn_sse_disconnects.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
 /// 消费 event_stream 指标钩子样本（R7 桥接）：
 /// 解析 `event_stream::MetricsSample::to_json()` 快照并更新运行时注册表。
 /// 与 event_stream 解耦（双方互不引用类型），主控接线：`event_stream::set_metrics_observer(closure)`，
@@ -173,6 +193,17 @@ pub fn ingest_metrics_sample(sample: &Value) {
 #[allow(dead_code)] // 仅供 observability_tests 以 #[path] 独立编译调用；lib 目标内无引用。
 pub fn reset_runtime_metrics_for_test() {
     *RUNTIME.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // turn_api 单元测试在库内目标中调用；observability_tests 以路径复用时不调用。
+pub(crate) fn turn_sse_counts_for_test() -> (u64, u64) {
+    with_runtime(|metrics| {
+        (
+            metrics.turn_sse_slow_consumers.load(Ordering::Relaxed),
+            metrics.turn_sse_disconnects.load(Ordering::Relaxed),
+        )
+    })
 }
 
 /// 有序样本的百分位（0.0-1.0）。空样本返回 None。
@@ -367,6 +398,8 @@ async fn runtime(State(state): State<Arc<AppState>>) -> ApiResult {
         sse_lagged,
         events_published,
         events_dropped,
+        turn_sse_slow_consumers,
+        turn_sse_disconnects,
     ) = with_runtime(|metrics| {
         let mut tool_durations = metrics
             .tool_durations_ms
@@ -382,6 +415,8 @@ async fn runtime(State(state): State<Arc<AppState>>) -> ApiResult {
             metrics.sse_lagged.load(Ordering::Relaxed),
             metrics.events_published.load(Ordering::Relaxed),
             metrics.events_dropped.load(Ordering::Relaxed),
+            metrics.turn_sse_slow_consumers.load(Ordering::Relaxed),
+            metrics.turn_sse_disconnects.load(Ordering::Relaxed),
         )
     });
     let (approvals_total, denied) = approval_stats(&state);
@@ -418,6 +453,10 @@ async fn runtime(State(state): State<Arc<AppState>>) -> ApiResult {
         "events": {
             "published": events_published,
             "dropped": events_dropped,
+        },
+        "turn_sse": {
+            "slow_consumers_total": turn_sse_slow_consumers,
+            "disconnects_total": turn_sse_disconnects,
         },
         "updated_at": chrono::Utc::now().to_rfc3339(),
     })))
@@ -495,6 +534,8 @@ fn render_prometheus(state: &AppState) -> String {
         sse_lagged,
         events_published,
         events_dropped,
+        turn_sse_slow_consumers,
+        turn_sse_disconnects,
     ) = with_runtime(|metrics| {
         let mut tool_durations = metrics
             .tool_durations_ms
@@ -510,6 +551,8 @@ fn render_prometheus(state: &AppState) -> String {
             metrics.sse_lagged.load(Ordering::Relaxed),
             metrics.events_published.load(Ordering::Relaxed),
             metrics.events_dropped.load(Ordering::Relaxed),
+            metrics.turn_sse_slow_consumers.load(Ordering::Relaxed),
+            metrics.turn_sse_disconnects.load(Ordering::Relaxed),
         )
     });
     // R11：无样本时输出 NaN（Prometheus 合法值），避免空 sample value 破坏文本格式。
@@ -580,6 +623,16 @@ fn render_prometheus(state: &AppState) -> String {
     out.push_str("# HELP owo_events_dropped_total 事件流丢弃总数\n");
     out.push_str("# TYPE owo_events_dropped_total counter\n");
     out.push_str(&format!("owo_events_dropped_total {events_dropped}\n"));
+    out.push_str("# HELP owo_turn_sse_slow_consumers_total Turn SSE slow consumers that overflowed the bounded queue\n");
+    out.push_str("# TYPE owo_turn_sse_slow_consumers_total counter\n");
+    out.push_str(&format!(
+        "owo_turn_sse_slow_consumers_total {turn_sse_slow_consumers}\n"
+    ));
+    out.push_str("# HELP owo_turn_sse_disconnects_total Turn SSE client disconnects observed by the producer\n");
+    out.push_str("# TYPE owo_turn_sse_disconnects_total counter\n");
+    out.push_str(&format!(
+        "owo_turn_sse_disconnects_total {turn_sse_disconnects}\n"
+    ));
     // R10：SLO 指标（探针已注册时）。
     let slo_probe = SLO_PROBE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(probe) = slo_probe {

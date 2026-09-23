@@ -1,16 +1,31 @@
+//! Agent 工具定义与注册表。
+//!
+//! 原始句柄查找与直接执行仅供 core 内部运行时使用；下游 crate 必须通过
+//! Agent 的受策略控制回合入口，不得自行取出工具句柄运行。
+//!
+//! ```compile_fail
+//! let _ = owo_agent_core::tools::ToolRegistry::get;
+//! ```
+//!
+//! ```compile_fail
+//! let _ = owo_agent_core::tools::ToolRegistry::execute;
+//! ```
+
 use crate::audit::AuditLog;
+use crate::external_tools;
 use crate::mcp::{McpClient, McpTool};
-use crate::permissions::Policy;
+use crate::permissions::{Decision, PermissionRequest, Policy};
 use crate::session::Session;
 use crate::skill::SkillRegistry;
 use crate::subagent::SubagentRunner;
+use crate::tool_effects::EffectClass;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 // 工具参数取用助手（M1）：归属内核 `tool_args`，本文件多处工具实现共用。
 use owo_agent_kernel::required_string;
 
@@ -53,10 +68,347 @@ pub struct ToolContext<'a> {
     pub elements: &'a Arc<Mutex<crate::ElementRegistry>>,
 }
 
+/// ToolHost 签发 capability 时必须绑定的运行上下文。
+///
+/// 该类型只在 core 内部构造；调用方不能只凭工具名/参数伪造一个脱离
+/// 当前会话、工作区和回合的执行能力。
+#[derive(Debug, Clone)]
+pub(crate) struct ToolCapabilityContext {
+    pub workspace: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub scope: String,
+}
+
+/// Policy 放行后的类型化凭证。
+///
+/// `ToolHostService` 不接受裸 `bool` 作为批准证明；凭证只能由
+/// `PermissionRequest + Decision::Allow` 构造，并绑定工具名和参数摘要。
+#[derive(Debug, Clone)]
+pub(crate) struct ToolApprovalGrant {
+    tool: String,
+    args_sha256: String,
+    request_id: String,
+}
+
+impl ToolApprovalGrant {
+    pub(crate) fn from_decision(
+        request: &PermissionRequest,
+        decision: Decision,
+    ) -> Result<Self, String> {
+        if decision != Decision::Allow {
+            return Err(format!("permission not granted: {}", request.tool));
+        }
+        Ok(Self {
+            tool: request.tool.clone(),
+            args_sha256: crate::CasStore::hash_of(request.args.to_string().as_bytes()),
+            request_id: request.request_id.clone(),
+        })
+    }
+}
+
+impl ToolCapabilityContext {
+    pub(crate) fn for_workspace(
+        workspace: &Path,
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            workspace: workspace.to_string_lossy().to_string(),
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            scope: format!("workspace:{}", workspace.to_string_lossy()),
+        }
+    }
+}
+
+/// 受信执行能力：只能由 `ToolHostService::issue` 创建，携带一次性调用参数。
+///
+/// Agent loop 不再直接从 `ToolRegistry` 取出工具并执行；它必须先经过这个
+/// capability 门面。参数摘要进入收据，避免把原始参数写入审计日志。
+#[derive(Debug, Clone)]
+pub(crate) struct ToolCapability {
+    tool: String,
+    tool_version: String,
+    args: Value,
+    args_sha256: String,
+    workspace: String,
+    session_id: String,
+    turn_id: String,
+    effect: EffectClass,
+    scope: String,
+    /// 短时效能力：审批结果不能被无限期重放。
+    expires_at_unix: u64,
+    /// 每次签发的不可预测调用标识，写入收据用于关联但不写原始参数。
+    nonce: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ToolReceipt {
+    pub tool: String,
+    pub tool_version: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub approved: bool,
+    pub ok: bool,
+    pub effect: EffectClass,
+    pub scope_sha256: String,
+    pub args_sha256: String,
+    pub result_sha256: Option<String>,
+    pub execution_receipt_id: Option<String>,
+    pub changed_files: Vec<String>,
+    pub diff_sha256: Option<String>,
+    pub duration_ms: u64,
+    pub expires_at_unix: u64,
+    pub nonce: String,
+}
+
+pub(crate) trait ToolReceiptSink: Send + Sync {
+    fn record(&self, receipt: ToolReceipt);
+}
+
+struct AuditReceiptSink {
+    audit: Arc<Mutex<AuditLog>>,
+}
+
+impl ToolReceiptSink for AuditReceiptSink {
+    fn record(&self, receipt: ToolReceipt) {
+        let detail = json!({
+            "tool_version": receipt.tool_version,
+            "turn_id": receipt.turn_id,
+            "approved": receipt.approved,
+            "ok": receipt.ok,
+            "effect": receipt.effect.label(),
+            "scope_sha256": receipt.scope_sha256,
+            "args_sha256": receipt.args_sha256,
+            "result_sha256": receipt.result_sha256,
+            "execution_receipt_id": receipt.execution_receipt_id,
+            "changed_files": receipt.changed_files,
+            "diff_sha256": receipt.diff_sha256,
+            "duration_ms": receipt.duration_ms,
+            "expires_at_unix": receipt.expires_at_unix,
+            "nonce": receipt.nonce,
+        })
+        .to_string();
+        if let Ok(mut audit) = self.audit.lock() {
+            audit.record(
+                &receipt.session_id,
+                "tool_receipt",
+                Some(receipt.tool),
+                Some(receipt.approved),
+                detail,
+            );
+        }
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String>;
+}
+
+fn tool_spec_fingerprint(spec: &ToolSpec) -> String {
+    crate::CasStore::hash_of(
+        json!({
+            "name": spec.name,
+            "input_schema": spec.input_schema,
+            "effect": spec.effect,
+        })
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+/// Agent 工具执行的唯一受信门面。
+///
+/// `ToolRegistry::get` 仍只在 core crate 内可见，但执行也必须通过这里完成：
+/// 先签发带参数摘要的 capability，再由门面查找并运行工具，最后无论成功或
+/// 失败都向 receipt sink 写入结构化收据。后续可在不改变 Agent loop 的情况下
+/// 将 sink 替换为持久化/变更集收据实现。
+#[derive(Clone)]
+pub(crate) struct ToolHostService {
+    registry: Arc<RwLock<ToolRegistry>>,
+    receipt_sink: Arc<dyn ToolReceiptSink>,
+}
+
+impl ToolHostService {
+    pub(crate) fn new(registry: Arc<RwLock<ToolRegistry>>, audit: Arc<Mutex<AuditLog>>) -> Self {
+        Self {
+            registry,
+            receipt_sink: Arc::new(AuditReceiptSink { audit }),
+        }
+    }
+
+    /// 只有最终通过审批的调用才能取得执行 capability。
+    pub(crate) fn issue(
+        &self,
+        tool: &str,
+        args: Value,
+        approval: ToolApprovalGrant,
+        context: ToolCapabilityContext,
+    ) -> Result<ToolCapability, String> {
+        let args_sha256 = crate::CasStore::hash_of(args.to_string().as_bytes());
+        if approval.tool != tool {
+            return Err(format!("approval tool mismatch: {tool}"));
+        }
+        if approval.args_sha256 != args_sha256 {
+            return Err(format!("approval args mismatch: {tool}"));
+        }
+        if context.workspace.is_empty()
+            || context.session_id.is_empty()
+            || context.turn_id.is_empty()
+            || context.scope.is_empty()
+        {
+            return Err(format!("capability context missing: {tool}"));
+        }
+        let spec = self
+            .registry
+            .read()
+            .map_err(|_| "工具注册表锁中毒".to_string())?
+            .get(tool)
+            .map(|registered| registered.spec())
+            .ok_or_else(|| format!("未知工具：{tool}"))?;
+        let tool_version = tool_spec_fingerprint(&spec);
+        let effect = spec
+            .effect
+            .as_ref()
+            .map(|metadata| metadata.class)
+            .unwrap_or_else(|| crate::tool_effects::effect_class_for(&spec.name));
+        let issued_at_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "系统时钟早于 Unix epoch".to_string())?
+            .as_secs();
+        Ok(ToolCapability {
+            tool: tool.to_string(),
+            tool_version,
+            args,
+            args_sha256,
+            workspace: context.workspace,
+            session_id: context.session_id,
+            turn_id: context.turn_id,
+            effect,
+            scope: context.scope,
+            expires_at_unix: issued_at_unix.saturating_add(60),
+            nonce: format!("{}:{}", approval.request_id, uuid::Uuid::new_v4()),
+        })
+    }
+
+    pub(crate) async fn execute(
+        &self,
+        capability: ToolCapability,
+        ctx: &mut ToolContext<'_>,
+    ) -> Result<Value, String> {
+        let (tool, current_tool_version) = self
+            .registry
+            .read()
+            .map_err(|_| "工具注册表锁中毒".to_string())?
+            .get(&capability.tool)
+            .map(|registered| {
+                let spec = registered.spec();
+                (Some(registered), tool_spec_fingerprint(&spec))
+            })
+            .unwrap_or((None, String::new()));
+        let started = std::time::Instant::now();
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(u64::MAX);
+        let current_workspace = ctx.workspace.to_string_lossy();
+        let write_path = (capability.effect == EffectClass::Write)
+            .then(|| capability.args.get("path").and_then(Value::as_str))
+            .flatten()
+            .and_then(|path| resolve_session_path(ctx, path).ok());
+        let mut outcome = if capability.session_id != ctx.session.id {
+            Err(format!("capability session mismatch: {}", capability.tool))
+        } else if capability.workspace != current_workspace {
+            Err(format!(
+                "capability workspace mismatch: {}",
+                capability.tool
+            ))
+        } else if capability.tool_version != current_tool_version {
+            Err(format!(
+                "capability tool version mismatch: {}",
+                capability.tool
+            ))
+        } else if now_unix >= capability.expires_at_unix {
+            Err(format!("approval expired: {}", capability.tool))
+        } else {
+            match tool {
+                Some(tool) => tool.run(ctx, capability.args).await,
+                None => Err(format!("未知工具：{}", capability.tool)),
+            }
+        };
+        let execution_receipt = if outcome.is_ok() {
+            if let Some(path) = write_path.as_deref() {
+                match ctx
+                    .session
+                    .record_file_execution(&capability.tool, &capability.turn_id, path)
+                {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        outcome = Err(format!("写入收据失败：{error}"));
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let (Ok(Value::Object(result)), Some(receipt)) = (&mut outcome, &execution_receipt) {
+            result.insert(
+                "execution_receipt_id".to_string(),
+                Value::String(receipt.receipt_id.clone()),
+            );
+            result.insert(
+                "changed_files".to_string(),
+                Value::Array(
+                    receipt
+                        .changed_files
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+            result.insert(
+                "diff_sha256".to_string(),
+                Value::String(receipt.diff_sha256.clone()),
+            );
+        }
+        let result_sha256 = outcome
+            .as_ref()
+            .ok()
+            .map(|value| crate::CasStore::hash_of(value.to_string().as_bytes()));
+        self.receipt_sink.record(ToolReceipt {
+            tool: capability.tool,
+            tool_version: capability.tool_version,
+            session_id: ctx.session.id.clone(),
+            turn_id: capability.turn_id,
+            approved: true,
+            ok: outcome.is_ok(),
+            effect: capability.effect,
+            scope_sha256: crate::CasStore::hash_of(capability.scope.as_bytes()),
+            args_sha256: capability.args_sha256,
+            result_sha256,
+            execution_receipt_id: execution_receipt
+                .as_ref()
+                .map(|receipt| receipt.receipt_id.clone()),
+            changed_files: execution_receipt
+                .as_ref()
+                .map(|receipt| receipt.changed_files.clone())
+                .unwrap_or_default(),
+            diff_sha256: execution_receipt
+                .as_ref()
+                .map(|receipt| receipt.diff_sha256.clone()),
+            duration_ms: started.elapsed().as_millis() as u64,
+            expires_at_unix: capability.expires_at_unix,
+            nonce: capability.nonce,
+        });
+        outcome
+    }
 }
 
 pub struct ToolRegistry {
@@ -66,62 +418,26 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// 默认最小工具集：文件读写/搜索、受控命令与委派。桌面、视觉、浏览器能力
+    /// 必须由工作区设置或显式调用方按场景加入，避免每个 Agent 默认暴露完整工具面。
     pub fn new() -> Self {
-        let mut registry = Self {
-            tools: Vec::new(),
-            full_schemas: HashMap::new(),
-        };
+        let mut registry = Self::empty();
+        // 保留历史基础工具顺序，避免不相关的模型提示变化。
         registry.register(ReadFileTool);
         registry.register(WriteFileTool);
         registry.register(ListDirTool);
         registry.register(SearchFilesTool);
-        registry.register(RunCommandTool);
-        registry.register(ExploreTool);
-        registry.register(SubagentTool);
-        registry.register(UseSkillTool);
-        registry.register(crate::computer_use::ScreenOcrTool);
-        registry.register(crate::computer_use::OcrRegionTool);
-        registry.register(crate::computer_use::DesktopWindowOcrTool);
-        registry.register(crate::computer_use::DesktopForegroundTool);
-        registry.register(crate::computer_use::DesktopWindowListTool);
-        registry.register(crate::computer_use::DesktopActivateTool);
-        registry.register(crate::computer_use::DesktopClickTool);
-        registry.register(crate::computer_use::DesktopTypeTool);
-        registry.register(crate::computer_use::DesktopKeyTool);
-        registry.register(crate::computer_use::DesktopShortcutTool);
-        registry.register(crate::computer_use::DesktopLaunchTool);
-        registry.register(crate::computer_use::DesktopScrollTool);
-        registry.register(crate::computer_use::DesktopWaitTool);
-        registry.register(crate::computer_use::DesktopWaitUntilTool);
-        registry.register(crate::computer_use::ScreenVisionTool);
-        registry.register(crate::computer_use::VisionVerifyTool);
-        registry.register(crate::computer_use::VisionGroundTool);
-        let browser = crate::computer_use::BrowserTools::new();
-        registry.register(crate::computer_use::BrowserNavigateTool {
-            tools: browser.clone(),
-        });
-        registry.register(crate::computer_use::BrowserSearchTool {
-            tools: browser.clone(),
-        });
-        registry.register(crate::computer_use::BrowserSnapshotTool {
-            tools: browser.clone(),
-        });
-        registry.register(crate::computer_use::BrowserClickTool {
-            tools: browser.clone(),
-        });
-        registry.register(crate::computer_use::BrowserTypeTool {
-            tools: browser.clone(),
-        });
-        registry.register(crate::computer_use::BrowserPressTool {
-            tools: browser.clone(),
-        });
-        registry.register(crate::computer_use::BrowserScreenshotWriteTool {
-            tools: browser.clone(),
-        });
-        registry.register(crate::computer_use::BrowserDownloadImageWriteTool {
-            tools: browser.clone(),
-        });
-        registry.register(crate::computer_use::BrowserCloseTool { tools: browser });
+        registry.register_run_command();
+        registry.register_delegation_tools();
+        registry
+    }
+
+    /// 显式构造所有内置能力；主要用于兼容性/全能力集成测试，不作为生产默认值。
+    pub fn with_all_builtin_capabilities() -> Self {
+        let mut registry = Self::new();
+        registry.register_desktop_observation_tools();
+        registry.register_desktop_control_tools();
+        registry.register_browser_tools();
         registry
     }
 
@@ -171,6 +487,31 @@ impl ToolRegistry {
     /// 受控命令执行：`run_command`（实现族角色专用；沙箱 + 审批约束不变）。
     pub fn register_run_command(&mut self) {
         self.register(RunCommandTool);
+    }
+
+    /// 桌面观察/视觉组：截图 OCR、窗口信息与视觉 grounding/verify，不包含输入操作。
+    pub fn register_desktop_observation_tools(&mut self) {
+        self.register(crate::computer_use::ScreenOcrTool);
+        self.register(crate::computer_use::OcrRegionTool);
+        self.register(crate::computer_use::DesktopWindowOcrTool);
+        self.register(crate::computer_use::DesktopForegroundTool);
+        self.register(crate::computer_use::DesktopWindowListTool);
+        self.register(crate::computer_use::ScreenVisionTool);
+        self.register(crate::computer_use::VisionVerifyTool);
+        self.register(crate::computer_use::VisionGroundTool);
+    }
+
+    /// 桌面控制组：会激活窗口、注入键鼠或启动程序，默认不注册。
+    pub fn register_desktop_control_tools(&mut self) {
+        self.register(crate::computer_use::DesktopActivateTool);
+        self.register(crate::computer_use::DesktopClickTool);
+        self.register(crate::computer_use::DesktopTypeTool);
+        self.register(crate::computer_use::DesktopKeyTool);
+        self.register(crate::computer_use::DesktopShortcutTool);
+        self.register(crate::computer_use::DesktopLaunchTool);
+        self.register(crate::computer_use::DesktopScrollTool);
+        self.register(crate::computer_use::DesktopWaitTool);
+        self.register(crate::computer_use::DesktopWaitUntilTool);
     }
 
     /// 委派组：`explore` / `subagent` / `use_skill`。
@@ -242,21 +583,11 @@ impl ToolRegistry {
     }
 
     /// 取工具句柄（Arc 克隆，锁外可跨 await 执行）。
-    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+    pub(crate) fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools
             .iter()
             .find(|tool| tool.spec().name == name)
             .cloned()
-    }
-
-    pub async fn execute(
-        &self,
-        name: &str,
-        ctx: &mut ToolContext<'_>,
-        args: Value,
-    ) -> Result<Value, String> {
-        let tool = self.get(name).ok_or_else(|| format!("未知工具：{name}"))?;
-        tool.run(ctx, args).await
     }
 
     /// 把 MCP 服务器暴露的工具注册为 Agent 工具（命名：`{server}_{tool}`）。
@@ -495,7 +826,7 @@ impl Tool for WriteFileTool {
 }
 
 /// 写入执行体（[`WriteFileTool`] / [`WhitelistWriteFileTool`] 共享）：
-/// 首写快照（可 diff/revert）→ 建父目录 → 写盘。
+/// 首写快照；后续写入先校验上次 Agent 写入哈希，避免覆盖 Agent 运行期间的外部修改。
 async fn write_file_body(
     ctx: &mut ToolContext<'_>,
     path: &str,
@@ -503,14 +834,45 @@ async fn write_file_body(
     content: &str,
 ) -> Result<Value, String> {
     let key = snapshot_key(abs);
-    if let std::collections::hash_map::Entry::Vacant(entry) = ctx.session.snapshots.entry(key) {
+    if let Some(snapshot) = ctx.session.snapshots.get(&key) {
+        let current = match tokio::fs::read(abs).await {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("写入前读取 {path} 失败：{error}")),
+        };
+        let matches_expected = if let Some(expected) = snapshot.expected_after_sha256.as_deref() {
+            current
+                .as_deref()
+                .is_some_and(|bytes| crate::CasStore::hash_of(bytes) == expected)
+        } else {
+            let original = match snapshot.original_b64.as_deref() {
+                Some(encoded) => Some(
+                    BASE64
+                        .decode(encoded)
+                        .map_err(|error| format!("快照解码失败：{error}"))?,
+                ),
+                None => None,
+            };
+            current == original
+        };
+        if !matches_expected {
+            return Err(format!(
+                "写入冲突：{path} 在 Agent 上次记录的文件状态后再次变化，已拒绝覆盖"
+            ));
+        }
+    } else {
         let original = match tokio::fs::read(abs).await {
             Ok(bytes) => Some(BASE64.encode(bytes)),
-            Err(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("写入前快照 {path} 失败：{error}")),
         };
-        entry.insert(crate::session::SnapshotEntry {
-            original_b64: original,
-        });
+        ctx.session.snapshots.insert(
+            key.clone(),
+            crate::session::SnapshotEntry {
+                original_b64: original,
+                expected_after_sha256: None,
+            },
+        );
     }
     if let Some(parent) = abs.parent() {
         tokio::fs::create_dir_all(parent)
@@ -520,6 +882,9 @@ async fn write_file_body(
     tokio::fs::write(abs, content.as_bytes())
         .await
         .map_err(|e| format!("写入 {path} 失败：{e}"))?;
+    if let Some(snapshot) = ctx.session.snapshots.get_mut(&key) {
+        snapshot.expected_after_sha256 = Some(crate::CasStore::hash_of(content.as_bytes()));
+    }
     Ok(json!({
         "path": path,
         "written": true,
@@ -658,7 +1023,7 @@ impl Tool for SearchFilesTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "search_files".into(),
-            description: "按文件名关键字递归搜索工作区文件".into(),
+            description: "使用随包 ripgrep 按文件名关键字递归搜索工作区文件（只读）".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": { "pattern": { "type": "string" } },
@@ -669,48 +1034,81 @@ impl Tool for SearchFilesTool {
     }
 
     async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        let pattern = required_string(&args, "pattern")?.to_lowercase();
-        let workspace = ctx.workspace.to_path_buf();
-        let mut matches = Vec::new();
-        collect_matches(&workspace, &workspace, &pattern, 0, &mut matches)
-            .map_err(|e| format!("搜索失败：{e}"))?;
-        Ok(json!({ "pattern": pattern, "matches": matches }))
-    }
-}
+        let pattern = required_string(&args, "pattern")?;
+        if pattern.trim().is_empty() {
+            return Err("搜索模式不能为空".to_string());
+        }
+        let rg = external_tools::resolve_ripgrep().ok_or_else(|| {
+            "随包 ripgrep 不可用：请重新安装 OwO Agent，或仅在测试时设置 OWO_EXTERNAL_TOOLS_DIR"
+                .to_string()
+        })?;
 
-fn collect_matches(
-    root: &Path,
-    dir: &Path,
-    pattern: &str,
-    depth: usize,
-    matches: &mut Vec<String>,
-) -> std::io::Result<()> {
-    if depth > 8 || matches.len() >= 200 {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_matches(root, &entry.path(), pattern, depth + 1, matches)?;
-        } else if entry
-            .file_name()
-            .to_string_lossy()
-            .to_lowercase()
-            .contains(pattern)
-        {
-            let rel = entry
-                .path()
-                .strip_prefix(root)
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|_| entry.path());
-            matches.push(rel.to_string_lossy().replace('\\', "/"));
+        let mut policy =
+            crate::sandbox::SandboxPolicy::for_workspace("search_files", ctx.workspace);
+        policy.require_isolation = crate::sandbox::IsolationLevel::JobOnly;
+        policy.allow_degraded = true;
+        policy.cpu_ms = Some(30_000);
+        policy.mem_mb = Some(512);
+        let mut sandbox_command =
+            crate::sandbox::SandboxCommand::new(rg.to_string_lossy().into_owned(), policy)
+                .with_args(vec![
+                    "--files".to_string(),
+                    "--hidden".to_string(),
+                    "--glob".to_string(),
+                    "!.git/**".to_string(),
+                    "--glob".to_string(),
+                    "!target/**".to_string(),
+                    "--glob".to_string(),
+                    "!node_modules/**".to_string(),
+                    "--iglob".to_string(),
+                    format!("*{}*", pattern),
+                ])
+                .with_cwd(ctx.workspace.to_path_buf());
+        if let Some(path) = external_tools::path_with_bundled_tools() {
+            sandbox_command.env.push(("PATH".to_string(), path));
         }
-        if matches.len() >= 200 {
-            break;
+
+        let manager = crate::sandbox::default_manager();
+        let process = {
+            let mut manager = manager
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            manager
+                .spawn(&sandbox_command)
+                .map_err(|error| format!("搜索沙箱拒绝执行：{error}"))?
+        };
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || {
+                let mut process = process;
+                process.wait_output()
+            }),
+        )
+        .await
+        .map_err(|_| "ripgrep 搜索超时（30s，进程仍在受限 Job 内）".to_string())?
+        .map_err(|join_error| format!("搜索等待失败：{join_error}"))?
+        .map_err(|error| format!("ripgrep 执行失败：{error}"))?;
+
+        if output.exit_code != 0 && output.exit_code != 1 {
+            return Err(format!(
+                "ripgrep 搜索失败（exit_code={}）：{}",
+                output.exit_code,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
+        let matches = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .take(200)
+            .map(|line| line.replace('\\', "/"))
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "pattern": pattern,
+            "matches": matches,
+            "tool": "ripgrep",
+            "tool_version": external_tools::RIPGREP_VERSION,
+        }))
     }
-    Ok(())
 }
 
 struct RunCommandTool;
@@ -756,9 +1154,12 @@ impl Tool for RunCommandTool {
         {
             return Err(format!("命令命中危险黑名单片段：{fragment}"));
         }
-        let sandbox_command = crate::sandbox::SandboxCommand::new("cmd", policy.clone())
+        let mut sandbox_command = crate::sandbox::SandboxCommand::new("cmd", policy.clone())
             .with_args(vec!["/C".to_string(), command.to_string()])
             .with_cwd(cwd.clone());
+        if let Some(path) = external_tools::path_with_bundled_tools() {
+            sandbox_command.env.push(("PATH".to_string(), path));
+        }
 
         let manager = crate::sandbox::default_manager();
         let process = {
@@ -973,6 +1374,81 @@ impl Tool for UseSkillTool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn search_files_uses_bundled_ripgrep_with_workspace_scope() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-search-ripgrep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(workspace.join("nested")).unwrap();
+        std::fs::write(workspace.join("nested").join("AlphaMarker.TXT"), b"ok").unwrap();
+
+        let policy = crate::Policy::new(&workspace);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let mut context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+        };
+
+        let result = SearchFilesTool
+            .run(&mut context, json!({ "pattern": "alphamarker" }))
+            .await
+            .unwrap();
+        assert_eq!(result["tool"], "ripgrep");
+        assert_eq!(result["tool_version"], external_tools::RIPGREP_VERSION);
+        assert_eq!(result["matches"][0], "nested/AlphaMarker.TXT");
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn repeated_agent_write_refuses_to_overwrite_external_edit() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-write-conflict-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = workspace.join("shared.txt");
+        std::fs::write(&path, "original").unwrap();
+        let policy = crate::Policy::new(&workspace);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let mut context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+        };
+
+        write_file_body(&mut context, "shared.txt", &path, "agent version")
+            .await
+            .unwrap();
+        std::fs::write(&path, "user edit").unwrap();
+        let error = write_file_body(&mut context, "shared.txt", &path, "agent overwrite")
+            .await
+            .expect_err("外部编辑必须阻止后续 Agent 写入");
+
+        assert!(error.contains("写入冲突"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "user edit");
+        assert_eq!(
+            context.session.snapshots[&snapshot_key(&path)]
+                .expected_after_sha256
+                .as_deref(),
+            Some(crate::CasStore::hash_of(b"agent version").as_str()),
+            "被拒绝的写入不得推进快照中的 Agent 版本"
+        );
+        drop(context);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     #[test]
     fn sanitizes_tool_names_for_model_api() {
         assert_eq!(
@@ -1017,6 +1493,186 @@ mod tests {
         ) -> Result<serde_json::Value, String> {
             Ok(serde_json::Value::Null)
         }
+    }
+
+    #[tokio::test]
+    async fn tool_host_requires_approval_and_emits_receipt() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-tool-host-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let registry = Arc::new(RwLock::new(ToolRegistry::empty()));
+        registry.write().unwrap().register(NamedTool {
+            name: "contract_probe".to_string(),
+        });
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let host = ToolHostService::new(Arc::clone(&registry), Arc::clone(&audit));
+        let denied_request = PermissionRequest::new(
+            "contract_probe",
+            json!({"value": 1}),
+            crate::permissions::Level::Write,
+            "test denial",
+        );
+        assert!(ToolApprovalGrant::from_decision(&denied_request, Decision::Deny).is_err());
+        let approval_for = |args: Value| {
+            ToolApprovalGrant::from_decision(
+                &PermissionRequest::new(
+                    "contract_probe",
+                    args,
+                    crate::permissions::Level::Write,
+                    "test approval",
+                ),
+                Decision::Allow,
+            )
+            .unwrap()
+        };
+
+        let policy = crate::Policy::new(&workspace);
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let session_id = session.id.clone();
+        let capability_context =
+            ToolCapabilityContext::for_workspace(&workspace, session.id.clone(), "contract-turn");
+        let mut context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+        };
+        let capability = host
+            .issue(
+                "contract_probe",
+                json!({"value": 1}),
+                approval_for(json!({"value": 1})),
+                capability_context,
+            )
+            .unwrap();
+        assert!(!capability.nonce.is_empty());
+        assert!(capability.expires_at_unix > 0);
+        assert_eq!(
+            host.execute(capability, &mut context).await.unwrap(),
+            Value::Null
+        );
+        let wrong_session = host
+            .issue(
+                "contract_probe",
+                json!({"value": 3}),
+                approval_for(json!({"value": 3})),
+                ToolCapabilityContext::for_workspace(
+                    &workspace,
+                    "different-session",
+                    "contract-turn-3",
+                ),
+            )
+            .unwrap();
+        let error = host.execute(wrong_session, &mut context).await.unwrap_err();
+        assert!(error.contains("capability session mismatch"));
+        let mut stale_schema = host
+            .issue(
+                "contract_probe",
+                json!({"value": 4}),
+                approval_for(json!({"value": 4})),
+                ToolCapabilityContext::for_workspace(
+                    &workspace,
+                    session_id.clone(),
+                    "contract-turn-4",
+                ),
+            )
+            .unwrap();
+        stale_schema.tool_version = "stale-tool-version".to_string();
+        let error = host.execute(stale_schema, &mut context).await.unwrap_err();
+        assert!(error.contains("capability tool version mismatch"));
+        let mut expired = host
+            .issue(
+                "contract_probe",
+                json!({"value": 2}),
+                approval_for(json!({"value": 2})),
+                ToolCapabilityContext::for_workspace(&workspace, session_id, "contract-turn-2"),
+            )
+            .unwrap();
+        expired.expires_at_unix = 0;
+        let error = host
+            .execute(expired, &mut context)
+            .await
+            .expect_err("过期 capability 不得执行工具");
+        assert!(error.contains("approval expired"));
+        drop(context);
+
+        let entries = audit.lock().unwrap().entries.clone();
+        let receipt = entries
+            .iter()
+            .find(|entry| entry.event == "tool_receipt")
+            .expect("受信执行必须产生 receipt");
+        assert_eq!(receipt.tool.as_deref(), Some("contract_probe"));
+        assert_eq!(receipt.approved, Some(true));
+        assert!(receipt.detail.contains("args_sha256"));
+        assert!(receipt.detail.contains("expires_at_unix"));
+        assert!(receipt.detail.contains("nonce"));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn write_toolhost_emits_execution_receipt_and_scoped_revert() {
+        let workspace = std::env::temp_dir().join(format!(
+            "owo-tool-host-write-receipt-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let registry = Arc::new(RwLock::new(ToolRegistry::empty()));
+        registry.write().unwrap().register_write_file();
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let host = ToolHostService::new(Arc::clone(&registry), Arc::clone(&audit));
+        let policy = crate::Policy::new(&workspace);
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let session_id = session.id.clone();
+        let args = json!({"path": "receipt.txt", "content": "agent content"});
+        let request = PermissionRequest::new(
+            "write_file",
+            args.clone(),
+            crate::permissions::Level::Write,
+            "test write",
+        );
+        let approval = ToolApprovalGrant::from_decision(&request, Decision::Allow).unwrap();
+        let context = ToolCapabilityContext::for_workspace(&workspace, session_id, "turn-write");
+        let mut tool_context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+        };
+        let capability = host.issue("write_file", args, approval, context).unwrap();
+        let result = host.execute(capability, &mut tool_context).await.unwrap();
+        let receipt_id = result
+            .get("execution_receipt_id")
+            .and_then(Value::as_str)
+            .expect("写入结果必须返回执行收据 ID")
+            .to_string();
+        assert_eq!(tool_context.session.execution_receipts.len(), 1);
+        assert_eq!(
+            tool_context.session.execution_receipts[0].receipt_id,
+            receipt_id
+        );
+        drop(tool_context);
+        let restored = session.revert_receipt(Some(&receipt_id)).await.unwrap();
+        assert_eq!(restored, vec!["receipt.txt"]);
+        assert!(!workspace.join("receipt.txt").exists());
+        let audit_guard = audit.lock().unwrap();
+        let receipt = audit_guard
+            .entries
+            .iter()
+            .find(|entry| entry.event == "tool_receipt")
+            .expect("写入必须产生 tool receipt");
+        assert!(receipt.detail.contains("execution_receipt_id"));
+        assert!(receipt.detail.contains("diff_sha256"));
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
@@ -1090,6 +1746,36 @@ mod tests {
             .collect();
         assert!(names.contains(&"browser_navigate".to_string()));
         assert!(names.contains(&"browser_screenshot".to_string()));
+    }
+
+    #[test]
+    fn default_registry_is_minimal_and_optional_groups_are_explicit() {
+        let mut registry = ToolRegistry::new();
+        let names: Vec<String> = registry.specs().into_iter().map(|spec| spec.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "read_file",
+                "write_file",
+                "list_dir",
+                "search_files",
+                "run_command",
+                "explore",
+                "subagent",
+                "use_skill",
+            ]
+        );
+        assert!(!names.iter().any(|name| name.starts_with("desktop_")));
+        assert!(!names.iter().any(|name| name.starts_with("browser_")));
+        assert!(!names.iter().any(|name| name == "screen_ocr"));
+
+        registry.register_desktop_observation_tools();
+        registry.register_desktop_control_tools();
+        registry.register_browser_tools();
+        let enabled: Vec<String> = registry.specs().into_iter().map(|spec| spec.name).collect();
+        for optional in ["screen_ocr", "desktop_click", "browser_navigate"] {
+            assert!(enabled.iter().any(|name| name == optional));
+        }
     }
 
     #[test]

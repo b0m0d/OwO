@@ -1,0 +1,235 @@
+{
+  "session_id": "2bbb3bb3-1998-45ea-9e55-3da927c6bf90",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-short-text\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请用大约 60 个字介绍你自己，并说明你能做什么。",
+  "started_at": "2026-09-22T04:37:17.609073800+00:00",
+  "duration_ms": 5691,
+  "steps": 0,
+  "final_text": "你好！我是 OwO Agent SDK 驱动的智能体，能读写文件、执行命令、搜索资料，还能调用子代理与浏览器、文档、表格、PDF 等技能，帮你自动化完成开发、数据处理和文档任务。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "你好"
+    },
+    {
+      "type": "token_delta",
+      "delta": "！"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我是"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Ow"
+    },
+    {
+      "type": "token_delta",
+      "delta": "O"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Agent"
+    },
+    {
+      "type": "token_delta",
+      "delta": " SDK"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "驱"
+    },
+    {
+      "type": "token_delta",
+      "delta": "动的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "智能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "体"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "读写"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "执行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命令"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "资料"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "还能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "调用"
+    },
+    {
+      "type": "token_delta",
+      "delta": "子"
+    },
+    {
+      "type": "token_delta",
+      "delta": "代理"
+    },
+    {
+      "type": "token_delta",
+      "delta": "与"
+    },
+    {
+      "type": "token_delta",
+      "delta": "浏览器"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文档"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "表格"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "PDF"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "等"
+    },
+    {
+      "type": "token_delta",
+      "delta": "技能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "帮你"
+    },
+    {
+      "type": "token_delta",
+      "delta": "自动化"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "开发"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "数据处理"
+    },
+    {
+      "type": "token_delta",
+      "delta": "和"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文档"
+    },
+    {
+      "type": "token_delta",
+      "delta": "任务"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "final",
+      "text": "你好！我是 OwO Agent SDK 驱动的智能体，能读写文件、执行命令、搜索资料，还能调用子代理与浏览器、文档、表格、PDF 等技能，帮你自动化完成开发、数据处理和文档任务。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 719,
+    "completion_tokens": 84,
+    "total_tokens": 803
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 5689,
+      "target": "",
+      "first_token_ms": 4300
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "short_text_conversation"
+}

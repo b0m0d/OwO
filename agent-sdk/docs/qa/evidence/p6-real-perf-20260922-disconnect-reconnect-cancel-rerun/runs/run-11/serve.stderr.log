@@ -1,0 +1,7 @@
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-22T10:06:38.454685700+00:00"}
+{"duration_ms":2,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"536806d133404ad396357e6b","ts":"2026-09-22T10:06:38.587357900+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/turn","source":"other","status":200,"target":"http","trace_id":"21cc4fbab3ff4feab47b490c","ts":"2026-09-22T10:06:38.590468+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/abort","source":"other","status":200,"target":"http","trace_id":"14d5e5dcfc0e4c62aeb8cdc8","ts":"2026-09-22T10:06:38.616124900+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/session/{id}/turn/events","source":"other","status":200,"target":"http","trace_id":"edcf0093fc224a74909435d3","ts":"2026-09-22T10:06:38.631505300+00:00"}
+{"level":"error","msg":"回合执行失败","session_id":"8ec60d45-605a-4c53-9c9e-3f21063cc1b3","target":"agent","ts":"2026-09-22T10:06:38.650103600+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/session/{id}/turn/events","source":"other","status":200,"target":"http","trace_id":"0137e3da245f4a348cc379ad","ts":"2026-09-22T10:06:38.885265800+00:00"}

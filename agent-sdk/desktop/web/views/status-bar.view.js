@@ -17,7 +17,7 @@
   const SEGMENTS = [
     { key: "backend", label: "后台", target: "settings", hint: "核心服务状态 · 点击进入设置与诊断" },
     { key: "workspace", label: "工作区", target: "projects", hint: "当前项目与读写范围 · 点击进入工作区" },
-    { key: "model", label: "模型", target: "settings", hint: "提供商与模型 · 点击进入设置" },
+    { key: "model", label: "模型", target: "model", hint: "切换模型、设置自定义接口地址与模型名 · 点击进入模型页" },
     { key: "permission", label: "权限", target: "permissions", hint: "权限档位与待审批 · 点击进入权限中心" },
     { key: "task", label: "当前任务", target: "chat", hint: "任务进展 · 点击进入会话" },
   ];

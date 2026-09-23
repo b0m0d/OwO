@@ -1,0 +1,11 @@
+{
+    "staged_sha256":  "8CB3347C7CB78DD9DCC8263C9B9C3E9170FB1424446C024F74736D2C7978FC7C",
+    "launched_sha256":  "8CB3347C7CB78DD9DCC8263C9B9C3E9170FB1424446C024F74736D2C7978FC7C",
+    "shell_exe":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-release-20260922-122500\\installed\\owo-agent-desktop.exe",
+    "stage_configuration":  "debug",
+    "sidecar_version_line":  "owo-agent 0.1.0 api=0.7 commit=fc8251d42aa192715fa9f3208585802fa87d88ef dirty=true built_at=2026-09-21T18:59:59Z source=compiled",
+    "sidecar_exe":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-release-20260922-122500\\installed\\owo-agent.exe",
+    "acceptance_mode":  true,
+    "bin_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-122827\\coldboot\\bin",
+    "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-122827\\coldboot\\bin\\owo-agent.exe"
+}

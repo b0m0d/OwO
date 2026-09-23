@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src http://127.0.0.1:* http://localhost:*;" />
+  <title>OwO Agent 工作台</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!--
+    组件化动态渲染：整页由 renderer/app.js 的组件树生成（Vue 风格声明式渲染），
+    HTML 里只留一个挂载点。这样就不会再出现"HTML 写死导致的状态与 DOM 不同步"
+    （旧壳的典型 bug：权限中心打开后关不掉、设置页节点被搬走后再也回不来）。
+  -->
+  <div id="app"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

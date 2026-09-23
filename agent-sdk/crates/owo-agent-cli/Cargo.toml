@@ -10,9 +10,14 @@ owo-agent-core.workspace = true
 # crates/owo-agent-eval-facade/Cargo.toml 的环依赖说明）。
 owo-agent-eval-facade.workspace = true
 owo-agent-server.workspace = true
+# §2.3：Daemon 发现描述符契约（core_ready 后写 runtime/daemon.json）。
+owo-agent-protocol.workspace = true
+# §7.1 P1：CLI/TUI 经唯一共享客户端访问 Daemon（turn/repl/daemon 子命令）。
+owo-agent-client.workspace = true
 # §6.1.2：共享构建身份（编译期烧录的 git commit/dirty/epoch），替代本 crate 的 build.rs。
 owo-build-info.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 axum.workspace = true

@@ -20,6 +20,9 @@ const groups = [
   // §4.8 权限中心四分（domain/api/controller/render）与 panels 同等对待：
   // 新增前端目录必须显式登记进 lint 面，否则 index.html 挂了脚本也没人查。
   { dir: "permissions", pattern: (name) => name.endsWith(".js") },
+  // R10：模型服务提供方预设（含本地 Ollama 端点）。登记进 lint 面是刻意的：
+  // 这个文件是唯一允许出现"本机 URL 字面量"的地方，规则必须继续盯着它。
+  { dir: "config", pattern: (name) => name.endsWith(".js") },
 ];
 
 function listScripts() {

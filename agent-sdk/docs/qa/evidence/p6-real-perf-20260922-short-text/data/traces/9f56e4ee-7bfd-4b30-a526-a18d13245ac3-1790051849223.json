@@ -1,0 +1,243 @@
+{
+  "session_id": "9f56e4ee-7bfd-4b30-a526-a18d13245ac3",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-short-text\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请用大约 60 个字介绍你自己，并说明你能做什么。",
+  "started_at": "2026-09-22T04:37:23.568826400+00:00",
+  "duration_ms": 5654,
+  "steps": 0,
+  "final_text": "你好！我是 OwO Agent，一个能读写文件、执行命令、搜索资料、调用子代理的智能助手。我可以帮你整理文档、生成表格与 PDF、自动化浏览器操作、分析数据并完成各类日常任务，欢迎随时吩咐！",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "你好"
+    },
+    {
+      "type": "token_delta",
+      "delta": "！"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我是"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Ow"
+    },
+    {
+      "type": "token_delta",
+      "delta": "O"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Agent"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "一个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "读写"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "执行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命令"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "资料"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "调用"
+    },
+    {
+      "type": "token_delta",
+      "delta": "子"
+    },
+    {
+      "type": "token_delta",
+      "delta": "代理"
+    },
+    {
+      "type": "token_delta",
+      "delta": "的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "智能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "助手"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我可以"
+    },
+    {
+      "type": "token_delta",
+      "delta": "帮你"
+    },
+    {
+      "type": "token_delta",
+      "delta": "整理"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文档"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "生成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "表格"
+    },
+    {
+      "type": "token_delta",
+      "delta": "与"
+    },
+    {
+      "type": "token_delta",
+      "delta": " PDF"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "自动化"
+    },
+    {
+      "type": "token_delta",
+      "delta": "浏览器"
+    },
+    {
+      "type": "token_delta",
+      "delta": "操作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "分析"
+    },
+    {
+      "type": "token_delta",
+      "delta": "数据"
+    },
+    {
+      "type": "token_delta",
+      "delta": "并"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "各类"
+    },
+    {
+      "type": "token_delta",
+      "delta": "日常"
+    },
+    {
+      "type": "token_delta",
+      "delta": "任务"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "欢迎"
+    },
+    {
+      "type": "token_delta",
+      "delta": "随时"
+    },
+    {
+      "type": "token_delta",
+      "delta": "吩咐"
+    },
+    {
+      "type": "token_delta",
+      "delta": "！"
+    },
+    {
+      "type": "final",
+      "text": "你好！我是 OwO Agent，一个能读写文件、执行命令、搜索资料、调用子代理的智能助手。我可以帮你整理文档、生成表格与 PDF、自动化浏览器操作、分析数据并完成各类日常任务，欢迎随时吩咐！"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 719,
+    "completion_tokens": 83,
+    "total_tokens": 802
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 5651,
+      "target": "",
+      "first_token_ms": 4546
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "short_text_conversation"
+}

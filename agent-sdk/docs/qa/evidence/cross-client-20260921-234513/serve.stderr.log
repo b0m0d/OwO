@@ -1,0 +1,17 @@
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-21T15:45:26.746055900+00:00"}
+{"duration_ms":4,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"c5b57602b3c14a6a9ffe0468","ts":"2026-09-21T15:45:27.223196400+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"a850b8061f3d45b9b689f37b","ts":"2026-09-21T15:45:27.295159400+00:00"}
+{"duration_ms":2,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"bb9629933fc94a8c9fef0c31","ts":"2026-09-21T15:45:27.415232600+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/turn","source":"other","status":200,"target":"http","trace_id":"d17e7c01f93d486cbf97f9d0","ts":"2026-09-21T15:45:27.418422600+00:00"}
+{"level":"error","msg":"回合执行失败","session_id":"26f05de5-7a7c-4d80-9aea-0a97db9aac48","target":"agent","ts":"2026-09-21T15:45:27.426394400+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/session/{id}/diff","source":"other","status":200,"target":"http","trace_id":"454fee96dc3947afa33245e1","ts":"2026-09-21T15:45:27.431175800+00:00"}
+{"duration_ms":1,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"d764dee36b7d4a45a7f36615","ts":"2026-09-21T15:45:27.531627900+00:00"}
+{"duration_ms":2,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"02a7c817eb4646dd80984a77","ts":"2026-09-21T15:45:27.649679800+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/audit","source":"other","status":200,"target":"http","trace_id":"3f0faaef61fe41e68153582a","ts":"2026-09-21T15:45:27.652635200+00:00"}
+{"duration_ms":1,"level":"info","method":"GET","msg":"request","route_template":"/capabilities","source":"other","status":200,"target":"http","trace_id":"a13dbf57083f436ba0615c97","ts":"2026-09-21T15:45:27.656095700+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"7c34916f9b7a4c46be73a9f0","ts":"2026-09-21T15:45:27.691601+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/health","source":"other","status":200,"target":"http","trace_id":"307942f2393d4ee79e737e86","ts":"2026-09-21T15:45:28.459516600+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"fb692ad7174c41769a462edd","ts":"2026-09-21T15:45:28.462658300+00:00"}
+{"active_turns":0,"level":"warn","msg":"收到优雅关闭请求（需二次确认）","target":"server","trace_id":"c4ed3ea88db740229071a640","ts":"2026-09-21T15:45:28.614012+00:00"}
+{"duration_ms":1,"level":"info","method":"POST","msg":"request","route_template":"/server/shutdown","source":"other","status":200,"target":"http","trace_id":"c4ed3ea88db740229071a640","ts":"2026-09-21T15:45:28.614862500+00:00"}
+{"action":"server_stop","detail":"len=16 hash=8c8ef0e0","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-21T15:45:28.617665+00:00"}

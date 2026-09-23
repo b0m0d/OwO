@@ -1,0 +1,1 @@
+{"status": "failed", "ok": false, "delta_count": 44, "first_delta_latency_s": null, "stream_span_s": null, "final_latency_s": null, "buffered_suspected": null, "text_len": 0, "final_received": false, "first_delta_before_final": false, "model": null, "error": "TimeoutError: timed out"}

@@ -1,0 +1,70 @@
+{
+    "schema":  "owo-cross-client/1",
+    "tag":  "cross-client",
+    "finished_at":  "2026-09-21T14:38:36.8689591Z",
+    "work_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-cross-client-20260921-223824",
+    "evidence":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\cross-client-20260921-223824",
+    "checks":  [
+                   {
+                       "check":  "cli.autostart_daemon",
+                       "pass":  true,
+                       "detail":  "spawned pid=16500 port=64970（turn exit=）"
+                   },
+                   {
+                       "check":  "cli.autostart_cleanup",
+                       "pass":  true,
+                       "detail":  "pid=16500 已停止"
+                   },
+                   {
+                       "check":  "daemon.core_ready",
+                       "pass":  true,
+                       "detail":  "core_ready 已输出"
+                   },
+                   {
+                       "check":  "http.create_session_A",
+                       "pass":  true,
+                       "detail":  "id=7dbbf48a-83a0-4e4e-adae-1deda618adcd"
+                   },
+                   {
+                       "check":  "cli.turn_reused_same_daemon",
+                       "pass":  true,
+                       "detail":  "sessions 1 -\u003e 2（CLI turn exit=0，模型未配置不影响会话创建）"
+                   },
+                   {
+                       "check":  "shared.sessions_visible_to_both",
+                       "pass":  true,
+                       "detail":  "HTTP 会话 7dbbf48a-83a0-4e4e-adae-1deda618adcd 在共享会话列表中"
+                   },
+                   {
+                       "check":  "repl.daemon_mode",
+                       "pass":  true,
+                       "detail":  "daemon REPL 含 新会话/工作区（--daemon 经共享客户端）"
+                   },
+                   {
+                       "check":  "repl.daemon_session_shared",
+                       "pass":  false,
+                       "detail":  "REPL /new 后共享会话数 2 -\u003e 1"
+                   },
+                   {
+                       "check":  "client.example_connects",
+                       "pass":  true,
+                       "detail":  "client 输出：connected base_url=http://127.0.0.1:8540 healthy=true api_version=0.7 build_id=fc8251d42aa192715fa9f3208585802fa87d88ef pid=Some(32052) port=Some(8540)\r"
+                   },
+                   {
+                       "check":  "client.sees_same_sessions",
+                       "pass":  false,
+                       "detail":  "client sessions=3 daemon sessions=2"
+                   },
+                   {
+                       "check":  "daemon.status_matches",
+                       "pass":  true,
+                       "detail":  "status 行：Daemon 运行中：pid=32052 port=8540 api=0.7 build=fc8251d42aa192715fa9f3208585802fa87d88ef instance=\u0027\u0027 data_root=data-29d622a0f557 started_at=2026-09-21T14:38:33Z\r"
+                   },
+                   {
+                       "check":  "daemon.stop_graceful",
+                       "pass":  true,
+                       "detail":  "pid=32052 存活=False"
+                   }
+               ],
+    "ok":  false
+}

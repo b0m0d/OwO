@@ -1,0 +1,3 @@
+✘ MCP invalid-perf-mcp 连接失败：MCP 服务器启动失败（owo-agent-perf-missing-mcp-command）：program not found
+2026-09-22T09:30:45.433908Z  WARN owo_agent_server: 文件日志初始化失败（仅落 stderr）：系统找不到指定的路径。 (os error 3)
+{"api_version":"0.7","build_id":"fc8251d42aa192715fa9f3208585802fa87d88ef","event":"core_ready","instance_id":"","pid":38228,"port":34175}

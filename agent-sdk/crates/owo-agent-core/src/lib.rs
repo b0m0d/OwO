@@ -15,6 +15,7 @@ pub mod computer_use;
 pub mod contract_worker;
 pub mod critic;
 pub mod execution_target;
+pub mod external_tools;
 pub mod fleet;
 pub mod fleet_node_protocol;
 pub mod fleet_transport;
@@ -358,6 +359,7 @@ pub use ocr::{
     crop_scale_bmp, group_ocr_lines, ocr_bmp, ocr_bmp_detailed, ocr_bmp_region, ocr_engine_status,
     OcrBox, OcrEngineStatus, OcrLine, OcrSummary,
 };
+pub use owo_agent_protocol::TurnReplayState;
 pub use paddle_ocr::{ocr_paddle, ocr_preferred, paddle_enabled, parse_paddle_jsonl};
 pub use perception::{
     CaptureMeta, ContentRef, ForegroundApp, PerceptionEvent, PerceptionLayer, SituationSnapshot,
@@ -392,7 +394,7 @@ pub use scene::{
     merge_sources, text_hash, ElementRelation, EntityState, Evidence, EvidenceSource, GraphElement,
     SceneGraph, WindowState,
 };
-pub use session::{JsonSessionStore, Session, SessionStore};
+pub use session::{JsonSessionStore, Session, SessionStore, TurnEventRecord};
 pub use settings::{EgressSettings, Settings};
 pub use share::{export_html, export_markdown};
 pub use share_skill::{export_flow_skill_package, import_flow_skill_package};

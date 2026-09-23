@@ -44,6 +44,13 @@ pub(super) fn to_session_info(session: &Session) -> SessionInfo {
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct RevertRequest {
+    /// 可选执行收据；省略时消费最近一张未撤销收据，旧会话回退兼容快照撤销。
+    #[serde(default)]
+    pub receipt_id: Option<String>,
+}
+
 pub(super) fn load_session(state: &AppState, id: &str) -> Result<Session, (StatusCode, String)> {
     if let Ok(sessions) = state.sessions.lock() {
         if let Some(session) = sessions.get(id) {
@@ -404,25 +411,69 @@ pub(super) async fn diff(
 pub(super) async fn revert(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let _session_guard = owo_agent_server::acquire_session_lock(&state, &id).await?;
-    let mut session = load_session(&state, &id)?;
-    let restored = session
-        .revert()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("回滚失败：{e}")))?;
-    state
-        .store
-        .save(&session)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    state
-        .sessions
-        .lock()
-        .map_err(poison)?
-        .insert(session.id.clone(), session);
+    request: Option<Json<RevertRequest>>,
+) -> axum::response::Response {
+    let _session_guard = match owo_agent_server::acquire_session_lock(&state, &id).await {
+        Ok(guard) => guard,
+        Err((status, message)) => return session_revert_error(status, message),
+    };
+    let mut session = match load_session(&state, &id) {
+        Ok(session) => session,
+        Err((status, message)) => return session_revert_error(status, message),
+    };
+    let receipt_id = request.and_then(|Json(body)| body.receipt_id);
+    let restored = match session.revert_receipt(receipt_id.as_deref()).await {
+        Ok(restored) => restored,
+        Err(owo_agent_core::AgentError::RevertConflict { paths }) => {
+            let code = owo_agent_server::error_codes::code("storage", "revert_conflict", false);
+            return owo_agent_server::api_error_response(
+                &code,
+                format!(
+                    "撤销冲突，以下文件在 Agent 写入后再次变化：{}",
+                    paths.join("、")
+                ),
+            )
+            .into_response();
+        }
+        Err(error) => {
+            let code = owo_agent_server::error_codes::code("internal", "unexpected", true);
+            return owo_agent_server::api_error_response(&code, format!("回滚失败：{error}"))
+                .into_response();
+        }
+    };
+    if let Err(error) = state.store.save(&session) {
+        let code = owo_agent_server::error_codes::code("internal", "unexpected", true);
+        return owo_agent_server::api_error_response(&code, error.to_string()).into_response();
+    }
+    match state.sessions.lock() {
+        Ok(mut sessions) => {
+            sessions.insert(session.id.clone(), session);
+        }
+        Err(_) => {
+            return session_revert_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "会话状态锁中毒".to_string(),
+            );
+        }
+    }
     owo_agent_server::event_stream::hub()
         .publish_invalidate(owo_agent_server::event_stream::InvalidateDomain::Sessions);
-    Ok(Json(json!({ "ok": true, "restored": restored })))
+    Json(json!({
+        "ok": true,
+        "restored": restored,
+        "receipt_id": receipt_id,
+    }))
+    .into_response()
+}
+
+fn session_revert_error(status: StatusCode, message: String) -> axum::response::Response {
+    let (domain, reason, retryable) = match status {
+        StatusCode::NOT_FOUND => ("storage", "not_found", false),
+        StatusCode::CONFLICT => ("validation", "conflict", false),
+        _ => ("internal", "unexpected", true),
+    };
+    let code = owo_agent_server::error_codes::code(domain, reason, retryable);
+    owo_agent_server::api_error_response(&code, message).into_response()
 }
 
 pub(super) async fn fork_session(

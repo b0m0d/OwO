@@ -26,6 +26,97 @@ function Initialize-CiPath {
     }
 }
 
+# ---------------------------------------------------------------------------
+# P0（指南 §8/§9.3）：构建身份与产物身份读取的**唯一实现**。
+#
+# 为什么放在这里：假通过的根因是验收脚本"自己猜产物"。M15 的 mk-smoke 直接运行
+# 现存 target\debug\owo-agent.exe，既没构建当前源码，也没比较 HEAD 与产物的
+# build id —— 于是 M0 的旧二进制拿了 M15 的 18/18（证据链断裂）。身份门必须与
+# 产物清单（release-artifact-manifest.ps1）同源、可被负例测试直接断言，因此抽成
+# 公共函数，禁止各脚本各写一份解析。
+#
+# 口径（与 owo-build-info/build.rs、release-artifact-manifest.ps1 一致）：
+#   * source commit/dirty 作用域 = agent-sdk/ 构建相关树（git status --porcelain -- .）；
+#   * 产物身份 = `--version` 一行（编译期烧录，证明"二进制自身主张"）。
+# ---------------------------------------------------------------------------
+
+function Get-CiGitIdentity {
+    <# 读取当前源码提交身份；git 不可用时 commit=unknown、dirty=true（不谎报干净）。 #>
+    param([string]$RepoRoot = '')
+    $root = if ($RepoRoot) { $RepoRoot } else { Get-CiRepoRoot }
+    $commit = ''
+    $dirty = $true
+    Push-Location $root
+    try {
+        $out = & git rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) { $commit = ("$out").Trim() }
+        $porcelain = & git status --porcelain -uall -- . 2>$null
+        $dirty = [bool]($porcelain -and (($porcelain -join "`n").Trim().Length -gt 0))
+    } catch { $commit = '' }
+    finally { Pop-Location }
+    if (-not $commit) { $commit = 'unknown' }
+    return [pscustomobject]@{ commit = $commit; dirty = $dirty }
+}
+
+function Get-CiExeIdentity {
+    <# 读取产物身份：SHA256/大小/mtime + `--version` 自报的 commit/dirty/built_at/api/version。
+       产物不可执行或输出不可解析时如实返回空字段（由调用方判定失败，不静默通过）。 #>
+    param([Parameter(Mandatory = $true)][string]$ExePath)
+    $item = Get-Item -LiteralPath $ExePath -ErrorAction Stop
+    $sha = (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $line = ''
+    try { $line = ((& $ExePath --version 2>&1) | Out-String).Trim() } catch { $line = '' }
+    $grab = {
+        param([string]$Text, [string]$Key)
+        $m = [regex]::Match($Text, "$Key=(\S+)")
+        if ($m.Success) { return $m.Groups[1].Value }
+        return ''
+    }
+    $version = ''
+    foreach ($tok in ($line -split '\s+')) {
+        if ($tok -and [char]::IsDigit($tok[0])) { $version = $tok; break }
+    }
+    return [pscustomobject]@{
+        path         = (Resolve-Path -LiteralPath $ExePath).Path
+        sha256       = $sha
+        bytes        = [long]$item.Length
+        mtime        = $item.LastWriteTimeUtc.ToString('o')
+        version_line = $line
+        version      = $version
+        commit       = (& $grab $line 'commit')
+        dirty        = (& $grab $line 'dirty')
+        built_at     = (& $grab $line 'built_at')
+        api_version  = (& $grab $line 'api')
+    }
+}
+
+function Test-CiBinaryIdentity {
+    <# 身份门：产物 commit 必须等于当前源码 HEAD，dirty 主张必须与源码事实一致。
+       返回 [pscustomobject]@{ ok; reason }；不一致的原因可直接进报告（负例据此断言）。 #>
+    param(
+        [Parameter(Mandatory = $true)]$Source,
+        [Parameter(Mandatory = $true)]$Binary
+    )
+    if (-not $Binary.commit) {
+        return [pscustomobject]@{ ok = $false; reason = "产物无法自报 build id（--version 未解析出 commit）：$($Binary.version_line)" }
+    }
+    if ($Binary.commit -eq 'unknown') {
+        return [pscustomobject]@{ ok = $false; reason = '产物 build id 为 unknown（编译时无 git，身份不可验证）' }
+    }
+    if ($Source.commit -eq 'unknown') {
+        return [pscustomobject]@{ ok = $false; reason = '源码 HEAD 不可读（git 不可用），无法验证产物身份' }
+    }
+    if ($Binary.commit -ne $Source.commit) {
+        return [pscustomobject]@{ ok = $false; reason = ("产物过期/来源不符：exe commit={0}，当前 HEAD={1}（先构建当前源码，禁止复用旧产物）" -f $Binary.commit, $Source.commit) }
+    }
+    $srcDirty = if ($Source.dirty) { 'true' } else { 'false' }
+    $binDirty = ("$($Binary.dirty)").ToLowerInvariant()
+    if ($binDirty -and $binDirty -ne $srcDirty) {
+        return [pscustomobject]@{ ok = $false; reason = ("产物 dirty 主张与源码事实不一致：exe dirty={0}，tree dirty={1}（构建身份作用域可能漂移）" -f $binDirty, $srcDirty) }
+    }
+    return [pscustomobject]@{ ok = $true; reason = ("commit={0} dirty={1}" -f $Binary.commit, $binDirty) }
+}
+
 function New-CiFailureState {
     if ($null -eq $script:ciFailures) { $script:ciFailures = @() }
     if ($null -eq $script:ciSteps) { $script:ciSteps = @() }
@@ -84,7 +175,31 @@ function Get-CiRustPolicyMode {
 # 内存快照：Get-CimInstance 主路径，WMI 兜底；两者都不可用时如实返回 unknown
 # （不猜测、不假装通过；调用方按红线 7 拒绝启动新构建）。
 function Get-CiMemoryStatus {
-    $param = [pscustomobject]@{ min_free_gb = 6.0; max_used_percent = 80.0 }
+    # 阈值可由环境变量覆盖（§2.4 红线 7 的口径不是物理常量，取决于"这台机器此刻谁在用"）：
+    #   OWO_CI_MAX_USED_PERCENT  已用率上限，缺省 80
+    #   OWO_CI_MIN_FREE_GB       可用内存下限，缺省 6
+    # 2026-09-22：机器主人在跑大型游戏（约 9GB 常驻）期间明确要求"已用 95% 以下都行"，
+    # 于是把两档一起下调（used<95 / free≥1.5GB）。覆盖是**显式且可追溯**的：
+    # 生效时打一行说明，summary 里也记 gate 实际取值——不允许悄悄放宽阈值。
+    $maxUsedPercent = 80.0
+    $minFreeGb = 6.0
+    if ($env:OWO_CI_MAX_USED_PERCENT) {
+        $parsed = 0.0
+        if ([double]::TryParse($env:OWO_CI_MAX_USED_PERCENT, [ref]$parsed) -and $parsed -gt 0 -and $parsed -le 100) {
+            $maxUsedPercent = $parsed
+        }
+    }
+    if ($env:OWO_CI_MIN_FREE_GB) {
+        $parsed = 0.0
+        if ([double]::TryParse($env:OWO_CI_MIN_FREE_GB, [ref]$parsed) -and $parsed -ge 0) {
+            $minFreeGb = $parsed
+        }
+    }
+    $param = [pscustomobject]@{
+        min_free_gb      = $minFreeGb
+        max_used_percent = $maxUsedPercent
+        overridden       = [bool]($env:OWO_CI_MAX_USED_PERCENT -or $env:OWO_CI_MIN_FREE_GB)
+    }
     $os = $null
     try { $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop } catch {
         try { $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop } catch { $os = $null }
@@ -114,6 +229,10 @@ function Get-CiMemoryStatus {
 function Assert-CiMemoryGate {
     param([string]$Context = 'cargo')
     $mem = Get-CiMemoryStatus
+    if ($mem.gate.overridden) {
+        Write-Host ("    [§2.4] 内存门阈值被环境变量覆盖：可用 ≥ {0} GB 且已用 < {1}%（owner 显式指定）" -f `
+                $mem.gate.min_free_gb, $mem.gate.max_used_percent) -ForegroundColor Yellow
+    }
     if ($mem.status -eq 'unknown') {
         Write-Host ("    [§2.4] 内存状态不可读取（{0}）——本轮仍按 -j≤2 / --test-threads≤2 受限并发执行" -f $Context) -ForegroundColor Yellow
     } elseif (-not $mem.ok) {

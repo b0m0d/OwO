@@ -56,6 +56,8 @@ fn trace_record(
             total_tokens: 15,
         },
         phase_timings: Vec::new(),
+        error: None,
+        performance_task: None,
     }
 }
 
@@ -404,6 +406,24 @@ async fn runtime_sse_connections_and_queue_depth() {
 }
 
 #[tokio::test]
+async fn runtime_turn_sse_resilience_counters_are_exposed() {
+    let _guard = RUNTIME_TEST_LOCK.lock().await;
+    observability_api::reset_runtime_metrics_for_test();
+    let (state, _temp) = test_state().await;
+    observability_api::record_turn_sse_slow_consumer();
+    observability_api::record_turn_sse_disconnect();
+    observability_api::record_turn_sse_disconnect();
+
+    let response = send(state, "GET", "/metrics/runtime").await;
+    let body = body_json(response).await;
+    assert_eq!(
+        body["turn_sse"]["slow_consumers_total"],
+        serde_json::json!(1)
+    );
+    assert_eq!(body["turn_sse"]["disconnects_total"], serde_json::json!(2));
+}
+
+#[tokio::test]
 async fn runtime_event_stream_counters() {
     let _guard = RUNTIME_TEST_LOCK.lock().await;
     observability_api::reset_runtime_metrics_for_test();
@@ -669,6 +689,8 @@ async fn prometheus_exports_red_tool_sse_queue_approval() {
     observability_api::record_tool_duration_ms(30);
     observability_api::record_sse_connection(1);
     observability_api::record_queue_depth(3);
+    observability_api::record_turn_sse_slow_consumer();
+    observability_api::record_turn_sse_disconnect();
     let (state, _temp) = test_state().await;
     seed_five_traces(&state).await;
 
@@ -699,6 +721,14 @@ async fn prometheus_exports_red_tool_sse_queue_approval() {
         "SSE 累计连接缺失"
     );
     assert!(text.contains("owo_event_queue_depth 3"), "队列深度缺失");
+    assert!(
+        text.contains("owo_turn_sse_slow_consumers_total 1"),
+        "turn SSE 慢消费者计数缺失"
+    );
+    assert!(
+        text.contains("owo_turn_sse_disconnects_total 1"),
+        "turn SSE 断连计数缺失"
+    );
     // 审批率。
     assert!(text.contains("owo_approvals_total "), "审批总数缺失");
     assert!(text.contains("owo_approval_pass_rate "), "审批率缺失");

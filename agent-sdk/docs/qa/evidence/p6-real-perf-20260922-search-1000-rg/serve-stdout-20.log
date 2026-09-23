@@ -1,0 +1,3 @@
+2026-09-22T05:33:27.988187Z  WARN owo_agent::commands::serve: 检测到强杀残留（pid=Some(17652)），已清理 pid 文件并恢复干净状态
+2026-09-22T05:33:27.990324Z  WARN owo_agent_server: 文件日志初始化失败（仅落 stderr）：系统找不到指定的路径。 (os error 3)
+{"api_version":"0.7","build_id":"fc8251d42aa192715fa9f3208585802fa87d88ef","event":"core_ready","instance_id":"","pid":45916,"port":1943}

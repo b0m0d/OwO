@@ -33,36 +33,59 @@
     <button class="rail-button" type="button" title="产物与待办" data-rail-target="artifacts"><span>◇</span>产物</button>
     <button class="rail-button" type="button" title="权限中心：审批、授权范围与撤销" data-rail-target="permissions"><span>⛨</span>权限</button>
     <span class="rail-spacer"></span>
+    <button class="rail-button" type="button" title="模型：服务提供方、接口地址与模型名" data-rail-target="model"><span>✦</span>模型</button>
     <button class="rail-button" type="button" title="设置" data-rail-target="settings"><span>⚙</span>设置</button>
   </nav>
 
   <aside id="sidebar">
-    <section>
+    <section class="owo-sidebar-head">
       <h2>工作区</h2>
       <div class="owo-field-row">
-        <input id="workspace" placeholder="当前项目工作区（新建会话时填写）" aria-label="当前项目工作区" list="workspaceCandidates">
+        <input id="workspace" placeholder="当前项目工作区" aria-label="当前项目工作区" list="workspaceCandidates">
         <button id="chooseWorkspace" class="secondary" type="button">选择目录…</button>
       </div>
       <p class="sub" id="workspacePickerHint">桌面版由原生目录选择器设定，不需要手输完整路径。</p>
       <datalist id="workspaceCandidates"></datalist>
     </section>
-    <section>
+    <section class="owo-sidebar-tasks">
       <h2>任务</h2>
       <button id="newSession" class="primary">＋ 新建会话</button>
       <label class="inline"><input type="checkbox" id="showArchived"> 显示归档</label>
       <ul id="sessionList" class="list"></ul>
     </section>
-    <button id="toggleTools" class="tools-toggle" type="button" aria-expanded="false">显示工具与设置</button>
-    <label class="dev-mode-toggle" title="开发者模式显示 MCP 原始配置、Trace、Eval 等内部能力">
-      <input type="checkbox" id="devModeToggle"> 开发者模式
-    </label>
-    <div id="toolsPanel" class="tools-panel">
-    <section data-tools>
-      <h2>技能中心</h2>
-      <ul id="skillList" class="list"></ul>
+    <!--
+      侧栏只留"每天都要用"的东西：工作区、任务、技能。
+      R10（2026-09-22 用户反馈）：原先这里挂着「显示工具与设置」+ 开发者模式两个
+      开关，展开后是 Eval/Trace/MCP/插件/computer-use/操作学习/自动化/白名单/
+      扩展面板共 10 个表单区——普通用户看到的是"左侧一堆参数"。
+      现在这些全部移入设置页的子页（工具与自动化 / 开发者选项），
+      侧栏只保留技能中心与子代理入口。
+    -->
+    <section class="owo-sidebar-skills">
+      <h2>技能</h2>
+      <ul id="skillList" class="list owo-skill-list"></ul>
       <details><summary>技能 SKILL.md</summary><pre id="skillDetail">—</pre></details>
       <details><summary>技能健康度</summary><div id="healthList">—</div></details>
     </section>
+    <section data-dev class="owo-sidebar-subagent">
+      <h2>子代理</h2>
+      <p class="hint">把一段调查交给独立子代理，结果回到当前会话。</p>
+      <select id="subagentMode">
+        <option value="read_only">只读探索（explore）</option>
+        <option value="full">通用子代理（subagent）</option>
+      </select>
+      <textarea id="subagentPrompt" rows="3" placeholder="子代理任务，如：调查 crates 目录结构并汇报"></textarea>
+      <button id="subagentRunBtn" class="primary">运行子代理</button>
+      <pre id="subagentResult" class="sub">—</pre>
+    </section>
+    <div class="owo-sidebar-foot">
+      <button id="openSettingsBtn" class="owo-sidebar-settings" type="button" title="模型、工具、诊断与存储">⚙ 设置与诊断</button>
+      <label class="dev-mode-toggle" title="开发者模式显示 MCP 原始配置、Trace、Eval 等内部能力">
+        <input type="checkbox" id="devModeToggle"> 开发者模式
+      </label>
+    </div>
+    <!-- 工具/开发者分区容器：由 setSettingsLocation() 搬入设置页；聊天态留在侧栏但默认折叠。 -->
+    <div id="toolsPanel" class="tools-panel">
     <section data-dev>
       <h2>Eval 评估</h2>
       <div class="inline">
@@ -78,16 +101,6 @@
       <button id="tracesRefreshBtn">刷新</button>
       <ul id="traceList" class="list"></ul>
       <details><summary>轨迹回放</summary><pre id="traceReplay" class="sub">点击上方轨迹查看</pre></details>
-    </section>
-    <section data-tools>
-      <h2>子代理（@explore / @subagent）</h2>
-      <select id="subagentMode">
-        <option value="read_only">只读探索（explore）</option>
-        <option value="full">通用子代理（subagent）</option>
-      </select>
-      <textarea id="subagentPrompt" rows="3" placeholder="子代理任务，如：调查 crates 目录结构并汇报"></textarea>
-      <button id="subagentRunBtn" class="primary">运行子代理</button>
-      <pre id="subagentResult" class="sub">—</pre>
     </section>
     <section data-tools>
       <h2>项目规则（AGENTS.md）</h2>
@@ -212,23 +225,140 @@
     </div>
     <section id="settingsSection">
       <h2>设置与诊断</h2>
-      <div class="settings-page-title">
-        <div><strong>模型与连接</strong><span>管理当前工作区的模型与运行偏好</span></div>
-        <span class="connection-summary" id="connectionSummary">检查中…</span>
-      </div>
-      <div class="settings-grid">
-        <label class="field-label">模型
-          <select id="settingsModel">
-            <option value="">读取实际运行模型…</option>
-          </select>
-        </label>
-        <div class="settings-card"><span>提供商</span><strong id="runtimeProvider">读取中…</strong><small id="runtimeEndpoint">OpenAI 兼容接口</small></div>
-        <div class="settings-card"><span>凭据来源</span><strong id="runtimeCredential">读取中…</strong><small>密钥不写入工作区或设置文件</small></div>
+      <!-- R10：模型配置提到最前（用户反馈"找不到模型切换 / 自定义地址与名称"）。
+           这里的字段与 setup-guide 的提供商卡共用 set_provider 命令与校验口径。 -->
+      <div class="model-card" id="modelCard">
+        <div class="model-card-head">
+          <div>
+            <strong>模型</strong>
+            <span class="sub">选择服务提供方，可自定义接口地址与模型名</span>
+          </div>
+          <span class="connection-summary" id="connectionSummary">检查中…</span>
+        </div>
+        <div class="model-presets" id="modelPresets" role="group" aria-label="常用模型服务"></div>
+        <div class="model-grid">
+          <label class="field-label">服务提供方
+            <select id="settingsProvider">
+              <option value="bigmodel">智谱 BigModel</option>
+              <option value="openai">OpenAI</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="dashscope">阿里 DashScope 兼容</option>
+              <option value="ollama">本地 Ollama</option>
+              <option value="custom">自定义 / 自建（OpenAI 兼容）</option>
+              <option value="unset">稍后配置</option>
+            </select>
+          </label>
+          <label class="field-label">接口地址（base_url）
+            <input id="settingsBaseUrl" type="text" spellcheck="false" placeholder="https://open.bigmodel.cn/api/paas/v4" />
+          </label>
+          <label class="field-label">模型名称
+            <input id="settingsModelName" type="text" spellcheck="false" placeholder="glm-5.3-flash" list="modelNameCandidates" />
+            <datalist id="modelNameCandidates"></datalist>
+          </label>
+          <label class="field-label">API Key
+            <span class="key-row">
+              <input id="settingsApiKey" type="password" spellcheck="false" autocomplete="off" placeholder="留空则读环境变量 OPENAI_API_KEY" />
+              <button id="settingsApiKeyToggle" type="button" class="key-toggle" title="显示/隐藏">显示</button>
+            </span>
+          </label>
+          <label class="field-label">密钥环境变量名（可选）
+            <input id="settingsApiKeyEnv" type="text" spellcheck="false" placeholder="OPENAI_API_KEY" />
+          </label>
+          <label class="field-label">实际生效模型
+            <select id="settingsModel">
+              <option value="">读取实际运行模型…</option>
+            </select>
+          </label>
+        </div>
+        <!-- R13：可调参数全部来自配置文件（用户要求"不能写死"）：留空 = 用核心默认。 -->
+        <details class="model-advanced" id="modelAdvanced">
+          <summary>上下文与采样参数（留空 = 用核心默认，也可直接改 config.json）</summary>
+          <div class="model-grid">
+            <label class="field-label">上下文窗口（token）
+              <input id="settingsContextWindow" type="number" min="1" step="1" inputmode="numeric" placeholder="留空 = 核心默认（60000）" />
+            </label>
+            <label class="field-label">单次最大输出（token）
+              <input id="settingsMaxOutput" type="number" min="1" step="1" inputmode="numeric" placeholder="留空 = 由模型/服务商决定" />
+            </label>
+            <label class="field-label">温度（0–2）
+              <input id="settingsTemperature" type="number" min="0" max="2" step="0.1" inputmode="decimal" placeholder="留空 = 核心默认" />
+            </label>
+            <label class="field-label">请求超时（秒）
+              <input id="settingsTimeout" type="number" min="1" step="1" inputmode="numeric" placeholder="留空 = 核心默认" />
+            </label>
+            <label class="field-label">保留最近消息条数
+              <input id="settingsKeepRecent" type="number" min="1" step="1" inputmode="numeric" placeholder="留空 = 核心默认（20）" />
+            </label>
+            <label class="field-label">上下文压缩
+              <select id="settingsCompaction">
+                <option value="">跟随核心默认</option>
+                <option value="1">开启</option>
+                <option value="0">关闭</option>
+              </select>
+            </label>
+          </div>
+          <p class="hint">
+            这些值可通过环境变量注入核心：<code>OWO_MODEL_CONTEXT_WINDOW</code>、<code>OWO_MODEL_MAX_OUTPUT_TOKENS</code>、
+            <code>OWO_MODEL_TEMPERATURE</code>、<code>OWO_MODEL_TIMEOUT_SECS</code>、<code>OWO_AGENT_KEEP_RECENT</code>、
+            <code>OWO_AGENT_COMPACTION</code>。保存后核心会按新值重启。
+          </p>
+        </details>
+        <div class="model-actions">
+          <button id="modelApplyBtn" class="primary" type="button">保存并重启核心</button>
+          <button id="modelReloadBtn" type="button" title="直接读取 config.json 并生效（手改文件后用这个）">从文件重载</button>
+          <button id="modelTestBtn" type="button">测试连接</button>
+          <button id="modelClearKeyBtn" type="button" title="清除配置文件里保存的 API Key（环境变量仍然可用）">清除已存密钥</button>
+          <span class="model-hint" id="modelHint"></span>
+        </div>
+        <p class="model-file-hint">
+          配置写在独立文件里，可直接手改：<code id="modelConfigPath">%LOCALAPPDATA%\OwO\Agent\config.json</code>
+          <button id="modelOpenConfigBtn" type="button" class="link-button" title="在资源管理器中定位配置文件">定位</button>
+        </p>
+        <div class="settings-grid">
+          <div class="settings-card"><span>提供商</span><strong id="runtimeProvider">读取中…</strong><small id="runtimeEndpoint">OpenAI 兼容接口</small></div>
+          <div class="settings-card"><span>凭据来源</span><strong id="runtimeCredential">读取中…</strong><small>密钥只读系统环境变量，不写入工作区或设置文件</small></div>
+        </div>
       </div>
       <div class="inline">
         <span>云端模型（数据出境）</span>
         <button id="egressToggle">…</button>
       </div>
+      <!-- R10：会话级模型切换（POST /session/{id}/model，只改当前会话，不重启核心）。 -->
+      <div class="model-card" id="sessionModelCard">
+        <div class="model-card-head">
+          <div>
+            <strong>当前会话使用的模型</strong>
+            <span class="sub">只对当前会话生效，不重启核心；留空则跟随上面的默认模型</span>
+          </div>
+        </div>
+        <div class="model-grid">
+          <label class="field-label">会话模型
+            <input id="sessionModelName" list="modelNameCandidates" spellcheck="false" placeholder="跟随默认模型" />
+          </label>
+        </div>
+        <div class="model-actions">
+          <button id="sessionModelApplyBtn" class="primary" type="button">应用到此会话</button>
+          <button id="sessionModelClearBtn" type="button">恢复默认</button>
+          <span class="model-hint" id="sessionModelHint"></span>
+        </div>
+      </div>
+      <h3>Agent 工具能力</h3>
+      <p class="hint">默认只启用文件、命令和委派等基础工具。可选能力只在明确开启后提供给模型；保存后需重启核心服务生效。</p>
+      <div class="tool-capabilities-grid">
+        <label class="tool-capability-card">
+          <span><input id="toolCapDesktopObservation" type="checkbox"> 屏幕与视觉观察</span>
+          <small>启用屏幕/窗口信息、OCR 与视觉定位，不会执行点击或键盘输入。</small>
+        </label>
+        <label class="tool-capability-card">
+          <span><input id="toolCapDesktopControl" type="checkbox"> 桌面控制</span>
+          <small>启用窗口激活、点击、键盘输入和启动程序；实际操作仍受权限审批约束。</small>
+        </label>
+        <label class="tool-capability-card">
+          <span><input id="toolCapBrowser" type="checkbox"> 浏览器操作</span>
+          <small>启用浏览器导航、搜索与交互；联网访问仍受数据出境和权限策略约束。</small>
+        </label>
+      </div>
+      <p id="toolCapabilityStatus" class="tool-capability-status" role="status" aria-live="polite">正在读取当前工具能力…</p>
       <h3>模型用量与预算</h3>
       <div id="usagePanel" class="sub">—</div>
       <pre id="settingsPreview" class="json-fallback">—</pre>
@@ -357,12 +487,16 @@
   <script src="core/workspace-display.js"></script>
   <script src="core/folder-picker.js"></script>
   <script src="shell/connection.js"></script>
+  <script src="config/provider-presets.js"></script>
   <script src="shell/markdown.js"></script>
   <script src="shell/speech.js"></script>
   <script src="views/service-error.view.js"></script>
   <script src="views/setup-guide.view.js"></script>
   <script src="views/diagnostics-ledger.view.js"></script>
   <script src="views/status-bar.view.js"></script>
+  <!-- R10：模型设置面板（模型切换 / 自定义接口地址 / 自定义模型名）。
+       必须在 app.js 之前注册到 window.OwoSettings。 -->
+  <script src="views/settings-panel.view.js"></script>
   <!-- §4.5/§4.8 权限中心：四分模块按依赖顺序加载（domain → api → controller → view），
        必须在 app.js 之前；页面数据只在进入该路由时按需请求，不进首屏链路。 -->
   <script src="permissions/permissions.domain.js"></script>
@@ -387,6 +521,7 @@
   <script src="panels/workswarm/render.js"></script>
   <script src="panels/workswarm.panel.js"></script>
 <script src="panels/project-launcher.panel.js"></script>
+  <script src="core/turn-sse.js"></script>
   <script src="app-domain.js"></script>
 <script src="app.js"></script>
 </body>

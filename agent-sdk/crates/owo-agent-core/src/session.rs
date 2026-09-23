@@ -4,6 +4,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::Utc;
 use owo_agent_protocol::FileDiff;
+use owo_agent_protocol::SseEvent;
+pub use owo_agent_protocol::TurnEventRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,30 @@ pub struct SnapshotEntry {
     /// None 表示文件原本不存在（回滚时删除）。
     #[serde(default)]
     pub original_b64: Option<String>,
+    /// Agent 最近一次成功写入后的 SHA-256；撤销前必须匹配，防止覆盖用户后续修改。
+    #[serde(default)]
+    pub expected_after_sha256: Option<String>,
+}
+
+/// 普通 Agent 文件写入的最小变更集收据。
+///
+/// 内容本身仍由 `SnapshotEntry` 保存；这里保存本次执行窗口的身份、基线/结果哈希和
+/// 状态，使 diff/revert 可以按收据消费，而不是只能按整个会话的路径集合猜测。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionReceipt {
+    pub receipt_id: String,
+    pub tool: String,
+    pub turn_id: String,
+    pub changed_files: Vec<String>,
+    /// 展示相对路径 → Session snapshot 的 canonical 绝对键；只用于内部恢复定位。
+    #[serde(default)]
+    pub snapshot_keys: HashMap<String, String>,
+    pub before_hashes: HashMap<String, Option<String>>,
+    pub after_hashes: HashMap<String, Option<String>>,
+    pub diff_sha256: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +49,9 @@ pub struct Session {
     pub system_prompt: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub snapshots: HashMap<String, SnapshotEntry>,
+    /// ToolHost 成功写入产生的收据；旧会话没有此字段时按空列表加载。
+    #[serde(default)]
+    pub execution_receipts: Vec<ExecutionReceipt>,
     pub created_at: String,
     pub updated_at: String,
     /// 父会话（由 fork 产生时）。
@@ -67,6 +96,7 @@ impl Session {
             system_prompt,
             messages: Vec::new(),
             snapshots: HashMap::new(),
+            execution_receipts: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
             parent_id: None,
@@ -175,28 +205,235 @@ impl Session {
         diffs
     }
 
-    /// 回滚全部已快照的写操作，返回被恢复的路径。
-    pub async fn revert(&mut self) -> Result<Vec<String>, AgentError> {
-        let mut restored = Vec::new();
-        for (path, snapshot) in &self.snapshots {
-            let target = PathBuf::from(path);
-            match &snapshot.original_b64 {
-                Some(encoded) => {
-                    let bytes = BASE64
+    /// 在工具成功写入后登记一个单文件执行收据。
+    ///
+    /// 返回 `None` 表示内容未发生变化；读取/解码错误则 fail closed，不生成可撤销收据。
+    pub fn record_file_execution(
+        &mut self,
+        tool: &str,
+        turn_id: &str,
+        absolute_path: &Path,
+    ) -> Result<Option<ExecutionReceipt>, AgentError> {
+        let key = absolute_path.to_string_lossy().replace('\\', "/");
+        let Some(snapshot) = self.snapshots.get(&key) else {
+            return Ok(None);
+        };
+        let before = snapshot
+            .original_b64
+            .as_deref()
+            .map(|encoded| {
+                BASE64
+                    .decode(encoded)
+                    .map_err(|error| AgentError::Session(format!("快照解码失败：{error}")))
+            })
+            .transpose()?;
+        let after = match std::fs::read(absolute_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(AgentError::Io(error)),
+        };
+        let before_hash = before.as_deref().map(crate::CasStore::hash_of);
+        let after_hash = after.as_deref().map(crate::CasStore::hash_of);
+        if before_hash == after_hash {
+            return Ok(None);
+        }
+        let relative = relative_display(&self.workspace, absolute_path);
+        let diff_sha256 = crate::CasStore::hash_of(
+            serde_json::json!({
+                "path": relative,
+                "before": before_hash,
+                "after": after_hash,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let receipt = ExecutionReceipt {
+            receipt_id: format!("exec-{}", uuid::Uuid::new_v4()),
+            tool: tool.to_string(),
+            turn_id: turn_id.to_string(),
+            changed_files: vec![relative.clone()],
+            snapshot_keys: HashMap::from([(relative.clone(), key)]),
+            before_hashes: HashMap::from([(relative.clone(), before_hash)]),
+            after_hashes: HashMap::from([(relative, after_hash)]),
+            diff_sha256,
+            created_at: Utc::now().to_rfc3339(),
+            status: "executed".to_string(),
+        };
+        self.execution_receipts.push(receipt.clone());
+        self.updated_at = Utc::now().to_rfc3339();
+        Ok(Some(receipt))
+    }
+
+    /// 按执行收据撤销；不传 ID 时消费最近一张尚未撤销的收据。
+    /// 没有新式收据的旧会话回退到兼容的全快照撤销逻辑。
+    pub async fn revert_receipt(
+        &mut self,
+        receipt_id: Option<&str>,
+    ) -> Result<Vec<String>, AgentError> {
+        let index = match receipt_id {
+            Some(id) => self
+                .execution_receipts
+                .iter()
+                .position(|receipt| receipt.receipt_id == id)
+                .ok_or_else(|| AgentError::Session(format!("执行收据不存在：{id}")))?,
+            None => match self
+                .execution_receipts
+                .iter()
+                .rposition(|receipt| receipt.status != "reverted")
+            {
+                Some(index) => index,
+                None => return self.revert_legacy().await,
+            },
+        };
+        let receipt = self.execution_receipts[index].clone();
+        if receipt.status == "reverted" {
+            return Ok(Vec::new());
+        }
+
+        let mut plan = Vec::new();
+        let mut conflicts = Vec::new();
+        for relative in &receipt.changed_files {
+            let key = receipt
+                .snapshot_keys
+                .get(relative)
+                .cloned()
+                .unwrap_or_else(|| {
+                    self.workspace
+                        .canonicalize()
+                        .unwrap_or_else(|_| self.workspace.clone())
+                        .join(relative)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                });
+            let target = PathBuf::from(&key);
+            let Some(snapshot) = self.snapshots.get(&key) else {
+                conflicts.push(relative.clone());
+                continue;
+            };
+            let current = match std::fs::read(&target) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(AgentError::Io(error)),
+            };
+            let current_hash = current.as_deref().map(crate::CasStore::hash_of);
+            let before_hash = receipt.before_hashes.get(relative).cloned().flatten();
+            let after_hash = receipt.after_hashes.get(relative).cloned().flatten();
+            if current_hash == before_hash {
+                continue;
+            }
+            if current_hash != after_hash {
+                conflicts.push(relative.clone());
+                continue;
+            }
+            let original = snapshot
+                .original_b64
+                .as_deref()
+                .map(|encoded| {
+                    BASE64
                         .decode(encoded)
-                        .map_err(|e| AgentError::Session(format!("快照解码失败：{e}")))?;
+                        .map_err(|error| AgentError::Session(format!("快照解码失败：{error}")))
+                })
+                .transpose()?;
+            plan.push((relative.clone(), target, key, original));
+        }
+        if !conflicts.is_empty() {
+            conflicts.sort();
+            conflicts.dedup();
+            return Err(AgentError::RevertConflict { paths: conflicts });
+        }
+
+        let mut restored = Vec::with_capacity(plan.len());
+        for (relative, target, key, original) in plan {
+            match original {
+                Some(bytes) => {
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
                     tokio::fs::write(&target, bytes).await?;
                 }
-                None => {
-                    let _ = tokio::fs::remove_file(&target).await;
+                None => match tokio::fs::remove_file(&target).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(AgentError::Io(error)),
+                },
+            }
+            self.snapshots.remove(&key);
+            restored.push(relative);
+        }
+        self.execution_receipts[index].status = "reverted".to_string();
+        self.updated_at = Utc::now().to_rfc3339();
+        Ok(restored)
+    }
+
+    /// 回滚全部已快照的写操作，返回被恢复的路径。
+    pub async fn revert(&mut self) -> Result<Vec<String>, AgentError> {
+        if !self.execution_receipts.is_empty() {
+            return self.revert_receipt(None).await;
+        }
+        self.revert_legacy().await
+    }
+
+    /// 旧快照格式的兼容撤销路径；新写入优先走 `revert_receipt`。
+    async fn revert_legacy(&mut self) -> Result<Vec<String>, AgentError> {
+        // 先完整预检，再开始写盘：任何文件被用户/外部进程改过时，整批撤销零副作用。
+        let mut restore_plan = Vec::new();
+        let mut conflicts = Vec::new();
+        for (path, snapshot) in &self.snapshots {
+            let target = PathBuf::from(path);
+            let original = match &snapshot.original_b64 {
+                Some(encoded) => Some(
+                    BASE64
+                        .decode(encoded)
+                        .map_err(|e| AgentError::Session(format!("快照解码失败：{e}")))?,
+                ),
+                None => None,
+            };
+            let current = match std::fs::read(&target) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(AgentError::Io(error)),
+            };
+            if current == original {
+                continue;
+            }
+            let matches_agent_write = match (
+                snapshot.expected_after_sha256.as_deref(),
+                current.as_deref(),
+            ) {
+                (Some(expected), Some(bytes)) => crate::CasStore::hash_of(bytes) == expected,
+                _ => false,
+            };
+            if matches_agent_write {
+                restore_plan.push((target, original));
+            } else {
+                conflicts.push(relative_display(&self.workspace, &target));
+            }
+        }
+        if !conflicts.is_empty() {
+            conflicts.sort();
+            conflicts.dedup();
+            return Err(AgentError::RevertConflict { paths: conflicts });
+        }
+
+        let mut restored = Vec::with_capacity(restore_plan.len());
+        for (target, original) in restore_plan {
+            match original {
+                Some(bytes) => {
+                    if let Some(parent) = target.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&target, bytes).await?;
                 }
+                None => match tokio::fs::remove_file(&target).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(AgentError::Io(error)),
+                },
             }
             restored.push(relative_display(&self.workspace, &target));
         }
         self.snapshots.clear();
+        self.execution_receipts.clear();
         self.updated_at = Utc::now().to_rfc3339();
         Ok(restored)
     }
@@ -217,6 +454,7 @@ impl Session {
             system_prompt: self.system_prompt.clone(),
             messages,
             snapshots: HashMap::new(),
+            execution_receipts: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
             parent_id: Some(self.id.clone()),
@@ -239,6 +477,7 @@ impl Session {
         let removed = self.messages.split_off(keep);
         self.redo_stack.push(removed.clone());
         self.snapshots.clear();
+        self.execution_receipts.clear();
         self.updated_at = Utc::now().to_rfc3339();
         removed
     }
@@ -294,6 +533,28 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<Session, AgentError>;
     fn load(&self, id: &str) -> Result<Session, AgentError>;
     fn save(&self, session: &Session) -> Result<(), AgentError>;
+    /// Persist one turn event and allocate the next sequence number for its session.
+    /// Non-durable stores must opt in explicitly rather than pretending to support replay.
+    fn append_turn_event(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        payload: &SseEvent,
+    ) -> Result<TurnEventRecord, AgentError> {
+        let _ = (session_id, turn_id, payload);
+        Err(AgentError::Session("当前存储不支持持久化回合事件".into()))
+    }
+    /// Read a bounded page of persisted events after a session-scoped sequence cursor.
+    fn turn_events_after(
+        &self,
+        session_id: &str,
+        turn_id: Option<&str>,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<TurnEventRecord>, AgentError> {
+        let _ = (session_id, turn_id, after_seq, limit);
+        Err(AgentError::Session("当前存储不支持回合事件回放".into()))
+    }
     /// 列出全部会话 ID（按更新时间倒序）。
     fn list(&self) -> Vec<String> {
         Vec::new()
@@ -573,6 +834,7 @@ mod tests {
             path.to_string_lossy().replace('\\', "/"),
             SnapshotEntry {
                 original_b64: Some(BASE64.encode("before")),
+                expected_after_sha256: Some(crate::CasStore::hash_of(b"after")),
             },
         );
 
@@ -583,6 +845,122 @@ mod tests {
         assert_eq!(session.messages.len(), 1);
         assert!(session.snapshots.is_empty());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "before");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn execution_receipt_revert_is_scoped_and_persistable() {
+        let workspace = std::env::temp_dir().join(format!(
+            "owo-session-execution-receipt-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = workspace.join("receipt.txt");
+        std::fs::write(&path, "before").unwrap();
+
+        let mut session = Session::new(&workspace, "mock", None);
+        session.snapshots.insert(
+            path.to_string_lossy().replace('\\', "/"),
+            SnapshotEntry {
+                original_b64: Some(BASE64.encode("before")),
+                expected_after_sha256: Some(crate::CasStore::hash_of(b"after")),
+            },
+        );
+        std::fs::write(&path, "after").unwrap();
+        let receipt = session
+            .record_file_execution("write_file", "turn-1", &path)
+            .unwrap()
+            .expect("内容变化必须产生执行收据");
+        assert_eq!(receipt.changed_files, vec!["receipt.txt"]);
+        assert_eq!(session.execution_receipts.len(), 1);
+        let serialized = serde_json::to_value(&session).unwrap();
+        assert!(serialized.get("execution_receipts").is_some());
+
+        let restored = session
+            .revert_receipt(Some(&receipt.receipt_id))
+            .await
+            .unwrap();
+        assert_eq!(restored, vec!["receipt.txt"]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before");
+        assert_eq!(session.execution_receipts[0].status, "reverted");
+        assert!(session.snapshots.is_empty());
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn revert_conflict_preflight_prevents_partial_overwrite() {
+        let workspace = std::env::temp_dir().join(format!(
+            "owo-session-revert-conflict-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let user_changed = workspace.join("a-user-edited.txt");
+        let agent_written = workspace.join("b-agent-written.txt");
+        std::fs::write(&user_changed, "user edit").unwrap();
+        std::fs::write(&agent_written, "agent version").unwrap();
+
+        let mut session = Session::new(&workspace, "mock", None);
+        session.snapshots.insert(
+            user_changed.to_string_lossy().replace('\\', "/"),
+            SnapshotEntry {
+                original_b64: Some(BASE64.encode("before a")),
+                expected_after_sha256: Some(crate::CasStore::hash_of(b"agent version")),
+            },
+        );
+        session.snapshots.insert(
+            agent_written.to_string_lossy().replace('\\', "/"),
+            SnapshotEntry {
+                original_b64: Some(BASE64.encode("before b")),
+                expected_after_sha256: Some(crate::CasStore::hash_of(b"agent version")),
+            },
+        );
+
+        let error = session
+            .revert()
+            .await
+            .expect_err("外部修改必须阻止整批撤销");
+        match error {
+            AgentError::RevertConflict { paths } => {
+                assert_eq!(paths, vec!["a-user-edited.txt".to_string()])
+            }
+            other => panic!("应返回结构化撤销冲突，实际：{other}"),
+        }
+        assert_eq!(std::fs::read_to_string(&user_changed).unwrap(), "user edit");
+        assert_eq!(
+            std::fs::read_to_string(&agent_written).unwrap(),
+            "agent version",
+            "预检发现任意冲突时，不得先回滚其他文件"
+        );
+        assert_eq!(session.snapshots.len(), 2, "冲突时保留快照以便用户处理");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn legacy_snapshot_without_write_hash_fails_closed() {
+        let workspace = std::env::temp_dir().join(format!(
+            "owo-session-revert-legacy-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = workspace.join("legacy.txt");
+        std::fs::write(&path, "possibly user-edited").unwrap();
+        let mut session = Session::new(&workspace, "mock", None);
+        session.snapshots.insert(
+            path.to_string_lossy().replace('\\', "/"),
+            SnapshotEntry {
+                original_b64: Some(BASE64.encode("before")),
+                expected_after_sha256: None,
+            },
+        );
+
+        assert!(matches!(
+            session.revert().await,
+            Err(AgentError::RevertConflict { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "possibly user-edited"
+        );
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
@@ -600,6 +978,7 @@ mod tests {
             path.to_string_lossy().replace('\\', "/"),
             SnapshotEntry {
                 original_b64: Some(BASE64.encode("before")),
+                expected_after_sha256: Some(crate::CasStore::hash_of(b"after")),
             },
         );
 

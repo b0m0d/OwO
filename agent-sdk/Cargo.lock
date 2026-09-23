@@ -1755,13 +1755,16 @@ dependencies = [
  "clap",
  "colored",
  "crossterm",
+ "owo-agent-client",
  "owo-agent-core",
  "owo-agent-eval-facade",
+ "owo-agent-protocol",
  "owo-agent-server",
  "owo-build-info",
  "ratatui",
  "reqwest",
  "rustyline",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -1769,6 +1772,19 @@ dependencies = [
  "unicode-width 0.2.0",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "owo-agent-client"
+version = "0.1.0"
+dependencies = [
+ "owo-agent-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2009,6 +2025,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "futures-util",
  "http-body-util",
  "owo-agent-core",
  "owo-agent-env",

@@ -25,10 +25,22 @@ test("业务脚本不绕过统一 API 客户端", () => {
 test("路由切换在清空页面前保留设置节点，自动恢复会启动周期刷新", () => {
   const app = readFileSync(join(here, "../app.js"), "utf8");
   const index = readFileSync(join(here, "../index.html"), "utf8");
+  // R10/R11（2026-09-22）：设置节点是**可搬动的**（侧栏 ↔ 路由内容区），因此
+  // 顺序是硬约束：先把节点搬回侧栏脱离内容区 → 清空内容区 → 再按需搬进来。
+  // 直接把节点搬进内容区再 replaceChildren()，会把刚搬进去的 #settingsSection
+  // 一起删掉，整段 DOM 从文档消失，现象是"模型页/设置页完全空白"，并且后续
+  // refreshUsage 在对 null 赋 textContent（真机栈证据）。
   assert.match(
     app,
     /setSettingsLocation\(false\);\s*content\.replaceChildren\(\);\s*setSettingsLocation\(route === "settings"\);/,
-    "设置节点必须在 routeContent 清空前回迁，避免 settings -> 其他页 -> settings 丢失节点"
+    "必须先让设置节点脱离内容区、再清空、最后按需搬入"
+  );
+  // R10：模型页借用同一份 #settingsSection（同一份 DOM，防止两套表单状态漂移），
+  // 但不接管 #toolsPanel —— 否则模型页立刻又变成"一堆参数"，正是用户投诉的形态。
+  assert.match(
+    app,
+    /const toolsTarget = withTools && inRoute \? target : sidebar;/,
+    "工具面板只允许在设置路由搬进内容区（模型页不得接管）"
   );
   // 意图断言，不锁字面相邻行：上一版把 `hydrateShell(); serviceReady = true;` 逐字
   // 钉死，结果 §3.4 要求的"ready 之后复查提供商"一进来就误判成回归。现在分别断言

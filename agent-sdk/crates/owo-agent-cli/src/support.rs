@@ -88,25 +88,6 @@ pub(crate) fn resolve_model(option: Option<String>, settings_model: Option<&str>
         .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
-pub(crate) fn build_agent(
-    workspace: &std::path::Path,
-    model: &str,
-    read_only: bool,
-) -> Result<Agent, Box<dyn std::error::Error>> {
-    let root = ensure_data_root(None, workspace);
-    let settings = Settings::load(workspace);
-    let mut skills = SkillRegistry::discover(workspace, &root);
-    apply_disabled_skills(&mut skills, &settings);
-    build_agent_with_mcp(
-        workspace,
-        model,
-        read_only,
-        &[],
-        &skills,
-        &settings.deny_commands,
-    )
-}
-
 pub(crate) fn build_agent_with_mcp(
     workspace: &std::path::Path,
     model: &str,
@@ -192,6 +173,9 @@ fn assemble_agent(
             config.token_budget = budget;
         }
     }
+    // 配置文件（桌面壳读 config.json 后注入）优先于上面这些历史变量：
+    // 用户在文件里写的上下文窗口/输出上限/温度/超时是显式意图，必须赢。
+    config = config.with_env_overrides();
     if let Ok(value) = std::env::var("OWO_KEEP_RECENT") {
         if let Ok(keep) = value.parse() {
             config.keep_recent = keep;
@@ -205,7 +189,8 @@ fn assemble_agent(
             }
         }
     }
-    let mut agent = Agent::new(provider, ToolRegistry::new(), policy, config);
+    let registry = builtin_registry_for_workspace(workspace);
+    let mut agent = Agent::new(provider, registry, policy, config);
     // §9.3：超大工具结果落 CAS artifact（workspace/.owo/artifacts）。
     if let Ok(store) =
         owo_agent_core::cas_store::CasStore::new(workspace.join(".owo").join("artifacts"))
@@ -224,6 +209,21 @@ fn assemble_agent(
     agent.set_skills(skills.clone());
     attach_auto_review(&mut agent, model);
     Ok(agent)
+}
+
+fn builtin_registry_for_workspace(workspace: &std::path::Path) -> ToolRegistry {
+    let capabilities = Settings::load(workspace).tool_capabilities;
+    let mut registry = ToolRegistry::new();
+    if capabilities.desktop_observation {
+        registry.register_desktop_observation_tools();
+    }
+    if capabilities.desktop_control {
+        registry.register_desktop_control_tools();
+    }
+    if capabilities.browser {
+        registry.register_browser_tools();
+    }
+    registry
 }
 
 /// 独立审批模型（Auto-review）：
@@ -256,21 +256,83 @@ pub(crate) fn attach_auto_review(agent: &mut Agent, model: &str) {
     }
 }
 
+#[cfg(test)]
+mod tool_capability_tests {
+    use super::builtin_registry_for_workspace;
+    use owo_agent_core::settings::AgentToolCapabilities;
+    use owo_agent_core::Settings;
+
+    #[test]
+    fn workspace_settings_opt_in_optional_tool_groups() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-tool-capabilities-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let defaults = builtin_registry_for_workspace(&workspace);
+        let default_names: Vec<String> =
+            defaults.specs().into_iter().map(|spec| spec.name).collect();
+        assert!(default_names.contains(&"run_command".to_string()));
+        assert!(!default_names.contains(&"screen_ocr".to_string()));
+        assert!(!default_names.contains(&"desktop_click".to_string()));
+        assert!(!default_names.contains(&"browser_navigate".to_string()));
+
+        Settings {
+            tool_capabilities: AgentToolCapabilities {
+                desktop_observation: true,
+                desktop_control: false,
+                browser: true,
+            },
+            ..Settings::default()
+        }
+        .save(&workspace)
+        .unwrap();
+        let opted_in = builtin_registry_for_workspace(&workspace);
+        let opted_names: Vec<String> = opted_in.specs().into_iter().map(|spec| spec.name).collect();
+        assert!(opted_names.contains(&"screen_ocr".to_string()));
+        assert!(opted_names.contains(&"browser_navigate".to_string()));
+        assert!(!opted_names.contains(&"desktop_click".to_string()));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+}
+
 pub(crate) async fn connect_mcp_clients(
     configs: &[McpServerConfig],
 ) -> Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)> {
-    // 服务端必须先进入可用状态；外部 MCP 的不可达/握手卡住不能无限阻塞
-    // 本地 HTTP 监听和桌面壳健康检查。失败的可选 MCP 保持降级，后续重启可重试。
-    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-    let mut clients = Vec::new();
+    // 服务端必须先进入可用状态；外部 MCP 的不可达/握手卡住不能无限阻塞本地 HTTP
+    // 监听与桌面壳健康检查。失败的可选 MCP 保持降级，后续重启可重试。
+    //
+    // §6.2/P2：改为**并发连接 + 全局 3s 上限**。旧实现逐个串行 3s，N 个坏 MCP 就是
+    // 3N 秒——"坏 MCP 不影响 3 秒内 ready"在 N≥2 时直接不成立。并发 + 全局预算后，
+    // 无论多少个坏 MCP，就绪延迟都被钉在 3s 内。
+    const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    let mut set = tokio::task::JoinSet::new();
     for config in configs {
-        match tokio::time::timeout(CONNECT_TIMEOUT, McpClient::connect(config)).await {
-            Ok(Ok(client)) => {
+        let config = config.clone();
+        set.spawn(async move {
+            let result = McpClient::connect(&config).await;
+            (config, result)
+        });
+    }
+    let mut clients = Vec::new();
+    let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            println!(
+                "{} 仍有 MCP 在 {} 秒内未完成连接，已跳过（不阻塞本地服务启动）",
+                "✘".red(),
+                TOTAL_TIMEOUT.as_secs()
+            );
+            break;
+        }
+        match tokio::time::timeout(remaining, set.join_next()).await {
+            Ok(Some(Ok((config, Ok(client))))) => {
                 let tools = client.tools();
                 // §5.2：连接成功后先按 config 声明宿主可信只读（server+tool+schema hash），
                 // 后续 register 时 hash 匹配的 readOnlyHint 才允许降级为 Read。
                 let declared =
-                    owo_agent_core::tool_effects::declare_trusted_from_config(config, &tools);
+                    owo_agent_core::tool_effects::declare_trusted_from_config(&config, &tools);
                 if declared > 0 {
                     println!(
                         "{} MCP {}：{declared} 个工具获宿主可信只读声明（schema hash 校验）",
@@ -289,15 +351,25 @@ pub(crate) async fn connect_mcp_clients(
                     Arc::new(tokio::sync::Mutex::new(client)),
                 ));
             }
-            Ok(Err(error)) => println!("{} MCP {} 连接失败：{error}", "✘".red(), config.name),
-            Err(_) => println!(
-                "{} MCP {} 在 {} 秒内未完成连接，已跳过（不阻塞本地服务启动）",
-                "✘".red(),
-                config.name,
-                CONNECT_TIMEOUT.as_secs()
-            ),
+            Ok(Some(Ok((config, Err(error))))) => {
+                println!("{} MCP {} 连接失败：{error}", "✘".red(), config.name)
+            }
+            Ok(Some(Err(join_error))) => {
+                println!("{} MCP 连接任务异常：{join_error}", "✘".red())
+            }
+            Ok(None) => break, // 全部完成
+            Err(_) => {
+                println!(
+                    "{} MCP 连接总时长超过 {} 秒，未完成的已跳过（不阻塞本地服务启动）",
+                    "✘".red(),
+                    TOTAL_TIMEOUT.as_secs()
+                );
+                break;
+            }
         }
     }
+    // 超时后终止仍在握手的连接任务（与旧实现丢弃 future 的语义一致，避免后台挂起）。
+    set.abort_all();
     clients
 }
 
@@ -342,6 +414,95 @@ pub(crate) fn ensure_data_root(
     fallback
 }
 
+/// §2.3/P1：确保有可用 Daemon 并返回**共享**客户端。
+///
+/// 规则（指南 §2.3）：
+///   1. 先读 discovery；存活且 API 兼容 → 直接复用（绝不另起第二个 DB writer）；
+///   2. 缺失/陈旧 → 以当前 exe 启动分离的 `serve` 进程，等待 discovery 就绪；
+///   3. API 版本不兼容 → 明确报错（禁止静默连到旧实例）。
+///
+/// 客户端只依赖 protocol；本函数是 CLI 侧"单实例启动协议"的唯一实现，
+/// turn/repl/daemon 子命令都经它，不再各自构造 Agent/打开 SQLite。
+pub(crate) async fn ensure_daemon_client(
+    data_root: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<owo_agent_client::AgentClient, Box<dyn std::error::Error>> {
+    let expected = owo_build_info::API_VERSION;
+    match owo_agent_client::connect(data_root, Some(expected)).await {
+        Ok(client) => return Ok(client),
+        Err(owo_agent_client::ClientError::ApiVersionMismatch {
+            expected: want,
+            actual,
+        }) => {
+            return Err(format!(
+                "已运行 Daemon 的 API 版本为 {actual}，本客户端期望 {want}：请升级或重启 Daemon（禁止静默另起旧实例）"
+            )
+            .into());
+        }
+        Err(owo_agent_client::ClientError::NotFound(_))
+        | Err(owo_agent_client::ClientError::Discovery(_)) => {
+            // 无可用 Daemon：启动一个。
+        }
+        Err(other) => return Err(other.into()),
+    }
+    spawn_daemon(data_root, workspace)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut last = String::from("（尚未出现发现文件）");
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        match owo_agent_client::connect(data_root, Some(expected)).await {
+            Ok(client) => return Ok(client),
+            Err(owo_agent_client::ClientError::ApiVersionMismatch {
+                expected: want,
+                actual,
+            }) => {
+                return Err(format!(
+                    "新启动 Daemon 的 API 版本为 {actual}，本客户端期望 {want}：拒绝连接"
+                )
+                .into());
+            }
+            Err(error) => last = error.to_string(),
+        }
+    }
+    Err(format!("等待 Daemon 就绪超时（60s）：{last}").into())
+}
+
+/// 分离启动 `owo-agent serve`（不占用调用方 stdout，退出不随父进程）。
+fn spawn_daemon(
+    data_root: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let logs = data_root.join("logs");
+    std::fs::create_dir_all(&logs)?;
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let out = std::fs::File::create(logs.join(format!("daemon-{stamp}.out.log")))?;
+    let err = out.try_clone()?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("serve")
+        .arg("--port")
+        .arg("0")
+        .arg("--output")
+        .arg("jsonl")
+        .arg("--workspace")
+        .arg(workspace)
+        .env("OWO_AGENT_DATA", data_root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(out))
+        .stderr(std::process::Stdio::from(err));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    command.spawn()?;
+    Ok(())
+}
+
 /// R3-B（§3.4 `storage/not_writable`）：严格版数据根准备——**不**静默迁移。
 /// 首选目录不可写即返回 Err（原因含脱敏路径），由调用方决定是否降级；
 /// 桌面壳上下文必须用本函数：悄悄把会话/审计搬进用户项目目录是"看起来成功"
@@ -356,6 +517,18 @@ pub(crate) fn ensure_data_root_checked(override_dir: Option<PathBuf>) -> Result<
 pub(crate) fn display_path(path: &std::path::Path) -> String {
     let raw = path.to_string_lossy();
     raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string()
+}
+
+/// 归一化一行交互输入：去首尾空白并剥掉可能的前导 BOM。
+///
+/// 为什么需要：PowerShell 5.1 把管道内容写给原生子进程 stdin 时，首个写入可能带
+/// UTF-8 BOM（U+FEFF）。Rust 的 `trim()` 不把 U+FEFF 当空白，于是 `strip_prefix('/')`
+/// 失败——`/new` 会被当成普通提示词触发一次模型回合（实测踩到）。
+pub(crate) fn normalize_input_line(line: &str) -> String {
+    line.trim()
+        .trim_start_matches('\u{feff}')
+        .trim()
+        .to_string()
 }
 
 /// §4.2/§5.1/§6.1.2/§7.1：core_ready 行的 build_id 解析——委托

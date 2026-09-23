@@ -1,0 +1,201 @@
+/* OwO Agent 工作台（Electron 渲染层）样式。
+   组件化渲染下没有"节点搬来搬去"，所以布局用最朴素的 flex/grid 即可，
+   不再需要旧壳里那些针对 DOM 搬动的补丁规则（hide/show 各占一半的那种）。 */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --raised: #eef1f5;
+  --border: #d9dee6;
+  --text: #1d2430;
+  --muted: #6b7686;
+  --accent: #2f6fed;
+  --ok: #1f9d55;
+  --warn: #b8860b;
+  --bad: #c0392b;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app { height: 100%; margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.55 system-ui, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+.shell { height: 100%; display: flex; flex-direction: column; }
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 8px; }
+.logo {
+  width: 26px; height: 26px; border-radius: 8px; background: var(--accent);
+  color: #fff; display: grid; place-items: center; font-weight: 700;
+}
+.brand h1 { margin: 0; font-size: 15px; letter-spacing: -0.01em; }
+.tag { color: var(--muted); font-size: 11px; border-left: 1px solid var(--border); padding-left: 8px; }
+.topbar-mid { display: flex; gap: 6px; flex: 1 1 auto; flex-wrap: wrap; min-width: 0; }
+.topbar-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+
+.pill {
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--raised); color: var(--text); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px;
+}
+.pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+.pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+.pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--border)); }
+
+/* ---------- 三栏 ---------- */
+.body { flex: 1 1 auto; min-height: 0; display: flex; }
+
+.rail {
+  width: 74px; flex: 0 0 auto; padding: 10px 6px;
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--surface); border-right: 1px solid var(--border);
+}
+.rail-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 9px 2px; border: 1px solid transparent; border-radius: 10px;
+  background: transparent; color: var(--muted); cursor: pointer; font: inherit;
+}
+.rail-btn:hover { background: var(--raised); color: var(--text); }
+.rail-btn.active { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.rail-icon { font-size: 17px; line-height: 1; }
+.rail-label { font-size: 11px; white-space: nowrap; }
+
+.sidebar {
+  width: 300px; flex: 0 0 auto; padding: 10px;
+  background: var(--surface); border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+.content { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ---------- 面板与列表 ---------- */
+.panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px; margin-bottom: 12px;
+}
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.panel-head h2 { margin: 0; font-size: 14px; }
+.hint { color: var(--muted); font-size: 12px; margin: 6px 0; }
+.muted { color: var(--muted); }
+.list { list-style: none; margin: 0; padding: 0; }
+.list .session {
+  padding: 8px 10px; border: 1px solid transparent; border-radius: 10px; cursor: pointer;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.list .session:hover { background: var(--raised); }
+.list .session.active { border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.session-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-meta { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.audit-row { padding: 4px 2px; border-bottom: 1px dashed var(--border); font-size: 12px; color: var(--muted); }
+
+/* ---------- 聊天 ---------- */
+.chat { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 18px 22px; }
+.msg {
+  max-width: 900px; margin: 0 auto 12px; padding: 10px 12px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+}
+.msg.user { background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.msg.assistant { background: var(--surface); }
+.msg.streaming { opacity: 0.95; border-style: dashed; }
+.streaming-hint { color: var(--muted); font-size: 11px; margin-top: 6px; }
+.md-code {
+  background: #0f172a; color: #e2e8f0; padding: 10px 12px; border-radius: 8px;
+  overflow-x: auto; font-size: 12px;
+}
+.empty { max-width: 620px; margin: 8vh auto 0; text-align: center; color: var(--muted); }
+.empty h3 { color: var(--text); font-size: 20px; margin-bottom: 6px; }
+
+.composer {
+  flex: 0 0 auto; padding: 12px 16px; border-top: 1px solid var(--border);
+  background: var(--surface); display: flex; flex-direction: column; gap: 8px;
+}
+.composer textarea {
+  width: 100%; resize: vertical; padding: 10px 12px; font: inherit;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text);
+}
+.composer-actions { display: flex; align-items: center; justify-content: space-between; }
+
+/* ---------- 表单 ---------- */
+.page { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 16px 22px 40px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field-label { color: var(--muted); font-size: 12px; }
+.input {
+  width: 100%; padding: 8px 10px; font: inherit;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--text);
+}
+.presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.code-block {
+  background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 10px;
+  font-size: 12px; overflow-x: auto; max-height: 420px;
+}
+code {
+  padding: 1px 5px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--raised); font-size: 11px;
+}
+
+/* ---------- 按钮 ---------- */
+.btn {
+  padding: 7px 12px; font: inherit; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--raised); color: var(--text);
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.06); color: #fff; }
+.btn.danger { background: color-mix(in srgb, var(--bad) 12%, var(--surface)); border-color: color-mix(in srgb, var(--bad) 40%, var(--border)); color: var(--bad); }
+.btn.small { padding: 4px 9px; font-size: 12px; }
+
+/* ---------- 审批 ---------- */
+.approval {
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+  border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
+}
+.approval-title { font-weight: 600; margin-bottom: 6px; }
+.approval-actions { display: flex; gap: 8px; }
+
+/* ---------- 提示条 ---------- */
+.toast {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  max-width: 720px; padding: 9px 14px; cursor: pointer;
+  background: #1d2430; color: #fff; border-radius: 10px; font-size: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
+}
+.toast-close { color: #9aa5b4; }
+
+/* 审批卡：必须显眼、可点掉（"能在界面里直接对话"的必要条件）。 */
+.approval-card {
+  margin: 0 16px 10px; padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+  border-radius: 12px;
+}
+.approval-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.approval-reason { margin-bottom: 6px; }
+.approval-risk { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.approval-args {
+  background: var(--raised); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font-size: 12px; max-height: 180px; overflow: auto; margin: 0 0 10px;
+  white-space: pre-wrap; word-break: break-all;
+}
+.approval-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 活动提示（正在调用哪个工具 / 工具结果）。 */
+.activity {
+  padding: 6px 18px; color: var(--muted); font-size: 12px;
+  border-top: 1px dashed var(--border);
+}

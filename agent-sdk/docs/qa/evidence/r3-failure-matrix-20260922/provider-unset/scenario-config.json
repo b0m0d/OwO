@@ -1,0 +1,18 @@
+{
+    "id":  "provider-unset",
+    "kind":  "healthy",
+    "note":  "§3.4：provider 未配置 → core 正常运行 + 模型配置引导（R3-BUG-05 错误归因已修）",
+    "expected_codes":  [
+                           "provider/not_configured"
+                       ],
+    "required_actions":  [
+                             "打开模型设置",
+                             "测试连接"
+                         ],
+    "final_budget_sec":  20,
+    "needs_workspace":  true,
+    "needs_key":  false,
+    "acceptance_mode":  "OWO_DESKTOP_ACCEPTANCE=1 + OWO_SIDECAR_ROOT=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-122254\\provider-unset",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-122254\\provider-unset\\owo-agent.exe",
+    "sidecar_sha256":  "8CB3347C7CB78DD9DCC8263C9B9C3E9170FB1424446C024F74736D2C7978FC7C"
+}

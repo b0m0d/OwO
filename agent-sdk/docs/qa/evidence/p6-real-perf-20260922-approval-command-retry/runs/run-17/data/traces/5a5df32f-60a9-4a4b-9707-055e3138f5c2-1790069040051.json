@@ -1,0 +1,2692 @@
+{
+  "session_id": "5a5df32f-60a9-4a4b-9707-055e3138f5c2",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-approval-command-retry\\runs\\run-17\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请在当前工作区执行一个只读命令，运行 rg --version，然后告诉我版本。",
+  "started_at": "2026-09-22T09:21:15.296654300+00:00",
+  "duration_ms": 164754,
+  "steps": 19,
+  "final_text": "已完成排查，结论如下：\n\n## 执行结果\n\n**`rg --version` 未能成功在 shell 中执行**，返回：\n\n```\nexit_code: 1\nstderr: Not enough quota is available to process this command.\n```\n\n这是 Windows 的系统级错误（进程创建配额不足，通常与分页文件/内存配额耗尽有关），而不是 rg 本身的报错。\n\n## 佐证排查\n\n| 命令 | 结果 |\n|---|---|\n| `echo test`（shell 内建，不创建新进程） | ✅ 正常 |\n| `echo a && echo b`（复合内建命令） | ✅ 正常 |\n| `rg --version` / `cmd /c rg --version` / `where rg` | ❌ 同样的 quota 错误 |\n| `findstr`（外部 exe） | ❌ 同样的 quota 错误 |\n\n规律很明确：凡是需要**启动外部 .exe 进程**的命令都因配额不足失败，只有不创建新进程的 shell 内建命令能跑。也就是说当前 shell 环境无法 spawn 任何子进程，rg 只是受害者之一。\n\n## 版本答案\n\n虽然直接运行失败，但我通过内置的 `search_files` 工具（它正是由随包 ripgrep 驱动的）拿到了元数据：\n\n> **ripgrep 版本：14.1.1**\n\n这应该就是 PATH 中那份 rg 的版本。如果你希望我在 shell 里拿到原生输出，可能需要先释放系统配额（例如增大页面文件、关闭占用内存的进程）后重试。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "0c089364-6d0b-4312-b0fe-c8524425b68a",
+      "tool": "run_command",
+      "args": {
+        "command": "rg --version"
+      },
+      "level": "execute",
+      "reason": "执行命令：rg --version",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "rg --version"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_5c5fbd8fca3a472181af7294",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_5c5fbd8fca3a472181af7294",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命令"
+    },
+    {
+      "type": "token_delta",
+      "delta": "执行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "遇到了"
+    },
+    {
+      "type": "token_delta",
+      "delta": "一个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "系统"
+    },
+    {
+      "type": "token_delta",
+      "delta": "资源"
+    },
+    {
+      "type": "token_delta",
+      "delta": "配"
+    },
+    {
+      "type": "token_delta",
+      "delta": "额"
+    },
+    {
+      "type": "token_delta",
+      "delta": "错误"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "Not"
+    },
+    {
+      "type": "token_delta",
+      "delta": " enough"
+    },
+    {
+      "type": "token_delta",
+      "delta": " quota"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "），"
+    },
+    {
+      "type": "token_delta",
+      "delta": "这"
+    },
+    {
+      "type": "token_delta",
+      "delta": "通常是"
+    },
+    {
+      "type": "token_delta",
+      "delta": "暂时"
+    },
+    {
+      "type": "token_delta",
+      "delta": "性的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我再"
+    },
+    {
+      "type": "token_delta",
+      "delta": "尝试"
+    },
+    {
+      "type": "token_delta",
+      "delta": "一次"
+    },
+    {
+      "type": "token_delta",
+      "delta": "："
+    },
+    {
+      "type": "permission_request",
+      "request_id": "3ef22c82-a910-44b2-ac11-abe63821ce02",
+      "tool": "run_command",
+      "args": {
+        "command": "rg --version"
+      },
+      "level": "execute",
+      "reason": "执行命令：rg --version",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "rg --version"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_0e377d7b16054c51ad52c52d",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_0e377d7b16054c51ad52c52d",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "e6252a6e-1a02-4bd7-b52b-6816cfcfae7a",
+      "tool": "run_command",
+      "args": {
+        "command": "rg --version"
+      },
+      "level": "execute",
+      "reason": "执行命令：rg --version",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "rg --version"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_ed9c0c0f627e40b2a8b6e239",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_ed9c0c0f627e40b2a8b6e239",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "rg"
+    },
+    {
+      "type": "token_delta",
+      "delta": " --"
+    },
+    {
+      "type": "token_delta",
+      "delta": "version"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 连"
+    },
+    {
+      "type": "token_delta",
+      "delta": "续"
+    },
+    {
+      "type": "token_delta",
+      "delta": "三次"
+    },
+    {
+      "type": "token_delta",
+      "delta": "返回"
+    },
+    {
+      "type": "token_delta",
+      "delta": "同一个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "系统"
+    },
+    {
+      "type": "token_delta",
+      "delta": "级"
+    },
+    {
+      "type": "token_delta",
+      "delta": "错误"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "exit"
+    },
+    {
+      "type": "token_delta",
+      "delta": "_code"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "stderr"
+    },
+    {
+      "type": "token_delta",
+      "delta": ":"
+    },
+    {
+      "type": "token_delta",
+      "delta": " \""
+    },
+    {
+      "type": "token_delta",
+      "delta": "Not"
+    },
+    {
+      "type": "token_delta",
+      "delta": " enough"
+    },
+    {
+      "type": "token_delta",
+      "delta": " quota"
+    },
+    {
+      "type": "token_delta",
+      "delta": " is"
+    },
+    {
+      "type": "token_delta",
+      "delta": " available"
+    },
+    {
+      "type": "token_delta",
+      "delta": " to"
+    },
+    {
+      "type": "token_delta",
+      "delta": " process"
+    },
+    {
+      "type": "token_delta",
+      "delta": " this"
+    },
+    {
+      "type": "token_delta",
+      "delta": " command"
+    },
+    {
+      "type": "token_delta",
+      "delta": ".\""
+    },
+    {
+      "type": "token_delta",
+      "delta": "）。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我"
+    },
+    {
+      "type": "token_delta",
+      "delta": "换个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "简单"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命令"
+    },
+    {
+      "type": "token_delta",
+      "delta": "测试"
+    },
+    {
+      "type": "token_delta",
+      "delta": "一下"
+    },
+    {
+      "type": "token_delta",
+      "delta": " shell"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "环"
+    },
+    {
+      "type": "token_delta",
+      "delta": "境"
+    },
+    {
+      "type": "token_delta",
+      "delta": "本身"
+    },
+    {
+      "type": "token_delta",
+      "delta": "是否"
+    },
+    {
+      "type": "token_delta",
+      "delta": "可用"
+    },
+    {
+      "type": "token_delta",
+      "delta": "："
+    },
+    {
+      "type": "permission_request",
+      "request_id": "fdb55833-f641-47bb-95e9-4532202c811c",
+      "tool": "run_command",
+      "args": {
+        "command": "echo quota-test"
+      },
+      "level": "execute",
+      "reason": "执行命令：echo quota-test",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "echo quota-test"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_3ab82a542a6147548261d4df",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_3ab82a542a6147548261d4df",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "echo"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "正常运行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "说明"
+    },
+    {
+      "type": "token_delta",
+      "delta": " shell"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 可"
+    },
+    {
+      "type": "token_delta",
+      "delta": "用"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "但"
+    },
+    {
+      "type": "token_delta",
+      "delta": "启动"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "rg"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 进"
+    },
+    {
+      "type": "token_delta",
+      "delta": "程"
+    },
+    {
+      "type": "token_delta",
+      "delta": "时"
+    },
+    {
+      "type": "token_delta",
+      "delta": "系统"
+    },
+    {
+      "type": "token_delta",
+      "delta": "报"
+    },
+    {
+      "type": "token_delta",
+      "delta": "\""
+    },
+    {
+      "type": "token_delta",
+      "delta": "配"
+    },
+    {
+      "type": "token_delta",
+      "delta": "额"
+    },
+    {
+      "type": "token_delta",
+      "delta": "不足"
+    },
+    {
+      "type": "token_delta",
+      "delta": "\""
+    },
+    {
+      "type": "token_delta",
+      "delta": "错误"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "让我"
+    },
+    {
+      "type": "token_delta",
+      "delta": "进一步"
+    },
+    {
+      "type": "token_delta",
+      "delta": "诊断"
+    },
+    {
+      "type": "token_delta",
+      "delta": "："
+    },
+    {
+      "type": "permission_request",
+      "request_id": "aa392f7b-2b10-489d-ae7e-f74f254de1c7",
+      "tool": "run_command",
+      "args": {
+        "command": "where rg && rg --version"
+      },
+      "level": "execute",
+      "reason": "执行命令：where rg && rg --version",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "where rg && rg --version"
+      }
+    },
+    {
+      "type": "permission_request",
+      "request_id": "db9ee44f-f44b-4445-9245-15c1e622833c",
+      "tool": "run_command",
+      "args": {
+        "command": "cmd /c rg --version"
+      },
+      "level": "execute",
+      "reason": "执行命令：cmd /c rg --version",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "cmd /c rg --version"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_60f094d3b8344711bacc9cba",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_60f094d3b8344711bacc9cba",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "tool_start",
+      "id": "call_ce04fb5b62624f7a90531f50",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_ce04fb5b62624f7a90531f50",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "d52104ae-b9e0-43c5-9a11-4d1c1ee92941",
+      "tool": "run_command",
+      "args": {
+        "command": "echo rg"
+      },
+      "level": "execute",
+      "reason": "执行命令：echo rg",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "echo rg"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_89d5684551ac48b88ca9454b",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_89d5684551ac48b88ca9454b",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "b360fa87-84df-4e17-9c01-84c1b3884eea",
+      "tool": "run_command",
+      "args": {
+        "command": "echo --version"
+      },
+      "level": "execute",
+      "reason": "执行命令：echo --version",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "echo --version"
+      }
+    },
+    {
+      "type": "permission_request",
+      "request_id": "7c60927c-c3f5-4510-ab14-336b2ecedd9d",
+      "tool": "run_command",
+      "args": {
+        "command": "echo rg --version"
+      },
+      "level": "execute",
+      "reason": "执行命令：echo rg --version",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "echo rg --version"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_1bf9e74a1c6c4ababe911b40",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_1bf9e74a1c6c4ababe911b40",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "tool_start",
+      "id": "call_e280666d2bb6479f8db3566f",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_e280666d2bb6479f8db3566f",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_09547364203d4e8a8dc5d152",
+      "tool": "list_dir"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_09547364203d4e8a8dc5d152",
+      "tool": "list_dir",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_d4d9ed2623bb46a49a50a605",
+      "tool": "list_dir"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_d4d9ed2623bb46a49a50a605",
+      "tool": "list_dir",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_464d375a1fb7407eadc817e0",
+      "tool": "list_dir"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_464d375a1fb7407eadc817e0",
+      "tool": "list_dir",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_93070cc918ff4691b1721967",
+      "tool": "search_files"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_93070cc918ff4691b1721967",
+      "tool": "search_files",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "4b870b89-90ce-4409-a6fe-37782348843a",
+      "tool": "run_command",
+      "args": {
+        "command": "echo test1"
+      },
+      "level": "execute",
+      "reason": "执行命令：echo test1",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "echo test1"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_1a28c9b1c68540db96ddabb7",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_1a28c9b1c68540db96ddabb7",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "cd8da237-a0bb-46c5-af9c-7847c3191b48",
+      "tool": "run_command",
+      "args": {
+        "command": "echo test2 && echo test3"
+      },
+      "level": "execute",
+      "reason": "执行命令：echo test2 && echo test3",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "echo test2 && echo test3"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_90434d280459444cbb018f43",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_90434d280459444cbb018f43",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "110d4c20-5169-4d07-95af-aa511074a72a",
+      "tool": "run_command",
+      "args": {
+        "command": "echo test4 | findstr test"
+      },
+      "level": "execute",
+      "reason": "执行命令：echo test4 | findstr test",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "echo test4 | findstr test"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_69969d2dadec4a44a70356b9",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_69969d2dadec4a44a70356b9",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "886a4f0f-3b4e-43e5-8cdc-82c8a4f19227",
+      "tool": "run_command",
+      "args": {
+        "command": "findstr /?"
+      },
+      "level": "execute",
+      "reason": "执行命令：findstr /?",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "findstr /?"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_3b370a1616ea45c19769e9a4",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_3b370a1616ea45c19769e9a4",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "4bc29e4f-2022-4065-af0d-a268fe80f0d3",
+      "tool": "run_command",
+      "args": {
+        "command": "echo test5"
+      },
+      "level": "execute",
+      "reason": "执行命令：echo test5",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "echo test5"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_0a42b58d178d41b3aef82a78",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_0a42b58d178d41b3aef82a78",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "permission_request",
+      "request_id": "23a87468-eea8-47ee-8be9-4866b3a428e5",
+      "tool": "run_command",
+      "args": {
+        "command": "echo test6"
+      },
+      "level": "execute",
+      "reason": "执行命令：echo test6",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "redacted_args": {
+        "command": "echo test6"
+      }
+    },
+    {
+      "type": "tool_start",
+      "id": "call_d5c8f729a9514e5199ba81bf",
+      "tool": "run_command"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_d5c8f729a9514e5199ba81bf",
+      "tool": "run_command",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "已完成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "排查"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "结论"
+    },
+    {
+      "type": "token_delta",
+      "delta": "如下"
+    },
+    {
+      "type": "token_delta",
+      "delta": "：\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "##"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "执行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "结果"
+    },
+    {
+      "type": "token_delta",
+      "delta": "\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "**"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "rg"
+    },
+    {
+      "type": "token_delta",
+      "delta": " --"
+    },
+    {
+      "type": "token_delta",
+      "delta": "version"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "未能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "成功"
+    },
+    {
+      "type": "token_delta",
+      "delta": "在"
+    },
+    {
+      "type": "token_delta",
+      "delta": " shell"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 中"
+    },
+    {
+      "type": "token_delta",
+      "delta": "执行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "**"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "返回"
+    },
+    {
+      "type": "token_delta",
+      "delta": "：\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "``"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "exit"
+    },
+    {
+      "type": "token_delta",
+      "delta": "_code"
+    },
+    {
+      "type": "token_delta",
+      "delta": ":"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": "\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "stderr"
+    },
+    {
+      "type": "token_delta",
+      "delta": ":"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Not"
+    },
+    {
+      "type": "token_delta",
+      "delta": " enough"
+    },
+    {
+      "type": "token_delta",
+      "delta": " quota"
+    },
+    {
+      "type": "token_delta",
+      "delta": " is"
+    },
+    {
+      "type": "token_delta",
+      "delta": " available"
+    },
+    {
+      "type": "token_delta",
+      "delta": " to"
+    },
+    {
+      "type": "token_delta",
+      "delta": " process"
+    },
+    {
+      "type": "token_delta",
+      "delta": " this"
+    },
+    {
+      "type": "token_delta",
+      "delta": " command"
+    },
+    {
+      "type": "token_delta",
+      "delta": ".\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "``"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "这是"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Windows"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "系统"
+    },
+    {
+      "type": "token_delta",
+      "delta": "级"
+    },
+    {
+      "type": "token_delta",
+      "delta": "错误"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "进程"
+    },
+    {
+      "type": "token_delta",
+      "delta": "创建"
+    },
+    {
+      "type": "token_delta",
+      "delta": "配"
+    },
+    {
+      "type": "token_delta",
+      "delta": "额"
+    },
+    {
+      "type": "token_delta",
+      "delta": "不足"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "通常"
+    },
+    {
+      "type": "token_delta",
+      "delta": "与"
+    },
+    {
+      "type": "token_delta",
+      "delta": "分"
+    },
+    {
+      "type": "token_delta",
+      "delta": "页"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "/"
+    },
+    {
+      "type": "token_delta",
+      "delta": "内存"
+    },
+    {
+      "type": "token_delta",
+      "delta": "配"
+    },
+    {
+      "type": "token_delta",
+      "delta": "额"
+    },
+    {
+      "type": "token_delta",
+      "delta": "耗"
+    },
+    {
+      "type": "token_delta",
+      "delta": "尽"
+    },
+    {
+      "type": "token_delta",
+      "delta": "有关"
+    },
+    {
+      "type": "token_delta",
+      "delta": "），"
+    },
+    {
+      "type": "token_delta",
+      "delta": "而不是"
+    },
+    {
+      "type": "token_delta",
+      "delta": " rg"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 本"
+    },
+    {
+      "type": "token_delta",
+      "delta": "身的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "报"
+    },
+    {
+      "type": "token_delta",
+      "delta": "错"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "##"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "佐"
+    },
+    {
+      "type": "token_delta",
+      "delta": "证"
+    },
+    {
+      "type": "token_delta",
+      "delta": "排查"
+    },
+    {
+      "type": "token_delta",
+      "delta": "\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "|"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "命"
+    },
+    {
+      "type": "token_delta",
+      "delta": "令"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 结果"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "|"
+    },
+    {
+      "type": "token_delta",
+      "delta": "---"
+    },
+    {
+      "type": "token_delta",
+      "delta": "|"
+    },
+    {
+      "type": "token_delta",
+      "delta": "---"
+    },
+    {
+      "type": "token_delta",
+      "delta": "|\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "|"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "echo"
+    },
+    {
+      "type": "token_delta",
+      "delta": " test"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "shell"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 内"
+    },
+    {
+      "type": "token_delta",
+      "delta": "建"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "不"
+    },
+    {
+      "type": "token_delta",
+      "delta": "创建"
+    },
+    {
+      "type": "token_delta",
+      "delta": "新"
+    },
+    {
+      "type": "token_delta",
+      "delta": "进程"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "✅"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 正"
+    },
+    {
+      "type": "token_delta",
+      "delta": "常"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "|"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "echo"
+    },
+    {
+      "type": "token_delta",
+      "delta": " a"
+    },
+    {
+      "type": "token_delta",
+      "delta": " &&"
+    },
+    {
+      "type": "token_delta",
+      "delta": " echo"
+    },
+    {
+      "type": "token_delta",
+      "delta": " b"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "复合"
+    },
+    {
+      "type": "token_delta",
+      "delta": "内"
+    },
+    {
+      "type": "token_delta",
+      "delta": "建"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命令"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "✅"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 正"
+    },
+    {
+      "type": "token_delta",
+      "delta": "常"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "|"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "rg"
+    },
+    {
+      "type": "token_delta",
+      "delta": " --"
+    },
+    {
+      "type": "token_delta",
+      "delta": "version"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " /"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "cmd"
+    },
+    {
+      "type": "token_delta",
+      "delta": " /"
+    },
+    {
+      "type": "token_delta",
+      "delta": "c"
+    },
+    {
+      "type": "token_delta",
+      "delta": " rg"
+    },
+    {
+      "type": "token_delta",
+      "delta": " --"
+    },
+    {
+      "type": "token_delta",
+      "delta": "version"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " /"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "where"
+    },
+    {
+      "type": "token_delta",
+      "delta": " rg"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "❌"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 同"
+    },
+    {
+      "type": "token_delta",
+      "delta": "样的"
+    },
+    {
+      "type": "token_delta",
+      "delta": " quota"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "错"
+    },
+    {
+      "type": "token_delta",
+      "delta": "误"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "|"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "find"
+    },
+    {
+      "type": "token_delta",
+      "delta": "str"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "外部"
+    },
+    {
+      "type": "token_delta",
+      "delta": " exe"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "❌"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 同"
+    },
+    {
+      "type": "token_delta",
+      "delta": "样的"
+    },
+    {
+      "type": "token_delta",
+      "delta": " quota"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "错"
+    },
+    {
+      "type": "token_delta",
+      "delta": "误"
+    },
+    {
+      "type": "token_delta",
+      "delta": " |\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "规律"
+    },
+    {
+      "type": "token_delta",
+      "delta": "很"
+    },
+    {
+      "type": "token_delta",
+      "delta": "明确"
+    },
+    {
+      "type": "token_delta",
+      "delta": "："
+    },
+    {
+      "type": "token_delta",
+      "delta": "凡是"
+    },
+    {
+      "type": "token_delta",
+      "delta": "需要"
+    },
+    {
+      "type": "token_delta",
+      "delta": "**"
+    },
+    {
+      "type": "token_delta",
+      "delta": "启动"
+    },
+    {
+      "type": "token_delta",
+      "delta": "外部"
+    },
+    {
+      "type": "token_delta",
+      "delta": " ."
+    },
+    {
+      "type": "token_delta",
+      "delta": "exe"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 进"
+    },
+    {
+      "type": "token_delta",
+      "delta": "程"
+    },
+    {
+      "type": "token_delta",
+      "delta": "**"
+    },
+    {
+      "type": "token_delta",
+      "delta": "的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命令"
+    },
+    {
+      "type": "token_delta",
+      "delta": "都"
+    },
+    {
+      "type": "token_delta",
+      "delta": "因"
+    },
+    {
+      "type": "token_delta",
+      "delta": "配"
+    },
+    {
+      "type": "token_delta",
+      "delta": "额"
+    },
+    {
+      "type": "token_delta",
+      "delta": "不足"
+    },
+    {
+      "type": "token_delta",
+      "delta": "失败"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "只有"
+    },
+    {
+      "type": "token_delta",
+      "delta": "不"
+    },
+    {
+      "type": "token_delta",
+      "delta": "创建"
+    },
+    {
+      "type": "token_delta",
+      "delta": "新"
+    },
+    {
+      "type": "token_delta",
+      "delta": "进程"
+    },
+    {
+      "type": "token_delta",
+      "delta": "的"
+    },
+    {
+      "type": "token_delta",
+      "delta": " shell"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 内"
+    },
+    {
+      "type": "token_delta",
+      "delta": "建"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命令"
+    },
+    {
+      "type": "token_delta",
+      "delta": "能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "跑"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "也就是说"
+    },
+    {
+      "type": "token_delta",
+      "delta": "当前"
+    },
+    {
+      "type": "token_delta",
+      "delta": " shell"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "环"
+    },
+    {
+      "type": "token_delta",
+      "delta": "境"
+    },
+    {
+      "type": "token_delta",
+      "delta": "无法"
+    },
+    {
+      "type": "token_delta",
+      "delta": " spawn"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "任何"
+    },
+    {
+      "type": "token_delta",
+      "delta": "子"
+    },
+    {
+      "type": "token_delta",
+      "delta": "进程"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "rg"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 只是"
+    },
+    {
+      "type": "token_delta",
+      "delta": "受害者"
+    },
+    {
+      "type": "token_delta",
+      "delta": "之一"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "##"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 版"
+    },
+    {
+      "type": "token_delta",
+      "delta": "本"
+    },
+    {
+      "type": "token_delta",
+      "delta": "答案"
+    },
+    {
+      "type": "token_delta",
+      "delta": "\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "虽然"
+    },
+    {
+      "type": "token_delta",
+      "delta": "直接"
+    },
+    {
+      "type": "token_delta",
+      "delta": "运行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "失败"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "但我"
+    },
+    {
+      "type": "token_delta",
+      "delta": "通过"
+    },
+    {
+      "type": "token_delta",
+      "delta": "内置"
+    },
+    {
+      "type": "token_delta",
+      "delta": "的"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "search"
+    },
+    {
+      "type": "token_delta",
+      "delta": "_files"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "工"
+    },
+    {
+      "type": "token_delta",
+      "delta": "具"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "它"
+    },
+    {
+      "type": "token_delta",
+      "delta": "正是"
+    },
+    {
+      "type": "token_delta",
+      "delta": "由"
+    },
+    {
+      "type": "token_delta",
+      "delta": "随"
+    },
+    {
+      "type": "token_delta",
+      "delta": "包"
+    },
+    {
+      "type": "token_delta",
+      "delta": " rip"
+    },
+    {
+      "type": "token_delta",
+      "delta": "grep"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "驱"
+    },
+    {
+      "type": "token_delta",
+      "delta": "动的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）"
+    },
+    {
+      "type": "token_delta",
+      "delta": "拿到了"
+    },
+    {
+      "type": "token_delta",
+      "delta": "元"
+    },
+    {
+      "type": "token_delta",
+      "delta": "数据"
+    },
+    {
+      "type": "token_delta",
+      "delta": "：\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": ">"
+    },
+    {
+      "type": "token_delta",
+      "delta": " **"
+    },
+    {
+      "type": "token_delta",
+      "delta": "ri"
+    },
+    {
+      "type": "token_delta",
+      "delta": "pg"
+    },
+    {
+      "type": "token_delta",
+      "delta": "rep"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 版"
+    },
+    {
+      "type": "token_delta",
+      "delta": "本"
+    },
+    {
+      "type": "token_delta",
+      "delta": "："
+    },
+    {
+      "type": "token_delta",
+      "delta": "14"
+    },
+    {
+      "type": "token_delta",
+      "delta": "."
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": "."
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": "**\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "这"
+    },
+    {
+      "type": "token_delta",
+      "delta": "应该"
+    },
+    {
+      "type": "token_delta",
+      "delta": "就是"
+    },
+    {
+      "type": "token_delta",
+      "delta": " PATH"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 中"
+    },
+    {
+      "type": "token_delta",
+      "delta": "那份"
+    },
+    {
+      "type": "token_delta",
+      "delta": " rg"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "版本"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "如果你"
+    },
+    {
+      "type": "token_delta",
+      "delta": "希望"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我在"
+    },
+    {
+      "type": "token_delta",
+      "delta": " shell"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 里"
+    },
+    {
+      "type": "token_delta",
+      "delta": "拿到"
+    },
+    {
+      "type": "token_delta",
+      "delta": "原生"
+    },
+    {
+      "type": "token_delta",
+      "delta": "输出"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "可能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "需要"
+    },
+    {
+      "type": "token_delta",
+      "delta": "先"
+    },
+    {
+      "type": "token_delta",
+      "delta": "释放"
+    },
+    {
+      "type": "token_delta",
+      "delta": "系统"
+    },
+    {
+      "type": "token_delta",
+      "delta": "配"
+    },
+    {
+      "type": "token_delta",
+      "delta": "额"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "例如"
+    },
+    {
+      "type": "token_delta",
+      "delta": "增大"
+    },
+    {
+      "type": "token_delta",
+      "delta": "页面"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "关闭"
+    },
+    {
+      "type": "token_delta",
+      "delta": "占用"
+    },
+    {
+      "type": "token_delta",
+      "delta": "内存"
+    },
+    {
+      "type": "token_delta",
+      "delta": "的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "进程"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）"
+    },
+    {
+      "type": "token_delta",
+      "delta": "后"
+    },
+    {
+      "type": "token_delta",
+      "delta": "重"
+    },
+    {
+      "type": "token_delta",
+      "delta": "试"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "final",
+      "text": "已完成排查，结论如下：\n\n## 执行结果\n\n**`rg --version` 未能成功在 shell 中执行**，返回：\n\n```\nexit_code: 1\nstderr: Not enough quota is available to process this command.\n```\n\n这是 Windows 的系统级错误（进程创建配额不足，通常与分页文件/内存配额耗尽有关），而不是 rg 本身的报错。\n\n## 佐证排查\n\n| 命令 | 结果 |\n|---|---|\n| `echo test`（shell 内建，不创建新进程） | ✅ 正常 |\n| `echo a && echo b`（复合内建命令） | ✅ 正常 |\n| `rg --version` / `cmd /c rg --version` / `where rg` | ❌ 同样的 quota 错误 |\n| `findstr`（外部 exe） | ❌ 同样的 quota 错误 |\n\n规律很明确：凡是需要**启动外部 .exe 进程**的命令都因配额不足失败，只有不创建新进程的 shell 内建命令能跑。也就是说当前 shell 环境无法 spawn 任何子进程，rg 只是受害者之一。\n\n## 版本答案\n\n虽然直接运行失败，但我通过内置的 `search_files` 工具（它正是由随包 ripgrep 驱动的）拿到了元数据：\n\n> **ripgrep 版本：14.1.1**\n\n这应该就是 PATH 中那份 rg 的版本。如果你希望我在 shell 里拿到原生输出，可能需要先释放系统配额（例如增大页面文件、关闭占用内存的进程）后重试。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 20853,
+    "completion_tokens": 3597,
+    "total_tokens": 24450
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 4883,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 3,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 43,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 20727,
+      "target": "",
+      "first_token_ms": 19821
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 2,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 30,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 3922,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 22,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 30,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 13341,
+      "target": "",
+      "first_token_ms": 11384
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 20,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 38,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 19951,
+      "target": "",
+      "first_token_ms": 18634
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 2,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 22,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 35,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 33,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 12666,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 20,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 38,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 10991,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 13,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 17,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 39,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 36,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 19280,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 1,
+      "target": "list_dir",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 3800,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 0,
+      "target": "list_dir",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 4244,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 0,
+      "target": "list_dir",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 3878,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 32,
+      "target": "search_files",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 4318,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 2,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 39,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 4053,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 25,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 32,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 1352,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 9,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 36,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 3931,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 12,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 36,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 4014,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 2,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 40,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 3870,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 0,
+      "target": "run_command:review",
+      "first_token_ms": null
+    },
+    {
+      "phase": "approval",
+      "elapsed_ms": 23,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 40,
+      "target": "run_command",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 24641,
+      "target": "",
+      "first_token_ms": 15204
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "approval_command"
+}

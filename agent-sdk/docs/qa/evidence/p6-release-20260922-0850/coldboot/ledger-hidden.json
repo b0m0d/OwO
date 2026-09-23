@@ -1,0 +1,63 @@
+{
+    "label":  "hidden-window",
+    "captured_at":  "2026-09-22T00:26:48.3373331Z",
+    "server_total":  16,
+    "returned":  16,
+    "web_total":  2,
+    "web_health":  0,
+    "web_auth":  0,
+    "web_events":  1,
+    "web_business":  1,
+    "web_business_routes":  [
+                                "GET /automations"
+                            ],
+    "web_route_repeats":  [
+
+                          ],
+    "shell_total":  2,
+    "shell_auth":  1,
+    "shell_health":  1,
+    "other_total":  0,
+    "probe_total":  12,
+    "sources":  [
+                    "probe",
+                    "shell",
+                    "web"
+                ],
+    "records":  [
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "shell",
+                        "started_at":  "2026-09-22T00:25:29.731Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/auth/token",
+                        "source":  "shell",
+                        "started_at":  "2026-09-22T00:25:29.735Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/automations",
+                        "source":  "web",
+                        "started_at":  "2026-09-22T00:25:44.779Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/events/stream",
+                        "source":  "web",
+                        "started_at":  "2026-09-22T00:25:44.784Z",
+                        "status":  200
+                    }
+                ],
+    "web_buckets_sum":  2,
+    "web_buckets_ok":  true
+}

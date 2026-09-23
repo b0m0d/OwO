@@ -1,0 +1,1 @@
+{"status": "ok", "ok": true, "delta_count": 38, "first_delta_latency_s": 10.66, "stream_span_s": 0.68, "final_latency_s": 11.34, "buffered_suspected": false, "text_len": 74, "final_received": true, "first_delta_before_final": true, "model": null, "error": null}

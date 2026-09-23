@@ -10,7 +10,9 @@ use crate::session::Session;
 use crate::skill::SkillRegistry;
 use crate::subagent::SubagentRunner;
 use crate::tool_effects::EffectClass;
-use crate::tools::{ToolContext, ToolRegistry};
+use crate::tools::{
+    ToolApprovalGrant, ToolCapabilityContext, ToolContext, ToolHostService, ToolRegistry,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -21,8 +23,8 @@ const MAX_TOOL_RESULT_CHARS: usize = 50_000;
 
 /// §9.1 阶段一产物：按原始 tool-call 顺序完成的权限判定（Ask 已归并为 Allow/Deny）。
 struct PreparedCall {
-    /// 归并后的放行结论。
-    approved: bool,
+    /// Policy/Approver 归并后的类型化放行凭证；拒绝调用没有执行凭证。
+    approval: Option<ToolApprovalGrant>,
     /// 权限理由（拒绝消息文案）。
     reason: String,
 }
@@ -39,6 +41,71 @@ pub struct AgentConfig {
     pub tool_concurrency: usize,
     /// §9.2：turn 级统一截止时间；None = 不限时（保持既有行为，仅记账）。
     pub turn_deadline: Option<std::time::Duration>,
+    /// 单次回复的最大输出 token（配置文件 `model.max_output_tokens`）。
+    pub max_output_tokens: Option<usize>,
+    /// 采样温度（配置文件 `model.temperature`）。
+    pub temperature: Option<f64>,
+    /// 单次模型请求超时秒数（配置文件 `model.timeout_secs`）。
+    pub request_timeout_secs: Option<usize>,
+}
+
+impl AgentConfig {
+    /// 从环境变量覆盖上下文相关预算（**配置文件 → 环境变量 → 代码默认**）。
+    ///
+    /// 为什么做成环境变量而不是塞进代码：用户明确要求"模型服务地址、模型名称、
+    /// 上下文等全都通过文件随时更改，不能写死"。桌面壳读 `config.json` 后把这些值
+    /// 注入核心进程环境，核心在这里消费——单一实现、单一来源，改文件即生效。
+    ///
+    /// 非法值（0、非数字）**忽略并保留默认**，不 panic：用户手写配置文件打错字
+    /// 不该让核心起不来，但也不能静默采纳一个会让压缩逻辑失效的 0。
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Some(value) = env_usize("OWO_MODEL_CONTEXT_WINDOW") {
+            self.token_budget = value;
+        }
+        if let Some(value) = env_usize("OWO_MODEL_MAX_OUTPUT_TOKENS") {
+            self.max_output_tokens = Some(value);
+        }
+        if let Some(value) = env_usize("OWO_AGENT_KEEP_RECENT") {
+            self.keep_recent = value;
+        }
+        if let Some(value) = env_bool("OWO_AGENT_COMPACTION") {
+            self.compaction_enabled = value;
+        }
+        if let Some(value) = env_f64("OWO_MODEL_TEMPERATURE") {
+            self.temperature = Some(value);
+        }
+        if let Some(value) = env_usize("OWO_MODEL_TIMEOUT_SECS") {
+            self.request_timeout_secs = Some(value);
+        }
+        self
+    }
+}
+
+/// 读一个正整数环境变量；空串/非法/0 一律当作"未设置"。
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn env_f64(name: &str) -> Option<f64> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    std::env::var(name).ok().and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    })
 }
 
 impl Default for AgentConfig {
@@ -52,6 +119,9 @@ impl Default for AgentConfig {
             compaction_enabled: true,
             tool_concurrency: 4,
             turn_deadline: None,
+            max_output_tokens: None,
+            temperature: None,
+            request_timeout_secs: None,
         }
     }
 }
@@ -102,10 +172,18 @@ pub struct TurnOutcome {
 }
 
 /// Agent 核心：执行循环 + 工具注册表 + 权限策略 + 审计。
+///
+/// 原始注册表句柄不属于下游公开面：
+///
+/// ```compile_fail
+/// let _ = owo_agent_core::Agent::registry;
+/// ```
 pub struct Agent {
     provider: Arc<dyn ModelProvider>,
     /// 工具注册表（RwLock：MCP 服务器热连接/热卸载时无需重建 Agent）。
     registry: Arc<RwLock<ToolRegistry>>,
+    /// 受信工具执行门面：能力签发、执行和 receipt 统一从此处经过。
+    tool_host: ToolHostService,
     /// 插件热卸载：已禁用工具前缀（模型不可见、直接调用被拒）。
     disabled_tool_prefixes: Arc<RwLock<HashSet<String>>>,
     /// MCP 客户端进程生命周期注册表（进程级热卸载/退出清理）。
@@ -130,9 +208,13 @@ impl Agent {
         policy: Policy,
         config: AgentConfig,
     ) -> Self {
+        let registry = Arc::new(RwLock::new(registry));
+        let audit = Arc::new(Mutex::new(AuditLog::default()));
+        let tool_host = ToolHostService::new(Arc::clone(&registry), Arc::clone(&audit));
         Self {
             provider,
-            registry: Arc::new(RwLock::new(registry)),
+            registry,
+            tool_host,
             disabled_tool_prefixes: Arc::new(RwLock::new(HashSet::new())),
             mcp_clients: Arc::new(crate::mcp::McpRegistry::new()),
             mcp_health: Arc::new(crate::mcp_health::McpHealthTracker::new(
@@ -140,7 +222,7 @@ impl Agent {
             )),
             reviewer: None,
             policy,
-            audit: Arc::new(Mutex::new(AuditLog::default())),
+            audit,
             config,
             skills: SkillRegistry::default(),
             elements: Arc::new(Mutex::new(crate::ElementRegistry::new())),
@@ -374,10 +456,6 @@ impl Agent {
         self.policy.profile()
     }
 
-    pub fn registry(&self) -> Arc<RwLock<ToolRegistry>> {
-        Arc::clone(&self.registry)
-    }
-
     /// 执行一轮任务。审批经 `approver` 独立决策；`abort` 可随时中止。
     pub async fn run_turn(
         &self,
@@ -389,6 +467,7 @@ impl Agent {
     ) -> Result<TurnOutcome, AgentError> {
         let started_at = Utc::now().to_rfc3339();
         let started = std::time::Instant::now();
+        let turn_id = uuid::Uuid::new_v4().to_string();
         let usage_before = self.provider.usage_snapshot();
         // §9.2：turn 入口建立统一预算（None = 不限时，仅记账不强制）；
         // §9.3：阶段耗时瀑布按发生顺序累积。
@@ -624,7 +703,8 @@ impl Agent {
                             }
                             other => other,
                         };
-                        let approved = decision == Decision::Allow;
+                        let approval = ToolApprovalGrant::from_decision(&request, decision).ok();
+                        let approved = approval.is_some();
                         self.audit
                             .lock()
                             .map_err(|_| AgentError::Session("审计锁中毒".into()))?
@@ -636,7 +716,7 @@ impl Agent {
                                 request.reason.clone(),
                             );
                         prepared.push(PreparedCall {
-                            approved,
+                            approval,
                             reason: request.reason.clone(),
                         });
                     }
@@ -654,7 +734,7 @@ impl Agent {
                             commit_turn_messages(session, &messages);
                             return Err(AgentError::Aborted);
                         }
-                        let eligible_here = prepared[index].approved
+                        let eligible_here = prepared[index].approval.is_some()
                             && !self.tool_disabled(&calls[index].name)
                             && self.call_is_concurrent_eligible(&calls[index]);
                         if eligible_here {
@@ -664,15 +744,24 @@ impl Agent {
                             let mut end = start + 1;
                             while end < calls.len()
                                 && end - start < self.config.tool_concurrency.max(1)
-                                && prepared[end].approved
+                                && prepared[end].approval.is_some()
                                 && !self.tool_disabled(&calls[end].name)
                                 && self.call_is_concurrent_eligible(&calls[end])
                             {
                                 end += 1;
                             }
                             let mut futures = Vec::with_capacity(end - start);
-                            for call in &calls[start..end] {
+                            for (offset, call) in calls[start..end].iter().enumerate() {
+                                let approval = prepared[start + offset]
+                                    .approval
+                                    .clone()
+                                    .expect("eligible tool call must have approval grant");
                                 let workspace = session.workspace.clone();
+                                let capability_context = ToolCapabilityContext::for_workspace(
+                                    &workspace,
+                                    session.id.clone(),
+                                    turn_id.clone(),
+                                );
                                 // 并发组内全部为宿主验证只读工具（经审计不改变会话
                                 // 状态）；Session 按值克隆以满足 ToolContext 的 &mut
                                 // 签名，克隆上的任何变更被有意丢弃（读取语义不变）。
@@ -685,15 +774,11 @@ impl Agent {
                                     max_turns: self.config.max_turns,
                                     model: session.model_override.clone().unwrap_or_default(),
                                 };
-                                let tool = self
-                                    .registry
-                                    .read()
-                                    .map_err(|_| AgentError::Session("工具注册表锁中毒".into()))?
-                                    .get(&call.name);
                                 let sink = Arc::clone(&group_events);
                                 let call_id = call.id.clone();
                                 let tool_name = call.name.clone();
                                 let arguments = call.arguments.clone();
+                                let tool_host = self.tool_host.clone();
                                 if let Ok(mut buffer) = sink.lock() {
                                     buffer.push(TurnEvent::ToolStart {
                                         id: call_id.clone(),
@@ -710,9 +795,16 @@ impl Agent {
                                         skills: &self.skills,
                                         elements: &self.elements,
                                     };
-                                    let outcome = match tool {
-                                        Some(tool) => tool.run(&mut ctx, arguments).await,
-                                        None => Err(format!("未知工具：{tool_name}")),
+                                    let outcome = match tool_host.issue(
+                                        &tool_name,
+                                        arguments,
+                                        approval,
+                                        capability_context,
+                                    ) {
+                                        Ok(capability) => {
+                                            tool_host.execute(capability, &mut ctx).await
+                                        }
+                                        Err(error) => Err(error),
                                     };
                                     if let Ok(mut buffer) = sink.lock() {
                                         buffer.push(TurnEvent::ToolResult {
@@ -789,8 +881,13 @@ impl Agent {
                             let call = &calls[index];
                             let result = if self.tool_disabled(&call.name) {
                                 Err(format!("工具已被禁用（插件热卸载）：{}", call.name))
-                            } else if prepared[index].approved {
+                            } else if prepared[index].approval.is_some() {
                                 let workspace = session.workspace.clone();
+                                let capability_context = ToolCapabilityContext::for_workspace(
+                                    &workspace,
+                                    session.id.clone(),
+                                    turn_id.clone(),
+                                );
                                 emit(
                                     &mut events,
                                     on_event,
@@ -816,15 +913,18 @@ impl Agent {
                                     skills: &self.skills,
                                     elements: &self.elements,
                                 };
-                                let tool = self
-                                    .registry
-                                    .read()
-                                    .map_err(|_| AgentError::Session("工具注册表锁中毒".into()))?
-                                    .get(&call.name);
                                 let tool_started = std::time::Instant::now();
-                                let outcome = match tool {
-                                    Some(tool) => {
-                                        let run = tool.run(&mut ctx, call.arguments.clone());
+                                let outcome = match self.tool_host.issue(
+                                    &call.name,
+                                    call.arguments.clone(),
+                                    prepared[index]
+                                        .approval
+                                        .clone()
+                                        .expect("approved tool call must have approval grant"),
+                                    capability_context,
+                                ) {
+                                    Ok(capability) => {
+                                        let run = self.tool_host.execute(capability, &mut ctx);
                                         // §9.2：激活预算时以阶段剩余包裹工具执行，
                                         // 超时转工具级错误（回合继续，模型可见）。
                                         if self.config.turn_deadline.is_some() {
@@ -849,7 +949,7 @@ impl Agent {
                                             run.await
                                         }
                                     }
-                                    None => Err(format!("未知工具：{}", call.name)),
+                                    Err(error) => Err(error),
                                 };
                                 let tool_elapsed = tool_started.elapsed();
                                 budget.record(Phase::Tool, tool_elapsed);

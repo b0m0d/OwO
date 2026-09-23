@@ -104,6 +104,20 @@ try {
 $script:ciStepFilter = $Step.ToLowerInvariant()
 $root = Get-CiRepoRoot
 
+# 0.1) 根目录 manifest 防回潮（指南 F-15）：agent-sdk 是唯一 Cargo workspace，
+#      仓库根不允许出现会劫持 Cargo 查找的临时 Cargo.toml。
+Invoke-CiStep -Name "根目录 Cargo manifest 清理检查（F-15）" -Id "root-manifest" -Cwd $root -LogDir $LogDir -Block {
+    $repoParent = Split-Path -Parent $root
+    $rootManifest = Join-Path $repoParent "Cargo.toml"
+    if (Test-Path -LiteralPath $rootManifest) {
+        Write-Host "    [root-manifest] 禁止的仓库根 Cargo.toml：$rootManifest" -ForegroundColor Red
+        $global:LASTEXITCODE = 1
+    } else {
+        Write-Host "    [root-manifest] 通过：仓库根无 Cargo.toml，workspace=$root"
+        $global:LASTEXITCODE = 0
+    }
+}
+
 # 0) UTF-8 扫描（AGENTS.md 硬性要求：源文件 UTF-8；.ps1 需带 UTF-8 BOM）
 if (-not $SkipUtf8) {
     Invoke-CiStep -Name "UTF-8 校验（rs/ts/js/html/json/css/md/ps1）" -Id "utf8" -Cwd $root -LogDir $LogDir -Block {
@@ -147,6 +161,9 @@ if (-not $SkipPermissionCtor) {
         # `-> PermissionRequest {`（返回类型）、`SseEvent::PermissionRequest {`（模式匹配）。
         $allowed = @(
             (Join-Path $root "crates\owo-agent-core\src\permissions.rs"),
+            # M12：权限策略已下沉到独立 policy crate；该文件保留 PermissionRequest
+            # 的唯一业务构造点，不能被旧 core-only 白名单误报。
+            (Join-Path $root "crates\owo-agent-policy\src\permissions.rs"),
             (Join-Path $root "crates\owo-agent-protocol\src\lib.rs")
         )
         $violations = @()

@@ -101,28 +101,25 @@ if (Test-Path (Join-Path $root "models\ocr")) {
     Copy-Item -LiteralPath (Join-Path $root "models") -Destination $dist -Recurse
 }
 
-# ONNX Runtime 动态库：ort 按 load-dynamic 加载 onnxruntime.dll（exe 同级优先）。
+# ONNX Runtime 运行时库：**已经不需要了，别再加回来**。
+#
+# 这段曾经按"ort 走 load-dynamic、需要 exe 同级 onnxruntime.dll"下载 22MB 的
+# ONNX Runtime；但 `crates/owo-agent-perception` 现在的 ort-sys 构建脚本自报
+# `cargo:rustc-link-lib=static=onnxruntime`（sherpa-onnx static-MT 资产），
+# 两个 exe 的导入表里都没有 onnxruntime.dll——随包不需要它。
+# 保留旧逻辑的后果是真实的：网络受限时这一步直接抛错，整条便携打包失败
+# （2026-09-22 实测 agent-sdk\dist\ 因此一直缺失，用户以为"打包坏了"）。
+# 现在只做一次事实核对：若产物真的动态依赖 onnxruntime.dll，就在日志里明确说出来，
+# 而不是去下载一个可能并不需要的文件。
 $onnxRuntimeDll = Join-Path $dist "onnxruntime.dll"
-if (-not (Test-Path $onnxRuntimeDll)) {
-    $builtDll = Join-Path $targetDir "onnxruntime.dll"
-    if (Test-Path $builtDll) {
-        Copy-Item -LiteralPath $builtDll -Destination $onnxRuntimeDll
-    } else {
-        Write-Host "[package] 下载 ONNX Runtime 1.28.0 x64（onnxruntime.dll，约 22MB）..."
-        $ortZip = Join-Path $env:TEMP "onnxruntime-win-x64-1.28.0.zip"
-        Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-1.28.0.zip" -OutFile $ortZip -UseBasicParsing
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $ortArchive = [System.IO.Compression.ZipFile]::OpenRead($ortZip)
-        try {
-            $entry = $ortArchive.GetEntry("onnxruntime-win-x64-1.28.0/lib/onnxruntime.dll")
-            if ($null -eq $entry) { throw "onnxruntime 包内缺少 lib\onnxruntime.dll" }
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $onnxRuntimeDll, $true)
-        } finally {
-            $ortArchive.Dispose()
-        }
-        Remove-Item $ortZip -Force
+foreach ($binary in @("owo-agent.exe", "owo-agent-desktop.exe")) {
+    $binaryPath = Join-Path $dist $binary
+    if (-not (Test-Path $binaryPath)) { continue }
+    $bytes = [System.IO.File]::ReadAllBytes($binaryPath)
+    $text = [System.Text.Encoding]::ASCII.GetString($bytes, 0, [Math]::Min($bytes.Length, 80000000))
+    if ($text.Contains("onnxruntime.dll")) {
+        Write-Host "[package] ⚠ $binary 动态依赖 onnxruntime.dll，但随包未附带该文件——请确认 ORT 链接方式（期望 static）" -ForegroundColor Yellow
     }
-    Write-Host "[package] onnxruntime.dll 已就位（$onnxRuntimeDll）"
 }
 
 @"
@@ -190,8 +187,10 @@ if (-not $SkipSbom) {
 $manifestScript = Join-Path $PSScriptRoot "release-artifact-manifest.ps1"
 if (Test-Path $manifestScript) {
     Write-Host "[package] 生成 release 产物清单（dist\\OwO-Agent，SHA-256 + git 身份）..."
+    # 只列真正随包的二进制：onnxruntime.dll 已不再随包（见上），把它留在清单里
+    # 会让清单脚本去核一个不存在的文件，整条打包在最后一步失败。
     & $manifestScript -ArtifactsDir "dist\OwO-Agent" `
-        -Names @("owo-agent.exe", "owo-agent-desktop.exe", "onnxruntime.dll") `
+        -Names @("owo-agent.exe", "owo-agent-desktop.exe") `
         -Out (Join-Path $root "dist\release-manifest.json")
 } else {
     Write-Host "[package] 跳过产物清单：release-artifact-manifest.ps1 不存在"

@@ -38,6 +38,7 @@ mod cloud_api;
 mod computer_api;
 mod desktop_api;
 mod desktop_world_api;
+pub mod discovery;
 pub mod error_codes;
 mod eval_api;
 mod eval_gate;
@@ -132,6 +133,8 @@ pub struct AppState {
     /// §5.4 授权记忆（server 全局一份；Agent.Policy 注入同一引用）。
     pub grants: Arc<owo_agent_core::grant_store::GrantStore>,
     pub aborts: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// Active turn identity, separate from the abort token so replay can distinguish sessions.
+    pub active_turn_ids: Arc<Mutex<HashMap<String, String>>>,
     /// 每个会话一个运行锁，避免并发回合覆盖消息、快照和审计状态。
     pub turn_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     pub traces_dir: PathBuf,
@@ -253,6 +256,7 @@ impl AppState {
             pending_approval_sessions: Arc::new(Mutex::new(HashMap::new())),
             grants: Arc::clone(&grants),
             aborts: Arc::new(Mutex::new(HashMap::new())),
+            active_turn_ids: Arc::new(Mutex::new(HashMap::new())),
             turn_locks: Arc::new(Mutex::new(HashMap::new())),
             traces_dir,
             perception: Arc::new(Mutex::new(SituationStore::new())),
@@ -371,6 +375,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session", post(session_api::create_session))
         .route("/session/{id}", get(session_api::get_session))
         .route("/session/{id}/turn", post(turn_api::turn))
+        .route("/session/{id}/turn/events", get(turn_api::turn_events))
         .route(
             "/session/{id}/attachments",
             get(session_api::attachments_list),
@@ -382,6 +387,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/session/{id}/permission/{request_id}",
             post(turn_api::respond_permission),
+        )
+        // 全权限模式（运行时开关）：写开关文件 + 读当前状态。界面在输入框下面切换，
+        // 不需要重启核心（见 turn_api::auto_approve_enabled 的注释）。
+        .route(
+            "/approval/mode",
+            get(turn_api::approval_mode_get).post(turn_api::approval_mode_set),
         )
         .route("/session/{id}/abort", post(session_api::abort_turn))
         .route("/session/{id}/diff", get(session_api::diff))
@@ -791,6 +802,7 @@ fn cors_layer() -> CorsLayer {
             axum::http::HeaderName::from_static(request_ledger_api::CLIENT_HEADER),
             axum::http::HeaderName::from_static(logging::TRACE_HEADER),
         ])
+        .expose_headers([axum::http::HeaderName::from_static("x-owo-turn-id")])
         .max_age(std::time::Duration::from_secs(600))
 }
 
@@ -852,13 +864,18 @@ async fn openapi_spec() -> Json<Value> {
                 "operationId": "agentTurn",
                 "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
                 "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TurnRequest" } } } },
-                "responses": { "200": { "description": "SSE event stream" } }
+                "responses": { "200": { "description": "SSE event stream", "headers": { "x-owo-turn-id": { "description": "Stable turn identifier used with the durable replay endpoint", "schema": { "type": "string" } } } } }
+            } },
+            "/session/{id}/turn/events": { "get": {
+                "operationId": "turnEventsAfter",
+                "parameters": [path_param("id"), { "name": "turn_id", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "after_seq", "in": "query", "required": false, "schema": { "type": "integer", "format": "int64", "minimum": 0 } }, { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 1000 } }],
+                "responses": { "200": { "description": "Persisted turn events after the session-scoped sequence cursor", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TurnEventReplayPage" } } } }, "404": { "description": "session not found" } }
             } },
             "/session/{id}/attachments": { "get": { "operationId": "attachmentsList", "parameters": [path_param("id")], "responses": { "200": { "description": "attachment list" } } }, "post": { "operationId": "attachmentUpload", "parameters": [path_param("id")], "responses": { "200": { "description": "uploaded attachment" } } } },
             "/session/{id}/abort": { "post": { "operationId": "abortTurn", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
             "/session/{id}/permission/{request_id}": { "post": { "operationId": "respondPermission", "parameters": [path_param("id"), path_param("request_id")], "responses": { "200": { "description": "ok" } } } },
             "/session/{id}/diff": { "get": { "operationId": "sessionDiff", "parameters": [path_param("id")], "responses": { "200": { "description": "diff list" } } } },
-            "/session/{id}/revert": { "post": { "operationId": "sessionRevert", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
+            "/session/{id}/revert": { "post": { "operationId": "sessionRevert", "parameters": [path_param("id")], "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "properties": { "receipt_id": { "type": "string", "description": "可选执行收据 ID；省略时使用最近一张未撤销收据" } } } } } }, "responses": { "200": { "description": "ok" }, "409": { "description": "撤销冲突：目标文件内容不再匹配 Agent 最近一次写入，整批零覆盖；错误码 storage/revert_conflict/not_retryable" } } } },
             "/session/{id}/fork": { "post": { "operationId": "sessionFork", "parameters": [path_param("id")], "responses": { "200": { "description": "forked session" } } } },
             "/session/{id}/rewind": { "post": { "operationId": "sessionRewind", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
             "/session/{id}/redo": { "post": { "operationId": "sessionRedo", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
@@ -1305,6 +1322,27 @@ async fn openapi_spec() -> Json<Value> {
                         "attachments": { "type": "array", "items": { "type": "string" } }
                     },
                     "required": ["prompt"]
+                },
+                "TurnEventRecord": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "turn_id": { "type": "string" },
+                        "seq": { "type": "integer", "format": "int64", "minimum": 1 },
+                        "created_at": { "type": "string" },
+                        "payload": { "type": "object", "description": "Versioned SseEvent payload" }
+                    },
+                    "required": ["session_id", "turn_id", "seq", "created_at", "payload"]
+                },
+                "TurnEventReplayPage": {
+                    "type": "object",
+                    "properties": {
+                        "events": { "type": "array", "items": { "$ref": "#/components/schemas/TurnEventRecord" } },
+                        "active": { "type": "boolean" },
+                        "state": { "type": "string", "enum": ["active", "completed", "failed", "interrupted"] },
+                        "next_after_seq": { "type": "integer", "format": "int64", "minimum": 0 }
+                    },
+                    "required": ["events", "active", "state", "next_after_seq"]
                 },
                 "EvalRunRequest": {
                     "type": "object",
@@ -2071,6 +2109,7 @@ mod tests {
             path.to_string_lossy().replace('\\', "/"),
             owo_agent_core::session::SnapshotEntry {
                 original_b64: Some(base64::engine::general_purpose::STANDARD.encode("before")),
+                expected_after_sha256: Some(owo_agent_core::CasStore::hash_of(b"after")),
             },
         );
         state.store.save(&session).unwrap();

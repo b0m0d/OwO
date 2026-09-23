@@ -1,0 +1,18 @@
+{
+    "id":  "core-exit",
+    "kind":  "exit",
+    "note":  "§3.4：sidecar 早退 → core/exited（协议行之前退出即判早退，不再烧成超时）",
+    "expected_codes":  [
+                           "core/exited"
+                       ],
+    "required_actions":  [
+                             "重启后台",
+                             "查看诊断"
+                         ],
+    "final_budget_sec":  15,
+    "needs_workspace":  true,
+    "needs_key":  true,
+    "acceptance_mode":  "OWO_DESKTOP_ACCEPTANCE=1 + OWO_SIDECAR_ROOT=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-083006\\core-exit",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-083006\\core-exit\\owo-agent.exe",
+    "sidecar_sha256":  "5366827BE10B43FA736BB80DB566B91AED7BE39466C3827731DDC699B8548C81"
+}

@@ -125,6 +125,18 @@ pub struct UsageSettings {
     pub output_price_per_mtok: f64,
 }
 
+/// 可选内置工具能力。默认关闭；改动在下一次 Daemon 启动时装配到 Agent 工具表。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AgentToolCapabilities {
+    /// 屏幕/窗口观察、OCR 与视觉定位。
+    pub desktop_observation: bool,
+    /// 点击、键盘输入、快捷键、窗口激活/启动等桌面副作用。
+    pub desktop_control: bool,
+    /// 浏览器导航、搜索、交互与下载。
+    pub browser: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -147,6 +159,9 @@ pub struct Settings {
     /// 额外危险命令片段（deny 优先）。
     #[serde(default)]
     pub deny_commands: Vec<String>,
+    /// 按需暴露的可选 Agent 工具能力；缺字段的旧 settings.json 默认全部关闭。
+    #[serde(default)]
+    pub tool_capabilities: AgentToolCapabilities,
     /// 启动时自动连接的 MCP 服务器。
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -341,6 +356,7 @@ mod tests {
         assert!(!settings.skills.require_signature);
         assert!(settings.whitelist.is_empty());
         assert!(settings.egress.cloud_enabled);
+        assert_eq!(settings.tool_capabilities, AgentToolCapabilities::default());
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
@@ -375,6 +391,11 @@ mod tests {
                 input_price_per_mtok: 0.5,
                 output_price_per_mtok: 2.0,
             },
+            tool_capabilities: AgentToolCapabilities {
+                desktop_observation: true,
+                desktop_control: false,
+                browser: true,
+            },
             ..Settings::default()
         };
         settings.save(&workspace).unwrap();
@@ -390,6 +411,14 @@ mod tests {
         assert_eq!(loaded.usage.token_budget, Some(100_000));
         assert_eq!(loaded.usage.cost_budget_usd, Some(5.0));
         assert!((loaded.usage.input_price_per_mtok - 0.5).abs() < 1e-9);
+        assert_eq!(
+            loaded.tool_capabilities,
+            AgentToolCapabilities {
+                desktop_observation: true,
+                desktop_control: false,
+                browser: true,
+            }
+        );
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
