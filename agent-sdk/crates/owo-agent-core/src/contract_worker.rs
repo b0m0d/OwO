@@ -227,6 +227,7 @@ pub async fn enforce_worker_output_contract(
         content: Some(contract_repair_prompt(is_critic, &first_violation, text)),
         tool_calls: None,
         tool_call_id: None,
+        images: Vec::new(),
     }];
     let repaired = match provider.complete(&messages, &[]).await {
         Ok(ModelOutput::Text(text)) => strip_code_fences(&text),

@@ -216,6 +216,23 @@ impl OpenAiCompatibleProvider {
                     "role": message.role,
                     "content": message.content,
                 });
+                // 多模态（取优合并自远端 engine）：user 消息带图片时，content 转成
+                // parts 数组（OpenAI 兼容格式：text + image_url）。无图片时保持纯文本。
+                if !message.images.is_empty() {
+                    let mut parts: Vec<Value> = Vec::new();
+                    if let Some(text) = &message.content {
+                        if !text.is_empty() {
+                            parts.push(json!({ "type": "text", "text": text }));
+                        }
+                    }
+                    for image in &message.images {
+                        parts.push(json!({
+                            "type": "image_url",
+                            "image_url": { "url": image.url },
+                        }));
+                    }
+                    wire["content"] = Value::Array(parts);
+                }
                 if let Some(tool_call_id) = &message.tool_call_id {
                     wire["tool_call_id"] = Value::String(tool_call_id.clone());
                 }

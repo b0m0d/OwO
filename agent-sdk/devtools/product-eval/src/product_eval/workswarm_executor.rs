@@ -1069,6 +1069,7 @@ impl WorkSwarmExecutor {
             content: Some(prompt),
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }];
         let output = match self.provider.complete(&messages, &[]).await {
             Ok(output) => output,

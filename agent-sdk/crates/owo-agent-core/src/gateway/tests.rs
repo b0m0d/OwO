@@ -610,3 +610,28 @@ async fn resilient_still_retries_before_any_delta() {
         "未产生增量前应重试一次"
     );
 }
+
+/// 多模态（取优合并自远端 engine）：`user_with_images` 构造 + serde 往返 +
+/// 老会话记录（缺 images 字段）向前兼容。
+#[test]
+fn user_with_images_roundtrip_and_legacy_compat() {
+    use crate::gateway::{ChatMessage, MessageImage};
+    let message = ChatMessage::user_with_images(
+        "看看这张图".to_string(),
+        vec![MessageImage::from_url("data:image/png;base64,AAAA")],
+    );
+    assert_eq!(message.images.len(), 1);
+    let value = serde_json::to_value(&message).unwrap();
+    assert_eq!(value["images"][0]["url"], "data:image/png;base64,AAAA");
+    let back: ChatMessage = serde_json::from_value(value).unwrap();
+    assert_eq!(back.images.len(), 1);
+
+    // 旧记录没有 images 字段 → 缺省为空（向前兼容）。
+    let legacy: ChatMessage =
+        serde_json::from_value(serde_json::json!({ "role": "user", "content": "hi" })).unwrap();
+    assert!(legacy.images.is_empty());
+    // 无图片的消息序列化时不带 images 字段（不污染旧 wire 形状）。
+    let plain = ChatMessage::user("hi".to_string());
+    let plain_value = serde_json::to_value(&plain).unwrap();
+    assert!(plain_value.get("images").is_none(), "{plain_value}");
+}

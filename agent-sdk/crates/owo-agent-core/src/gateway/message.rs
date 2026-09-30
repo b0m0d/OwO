@@ -9,6 +9,18 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
+/// 图片输入单元（多模态，取优合并自远端 engine）：URL（http/https）或 base64 data URL。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageImage {
+    pub url: String,
+}
+
+impl MessageImage {
+    pub fn from_url(url: impl Into<String>) -> Self {
+        Self { url: url.into() }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -18,6 +30,11 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 图片输入（多模态）：content 保持纯文本，provider 层在 images 非空且角色为
+    /// user 时把 wire 内容转成 parts 数组（OpenAI: image_url）。
+    /// 附加可选字段：老会话记录缺省视为空，向前兼容。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<MessageImage>,
 }
 
 impl ChatMessage {
@@ -27,6 +44,7 @@ impl ChatMessage {
             content: Some(content),
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -36,6 +54,17 @@ impl ChatMessage {
             content: Some(content),
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
+        }
+    }
+    /// 带图片的用户消息（多模态：截图/贴图进主对话上下文）。
+    pub fn user_with_images(content: String, images: Vec<MessageImage>) -> Self {
+        Self {
+            role: "user".into(),
+            content: Some(content),
+            tool_calls: None,
+            tool_call_id: None,
+            images,
         }
     }
 
@@ -45,6 +74,7 @@ impl ChatMessage {
             content: Some(content),
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -54,6 +84,7 @@ impl ChatMessage {
             content: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -63,6 +94,7 @@ impl ChatMessage {
             content: Some(content),
             tool_calls: None,
             tool_call_id: Some(tool_call_id),
+            images: Vec::new(),
         }
     }
 }
