@@ -51,6 +51,9 @@ pub(crate) fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {
             tool: tool.clone(),
             ok: *ok,
             error: error.clone(),
+            // preview 留给步骤 chip 展示结果正文；core 的 ToolResult 事件目前只带
+            // 错误摘要（结果正文在会话记录里），先置 None（字段已按远端协议就位）。
+            preview: None,
         }),
         owo_agent_core::TurnEvent::Final { text } => Some(SseEvent::Final { text: text.clone() }),
     }
@@ -65,6 +68,8 @@ pub(crate) fn to_event(seq: Option<u64>, sse: SseEvent) -> Result<Event, Infalli
         SseEvent::Final { .. } => "final",
         SseEvent::TokenDelta { .. } => "token_delta",
         SseEvent::Compaction { .. } => "compaction",
+        SseEvent::PermissionResolved { .. } => "permission_resolved",
+        SseEvent::TurnFailed { .. } => "turn_failed",
     };
     // R10：SSE 事件统一携带协议版本 v（见 protocol::SSE_PROTOCOL_VERSION）。
     let mut payload = serde_json::to_value(&sse).unwrap_or_else(|_| json!({}));
@@ -91,6 +96,9 @@ pub(crate) struct TurnEventsQuery {
 }
 
 pub(crate) fn is_turn_failed_event(event: &SseEvent) -> bool {
-    matches!(event, SseEvent::Progress { message }
-        if message.starts_with("turn failed:") || message.starts_with("session save failed:"))
+    // 取优合并：远端 engine 的显式 TurnFailed 终态优先；旧的 Progress 前缀
+    // 仍识别（历史持久化事件回放兼容）。
+    matches!(event, SseEvent::TurnFailed { .. })
+        || matches!(event, SseEvent::Progress { message }
+            if message.starts_with("turn failed:") || message.starts_with("session save failed:"))
 }

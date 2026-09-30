@@ -770,6 +770,11 @@ pub enum SseEvent {
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// 结果预览（截断）：前端步骤 chip 展开时展示"这一步产出了什么"。
+        /// 附加可选字段（非破坏性变更，SSE_PROTOCOL_VERSION 不变）；
+        /// 老客户端忽略即可，完整结果仍以会话记录为准。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
     },
     PermissionRequest {
         request_id: String,
@@ -797,6 +802,21 @@ pub enum SseEvent {
     },
     Compaction {
         summary: String,
+    },
+    /// 审批已解决（与提问的 `UserAnswered` 对称）：前端关闭审批卡行动区并显示结果。
+    /// 此前只有 `PermissionRequest`，300s 超时/回合中止后卡片仍留在界面上可点。
+    PermissionResolved {
+        request_id: String,
+        /// 来源：`user`=用户点了允许/拒绝；`timeout`=300s 未响应；`aborted`=回合中止。
+        #[serde(default)]
+        source: String,
+        /// 最终是否放行（超时/中止一律按拒绝）。
+        #[serde(default)]
+        allowed: bool,
+    },
+    /// 回合失败终态（异常/中断）：必须显式下发，避免前端停留在"执行中"。
+    TurnFailed {
+        message: String,
     },
 }
 

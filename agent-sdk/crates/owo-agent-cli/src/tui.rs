@@ -922,6 +922,11 @@ impl TuiApp {
                 self.push_line(format!("  ✦（上下文已压缩：{summary}）"), yellow());
             }
             SseEvent::PermissionRequest { .. } => {}
+            SseEvent::PermissionResolved { .. } => {}
+            // 回合失败终态（取优合并自远端 engine）。
+            SseEvent::TurnFailed { message } => {
+                self.push_line(format!("  ✘ 回合失败：{message}"), red());
+            }
         }
     }
 }

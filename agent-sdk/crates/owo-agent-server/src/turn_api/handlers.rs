@@ -292,8 +292,10 @@ pub(crate) async fn turn(
                     &producer_turn_id,
                     &producer_queue,
                     &producer_receiver,
-                    SseEvent::Progress {
-                        message: format!("turn failed: {error_text}"),
+                    // 取优合并（远端 engine）：显式 TurnFailed 终态，前端不再停留在
+                    // 「执行中」；`is_turn_failed_event` 同时识别旧的 Progress 前缀。
+                    SseEvent::TurnFailed {
+                        message: error_text.to_string(),
                     },
                 );
             }

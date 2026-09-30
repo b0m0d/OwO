@@ -271,6 +271,7 @@ impl StreamPrinter {
                 tool,
                 ok,
                 error,
+                preview: _,
             } => {
                 self.clear_status();
                 let suffix = self.elapsed_suffix(id);
@@ -304,6 +305,12 @@ impl StreamPrinter {
                     risk_note: risk_note.as_deref(),
                     explain: explain.as_ref(),
                 });
+            }
+            SseEvent::PermissionResolved { .. } => {}
+            // 回合失败终态（取优合并自远端 engine）：明确打印失败，不留在「执行中」。
+            SseEvent::TurnFailed { message } => {
+                self.clear_status();
+                println!("  {} 回合失败：{message}", "✘".red());
             }
             SseEvent::Compaction { summary } => {
                 self.clear_status();

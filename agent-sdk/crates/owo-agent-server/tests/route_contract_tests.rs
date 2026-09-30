@@ -1207,7 +1207,7 @@ async fn provider_disconnect_after_delta_is_persisted_as_failed_and_replayable()
         "the already-produced text must be preserved: {sse}"
     );
     assert!(
-        sse.contains("turn failed:"),
+        sse.contains("event: turn_failed"),
         "provider failure must be surfaced before stream close: {sse}"
     );
 
@@ -1240,6 +1240,7 @@ async fn provider_disconnect_after_delta_is_persisted_as_failed_and_replayable()
             && event["payload"]["message"]
                 .as_str()
                 .is_some_and(|message| message.starts_with("turn failed:"))
+            || event["payload"]["type"] == "turn_failed"
     }));
 }
 
@@ -1384,6 +1385,7 @@ async fn slow_http_consumer_and_provider_disconnect_preserve_failed_turn_replay(
             && event["payload"]["message"]
                 .as_str()
                 .is_some_and(|message| message.starts_with("turn failed:"))
+            || event["payload"]["type"] == "turn_failed"
     }));
     server.abort();
 }
