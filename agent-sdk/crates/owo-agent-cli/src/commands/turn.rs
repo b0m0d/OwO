@@ -7,8 +7,9 @@
 
 use crate::support::*;
 use crate::ui_output::{
-    parse_approval_response, print_sse_event_human, render_error_jsonl, render_event_jsonl,
-    render_final_result_jsonl, render_final_result_plain, OutputMode, PermissionsProfile,
+    parse_approval_response, print_permission_card, print_sse_event_human, render_error_jsonl,
+    render_event_jsonl, render_final_result_jsonl, render_final_result_plain, OutputMode,
+    PermissionCard, PermissionsProfile,
 };
 use clap::Args;
 use colored::Colorize;
@@ -68,6 +69,7 @@ pub(crate) async fn run_turn(
     let mut final_text: Option<String> = None;
     let mut streamed = false;
     let mut stream_error: Option<String> = None;
+    let mut markdown = crate::markdown::MarkdownStream::new();
 
     while let Some(event) = stream.next_event().await {
         let event = match event {
@@ -80,25 +82,31 @@ pub(crate) async fn run_turn(
         match &event {
             SseEvent::TokenDelta { delta } => {
                 if matches!(output, OutputMode::Human) {
-                    use std::io::Write;
                     streamed = true;
-                    print!("{delta}");
-                    let _ = std::io::stdout().flush();
+                    markdown.push(delta);
                 }
             }
             SseEvent::Final { text } => {
                 final_text = Some(text.clone());
+                if matches!(output, OutputMode::Human) {
+                    if streamed {
+                        markdown.finish();
+                        streamed = false;
+                    } else {
+                        println!("\n{}\n", "── 结果 ──".bold());
+                        markdown.push(text);
+                        markdown.finish();
+                    }
+                }
                 emit_event(output, &event);
             }
-            SseEvent::PermissionRequest {
-                request_id,
-                tool,
-                reason,
-                level,
-                ..
-            } => {
+            SseEvent::PermissionRequest { request_id, .. } => {
+                if streamed {
+                    markdown.finish();
+                    streamed = false;
+                }
                 emit_event(output, &event);
-                let response = decide_permission(output, trusted, tool, reason, level.as_deref())?;
+                let response = decide_permission(output, trusted, &event)?;
                 if let Err(error) = client
                     .respond_permission(&session.id, request_id, &response)
                     .await
@@ -108,12 +116,20 @@ pub(crate) async fn run_turn(
             }
             SseEvent::ToolResult { .. } => {
                 steps += 1;
+                if streamed {
+                    markdown.finish();
+                    streamed = false;
+                }
                 emit_event(output, &event);
                 if matches!(output, OutputMode::Human) {
                     print_sse_event_human(&event);
                 }
             }
             _ => {
+                if streamed {
+                    markdown.finish();
+                    streamed = false;
+                }
                 emit_event(output, &event);
                 if matches!(output, OutputMode::Human) {
                     print_sse_event_human(&event);
@@ -130,7 +146,7 @@ pub(crate) async fn run_turn(
     let diffs = client.session_diff(&session.id).await.unwrap_or_default();
     let diff_paths: Vec<String> = diffs.iter().map(|diff| diff.path.clone()).collect();
     if matches!(output, OutputMode::Human) && streamed {
-        println!();
+        markdown.finish();
     }
     render_final(output, final_text.as_deref(), steps, &diff_paths);
     if abort.load(Ordering::Relaxed) {
@@ -203,10 +219,21 @@ fn render_final(output: OutputMode, text: Option<&str>, steps: usize, diff_paths
 fn decide_permission(
     output: OutputMode,
     trusted: bool,
-    tool: &str,
-    reason: &str,
-    level: Option<&str>,
+    event: &SseEvent,
 ) -> Result<PermissionResponse, Box<dyn std::error::Error>> {
+    let SseEvent::PermissionRequest {
+        tool,
+        reason,
+        level,
+        args,
+        redacted_args,
+        risk_note,
+        explain,
+        ..
+    } = event
+    else {
+        return Ok(parse_approval_response("deny"));
+    };
     if trusted {
         return Ok(PermissionResponse {
             allow: true,
@@ -218,11 +245,24 @@ fn decide_permission(
         eprintln!("需要审批（jsonl 非交互，默认拒绝）：{tool}（{reason}）");
         return Ok(parse_approval_response("deny"));
     }
-    eprintln!(
-        "{} 需要 {} 权限：{tool}（{reason}）",
-        "审批".yellow(),
-        level.unwrap_or("unknown")
-    );
+    if matches!(output, OutputMode::Human) {
+        // 审批卡走 stdout，与流式结果同观感（repl 一致）。
+        print_permission_card(&PermissionCard {
+            tool,
+            level: level.as_deref(),
+            reason,
+            args: Some(args),
+            redacted_args: redacted_args.as_ref(),
+            risk_note: risk_note.as_deref(),
+            explain: explain.as_ref(),
+        });
+    } else {
+        eprintln!(
+            "{} 需要 {} 权限：{tool}（{reason}）",
+            "审批".yellow(),
+            level.as_deref().unwrap_or("unknown")
+        );
+    }
     eprint!("允许？[y=仅本次 / t=本任务 / w=工作区长期 / n=拒绝] ");
     use std::io::Write;
     let _ = std::io::stderr().flush();

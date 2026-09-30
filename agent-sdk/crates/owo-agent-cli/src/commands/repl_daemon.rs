@@ -9,7 +9,9 @@
 //! 其余命令在 daemon 模式下给出明确提示（`--local` 使用旧 REPL）。
 
 use crate::support::{ensure_daemon_client, ensure_data_root};
-use crate::ui_output::{parse_approval_response, print_sse_event_human};
+use crate::ui_output::{
+    parse_approval_response, print_permission_card, print_sse_event_human, PermissionCard,
+};
 use colored::Colorize;
 use owo_agent_protocol::{PermissionResponse, SseEvent};
 use rustyline::error::ReadlineError;
@@ -27,6 +29,7 @@ pub(crate) async fn run(args: super::repl::ReplArgs) -> Result<(), Box<dyn std::
     let mut repl = DaemonRepl {
         client,
         workspace,
+        data_root: root,
         session: None,
         model: args.model.clone(),
         read_only: args.agent == "plan",
@@ -51,6 +54,7 @@ pub(crate) async fn run(args: super::repl::ReplArgs) -> Result<(), Box<dyn std::
 struct DaemonRepl {
     client: owo_agent_client::AgentClient,
     workspace: PathBuf,
+    data_root: PathBuf,
     session: Option<String>,
     model: Option<String>,
     read_only: bool,
@@ -60,15 +64,12 @@ struct DaemonRepl {
 
 impl DaemonRepl {
     fn prompt(&self) -> String {
-        if self.read_only {
-            format!("{} ", "plan ❯".yellow())
-        } else {
-            format!("{} ", "build ❯".green())
-        }
+        // 纯文本提示串：rustyline 的宽度计算不剥离 ANSI，颜色由 ReplHelper::highlight_prompt 渲染。
+        crate::support::repl_prompt(self.read_only)
     }
 
     async fn run_terminal(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut editor = rustyline::DefaultEditor::new()?;
+        let mut editor = crate::support::new_repl_editor()?;
         loop {
             match editor.readline(&self.prompt()) {
                 Ok(line) => {
@@ -249,6 +250,14 @@ impl DaemonRepl {
                 }
             }
             "clear" => print!("\x1b[2J\x1b[1;1H"),
+            "compact" => self.compact().await?,
+            "review" => self.review(parts.next()).await?,
+            "mention" => crate::support::mention_path(&self.workspace, parts.next()),
+            "history" => crate::support::print_history(&self.data_root, parts.next()),
+            "editor" => self.editor_input().await?,
+            "login" => crate::support::print_login(),
+            "logout" => crate::support::print_logout(),
+            "debug" => self.show_debug(),
             other => println!(
                 "{}",
                 format!("命令 /{other} 尚未迁移到 daemon 模式（用 --local 使用旧 REPL）").yellow()
@@ -392,6 +401,139 @@ impl DaemonRepl {
         Ok(())
     }
 
+    /// `/compact`：显示上下文占用并触发服务端压缩（对齐 Codex）。
+    async fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let id = self.current_session().await?;
+        if let Ok(value) = self
+            .client
+            .get_json::<serde_json::Value>(&format!("/session/{id}/context"))
+            .await
+        {
+            let tokens = value
+                .get("estimated_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let budget = value
+                .get("token_budget")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let over = value
+                .get("over_budget")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let suffix = if over {
+                "（超预算）".yellow().to_string()
+            } else {
+                String::new()
+            };
+            println!("上下文：{tokens} / {budget} tokens{suffix}");
+        }
+        let result = self
+            .client
+            .post_empty::<serde_json::Value>(&format!("/session/{id}/compact"))
+            .await?;
+        let compacted = result
+            .get("compacted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if compacted {
+            let before = result
+                .get("tokens_before")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let after = result
+                .get("tokens_after")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!("{} 已压缩：{before} → {after} tokens", "✓".green());
+            if let Some(summary) = result.get("summary").and_then(|v| v.as_str()) {
+                println!("{}", "── 摘要 ──".bold());
+                let mut md = crate::markdown::MarkdownStream::new();
+                md.push(summary);
+                md.finish();
+            }
+        } else {
+            println!("{}", "未压缩（历史不足或模型未产出摘要）".yellow());
+        }
+        Ok(())
+    }
+
+    /// `/review [提示]`：发起一次「审查当前改动」的回合。
+    async fn review(&mut self, extra: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let prompt = match extra {
+            Some(extra) => format!(
+                "请审查工作区当前改动（git diff），指出缺陷、风险与改进建议。额外关注：{extra}"
+            ),
+            None => "请审查工作区当前改动（git diff），指出缺陷、风险与改进建议。".to_string(),
+        };
+        self.run_turn(&prompt).await
+    }
+
+    /// `/editor`：用 `$VISUAL`/`$EDITOR` 编辑多行提示后作为一次输入。
+    async fn editor_input(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let editor = std::env::var("VISUAL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            });
+        let Some(editor) = editor else {
+            println!(
+                "{}",
+                "未设置 $VISUAL/$EDITOR；请先设置外部编辑器（如 set EDITOR=notepad）".yellow()
+            );
+            return Ok(());
+        };
+        let path = std::env::temp_dir().join(format!("owo-prompt-{}.md", std::process::id()));
+        std::fs::write(&path, "")?;
+        let mut cmd = editor.split_whitespace();
+        let program = cmd.next().unwrap_or_default().to_string();
+        let status = std::process::Command::new(&program)
+            .args(cmd)
+            .arg(&path)
+            .status();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        match status {
+            Ok(status) if status.success() && !text.trim().is_empty() => {
+                self.run_turn(text.trim()).await?;
+            }
+            Ok(_) => println!("（空输入，已取消）"),
+            Err(error) => println!("{} 启动编辑器失败：{error}", "✘".red()),
+        }
+        Ok(())
+    }
+
+    /// `/debug`：诊断信息。
+    fn show_debug(&self) {
+        println!("[debug] 版本：{}", env!("CARGO_PKG_VERSION"));
+        println!("[debug] 工作区：{}", self.workspace.display());
+        println!("[debug] 数据目录：{}", self.data_root.display());
+        println!(
+            "[debug] 模式：{}",
+            if self.read_only {
+                "plan（只读）"
+            } else {
+                "build"
+            }
+        );
+        println!(
+            "[debug] 模型：{}",
+            self.model.as_deref().unwrap_or("（默认）")
+        );
+        println!(
+            "[debug] 会话：{}",
+            self.session.as_deref().unwrap_or("（无）")
+        );
+        println!("[debug] 后端：daemon {}", self.client.base_url());
+        println!(
+            "[debug] trace 目录：{}",
+            self.data_root.join("traces").display()
+        );
+    }
+
     fn show_status(&self) {
         println!("工作区：{}", self.workspace.display());
         println!("模型：{}", self.model.as_deref().unwrap_or("（默认）"));
@@ -427,24 +569,26 @@ impl DaemonRepl {
         println!("{} {}", "▶".green(), prompt.dimmed());
         let mut streamed = false;
         let mut steps = 0usize;
+        let mut markdown = crate::markdown::MarkdownStream::new();
         while let Some(event) = stream.next_event().await {
             let event = event?;
             match &event {
                 SseEvent::TokenDelta { delta } => {
-                    use std::io::Write;
                     streamed = true;
-                    print!("{delta}");
-                    let _ = std::io::stdout().flush();
+                    markdown.push(delta);
                 }
-                SseEvent::Final { .. } => {}
-                SseEvent::PermissionRequest {
-                    request_id,
-                    tool,
-                    reason,
-                    level,
-                    ..
-                } => {
-                    let response = self.decide_permission(tool, reason, level.as_deref())?;
+                SseEvent::Final { .. } => {
+                    if streamed {
+                        markdown.finish();
+                        streamed = false;
+                    }
+                }
+                SseEvent::PermissionRequest { request_id, .. } => {
+                    if streamed {
+                        markdown.finish();
+                        streamed = false;
+                    }
+                    let response = self.decide_permission(&event)?;
                     let _ = self
                         .client
                         .respond_permission(&id, request_id, &response)
@@ -452,7 +596,7 @@ impl DaemonRepl {
                 }
                 other => {
                     if streamed {
-                        println!();
+                        markdown.finish();
                         streamed = false;
                     }
                     if matches!(other, SseEvent::ToolResult { .. }) {
@@ -463,7 +607,7 @@ impl DaemonRepl {
             }
         }
         if streamed {
-            println!();
+            markdown.finish();
         }
         let diff_count = self
             .client
@@ -482,10 +626,21 @@ impl DaemonRepl {
 
     fn decide_permission(
         &self,
-        tool: &str,
-        reason: &str,
-        level: Option<&str>,
+        event: &SseEvent,
     ) -> Result<PermissionResponse, Box<dyn std::error::Error>> {
+        let SseEvent::PermissionRequest {
+            tool,
+            reason,
+            level,
+            args,
+            redacted_args,
+            risk_note,
+            explain,
+            ..
+        } = event
+        else {
+            return Ok(parse_approval_response("deny"));
+        };
         if self.no_approval {
             return Ok(PermissionResponse {
                 allow: true,
@@ -493,11 +648,15 @@ impl DaemonRepl {
                 scope: Some("once".to_string()),
             });
         }
-        eprintln!(
-            "{} 需要 {} 权限：{tool}（{reason}）",
-            "审批".yellow(),
-            level.unwrap_or("unknown")
-        );
+        print_permission_card(&PermissionCard {
+            tool,
+            level: level.as_deref(),
+            reason,
+            args: Some(args),
+            redacted_args: redacted_args.as_ref(),
+            risk_note: risk_note.as_deref(),
+            explain: explain.as_ref(),
+        });
         eprint!("允许？[y=仅本次 / t=本任务 / w=工作区长期 / n=拒绝] ");
         use std::io::Write;
         let _ = std::io::stderr().flush();

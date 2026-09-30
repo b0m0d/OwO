@@ -96,7 +96,8 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
     if desktop_ctx {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
         while let Err(ref reason) = recovery {
-            if reason.contains("检测到运行中的服务") && std::time::Instant::now() < deadline {
+            if reason.contains("检测到运行中的服务") && std::time::Instant::now() < deadline
+            {
                 tracing::warn!("上一代核心仍在退出（{reason}），等待其退出后继续启动");
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 recovery = owo_agent_server::shutdown::recover_force_kill(&root);

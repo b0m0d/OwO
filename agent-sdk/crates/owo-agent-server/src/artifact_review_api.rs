@@ -47,7 +47,7 @@ pub(crate) mod artifact_delivery;
 // 统一 Human Inbox（八期 · 第三路）：四类待办统一列表 + 领取/释放/直接处理。
 // 独立文件经本模块 router 合并挂载（lib.rs 装配零改动）；子模块可访问本模块
 // 私有项（store 连接）；resolve 分派复用既有领域能力（评审/人节点/retry）。
-#[path = "human_inbox_api.rs"]
+#[path = "human_inbox_api/mod.rs"]
 pub(crate) mod human_inbox;
 #[path = "human_inbox_store.rs"]
 pub(crate) mod human_inbox_store;

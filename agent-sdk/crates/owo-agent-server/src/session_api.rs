@@ -621,3 +621,43 @@ pub(super) async fn session_context(
         "last_compaction": last_compaction,
     })))
 }
+
+/// `POST /session/{id}/compact`：显式压缩会话历史（对齐 Codex `/compact`）。
+/// 不依赖 token 预算；历史不足或模型未产出摘要时 `compacted=false`。
+pub(super) async fn compact_session(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let _session_guard = owo_agent_server::acquire_session_lock(&state, &id).await?;
+    let mut session = load_session(&state, &id)?;
+    let tokens_before = owo_agent_core::estimate_tokens(&session.messages);
+    let messages_before = session.messages.len();
+    let summary = state
+        .agent
+        .compact_session(&mut session)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let compacted = summary.is_some();
+    if compacted {
+        state
+            .store
+            .save(&session)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        state
+            .sessions
+            .lock()
+            .map_err(poison)?
+            .insert(session.id.clone(), session.clone());
+        owo_agent_server::event_stream::hub()
+            .publish_invalidate(owo_agent_server::event_stream::InvalidateDomain::Sessions);
+    }
+    Ok(Json(json!({
+        "session_id": id,
+        "compacted": compacted,
+        "summary": summary,
+        "tokens_before": tokens_before,
+        "tokens_after": owo_agent_core::estimate_tokens(&session.messages),
+        "messages_before": messages_before,
+        "messages_after": session.messages.len(),
+    })))
+}

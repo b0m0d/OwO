@@ -1,6 +1,6 @@
 //! 可观测性测试（R5 Agent 3 子任务 2）：/metrics/*。
 //!
-//! 独立编译：`#[path = "../src/observability_api.rs"] mod observability_api;`。
+//! 独立编译：`#[path = "../src/observability_api/mod.rs"] mod observability_api;`。
 //! 全部使用 tempdir，写入 TraceRecord 后断言聚合统计。
 
 use owo_agent_core::permissions::Policy;
@@ -10,7 +10,7 @@ use owo_agent_core::{save_trace, Agent, TokenUsage, TraceRecord, TurnEvent};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-#[path = "../src/observability_api.rs"]
+#[path = "../src/observability_api/mod.rs"]
 mod observability_api;
 
 #[path = "../src/event_stream.rs"]

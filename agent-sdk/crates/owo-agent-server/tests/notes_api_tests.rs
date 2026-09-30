@@ -12,7 +12,7 @@ use owo_agent_core::Agent;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-#[path = "../src/notes_api.rs"]
+#[path = "../src/notes_api/mod.rs"]
 mod notes_api;
 
 struct IdleProvider;

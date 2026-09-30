@@ -575,17 +575,68 @@ impl SharedStdin {
     }
 }
 
+/// 本会话内「总是允许」的工具集合：`ConsoleApprover` 的 session scope 载体。
+/// 本地 `Approver` 的 `Decision` 不携带 scope，故在 CLI 侧做粘性记忆，减少重复询问。
+#[derive(Default)]
+pub(crate) struct SessionApprovals {
+    inner: Mutex<HashSet<String>>,
+}
+
+impl SessionApprovals {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn contains(&self, tool: &str) -> bool {
+        self.inner.lock().map(|s| s.contains(tool)).unwrap_or(false)
+    }
+
+    pub(crate) fn insert(&self, tool: &str) {
+        if let Ok(mut set) = self.inner.lock() {
+            set.insert(tool.to_string());
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        if let Ok(mut set) = self.inner.lock() {
+            set.clear();
+        }
+    }
+
+    pub(crate) fn list(&self) -> Vec<String> {
+        let mut tools: Vec<String> = self
+            .inner
+            .lock()
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default();
+        tools.sort();
+        tools
+    }
+}
+
 pub(crate) struct ConsoleApprover {
     pub(crate) stdin: SharedStdin,
+    pub(crate) approvals: Arc<SessionApprovals>,
 }
 
 #[async_trait]
 impl Approver for ConsoleApprover {
     async fn decide(&self, request: &PermissionRequest) -> Decision {
         use std::io::Write;
+        // 审批卡由 EventPrinter 在事件到达时打印（见 `ui_output::print_permission_card`）；
+        // 这里只负责交互：本会话已批准过的工具直接放行，否则询问
+        // y=本次 / s=本会话总是允许 / N=拒绝。
+        if self.approvals.contains(&request.tool) {
+            println!(
+                "  {} {}（本会话已批准，自动放行）",
+                "审批".green(),
+                request.tool
+            );
+            return Decision::Allow;
+        }
         print!(
-            "  {} 允许 {} 执行 {}？[y/N] ",
-            "审批".yellow(),
+            "  {} 允许 {} 执行 {}？[y=本次 / s=本会话总是允许 / N=拒绝] ",
+            "确认".yellow(),
             request.level.label(),
             request.tool
         );
@@ -593,10 +644,367 @@ impl Approver for ConsoleApprover {
         let mut line = String::new();
         if self.stdin.read_line(&mut line).await.is_ok() {
             match line.trim().to_lowercase().as_str() {
-                "y" | "yes" => return Decision::Allow,
+                "y" | "yes" | "1" | "once" => return Decision::Allow,
+                "s" | "session" | "a" | "always" => {
+                    self.approvals.insert(&request.tool);
+                    return Decision::Allow;
+                }
                 _ => return Decision::Deny,
             }
         }
         Decision::Deny
+    }
+}
+
+// ---------------------------------------------------------------------------
+// REPL 行编辑：slash 命令 + 文件路径 Tab 补全（本地 REPL 与 Daemon REPL 共用）
+// ---------------------------------------------------------------------------
+
+/// REPL 可补全的 slash 命令（与 handle_line 的分派保持一致；新增命令时同步）。
+pub(crate) const SLASH_COMMANDS: &[&str] = &[
+    "help",
+    "exit",
+    "quit",
+    "new",
+    "sessions",
+    "resume",
+    "model",
+    "plan",
+    "build",
+    "agent",
+    "diff",
+    "undo",
+    "revert",
+    "mcp",
+    "skills",
+    "fork",
+    "rewind",
+    "redo",
+    "undo-msg",
+    "redo-msg",
+    "tree",
+    "share",
+    "traces",
+    "trace",
+    "settings",
+    "plugins",
+    "whitelist",
+    "perception",
+    "learn",
+    "proactive",
+    "status",
+    "permissions",
+    "approvals",
+    "audit",
+    "init",
+    "abort",
+    "clear",
+    "compact",
+    "review",
+    "mention",
+    "history",
+    "editor",
+    "login",
+    "logout",
+    "debug",
+];
+
+/// REPL 提示串（**纯文本，禁止内嵌 ANSI**）：rustyline 14 的 Windows 端
+/// `calculate_position` 不剥离转义序列，会把转义字节按可见宽度计入，导致光标/输入右移
+/// （"提示符后多出很多空格"）。颜色由 `ReplHelper::highlight_prompt` 在渲染期添加。
+pub(crate) fn repl_prompt(read_only: bool) -> String {
+    if read_only {
+        "plan ❯ ".to_string()
+    } else {
+        "build ❯ ".to_string()
+    }
+}
+
+/// rustyline helper：补全行首 `/命令` 与路径样式词（相对当前工作目录）。
+pub(crate) struct ReplHelper;
+
+impl rustyline::Helper for ReplHelper {}
+impl rustyline::highlight::Highlighter for ReplHelper {
+    /// 提示串本身必须是纯文本：rustyline 14 的 **Windows** 端 `calculate_position`
+    /// 不剥离 ANSI 转义（Unix 端会剥离），会把转义字节当可见宽度，导致光标/输入整体右移
+    /// （表现为"提示符后多出很多空格"）。颜色改由这里渲染，宽度仍按纯文本计算。
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> std::borrow::Cow<'b, str> {
+        use colored::Colorize;
+        if prompt.starts_with("plan") {
+            std::borrow::Cow::Owned(prompt.yellow().to_string())
+        } else if prompt.starts_with("build") {
+            std::borrow::Cow::Owned(prompt.green().to_string())
+        } else {
+            std::borrow::Cow::Borrowed(prompt)
+        }
+    }
+}
+impl rustyline::hint::Hinter for ReplHelper {
+    type Hint = String;
+}
+impl rustyline::validate::Validator for ReplHelper {}
+
+impl rustyline::completion::Completer for ReplHelper {
+    type Candidate = rustyline::completion::Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        let head = &line[..pos];
+        let word_start = head.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+        let word = &head[word_start..];
+
+        // 行首 `/命令`：补全命令名（保留行首 '/'，补全后自动补空格）。
+        if word_start == 0 && word.starts_with('/') && !word.contains(char::is_whitespace) {
+            let prefix = &word[1..];
+            let candidates = SLASH_COMMANDS
+                .iter()
+                .filter(|cmd| cmd.starts_with(prefix))
+                .map(|cmd| rustyline::completion::Pair {
+                    display: format!("/{cmd}"),
+                    replacement: format!("{cmd} "),
+                })
+                .collect();
+            return Ok((1, candidates));
+        }
+
+        // 路径样式词：`src/ma`、`./a`、`../` 等按当前目录补全。
+        if let Some(result) = complete_path(word, word_start) {
+            return Ok(result);
+        }
+        Ok((0, Vec::new()))
+    }
+}
+
+/// 路径补全：把词拆成「目录前缀 + 文件名前缀」，读目录列出匹配项。
+/// 目录补 `/`，文件补空；无可补全返回 None。
+fn complete_path(
+    word: &str,
+    word_start: usize,
+) -> Option<(usize, Vec<rustyline::completion::Pair>)> {
+    if word.is_empty() {
+        return None;
+    }
+    let looks_like_path =
+        word.contains('/') || word.contains('\\') || word.starts_with('.') || word.starts_with('~');
+    if !looks_like_path {
+        return None;
+    }
+    let (dir, prefix) = match word.rfind(['/', '\\']) {
+        Some(i) => (&word[..=i], &word[i + 1..]),
+        None => ("", word),
+    };
+    let read_dir = if dir.is_empty() { "." } else { dir };
+    let entries = std::fs::read_dir(read_dir).ok()?;
+    let prefix_lower = prefix.to_lowercase();
+    let mut pairs = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let suffix = if is_dir { "/" } else { "" };
+        pairs.push(rustyline::completion::Pair {
+            display: format!("{dir}{name}{suffix}"),
+            replacement: format!("{name}{suffix}"),
+        });
+    }
+    if pairs.is_empty() {
+        return None;
+    }
+    pairs.sort_by(|a, b| a.replacement.cmp(&b.replacement));
+    pairs.truncate(50);
+    Some((word_start + dir.len(), pairs))
+}
+
+pub(crate) type ReplEditor = rustyline::Editor<ReplHelper, rustyline::history::DefaultHistory>;
+
+/// 构造带补全的 REPL 行编辑器（本地 REPL 与 Daemon REPL 共用）。
+pub(crate) fn new_repl_editor() -> rustyline::Result<ReplEditor> {
+    let mut editor = ReplEditor::new()?;
+    editor.set_helper(Some(ReplHelper));
+    Ok(editor)
+}
+
+// ---------------------------------------------------------------------------
+// Codex 对齐命令的共享实现（本地 REPL / Daemon REPL 共用）
+// ---------------------------------------------------------------------------
+
+/// `/review [额外关注]` 的默认提示。
+pub(crate) fn review_prompt(extra: Option<&str>) -> String {
+    match extra {
+        Some(extra) => {
+            format!("请审查工作区当前改动（git diff），指出缺陷、风险与改进建议。额外关注：{extra}")
+        }
+        None => "请审查工作区当前改动（git diff），指出缺陷、风险与改进建议。".to_string(),
+    }
+}
+
+/// `/mention <路径>`：解析并展示文件引用信息（供用户复制到提示中）。
+pub(crate) fn mention_path(workspace: &std::path::Path, path: Option<&str>) {
+    let Some(path) = path else {
+        println!("用法：/mention <路径>（相对工作区或绝对路径）");
+        return;
+    };
+    let candidate = workspace.join(path);
+    let target = if candidate.exists() {
+        candidate
+    } else {
+        PathBuf::from(path)
+    };
+    match std::fs::metadata(&target) {
+        Ok(meta) if meta.is_file() => {
+            let lines = std::fs::read_to_string(&target)
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
+            println!(
+                "{} {}（{} 字节，{} 行）",
+                "引用：".green(),
+                target.display(),
+                meta.len(),
+                lines
+            );
+        }
+        Ok(_) => println!("{} {}（目录）", "引用：".green(), target.display()),
+        Err(error) => println!("{} 无法读取 {}：{error}", "✘".red(), target.display()),
+    }
+}
+
+/// `/history [n]`：打印最近 n 条输入历史。
+pub(crate) fn print_history(data_root: &std::path::Path, arg: Option<&str>) {
+    let limit: usize = arg.and_then(|s| s.parse().ok()).unwrap_or(20);
+    let path = data_root.join("history.txt");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        println!("（无历史记录）");
+        return;
+    };
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(limit);
+    if start == lines.len() {
+        println!("（无历史记录）");
+        return;
+    }
+    for (i, line) in lines[start..].iter().enumerate() {
+        println!("  {:>4}  {line}", start + i + 1);
+    }
+}
+
+/// `/login`：凭据来源诊断（只显示存在性与长度，绝不回显密钥）。
+pub(crate) fn print_login() {
+    let key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let base = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "（内置 BigModel）".into());
+    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "（内置 glm-5.3-flash）".into());
+    println!("凭据来源：环境变量 OPENAI_API_KEY");
+    match key {
+        Some(k) => println!("  状态：{}（长度 {}）", "已配置".green(), k.chars().count()),
+        None => println!("  状态：{}", "缺失".yellow()),
+    }
+    println!("  端点：{base}");
+    println!("  模型：{model}");
+}
+
+/// `/logout`：说明凭据由环境变量注入，CLI 不持有密钥。
+pub(crate) fn print_logout() {
+    println!("凭据来自环境变量，CLI 不持有、也不回显密钥。");
+    println!("如需登出，删除用户级变量后重开终端：");
+    println!("  [Environment]::SetEnvironmentVariable('OPENAI_API_KEY', $null, 'User')");
+}
+
+#[cfg(test)]
+mod repl_completion_tests {
+    use super::{complete_path, SessionApprovals};
+
+    #[test]
+    fn path_completion_matches_src_main() {
+        let (start, pairs) = complete_path("src/ma", 0).expect("should complete src/ma");
+        assert_eq!(start, "src/".len());
+        assert!(
+            pairs.iter().any(|p| p.replacement == "main.rs"),
+            "应补全到 src/main.rs（候选数 {}）",
+            pairs.len()
+        );
+    }
+
+    #[test]
+    fn non_path_words_are_not_completed() {
+        assert!(complete_path("hello", 0).is_none());
+        assert!(complete_path("", 0).is_none());
+    }
+
+    #[test]
+    fn session_approvals_remember_and_clear() {
+        let approvals = SessionApprovals::new();
+        assert!(!approvals.contains("shell"));
+        approvals.insert("shell");
+        approvals.insert("write_file");
+        assert!(approvals.contains("shell"));
+        assert_eq!(approvals.list(), vec!["shell", "write_file"]);
+        approvals.clear();
+        assert!(!approvals.contains("shell"));
+        assert!(approvals.list().is_empty());
+    }
+
+    #[test]
+    fn repl_prompt_is_plain_text_without_ansi() {
+        for read_only in [true, false] {
+            let prompt = super::repl_prompt(read_only);
+            assert!(
+                !prompt.contains('\u{1b}'),
+                "提示串不得内嵌 ANSI（会触发 Windows 宽度误算）：{prompt:?}"
+            );
+        }
+        assert_eq!(super::repl_prompt(true), "plan ❯ ");
+        assert_eq!(super::repl_prompt(false), "build ❯ ");
+    }
+
+    #[test]
+    fn review_prompt_has_default_and_extra() {
+        assert!(super::review_prompt(None).contains("审查"));
+        assert!(super::review_prompt(Some("安全性")).contains("安全性"));
+    }
+
+    #[test]
+    fn highlight_prompt_colors_build_plan_without_changing_text() {
+        use rustyline::highlight::Highlighter;
+        colored::control::set_override(true);
+        let helper = super::ReplHelper;
+        let build = helper.highlight_prompt("build ❯ ", true).to_string();
+        let plan = helper.highlight_prompt("plan ❯ ", true).to_string();
+        let other = helper.highlight_prompt("other ", true).to_string();
+        colored::control::unset_override();
+
+        // 去掉 ANSI 后可见文本必须与纯文本提示一致（rustyline 宽度按可见文本计算）。
+        fn strip_ansi(s: &str) -> String {
+            let mut out = String::new();
+            let mut in_esc = false;
+            for c in s.chars() {
+                if c == '\u{1b}' {
+                    in_esc = true;
+                    continue;
+                }
+                if in_esc {
+                    if c == 'm' {
+                        in_esc = false;
+                    }
+                    continue;
+                }
+                out.push(c);
+            }
+            out
+        }
+        assert!(build.contains('\u{1b}'), "build 提示应带颜色：{build:?}");
+        assert_eq!(strip_ansi(&build), "build ❯ ");
+        assert_eq!(strip_ansi(&plan), "plan ❯ ");
+        assert_eq!(other, "other ");
     }
 }

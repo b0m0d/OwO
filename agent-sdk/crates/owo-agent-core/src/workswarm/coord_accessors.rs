@@ -1,0 +1,222 @@
+use super::*;
+impl TeamCoordinator {
+    pub fn new(
+        store: Arc<dyn ProjectSpaceStoreBackend>,
+        templates: Arc<TeamTemplateRegistry>,
+        cas: CasStore,
+        run_dir: PathBuf,
+    ) -> Self {
+        Self {
+            store,
+            templates,
+            cas,
+            bus: AgentBus::new(),
+            audit: None,
+            run_dir,
+            max_agent_members: 5,
+            team_locks: Arc::new(Mutex::new(HashMap::new())),
+            run_flags: Arc::new(Mutex::new(HashMap::new())),
+            loop_alive: Arc::new(Mutex::new(HashMap::new())),
+            cancels: Arc::new(Mutex::new(HashMap::new())),
+            phase_epochs: Arc::new(Mutex::new(HashMap::new())),
+            phase_claims: Arc::new(Mutex::new(HashMap::new())),
+            progress_seqs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn attach_audit(&mut self, log: Arc<Mutex<AuditLog>>) {
+        self.audit = Some(log);
+    }
+
+    pub fn bus(&self) -> &AgentBus {
+        &self.bus
+    }
+
+    pub fn templates(&self) -> &Arc<TeamTemplateRegistry> {
+        &self.templates
+    }
+
+    pub fn cas(&self) -> &CasStore {
+        &self.cas
+    }
+    /// 项目空间存储（七期 · 第三路：交付端点/诊断用只读访问器）。
+    pub fn store(&self) -> &Arc<dyn ProjectSpaceStoreBackend> {
+        &self.store
+    }
+
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+
+    // -- 内部基础 --
+
+    pub(crate) fn team_lock(&self, team_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.team_locks.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(team_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    pub(crate) fn run_flag(&self, team_id: &str) -> Arc<AtomicBool> {
+        let mut map = self.run_flags.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(team_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
+    pub fn cancel_token(&self, team_id: &str) -> Arc<CancelToken> {
+        let mut map = self.cancels.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(team_id.to_string())
+            .or_insert_with(|| Arc::new(CancelToken::new()))
+            .clone()
+    }
+
+    /// 重新武装取消令牌（R2/R3）：显式恢复（continue/retry）前调用——
+    /// 历史取消不得粘滞到下一轮执行（否则 continue 重启循环的瞬间又被旧取消打断，
+    /// 团队永远停在 cancelled，取消链不可收敛）。原子替换：在飞阶段持有的旧 Arc
+    /// 不受影响，仅新阶段取到全新令牌。
+    pub fn reset_cancel_token(&self, team_id: &str) {
+        let mut map = self.cancels.lock().unwrap_or_else(|e| e.into_inner());
+        map.insert(team_id.to_string(), Arc::new(CancelToken::new()));
+    }
+
+    pub(crate) fn set_run_active(&self, team_id: &str, active: bool) {
+        self.run_flag(team_id).store(active, Ordering::SeqCst);
+    }
+
+    pub fn is_run_active(&self, team_id: &str) -> bool {
+        self.run_flag(team_id).load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn loop_flag(&self, team_id: &str) -> Arc<AtomicBool> {
+        let mut map = self.loop_alive.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(team_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
+    /// 声明/撤销进程内运行循环存活（server 运行循环入口调用；重启后自然为空）。
+    pub fn set_loop_alive(&self, team_id: &str, alive: bool) {
+        self.loop_flag(team_id).store(alive, Ordering::SeqCst);
+    }
+
+    /// 该团队在当前进程中是否有存活的运行循环（磁盘 Running 但此值为假 → 中断候选）。
+    pub fn is_loop_alive(&self, team_id: &str) -> bool {
+        self.loop_flag(team_id).load(Ordering::SeqCst)
+    }
+
+    // -- 阶段代次 / 实时进度（长任务响应性支撑） --
+
+    /// 当前阶段代次（未领取过 = 0；cancel/retry/replace 等转向时 +1）。
+    pub(crate) fn phase_epoch(&self, team_id: &str) -> u64 {
+        self.phase_epochs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(team_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 阶段代次 +1（转向操作接管现场时调用；返回新代次）。
+    pub(crate) fn bump_phase_epoch(&self, team_id: &str) -> u64 {
+        let mut map = self.phase_epochs.lock().unwrap_or_else(|e| e.into_inner());
+        let next = map.entry(team_id.to_string()).or_insert(0);
+        *next = next.wrapping_add(1);
+        *next
+    }
+
+    /// 登记阶段领取（claim 后调用；进度视图据此外显 current_steps）。
+    pub(crate) fn note_phase_claim(&self, team_id: &str, claim: PhaseClaim) {
+        self.phase_claims
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(team_id.to_string(), claim);
+    }
+
+    /// 清除阶段领取（仅当代次仍匹配；防误清新阶段的领取）。
+    pub(crate) fn clear_phase_claim(&self, team_id: &str, epoch: u64) {
+        let mut map = self.phase_claims.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(team_id).map(|c| c.epoch) == Some(epoch) {
+            map.remove(team_id);
+        }
+    }
+
+    /// 进度序号 +1（每次状态转移调用；返回新序号）。
+    pub(crate) fn advance_progress(&self, team_id: &str) -> u64 {
+        let mut map = self.progress_seqs.lock().unwrap_or_else(|e| e.into_inner());
+        let seq = map.entry(team_id.to_string()).or_insert(0);
+        *seq = seq.wrapping_add(1);
+        *seq
+    }
+
+    /// 当前进度序号（只读；订阅方据此判断是否有新进度）。
+    pub fn progress_seq(&self, team_id: &str) -> u64 {
+        self.progress_seqs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(team_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 实时进度快照（**不取 team_lock**：长 Worker 执行期间随时可安全调用）。
+    ///
+    /// - `current_steps` 来自阶段领取记录（代次匹配时）；
+    /// - 计数：pending = Pending+Ready，running = Running，failed = Failed+Aborted。
+    pub async fn progress_snapshot(&self, team_id: &str) -> WorkSwarmResult<TeamProgress> {
+        let team = self
+            .store
+            .get_team_run(team_id)
+            .await
+            .map_err(|e| match e {
+                ProjectSpaceStoreError::NotFound(_) => {
+                    WorkSwarmError::NotFound(format!("团队 {team_id} 不存在"))
+                }
+                other => WorkSwarmError::Store(other),
+            })?;
+        let state = self.load_goal_state(team_id)?;
+        let mut counts = ProgressCounts::default();
+        for record in state.records.values() {
+            match record.status {
+                StepStatus::Pending | StepStatus::Ready => counts.pending += 1,
+                StepStatus::Running => counts.running += 1,
+                StepStatus::Succeeded => counts.succeeded += 1,
+                StepStatus::Failed => counts.failed += 1,
+                StepStatus::Aborted => counts.aborted += 1,
+            }
+        }
+        let claim = self
+            .phase_claims
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(team_id)
+            .cloned();
+        let current_steps = match claim {
+            Some(claim) if claim.epoch == self.phase_epoch(team_id) => claim.steps,
+            _ => Vec::new(),
+        };
+        Ok(TeamProgress {
+            seq: self.progress_seq(team_id),
+            team_id: team_id.to_string(),
+            status: format!("{:?}", team.status),
+            active: self.is_run_active(team_id),
+            current_steps,
+            counts,
+            updated_at: now_ts(),
+        })
+    }
+
+    pub(crate) fn audit(&self, team_id: &str, event: &str, detail: String) {
+        if let Some(log) = &self.audit {
+            if let Ok(mut log) = log.lock() {
+                log.record(
+                    team_id,
+                    event,
+                    Some(format!("workswarm/{team_id}")),
+                    None,
+                    detail,
+                );
+            }
+        }
+    }
+}

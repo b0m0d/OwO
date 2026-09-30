@@ -1,6 +1,6 @@
 //! 控制面 HTTP 契约测试（P2 双节点网格：第一阶段最小契约 + 第二阶段真实远端节点协议）。
 //!
-//! `#[path = "../src/fleet_api.rs"] mod fleet_api;` 独立编译；
+//! `#[path = "../src/fleet_api/mod.rs"] mod fleet_api;` 独立编译；
 //! 每个测试独立构造 [`FleetHub`]（tempfile 临时目录），避免跨测试状态污染；
 //! 节点执行由测试显式驱动（`hub.transport.complete_task`，模拟节点 agent 产出）。
 //!
@@ -9,7 +9,7 @@
 //! R13 真实远端节点协议：注册/心跳续租、按 node_id 领取、越权回传拒绝、进度/证据/结果回传、
 //! 取消确认、租约过期/旧 token/旧 epoch 拒绝并留审计（含真实 HTTP 两节点闭环）。
 
-#[path = "../src/fleet_api.rs"]
+#[path = "../src/fleet_api/mod.rs"]
 mod fleet_api;
 
 use axum::body::Body;

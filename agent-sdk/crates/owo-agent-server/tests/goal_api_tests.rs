@@ -3,7 +3,7 @@
 //! 独立编译目标：`goal_api.rs` 不引用 crate::/super::，本文件用 #[path] 挂载。
 //! 存储全部落在 tempfile 临时目录。
 
-#[path = "../src/goal_api.rs"]
+#[path = "../src/goal_api/mod.rs"]
 mod goal_api;
 
 use owo_agent_core::gateway::ModelProvider;

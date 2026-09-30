@@ -51,6 +51,7 @@ pub(crate) struct Repl {
     agent: Arc<Agent>,
     abort: Arc<AtomicBool>,
     stdin: SharedStdin,
+    approvals: Arc<SessionApprovals>,
     mcp_configs: Vec<McpServerConfig>,
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
     skills: SkillRegistry,
@@ -128,6 +129,7 @@ impl Repl {
             agent,
             abort: Arc::new(AtomicBool::new(false)),
             stdin: SharedStdin::new(),
+            approvals: Arc::new(SessionApprovals::new()),
             mcp_configs,
             mcp_clients,
             skills,
@@ -164,18 +166,15 @@ impl Repl {
         &mut self,
         history_path: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut rl = rustyline::DefaultEditor::new()?;
+        let mut rl = new_repl_editor()?;
         if let Ok(content) = std::fs::read_to_string(history_path) {
             for line in content.lines() {
                 let _ = rl.add_history_entry(line);
             }
         }
         loop {
-            let prompt = if self.read_only {
-                format!("{} ", "plan ❯".yellow())
-            } else {
-                format!("{} ", "build ❯".green())
-            };
+            // 纯文本提示串：rustyline 的宽度计算不剥离 ANSI，颜色由 ReplHelper::highlight_prompt 渲染。
+            let prompt = repl_prompt(self.read_only);
             match rl.readline(&prompt) {
                 Ok(line) => {
                     let line = normalize_input_line(&line);
@@ -314,6 +313,7 @@ impl Repl {
                 "proactive" => self.handle_proactive(command)?,
                 "status" => self.show_status(),
                 "permissions" => self.handle_permissions(command)?,
+                "approvals" => self.handle_approvals(parts.next()),
                 "audit" => self.show_audit(),
                 "init" => {
                     let target = self.workspace.join("AGENTS.md");
@@ -329,12 +329,144 @@ impl Repl {
                     println!("已请求中止当前回合");
                 }
                 "clear" => print!("\x1b[2J\x1b[1;1H"),
+                "compact" => self.compact().await?,
+                "review" => self.run_turn(&review_prompt(parts.next())).await?,
+                "mention" => mention_path(&self.workspace, parts.next()),
+                "history" => print_history(&self.data_root, parts.next()),
+                "editor" => self.editor_input().await?,
+                "login" => print_login(),
+                "logout" => print_logout(),
+                "debug" => self.show_debug(),
                 other => println!("未知命令：/{other}（/help 查看全部）"),
             }
             return Ok(false);
         }
         self.run_turn(line).await?;
         Ok(false)
+    }
+
+    /// `/approvals [clear]`：查看/清除本会话的「总是允许」工具记忆。
+    fn handle_approvals(&self, action: Option<&str>) {
+        match action {
+            Some("clear") | Some("reset") => {
+                self.approvals.clear();
+                println!("{}", "已清除本会话的「总是允许」记忆".green());
+            }
+            _ => {
+                let tools = self.approvals.list();
+                if tools.is_empty() {
+                    println!("本会话尚无「总是允许」的工具（审批时按 s 添加）");
+                } else {
+                    println!("{}", "本会话「总是允许」的工具：".bold());
+                    for tool in tools {
+                        println!("  • {tool}");
+                    }
+                    println!("（/approvals clear 清除）");
+                }
+            }
+        }
+    }
+
+    /// `/compact`：显式压缩会话历史（对齐 Codex）。
+    async fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.session.is_none() {
+            self.new_session(None).await?;
+        }
+        let mut session = self.session.take().expect("session just created");
+        let before = owo_agent_core::estimate_tokens(&session.messages);
+        let budget = self.agent.config().token_budget;
+        let suffix = if before > budget {
+            "（超预算）".yellow().to_string()
+        } else {
+            String::new()
+        };
+        println!("上下文：{before} / {budget} tokens{suffix}");
+        let summary = self.agent.compact_session(&mut session).await?;
+        let after = owo_agent_core::estimate_tokens(&session.messages);
+        self.session = Some(session);
+        if let Some(session) = &self.session {
+            self.store.save(session)?;
+        }
+        match summary {
+            Some(summary) => {
+                println!("{} 已压缩：{before} → {after} tokens", "✓".green());
+                println!("{}", "── 摘要 ──".bold());
+                let mut md = crate::markdown::MarkdownStream::new();
+                md.push(&summary);
+                md.finish();
+            }
+            None => println!("{}", "未压缩（历史不足或模型未产出摘要）".yellow()),
+        }
+        Ok(())
+    }
+
+    /// `/editor`：用 `$VISUAL`/`$EDITOR` 编辑多行提示后作为一次输入。
+    async fn editor_input(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let editor = std::env::var("VISUAL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            });
+        let Some(editor) = editor else {
+            println!(
+                "{}",
+                "未设置 $VISUAL/$EDITOR；请先设置外部编辑器（如 set EDITOR=notepad）".yellow()
+            );
+            return Ok(());
+        };
+        let path = std::env::temp_dir().join(format!("owo-prompt-{}.md", std::process::id()));
+        std::fs::write(&path, "")?;
+        let mut cmd = editor.split_whitespace();
+        let program = cmd.next().unwrap_or_default().to_string();
+        let status = std::process::Command::new(&program)
+            .args(cmd)
+            .arg(&path)
+            .status();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        match status {
+            Ok(status) if status.success() && !text.trim().is_empty() => {
+                self.run_turn(text.trim()).await?;
+            }
+            Ok(_) => println!("（空输入，已取消）"),
+            Err(error) => println!("{} 启动编辑器失败：{error}", "✘".red()),
+        }
+        Ok(())
+    }
+
+    /// `/debug`：诊断信息。
+    fn show_debug(&self) {
+        println!("[debug] 版本：{}", env!("CARGO_PKG_VERSION"));
+        println!("[debug] 工作区：{}", self.workspace.display());
+        println!("[debug] 数据目录：{}", self.data_root.display());
+        println!(
+            "[debug] 模式：{}",
+            if self.read_only {
+                "plan（只读）"
+            } else {
+                "build"
+            }
+        );
+        println!("[debug] 模型：{}", self.model);
+        println!(
+            "[debug] 会话：{}",
+            self.session
+                .as_ref()
+                .map(|s| s.id.as_str())
+                .unwrap_or("（无）")
+        );
+        println!(
+            "[debug] MCP：{} 个；插件：{} 个",
+            self.mcp_configs.len(),
+            self.plugins.len()
+        );
+        println!(
+            "[debug] trace 目录：{}",
+            self.data_root.join("traces").display()
+        );
     }
 
     fn set_mode(&mut self, read_only: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -378,11 +510,12 @@ impl Repl {
         } else {
             Arc::new(ConsoleApprover {
                 stdin: self.stdin.clone(),
+                approvals: Arc::clone(&self.approvals),
             })
         };
 
         println!("{} {}", "▶".green(), prompt.dimmed());
-        let task = tokio::spawn(async move {
+        let mut task = tokio::spawn(async move {
             let mut printer = EventPrinter::new();
             let mut on_event = |event: &TurnEvent| printer.print(event);
             let outcome = agent
@@ -397,23 +530,33 @@ impl Repl {
             (outcome, session)
         });
 
-        let abort_flag = Arc::clone(&self.abort);
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                abort_flag.store(true, Ordering::Relaxed);
-                println!("{}", "（Ctrl+C：正在中止当前回合…）".yellow());
+        // Ctrl+C 仅在当前回合内监听：旧实现每回合 spawn 一个永不结束的监听任务
+        // （任务泄漏），且回合结束后按 Ctrl+C 仍会误报“正在中止”。改为 select!：
+        // 中止后等待回合协作收尾，再走统一的保存/审计/摘要路径。
+        let (outcome, session) = tokio::select! {
+            joined = &mut task => {
+                joined.map_err(|error| std::io::Error::other(format!("回合任务失败：{error}")))?
             }
-        });
-
-        let (outcome, session) = task
-            .await
-            .map_err(|error| std::io::Error::other(format!("回合任务失败：{error}")))?;
+            _ = tokio::signal::ctrl_c() => {
+                self.abort.store(true, Ordering::Relaxed);
+                println!("{}", "（Ctrl+C：正在中止当前回合…）".yellow());
+                task.await
+                    .map_err(|error| std::io::Error::other(format!("回合任务失败：{error}")))?
+            }
+        };
         self.session = Some(session);
         if let Some(session) = &self.session {
             self.store.save(session)?;
         }
         self.flush_audit();
-        let outcome = outcome?;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                eprintln!("{} {error}", "回合失败：".red());
+                println!("（会话已保存；/status 查看状态，/diff 查看改动，/undo 回滚）");
+                return Ok(());
+            }
+        };
         let trace =
             TraceRecord::from_outcome(self.session.as_ref().expect("session saved"), &outcome);
         if let Ok(path) = save_trace(&self.data_root.join("traces"), &trace) {

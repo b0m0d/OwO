@@ -7,7 +7,7 @@
 use colored::Colorize;
 use owo_agent_core::TurnEvent;
 use owo_agent_protocol::{PermissionResponse, SseEvent};
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// `--output` 输出模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -100,35 +100,103 @@ pub fn parse_approval_response(input: &str) -> PermissionResponse {
     }
 }
 
+// ---------- 审批卡（本地 Approver / Daemon SSE 两条路径共用同一观感） ----------
+
+/// 审批卡数据：两条路径字段不完全一致，用 Option 收敛；参数优先用脱敏视图。
+pub(crate) struct PermissionCard<'a> {
+    pub tool: &'a str,
+    pub level: Option<&'a str>,
+    pub reason: &'a str,
+    pub args: Option<&'a Value>,
+    pub redacted_args: Option<&'a Value>,
+    pub risk_note: Option<&'a str>,
+    pub explain: Option<&'a Value>,
+}
+
+/// 渲染审批卡：让用户看清"批准的是什么"（工具/等级/原因/风险/影响/参数）。
+pub(crate) fn print_permission_card(card: &PermissionCard<'_>) {
+    println!(
+        "  {} {} 请求 {} 权限",
+        "审批".yellow(),
+        card.tool,
+        card.level.unwrap_or("unknown")
+    );
+    if !card.reason.trim().is_empty() {
+        println!("    原因：{}", card.reason);
+    }
+    if let Some(note) = card.risk_note {
+        // 内置工具无风险声明时核心会填统一占位串——展示侧抑制，避免每张卡都刷噪声。
+        let is_placeholder =
+            note.contains("未声明风险信息") || note.contains("未提供 MCP annotations");
+        if !note.trim().is_empty() && !is_placeholder {
+            println!("    {} {}", "风险：".red(), note);
+        }
+    }
+    if let Some(explain) = card.explain {
+        if !explain.is_null() && *explain != json!({}) {
+            println!("    影响：{}", summarize_permission_args(explain, 240));
+        }
+    }
+    if let Some(view) = card.redacted_args.or(card.args) {
+        let summary = summarize_permission_args(view, 240);
+        if !summary.is_empty() {
+            println!("    参数：{summary}");
+        }
+    }
+}
+
+/// 审批卡参数摘要：紧凑 JSON，超长按字符截断（秘密字段已由 redacted_args 脱敏）。
+pub(crate) fn summarize_permission_args(value: &Value, max_chars: usize) -> String {
+    let raw = value.to_string();
+    if raw == "null" || raw == "{}" {
+        return String::new();
+    }
+    if raw.chars().count() <= max_chars {
+        return raw;
+    }
+    let truncated: String = raw.chars().take(max_chars).collect();
+    format!("{truncated}…")
+}
+
 // ---------- human 事件打印（自 turn.rs 迁入；repl 仍复用同一观感） ----------
 
-/// 事件打印器：把流式增量逐字输出，Final 只收尾不重复打印。
+/// 事件打印器：把流式增量经 Markdown 渲染逐行输出，Final 只收尾不重复打印。
 pub struct EventPrinter {
+    markdown: crate::markdown::MarkdownStream,
     streamed: bool,
 }
 
 impl EventPrinter {
     pub fn new() -> Self {
-        Self { streamed: false }
+        Self {
+            markdown: crate::markdown::MarkdownStream::new(),
+            streamed: false,
+        }
     }
 
     pub fn print(&mut self, event: &TurnEvent) {
         match event {
             TurnEvent::TokenDelta { delta } => {
-                use std::io::Write;
                 self.streamed = true;
-                print!("{delta}");
-                let _ = std::io::stdout().flush();
+                self.markdown.push(delta);
             }
             TurnEvent::Final { text } => {
                 if self.streamed {
-                    println!();
+                    self.markdown.finish();
                     self.streamed = false;
                 } else {
-                    println!("\n{}\n{text}", "── 结果 ──".bold());
+                    println!("\n{}\n", "── 结果 ──".bold());
+                    self.markdown.push(text);
+                    self.markdown.finish();
                 }
             }
-            other => print_event(other),
+            other => {
+                if self.streamed {
+                    self.markdown.finish();
+                    self.streamed = false;
+                }
+                print_event(other);
+            }
         }
     }
 }
@@ -142,13 +210,15 @@ impl Default for EventPrinter {
 pub fn print_event(event: &TurnEvent) {
     match event {
         TurnEvent::ModelCall => println!("{}", "  ↻ 调用模型…".cyan()),
-        TurnEvent::PermissionRequest(request) => println!(
-            "  {} 需要 {} 权限：{}（{}）",
-            "审批".yellow(),
-            request.level.label(),
-            request.tool,
-            request.reason
-        ),
+        TurnEvent::PermissionRequest(request) => print_permission_card(&PermissionCard {
+            tool: &request.tool,
+            level: Some(request.level.label()),
+            reason: &request.reason,
+            args: Some(&request.args),
+            redacted_args: request.redacted_args.as_ref(),
+            risk_note: request.risk_note.as_deref(),
+            explain: None,
+        }),
         TurnEvent::ToolStart { tool, .. } => {
             println!("  {} {tool} …", "▶".blue());
         }
@@ -293,5 +363,16 @@ mod tests {
             assert!(response.scope.is_none());
             assert!(response.remember.is_none());
         }
+    }
+
+    #[test]
+    fn permission_args_summary_skips_empty_and_truncates_long() {
+        assert_eq!(summarize_permission_args(&json!(null), 10), "");
+        assert_eq!(summarize_permission_args(&json!({}), 10), "");
+        let short = summarize_permission_args(&json!({ "path": "a.txt" }), 240);
+        assert!(short.contains("a.txt"));
+        let long = summarize_permission_args(&json!({ "content": "x".repeat(500) }), 20);
+        assert!(long.chars().count() <= 21, "truncated must fit: {long}");
+        assert!(long.ends_with('…'));
     }
 }
