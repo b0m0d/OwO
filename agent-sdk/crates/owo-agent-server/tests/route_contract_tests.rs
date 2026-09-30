@@ -812,6 +812,7 @@ async fn session_revert_conflict_returns_structured_409_and_preserves_user_edit(
         owo_agent_core::session::SnapshotEntry {
             original_b64: Some(base64::engine::general_purpose::STANDARD.encode("before")),
             expected_after_sha256: Some(owo_agent_core::CasStore::hash_of(b"agent version")),
+            turn: 0,
         },
     );
     state.store.save(&session).unwrap();

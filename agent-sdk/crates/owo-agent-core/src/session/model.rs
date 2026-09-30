@@ -18,6 +18,10 @@ pub struct SnapshotEntry {
     /// Agent 最近一次成功写入后的 SHA-256；撤销前必须匹配，防止覆盖用户后续修改。
     #[serde(default)]
     pub expected_after_sha256: Option<String>,
+    /// 回合归属：记录快照时该回合用户消息的下标（= 写文件那一刻的 messages.len()）。
+    /// 供 `/rewind` 只回滚被截断段落的写操作；旧数据回退为 0（视作最早回合）。
+    #[serde(default)]
+    pub turn: usize,
 }
 
 /// 普通 Agent 文件写入的最小变更集收据。
@@ -387,10 +391,31 @@ impl Session {
 
     /// 旧快照格式的兼容撤销路径；新写入优先走 `revert_receipt`。
     async fn revert_legacy(&mut self) -> Result<Vec<String>, AgentError> {
+        self.revert_legacy_from(None).await
+    }
+
+    /// 只回滚「回合归属 >= keep」的写操作（配合 rewind：撤销被截断段落的文件改动），
+    /// 更早回合的快照保留：`/diff` 与后续 `/revert` 依旧能看到、回滚它们。
+    ///
+    /// 取优合并（远端 engine）：receipt 路径（`execution_receipts`）尚未带回合归属，
+    /// 存在 receipt 时保守退化为全量回滚。
+    pub async fn revert_from(&mut self, keep: usize) -> Result<Vec<String>, AgentError> {
+        if !self.execution_receipts.is_empty() {
+            return self.revert().await;
+        }
+        self.revert_legacy_from(Some(keep)).await
+    }
+
+    /// `keep = Some(k)`：只回滚 `turn >= k` 的快照，并把更早的快照留在表里。
+    async fn revert_legacy_from(&mut self, keep: Option<usize>) -> Result<Vec<String>, AgentError> {
         // 先完整预检，再开始写盘：任何文件被用户/外部进程改过时，整批撤销零副作用。
         let mut restore_plan = Vec::new();
         let mut conflicts = Vec::new();
         for (path, snapshot) in &self.snapshots {
+            // keep = Some(k)：只处理被截断段落（turn >= k）的快照。
+            if keep.is_some_and(|keep| snapshot.turn < keep) {
+                continue;
+            }
             let target = PathBuf::from(path);
             let original = match &snapshot.original_b64 {
                 Some(encoded) => Some(
@@ -444,7 +469,11 @@ impl Session {
             }
             restored.push(relative_display(&self.workspace, &target));
         }
-        self.snapshots.clear();
+        match keep {
+            // rewind 场景：更早回合的快照保留（/diff 与后续 /revert 仍可见）。
+            Some(keep) => self.snapshots.retain(|_, snapshot| snapshot.turn < keep),
+            None => self.snapshots.clear(),
+        }
         self.execution_receipts.clear();
         self.updated_at = Utc::now().to_rfc3339();
         Ok(restored)
@@ -490,7 +519,9 @@ impl Session {
         }
         let removed = self.messages.split_off(keep);
         self.redo_stack.push(removed.clone());
-        self.snapshots.clear();
+        // 取优合并（远端 engine）：保留被截断段落之前的快照，仅清掉被截断段落的
+        // 写操作归属（文件回滚由调用方 `revert_from(keep)` 执行）。
+        self.snapshots.retain(|_, snapshot| snapshot.turn < keep);
         self.execution_receipts.clear();
         self.updated_at = Utc::now().to_rfc3339();
         removed

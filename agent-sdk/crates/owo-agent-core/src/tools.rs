@@ -928,6 +928,7 @@ async fn write_file_body(
             crate::session::SnapshotEntry {
                 original_b64: original,
                 expected_after_sha256: None,
+                turn: ctx.session.messages.len(),
             },
         );
     }
@@ -1248,6 +1249,7 @@ impl Tool for ApplyPatchTool {
                         crate::session::SnapshotEntry {
                             original_b64: Some(BASE64.encode(content.as_bytes())),
                             expected_after_sha256: None,
+                            turn: ctx.session.messages.len(),
                         }
                     });
                     tokio::fs::remove_file(&abs)

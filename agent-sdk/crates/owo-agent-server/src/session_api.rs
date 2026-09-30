@@ -506,7 +506,10 @@ pub(super) async fn rewind_session(
     let _session_guard = owo_agent_server::acquire_session_lock(&state, &id).await?;
     let mut session = load_session(&state, &id)?;
     if request.keep < session.messages.len() {
-        session.revert().await.map_err(|error| {
+        // 取优合并（远端 engine）：只回滚被截断段落的写操作（revert_from），
+        // 更早回合的快照保留给 /diff 与后续 /revert；必须在 rewind 之前执行
+        // （rewind 会清掉被截断段落的快照归属）。
+        session.revert_from(request.keep).await.map_err(|error| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("回滚失败：{error}"),

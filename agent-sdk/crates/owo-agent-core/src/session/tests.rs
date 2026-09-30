@@ -121,6 +121,7 @@ async fn rewind_and_revert_restores_files_before_truncating_history() {
         SnapshotEntry {
             original_b64: Some(BASE64.encode("before")),
             expected_after_sha256: Some(crate::CasStore::hash_of(b"after")),
+            turn: 0,
         },
     );
 
@@ -150,6 +151,7 @@ async fn execution_receipt_revert_is_scoped_and_persistable() {
         SnapshotEntry {
             original_b64: Some(BASE64.encode("before")),
             expected_after_sha256: Some(crate::CasStore::hash_of(b"after")),
+            turn: 0,
         },
     );
     std::fs::write(&path, "after").unwrap();
@@ -191,6 +193,7 @@ async fn revert_conflict_preflight_prevents_partial_overwrite() {
         SnapshotEntry {
             original_b64: Some(BASE64.encode("before a")),
             expected_after_sha256: Some(crate::CasStore::hash_of(b"agent version")),
+            turn: 0,
         },
     );
     session.snapshots.insert(
@@ -198,6 +201,7 @@ async fn revert_conflict_preflight_prevents_partial_overwrite() {
         SnapshotEntry {
             original_b64: Some(BASE64.encode("before b")),
             expected_after_sha256: Some(crate::CasStore::hash_of(b"agent version")),
+            turn: 0,
         },
     );
 
@@ -236,6 +240,7 @@ async fn legacy_snapshot_without_write_hash_fails_closed() {
         SnapshotEntry {
             original_b64: Some(BASE64.encode("before")),
             expected_after_sha256: None,
+            turn: 0,
         },
     );
 
@@ -265,6 +270,7 @@ async fn rewind_does_not_change_files_when_keep_is_current_length() {
         SnapshotEntry {
             original_b64: Some(BASE64.encode("before")),
             expected_after_sha256: Some(crate::CasStore::hash_of(b"after")),
+            turn: 0,
         },
     );
 
@@ -324,4 +330,43 @@ fn title_archive_pin_round_trip() {
     assert!(!child.pinned);
     assert!(!child.archived);
     assert_eq!(child.display_title(), "给 parseConfig 补测试");
+}
+
+/// 取优合并（远端 engine）：`revert_from(keep)` 只回滚被截断段落（turn >= keep）
+/// 的写操作，更早回合的快照保留（/diff 与后续 /revert 仍可见）。
+#[tokio::test]
+async fn revert_from_only_rolls_back_truncated_turns() {
+    let workspace =
+        std::env::temp_dir().join(format!("owo-session-revert-from-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let early = workspace.join("early.txt");
+    let late = workspace.join("late.txt");
+    std::fs::write(&early, "early-after").unwrap();
+    std::fs::write(&late, "late-after").unwrap();
+
+    let mut session = Session::new(&workspace, "mock", None);
+    session.snapshots.insert(
+        early.to_string_lossy().replace('\\', "/"),
+        SnapshotEntry {
+            original_b64: Some(BASE64.encode("early-before")),
+            expected_after_sha256: Some(crate::CasStore::hash_of(b"early-after")),
+            turn: 1,
+        },
+    );
+    session.snapshots.insert(
+        late.to_string_lossy().replace('\\', "/"),
+        SnapshotEntry {
+            original_b64: Some(BASE64.encode("late-before")),
+            expected_after_sha256: Some(crate::CasStore::hash_of(b"late-after")),
+            turn: 3,
+        },
+    );
+
+    let restored = session.revert_from(2).await.unwrap();
+    assert_eq!(restored.len(), 1, "只应回滚被截断段落：{restored:?}");
+    assert_eq!(std::fs::read_to_string(&early).unwrap(), "early-after");
+    assert_eq!(std::fs::read_to_string(&late).unwrap(), "late-before");
+    assert_eq!(session.snapshots.len(), 1, "更早回合的快照必须保留");
+    assert!(session.snapshots.values().all(|snapshot| snapshot.turn < 2));
+    let _ = std::fs::remove_dir_all(&workspace);
 }
