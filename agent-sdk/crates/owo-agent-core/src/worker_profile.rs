@@ -79,8 +79,20 @@ impl WorkerProfile {
     ///   只读文件面；未知角色同样落这里（默认 deny）。
     pub fn for_role(role: &str, budget_calls: usize) -> Self {
         let name = role.trim().to_ascii_lowercase();
-        const IMPLEMENTER_KEYWORDS: [&str; 4] = ["implementer", "builder", "finalizer", "drafter"];
-        let is_implementer = IMPLEMENTER_KEYWORDS.iter().any(|k| name.contains(k));
+        // 写角色关键词：实现/交付族。**必须包含通用 producer/writer/leader**——
+        // 否则 `producer_role_name` 对未知分类返回的 "producer"（以及 forced team
+        // 的 "leader"）会落进只读分支：团队"成功"却什么都没写（"草草了事"的根因）。
+        // 注意判定顺序：researcher 分支在前，"brief_writer" 仍是只读研究角色。
+        const WRITER_KEYWORDS: [&str; 7] = [
+            "implementer",
+            "builder",
+            "finalizer",
+            "drafter",
+            "producer",
+            "writer",
+            "leader",
+        ];
+        let is_implementer = WRITER_KEYWORDS.iter().any(|k| name.contains(k));
         let is_researcher = name.starts_with("researcher")
             || name.contains("research")
             || name.contains("brief_writer");
@@ -90,25 +102,8 @@ impl WorkerProfile {
             budget_calls
         })
         .clamp(1, PROFILE_MAX_TURNS_CAP);
-        if is_implementer {
-            Self {
-                visible_tools: [
-                    "read_file",
-                    "write_file",
-                    "list_dir",
-                    "search_files",
-                    "run_command",
-                ]
-                .iter()
-                .map(|tool| (*tool).to_string())
-                .collect(),
-                read_only: false,
-                write_allowed_paths: Vec::new(),
-                max_turns,
-                can_use_browser: false,
-                can_run_command: true,
-            }
-        } else if is_researcher {
+        if is_researcher {
+            // 研究族优先于写角色判定（brief_writer 含 "writer" 但只读）。
             Self {
                 visible_tools: [
                     "read_file",
@@ -126,6 +121,26 @@ impl WorkerProfile {
                 max_turns,
                 can_use_browser: true,
                 can_run_command: false,
+            }
+        } else if is_implementer {
+            Self {
+                // 写角色的工具面：读写 + 搜索 + 执行（白名单写工具由
+                // `build_registry` 装配；注册表面即权限边界）。
+                visible_tools: [
+                    "read_file",
+                    "write_file",
+                    "list_dir",
+                    "search_files",
+                    "run_command",
+                ]
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
+                read_only: false,
+                write_allowed_paths: Vec::new(),
+                max_turns,
+                can_use_browser: false,
+                can_run_command: true,
             }
         } else {
             Self {
@@ -362,6 +377,26 @@ mod tests {
             );
         }
         assert_eq!(names.len(), 5, "implementer 不应有多余工具：{names:?}");
+    }
+
+    #[test]
+    fn generic_producer_writer_leader_roles_are_writers() {
+        // 回归：`producer_role_name` 对未知分类返回 "producer"，forced team 用
+        // "leader"，文档族用 "writer"——这些都必须能落盘，否则团队"成功"却没产出。
+        for role in ["producer", "writer", "leader", "builder", "implementer"] {
+            let profile = WorkerProfile::for_role(role, 6);
+            assert!(profile.is_writer(), "{role} 应为写角色");
+            assert!(profile.can_run_command, "{role} 应可执行命令");
+            let names = tool_names(&profile.build_registry(Vec::new()));
+            assert!(
+                names.iter().any(|name| name == "write_file"),
+                "{role} 注册表缺 write_file：{names:?}"
+            );
+        }
+        // brief_writer 仍走研究族（只读），不被 "writer" 关键词误判为写角色。
+        let brief = WorkerProfile::for_role("brief_writer", 6);
+        assert!(brief.read_only, "brief_writer 必须保持只读");
+        assert!(!brief.is_writer(), "brief_writer 不应是写角色");
     }
 
     #[test]

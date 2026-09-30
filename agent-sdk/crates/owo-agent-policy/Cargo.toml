@@ -36,3 +36,7 @@ uuid.workspace = true
 # thiserror / futures / once_cell / parking_lot 一并加进扫描词表。
 tracing.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# 内联测试用（WorkspaceApprover 的 decide 是 async 接口）。
+tokio.workspace = true

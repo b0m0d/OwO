@@ -700,6 +700,9 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "abort",
     "clear",
     "compact",
+    "goal",
+    "todo",
+    "team",
     "review",
     "mention",
     "history",
@@ -838,6 +841,76 @@ pub(crate) fn new_repl_editor() -> rustyline::Result<ReplEditor> {
 // Codex 对齐命令的共享实现（本地 REPL / Daemon REPL 共用）
 // ---------------------------------------------------------------------------
 
+/// 目标模式完成标记：模型在回复最后一行单独输出它表示目标达成。
+pub(crate) const GOAL_DONE_MARKER: &str = "GOAL_DONE";
+
+/// 目标模式状态（会话内）。
+pub(crate) struct GoalState {
+    pub objective: String,
+    pub iterations: usize,
+    pub done: bool,
+}
+
+/// `/goal` 最大自动推进轮数（env `OWO_GOAL_MAX_ITERATIONS`，默认 25）。
+pub(crate) fn goal_max_iterations() -> usize {
+    std::env::var("OWO_GOAL_MAX_ITERATIONS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(25)
+}
+
+/// 目标模式首轮提示。
+pub(crate) fn goal_first_prompt(objective: &str) -> String {
+    format!(
+        "【目标模式】目标：{objective}\n\n请开始推进该目标。完成后，在回复的**最后一行单独**输出 \
+         {GOAL_DONE_MARKER}；未完成时不要输出该标记，继续推进。"
+    )
+}
+
+/// 目标模式续推提示。
+pub(crate) fn goal_continue_prompt(objective: &str, iteration: usize) -> String {
+    format!(
+        "【目标模式·第 {iteration} 轮】目标：{objective}\n\n请继续推进未完成部分。若目标已全部完成，\
+         在回复的**最后一行单独**输出 {GOAL_DONE_MARKER}；否则继续推进，不要输出该标记。"
+    )
+}
+
+/// 目标激活且未完成时，把目标附到输入前；否则原样返回。
+pub(crate) fn goal_context_prompt(goal: Option<&GoalState>, line: &str) -> String {
+    match goal {
+        Some(goal) if !goal.done => format!("【当前目标】{}\n\n{line}", goal.objective),
+        _ => line.to_string(),
+    }
+}
+
+/// 高风险权限档位确认：交互终端要求输入 `yes`；管道模式要求显式 `--yes`。
+/// 返回 true 表示允许切换。
+pub(crate) fn confirm_high_risk_profile(profile: &str, allow_yes_flag: bool) -> bool {
+    use std::io::{IsTerminal, Write};
+    if !matches!(profile, "unrestricted" | "danger_full_access") {
+        return true;
+    }
+    println!(
+        "{}",
+        "⚠ 完全权限（unrestricted）：允许读写工作区外任意路径、执行任意命令并放开网络。".yellow()
+    );
+    println!(
+        "{}",
+        "  deny 黑名单、审计与注入类确认仍然生效；越界改动不可回滚。".yellow()
+    );
+    if !std::io::stdin().is_terminal() {
+        return allow_yes_flag;
+    }
+    print!("确认切换到 unrestricted？输入 yes 继续：");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    line.trim().eq_ignore_ascii_case("yes")
+}
+
 /// `/review [额外关注]` 的默认提示。
 pub(crate) fn review_prompt(extra: Option<&str>) -> String {
     match extra {
@@ -971,6 +1044,39 @@ mod repl_completion_tests {
     fn review_prompt_has_default_and_extra() {
         assert!(super::review_prompt(None).contains("审查"));
         assert!(super::review_prompt(Some("安全性")).contains("安全性"));
+    }
+
+    #[test]
+    fn goal_prompts_carry_objective_and_marker() {
+        let first = super::goal_first_prompt("重构登录模块");
+        assert!(first.contains("重构登录模块"));
+        assert!(first.contains(super::GOAL_DONE_MARKER));
+        let next = super::goal_continue_prompt("重构登录模块", 3);
+        assert!(next.contains("第 3 轮"));
+        assert!(next.contains(super::GOAL_DONE_MARKER));
+    }
+
+    #[test]
+    fn goal_context_attached_only_while_active() {
+        let active = super::GoalState {
+            objective: "重构登录模块".to_string(),
+            iterations: 0,
+            done: false,
+        };
+        let attached = super::goal_context_prompt(Some(&active), "先补单元测试");
+        assert!(attached.contains("【当前目标】重构登录模块"), "{attached}");
+        assert!(attached.contains("先补单元测试"), "{attached}");
+
+        let done = super::GoalState {
+            objective: "重构登录模块".to_string(),
+            iterations: 2,
+            done: true,
+        };
+        assert_eq!(
+            super::goal_context_prompt(Some(&done), "普通输入"),
+            "普通输入"
+        );
+        assert_eq!(super::goal_context_prompt(None, "普通输入"), "普通输入");
     }
 
     #[test]

@@ -444,6 +444,8 @@ impl SqliteSessionStore {
             archived: row.14,
             pinned: row.15,
             model_override: row.16,
+            // 任务清单暂不落库（会话内存态）；需要跨重启保留时再补列迁移。
+            todos: Vec::new(),
         })
     }
 }

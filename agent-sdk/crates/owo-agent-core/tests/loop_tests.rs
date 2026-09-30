@@ -11,6 +11,73 @@ use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+/// 父代理经 `subagent` 工具委派时，子代理的工具进度必须外发到父回合的事件流
+/// （`sub:` 前缀）；否则 CLI 上子代理是黑盒，用户看不到它在干什么。
+#[tokio::test]
+async fn subagent_tool_forwards_nested_events_to_parent_stream() {
+    let workspace = temp_workspace("subagent-nested-events");
+    let provider = ScriptedProvider::new(vec![
+        call("call-1", "subagent", json!({ "task": "写入 nested.txt" })),
+        call(
+            "call-2",
+            "write_file",
+            json!({ "path": "nested.txt", "content": "hi" }),
+        ),
+        ModelOutput::Text(
+            r#"{"status":"done","summary":"已写入 nested.txt","artifact":{"kind":"text","format":"text","content":"nested.txt = hi"},"evidence":[],"open_issues":[]}"#
+                .to_string(),
+        ),
+        // Step 3 质量门：委派返回后自动起只读复核（本脚本给"通过"）。
+        ModelOutput::Text(
+            r#"{"status":"done","summary":"{\"approved\":true,\"score\":90}","evidence":[],"open_issues":[]}"#
+                .to_string(),
+        ),
+        ModelOutput::Text("父代理：子代理已完成".to_string()),
+    ]);
+    let agent = build_agent(&workspace, provider);
+    let mut session = Session::new(&workspace, "mock".to_string(), None);
+    let abort = AtomicBool::new(false);
+    let approver = AutoApprover { allow: true };
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let capture = Arc::clone(&seen);
+    let mut on_event = |event: &TurnEvent| {
+        let label = match event {
+            TurnEvent::ToolStart { tool, .. } => format!("start:{tool}"),
+            TurnEvent::ToolResult { tool, .. } => format!("result:{tool}"),
+            TurnEvent::PermissionRequest(request) => format!("permission:{}", request.tool),
+            _ => return,
+        };
+        capture.lock().expect("事件锁中毒").push(label);
+    };
+    agent
+        .run_turn(
+            &mut session,
+            "委派子代理写文件",
+            &approver,
+            &abort,
+            &mut on_event,
+        )
+        .await
+        .unwrap();
+
+    let seen = seen.lock().expect("事件锁中毒").clone();
+    assert!(
+        seen.iter().any(|label| label == "start:sub:write_file"),
+        "子代理工具启动事件必须外发：{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|label| label == "result:sub:write_file"),
+        "子代理工具结果事件必须外发：{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|label| label == "permission:write_file"),
+        "子代理审批请求必须外发（否则等待超时）：{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|label| label == "start:subagent"),
+        "父代理自身的工具事件仍在：{seen:?}"
+    );
+}
 struct ScriptedProvider {
     script: Mutex<VecDeque<ModelOutput>>,
 }
@@ -121,6 +188,72 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> ModelOutput {
     }])
 }
 
+/// 质量门（Step 3）：复核不通过 → 按复核意见返工一次，返工结果作为委派结果返回。
+#[tokio::test]
+async fn subagent_review_failure_triggers_one_rework() {
+    let workspace = temp_workspace("subagent-review-rework");
+    let provider = ScriptedProvider::new(vec![
+        call(
+            "call-1",
+            "subagent",
+            json!({ "task": "写 hello.txt（验收：内容为 hi 且有回读证据）" }),
+        ),
+        // 上游交付（producer 契约输出）。
+        ModelOutput::Text(
+            r#"{"status":"done","summary":"已写 hello.txt","artifact":{"kind":"text","format":"text","content":"第一版交付"},"evidence":[],"open_issues":[]}"#
+                .to_string(),
+        ),
+        // 独立复核：不通过（无证据）。
+        ModelOutput::Text(
+            r#"{"status":"done","summary":"{\"approved\":false,\"score\":40,\"comments\":[\"没有回读证据\"]}","evidence":[],"open_issues":[]}"#
+                .to_string(),
+        ),
+        // 返工后的交付。
+        ModelOutput::Text(
+            r#"{"status":"done","summary":"已返工并回读验证","artifact":{"kind":"text","format":"text","content":"返工版交付"},"evidence":[{"source":"read_file","note":"回读 hello.txt 内容为 hi"}],"open_issues":[]}"#
+                .to_string(),
+        ),
+        // 父代理最终回复。
+        ModelOutput::Text("父代理：收到返工后的交付".to_string()),
+    ]);
+    let agent = build_agent(&workspace, provider);
+    let mut session = Session::new(&workspace, "mock".to_string(), None);
+    let abort = AtomicBool::new(false);
+    let approver = AutoApprover { allow: true };
+    let mut events: Vec<String> = Vec::new();
+    let mut on_event = |event: &TurnEvent| {
+        if let TurnEvent::ToolStart { tool, .. } = event {
+            events.push(tool.clone());
+        }
+    };
+    agent
+        .run_turn(
+            &mut session,
+            "委派子代理写文件并复核",
+            &approver,
+            &abort,
+            &mut on_event,
+        )
+        .await
+        .unwrap();
+
+    // 父代理最终文本是脚本第 5 条 —— 说明复核 + 返工确实各消耗了一次调用
+    // （若未返工，第 4 条会被父代理消费，最终文本会是返工契约 JSON）。
+    let last = session
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| message.content.clone())
+        .unwrap_or_default();
+    assert!(
+        last.contains("收到返工后的交付"),
+        "父代理应拿到返工后的交付：{last}"
+    );
+    assert!(
+        events.iter().any(|tool| tool == "subagent"),
+        "父代理的 subagent 工具事件应在：{events:?}"
+    );
+}
 fn temp_workspace(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("owo-agent-test-{name}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -781,33 +914,51 @@ async fn direct_subagent_invocation_returns_result() {
 }
 
 #[tokio::test]
-async fn direct_general_subagent_cannot_write_without_approval_channel() {
-    let workspace = temp_workspace("general-subagent-deny");
-    // 直呼通用子代理没有可回传的审批通道：Execute 级命令必须被拒绝
-    // （默认档位 Workspace 下工作区内 write 自动放行，改测命令执行路径）。
+async fn direct_general_subagent_uses_workspace_scoped_approver() {
+    let workspace = temp_workspace("general-subagent-workspace-scope");
+    // 直呼通用子代理没有可回传的审批通道 → 工作区范围审批器：
+    // 工作区内写/执行放行（否则 producer 角色"跑完什么都没改"），
+    // 工作区外写一律拒绝。
+    let outside = workspace
+        .parent()
+        .unwrap()
+        .join(format!("owo-outside-{}.txt", uuid::Uuid::new_v4()));
     let provider = ScriptedProvider::new(vec![
         call(
             "write-1",
             "run_command",
-            json!({ "command": "echo must not write > blocked.txt" }),
+            json!({ "command": "echo allowed > inside.txt" }),
+        ),
+        call(
+            "write-2",
+            "write_file",
+            json!({ "path": outside.to_string_lossy(), "content": "越界" }),
         ),
         ModelOutput::Text("已完成委派".to_string()),
         // 七期一路：producer 角色 done 必须携带 artifact；首轮自由文本经一次
         // 定向修复（第三个脚本输出）转为 WorkerOutputV1 契约 JSON。
         ModelOutput::Text(
-            r#"{"status":"done","summary":"已完成委派","artifact":{"kind":"text","format":"text","content":"已完成委派，写入被权限策略拒绝"},"evidence":[],"open_issues":[]}"#
+            r#"{"status":"done","summary":"已完成委派","artifact":{"kind":"text","format":"text","content":"工作区内写入成功，越界写入被拒"},"evidence":[],"open_issues":[]}"#
                 .to_string(),
         ),
     ]);
     let agent = build_agent(&workspace, provider);
 
     let text = agent
-        .run_subagent(&workspace, "mock", "写入 blocked.txt", false)
+        .run_subagent(&workspace, "mock", "写入 inside.txt 并尝试越界写", false)
         .await
         .unwrap();
 
     assert!(text.contains("已完成"));
-    assert!(!workspace.join("blocked.txt").exists());
+    assert!(
+        workspace.join("inside.txt").exists(),
+        "工作区内写入必须真正落盘（旧实现一律拒绝 → producer 无法完成工作）"
+    );
+    assert!(
+        !outside.exists(),
+        "工作区外写入必须被拒绝（无交互通道也不能越界）"
+    );
+    let _ = std::fs::remove_file(&outside);
 }
 
 #[tokio::test]

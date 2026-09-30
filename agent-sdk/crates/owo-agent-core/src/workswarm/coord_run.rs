@@ -139,12 +139,25 @@ impl TeamCoordinator {
             && (selection == crate::team_strategy::TeamSelectionMode::ForceSingle
                 || req.roles.is_empty());
         if trim_to_single {
-            // 单 Agent 判定：保留首个角色（保留用户显式 worker 绑定），其余裁剪。
+            // 单 Agent 判定：**优先保留可交付的写角色**（builder/producer/writer/leader），
+            // 而不是盲目保留首个角色——默认接力的首个是只读 planner，裁到它会让团队
+            // "成功"却零产出（"草草了事"的根因）。研究类任务没有写角色时保留首个
+            // （researcher 只读是正确语义）。
+            let keep_index = specs
+                .iter()
+                .position(|spec| {
+                    crate::worker_profile::WorkerProfile::for_role(&spec.role, 0).is_writer()
+                })
+                .unwrap_or(0);
+            let mut kept = specs.remove(keep_index);
+            // 上游角色已被裁掉：清空依赖（保持 DAG 可拓扑排序）。
+            kept.depends_on.clear();
             strategy_plan.reasons.push(format!(
-                "判定单 Agent：已裁剪 {} 个附加角色（评审/综合按需在评审闭环补充）",
-                specs.len() - 1
+                "判定单 Agent：保留可交付角色 {}（已裁剪 {} 个附加角色，上游依赖解除）",
+                kept.role,
+                specs.len()
             ));
-            specs.truncate(1);
+            specs = vec![kept];
         }
 
         // 八期一路：模板级自适应角色策略——简单任务自动减少 Worker（创建期裁剪）。

@@ -7,9 +7,8 @@
 
 use crate::support::*;
 use crate::ui_output::{
-    parse_approval_response, print_permission_card, print_sse_event_human, render_error_jsonl,
-    render_event_jsonl, render_final_result_jsonl, render_final_result_plain, OutputMode,
-    PermissionCard, PermissionsProfile,
+    parse_approval_response, render_error_jsonl, render_event_jsonl, render_final_result_jsonl,
+    render_final_result_plain, OutputMode, PermissionsProfile, StreamPrinter,
 };
 use clap::Args;
 use colored::Colorize;
@@ -67,9 +66,8 @@ pub(crate) async fn run_turn(
     let mut stream = client.open_turn(&session.id, &args.prompt).await?;
     let mut steps = 0usize;
     let mut final_text: Option<String> = None;
-    let mut streamed = false;
     let mut stream_error: Option<String> = None;
-    let mut markdown = crate::markdown::MarkdownStream::new();
+    let mut printer = StreamPrinter::new();
 
     while let Some(event) = stream.next_event().await {
         let event = match event {
@@ -79,31 +77,23 @@ pub(crate) async fn run_turn(
                 break;
             }
         };
+        let human = matches!(output, OutputMode::Human);
         match &event {
-            SseEvent::TokenDelta { delta } => {
-                if matches!(output, OutputMode::Human) {
-                    streamed = true;
-                    markdown.push(delta);
+            SseEvent::TokenDelta { .. } => {
+                if human {
+                    printer.print_sse(&event);
                 }
             }
             SseEvent::Final { text } => {
                 final_text = Some(text.clone());
-                if matches!(output, OutputMode::Human) {
-                    if streamed {
-                        markdown.finish();
-                        streamed = false;
-                    } else {
-                        println!("\n{}\n", "── 结果 ──".bold());
-                        markdown.push(text);
-                        markdown.finish();
-                    }
+                if human {
+                    printer.print_sse(&event);
                 }
                 emit_event(output, &event);
             }
             SseEvent::PermissionRequest { request_id, .. } => {
-                if streamed {
-                    markdown.finish();
-                    streamed = false;
+                if human {
+                    printer.print_sse(&event);
                 }
                 emit_event(output, &event);
                 let response = decide_permission(output, trusted, &event)?;
@@ -116,23 +106,15 @@ pub(crate) async fn run_turn(
             }
             SseEvent::ToolResult { .. } => {
                 steps += 1;
-                if streamed {
-                    markdown.finish();
-                    streamed = false;
-                }
                 emit_event(output, &event);
-                if matches!(output, OutputMode::Human) {
-                    print_sse_event_human(&event);
+                if human {
+                    printer.print_sse(&event);
                 }
             }
             _ => {
-                if streamed {
-                    markdown.finish();
-                    streamed = false;
-                }
                 emit_event(output, &event);
-                if matches!(output, OutputMode::Human) {
-                    print_sse_event_human(&event);
+                if human {
+                    printer.print_sse(&event);
                 }
             }
         }
@@ -145,8 +127,8 @@ pub(crate) async fn run_turn(
 
     let diffs = client.session_diff(&session.id).await.unwrap_or_default();
     let diff_paths: Vec<String> = diffs.iter().map(|diff| diff.path.clone()).collect();
-    if matches!(output, OutputMode::Human) && streamed {
-        markdown.finish();
+    if matches!(output, OutputMode::Human) {
+        printer.finish();
     }
     render_final(output, final_text.as_deref(), steps, &diff_paths);
     if abort.load(Ordering::Relaxed) {
@@ -225,10 +207,6 @@ fn decide_permission(
         tool,
         reason,
         level,
-        args,
-        redacted_args,
-        risk_note,
-        explain,
         ..
     } = event
     else {
@@ -246,16 +224,7 @@ fn decide_permission(
         return Ok(parse_approval_response("deny"));
     }
     if matches!(output, OutputMode::Human) {
-        // 审批卡走 stdout，与流式结果同观感（repl 一致）。
-        print_permission_card(&PermissionCard {
-            tool,
-            level: level.as_deref(),
-            reason,
-            args: Some(args),
-            redacted_args: redacted_args.as_ref(),
-            risk_note: risk_note.as_deref(),
-            explain: explain.as_ref(),
-        });
+        // 审批卡已由 StreamPrinter 输出（含参数/风险/影响），这里只给交互提示。
     } else {
         eprintln!(
             "{} 需要 {} 权限：{tool}（{reason}）",

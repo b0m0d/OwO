@@ -28,6 +28,8 @@ pub enum FilesystemScope {
     WorkspaceRead,
     /// 工作区内可写（越界路径仍由 `resolve_within` 拒绝）。
     WorkspaceWrite,
+    /// 无文件范围限制（越界路径放行；高风险，仅 `unrestricted` 档位投影）。
+    Unrestricted,
     /// 自定义：范围由 `scopes` 说，不假装等于上面三档。
     Custom,
 }
@@ -51,6 +53,7 @@ impl FilesystemScope {
             Self::None => "none",
             Self::WorkspaceRead => "workspace_read",
             Self::WorkspaceWrite => "workspace_write",
+            Self::Unrestricted => "unrestricted",
             Self::Custom => "custom",
         }
     }
@@ -60,6 +63,7 @@ impl FilesystemScope {
             Self::None => "不开放",
             Self::WorkspaceRead => "工作区只读",
             Self::WorkspaceWrite => "工作区可写",
+            Self::Unrestricted => "无范围限制",
             Self::Custom => "自定义范围",
         }
     }
@@ -177,6 +181,13 @@ impl PermissionSpec {
                 RuleScope::Unrestricted,
                 PersistenceScope::Workspace,
             ),
+            // Unrestricted：越界文件访问 + 命令/网络不设名单（高风险，显式 opt-in）。
+            PermissionProfile::Unrestricted => (
+                FilesystemScope::Unrestricted,
+                RuleScope::Unrestricted,
+                RuleScope::Unrestricted,
+                PersistenceScope::Workspace,
+            ),
             // Custom 档位本身就说明"范围在别处"，不能替它编一个看起来整齐的词表值。
             PermissionProfile::Custom => (
                 FilesystemScope::Custom,
@@ -197,6 +208,9 @@ impl PermissionSpec {
     /// 反查最接近的既有档位（`Policy::set_spec` 用它同步档位；
     /// 只降不升：任何维度是 Deny 时绝不映射到 FullAccess）。
     pub fn nearest_profile(&self) -> PermissionProfile {
+        if self.filesystem == FilesystemScope::Unrestricted {
+            return PermissionProfile::Unrestricted;
+        }
         if self.filesystem == FilesystemScope::Custom {
             return PermissionProfile::Custom;
         }
@@ -224,6 +238,7 @@ impl PermissionSpec {
                 FilesystemScope::None => "deny",
                 FilesystemScope::WorkspaceRead => "allow",
                 FilesystemScope::WorkspaceWrite => "allow",
+                FilesystemScope::Unrestricted => "allow",
                 FilesystemScope::Custom => "ask",
             }
             .to_string(),
@@ -232,6 +247,7 @@ impl PermissionSpec {
                 FilesystemScope::WorkspaceRead | FilesystemScope::WorkspaceWrite => {
                     "工作区内路径".to_string()
                 }
+                FilesystemScope::Unrestricted => "全部路径（含工作区外）".to_string(),
                 FilesystemScope::Custom => self
                     .scopes
                     .iter()
@@ -244,6 +260,7 @@ impl PermissionSpec {
                 FilesystemScope::None => "未开放文件系统".to_string(),
                 FilesystemScope::WorkspaceRead => "只读；写操作一律拒绝".to_string(),
                 FilesystemScope::WorkspaceWrite => "工作区内可写，越界路径拒绝".to_string(),
+                FilesystemScope::Unrestricted => "无范围限制：越界路径放行（高风险）".to_string(),
                 FilesystemScope::Custom => "自定义范围（未列出的路径按询问处理）".to_string(),
             },
         });
@@ -331,6 +348,9 @@ impl PermissionSpec {
             FilesystemScope::WorkspaceRead => "文件：只读，写入一律拒".to_string(),
             FilesystemScope::WorkspaceWrite => {
                 "文件：工作区内可写；覆盖/删除不可自动撤销（依赖变更集回滚）".to_string()
+            }
+            FilesystemScope::Unrestricted => {
+                "文件：无范围限制，可读写工作区外任意路径（高风险，不可回滚）".to_string()
             }
             FilesystemScope::Custom => format!("文件：自定义 {} 条范围", self.scopes.len()),
         }];

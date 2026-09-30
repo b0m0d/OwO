@@ -143,6 +143,7 @@ impl Worker for AgentSubagentWorker {
                     depth: 0,
                     max_turns: 12,
                     model,
+                    events: None,
                 };
                 runner.run(&self.workspace, prompt, read_only).await
             }

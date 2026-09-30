@@ -661,10 +661,18 @@ impl Repl {
         match parts.next() {
             Some("set") => {
                 let profile = parts.next().ok_or(
-                    "用法：/permissions set <read_only|workspace|auto_review|full_access|custom>",
+                    "用法：/permissions set <read_only|workspace|auto_review|full_access|unrestricted|custom> [--yes]",
                 )?;
+                let yes = parts.any(|part| part == "--yes");
+                if !crate::support::confirm_high_risk_profile(profile, yes) {
+                    println!(
+                        "{}",
+                        "已取消（管道模式切换 unrestricted 需显式追加 --yes）".yellow()
+                    );
+                    return Ok(());
+                }
                 let parsed = PermissionProfile::parse(profile).ok_or_else(|| {
-                    format!("未知档位：{profile}（可选 read_only / workspace / auto_review / full_access / custom）")
+                    format!("未知档位：{profile}（可选 read_only / workspace / auto_review / full_access / unrestricted / custom）")
                 })?;
                 self.agent.set_permission_profile(parsed);
                 if parsed == PermissionProfile::ReadOnly {

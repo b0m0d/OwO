@@ -157,9 +157,11 @@ fn print_help() {
     println!("  /diff               查看本次会话文件改动");
     println!("  /undo               回滚本次会话全部写操作");
     println!("  /status             查看工作区/模型/会话状态");
-    println!("  /permissions [set <read_only|workspace|auto_review|full_access|custom>]  查看/切换权限档位");
+    println!("  /permissions [set <read_only|workspace|auto_review|full_access|unrestricted|custom>]  查看/切换权限档位（unrestricted=越界+命令执行，高风险）");
     println!("  /approvals [clear]  查看/清除本会话「总是允许」的工具（--local）");
     println!("  /compact            立即压缩会话历史（省 token）");
+    println!("  /goal [目标|status|clear]  目标模式：未完成时持续自动推进，模型标记完成才停");
+    println!("  /todo               查看会话任务清单（todo 工具维护）");
     println!("  /review [提示]      发起一次「审查工作区改动」的回合");
     println!("  /mention <路径>     展示文件引用信息（字节/行数）");
     println!("  /history [n]        查看最近输入历史");

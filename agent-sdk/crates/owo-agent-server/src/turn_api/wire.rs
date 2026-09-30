@@ -29,10 +29,17 @@ pub(crate) fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {
                 explain: Some(explain),
             })
         }
-        owo_agent_core::TurnEvent::ToolStart { id, tool } => Some(SseEvent::ToolUse {
+        owo_agent_core::TurnEvent::ToolStart {
+            id,
+            tool,
+            args_preview,
+        } => Some(SseEvent::ToolUse {
             id: id.clone(),
             tool: tool.clone(),
-            args: Value::Null,
+            args: args_preview
+                .as_ref()
+                .map(|preview| Value::String(preview.clone()))
+                .unwrap_or(Value::Null),
         }),
         owo_agent_core::TurnEvent::ToolResult {
             id,

@@ -43,6 +43,9 @@ pub enum PermissionProfile {
     AutoReview,
     /// 减少询问，但不绕过审计、秘密脱敏和不可恢复操作确认。
     FullAccess,
+    /// 完全权限（高风险，显式 opt-in）：允许**越界**文件访问与命令执行（等价 Codex
+    /// danger-full-access）；仍不绕过 deny 规则、审计、秘密脱敏与注入类确认。
+    Unrestricted,
     /// 用户按工具、路径、主机和时效组合规则。
     Custom,
 }
@@ -54,6 +57,7 @@ impl PermissionProfile {
             PermissionProfile::Workspace => "workspace",
             PermissionProfile::AutoReview => "auto_review",
             PermissionProfile::FullAccess => "full_access",
+            PermissionProfile::Unrestricted => "unrestricted",
             PermissionProfile::Custom => "custom",
         }
     }
@@ -64,6 +68,7 @@ impl PermissionProfile {
             "workspace" => Some(Self::Workspace),
             "auto_review" => Some(Self::AutoReview),
             "full_access" => Some(Self::FullAccess),
+            "unrestricted" | "danger_full_access" => Some(Self::Unrestricted),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -271,6 +276,103 @@ impl Approver for AutoApprover {
             Decision::Allow
         } else {
             Decision::Deny
+        }
+    }
+}
+
+/// 无交互审批通道（后台/嵌套子代理）用的工作区范围审批器。
+///
+/// 背景：直呼子代理（goal/plan 的 `AgentWorker`、`POST /subagent`）没有把审批卡
+/// 回传给用户的通道；此前用 `AutoApprover { allow: read_only }` 兜底，导致
+/// **producer 角色的写/执行一律被拒**——子代理"跑完了但什么都没改"，或者
+/// 在等待一个永远不会到来的审批（直到超时）。
+///
+/// 语义（与 WorkSwarm 的 `WorkspaceScopeApprover` 同口径）：
+/// - `Read` 恒放行（文件/命令路径已被 [`Policy`] 限制在工作区内）；
+/// - `Write` 仅当 `allow_writes` 且目标路径在工作区内（绝对/相对路径都支持，
+///   `\\?\` 前缀已剥离）——越界写一律拒绝；
+/// - `Execute` / `Inject` 仅当 `allow_writes`（危险命令片段仍由 [`Policy`] 黑名单
+///   拦截，`Inject` 级锚点熔断不经过审批层）。
+///
+/// 注意：本审批器**不放宽** [`Policy`] 的判定——它只处理策略层已经判为"需要询问"
+/// 的请求，且永远不放行工作区外的写入。
+pub struct WorkspaceApprover {
+    pub workspace: PathBuf,
+    /// 是否允许工作区内的写/执行（`false` = 只读子代理）。
+    pub allow_writes: bool,
+}
+
+impl WorkspaceApprover {
+    /// 工作区内的写路径判定：绝对路径直接用，相对路径相对 workspace 解析。
+    fn write_path_allowed(&self, raw: &str) -> bool {
+        let root = strip_verbatim_prefix(&self.workspace);
+        let candidate = if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            root.join(raw)
+        };
+        // 不要求路径已存在（新建文件），逐级向上找到最近的存在祖先再比对。
+        let resolved = nearest_existing_ancestor(&candidate);
+        resolved.starts_with(&root)
+    }
+}
+
+/// 最近的存在祖先（canonicalize 仅对存在路径有效；新建文件的父目录通常已存在）。
+fn nearest_existing_ancestor(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(&current) {
+            return strip_verbatim_prefix(&canonical);
+        }
+        match current.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => {
+                return strip_verbatim_prefix(&current);
+            }
+            Some(parent) => current = parent.to_path_buf(),
+            None => return strip_verbatim_prefix(&current),
+        }
+    }
+}
+
+/// 剥离 Windows canonicalize 产物前缀 `\\?\`（`\\?\C:\a` → `C:\a`）。
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[async_trait]
+impl Approver for WorkspaceApprover {
+    async fn decide(&self, request: &PermissionRequest) -> Decision {
+        match request.level {
+            Level::Read => Decision::Allow,
+            Level::Write => {
+                if !self.allow_writes {
+                    return Decision::Deny;
+                }
+                let path = request
+                    .args
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                // 无 path 参数的写级请求（如 apply_patch 的多文件补丁）保守拒绝：
+                // 多目标补丁无法在此逐条校验，交由带交互通道的路径处理。
+                if path.is_empty() || !self.write_path_allowed(path) {
+                    Decision::Deny
+                } else {
+                    Decision::Allow
+                }
+            }
+            Level::Execute | Level::Inject => {
+                if self.allow_writes {
+                    Decision::Allow
+                } else {
+                    Decision::Deny
+                }
+            }
         }
     }
 }
@@ -551,6 +653,12 @@ impl Policy {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
                 match self.resolve_within_workspace(path) {
                     Ok(_) => format!("{level} 文件操作（工作区内）", level = level.label()),
+                    Err(_) if self.profile() == PermissionProfile::Unrestricted => {
+                        format!(
+                            "{level} 文件操作（工作区外，unrestricted）",
+                            level = level.label()
+                        )
+                    }
                     Err(e) => format!("拒绝：{e}"),
                 }
             }
@@ -634,6 +742,12 @@ impl Policy {
                 Level::Inject => Decision::Ask,
                 Level::Read => Decision::Allow,
             },
+            // Unrestricted：完全权限（显式 opt-in）——读/写/执行放行，越界已在 evaluate
+            // 阶段放行；Inject 仍 Ask；deny 规则与维度收紧层已在上方生效。
+            PermissionProfile::Unrestricted => match request.level {
+                Level::Read | Level::Write | Level::Execute => Decision::Allow,
+                Level::Inject => Decision::Ask,
+            },
             PermissionProfile::Custom => match request.level {
                 Level::Write if request.reason.contains("工作区内") => Decision::Allow,
                 Level::Execute | Level::Inject => Decision::Ask,
@@ -702,6 +816,117 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // -----------------------------------------------------------------------
+    // WorkspaceApprover：无交互通道（后台/嵌套子代理）的工作区范围审批
+    // -----------------------------------------------------------------------
+
+    fn workspace_approver(workspace: &Path, allow_writes: bool) -> WorkspaceApprover {
+        WorkspaceApprover {
+            workspace: workspace.to_path_buf(),
+            allow_writes,
+        }
+    }
+
+    fn request(level: Level, args: serde_json::Value) -> PermissionRequest {
+        PermissionRequest::new("tool", args, level, "测试")
+    }
+
+    #[tokio::test]
+    async fn workspace_approver_allows_reads_and_in_workspace_writes() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-ws-approver-{}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let approver = workspace_approver(&workspace, true);
+        assert_eq!(
+            approver
+                .decide(&request(Level::Read, json!({ "path": "a.txt" })))
+                .await,
+            Decision::Allow,
+            "读恒放行（路径已由 Policy 限制在工作区内）"
+        );
+        assert_eq!(
+            approver
+                .decide(&request(Level::Write, json!({ "path": "sub/new.txt" })))
+                .await,
+            Decision::Allow,
+            "工作区内相对路径写应放行（新建文件的父目录无需存在）"
+        );
+        assert_eq!(
+            approver
+                .decide(&request(
+                    Level::Write,
+                    json!({ "path": workspace.join("abs.txt").to_string_lossy() })
+                ))
+                .await,
+            Decision::Allow,
+            "工作区内绝对路径写应放行"
+        );
+        assert_eq!(
+            approver
+                .decide(&request(Level::Execute, json!({ "command": "echo hi" })))
+                .await,
+            Decision::Allow,
+            "允许写时执行放行（危险片段仍由 Policy 黑名单拦截）"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn workspace_approver_denies_out_of_workspace_and_readonly() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-ws-approver-deny-{}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let approver = workspace_approver(&workspace, true);
+        let outside = workspace.parent().unwrap().join("owo-outside.txt");
+        assert_eq!(
+            approver
+                .decide(&request(
+                    Level::Write,
+                    json!({ "path": outside.to_string_lossy() })
+                ))
+                .await,
+            Decision::Deny,
+            "越界写必须拒绝（无交互通道也不能放开工作区外）"
+        );
+        assert_eq!(
+            approver
+                .decide(&request(Level::Write, json!({ "path": "../escape.txt" })))
+                .await,
+            Decision::Deny,
+            "相对路径越界同样拒绝"
+        );
+        assert_eq!(
+            approver
+                .decide(&request(Level::Write, json!({ "path": "" })))
+                .await,
+            Decision::Deny,
+            "无 path 参数的写级请求（多文件补丁）保守拒绝"
+        );
+
+        let read_only = workspace_approver(&workspace, false);
+        assert_eq!(
+            read_only
+                .decide(&request(Level::Write, json!({ "path": "a.txt" })))
+                .await,
+            Decision::Deny,
+            "只读模式拒绝工作区内写"
+        );
+        assert_eq!(
+            read_only
+                .decide(&request(Level::Execute, json!({ "command": "echo hi" })))
+                .await,
+            Decision::Deny,
+            "只读模式拒绝执行"
+        );
+        assert_eq!(
+            read_only
+                .decide(&request(Level::Read, json!({ "path": "a.txt" })))
+                .await,
+            Decision::Allow,
+            "只读模式仍允许读"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
     #[test]
     fn read_only_policy_denies_writes() {
         let policy = Policy::read_only(".");
@@ -735,6 +960,46 @@ mod tests {
             Decision::Deny,
             "越界写入在 evaluate 阶段拒绝"
         );
+    }
+
+    #[test]
+    fn unrestricted_profile_allows_out_of_workspace_but_keeps_danger_deny() {
+        // 显式 opt-in 的完全权限：越界文件放行，但 deny 黑名单仍然拒绝。
+        let policy = Policy::new(".");
+        policy.set_profile(PermissionProfile::Unrestricted);
+
+        let outside = if cfg!(windows) {
+            "C:/owo-outside.txt"
+        } else {
+            "/tmp/owo-outside.txt"
+        };
+        let read = policy.evaluate("read_file", &json!({ "path": outside }));
+        assert!(
+            !read.reason.starts_with("拒绝"),
+            "unrestricted 下越界不应拒绝：{}",
+            read.reason
+        );
+        assert_eq!(policy.decision(&read), Decision::Allow);
+        let write = policy.evaluate("write_file", &json!({ "path": outside }));
+        assert_eq!(policy.decision(&write), Decision::Allow);
+
+        let danger = policy.evaluate("run_command", &json!({ "command": "shutdown /s" }));
+        assert!(
+            danger.reason.starts_with("拒绝"),
+            "危险命令仍应拒绝：{}",
+            danger.reason
+        );
+        assert_eq!(policy.decision(&danger), Decision::Deny);
+
+        // 回到 workspace 档位：越界恢复拒绝。
+        policy.set_profile(PermissionProfile::Workspace);
+        let blocked = policy.evaluate("read_file", &json!({ "path": outside }));
+        assert!(
+            blocked.reason.starts_with("拒绝"),
+            "workspace 档位应拒绝越界：{}",
+            blocked.reason
+        );
+        assert_eq!(policy.decision(&blocked), Decision::Deny);
     }
 
     #[test]

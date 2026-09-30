@@ -425,9 +425,18 @@ impl ToolRegistry {
         // 保留历史基础工具顺序，避免不相关的模型提示变化。
         registry.register(ReadFileTool);
         registry.register(WriteFileTool);
+        registry.register(EditFileTool);
+        registry.register(ApplyPatchTool);
         registry.register(ListDirTool);
         registry.register(SearchFilesTool);
+        registry.register(GrepTool);
         registry.register_run_command();
+        registry.register(ShellOutputTool);
+        registry.register(KillShellTool);
+        registry.register(TodoTool);
+        registry.register(WebFetchTool);
+        registry.register(WebSearchTool);
+        registry.register(ReadImageTool);
         registry.register_delegation_tools();
         registry
     }
@@ -458,6 +467,8 @@ impl ToolRegistry {
         registry.register(ReadFileTool);
         registry.register(ListDirTool);
         registry.register(SearchFilesTool);
+        registry.register(GrepTool);
+        registry.register(ReadImageTool);
         registry
     }
 
@@ -752,15 +763,25 @@ pub(crate) fn resolve_session_path(ctx: &ToolContext, path: &str) -> Result<Path
     let base = ctx
         .workspace
         .canonicalize()
-        .map_err(|error| format!("工作区不可访问：{error}"))?;
-    let candidate = base.join(path);
+        .unwrap_or_else(|_| ctx.workspace.to_path_buf());
+    // 绝对路径直接采用（`Path::join` 对绝对路径会整体替换，且 canonicalize 可能不可用）。
+    let raw = Path::new(path);
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        base.join(path)
+    };
     let candidate = candidate.canonicalize().unwrap_or(candidate);
     let policy_workspace = ctx
         .policy
         .workspace()
         .canonicalize()
         .unwrap_or_else(|_| ctx.policy.workspace().to_path_buf());
-    if !candidate.starts_with(&policy_workspace) {
+    // 两侧统一去 Windows verbatim 前缀再比对（`\\?\C:\x` vs `C:\x` 否则恒不匹配）。
+    let candidate_cmp = strip_verbatim_prefix(&candidate);
+    let workspace_cmp = strip_verbatim_prefix(&policy_workspace);
+    let unrestricted = ctx.policy.profile() == crate::permissions::PermissionProfile::Unrestricted;
+    if !candidate_cmp.starts_with(&workspace_cmp) && !unrestricted {
         return Err(format!("路径越界：{path}"));
     }
     Ok(candidate)
@@ -773,10 +794,16 @@ impl Tool for ReadFileTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "read_file".into(),
-            description: "读取工作区内的文本文件内容".into(),
+            description: "读取工作区内的文本文件（支持 offset/limit 分页与行号，默认 400 行）"
+                .into(),
             input_schema: json!({
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
+                "properties": {
+                    "path": { "type": "string" },
+                    "offset": { "type": "integer", "description": "起始行（1-based，默认 1）" },
+                    "limit": { "type": "integer", "description": "读取行数（默认 400，上限 2000）" },
+                    "number": { "type": "boolean", "description": "是否输出行号（默认 false）" }
+                },
                 "required": ["path"]
             }),
             effect: None,
@@ -785,13 +812,43 @@ impl Tool for ReadFileTool {
 
     async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
         let path = required_string(&args, "path")?;
+        let offset = args
+            .get("offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .max(1) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(400)
+            .clamp(1, 2000) as usize;
+        let number = args.get("number").and_then(Value::as_bool).unwrap_or(false);
         let abs = resolve_session_path(ctx, &path)?;
-        let content = tokio::fs::read_to_string(&abs)
+        let raw = tokio::fs::read_to_string(&abs)
             .await
             .map_err(|e| format!("读取 {path} 失败：{e}"))?;
+        let total_lines = raw.lines().count();
+        let start = offset.min(total_lines.saturating_add(1));
+        let selected: Vec<&str> = raw.lines().skip(start - 1).take(limit).collect();
+        let end_line = start + selected.len().saturating_sub(1);
+        let truncated = end_line < total_lines;
+        let content = if number {
+            selected
+                .iter()
+                .enumerate()
+                .map(|(index, line)| format!("{:>5}\t{line}", start + index))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            selected.join("\n")
+        };
         Ok(json!({
             "path": path,
             "content": content,
+            "start_line": start,
+            "end_line": end_line,
+            "total_lines": total_lines,
+            "truncated": truncated,
             "bytes": content.len(),
         }))
     }
@@ -892,6 +949,802 @@ async fn write_file_body(
     }))
 }
 
+/// `edit_file`：精确替换（`old_string` 必须唯一命中，除非 `replace_all`）。
+/// 复用 [`write_file_body`] 的快照/冲突校验，可 diff/revert。
+struct EditFileTool;
+
+#[async_trait]
+impl Tool for EditFileTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "edit_file".into(),
+            description: "精确替换文件片段（old_string → new_string；默认要求唯一命中，replace_all=true 替换全部）".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "old_string": { "type": "string" },
+                    "new_string": { "type": "string" },
+                    "replace_all": { "type": "boolean" }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let path = required_string(&args, "path")?;
+        let old_string = required_string(&args, "old_string")?;
+        let new_string = required_string(&args, "new_string")?;
+        let replace_all = args
+            .get("replace_all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if old_string.is_empty() {
+            return Err("old_string 不能为空（新增内容请用 write_file / apply_patch）".to_string());
+        }
+        let abs = resolve_session_path(ctx, &path)?;
+        let original = tokio::fs::read_to_string(&abs)
+            .await
+            .map_err(|e| format!("读取 {path} 失败：{e}"))?;
+        let occurrences = original.matches(old_string.as_str()).count();
+        if occurrences == 0 {
+            return Err(format!(
+                "未找到 old_string（{path}）：请确认空白/缩进与文件一致"
+            ));
+        }
+        if occurrences > 1 && !replace_all {
+            return Err(format!(
+                "old_string 命中 {occurrences} 处（不唯一）：请扩大上下文或设置 replace_all=true"
+            ));
+        }
+        let updated = if replace_all {
+            original.replace(old_string.as_str(), new_string.as_str())
+        } else {
+            original.replacen(old_string.as_str(), new_string.as_str(), 1)
+        };
+        write_file_body(ctx, &path, &abs, &updated).await?;
+        Ok(json!({
+            "path": path,
+            "replaced": if replace_all { occurrences } else { 1 },
+            "replace_all": replace_all,
+        }))
+    }
+}
+
+/// 补丁段落：`old_lines`（上下文 + `-`）→ `new_lines`（上下文 + `+`）。
+struct PatchHunk {
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
+}
+
+/// 单个文件补丁操作。
+enum PatchOp {
+    Add { path: String, content: String },
+    Delete { path: String },
+    Update { path: String, hunks: Vec<PatchHunk> },
+}
+
+/// 解析 Codex 风格补丁：`*** Add/Update/Delete File:` + `@@` 段落 + `+`/`-`/空格 行。
+fn parse_patch(patch: &str) -> Result<Vec<PatchOp>, String> {
+    fn close(
+        current: &mut Option<PatchOp>,
+        hunk: &mut Option<(Vec<String>, Vec<String>)>,
+        ops: &mut Vec<PatchOp>,
+    ) -> Result<(), String> {
+        if let Some((old, new)) = hunk.take() {
+            if old == new {
+                return Err("补丁段落没有实际变化（- / + 内容相同）".to_string());
+            }
+            match current.as_mut() {
+                Some(PatchOp::Update { hunks, .. }) => {
+                    hunks.push(PatchHunk {
+                        old_lines: old,
+                        new_lines: new,
+                    });
+                }
+                _ => return Err("@@ 段落只能出现在 Update File 下".to_string()),
+            }
+        }
+        if let Some(op) = current.take() {
+            if let PatchOp::Update { hunks, .. } = &op {
+                if hunks.is_empty() {
+                    return Err("Update File 缺少 @@ 段落".to_string());
+                }
+            }
+            ops.push(op);
+        }
+        Ok(())
+    }
+
+    let mut ops: Vec<PatchOp> = Vec::new();
+    let mut current: Option<PatchOp> = None;
+    let mut hunk: Option<(Vec<String>, Vec<String>)> = None;
+    for line in patch.lines() {
+        if line.starts_with("*** Begin Patch") || line.starts_with("*** End Patch") {
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            close(&mut current, &mut hunk, &mut ops)?;
+            current = Some(PatchOp::Add {
+                path: path.trim().to_string(),
+                content: String::new(),
+            });
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            close(&mut current, &mut hunk, &mut ops)?;
+            current = Some(PatchOp::Delete {
+                path: path.trim().to_string(),
+            });
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            close(&mut current, &mut hunk, &mut ops)?;
+            current = Some(PatchOp::Update {
+                path: path.trim().to_string(),
+                hunks: Vec::new(),
+            });
+            continue;
+        }
+        let Some(op) = current.as_mut() else {
+            if line.trim().is_empty() {
+                continue;
+            }
+            return Err(format!("补丁格式错误：行不在任何文件操作下：{line}"));
+        };
+        match op {
+            PatchOp::Add { content, .. } => {
+                if let Some(rest) = line.strip_prefix('+') {
+                    content.push_str(rest);
+                    content.push('\n');
+                } else if !line.trim().is_empty() {
+                    return Err(format!("Add File 内容行必须以 + 开头：{line}"));
+                }
+            }
+            PatchOp::Delete { .. } => {
+                if !line.trim().is_empty() {
+                    return Err(format!("Delete File 后不应再有内容行：{line}"));
+                }
+            }
+            PatchOp::Update { hunks, .. } => {
+                if line.starts_with("@@") {
+                    if let Some((old, new)) = hunk.take() {
+                        if old == new {
+                            return Err("补丁段落没有实际变化（- / + 内容相同）".to_string());
+                        }
+                        hunks.push(PatchHunk {
+                            old_lines: old,
+                            new_lines: new,
+                        });
+                    }
+                    hunk = Some((Vec::new(), Vec::new()));
+                    continue;
+                }
+                let Some((old, new)) = hunk.as_mut() else {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    return Err(format!("Update File 内容必须位于 @@ 段落内：{line}"));
+                };
+                if let Some(rest) = line.strip_prefix('-') {
+                    old.push(rest.to_string());
+                } else if let Some(rest) = line.strip_prefix('+') {
+                    new.push(rest.to_string());
+                } else if let Some(rest) = line.strip_prefix(' ') {
+                    old.push(rest.to_string());
+                    new.push(rest.to_string());
+                } else if !line.trim().is_empty() {
+                    return Err(format!("补丁行必须以 + / - / 空格 开头：{line}"));
+                }
+            }
+        }
+    }
+    close(&mut current, &mut hunk, &mut ops)?;
+    if ops.is_empty() {
+        return Err("补丁为空".to_string());
+    }
+    Ok(ops)
+}
+
+/// 逐段应用补丁：每段上下文必须**唯一命中**，否则报错（不改文件）。
+fn apply_hunks(original: &str, hunks: &[PatchHunk]) -> Result<String, String> {
+    let mut lines: Vec<String> = original.lines().map(str::to_string).collect();
+    let trailing_newline = original.ends_with('\n');
+    for hunk in hunks {
+        if hunk.old_lines.is_empty() {
+            return Err("补丁段落缺少上下文（无法定位）".to_string());
+        }
+        let mut found: Option<usize> = None;
+        let mut matches = 0usize;
+        for index in 0..=lines.len().saturating_sub(hunk.old_lines.len()) {
+            if lines[index..index + hunk.old_lines.len()] == hunk.old_lines[..] {
+                matches += 1;
+                if found.is_none() {
+                    found = Some(index);
+                }
+            }
+        }
+        let Some(index) = found else {
+            return Err(format!(
+                "补丁上下文未命中（首个上下文行：{:?}）",
+                hunk.old_lines.first()
+            ));
+        };
+        if matches > 1 {
+            return Err("补丁上下文命中多处（不唯一）：请扩大上下文".to_string());
+        }
+        lines.splice(
+            index..index + hunk.old_lines.len(),
+            hunk.new_lines.iter().cloned(),
+        );
+    }
+    let mut result = lines.join("\n");
+    if trailing_newline {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
+/// `apply_patch`：多文件原子补丁（Add/Update/Delete），写入走快照可 diff/revert。
+struct ApplyPatchTool;
+
+#[async_trait]
+impl Tool for ApplyPatchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "apply_patch".into(),
+            description:
+                "应用多文件补丁（*** Add/Update/Delete File: + @@ 段落；写入记录快照，可 diff/revert）"
+                    .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "patch": { "type": "string" } },
+                "required": ["patch"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let patch = required_string(&args, "patch")?;
+        let ops = parse_patch(&patch)?;
+        // 先全部解析/校验/计算，再落盘：任一文件失败即整体失败，不留半成品。
+        let mut prepared: Vec<(String, PathBuf, String)> = Vec::with_capacity(ops.len());
+        for op in &ops {
+            match op {
+                PatchOp::Add { path, content } => {
+                    let abs = resolve_session_path(ctx, path)?;
+                    if abs.exists() {
+                        return Err(format!("Add File 目标已存在：{path}"));
+                    }
+                    prepared.push((path.clone(), abs, content.clone()));
+                }
+                PatchOp::Delete { path } => {
+                    let abs = resolve_session_path(ctx, path)?;
+                    let original = tokio::fs::read_to_string(&abs)
+                        .await
+                        .map_err(|e| format!("Delete File 读取 {path} 失败：{e}"))?;
+                    prepared.push((path.clone(), abs, original));
+                }
+                PatchOp::Update { path, hunks } => {
+                    let abs = resolve_session_path(ctx, path)?;
+                    let original = tokio::fs::read_to_string(&abs)
+                        .await
+                        .map_err(|e| format!("Update File 读取 {path} 失败：{e}"))?;
+                    let updated = apply_hunks(&original, hunks)?;
+                    prepared.push((path.clone(), abs, updated));
+                }
+            }
+        }
+        let mut applied = Vec::with_capacity(ops.len());
+        for (op, (path, abs, content)) in ops.iter().zip(prepared) {
+            match op {
+                PatchOp::Delete { .. } => {
+                    // 删除也落快照（original_b64），revert 可恢复。
+                    let key = snapshot_key(&abs);
+                    ctx.session.snapshots.entry(key).or_insert_with(|| {
+                        crate::session::SnapshotEntry {
+                            original_b64: Some(BASE64.encode(content.as_bytes())),
+                            expected_after_sha256: None,
+                        }
+                    });
+                    tokio::fs::remove_file(&abs)
+                        .await
+                        .map_err(|e| format!("删除 {path} 失败：{e}"))?;
+                    applied.push(json!({ "path": path, "op": "delete" }));
+                }
+                PatchOp::Add { .. } | PatchOp::Update { .. } => {
+                    write_file_body(ctx, &path, &abs, &content).await?;
+                    let kind = if matches!(op, PatchOp::Add { .. }) {
+                        "add"
+                    } else {
+                        "update"
+                    };
+                    applied.push(json!({ "path": path, "op": kind }));
+                }
+            }
+        }
+        Ok(json!({ "ok": true, "files": applied }))
+    }
+}
+
+/// `todo`：会话级任务清单（整表替换；CLI `/todo` 渲染）。
+struct TodoTool;
+
+#[async_trait]
+impl Tool for TodoTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "todo".into(),
+            description: "写入/更新任务清单（整表替换；status: pending|in_progress|completed）"
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": { "type": "string" },
+                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let items = args
+            .get("todos")
+            .and_then(Value::as_array)
+            .ok_or("todos 必须是数组")?;
+        let mut todos = Vec::with_capacity(items.len());
+        for item in items {
+            let content = item
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if content.is_empty() {
+                return Err("todo.content 不能为空".to_string());
+            }
+            let status = item
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("pending");
+            if !matches!(status, "pending" | "in_progress" | "completed") {
+                return Err(format!(
+                    "todo.status 非法：{status}（pending|in_progress|completed）"
+                ));
+            }
+            todos.push(crate::session::TodoItem {
+                content,
+                status: status.to_string(),
+            });
+        }
+        ctx.session.todos = todos;
+        let rendered = ctx
+            .session
+            .todos
+            .iter()
+            .map(|todo| {
+                let mark = match todo.status.as_str() {
+                    "completed" => "x",
+                    "in_progress" => ">",
+                    _ => " ",
+                };
+                format!("[{mark}] {}", todo.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(json!({ "todos": ctx.session.todos, "rendered": rendered }))
+    }
+}
+
+/// 极简 HTML → 文本：去 script/style 与标签，合并空白（web_fetch 用）。
+fn html_to_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut rest = html;
+    loop {
+        let Some(start) = rest.find('<') else {
+            text.push_str(rest);
+            break;
+        };
+        text.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find('>') else {
+            break;
+        };
+        let tag = rest[start + 1..start + end].to_ascii_lowercase();
+        if tag.starts_with("script") || tag.starts_with("style") {
+            let close = if tag.starts_with("script") {
+                "</script"
+            } else {
+                "</style"
+            };
+            match rest[start + end + 1..].find(close) {
+                Some(offset) => {
+                    let after = start + end + 1 + offset;
+                    match rest[after..].find('>') {
+                        Some(gt) => {
+                            rest = &rest[after + gt + 1..];
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                None => break,
+            }
+        }
+        text.push(' ');
+        rest = &rest[start + end + 1..];
+    }
+    let decoded = text
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("OwO-Agent/1.0 (+web)")
+        .build()
+        .map_err(|error| format!("HTTP 客户端构造失败：{error}"))
+}
+
+/// `web_fetch`：抓取 URL 并返回纯文本（网络出口，需审批）。
+struct WebFetchTool;
+
+#[async_trait]
+impl Tool for WebFetchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "web_fetch".into(),
+            description: "抓取 URL 并返回纯文本（20s 超时、默认 256KB 上限；网络访问需审批）"
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "max_bytes": { "type": "integer", "description": "响应上限（默认 262144）" }
+                },
+                "required": ["url"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let url = required_string(&args, "url")?;
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err("url 必须以 http:// 或 https:// 开头".to_string());
+        }
+        let max_bytes = args
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(262_144)
+            .clamp(1024, 1_048_576) as usize;
+        let client = http_client()?;
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| format!("抓取失败：{error}"))?;
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| format!("读取响应失败：{error}"))?;
+        let truncated = bytes.len() > max_bytes;
+        let raw = String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).to_string();
+        let text = if content_type.contains("html") {
+            html_to_text(&raw)
+        } else {
+            raw
+        };
+        Ok(json!({
+            "url": url,
+            "status": status,
+            "content_type": content_type,
+            "truncated": truncated,
+            "bytes": bytes.len(),
+            "text": text,
+        }))
+    }
+}
+
+/// `web_search`：默认走 DuckDuckGo HTML 端点，可用 `OWO_WEB_SEARCH_URL` 覆盖。
+struct WebSearchTool;
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "web_search".into(),
+            description: "网页搜索（默认 DuckDuckGo HTML；可用 OWO_WEB_SEARCH_URL 覆盖端点）"
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let query = required_string(&args, "query")?;
+        let endpoint = std::env::var("OWO_WEB_SEARCH_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "https://html.duckduckgo.com/html/".to_string());
+        let client = http_client()?;
+        let response = client
+            .get(&endpoint)
+            .query(&[("q", query.as_str())])
+            .send()
+            .await
+            .map_err(|error| format!("搜索请求失败：{error}"))?;
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("读取搜索结果失败：{error}"))?;
+        let results = parse_search_results(&body);
+        Ok(json!({
+            "query": query,
+            "engine": endpoint,
+            "status": status,
+            "count": results.len(),
+            "results": results,
+        }))
+    }
+}
+
+/// 解析 DuckDuckGo HTML 结果（`class="result__a"`）；最多 10 条。
+fn parse_search_results(html: &str) -> Vec<Value> {
+    let mut results = Vec::new();
+    let mut rest = html;
+    while let Some(position) = rest.find("class=\"result__a\"") {
+        let anchor_start = rest[..position].rfind("<a ").unwrap_or(position);
+        let href = rest[anchor_start..position]
+            .find("href=\"")
+            .map(|offset| {
+                let start = anchor_start + offset + 6;
+                rest[start..]
+                    .find('"')
+                    .map(|end| decode_search_href(&rest[start..start + end]))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let Some(gt) = rest[position..].find('>') else {
+            break;
+        };
+        let title_start = position + gt + 1;
+        let Some(close) = rest[title_start..].find("</a>") else {
+            break;
+        };
+        let title = html_to_text(&rest[title_start..title_start + close]);
+        if !title.is_empty() {
+            results.push(json!({ "title": title, "url": href }));
+        }
+        rest = &rest[title_start + close..];
+        if results.len() >= 10 {
+            break;
+        }
+    }
+    results
+}
+
+/// DDG 跳转链接解码（`uddg=` + percent-encoding）。
+fn decode_search_href(href: &str) -> String {
+    if let Some(index) = href.find("uddg=") {
+        let encoded = &href[index + 5..];
+        let encoded = encoded.split('&').next().unwrap_or(encoded);
+        return percent_decode(encoded);
+    }
+    if let Some(stripped) = href.strip_prefix("//") {
+        return format!("https://{stripped}");
+    }
+    href.to_string()
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(value) = u8::from_str_radix(hex, 16) {
+                out.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `read_image`：读取图片并返回元数据 + base64（视觉理解需多模态模型支持）。
+struct ReadImageTool;
+
+#[async_trait]
+impl Tool for ReadImageTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "read_image".into(),
+            description: "读取图片文件（返回 mime/尺寸/base64；默认 4MB 上限）".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let path = required_string(&args, "path")?;
+        let abs = resolve_session_path(ctx, &path)?;
+        let bytes = tokio::fs::read(&abs)
+            .await
+            .map_err(|e| format!("读取 {path} 失败：{e}"))?;
+        const MAX_BYTES: usize = 4 * 1024 * 1024;
+        if bytes.len() > MAX_BYTES {
+            return Err(format!(
+                "图片过大（{} 字节 > {MAX_BYTES}）：请先压缩",
+                bytes.len()
+            ));
+        }
+        let mime = match abs
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            other => return Err(format!("不支持的图片扩展名：{other}")),
+        };
+        Ok(json!({
+            "path": path,
+            "mime": mime,
+            "bytes": bytes.len(),
+            "base64": BASE64.encode(&bytes),
+            "note": "多模态视觉理解需要 gateway 支持图像内容；当前返回原始数据供工具/上层使用",
+        }))
+    }
+}
+
+/// 后台 shell 记录（`run_command background=true` 产生）。
+#[derive(Clone)]
+struct BackgroundShell {
+    handle: crate::sandbox::SandboxHandle,
+    log_path: PathBuf,
+    done: Arc<std::sync::atomic::AtomicBool>,
+    exit_code: Arc<Mutex<Option<i32>>>,
+}
+
+fn background_shells() -> &'static Mutex<HashMap<String, BackgroundShell>> {
+    static SHELLS: std::sync::OnceLock<Mutex<HashMap<String, BackgroundShell>>> =
+        std::sync::OnceLock::new();
+    SHELLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `shell_output`：读取后台 shell 的累积输出与状态。
+struct ShellOutputTool;
+
+#[async_trait]
+impl Tool for ShellOutputTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "shell_output".into(),
+            description: "查看后台 shell 的输出与状态（shell_id 来自 run_command background=true）"
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "shell_id": { "type": "string" } },
+                "required": ["shell_id"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let shell_id = required_string(&args, "shell_id")?;
+        let shell = background_shells()
+            .lock()
+            .map_err(|_| "后台 shell 注册表中毒".to_string())?
+            .get(&shell_id)
+            .cloned()
+            .ok_or_else(|| format!("未知 shell_id：{shell_id}"))?;
+        let log = std::fs::read(&shell.log_path).unwrap_or_default();
+        const TAIL_BYTES: usize = 32 * 1024;
+        let slice = if log.len() > TAIL_BYTES {
+            &log[log.len() - TAIL_BYTES..]
+        } else {
+            &log[..]
+        };
+        let done = shell.done.load(std::sync::atomic::Ordering::Relaxed);
+        let exit_code = *shell
+            .exit_code
+            .lock()
+            .map_err(|_| "后台 shell 状态锁中毒".to_string())?;
+        Ok(json!({
+            "shell_id": shell_id,
+            "running": !done,
+            "exit_code": exit_code,
+            "log_path": shell.log_path.display().to_string(),
+            "output": String::from_utf8_lossy(slice),
+        }))
+    }
+}
+
+/// `kill_shell`：终止后台 shell（仅限本 Agent 启动的 shell）。
+struct KillShellTool;
+
+#[async_trait]
+impl Tool for KillShellTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "kill_shell".into(),
+            description: "终止后台 shell（仅限 run_command background=true 启动的 shell）".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "shell_id": { "type": "string" } },
+                "required": ["shell_id"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let shell_id = required_string(&args, "shell_id")?;
+        let shell = background_shells()
+            .lock()
+            .map_err(|_| "后台 shell 注册表中毒".to_string())?
+            .get(&shell_id)
+            .cloned()
+            .ok_or_else(|| format!("未知 shell_id：{shell_id}"))?;
+        let killed = {
+            let manager = crate::sandbox::default_manager();
+            let mut manager = manager
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            manager.kill(&shell.handle).is_ok()
+        };
+        shell.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(json!({ "shell_id": shell_id, "killed": killed }))
+    }
+}
+
 /// 白名单受限写入工具（七期 · 二路）：与 [`WriteFileTool`] 同语义（快照可
 /// diff/revert），但写目标必须落在 `allowed` 绝对路径前缀内——工具面层强制，
 /// 叠加在审批策略之上（权限三道闸：注册表面 → 白名单前缀 → 审批）。
@@ -979,6 +1832,21 @@ impl Tool for WhitelistWriteFileTool {
     }
 }
 
+/// 工具沙箱策略：默认工作区范围 + Job 隔离（允许显式降级，审计记录）。
+/// `unrestricted` 档位显式放开文件/网络范围（`SandboxPolicy::validate` 要求显式开关）。
+fn tool_sandbox_policy(ctx: &ToolContext<'_>, name: &str) -> crate::sandbox::SandboxPolicy {
+    let mut policy = crate::sandbox::SandboxPolicy::for_workspace(name, ctx.workspace);
+    policy.require_isolation = crate::sandbox::IsolationLevel::JobOnly;
+    policy.allow_degraded = true;
+    if ctx.policy.profile() == crate::permissions::PermissionProfile::Unrestricted {
+        policy.file_scope = crate::FileScope::Unrestricted;
+        policy.allow_unrestricted_file = true;
+        policy.network_policy = crate::NetworkPolicy::Unrestricted;
+        policy.allow_unrestricted_network = true;
+    }
+    policy
+}
+
 struct ListDirTool;
 
 #[async_trait]
@@ -1043,10 +1911,7 @@ impl Tool for SearchFilesTool {
                 .to_string()
         })?;
 
-        let mut policy =
-            crate::sandbox::SandboxPolicy::for_workspace("search_files", ctx.workspace);
-        policy.require_isolation = crate::sandbox::IsolationLevel::JobOnly;
-        policy.allow_degraded = true;
+        let mut policy = tool_sandbox_policy(ctx, "search_files");
         policy.cpu_ms = Some(30_000);
         policy.mem_mb = Some(512);
         let mut sandbox_command =
@@ -1111,6 +1976,133 @@ impl Tool for SearchFilesTool {
     }
 }
 
+/// `grep`：用随包 ripgrep 做**内容**检索（只读，正则）。
+struct GrepTool;
+
+#[async_trait]
+impl Tool for GrepTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "grep".into(),
+            description: "使用随包 ripgrep 做内容检索（正则；只读，返回 path/line/text）".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "正则表达式或字面量" },
+                    "path": { "type": "string", "description": "可选：检索子路径（默认工作区根）" },
+                    "glob": { "type": "string", "description": "可选：文件名过滤，如 *.rs" },
+                    "max_results": { "type": "integer", "description": "最多返回条数（默认 100，上限 500）" }
+                },
+                "required": ["pattern"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let pattern = required_string(&args, "pattern")?;
+        if pattern.trim().is_empty() {
+            return Err("检索模式不能为空".to_string());
+        }
+        let rg = external_tools::resolve_ripgrep().ok_or_else(|| {
+            "随包 ripgrep 不可用：请重新安装 OwO Agent，或仅在测试时设置 OWO_EXTERNAL_TOOLS_DIR"
+                .to_string()
+        })?;
+        let max_results = args
+            .get("max_results")
+            .and_then(Value::as_u64)
+            .unwrap_or(100)
+            .clamp(1, 500) as usize;
+        let search_path = match args.get("path").and_then(Value::as_str) {
+            Some(path) if !path.trim().is_empty() => resolve_session_path(ctx, path)?,
+            _ => ctx.workspace.to_path_buf(),
+        };
+
+        let mut rg_args = vec![
+            "--json".to_string(),
+            "--glob".to_string(),
+            "!.git/**".to_string(),
+            "--glob".to_string(),
+            "!target/**".to_string(),
+            "--glob".to_string(),
+            "!node_modules/**".to_string(),
+        ];
+        if let Some(glob) = args.get("glob").and_then(Value::as_str) {
+            if !glob.trim().is_empty() {
+                rg_args.push("--glob".to_string());
+                rg_args.push(glob.to_string());
+            }
+        }
+        rg_args.push("-e".to_string());
+        rg_args.push(pattern.clone());
+        rg_args.push(search_path.to_string_lossy().into_owned());
+
+        let mut policy = tool_sandbox_policy(ctx, "grep");
+        policy.cpu_ms = Some(30_000);
+        policy.mem_mb = Some(512);
+        let mut sandbox_command =
+            crate::sandbox::SandboxCommand::new(rg.to_string_lossy().into_owned(), policy)
+                .with_args(rg_args)
+                .with_cwd(ctx.workspace.to_path_buf());
+        if let Some(path) = external_tools::path_with_bundled_tools() {
+            sandbox_command.env.push(("PATH".to_string(), path));
+        }
+
+        let manager = crate::sandbox::default_manager();
+        let process = {
+            let mut manager = manager
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            manager
+                .spawn(&sandbox_command)
+                .map_err(|error| format!("检索沙箱拒绝执行：{error}"))?
+        };
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || {
+                let mut process = process;
+                process.wait_output()
+            }),
+        )
+        .await
+        .map_err(|_| "ripgrep 检索超时（30s，进程仍在受限 Job 内）".to_string())?
+        .map_err(|join_error| format!("检索等待失败：{join_error}"))?
+        .map_err(|error| format!("ripgrep 执行失败：{error}"))?;
+
+        if output.exit_code != 0 && output.exit_code != 1 {
+            return Err(format!(
+                "ripgrep 检索失败（exit_code={}）：{}",
+                output.exit_code,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        // `--json` 输出逐行解析，避免 Windows 盘符冒号破坏 `path:line:text` 切分。
+        let mut matches: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|value| value.get("type").and_then(Value::as_str) == Some("match"))
+            .filter_map(|value| {
+                let data = value.get("data")?;
+                let path = data.get("path")?.get("text")?.as_str()?.replace('\\', "/");
+                let line_no = data.get("line_number")?.as_u64()?;
+                let raw = data.get("lines")?.get("text")?.as_str()?.trim_end();
+                let text: String = raw.chars().take(300).collect();
+                Some(json!({ "path": path, "line": line_no, "text": text }))
+            })
+            .take(max_results + 1)
+            .collect();
+        let truncated = matches.len() > max_results;
+        matches.truncate(max_results);
+        Ok(json!({
+            "pattern": pattern,
+            "matches": matches,
+            "truncated": truncated,
+            "tool": "ripgrep",
+            "tool_version": external_tools::RIPGREP_VERSION,
+        }))
+    }
+}
+
 struct RunCommandTool;
 
 #[async_trait]
@@ -1123,7 +2115,8 @@ impl Tool for RunCommandTool {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "cwd": { "type": "string" }
+                    "cwd": { "type": "string" },
+                    "background": { "type": "boolean", "description": "后台运行（返回 shell_id，用 shell_output/kill_shell 管理）" }
                 },
                 "required": ["command"]
             }),
@@ -1143,11 +2136,12 @@ impl Tool for RunCommandTool {
 
         // 沙箱门卫：run_command 统一经 SandboxManager 执行（X01）。
         // 策略：工作区作用域 + 危险片段 deny + Job 级隔离（允许显式降级，审计记录）。
-        let mut policy = crate::sandbox::SandboxPolicy::for_workspace("run_command", ctx.workspace);
-        policy.require_isolation = crate::sandbox::IsolationLevel::JobOnly;
-        policy.allow_degraded = true;
+        let mut policy = tool_sandbox_policy(ctx, "run_command");
         policy.cpu_ms = Some(60_000);
         policy.mem_mb = Some(1024);
+        // `cmd /C <外部命令>` 至少占 2 个 Job 进程（cmd + 子进程）；默认 limit=1 会
+        // 直接报 "Not enough quota"。放宽到 16，仍能兜住进程炸弹。
+        policy.active_process_limit = Some(16);
         // 命令文本（cmd /C <command> 的命令体）同样过 deny 检查。
         if let Some(fragment) =
             crate::sandbox::SandboxCommand::deny_hit(&command, &policy.deny_programs)
@@ -1157,6 +2151,83 @@ impl Tool for RunCommandTool {
         let mut sandbox_command = crate::sandbox::SandboxCommand::new("cmd", policy.clone())
             .with_args(vec!["/C".to_string(), command.to_string()])
             .with_cwd(cwd.clone());
+        if args
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            // 后台 shell：输出重定向到日志文件，句柄入注册表，watcher 任务等待退出。
+            // 日志必须落在**工作区内**：沙箱文件作用域只允许工作区，写到 %TEMP% 会被拒。
+            let shell_id = uuid::Uuid::new_v4().to_string();
+            // 去 verbatim 前缀：`\\?\C:\…` 在沙箱（受限令牌）下做 cmd 重定向会失败。
+            let workspace_plain = strip_verbatim_prefix(ctx.workspace);
+            let log_dir = workspace_plain.join(".owo").join("shells");
+            tokio::fs::create_dir_all(&log_dir)
+                .await
+                .map_err(|error| format!("创建后台日志目录失败：{error}"))?;
+            let log_path = log_dir.join(format!("{shell_id}.log"));
+            // 用包装脚本而不是 `cmd /C "<cmd> > "<log>" 2>&1"`：嵌套引号会被沙箱的
+            // 参数引用破坏（cmd 提前截断 → exit 1、日志不生成）。
+            let script_path = log_dir.join(format!("{shell_id}.cmd"));
+            let script = format!(
+                "@echo off\r\n{} > \"{}\" 2>&1\r\nexit /b %ERRORLEVEL%\r\n",
+                command,
+                log_path.display()
+            );
+            tokio::fs::write(&script_path, script)
+                .await
+                .map_err(|error| format!("写入后台脚本失败：{error}"))?;
+            let mut background_command = crate::sandbox::SandboxCommand::new("cmd", policy.clone())
+                .with_args(vec![
+                    "/C".to_string(),
+                    script_path.to_string_lossy().into_owned(),
+                ])
+                .with_cwd(cwd.clone());
+            if let Some(path) = external_tools::path_with_bundled_tools() {
+                background_command.env.push(("PATH".to_string(), path));
+            }
+            let manager = crate::sandbox::default_manager();
+            let process = {
+                let mut manager = manager
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                manager
+                    .spawn(&background_command)
+                    .map_err(|error| format!("沙箱拒绝执行（{command}）：{error}"))?
+            };
+            let handle = process.handle.clone();
+            let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let exit_code: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+            let done_task = Arc::clone(&done);
+            let code_task = Arc::clone(&exit_code);
+            tokio::task::spawn_blocking(move || {
+                let mut process = process;
+                if let Ok(info) = process.wait_output() {
+                    if let Ok(mut guard) = code_task.lock() {
+                        *guard = Some(info.exit_code);
+                    }
+                }
+                done_task.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            background_shells()
+                .lock()
+                .map_err(|_| "后台 shell 注册表中毒".to_string())?
+                .insert(
+                    shell_id.clone(),
+                    BackgroundShell {
+                        handle,
+                        log_path: log_path.clone(),
+                        done,
+                        exit_code,
+                    },
+                );
+            return Ok(json!({
+                "shell_id": shell_id,
+                "background": true,
+                "log_path": log_path.display().to_string(),
+                "hint": "用 shell_output 查看输出，kill_shell 终止",
+            }));
+        }
         if let Some(path) = external_tools::path_with_bundled_tools() {
             sandbox_command.env.push(("PATH".to_string(), path));
         }
@@ -1274,24 +2345,69 @@ impl Tool for ExploreTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "explore".into(),
-            description: "把调查任务交给只读探索子代理（只能读/搜文件），返回其调查汇报".into(),
+            description: "把调查任务交给只读探索子代理（只能读/搜文件），返回其调查汇报；多个独立问题用 queries 数组一次并行调查（比逐个问快数倍）".into(),
             input_schema: json!({
                 "type": "object",
-                "properties": { "query": { "type": "string" } },
-                "required": ["query"]
+                "properties": {
+                    "query": { "type": "string", "description": "单个调查问题（与 queries 二选一）" },
+                    "queries": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "多个相互独立的调查问题（并行执行；最多 8 个）"
+                    }
+                }
             }),
             effect: None,
         }
     }
 
     async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        let query = args
-            .get("query")
-            .and_then(Value::as_str)
-            .ok_or("参数缺少字符串字段：query")?;
+        // 单个 query 与 queries 数组都支持：数组用于"同时调查多个独立问题"，
+        // 并行执行（原先只能串行逐个委派，长任务下反馈极慢）。
+        let mut queries: Vec<String> = Vec::new();
+        if let Some(query) = args.get("query").and_then(Value::as_str) {
+            let trimmed = query.trim();
+            if !trimmed.is_empty() {
+                queries.push(trimmed.to_string());
+            }
+        }
+        if let Some(list) = args.get("queries").and_then(Value::as_array) {
+            for item in list {
+                if let Some(text) = item.as_str() {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        queries.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        if queries.is_empty() {
+            return Err("参数缺少字符串字段：query 或 queries".to_string());
+        }
+        const MAX_PARALLEL_QUERIES: usize = 8;
+        let truncated = queries.len() > MAX_PARALLEL_QUERIES;
+        queries.truncate(MAX_PARALLEL_QUERIES);
         let runner = ctx.subagent.as_ref().ok_or("子代理运行时不可用")?;
-        let text = runner.run(ctx.workspace, query, true).await?;
-        Ok(json!({ "mode": "explore", "text": text }))
+        let workspace = ctx.workspace;
+        let results = futures::future::join_all(
+            queries
+                .iter()
+                .map(|query| async move { runner.run(workspace, query, true).await }),
+        )
+        .await;
+        let mut items = Vec::with_capacity(queries.len());
+        for (query, result) in queries.into_iter().zip(results) {
+            match result {
+                Ok(text) => items.push(json!({ "query": query, "ok": true, "text": text })),
+                Err(error) => items.push(json!({ "query": query, "ok": false, "error": error })),
+            }
+        }
+        Ok(json!({
+            "mode": "explore",
+            "parallel": true,
+            "truncated": truncated,
+            "results": items,
+        }))
     }
 }
 
@@ -1302,7 +2418,7 @@ impl Tool for SubagentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "subagent".into(),
-            description: "把独立任务委派给通用子代理（完整工具、仍需审批），返回其汇报".into(),
+            description: "把独立任务委派给通用子代理（完整工具、仍需审批），返回其汇报。任务描述里要写明**验收标准**（做到什么算完成）与需要提交的**证据**（命令输出/文件路径/测试结果）；返回后会自动起只读复核子代理独立核对，未通过则按复核意见返工一次。".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": { "task": { "type": "string" } },
@@ -1318,8 +2434,54 @@ impl Tool for SubagentTool {
             .and_then(Value::as_str)
             .ok_or("参数缺少字符串字段：task")?;
         let runner = ctx.subagent.as_ref().ok_or("子代理运行时不可用")?;
-        let text = runner.run(ctx.workspace, task, false).await?;
-        Ok(json!({ "mode": "general", "text": text }))
+        let workspace = ctx.workspace;
+        let text = runner.run(workspace, task, false).await?;
+        // 质量门（Step 3）：父侧自动起只读 critic 独立复核；不通过则按复核意见
+        // 返工一次（有界，不无限重试）。复核本身失败不阻断交付（best-effort）。
+        if !crate::contract_worker::subagent_review_enabled() {
+            return Ok(json!({ "mode": "general", "text": text }));
+        }
+        let review = match runner
+            .run(
+                workspace,
+                &crate::contract_worker::review_prompt(task, &text),
+                true,
+            )
+            .await
+        {
+            Ok(review) => review,
+            Err(error) => {
+                return Ok(json!({
+                    "mode": "general",
+                    "text": text,
+                    "review": { "error": error },
+                }))
+            }
+        };
+        let approved = crate::contract_worker::critic_approved(&review);
+        if approved == Some(false) {
+            let rework = runner
+                .run(
+                    workspace,
+                    &crate::contract_worker::rework_prompt(task, &text, &review),
+                    false,
+                )
+                .await?;
+            return Ok(json!({
+                "mode": "general",
+                "text": rework,
+                "review": {
+                    "approved": false,
+                    "reworked": true,
+                    "critic": review,
+                },
+            }));
+        }
+        Ok(json!({
+            "mode": "general",
+            "text": text,
+            "review": { "approved": approved, "reworked": false, "critic": review },
+        }))
     }
 }
 
@@ -1403,6 +2565,7 @@ mod tests {
         assert_eq!(result["tool"], "ripgrep");
         assert_eq!(result["tool_version"], external_tools::RIPGREP_VERSION);
         assert_eq!(result["matches"][0], "nested/AlphaMarker.TXT");
+        drop(context);
         let _ = std::fs::remove_dir_all(workspace);
     }
 
@@ -1757,9 +2920,18 @@ mod tests {
             vec![
                 "read_file",
                 "write_file",
+                "edit_file",
+                "apply_patch",
                 "list_dir",
                 "search_files",
+                "grep",
                 "run_command",
+                "shell_output",
+                "kill_shell",
+                "todo",
+                "web_fetch",
+                "web_search",
+                "read_image",
                 "explore",
                 "subagent",
                 "use_skill",
@@ -1813,6 +2985,85 @@ mod tests {
         assert_eq!(
             strip_verbatim_prefix(Path::new("/home/ws/src/a.rs")),
             PathBuf::from("/home/ws/src/a.rs")
+        );
+    }
+
+    #[test]
+    fn patch_parser_supports_add_update_delete() {
+        let patch = "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** Update File: b.txt\n@@ fn main\n-let x = 1;\n+let x = 2;\n*** Delete File: c.txt\n*** End Patch\n";
+        let ops = parse_patch(patch).expect("patch should parse");
+        assert_eq!(ops.len(), 3);
+        match &ops[0] {
+            PatchOp::Add { path, content } => {
+                assert_eq!(path, "a.txt");
+                assert_eq!(content, "hello\n");
+            }
+            _ => panic!("first op should be add"),
+        }
+        match &ops[1] {
+            PatchOp::Update { path, hunks } => {
+                assert_eq!(path, "b.txt");
+                assert_eq!(hunks.len(), 1);
+                // `@@` 行是段落标题提示，不计入上下文。
+                assert_eq!(hunks[0].old_lines, vec!["let x = 1;"]);
+                assert_eq!(hunks[0].new_lines, vec!["let x = 2;"]);
+            }
+            _ => panic!("second op should be update"),
+        }
+        assert!(matches!(&ops[2], PatchOp::Delete { path } if path == "c.txt"));
+    }
+
+    #[test]
+    fn patch_apply_requires_unique_context() {
+        let original = "alpha\nbeta\ngamma\n";
+        let ok = apply_hunks(
+            original,
+            &[PatchHunk {
+                old_lines: vec!["beta".to_string()],
+                new_lines: vec!["BETA".to_string()],
+            }],
+        )
+        .expect("unique context should apply");
+        assert_eq!(ok, "alpha\nBETA\ngamma\n");
+
+        let ambiguous = apply_hunks(
+            "x\ny\nx\ny\n",
+            &[PatchHunk {
+                old_lines: vec!["x".to_string(), "y".to_string()],
+                new_lines: vec!["z".to_string(), "y".to_string()],
+            }],
+        );
+        assert!(ambiguous.is_err(), "重复上下文必须拒绝");
+
+        let missing = apply_hunks(
+            original,
+            &[PatchHunk {
+                old_lines: vec!["nope".to_string()],
+                new_lines: vec!["yes".to_string()],
+            }],
+        );
+        assert!(missing.is_err(), "未命中必须报错");
+    }
+
+    #[test]
+    fn html_to_text_strips_tags_and_scripts() {
+        let html = "<html><head><style>body{color:red}</style></head><body><h1>Hello</h1><script>var x=1;</script><p>World&nbsp;!</p></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("Hello"), "{text}");
+        assert!(text.contains("World !"), "{text}");
+        assert!(!text.contains("var x"), "script 内容应剔除：{text}");
+        assert!(!text.contains("color:red"), "style 内容应剔除：{text}");
+    }
+
+    #[test]
+    fn search_href_decodes_ddg_redirect() {
+        assert_eq!(
+            decode_search_href("//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&rut=1"),
+            "https://example.com/a"
+        );
+        assert_eq!(
+            decode_search_href("https://direct.example"),
+            "https://direct.example"
         );
     }
 }

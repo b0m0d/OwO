@@ -298,9 +298,10 @@ pub fn classify_mcp_annotations(
 /// 内置工具矩阵（与原 `Policy::level_for` 完全一致；未知工具返回 None）。
 pub fn builtin_class_for(tool: &str) -> Option<EffectClass> {
     let class = match tool {
-        "read_file" | "list_dir" | "search_files" => EffectClass::Read,
-        "write_file" => EffectClass::Write,
-        "run_command" => EffectClass::Execute,
+        "read_file" | "list_dir" | "search_files" | "grep" | "read_image" | "shell_output"
+        | "kill_shell" | "todo" => EffectClass::Read,
+        "write_file" | "edit_file" | "apply_patch" => EffectClass::Write,
+        "run_command" | "web_fetch" | "web_search" => EffectClass::Execute,
         "text.inject" | "clipboard" => EffectClass::Inject,
         "screen_ocr"
         | "desktop_window_ocr"
@@ -328,6 +329,15 @@ fn builtin_effects() -> Vec<(&'static str, EffectClass)> {
         ("read_file", EffectClass::Read),
         ("list_dir", EffectClass::Read),
         ("search_files", EffectClass::Read),
+        ("grep", EffectClass::Read),
+        ("read_image", EffectClass::Read),
+        ("shell_output", EffectClass::Read),
+        ("kill_shell", EffectClass::Read),
+        ("todo", EffectClass::Read),
+        ("edit_file", EffectClass::Write),
+        ("apply_patch", EffectClass::Write),
+        ("web_fetch", EffectClass::Execute),
+        ("web_search", EffectClass::Execute),
         ("screen_ocr", EffectClass::Read),
         ("desktop_window_ocr", EffectClass::Read),
         ("ocr_region", EffectClass::Read),
@@ -376,11 +386,14 @@ mod tests {
         assert_eq!(effect_class_for("desktop_click"), EffectClass::Inject);
         assert_eq!(effect_class_for("browser_snapshot"), EffectClass::Read);
         assert_eq!(effect_class_for("text.inject"), EffectClass::Inject);
+        assert_eq!(effect_class_for("grep"), EffectClass::Read);
+        assert_eq!(effect_class_for("apply_patch"), EffectClass::Write);
+        assert_eq!(effect_class_for("web_fetch"), EffectClass::Execute);
         let builtin = all_effects()
             .into_iter()
             .filter(|effect| effect.source == "builtin")
             .count();
-        assert_eq!(builtin, 33, "内置矩阵应完整播种 33 个工具");
+        assert_eq!(builtin, 42, "内置矩阵应完整播种 42 个工具");
     }
 
     #[test]

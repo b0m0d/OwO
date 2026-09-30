@@ -2,7 +2,7 @@
 // Repl 主循环：会话/审批/恢复/子命令；审批者与共享 stdin 经 crate::support 显式引用。
 
 use crate::support::*;
-use crate::ui_output::EventPrinter;
+use crate::ui_output::StreamPrinter;
 use clap::Args;
 use colored::Colorize;
 use owo_agent_core::permissions::{Approver, AutoApprover};
@@ -52,6 +52,7 @@ pub(crate) struct Repl {
     abort: Arc<AtomicBool>,
     stdin: SharedStdin,
     approvals: Arc<SessionApprovals>,
+    goal: Option<GoalState>,
     mcp_configs: Vec<McpServerConfig>,
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
     skills: SkillRegistry,
@@ -130,6 +131,7 @@ impl Repl {
             abort: Arc::new(AtomicBool::new(false)),
             stdin: SharedStdin::new(),
             approvals: Arc::new(SessionApprovals::new()),
+            goal: None,
             mcp_configs,
             mcp_clients,
             skills,
@@ -314,6 +316,11 @@ impl Repl {
                 "status" => self.show_status(),
                 "permissions" => self.handle_permissions(command)?,
                 "approvals" => self.handle_approvals(parts.next()),
+                "goal" => {
+                    let rest = command.strip_prefix("goal").unwrap_or("").trim();
+                    self.handle_goal(rest).await?;
+                }
+                "todo" => self.show_todos(),
                 "audit" => self.show_audit(),
                 "init" => {
                     let target = self.workspace.join("AGENTS.md");
@@ -341,8 +348,14 @@ impl Repl {
             }
             return Ok(false);
         }
-        self.run_turn(line).await?;
+        let prompt = self.with_goal_context(line);
+        self.run_turn(&prompt).await?;
         Ok(false)
+    }
+
+    /// 目标激活且未完成时，把目标附到每次输入前（目标推进期间用户插话也带目标上下文）。
+    fn with_goal_context(&self, line: &str) -> String {
+        goal_context_prompt(self.goal.as_ref(), line)
     }
 
     /// `/approvals [clear]`：查看/清除本会话的「总是允许」工具记忆。
@@ -363,6 +376,105 @@ impl Repl {
                     }
                     println!("（/approvals clear 清除）");
                 }
+            }
+        }
+    }
+
+    /// `/todo`：查看会话任务清单（`todo` 工具维护）。
+    fn show_todos(&self) {
+        let todos = self
+            .session
+            .as_ref()
+            .map(|session| session.todos.as_slice())
+            .unwrap_or(&[]);
+        if todos.is_empty() {
+            println!("（任务清单为空；模型调用 todo 工具后会出现在这里）");
+            return;
+        }
+        println!("{}", "任务清单：".bold());
+        for todo in todos {
+            let mark = match todo.status.as_str() {
+                "completed" => "✔".green().to_string(),
+                "in_progress" => "▶".yellow().to_string(),
+                _ => "○".dimmed().to_string(),
+            };
+            println!("  {mark} {}", todo.content);
+        }
+    }
+
+    /// `/goal [目标|status|clear]`：目标模式——未完成时持续自动推进，模型标记完成才停。
+    async fn handle_goal(&mut self, arg: &str) -> Result<(), Box<dyn std::error::Error>> {
+        match arg {
+            "" | "status" => {
+                match &self.goal {
+                    Some(goal) => println!(
+                        "目标：{}\n  轮次：{}/{}  状态：{}",
+                        goal.objective,
+                        goal.iterations,
+                        goal_max_iterations(),
+                        if goal.done { "已完成" } else { "推进中" }
+                    ),
+                    None => println!("（未设定目标；用法：/goal <目标描述>）"),
+                }
+                Ok(())
+            }
+            "clear" | "stop" => {
+                self.goal = None;
+                println!("{}", "已清除目标".green());
+                Ok(())
+            }
+            objective => {
+                let max = goal_max_iterations();
+                self.goal = Some(GoalState {
+                    objective: objective.to_string(),
+                    iterations: 0,
+                    done: false,
+                });
+                println!(
+                    "{}（最多 {max} 轮；/goal clear 停止）",
+                    format!("目标已设定：{objective}").green()
+                );
+                loop {
+                    if self.abort.load(Ordering::Relaxed) {
+                        println!("{}", "（目标推进已中止）".yellow());
+                        break;
+                    }
+                    let Some(goal) = self.goal.as_ref() else {
+                        break;
+                    };
+                    if goal.done {
+                        break;
+                    }
+                    if goal.iterations >= max {
+                        println!(
+                            "{}",
+                            format!("已达最大迭代 {max}，目标未标记完成（/goal status 查看）")
+                                .yellow()
+                        );
+                        break;
+                    }
+                    let iteration = goal.iterations + 1;
+                    let prompt = if iteration == 1 {
+                        goal_first_prompt(objective)
+                    } else {
+                        goal_continue_prompt(objective, iteration)
+                    };
+                    println!("{}", format!("── 目标推进 {iteration}/{max} ──").bold());
+                    let final_text = self.run_turn_capture(&prompt).await?;
+                    if let Some(goal) = self.goal.as_mut() {
+                        goal.iterations = iteration;
+                    }
+                    if let Some(text) = final_text {
+                        if text.contains(GOAL_DONE_MARKER) {
+                            if let Some(goal) = self.goal.as_mut() {
+                                goal.done = true;
+                            }
+                            println!("{} 目标完成（第 {iteration} 轮）", "✓".green());
+                            break;
+                        }
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -391,9 +503,9 @@ impl Repl {
             Some(summary) => {
                 println!("{} 已压缩：{before} → {after} tokens", "✓".green());
                 println!("{}", "── 摘要 ──".bold());
-                let mut md = crate::markdown::MarkdownStream::new();
-                md.push(&summary);
-                md.finish();
+                for line in summary.lines() {
+                    println!("{}", crate::markdown::render_block_line(line));
+                }
             }
             None => println!("{}", "未压缩（历史不足或模型未产出摘要）".yellow()),
         }
@@ -497,6 +609,14 @@ impl Repl {
     }
 
     async fn run_turn(&mut self, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.run_turn_capture(prompt).await.map(|_| ())
+    }
+
+    /// 执行一回合并返回最终文本（`/goal` 依赖它判断完成标记）。
+    async fn run_turn_capture(
+        &mut self,
+        prompt: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
         if self.session.is_none() {
             self.new_session(None).await?;
         }
@@ -516,8 +636,8 @@ impl Repl {
 
         println!("{} {}", "▶".green(), prompt.dimmed());
         let mut task = tokio::spawn(async move {
-            let mut printer = EventPrinter::new();
-            let mut on_event = |event: &TurnEvent| printer.print(event);
+            let mut printer = StreamPrinter::new();
+            let mut on_event = |event: &TurnEvent| printer.print_turn(event);
             let outcome = agent
                 .run_turn(
                     &mut session,
@@ -554,7 +674,7 @@ impl Repl {
             Err(error) => {
                 eprintln!("{} {error}", "回合失败：".red());
                 println!("（会话已保存；/status 查看状态，/diff 查看改动，/undo 回滚）");
-                return Ok(());
+                return Ok(None);
             }
         };
         let trace =
@@ -573,7 +693,7 @@ impl Repl {
                 .unwrap_or(0),
             self.session.as_ref().map(|s| s.diff().len()).unwrap_or(0),
         );
-        Ok(())
+        Ok(outcome.final_text.clone())
     }
 
     fn flush_audit(&mut self) {

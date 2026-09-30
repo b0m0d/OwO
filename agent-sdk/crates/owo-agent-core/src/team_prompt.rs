@@ -424,10 +424,30 @@ mod tests {
         assert!(prompt.contains("动态组队"));
         assert!(prompt.contains("综合上游并产出最终交付物"));
         assert!(prompt.contains("（无上游产物；你是首个执行者）"));
-        // 未知角色默认只读（权限默认 deny → 护栏如实告知）。
-        assert!(prompt.contains("禁止写入工作区文件"));
+        // leader 是交付角色（写面）：护栏应声明"落盘最终变更"而不是只读禁令。
+        assert!(
+            prompt.contains("只允许在允许写路径内用 write_file 落盘最终变更"),
+            "交付角色的护栏行应声明落盘义务：\n{prompt}"
+        );
         // 未声明预算 → 缺省 12（与画像硬上限一致）。
         assert!(prompt.contains("回合预算为 12 回合"));
+    }
+
+    #[test]
+    fn unknown_role_prompt_falls_back_to_readonly_guard() {
+        let compiled = compile_upstream(&[], PromptBudget::default());
+        let ctx = PromptContext {
+            objective: "目标 O",
+            role: "some_future_role",
+            handoff_contract: "产出交付物",
+            template_id: None,
+            budget_calls: 0,
+            is_critic: false,
+            upstream: &compiled,
+        };
+        let prompt = compile_prompt(&ctx);
+        // 未知角色默认只读（权限默认 deny → 护栏如实告知）。
+        assert!(prompt.contains("禁止写入工作区文件"));
     }
 
     #[test]

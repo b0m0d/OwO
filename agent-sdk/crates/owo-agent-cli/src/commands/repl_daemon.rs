@@ -10,7 +10,7 @@
 
 use crate::support::{ensure_daemon_client, ensure_data_root};
 use crate::ui_output::{
-    parse_approval_response, print_permission_card, print_sse_event_human, PermissionCard,
+    parse_approval_response, print_permission_card, PermissionCard, StreamPrinter,
 };
 use colored::Colorize;
 use owo_agent_protocol::{PermissionResponse, SseEvent};
@@ -35,6 +35,8 @@ pub(crate) async fn run(args: super::repl::ReplArgs) -> Result<(), Box<dyn std::
         read_only: args.agent == "plan",
         no_approval: args.no_approval,
         abort: Arc::new(AtomicBool::new(false)),
+        goal: None,
+        team_id: None,
     };
     println!(
         "{} {}（daemon 模式 · {}）",
@@ -60,6 +62,9 @@ struct DaemonRepl {
     read_only: bool,
     no_approval: bool,
     abort: Arc<AtomicBool>,
+    goal: Option<crate::support::GoalState>,
+    /// 当前团队（`/team` 目标；status/steer/diff 缺省作用于它）。
+    team_id: Option<String>,
 }
 
 impl DaemonRepl {
@@ -130,7 +135,8 @@ impl DaemonRepl {
             return Ok(false);
         }
         let Some(command) = line.strip_prefix('/') else {
-            self.run_turn(line).await?;
+            let prompt = self.with_goal_context(line);
+            self.run_turn(&prompt).await?;
             return Ok(false);
         };
         let mut parts = command.split_whitespace();
@@ -195,13 +201,21 @@ impl DaemonRepl {
                 None | Some("overview") => {
                     self.print_json("权限", "/permissions/overview").await
                 }
+                Some("set") => {
+                    let profile = parts.next().ok_or(
+                        "用法：/permissions set <read_only|workspace|auto_review|full_access|unrestricted|custom> [--yes]",
+                    )?;
+                    let yes = parts.any(|part| part == "--yes");
+                    self.set_permission_profile(profile, yes).await?;
+                }
+                Some("status") => self.print_json("权限", "/permissions").await,
                 Some("revoke") => {
                     let grant_id = parts.next().ok_or("用法：/permissions revoke <授权ID>")?;
                     self.revoke_permission_grant(grant_id).await?;
                 }
                 Some(other) => println!(
                     "{}",
-                    format!("未知权限子命令：{other}（用法：/permissions [overview] 或 /permissions revoke <授权ID>）").yellow()
+                    format!("未知权限子命令：{other}（用法：/permissions [overview|status] | set <档位> | revoke <授权ID>）").yellow()
                 ),
             },
             "settings" => self.print_json("设置", "/settings").await,
@@ -258,6 +272,12 @@ impl DaemonRepl {
             "login" => crate::support::print_login(),
             "logout" => crate::support::print_logout(),
             "debug" => self.show_debug(),
+            "goal" => {
+                let rest = command.strip_prefix("goal").unwrap_or("").trim();
+                self.handle_goal(rest).await?;
+            }
+            "team" => self.handle_team(parts).await?,
+            "todo" => self.show_todos().await?,
             other => println!(
                 "{}",
                 format!("命令 /{other} 尚未迁移到 daemon 模式（用 --local 使用旧 REPL）").yellow()
@@ -388,6 +408,31 @@ impl DaemonRepl {
         }
     }
 
+    /// `/permissions set <profile>`：切换权限档位（高风险档位需确认）。
+    async fn set_permission_profile(
+        &self,
+        profile: &str,
+        allow_yes_flag: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !crate::support::confirm_high_risk_profile(profile, allow_yes_flag) {
+            println!(
+                "{}",
+                "已取消（管道模式切换 unrestricted 需显式追加 --yes）".yellow()
+            );
+            return Ok(());
+        }
+        let result: serde_json::Value = self
+            .client
+            .post_json("/permissions", &serde_json::json!({ "profile": profile }))
+            .await?;
+        let applied = result
+            .get("profile")
+            .and_then(|value| value.as_str())
+            .unwrap_or(profile);
+        println!("{} 已切换权限档位：{applied}", "✓".green());
+        Ok(())
+    }
+
     async fn revoke_permission_grant(
         &self,
         grant_id: &str,
@@ -448,9 +493,9 @@ impl DaemonRepl {
             println!("{} 已压缩：{before} → {after} tokens", "✓".green());
             if let Some(summary) = result.get("summary").and_then(|v| v.as_str()) {
                 println!("{}", "── 摘要 ──".bold());
-                let mut md = crate::markdown::MarkdownStream::new();
-                md.push(summary);
-                md.finish();
+                for line in summary.lines() {
+                    println!("{}", crate::markdown::render_block_line(line));
+                }
             }
         } else {
             println!("{}", "未压缩（历史不足或模型未产出摘要）".yellow());
@@ -552,63 +597,64 @@ impl DaemonRepl {
     }
 
     async fn run_turn(&mut self, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.run_turn_capture(prompt).await.map(|_| ())
+    }
+
+    /// 执行一回合并返回最终文本（`/goal` 依赖它判断完成标记）。
+    async fn run_turn_capture(
+        &mut self,
+        prompt: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
         let id = self.current_session().await?;
         self.abort.store(false, Ordering::Relaxed);
         let mut stream = self.client.open_turn(&id, prompt).await?;
 
+        // Ctrl+C 监听随回合结束而退出（旧实现每回合 spawn 一个永不结束的任务：
+        // `/goal` 多轮会累积监听器，回合结束后按 Ctrl+C 还会误置 abort）。
+        let turn_done = Arc::new(tokio::sync::Notify::new());
         let cancel_client = self.client.clone();
         let cancel_id = id.clone();
         let abort_flag = Arc::clone(&self.abort);
+        let done = Arc::clone(&turn_done);
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                abort_flag.store(true, Ordering::Relaxed);
-                let _ = cancel_client.cancel_turn(&cancel_id).await;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    abort_flag.store(true, Ordering::Relaxed);
+                    let _ = cancel_client.cancel_turn(&cancel_id).await;
+                }
+                _ = done.notified() => {}
             }
         });
 
         println!("{} {}", "▶".green(), prompt.dimmed());
-        let mut streamed = false;
         let mut steps = 0usize;
-        let mut markdown = crate::markdown::MarkdownStream::new();
+        let mut final_text: Option<String> = None;
+        let mut printer = StreamPrinter::new();
         while let Some(event) = stream.next_event().await {
             let event = event?;
             match &event {
-                SseEvent::TokenDelta { delta } => {
-                    streamed = true;
-                    markdown.push(delta);
-                }
-                SseEvent::Final { .. } => {
-                    if streamed {
-                        markdown.finish();
-                        streamed = false;
-                    }
-                }
                 SseEvent::PermissionRequest { request_id, .. } => {
-                    if streamed {
-                        markdown.finish();
-                        streamed = false;
-                    }
+                    printer.print_sse(&event);
                     let response = self.decide_permission(&event)?;
                     let _ = self
                         .client
                         .respond_permission(&id, request_id, &response)
                         .await;
                 }
+                SseEvent::Final { text } => {
+                    final_text = Some(text.clone());
+                    printer.print_sse(&event);
+                }
                 other => {
-                    if streamed {
-                        markdown.finish();
-                        streamed = false;
-                    }
                     if matches!(other, SseEvent::ToolResult { .. }) {
                         steps += 1;
                     }
-                    print_sse_event_human(other);
+                    printer.print_sse(other);
                 }
             }
         }
-        if streamed {
-            markdown.finish();
-        }
+        printer.finish();
+        turn_done.notify_waiters();
         let diff_count = self
             .client
             .session_diff(&id)
@@ -621,9 +667,477 @@ impl DaemonRepl {
             steps,
             diff_count
         );
+        Ok(final_text)
+    }
+
+    /// 目标激活且未完成时，把目标附到每次输入前（目标推进期间用户插话也带目标上下文）。
+    fn with_goal_context(&self, line: &str) -> String {
+        crate::support::goal_context_prompt(self.goal.as_ref(), line)
+    }
+
+    /// `/todo`：查看会话任务清单（`todo` 工具维护）。
+    async fn show_todos(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let id = self.current_session().await?;
+        let session = self
+            .client
+            .get_json::<serde_json::Value>(&format!("/session/{id}"))
+            .await?;
+        let todos = session
+            .get("todos")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if todos.is_empty() {
+            println!("（任务清单为空；模型调用 todo 工具后会出现在这里）");
+            return Ok(());
+        }
+        println!("{}", "任务清单：".bold());
+        for todo in todos {
+            let content = todo
+                .get("content")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let status = todo
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("pending");
+            let mark = match status {
+                "completed" => "✔".green().to_string(),
+                "in_progress" => "▶".yellow().to_string(),
+                _ => "○".dimmed().to_string(),
+            };
+            println!("  {mark} {content}");
+        }
         Ok(())
     }
 
+    /// `/goal [目标|status|clear]`：目标模式——未完成时持续自动推进，模型标记完成才停。
+    async fn handle_goal(&mut self, arg: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::support::{
+            goal_continue_prompt, goal_first_prompt, goal_max_iterations, GoalState,
+        };
+        match arg {
+            "" | "status" => {
+                match &self.goal {
+                    Some(goal) => println!(
+                        "目标：{}\n  轮次：{}/{}  状态：{}",
+                        goal.objective,
+                        goal.iterations,
+                        goal_max_iterations(),
+                        if goal.done { "已完成" } else { "推进中" }
+                    ),
+                    None => println!("（未设定目标；用法：/goal <目标描述>）"),
+                }
+                Ok(())
+            }
+            "clear" | "stop" => {
+                self.goal = None;
+                println!("{}", "已清除目标".green());
+                Ok(())
+            }
+            objective => {
+                let max = goal_max_iterations();
+                self.goal = Some(GoalState {
+                    objective: objective.to_string(),
+                    iterations: 0,
+                    done: false,
+                });
+                println!(
+                    "{}（最多 {max} 轮；/goal clear 停止）",
+                    format!("目标已设定：{objective}").green()
+                );
+                loop {
+                    if self.abort.load(Ordering::Relaxed) {
+                        println!("{}", "（目标推进已中止）".yellow());
+                        break;
+                    }
+                    let Some(goal) = self.goal.as_ref() else {
+                        break;
+                    };
+                    if goal.done {
+                        break;
+                    }
+                    if goal.iterations >= max {
+                        println!(
+                            "{}",
+                            format!("已达最大迭代 {max}，目标未标记完成（/goal status 查看）")
+                                .yellow()
+                        );
+                        break;
+                    }
+                    let iteration = goal.iterations + 1;
+                    let prompt = if iteration == 1 {
+                        goal_first_prompt(objective)
+                    } else {
+                        goal_continue_prompt(objective, iteration)
+                    };
+                    println!("{}", format!("── 目标推进 {iteration}/{max} ──").bold());
+                    let final_text = self.run_turn_capture(&prompt).await?;
+                    if let Some(goal) = self.goal.as_mut() {
+                        goal.iterations = iteration;
+                    }
+                    if let Some(text) = final_text {
+                        if text.contains(crate::support::GOAL_DONE_MARKER) {
+                            if let Some(goal) = self.goal.as_mut() {
+                                goal.done = true;
+                            }
+                            println!("{} 目标完成（第 {iteration} 轮）", "✓".green());
+                            break;
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// `/team ...`：WorkSwarm 多 agent 团队——创建即后台跑，CLI 实时跟踪进度，
+    /// 可查看任务图 / 干预（steer/retry/cancel）/ 查看真实变更集（diff）。
+    async fn handle_team(
+        &mut self,
+        parts: std::str::SplitWhitespace<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const USAGE: &str = "用法：/team [--single|--team|--auto] <目标>（创建并跟踪）| list | use <团队ID> | status | watch | steer <说明> | retry <步骤ID> | cancel | diff";
+        // 前置策略开关：`--single` 单 Agent / `--team` 强制流水线 / `--auto`（缺省）
+        // 交给策略层判定——用于单/队 A/B 实测对比。
+        let mut args: Vec<&str> = parts.collect();
+        let mut strategy = "auto".to_string();
+        while let Some(flag) = args.first() {
+            match *flag {
+                "--single" => strategy = "single".to_string(),
+                "--team" => strategy = "team".to_string(),
+                "--auto" => strategy = "auto".to_string(),
+                _ => break,
+            }
+            args.remove(0);
+        }
+        let mut parts = args.into_iter();
+        match parts.next() {
+            None => println!("{}", USAGE.dimmed()),
+            Some("list") => self.team_list().await?,
+            Some("use") => {
+                let id = parts
+                    .next()
+                    .ok_or("用法：/team use <团队ID>（/team list 查看）")?;
+                self.team_id = Some(id.to_string());
+                println!("{} {}", "当前团队：".green(), id);
+            }
+            Some("status") => {
+                let id = self.team_required()?;
+                self.team_status(&id).await?;
+            }
+            Some("watch") => {
+                let id = self.team_required()?;
+                self.team_watch(&id).await?;
+            }
+            Some("steer") => {
+                let id = self.team_required()?;
+                let note = parts.collect::<Vec<_>>().join(" ");
+                if note.trim().is_empty() {
+                    return Err("用法：/team steer <给团队的说明>".into());
+                }
+                self.team_steer(&id, serde_json::json!({ "command": "steer", "note": note }))
+                    .await?;
+            }
+            Some("retry") => {
+                let id = self.team_required()?;
+                let step_id = parts
+                    .next()
+                    .ok_or("用法：/team retry <步骤ID>（/team status 查看步骤）")?;
+                self.team_steer(
+                    &id,
+                    serde_json::json!({ "command": "retry", "step_id": step_id }),
+                )
+                .await?;
+            }
+            Some("cancel") => {
+                let id = self.team_required()?;
+                self.team_steer(&id, serde_json::json!({ "command": "cancel" }))
+                    .await?;
+            }
+            Some("diff") => {
+                let id = self.team_required()?;
+                self.team_diff(&id).await?;
+            }
+            Some(first) => {
+                // 目标可能含空格：把剩余片段拼回。
+                let objective = std::iter::once(first)
+                    .chain(parts)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.team_create_and_watch(&objective, &strategy).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn team_required(&self) -> Result<String, Box<dyn std::error::Error>> {
+        self.team_id
+            .clone()
+            .ok_or_else(|| "当前没有团队（先 /team <目标> 创建，或 /team use <团队ID>）".into())
+    }
+
+    async fn team_list(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let value = self.client.get_json::<serde_json::Value>("/teams").await?;
+        let teams = value
+            .get("teams")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if teams.is_empty() {
+            println!("（没有团队运行；/team <目标> 创建）");
+            return Ok(());
+        }
+        println!("{}", "团队运行：".bold());
+        for team in teams {
+            let id = team.get("team_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let status = team.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            let mode = team.get("mode").and_then(|v| v.as_str()).unwrap_or("?");
+            let active = team
+                .get("active")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let interrupted = team
+                .get("interrupted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let members = team
+                .get("members")
+                .and_then(|v| v.as_array())
+                .map(|list| list.len())
+                .unwrap_or(0);
+            let current = self.team_id.as_deref() == Some(id);
+            println!(
+                "  {} {}  {}  mode={mode}  {members} 名成员{}{}",
+                if current {
+                    "→".green().to_string()
+                } else {
+                    " ".to_string()
+                },
+                id.dimmed(),
+                status,
+                if active { " · 运行中" } else { "" },
+                if interrupted {
+                    " · 已中断（可 /team retry）"
+                } else {
+                    ""
+                },
+            );
+        }
+        Ok(())
+    }
+
+    async fn team_status(&self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let detail = self
+            .client
+            .get_json::<serde_json::Value>(&format!("/teams/{id}"))
+            .await?;
+        print_team_detail(&detail);
+        Ok(())
+    }
+
+    /// 创建团队（后台跑）+ 实时跟踪到终态（Ctrl+C 只停止跟踪，团队继续跑）。
+    async fn team_create_and_watch(
+        &mut self,
+        objective: &str,
+        strategy: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let body = serde_json::json!({
+            "objective": objective,
+            "mode": "team",
+            "strategy": strategy,
+            "workspace": {
+                "root": self.workspace.to_string_lossy(),
+                "read_only": false,
+            },
+        });
+        let created: serde_json::Value = self.client.post_json("/teams", &body).await?;
+        let team_id = created
+            .get("team_id")
+            .and_then(|v| v.as_str())
+            .ok_or("创建团队响应缺少 team_id")?
+            .to_string();
+        let mode = created
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Team");
+        let template = created
+            .get("template_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("（动态组队）");
+        let members = created
+            .get("members")
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|member| member.get("user_id").and_then(|v| v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        self.team_id = Some(team_id.clone());
+        println!(
+            "{} 团队已创建：{}（{mode} · 模板 {template}）",
+            "✓".green(),
+            team_id
+        );
+        if !members.is_empty() {
+            println!("  成员：{members}");
+        }
+        println!("  团队在 Daemon 侧后台运行；下面实时跟踪（Ctrl+C 停止跟踪，团队继续跑）");
+        self.team_watch(&team_id).await
+    }
+
+    /// 轮询任务图并打印状态转移，直到团队进入终态。
+    async fn team_watch(&self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use std::collections::HashMap;
+        let mut last: HashMap<String, String> = HashMap::new();
+        let mut printed_header = false;
+        // 跟踪上限：到点自动放手（团队继续后台跑），避免 REPL 无限挂住。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        loop {
+            let detail = self
+                .client
+                .get_json::<serde_json::Value>(&format!("/teams/{id}"))
+                .await?;
+            if !printed_header {
+                print_team_detail(&detail);
+                printed_header = true;
+            }
+            let status = detail
+                .get("team")
+                .and_then(|team| team.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("running")
+                .to_string();
+            if let Some(tasks) = detail.get("tasks").and_then(|v| v.as_array()) {
+                for task in tasks {
+                    let task_id = task
+                        .get("task_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let role = task.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+                    let state = task
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Pending")
+                        .to_string();
+                    if last.get(&task_id) != Some(&state) {
+                        let line = match state.as_str() {
+                            "Running" => format!("  {} {role} 开始执行", "▶".blue()),
+                            "Succeeded" => format!("  {} {role} 完成", "✔".green()),
+                            "Failed" => format!(
+                                "  {} {role} 失败：{}",
+                                "✘".red(),
+                                task.get("error").and_then(|v| v.as_str()).unwrap_or("未知")
+                            ),
+                            "Skipped" => format!("  {} {role} 跳过", "○".dimmed()),
+                            _ => format!("  {} {role} {state}", "○".dimmed()),
+                        };
+                        println!("{line}");
+                        last.insert(task_id, state);
+                    }
+                }
+            }
+            if matches!(status.as_str(), "succeeded" | "failed" | "cancelled") {
+                let mark = if status == "succeeded" {
+                    "✓".green().to_string()
+                } else {
+                    "✘".red().to_string()
+                };
+                println!(
+                    "{mark} 团队终态：{status}（/team diff 看真实变更集，/team status 看详情）"
+                );
+                return Ok(());
+            }
+            // 轮询 + Ctrl+C 只停止跟踪（团队仍在 Daemon 侧运行）。
+            if std::time::Instant::now() >= deadline {
+                println!(
+                    "{}",
+                    "（跟踪已到 10 分钟上限；团队继续在后台运行，/team watch 继续跟踪）".yellow()
+                );
+                return Ok(());
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                _ = tokio::signal::ctrl_c() => {
+                    println!(
+                        "{}",
+                        "（已停止跟踪；团队继续在后台运行，/team status 查看）".yellow()
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    async fn team_steer(
+        &self,
+        id: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let value: serde_json::Value = self
+            .client
+            .post_json(&format!("/teams/{id}/steer"), &payload)
+            .await?;
+        println!("{} {}", "已提交团队指令：".green(), value);
+        Ok(())
+    }
+
+    async fn team_diff(&self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let value = self
+            .client
+            .get_json::<serde_json::Value>(&format!("/teams/{id}/change-sets"))
+            .await?;
+        let change_sets = value
+            .get("change_sets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if change_sets.is_empty() {
+            println!("（团队还没有变更集；写角色产出真实文件改动后会出现）");
+            return Ok(());
+        }
+        println!("{}", "团队变更集：".bold());
+        if let Some(reason) = value.get("approval_block_reason").and_then(|v| v.as_str()) {
+            println!("  {} {reason}", "批准门：".yellow());
+        }
+        for change_set in change_sets {
+            let cs_id = change_set
+                .get("change_set_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let role = change_set
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let state = change_set
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let files = change_set
+                .get("changed_files")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            println!(
+                "  {} role={role} status={state} 文件 {} 个",
+                cs_id.dimmed(),
+                files.len()
+            );
+            for file in files.iter().take(10) {
+                if let Some(path) = file.as_str() {
+                    println!("      {path}");
+                }
+            }
+            if let Some(diff_ref) = change_set.get("diff_ref").and_then(|v| v.as_str()) {
+                println!("      diff: {diff_ref}");
+            }
+        }
+        println!("  （接受/拒绝/回滚：POST /change-sets/{id}/accept|reject|revert）");
+        Ok(())
+    }
     fn decide_permission(
         &self,
         event: &SseEvent,
@@ -666,6 +1180,69 @@ impl DaemonRepl {
     }
 }
 
+/// 团队详情渲染（状态 / 成员 / 任务图 / 审计尾迹）——`/team status` 与跟踪共用。
+fn print_team_detail(detail: &serde_json::Value) {
+    let team = detail.get("team").cloned().unwrap_or_default();
+    let id = team.get("team_id").and_then(|v| v.as_str()).unwrap_or("?");
+    let status = team.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+    let mode = team.get("mode").and_then(|v| v.as_str()).unwrap_or("?");
+    let template = team
+        .get("template_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("（动态组队）");
+    let interrupted = detail
+        .get("interrupted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    println!(
+        "{} {id}  {status}  mode={mode}  模板={template}{}",
+        "团队：".bold(),
+        if interrupted { "  · 已中断" } else { "" }
+    );
+    if let Some(members) = team.get("members").and_then(|v| v.as_array()) {
+        let names = members
+            .iter()
+            .filter_map(|member| member.get("user_id").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !names.is_empty() {
+            println!("  成员：{names}");
+        }
+    }
+    if let Some(tasks) = detail.get("tasks").and_then(|v| v.as_array()) {
+        println!("  任务图：");
+        for task in tasks {
+            let task_id = task.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let role = task.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+            let state = task
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Pending");
+            let mark = match state {
+                "Succeeded" => "✔".green().to_string(),
+                "Running" => "▶".blue().to_string(),
+                "Failed" => "✘".red().to_string(),
+                _ => "○".dimmed().to_string(),
+            };
+            let error = task
+                .get("error")
+                .and_then(|v| v.as_str())
+                .map(|error| format!("：{error}"))
+                .unwrap_or_default();
+            println!("    {mark} {task_id}  {role}  {state}{error}");
+        }
+    }
+    if let Some(tail) = detail.get("audit_tail").and_then(|v| v.as_array()) {
+        if !tail.is_empty() {
+            println!("  审计尾迹（最近 {} 条）：", tail.len());
+            for entry in tail.iter().take(5) {
+                let event = entry.get("event").and_then(|v| v.as_str()).unwrap_or("?");
+                let text = entry.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                println!("    {event}  {text}");
+            }
+        }
+    }
+}
 fn grant_revoke_payload(grant_id: &str) -> serde_json::Value {
     serde_json::json!({ "grant_id": grant_id })
 }
@@ -687,7 +1264,12 @@ fn print_help() {
     println!("  /archive | /pin    归档 / 置顶当前会话");
     println!("  /abort             中止当前回合");
     println!("  /status            查看工作区/模型/会话状态");
-    println!("  /permissions [overview] 查看审批与授权；/permissions revoke <授权ID> 撤销单条授权");
+    println!(
+        "  /permissions [status] 查看档位与授权；set <档位> 切换；revoke <授权ID> 撤销单条授权"
+    );
+    println!(
+        "  /team <目标>       创建多 agent 团队并实时跟踪（list/status/steer/retry/cancel/diff）"
+    );
     println!("  /audit /skills /settings /traces  读取服务端状态");
     println!("  /clear             清屏");
     println!("  /exit | /quit      退出");

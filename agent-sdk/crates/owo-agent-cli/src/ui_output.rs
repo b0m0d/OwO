@@ -158,114 +158,220 @@ pub(crate) fn summarize_permission_args(value: &Value, max_chars: usize) -> Stri
     format!("{truncated}…")
 }
 
-// ---------- human 事件打印（自 turn.rs 迁入；repl 仍复用同一观感） ----------
+// ---------- human 流式打印（本地 TurnEvent / Daemon SseEvent 共用） ----------
 
-/// 事件打印器：把流式增量经 Markdown 渲染逐行输出，Final 只收尾不重复打印。
-pub struct EventPrinter {
+/// 统一流式打印器：Markdown 增量渲染 + 实时状态（思考中 / 工具参数 / 耗时）。
+///
+/// - `⏳ 思考中…` 在模型调用开始时显示，首个 token 到达时原地清除（仅 tty）；
+/// - `▶ tool <参数预览>` 在工具启动时立即显示（含并发组，核心已改为实时外发）；
+/// - `✔/✘ tool（1.2s）` 在工具完成时显示耗时。
+pub struct StreamPrinter {
     markdown: crate::markdown::MarkdownStream,
     streamed: bool,
+    status_visible: bool,
+    tools: std::collections::HashMap<String, std::time::Instant>,
 }
 
-impl EventPrinter {
+impl StreamPrinter {
     pub fn new() -> Self {
         Self {
             markdown: crate::markdown::MarkdownStream::new(),
             streamed: false,
+            status_visible: false,
+            tools: std::collections::HashMap::new(),
         }
     }
 
-    pub fn print(&mut self, event: &TurnEvent) {
+    /// 本地 `TurnEvent`。
+    pub fn print_turn(&mut self, event: &TurnEvent) {
         match event {
+            TurnEvent::ModelCall => {
+                self.clear_status();
+                self.show_status("  ⏳ 思考中…");
+            }
             TurnEvent::TokenDelta { delta } => {
+                self.clear_status();
                 self.streamed = true;
                 self.markdown.push(delta);
             }
-            TurnEvent::Final { text } => {
-                if self.streamed {
-                    self.markdown.finish();
-                    self.streamed = false;
+            TurnEvent::ToolStart {
+                id,
+                tool,
+                args_preview,
+            } => {
+                self.clear_status();
+                self.tools.insert(id.clone(), std::time::Instant::now());
+                println!(
+                    "  {} {tool}{}",
+                    "▶".blue(),
+                    preview_suffix(args_preview.as_deref())
+                );
+            }
+            TurnEvent::ToolResult {
+                id,
+                tool,
+                ok,
+                error,
+            } => {
+                self.clear_status();
+                let suffix = self.elapsed_suffix(id);
+                if *ok {
+                    println!("  {} {tool}{suffix}", "✔".green());
                 } else {
-                    println!("\n{}\n", "── 结果 ──".bold());
-                    self.markdown.push(text);
-                    self.markdown.finish();
+                    println!(
+                        "  {} {tool}：{}{suffix}",
+                        "✘".red(),
+                        error.as_deref().unwrap_or("未知错误")
+                    );
                 }
             }
-            other => {
-                if self.streamed {
-                    self.markdown.finish();
-                    self.streamed = false;
-                }
-                print_event(other);
+            TurnEvent::PermissionRequest(request) => {
+                self.clear_status();
+                print_permission_card(&PermissionCard {
+                    tool: &request.tool,
+                    level: Some(request.level.label()),
+                    reason: &request.reason,
+                    args: Some(&request.args),
+                    redacted_args: request.redacted_args.as_ref(),
+                    risk_note: request.risk_note.as_deref(),
+                    explain: None,
+                });
             }
+            TurnEvent::Compaction { summary } => {
+                self.clear_status();
+                println!("  {}（上下文已压缩：{}）", "✦".yellow(), summary);
+            }
+            TurnEvent::Final { text } => self.finish_final(text),
+        }
+    }
+
+    /// Daemon `SseEvent`。
+    pub fn print_sse(&mut self, event: &SseEvent) {
+        match event {
+            SseEvent::Progress { message } => {
+                self.clear_status();
+                if message.contains("模型调用") {
+                    self.show_status("  ⏳ 思考中…");
+                } else {
+                    println!("{} {message}", "  ↻".cyan());
+                }
+            }
+            SseEvent::TokenDelta { delta } => {
+                self.clear_status();
+                self.streamed = true;
+                self.markdown.push(delta);
+            }
+            SseEvent::ToolUse { id, tool, args } => {
+                self.clear_status();
+                self.tools.insert(id.clone(), std::time::Instant::now());
+                println!("  {} {tool}{}", "▶".blue(), preview_suffix(args.as_str()));
+            }
+            SseEvent::ToolResult {
+                id,
+                tool,
+                ok,
+                error,
+            } => {
+                self.clear_status();
+                let suffix = self.elapsed_suffix(id);
+                if *ok {
+                    println!("  {} {tool}{suffix}", "✔".green());
+                } else {
+                    println!(
+                        "  {} {tool}：{}{suffix}",
+                        "✘".red(),
+                        error.as_deref().unwrap_or("未知错误")
+                    );
+                }
+            }
+            SseEvent::PermissionRequest {
+                tool,
+                reason,
+                level,
+                args,
+                redacted_args,
+                risk_note,
+                explain,
+                ..
+            } => {
+                self.clear_status();
+                print_permission_card(&PermissionCard {
+                    tool,
+                    level: level.as_deref(),
+                    reason,
+                    args: Some(args),
+                    redacted_args: redacted_args.as_ref(),
+                    risk_note: risk_note.as_deref(),
+                    explain: explain.as_ref(),
+                });
+            }
+            SseEvent::Compaction { summary } => {
+                self.clear_status();
+                println!("  {}（上下文已压缩：{}）", "✦".yellow(), summary);
+            }
+            SseEvent::Final { text } => self.finish_final(text),
+        }
+    }
+
+    /// 收尾：输出 Markdown 残留并清除状态行。
+    pub fn finish(&mut self) {
+        self.clear_status();
+        if self.streamed {
+            self.markdown.finish();
+            self.streamed = false;
+        }
+    }
+
+    fn finish_final(&mut self, text: &str) {
+        self.clear_status();
+        if self.streamed {
+            self.markdown.finish();
+            self.streamed = false;
+        } else {
+            println!("\n{}\n", "── 结果 ──".bold());
+            self.markdown.push(text);
+            self.markdown.finish();
+        }
+    }
+
+    fn elapsed_suffix(&mut self, id: &str) -> String {
+        match self.tools.remove(id) {
+            Some(started) => format!("（{:.1}s）", started.elapsed().as_secs_f64()),
+            None => String::new(),
+        }
+    }
+
+    fn show_status(&mut self, text: &str) {
+        use std::io::{IsTerminal, Write};
+        if std::io::stdout().is_terminal() {
+            print!("{text}");
+            let _ = std::io::stdout().flush();
+            self.status_visible = true;
+        } else {
+            println!("{text}");
+        }
+    }
+
+    fn clear_status(&mut self) {
+        use std::io::Write;
+        if self.status_visible {
+            print!("\r\u{1b}[2K");
+            let _ = std::io::stdout().flush();
+            self.status_visible = false;
         }
     }
 }
 
-impl Default for EventPrinter {
+impl Default for StreamPrinter {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub fn print_event(event: &TurnEvent) {
-    match event {
-        TurnEvent::ModelCall => println!("{}", "  ↻ 调用模型…".cyan()),
-        TurnEvent::PermissionRequest(request) => print_permission_card(&PermissionCard {
-            tool: &request.tool,
-            level: Some(request.level.label()),
-            reason: &request.reason,
-            args: Some(&request.args),
-            redacted_args: request.redacted_args.as_ref(),
-            risk_note: request.risk_note.as_deref(),
-            explain: None,
-        }),
-        TurnEvent::ToolStart { tool, .. } => {
-            println!("  {} {tool} …", "▶".blue());
-        }
-        TurnEvent::ToolResult {
-            tool, ok, error, ..
-        } => {
-            if *ok {
-                println!("  {} {tool}", "✔".green());
-            } else {
-                println!(
-                    "  {} {tool}：{}",
-                    "✘".red(),
-                    error.as_deref().unwrap_or("未知错误")
-                );
-            }
-        }
-        TurnEvent::TokenDelta { .. } => {}
-        TurnEvent::Compaction { summary } => {
-            println!("  {}（上下文已压缩：{}）", "✦".yellow(), summary);
-        }
-        TurnEvent::Final { .. } => {}
-    }
-}
-
-/// human 模式：单个 SSE 事件行（turn/repl 共用同一观感）。
-pub fn print_sse_event_human(event: &SseEvent) {
-    match event {
-        SseEvent::Progress { message } => println!("{} {message}", "  ↻".cyan()),
-        SseEvent::ToolUse { tool, .. } => println!("  {} {tool} …", "▶".blue()),
-        SseEvent::ToolResult {
-            tool, ok, error, ..
-        } => {
-            if *ok {
-                println!("  {} {tool}", "✔".green());
-            } else {
-                println!(
-                    "  {} {tool}：{}",
-                    "✘".red(),
-                    error.as_deref().unwrap_or("未知错误")
-                );
-            }
-        }
-        SseEvent::PermissionRequest { .. } => {}
-        SseEvent::Compaction { summary } => {
-            println!("  {}（上下文已压缩：{}）", "✦".yellow(), summary);
-        }
-        SseEvent::TokenDelta { .. } | SseEvent::Final { .. } => {}
+fn preview_suffix(preview: Option<&str>) -> String {
+    match preview {
+        Some(preview) if !preview.is_empty() => format!(" {preview}"),
+        _ => String::new(),
     }
 }
 
@@ -374,5 +480,15 @@ mod tests {
         let long = summarize_permission_args(&json!({ "content": "x".repeat(500) }), 20);
         assert!(long.chars().count() <= 21, "truncated must fit: {long}");
         assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn preview_suffix_formats_tool_args() {
+        assert_eq!(
+            preview_suffix(Some("{\"path\":\"a\"}")),
+            " {\"path\":\"a\"}"
+        );
+        assert_eq!(preview_suffix(Some("")), "");
+        assert_eq!(preview_suffix(None), "");
     }
 }

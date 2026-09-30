@@ -80,6 +80,17 @@ pub struct Session {
     /// 配置 → 内置默认）。`model` 字段仅为展示值，路由以本字段为准。
     #[serde(default)]
     pub model_override: Option<String>,
+    /// 会话级任务清单（`todo` 工具维护；整表替换语义）。
+    #[serde(default)]
+    pub todos: Vec<TodoItem>,
+}
+
+/// 任务清单条目（`todo` 工具写入，CLI `/todo` 渲染）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TodoItem {
+    pub content: String,
+    /// `pending` | `in_progress` | `completed`。
+    pub status: String,
 }
 
 impl Session {
@@ -107,6 +118,7 @@ impl Session {
             archived: false,
             pinned: false,
             model_override: None,
+            todos: Vec::new(),
         }
     }
 
@@ -466,6 +478,8 @@ impl Session {
             pinned: false,
             // fork 继承父会话的模型覆盖（路由语义随历史一起派生）。
             model_override: self.model_override.clone(),
+            // 任务清单随 fork 继承（继续同一任务）。
+            todos: self.todos.clone(),
         }
     }
 

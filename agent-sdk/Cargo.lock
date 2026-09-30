@@ -1985,6 +1985,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "tracing",
  "uuid",
 ]

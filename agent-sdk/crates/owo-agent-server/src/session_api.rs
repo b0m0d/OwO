@@ -156,6 +156,7 @@ pub(super) async fn get_session(
         "pinned": session.pinned,
         "parent_id": session.parent_id,
         "fork_point": session.fork_point,
+        "todos": session.todos,
         "messages": session.messages,
     })))
 }

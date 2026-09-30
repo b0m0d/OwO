@@ -10,11 +10,19 @@
 
 use crate::gateway::ModelProvider;
 use crate::permissions::Approver;
+use crate::TurnEvent;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 pub const MAX_SUBAGENT_DEPTH: usize = 2;
+
+/// 嵌套回合事件出口：把子代理回合的事件**即时**转交给父回合的 `on_event`。
+///
+/// 为什么必须即时（不能缓冲）：子代理的审批请求（`TurnEvent::PermissionRequest`）
+/// 要经由父回合的流到达客户端；若缓冲到子代理结束才回放，子代理正阻塞在
+/// `approver.decide()` 上等一个永远不会到达的决定 → 任务卡死到审批超时。
+pub type TurnEventSink<'a> = Arc<dyn Fn(&TurnEvent) + Send + Sync + 'a>;
 
 /// 子代理执行器：启动一个只读或完整子会话并运行一轮 `Agent::run_turn`。
 ///
@@ -31,6 +39,8 @@ pub struct SubagentRunner<'a> {
     pub depth: usize,
     pub max_turns: usize,
     pub model: String,
+    /// 嵌套回合事件出口（`None` = 不可见，用于无交互通道的后台路径）。
+    pub events: Option<TurnEventSink<'a>>,
 }
 
 impl SubagentRunner<'_> {
@@ -52,6 +62,7 @@ impl SubagentRunner<'_> {
             depth: self.depth,
             max_turns: self.max_turns,
             model: self.model.clone(),
+            events: self.events.clone(),
         };
         contract.run(workspace, prompt, read_only).await
     }
@@ -88,6 +99,7 @@ mod tests {
             depth: MAX_SUBAGENT_DEPTH,
             max_turns: 5,
             model: "mock".to_string(),
+            events: None,
         };
         let result = runner.run(&workspace, "x", true).await;
         assert!(result.unwrap_err().contains("深度超限"));

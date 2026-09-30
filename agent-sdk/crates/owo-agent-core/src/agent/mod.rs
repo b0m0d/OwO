@@ -40,6 +40,10 @@ pub enum TurnEvent {
     ToolStart {
         id: String,
         tool: String,
+        /// 参数预览（脱敏、截断）：供 CLI/前端实时展示"正在用什么参数调用"。
+        /// 序列化向后兼容（缺省为 None）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args_preview: Option<String>,
     },
     ToolResult {
         id: String,
@@ -305,9 +309,16 @@ impl Agent {
         read_only: bool,
     ) -> Result<String, AgentError> {
         let abort = AtomicBool::new(false);
-        // 直呼子代理没有可回传到客户端的审批通道：只读模式可以自动放行，
-        // 通用模式必须默认拒绝写入/执行，避免子代理绕过主会话审批。
-        let approver = crate::permissions::AutoApprover { allow: read_only };
+        // 直呼子代理没有可回传到客户端的审批通道（goal/plan 后台 worker、
+        // POST /subagent）：改用工作区范围审批器——读恒放行；写/执行仅在
+        // **工作区内**放行，越界一律拒绝；只读模式拒绝全部写/执行。
+        // 旧实现用 `AutoApprover { allow: read_only }`，导致 producer 角色的
+        // 写/执行被一律拒绝（子代理"跑完了但什么都没改"），或阻塞在永远
+        // 到不了的审批上直到超时。
+        let approver = crate::permissions::WorkspaceApprover {
+            workspace: workspace.to_path_buf(),
+            allow_writes: !read_only,
+        };
         let runner = SubagentRunner {
             provider: Arc::clone(&self.provider),
             approver: &approver,
@@ -315,6 +326,7 @@ impl Agent {
             depth: self.config.subagent_depth,
             max_turns: self.config.max_turns,
             model: model.to_string(),
+            events: None,
         };
         runner
             .run(workspace, prompt, read_only)
@@ -401,6 +413,19 @@ impl Agent {
         // 循环保护状态（本回合内）：工具调用总量 + 「同一 name/参数」重复计数。
         let mut tool_calls_seen = 0usize;
         let mut call_signatures: HashMap<String, usize> = HashMap::new();
+        // 事件出口共享单元：嵌套子代理（subagent/explore）要能在父回合 await 期间
+        // **即时**回传工具进度与审批请求（审批卡必须立刻到达客户端，否则子代理会
+        // 一直等一个到不了的决定，直到审批超时——"卡死"的根因）。
+        let event_cell: EventCell<'_> = Arc::new(Mutex::new(on_event));
+        let nested_sink: crate::subagent::TurnEventSink<'_> = {
+            let cell = Arc::clone(&event_cell);
+            Arc::new(move |event: &TurnEvent| {
+                // 中毒也继续转发（与仓库既有锁处理口径一致）：静默丢弃事件会让
+                // 子代理进度/审批卡凭空消失，比"带毒继续"危险得多。
+                let mut forward = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                forward(event);
+            })
+        };
 
         for _index in 0..self.config.max_turns {
             if abort.load(Ordering::Relaxed) {
@@ -418,7 +443,7 @@ impl Agent {
             if let Some(summary) = summary {
                 emit(
                     &mut events,
-                    on_event,
+                    &event_cell,
                     TurnEvent::Compaction {
                         summary: summary.clone(),
                     },
@@ -428,8 +453,8 @@ impl Agent {
                 compact_truncate(&mut messages, self.config.context_limit);
             }
 
-            emit(&mut events, on_event, TurnEvent::ModelCall);
-            let on_event_reborrow = &mut *on_event;
+            emit(&mut events, &event_cell, TurnEvent::ModelCall);
+            let on_event_reborrow = &event_cell;
             let model_started = std::time::Instant::now();
             // §9.3 瀑布：首个 TokenDelta 到达时刻记为首 token 时延。
             // 哨兵必须与合法值域不相交：0ms 是真实可能（本地/mock 端点同毫秒
@@ -512,7 +537,7 @@ impl Agent {
                 ModelOutput::Text(text) => {
                     messages.push(ChatMessage::assistant_text(text.clone()));
                     final_text = Some(text.clone());
-                    emit(&mut events, on_event, TurnEvent::Final { text });
+                    emit(&mut events, &event_cell, TurnEvent::Final { text });
                     break;
                 }
                 ModelOutput::ToolCalls(calls) => {
@@ -615,7 +640,7 @@ impl Agent {
                                     ReviewVerdict::Unknown => {
                                         emit(
                                             &mut events,
-                                            on_event,
+                                            &event_cell,
                                             TurnEvent::PermissionRequest(request.clone()),
                                         );
                                         let decide_started = std::time::Instant::now();
@@ -703,18 +728,24 @@ impl Agent {
                                     depth: self.config.subagent_depth,
                                     max_turns: self.config.max_turns,
                                     model: session.model_override.clone().unwrap_or_default(),
+                                    events: Some(Arc::clone(&nested_sink)),
                                 };
                                 let sink = Arc::clone(&group_events);
                                 let call_id = call.id.clone();
                                 let tool_name = call.name.clone();
                                 let arguments = call.arguments.clone();
                                 let tool_host = self.tool_host.clone();
-                                if let Ok(mut buffer) = sink.lock() {
-                                    buffer.push(TurnEvent::ToolStart {
+                                // 实时状态：ToolStart 立即外发（不再等整组结束），
+                                // 让长任务/多工具链在 CLI 上可见"正在跑哪些工具、什么参数"。
+                                emit(
+                                    &mut events,
+                                    &event_cell,
+                                    TurnEvent::ToolStart {
                                         id: call_id.clone(),
                                         tool: tool_name.clone(),
-                                    });
-                                }
+                                        args_preview: tool_args_preview(&call.arguments),
+                                    },
+                                );
                                 futures.push(async move {
                                     let mut ctx = ToolContext {
                                         workspace: &workspace,
@@ -781,11 +812,24 @@ impl Agent {
                                     }
                                 }
                             } else {
-                                tokio::select! {
-                                    outcomes = futures::future::join_all(futures) => outcomes,
-                                    _ = wait_for_abort(abort) => {
-                                        commit_turn_messages(session, &messages);
-                                        return Err(AgentError::Aborted);
+                                // 实时回放：等待期间每 100ms drain 一次组事件缓冲，
+                                // 工具一完成即可在 CLI 看到 ToolResult（不再等整组结束）。
+                                let join = futures::future::join_all(futures);
+                                tokio::pin!(join);
+                                loop {
+                                    tokio::select! {
+                                        outcomes = &mut join => break outcomes,
+                                        _ = wait_for_abort(abort) => {
+                                            commit_turn_messages(session, &messages);
+                                            return Err(AgentError::Aborted);
+                                        }
+                                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                                            if let Ok(mut buffer) = group_events.lock() {
+                                                for event in buffer.drain(..) {
+                                                    emit(&mut events, &event_cell, event);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             };
@@ -798,11 +842,11 @@ impl Agent {
                                 first_token_ms: None,
                             });
                             results.extend(outcomes);
-                            // 组事件统一转发：组完成时按 ToolStart…/ToolResult 插入序
-                            // 回放（并发工具的 ToolStart 不再实时流式，属预期取舍）。
+                            // 兜底 drain：把剩余 ToolResult 按插入序回放
+                            // （ToolStart 已实时外发；未完成工具的 ToolResult 在此补齐）。
                             if let Ok(mut buffer) = group_events.lock() {
                                 for event in buffer.drain(..) {
-                                    emit(&mut events, on_event, event);
+                                    emit(&mut events, &event_cell, event);
                                 }
                             }
                             index = end;
@@ -813,7 +857,7 @@ impl Agent {
                                 // 循环保护拦截：不执行，回灌可读原因（模型据此改策略）。
                                 emit(
                                     &mut events,
-                                    on_event,
+                                    &event_cell,
                                     TurnEvent::ToolResult {
                                         id: call.id.clone(),
                                         tool: call.name.clone(),
@@ -833,10 +877,11 @@ impl Agent {
                                 );
                                 emit(
                                     &mut events,
-                                    on_event,
+                                    &event_cell,
                                     TurnEvent::ToolStart {
                                         id: call.id.clone(),
                                         tool: call.name.clone(),
+                                        args_preview: tool_args_preview(&call.arguments),
                                     },
                                 );
                                 let subagent = SubagentRunner {
@@ -846,6 +891,7 @@ impl Agent {
                                     depth: self.config.subagent_depth,
                                     max_turns: self.config.max_turns,
                                     model: session.model_override.clone().unwrap_or_default(),
+                                    events: Some(Arc::clone(&nested_sink)),
                                 };
                                 let mut ctx = ToolContext {
                                     workspace: &workspace,
@@ -904,7 +950,7 @@ impl Agent {
                                 });
                                 emit(
                                     &mut events,
-                                    on_event,
+                                    &event_cell,
                                     TurnEvent::ToolResult {
                                         id: call.id.clone(),
                                         tool: call.name.clone(),
@@ -1067,6 +1113,22 @@ impl Agent {
     }
 }
 
+/// 工具参数预览：脱敏（秘密字段只显示类型/长度）+ 紧凑 JSON + 截断，供 `ToolStart`
+/// 实时状态展示；空参数返回 `None`。
+fn tool_args_preview(args: &serde_json::Value) -> Option<String> {
+    let text = crate::permissions::redact_args(args).to_string();
+    if text == "null" || text == "{}" {
+        return None;
+    }
+    const MAX_CHARS: usize = 160;
+    if text.chars().count() <= MAX_CHARS {
+        Some(text)
+    } else {
+        let truncated: String = text.chars().take(MAX_CHARS).collect();
+        Some(format!("{truncated}…"))
+    }
+}
+
 /// 循环保护签名：`name` + 规范化参数（键序稳定，避免 provider 参数键序不同导致漏判）。
 fn tool_call_signature(call: &crate::gateway::ToolCall) -> String {
     format!("{}:{}", call.name, canonical_json(&call.arguments))
@@ -1127,12 +1189,17 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
         .sum()
 }
 
-fn emit(
-    events: &mut Vec<TurnEvent>,
-    on_event: &mut (dyn FnMut(&TurnEvent) + Send),
-    event: TurnEvent,
-) {
-    on_event(&event);
+/// 回合事件出口的共享单元：父回合与嵌套子代理（`SubagentRunner.events`）共用同一份，
+/// 保证子代理的审批请求/工具进度在父回合 await 期间也能即时外发。
+pub(crate) type EventCell<'a> = Arc<Mutex<&'a mut (dyn FnMut(&TurnEvent) + Send + 'a)>>;
+
+/// 回合事件出口：`on_event` 用共享单元传递（子代理/嵌套回合持同一单元即时回传）。
+fn emit(events: &mut Vec<TurnEvent>, on_event: &EventCell<'_>, event: TurnEvent) {
+    // 中毒也继续转发（见 nested_sink 注释）。
+    let mut forward = on_event
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    forward(&event);
     events.push(event);
 }
 

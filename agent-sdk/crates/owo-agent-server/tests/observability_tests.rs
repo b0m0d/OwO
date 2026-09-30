@@ -118,6 +118,7 @@ async fn seed_five_traces(state: &Arc<owo_agent_server::AppState>) {
             TurnEvent::ToolStart {
                 id: format!("t{i}"),
                 tool: "read_file".to_string(),
+                args_preview: None,
             },
             TurnEvent::ToolResult {
                 id: format!("t{i}"),
@@ -128,6 +129,7 @@ async fn seed_five_traces(state: &Arc<owo_agent_server::AppState>) {
             TurnEvent::ToolStart {
                 id: format!("w{i}"),
                 tool: "write_file".to_string(),
+                args_preview: None,
             },
             TurnEvent::ToolResult {
                 id: format!("w{i}"),

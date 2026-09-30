@@ -8,11 +8,13 @@ use async_trait::async_trait;
 use owo_agent_core::contract_worker::{
     enforce_worker_output_contract, ContractEnforcementError, ContractSubagentRunner,
 };
+use owo_agent_core::gateway::ToolCall;
 use owo_agent_core::gateway::{ChatMessage, ModelOutput, ModelProvider};
 use owo_agent_core::permissions::AutoApprover;
 use owo_agent_core::subagent::SubagentRunner;
 use owo_agent_core::tools::ToolSpec;
 use owo_agent_core::workswarm_output::{parse_worker_output, strip_code_fences, WorkerOutputParse};
+use owo_agent_core::TurnEvent;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,16 +31,104 @@ const CRITIC_WITH_ARTIFACT: &str = r#"{"status":"done","summary":"评审完成",
 /// 自由文本（Legacy：不是契约 JSON，不能登记为交付物）。
 const FREE_TEXT: &str = "任务完成：我已经修好了 bug 并通过了测试。";
 
+/// 嵌套子代理事件转发：工具进度与审批请求必须即时到达父回合的事件出口。
+///
+/// 回归背景：`ContractSubagentRunner` 此前用 `|_event| {}` 丢弃全部子事件——
+/// 子代理的审批卡到不了客户端，子代理阻塞在 `approver.decide()` 上直到超时
+/// （表现为"任务卡死"）。本测试断言 `PermissionRequest` 与带 `sub:` 前缀的
+/// ToolStart/ToolResult 都经 `events` 出口外发。
+#[tokio::test]
+async fn nested_subagent_forwards_permission_and_tool_events() {
+    let workspace =
+        std::env::temp_dir().join(format!("owo-subagent-events-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    // 脚本：先要求执行命令（Execute 级 → 触发审批请求），再交付契约输出。
+    let provider = ScriptedProvider::from_outputs(vec![
+        ModelOutput::ToolCalls(vec![ToolCall {
+            id: "call-1".to_string(),
+            name: "run_command".to_string(),
+            arguments: serde_json::json!({ "command": "echo nested" }),
+        }]),
+        ModelOutput::Text(PRODUCER_OK.to_string()),
+    ]);
+    let abort = AtomicBool::new(false);
+    let approver = AutoApprover { allow: true };
+    let seen: Arc<Mutex<Vec<TurnEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink_seen = Arc::clone(&seen);
+    let sink: owo_agent_core::subagent::TurnEventSink<'_> = Arc::new(move |event: &TurnEvent| {
+        sink_seen.lock().expect("事件锁中毒").push(event.clone());
+    });
+    let runner = ContractSubagentRunner {
+        provider: provider_arc(&provider),
+        approver: &approver,
+        abort: &abort,
+        depth: 0,
+        max_turns: 4,
+        model: "mock".to_string(),
+        events: Some(sink),
+    };
+    runner
+        .run(&workspace, "执行一条命令并交付", false)
+        .await
+        .expect("契约合规输出应被接受");
+
+    let events = seen.lock().expect("事件锁中毒").clone();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::PermissionRequest(_))),
+        "审批请求必须外发（否则子代理会等到审批超时）：{events:?}"
+    );
+    let tool_starts: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            TurnEvent::ToolStart { tool, .. } => Some(tool.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        tool_starts.iter().any(|tool| tool == "sub:run_command"),
+        "子代理工具启动事件应带 sub: 前缀外发：{tool_starts:?}"
+    );
+    let tool_results: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            TurnEvent::ToolResult { tool, .. } => Some(tool.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        tool_results.iter().any(|tool| tool == "sub:run_command"),
+        "子代理工具结果事件应带 sub: 前缀外发：{tool_results:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            TurnEvent::Final { .. } | TurnEvent::TokenDelta { .. }
+        )),
+        "子代理的 Final/TokenDelta 不得混入父回合事件流"
+    );
+    let _ = std::fs::remove_dir_all(&workspace);
+}
 /// 脚本化 provider：按序返回预设输出；耗尽后报错。
 struct ScriptedProvider {
-    outputs: Mutex<VecDeque<String>>,
+    outputs: Mutex<VecDeque<ModelOutput>>,
     calls: AtomicU32,
 }
 
 impl ScriptedProvider {
     fn new(outputs: &[&str]) -> Arc<Self> {
+        Self::from_outputs(
+            outputs
+                .iter()
+                .map(|s| ModelOutput::Text(s.to_string()))
+                .collect(),
+        )
+    }
+
+    fn from_outputs(outputs: Vec<ModelOutput>) -> Arc<Self> {
         Arc::new(Self {
-            outputs: Mutex::new(outputs.iter().map(|s| s.to_string()).collect()),
+            outputs: Mutex::new(outputs.into()),
             calls: AtomicU32::new(0),
         })
     }
@@ -62,7 +152,7 @@ impl ModelProvider for ScriptedProvider {
             .expect("provider 锁中毒")
             .pop_front()
             .ok_or_else(|| "脚本输出耗尽".to_string())?;
-        Ok(ModelOutput::Text(next))
+        Ok(next)
     }
 }
 
@@ -187,6 +277,7 @@ async fn subagent_end_to_end_producer() {
         depth: 0,
         max_turns: 3,
         model: "mock".to_string(),
+        events: None,
     };
     let text = runner
         .run(&workspace, "调查并交付修复", false)
@@ -228,6 +319,7 @@ async fn subagent_end_to_end_critic() {
         depth: 0,
         max_turns: 3,
         model: "mock".to_string(),
+        events: None,
     };
     let text = runner
         .run(&workspace, "评审上游交付物", true)
@@ -257,6 +349,7 @@ async fn subagent_free_text_path_is_closed() {
         depth: 0,
         max_turns: 3,
         model: "mock".to_string(),
+        events: None,
     };
     let error = runner
         .run(&workspace, "调查并交付修复", false)
@@ -288,6 +381,7 @@ async fn contract_runner_accepts_explicit_fields() {
         depth: 0,
         max_turns: 3,
         model: "mock".to_string(),
+        events: None,
     };
     let text = runner
         .run(&workspace, "评审", true)
