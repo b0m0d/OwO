@@ -195,6 +195,13 @@ pub enum ModelOutput {
     ToolCalls(Vec<ToolCall>),
 }
 
+/// 流式增量块：正文（对用户可见的回答）或思考（深度思考过程，不写入对话历史）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamChunk {
+    Content(String),
+    Reasoning(String),
+}
+
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     async fn complete(
@@ -232,6 +239,18 @@ pub trait ModelProvider: Send + Sync {
     }
 
     /// 流式版按请求覆盖（语义同 [`complete_with_model`](Self::complete_with_model)）。
+    /// 带思考通道的流式补全：正文与思考增量统一经 `on_chunk` 回调（类型区分）。
+    /// 默认实现委托 `complete_stream`（不支持的 provider 自动兼容，思考块缺失）。
+    async fn complete_stream_with_reasoning(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        let mut forward = |text: String| on_chunk(StreamChunk::Content(text));
+        self.complete_stream(messages, tools, &mut forward).await
+    }
+
     async fn complete_stream_with_model(
         &self,
         model: Option<&str>,

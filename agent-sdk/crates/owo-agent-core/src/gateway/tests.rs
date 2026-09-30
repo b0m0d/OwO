@@ -635,3 +635,22 @@ fn user_with_images_roundtrip_and_legacy_compat() {
     let plain_value = serde_json::to_value(&plain).unwrap();
     assert!(plain_value.get("images").is_none(), "{plain_value}");
 }
+
+/// 思考通道（取优合并自远端 engine）：`reasoning_content` 增量被解析且不污染正文。
+#[test]
+fn parse_sse_payload_reads_reasoning_channel() {
+    use crate::gateway::stream::parse_sse_payload;
+    let reasoning =
+        parse_sse_payload(r#"{"choices":[{"delta":{"reasoning_content":"先想一步"}}]}"#)
+            .expect("思考增量不应被当作心跳丢弃");
+    assert_eq!(reasoning.reasoning.as_deref(), Some("先想一步"));
+    assert!(reasoning.content.is_none());
+
+    let content =
+        parse_sse_payload(r#"{"choices":[{"delta":{"content":"答案"}}]}"#).expect("正文增量");
+    assert_eq!(content.content.as_deref(), Some("答案"));
+    assert!(content.reasoning.is_none());
+
+    // 空 reasoning_content 不产生事件（与空正文同口径）。
+    assert!(parse_sse_payload(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#).is_none());
+}

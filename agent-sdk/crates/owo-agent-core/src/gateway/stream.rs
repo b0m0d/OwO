@@ -5,6 +5,8 @@ use super::message::*;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct StreamDelta {
     pub content: Option<String>,
+    /// 思考通道增量（`reasoning_content`，GLM/DeepSeek 约定）；不写入对话历史。
+    pub reasoning: Option<String>,
     /// 原始 tool_calls 增量片段（JSON 值）。
     pub tool_call_fragments: Vec<Value>,
     /// 末尾 usage 块（OpenAI-compatible 流式响应在最后一条 data 中给出）。
@@ -24,6 +26,12 @@ pub fn parse_sse_payload(payload: &str) -> Option<StreamDelta> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    // 思考通道（取优合并自远端 engine）：GLM/DeepSeek 的 reasoning_content。
+    let reasoning = delta
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
     let tool_call_fragments = delta
         .get("tool_calls")
         .and_then(Value::as_array)
@@ -33,11 +41,13 @@ pub fn parse_sse_payload(payload: &str) -> Option<StreamDelta> {
         .get("usage")
         .map(parse_usage_value)
         .filter(|usage| usage.total_tokens > 0 || usage.prompt_tokens > 0);
-    if content.is_none() && tool_call_fragments.is_empty() && usage.is_none() {
+    if content.is_none() && reasoning.is_none() && tool_call_fragments.is_empty() && usage.is_none()
+    {
         return None;
     }
     Some(StreamDelta {
         content,
+        reasoning,
         tool_call_fragments,
         usage,
     })
