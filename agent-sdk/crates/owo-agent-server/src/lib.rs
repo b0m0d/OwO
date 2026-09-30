@@ -692,6 +692,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // R8/R9：trace_id 贯穿置于最外层（public + protected + fallback 全覆盖）。
     public
         .merge(protected)
+        // 桌宠 UI（overlay 壳加载）：`OWO_PET_UI_DIR` 指向桌面端仓库的
+        // `apps/overlay/ui/pet`（index.html/JS/CSS 与 assets/skins 皮肤资产），
+        // 未设置或目录无效时回落 `desktop/web/pet`。磁盘直读 + 全局 no-store
+        // → 改桌宠前端只需刷新窗口，无需重新构建 overlay。
+        .nest_service("/pet", ServeDir::new(pet_ui_dir()))
+        // 桌宠皮肤资产（spritesheet/静态图）：与 `/pet` 分离挂载——
+        // 桌面端 overlay 的皮肤目录 `ui/assets/skins` 单一来源，
+        // 前端以根相对路径 `/pet-assets/skins/<id>/<file>` 取图。
+        .nest_service("/pet-assets", ServeDir::new(pet_assets_dir()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             trace_id_middleware,
@@ -700,6 +709,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn(deprecation_middleware))
         .fallback_service(ServeDir::new(desktop_web_dir()))
         .layer(cors_layer())
+        // 本地工具：API 与静态资源一律禁用浏览器缓存——工作台由磁盘直读，
+        // 启发式缓存会让「代码改了页面却没变」（已实测 app.js 被缓存拿旧逻辑）。
+        .layer(axum::middleware::from_fn(no_store_middleware))
+}
+
+/// 全局 `Cache-Control: no-store`（含静态资源；SSE 不受影响）。
+async fn no_store_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+    );
+    response
 }
 
 /// R8/R9：trace_id 请求贯穿——从 `X-Trace-Id` 头继承（不合法则生成），回填响应头，
@@ -843,6 +868,31 @@ fn desktop_web_dir() -> PathBuf {
         .and_then(|parent| parent.parent())
         .map(|root| root.join("desktop").join("web"))
         .unwrap_or_else(|| PathBuf::from("desktop/web"))
+}
+
+/// 桌宠前端静态目录：环境变量 `OWO_PET_UI_DIR`（桌面端 overlay 启动引擎时
+/// 传入其 `ui/pet` 目录）优先——目录里必须有 index.html 才采纳；
+/// 否则回落 `desktop/web/pet`（仓库内兜底目录，可为占位页）。
+fn pet_ui_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("OWO_PET_UI_DIR") {
+        let path = PathBuf::from(dir);
+        if path.join("index.html").is_file() {
+            return path;
+        }
+    }
+    desktop_web_dir().join("pet")
+}
+
+/// 桌宠皮肤资产目录：`OWO_PET_ASSETS_DIR`（桌面端 overlay 的 `ui/assets`）
+/// 优先，回落 `desktop/web/pet/assets`。
+fn pet_assets_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("OWO_PET_ASSETS_DIR") {
+        let path = PathBuf::from(dir);
+        if path.join("skins").is_dir() {
+            return path;
+        }
+    }
+    desktop_web_dir().join("pet").join("assets")
 }
 
 // （§12：to_session_info/load_session 与会话元数据处理器已外移至 session_api.rs）

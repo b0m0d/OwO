@@ -3375,3 +3375,73 @@ async fn diagnostics_requests_ledger_is_protected_and_privacy_safe() {
         "CORS 必须放行 ledger 标签与 trace 头，实际为 {allowed:?}"
     );
 }
+
+/// 桌宠静态面（远端 be6298f 取优）：`/pet` 与 `/pet-assets` 分目录挂载、
+/// 磁盘直读、全局 `Cache-Control: no-store`（改前端刷新即生效，免重新构建 overlay）。
+/// 环境变量是进程级共享：与 test_state 共用 STATE_ENV_LOCK 串行化，测试尾部必须清理。
+#[tokio::test]
+async fn pet_static_routes_are_mounted_and_no_store() {
+    let _guard = STATE_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let pet_root = tempfile::tempdir().unwrap();
+    let ui = pet_root.path().join("ui");
+    std::fs::create_dir_all(&ui).unwrap();
+    std::fs::write(ui.join("index.html"), "<html>owo-pet-ui</html>").unwrap();
+    let assets = pet_root.path().join("assets");
+    std::fs::create_dir_all(assets.join("skins").join("default")).unwrap();
+    std::fs::write(
+        assets.join("skins").join("default").join("skin.json"),
+        r#"{"id":"default"}"#,
+    )
+    .unwrap();
+
+    std::env::set_var("OWO_PET_UI_DIR", &ui);
+    std::env::set_var("OWO_PET_ASSETS_DIR", &assets);
+    let (state, _temp) = build_state_inner().await;
+    let app = build_router(Arc::clone(&state));
+    std::env::remove_var("OWO_PET_UI_DIR");
+    std::env::remove_var("OWO_PET_ASSETS_DIR");
+
+    // /pet：公开面（无需 bearer），直接读到 index.html，且 no-store 覆盖静态面。
+    let response = app
+        .clone()
+        .oneshot(anonymous_request("GET", "/pet/index.html", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200, "/pet 应挂载并磁盘直读");
+    let cache_control = response
+        .headers()
+        .get(axum::http::header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        cache_control.contains("no-store"),
+        "静态资源必须 no-store（实际 {cache_control:?}）"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("owo-pet-ui"),
+        "应返回磁盘上的桌宠页面正文"
+    );
+
+    // /pet-assets：皮肤资产从 OWO_PET_ASSETS_DIR 单一来源直读（与 /pet 分离挂载）。
+    let response = app
+        .clone()
+        .oneshot(anonymous_request(
+            "GET",
+            "/pet-assets/skins/default/skin.json",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "/pet-assets 应挂载并直读皮肤资产"
+    );
+}
