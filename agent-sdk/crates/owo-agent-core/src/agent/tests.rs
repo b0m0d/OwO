@@ -8,10 +8,110 @@ fn estimate_tokens_counts_chars_and_overhead() {
         ChatMessage::assistant_text("好的。".to_string()),
     ];
     let total = estimate_tokens(&messages);
-    // 每条约 +4 开销：3 条 → 12；正文 ≈ (2 + 12 + 3)/2。
+    // P1-1 口径（取优合并自远端 engine）：中文 ≈1 token/字（cl100k 实测区间），
+    // 3 条共 17 字 + 12 开销；旧公式「字符数/2」会给出 ~20 的低估。
     assert!(
-        (15..=25).contains(&total),
-        "估算 token {total} 应在合理区间"
+        (22..=45).contains(&total),
+        "估算 token {total} 应在中文真实区间（旧公式低估）"
+    );
+}
+
+/// 取优合并（远端 engine）：切点落在 tool 群组内时对齐 assistant(tool_calls)，
+/// 群组前无调用则跳过孤儿群组（避免保留段以孤立 tool 开头被模型拒 400）。
+#[test]
+fn align_keep_start_pulls_in_tool_call_message() {
+    let messages = vec![
+        ChatMessage::system("系统".to_string()),
+        ChatMessage::user("请求".to_string()),
+        ChatMessage::assistant_tool_calls(vec![crate::gateway::ToolCall {
+            id: "c1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": "a.txt" }),
+        }]),
+        ChatMessage::tool("c1".to_string(), "结果一".to_string()),
+        ChatMessage::user("继续".to_string()),
+    ];
+    // 切点在 tool 上：回退到 assistant。
+    assert_eq!(align_keep_start(&messages, 3), 2);
+    // 切点在群组之外：不动。
+    assert_eq!(align_keep_start(&messages, 4), 4);
+    // 群组前无 assistant(tool_calls)（脏历史）：跳过整个群组。
+    let orphan = vec![
+        ChatMessage::system("系统".to_string()),
+        ChatMessage::user("请求".to_string()),
+        ChatMessage::tool("孤儿".to_string(), "结果".to_string()),
+        ChatMessage::user("继续".to_string()),
+    ];
+    assert_eq!(align_keep_start(&orphan, 2), 3);
+}
+
+/// 取优合并（远端 engine）：脏历史归一（丢孤立 tool、补缺失结果且紧跟调用）。
+#[test]
+fn sanitize_history_drops_orphan_tool_and_fills_missing_results() {
+    let mut messages = vec![
+        ChatMessage::system("系统".to_string()),
+        ChatMessage::tool("orphan-1".to_string(), "孤儿结果".to_string()),
+        ChatMessage::user("请求".to_string()),
+        ChatMessage::assistant_tool_calls(vec![crate::gateway::ToolCall {
+            id: "keep-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": "a.txt" }),
+        }]),
+        ChatMessage::tool("keep-1".to_string(), "正常结果".to_string()),
+        ChatMessage::assistant_tool_calls(vec![crate::gateway::ToolCall {
+            id: "lost-1".to_string(),
+            name: "write_file".to_string(),
+            arguments: serde_json::json!({ "path": "b.txt" }),
+        }]),
+        ChatMessage::user("新回合".to_string()),
+    ];
+    sanitize_history(&mut messages);
+    assert_eq!(messages[0].role, "system");
+    assert!(!messages
+        .iter()
+        .any(|message| message.tool_call_id.as_deref() == Some("orphan-1")));
+    assert!(messages
+        .iter()
+        .any(|message| message.tool_call_id.as_deref() == Some("keep-1")));
+    let lost_index = messages
+        .iter()
+        .position(|message| {
+            message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| calls.iter().any(|call| call.id == "lost-1"))
+        })
+        .expect("lost-1 的 assistant 消息应保留");
+    assert_eq!(messages[lost_index + 1].role, "tool");
+    assert_eq!(
+        messages[lost_index + 1].tool_call_id.as_deref(),
+        Some("lost-1")
+    );
+}
+
+/// 取优合并（远端 engine）：token 预算硬裁剪保留 system + 最近 tail。
+#[test]
+fn compact_truncate_to_budget_keeps_system_and_tail() {
+    let mut messages = vec![ChatMessage::system("系统".to_string())];
+    for index in 0..40 {
+        messages.push(ChatMessage::user(format!(
+            "历史消息 {index} {}",
+            "内容".repeat(200)
+        )));
+    }
+    compact_truncate_to_budget(&mut messages, 2_000);
+    assert_eq!(messages[0].role, "system");
+    assert!(estimate_tokens(&messages) <= 2_000, "应压回预算内");
+    assert!(messages.len() < 41, "必须裁掉多数历史");
+    assert!(
+        messages
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("历史消息 39"),
+        "必须保留最新消息"
     );
 }
 

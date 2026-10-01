@@ -453,6 +453,8 @@ impl Agent {
         let mut messages = vec![ChatMessage::system(system)];
         messages.extend(session.messages.iter().cloned());
         messages.push(ChatMessage::user(prompt.to_string()));
+        // 存量历史可能带非法序列（压缩切分、中断半截、外部导入）：发请求前归一。
+        sanitize_history(&mut messages);
         // A2-1 UserPromptSubmit hook：exit 2 = 拒绝本回合（敏感词门卫/强制工单号等
         // 确定性控制），stderr 回喂模型与用户。
         let hooks = self.hooks_snapshot();
@@ -1315,7 +1317,28 @@ impl Agent {
             .await
         {
             Ok(crate::gateway::ModelOutput::Text(text)) => text,
-            Ok(_) | Err(_) => return Ok(None),
+            Ok(_) | Err(_) => {
+                // 压缩失败兜底（A4-3）：按 token 硬裁剪历史，保证本回合仍可发送，
+                // 而不是带着超预算历史直接撞模型 400。返回 Some 让前端收到可见提示。
+                let before = messages.len();
+                compact_truncate_to_budget(messages, self.config.token_budget / 2);
+                self.audit
+                    .lock()
+                    .map_err(|_| AgentError::Session("审计锁中毒".into()))?
+                    .record(
+                        session_id,
+                        "compaction_fallback",
+                        None,
+                        None,
+                        format!(
+                            "模型压缩失败，按预算硬裁剪历史：{before} → {} 条",
+                            messages.len().saturating_sub(1)
+                        ),
+                    );
+                return Ok(Some(
+                    "模型压缩失败，已硬裁剪最近历史以保持在上下文预算内".to_string(),
+                ));
+            }
         };
         let mut compacted = vec![messages[0].clone()];
         compacted.push(ChatMessage::system(format!(
@@ -1498,20 +1521,152 @@ fn tool_call_preview(arguments: &serde_json::Value) -> String {
     preview.replace('\n', " ")
 }
 
-/// 粗略 token 估算：字符数 / 2 + 每条消息固定开销。
+/// 每条消息的固定开销（role / 分隔符等）。
+pub const MESSAGE_OVERHEAD: usize = 4;
+
+/// 图片消息的 token 估算（取优合并自远端 engine）：视觉输入 token 随分辨率
+/// 浮动（数百到数千），按 1100 中位值计入预算，防止带图消息把 token 估算打穿。
+pub const IMAGE_TOKEN_ESTIMATE: usize = 1_100;
+
+/// 单段文本的 token 估算：CJK ≈ 1 token/字，ASCII 按 4 字符/token。
+/// （不引入 tiktoken 原生依赖；与真实 cl100k 计数同量级，用于预算与压缩触发。）
+fn text_token_estimate(text: &str) -> usize {
+    let mut tokens = 0usize;
+    let mut ascii_run = 0usize;
+    for ch in text.chars() {
+        let wide = (ch as u32) >= 0x2E80; // CJK 及全角标点
+        if wide {
+            tokens += 1;
+            ascii_run = 0;
+        } else if ch.is_ascii_alphanumeric() || ch == ' ' {
+            ascii_run += 1;
+            if ascii_run == 4 {
+                tokens += 1;
+                ascii_run = 0;
+            }
+        } else {
+            tokens += 1;
+            ascii_run = 0;
+        }
+    }
+    if ascii_run > 0 {
+        tokens += 1;
+    }
+    tokens
+}
+
+/// token 估算（P1-1 口径）：CJK 按 1 token/字，图片按 [`IMAGE_TOKEN_ESTIMATE`]。
 pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
         .map(|message| {
-            let chars = message
-                .content
-                .as_deref()
-                .map(str::chars)
-                .map(|chars| chars.count())
-                .unwrap_or(0);
-            chars / 2 + 4
+            text_token_estimate(message.content.as_deref().unwrap_or_default())
+                + MESSAGE_OVERHEAD
+                + message.images.len() * IMAGE_TOKEN_ESTIMATE
         })
         .sum()
+}
+
+/// 压缩保留段起点对齐（A4-2）：切点落在 tool 群组内时——
+/// 有前置 assistant(tool_calls) 则回退到该消息（调用与结果同进同出）；
+/// 否则跳过整个孤儿 tool 群组（脏历史直接发给模型会 400）。
+fn align_keep_start(messages: &[ChatMessage], start: usize) -> usize {
+    if start >= messages.len() || messages[start].role != "tool" {
+        return start;
+    }
+    let mut group_start = start;
+    while group_start > 1 && messages[group_start - 1].role == "tool" {
+        group_start -= 1;
+    }
+    if group_start > 1
+        && messages[group_start - 1].role == "assistant"
+        && messages[group_start - 1].tool_calls.is_some()
+    {
+        return group_start - 1;
+    }
+    let mut after = start;
+    while after < messages.len() && messages[after].role == "tool" {
+        after += 1;
+    }
+    after
+}
+
+/// 存量脏历史归一（取优合并自远端 engine）：发请求前调用——
+/// 丢弃无配对的孤立 tool 消息；给有 tool_calls 但没有结果的 assistant 补占位结果
+/// （中断半截提交/外部导入的会话直接发给模型会 400）。
+fn sanitize_history(messages: &mut Vec<ChatMessage>) {
+    fn flush_pending(pending: &mut Vec<String>, cleaned: &mut Vec<ChatMessage>) {
+        for id in pending.drain(..) {
+            cleaned.push(ChatMessage::tool(
+                id,
+                "工具结果缺失（该回合被中断或未完成）".to_string(),
+            ));
+        }
+    }
+
+    let mut cleaned: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    let mut pending: Vec<String> = Vec::new();
+    for message in messages.drain(..) {
+        match message.role.as_str() {
+            "tool" => {
+                let id = message.tool_call_id.clone().unwrap_or_default();
+                if let Some(position) = pending.iter().position(|call_id| *call_id == id) {
+                    pending.remove(position);
+                    cleaned.push(message);
+                }
+                // 无配对（孤立 tool）：丢弃。
+            }
+            "assistant" => {
+                flush_pending(&mut pending, &mut cleaned);
+                if let Some(calls) = &message.tool_calls {
+                    pending.extend(calls.iter().map(|call| call.id.clone()));
+                }
+                cleaned.push(message);
+            }
+            _ => {
+                flush_pending(&mut pending, &mut cleaned);
+                cleaned.push(message);
+            }
+        }
+    }
+    flush_pending(&mut pending, &mut cleaned);
+    *messages = cleaned;
+}
+
+/// 按 token 预算硬裁剪历史（A4-3 兜底）：从尾部保留尽量多的消息（对齐 tool
+/// 群组切点），使 [`estimate_tokens`] 回到 `budget` 内。
+///
+/// 与条数版 [`compact_truncate`] 的区别：模型上下文是 token 硬约束，压缩模型
+/// 调用失败时条数检查挡不住 token 超限。
+fn compact_truncate_to_budget(messages: &mut Vec<ChatMessage>, budget: usize) {
+    let token_of = |message: &ChatMessage| {
+        text_token_estimate(message.content.as_deref().unwrap_or_default())
+            + MESSAGE_OVERHEAD
+            + message.images.len() * IMAGE_TOKEN_ESTIMATE
+    };
+    // system（messages[0]）必保留；从尾部往前累计，找出预算内可保留的 tail。
+    let mut acc = messages.first().map(&token_of).unwrap_or(0);
+    let mut keep = 0usize;
+    for message in messages.iter().skip(1).rev() {
+        let tokens = token_of(message);
+        if acc + tokens > budget && keep > 0 {
+            break;
+        }
+        acc += tokens;
+        keep += 1;
+    }
+    if keep == 0 || keep >= messages.len() {
+        return;
+    }
+    let tail_start = align_keep_start(messages, messages.len() - keep);
+    // 对齐可能把 tail 推到群组之后甚至越界：越界时不裁（保守，不破坏序列）。
+    if tail_start >= messages.len() {
+        return;
+    }
+    let mut tail = messages[tail_start..].to_vec();
+    let system = messages[0].clone();
+    tail.insert(0, system);
+    *messages = tail;
 }
 
 /// 回合事件出口的共享单元：父回合与嵌套子代理（`SubagentRunner.events`）共用同一份，
@@ -1533,22 +1688,9 @@ fn compact_truncate(messages: &mut Vec<ChatMessage>, limit: usize) {
         return;
     }
     let keep = limit.saturating_sub(1);
-    let mut tail_start = messages.len().saturating_sub(keep);
-    if tail_start < messages.len() && messages[tail_start].role == "tool" {
-        let mut group_start = tail_start;
-        while group_start > 1 && messages[group_start - 1].role == "tool" {
-            group_start -= 1;
-        }
-        if group_start > 1
-            && messages[group_start - 1].role == "assistant"
-            && messages[group_start - 1].tool_calls.is_some()
-        {
-            tail_start = group_start - 1;
-        } else {
-            while tail_start < messages.len() && messages[tail_start].role == "tool" {
-                tail_start += 1;
-            }
-        }
+    let tail_start = align_keep_start(messages, messages.len().saturating_sub(keep));
+    if tail_start >= messages.len() {
+        return;
     }
     let mut tail = messages[tail_start..].to_vec();
     let system = messages[0].clone();

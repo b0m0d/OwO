@@ -393,6 +393,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
         self.stream_completion(model, messages, tools, on_chunk)
             .await
     }
+
+    fn usage_snapshot(&self) -> TokenUsage {
+        self.usage.lock().map(|usage| *usage).unwrap_or_default()
+    }
 }
 
 impl OpenAiCompatibleProvider {
@@ -482,9 +486,5 @@ impl OpenAiCompatibleProvider {
         } else {
             Ok(ModelOutput::Text(content))
         }
-    }
-
-    fn usage_snapshot(&self) -> TokenUsage {
-        self.usage.lock().map(|usage| *usage).unwrap_or_default()
     }
 }
