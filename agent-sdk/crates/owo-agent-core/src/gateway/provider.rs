@@ -268,7 +268,26 @@ impl OpenAiCompatibleProvider {
         if stream {
             body["stream_options"] = json!({ "include_usage": true });
         }
+        // 推理档位只在用户显式选择时才下发（默认请求体与旧版完全一致）。
+        if let Some(effort) = reasoning_effort_from_env() {
+            body["reasoning_effort"] = Value::String(effort);
+        }
         body
+    }
+}
+
+/// 推理档位（`reasoning_effort`，取优合并自远端 engine）：读运行时环境变量
+/// （设置页保存后即时生效）。只认 minimal/low/medium/high；未设置或取值非法
+/// 则返回 None = 不发送该参数，避免不支持它的 OpenAI 兼容端点因为未知字段 400。
+fn reasoning_effort_from_env() -> Option<String> {
+    let value = std::env::var("OWO_REASONING_EFFORT")
+        .ok()?
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(value.as_str(), "minimal" | "low" | "medium" | "high") {
+        Some(value)
+    } else {
+        None
     }
 }
 

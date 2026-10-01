@@ -589,6 +589,7 @@ pub(super) async fn settings_update(
         .save(&state.workspace)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     settings.apply_usage_env();
+    settings.apply_reasoning_env();
     // §13 批次六：遥测开关即时生效（默认关；与 cli serve 启动应用同一出口）。
     owo_agent_server::apply_telemetry_setting(settings.telemetry_enabled == Some(true));
     state

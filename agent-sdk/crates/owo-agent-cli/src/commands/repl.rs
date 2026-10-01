@@ -76,6 +76,7 @@ impl Repl {
         let settings = Settings::load(&workspace);
         apply_egress_setting(&settings);
         settings.apply_usage_env();
+        settings.apply_reasoning_env();
         let model = resolve_model(args.model, settings.model.as_deref());
         let read_only = args.agent == "plan" || settings.read_only;
         let root = ensure_data_root(args.data_dir, &workspace);

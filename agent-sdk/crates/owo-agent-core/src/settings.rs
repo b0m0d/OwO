@@ -196,6 +196,11 @@ pub struct Settings {
     /// v0.4.30 模型用量预算。
     #[serde(default)]
     pub usage: UsageSettings,
+    /// 推理档位（`reasoning_effort`，取优合并自远端 engine）：minimal / low / medium / high。
+    /// 留空 = 不发送该参数（用模型自身默认）；只有显式选择时才写入请求体，
+    /// 避免不支持该字段的 OpenAI 兼容端点直接 400。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     /// §13 批次六：可选遥测开关（默认关；仅聚合功能计数/错误码分布/性能分位，
     /// 不含任何消息/提示词/输出/文件内容——数据字典经 /metrics/telemetry/status 暴露）。
     #[serde(default)]
@@ -262,6 +267,21 @@ impl Settings {
             "OWO_MODEL_OUTPUT_PRICE_PER_MTOK",
             self.usage.output_price_per_mtok.to_string(),
         );
+    }
+
+    /// 把推理档位写回环境变量（provider 每次请求前读取，设置页保存后即时生效）。
+    /// 仅接受 minimal/low/medium/high：其余取值（含空串）一律清除变量 = 不下发该参数。
+    pub fn apply_reasoning_env(&self) {
+        let normalized = self
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .filter(|value| matches!(value.as_str(), "minimal" | "low" | "medium" | "high"));
+        match normalized {
+            Some(value) => std::env::set_var("OWO_REASONING_EFFORT", value),
+            None => std::env::remove_var("OWO_REASONING_EFFORT"),
+        }
     }
 }
 
@@ -466,5 +486,32 @@ mod tests {
         assert!(std::env::var("OWO_USAGE_COST_BUDGET_USD").is_err());
         std::env::remove_var("OWO_MODEL_INPUT_PRICE_PER_MTOK");
         std::env::remove_var("OWO_MODEL_OUTPUT_PRICE_PER_MTOK");
+    }
+
+    /// 取优合并（远端 engine）：推理档位只接受 minimal/low/medium/high；
+    /// 大小写与空白归一，非法值/缺省一律清除变量（= 不下发该参数）。
+    #[test]
+    fn apply_reasoning_env_only_accepts_known_levels() {
+        static ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let settings = Settings {
+            reasoning_effort: Some(" HIGH ".to_string()),
+            ..Settings::default()
+        };
+        settings.apply_reasoning_env();
+        assert_eq!(std::env::var("OWO_REASONING_EFFORT").as_deref(), Ok("high"));
+
+        let invalid = Settings {
+            reasoning_effort: Some("unsupported".to_string()),
+            ..Settings::default()
+        };
+        invalid.apply_reasoning_env();
+        assert!(std::env::var("OWO_REASONING_EFFORT").is_err());
+
+        Settings::default().apply_reasoning_env();
+        assert!(std::env::var("OWO_REASONING_EFFORT").is_err());
     }
 }

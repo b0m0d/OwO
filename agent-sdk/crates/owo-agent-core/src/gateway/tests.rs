@@ -722,3 +722,40 @@ async fn deferred_provider_ready_when_configured_and_reuses_instances() {
         }
     }
 }
+
+/// 推理档位（取优合并自远端 engine）：只认 minimal/low/medium/high，默认与非法值
+/// 都不下发 `reasoning_effort`（避免不支持该字段的端点 400）。
+#[tokio::test]
+async fn request_body_sends_reasoning_effort_only_for_known_levels() {
+    let _guard = ENV_LOCK.lock().await;
+    let saved = std::env::var("OWO_REASONING_EFFORT").ok();
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: "http://127.0.0.1:11434/v1".to_string(),
+        api_key: String::new(),
+        model: "local".to_string(),
+        cloud_enabled: false,
+    })
+    .unwrap();
+
+    // 默认（未选择档位）：请求体与旧版一致，不新增字段。
+    std::env::remove_var("OWO_REASONING_EFFORT");
+    let body = provider.request_body(None, &[], &[], false);
+    assert!(
+        body.get("reasoning_effort").is_none(),
+        "默认不应下发推理档位"
+    );
+
+    std::env::set_var("OWO_REASONING_EFFORT", " HIGH ");
+    let body = provider.request_body(None, &[], &[], false);
+    assert_eq!(body["reasoning_effort"], "high");
+
+    // 非法取值不下发：宁可回落模型默认，也不让端点因未知字段报错。
+    std::env::set_var("OWO_REASONING_EFFORT", "unsupported");
+    let body = provider.request_body(None, &[], &[], false);
+    assert!(body.get("reasoning_effort").is_none(), "非法取值不应下发");
+
+    match saved {
+        Some(value) => std::env::set_var("OWO_REASONING_EFFORT", value),
+        None => std::env::remove_var("OWO_REASONING_EFFORT"),
+    }
+}

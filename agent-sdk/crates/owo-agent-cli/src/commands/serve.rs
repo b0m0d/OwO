@@ -35,6 +35,7 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
     let settings = Settings::load(&workspace);
     apply_egress_setting(&settings);
     settings.apply_usage_env();
+    settings.apply_reasoning_env();
     let model = resolve_model(None, settings.model.as_deref());
     // DeferredProvider（取优合并自远端 engine）每次调用前重读 OPENAI_MODEL；把启动
     // 解析出的模型写回进程环境，使保存的 settings.model 在重启后也生效（设置页保存
