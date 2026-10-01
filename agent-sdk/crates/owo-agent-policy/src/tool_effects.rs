@@ -300,7 +300,7 @@ pub fn builtin_class_for(tool: &str) -> Option<EffectClass> {
     let class = match tool {
         "read_file" | "list_dir" | "search_files" | "grep" | "read_image" | "shell_output"
         | "kill_shell" | "todo" => EffectClass::Read,
-        "write_file" | "edit_file" | "apply_patch" => EffectClass::Write,
+        "write_file" | "edit_file" | "multi_edit" | "apply_patch" => EffectClass::Write,
         "run_command" | "web_fetch" | "web_search" => EffectClass::Execute,
         "text.inject" | "clipboard" => EffectClass::Inject,
         "screen_ocr"
@@ -335,6 +335,7 @@ fn builtin_effects() -> Vec<(&'static str, EffectClass)> {
         ("kill_shell", EffectClass::Read),
         ("todo", EffectClass::Read),
         ("edit_file", EffectClass::Write),
+        ("multi_edit", EffectClass::Write),
         ("apply_patch", EffectClass::Write),
         ("web_fetch", EffectClass::Execute),
         ("web_search", EffectClass::Execute),
@@ -388,12 +389,13 @@ mod tests {
         assert_eq!(effect_class_for("text.inject"), EffectClass::Inject);
         assert_eq!(effect_class_for("grep"), EffectClass::Read);
         assert_eq!(effect_class_for("apply_patch"), EffectClass::Write);
+        assert_eq!(effect_class_for("multi_edit"), EffectClass::Write);
         assert_eq!(effect_class_for("web_fetch"), EffectClass::Execute);
         let builtin = all_effects()
             .into_iter()
             .filter(|effect| effect.source == "builtin")
             .count();
-        assert_eq!(builtin, 42, "内置矩阵应完整播种 42 个工具");
+        assert_eq!(builtin, 43, "内置矩阵应完整播种 43 个工具（含 multi_edit）");
     }
 
     #[test]

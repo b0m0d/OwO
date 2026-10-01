@@ -209,15 +209,16 @@ pub fn describe_request(request: &PermissionRequest) -> serde_json::Value {
     let mut undoable = false;
     let args = &request.args;
     match request.tool.as_str() {
-        "read_file" | "write_file" => {
+        "read_file" | "write_file" | "edit_file" | "multi_edit" | "apply_patch" => {
             if let Some(path) = args.get("path").and_then(Value::as_str) {
                 target = path.to_string();
             }
-            undoable = request.tool == "write_file";
-            action = if request.tool == "read_file" {
-                "读取文件".to_string()
-            } else {
-                "写入文件".to_string()
+            undoable = request.tool != "read_file";
+            action = match request.tool.as_str() {
+                "read_file" => "读取文件".to_string(),
+                "write_file" => "写入文件".to_string(),
+                "apply_patch" => "应用补丁".to_string(),
+                _ => "修改文件".to_string(),
             };
         }
         "run_command" => {
@@ -598,6 +599,9 @@ impl Policy {
             ("vision_verify", Level::Read),
             ("vision_ground", Level::Read),
             ("write_file", Level::Write),
+            ("edit_file", Level::Write),
+            ("multi_edit", Level::Write),
+            ("apply_patch", Level::Write),
             ("browser_screenshot", Level::Write),
             ("browser_download_image", Level::Write),
             ("run_command", Level::Execute),
@@ -1118,6 +1122,20 @@ mod tests {
             redacted["headers"]["Authorization"].get("text").is_none(),
             "不携带原文"
         );
+    }
+
+    /// multi_edit（远端 engine 取优）：与 edit_file 同为 Write 级，审批卡展示目标与可撤销。
+    #[test]
+    fn multi_edit_is_write_level_and_described_with_target() {
+        assert_eq!(Policy::level_for("multi_edit"), Level::Write);
+        let request = Policy::new(".").evaluate(
+            "multi_edit",
+            &json!({ "path": "a.txt", "edits": [{ "old_string": "x", "new_string": "y" }] }),
+        );
+        let summary = describe_request(&request);
+        assert_eq!(summary["action"], json!("修改文件"));
+        assert_eq!(summary["target"], json!("a.txt"));
+        assert_eq!(summary["undoable"], json!(true));
     }
 
     #[test]

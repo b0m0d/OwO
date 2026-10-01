@@ -426,6 +426,7 @@ impl ToolRegistry {
         registry.register(ReadFileTool);
         registry.register(WriteFileTool);
         registry.register(EditFileTool);
+        registry.register(MultiEditTool);
         registry.register(ApplyPatchTool);
         registry.register(ListDirTool);
         registry.register(SearchFilesTool);
@@ -1010,6 +1011,120 @@ impl Tool for EditFileTool {
             "path": path,
             "replaced": if replace_all { occurrences } else { 1 },
             "replace_all": replace_all,
+        }))
+    }
+}
+
+/// 对同一文件做多处精准替换（取优合并自远端 engine）：一次调用替代多次
+/// `edit_file`，省回合。原子性：任一处失败则整批不落盘。
+struct MultiEditTool;
+
+#[async_trait]
+impl Tool for MultiEditTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "multi_edit".into(),
+            description: "对同一文件做多处精准替换（一次调用替代多次 edit_file，省回合）。edits 按顺序应用——后面替换的 old_string 要匹配前面替换后的内容。原子性：任一处失败则整批不生效。old_string 必须先 read_file 确认且唯一（或设 replace_all）。自动快照，可 diff/revert。".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "文件路径" },
+                    "edits": {
+                        "type": "array",
+                        "description": "替换列表（按顺序应用，上限 20 个）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": { "type": "string", "description": "要替换的原文（必须唯一、含缩进）" },
+                                "new_string": { "type": "string", "description": "替换后的内容" },
+                                "replace_all": { "type": "boolean", "description": "替换该片段的全部出现位置（默认 false）" }
+                            },
+                            "required": ["old_string", "new_string"]
+                        }
+                    }
+                },
+                "required": ["path", "edits"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let path = required_string(&args, "path")?;
+        let raw_edits = args
+            .get("edits")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if raw_edits.is_empty() {
+            return Err("edits 不能为空".to_string());
+        }
+        if raw_edits.len() > 20 {
+            return Err(format!(
+                "edits 过多（{} 个 > 20）。请拆分为多次 multi_edit 调用",
+                raw_edits.len()
+            ));
+        }
+        // 预解析全部替换项（先整体校验参数，再动文件）。
+        let mut planned: Vec<(String, String, bool)> = Vec::with_capacity(raw_edits.len());
+        for (index, edit) in raw_edits.iter().enumerate() {
+            let old_string = edit
+                .get("old_string")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("edits[{index}] 缺少 old_string"))?
+                .to_string();
+            let new_string = edit
+                .get("new_string")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("edits[{index}] 缺少 new_string"))?
+                .to_string();
+            if old_string.is_empty() {
+                return Err(format!("edits[{index}] 的 old_string 不能为空"));
+            }
+            let replace_all = edit
+                .get("replace_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            planned.push((old_string, new_string, replace_all));
+        }
+
+        let abs = resolve_session_path(ctx, &path)?;
+        if !abs.is_file() {
+            return Err(format!("{path} 不存在（新建文件请用 write_file）"));
+        }
+        let mut content = tokio::fs::read_to_string(&abs)
+            .await
+            .map_err(|e| format!("读取 {path} 失败（仅支持 UTF-8 文本）：{e}"))?;
+
+        // 内存中顺序应用；任一处失败立即返回，原文件不受影响。
+        for (index, (old_string, new_string, replace_all)) in planned.iter().enumerate() {
+            let occurrences = content.matches(old_string.as_str()).count();
+            if occurrences == 0 {
+                return Err(format!(
+                    "第 {}/{} 处替换失败：未找到 old_string（前面的替换可能已改变上下文）。整批未应用，请 read_file 后重试",
+                    index + 1,
+                    planned.len()
+                ));
+            }
+            if occurrences > 1 && !replace_all {
+                return Err(format!(
+                    "第 {}/{} 处替换失败：old_string 出现 {occurrences} 次。请扩大上下文使其唯一或设 replace_all。整批未应用",
+                    index + 1,
+                    planned.len()
+                ));
+            }
+            content = if *replace_all {
+                content.replace(old_string.as_str(), new_string.as_str())
+            } else {
+                content.replacen(old_string.as_str(), new_string.as_str(), 1)
+            };
+        }
+
+        write_file_body(ctx, &path, &abs, &content).await?;
+        Ok(json!({
+            "path": path,
+            "applied": planned.len(),
+            "bytes_after": content.len(),
         }))
     }
 }
@@ -2840,6 +2955,119 @@ mod tests {
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
+    /// multi_edit（远端 engine 取优）：按顺序应用多处替换，第 2 处的 old_string
+    /// 匹配第 1 处替换后的内容。
+    #[tokio::test]
+    async fn multi_edit_applies_all_edits_in_order() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-multi-edit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let original = "fn main() {\n    let version = \"1.0\";\n    println!(\"v1.0\");\n}\n";
+        std::fs::write(workspace.join("app.rs"), original).unwrap();
+
+        let policy = crate::Policy::new(&workspace);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let mut context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+        };
+
+        let result = MultiEditTool
+            .run(
+                &mut context,
+                json!({
+                    "path": "app.rs",
+                    "edits": [
+                        { "old_string": "let version = \"1.0\";", "new_string": "let version = \"2.0\";" },
+                        { "old_string": "println!(\"v1.0\");", "new_string": "println!(\"v{version}\");" }
+                    ]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["applied"], 2);
+        let updated = std::fs::read_to_string(workspace.join("app.rs")).unwrap();
+        assert!(updated.contains("let version = \"2.0\";"), "{updated}");
+        assert!(updated.contains("println!(\"v{version}\");"), "{updated}");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// multi_edit 原子性：任一处失败（未命中/歧义）整批不落盘。
+    #[tokio::test]
+    async fn multi_edit_is_atomic_on_failure() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-multi-edit-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let original = "alpha\nbeta\ngamma\n";
+        std::fs::write(workspace.join("data.txt"), original).unwrap();
+
+        let policy = crate::Policy::new(&workspace);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let mut context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+        };
+
+        // 第 2 处失败（old_string 不存在）：整批不落盘。
+        let error = MultiEditTool
+            .run(
+                &mut context,
+                json!({
+                    "path": "data.txt",
+                    "edits": [
+                        { "old_string": "alpha", "new_string": "ALPHA" },
+                        { "old_string": "不存在的片段", "new_string": "x" }
+                    ]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("2/2") && error.contains("整批未应用"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("data.txt")).unwrap(),
+            original,
+            "失败时原文件必须保持不变"
+        );
+
+        // 多处歧义（未设 replace_all）同样整体失败。
+        std::fs::write(workspace.join("data.txt"), "same\nsame\n").unwrap();
+        let error = MultiEditTool
+            .run(
+                &mut context,
+                json!({
+                    "path": "data.txt",
+                    "edits": [{ "old_string": "same", "new_string": "x" }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("出现 2 次"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("data.txt")).unwrap(),
+            "same\nsame\n"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     #[test]
     fn remove_prefix_unregisters_only_matching_tools() {
         let mut registry = ToolRegistry::new();
@@ -2923,6 +3151,7 @@ mod tests {
                 "read_file",
                 "write_file",
                 "edit_file",
+                "multi_edit",
                 "apply_patch",
                 "list_dir",
                 "search_files",
