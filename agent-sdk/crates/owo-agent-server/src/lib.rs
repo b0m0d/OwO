@@ -1500,7 +1500,10 @@ mod tests {
             owo_agent_core::session::SnapshotEntry {
                 original_b64: Some(base64::engine::general_purpose::STANDARD.encode("before")),
                 expected_after_sha256: Some(owo_agent_core::CasStore::hash_of(b"after")),
-                turn: 0,
+                // turn 归属 = 写入时已存在的消息数：该写入发生在第一个用户回合内
+                // （user 已入历史、assistant 未入），故 turn=1；keep=1 截掉该回合，
+                // 快照必须被回滚（turn=0 表示"回合开始前"，语义上不属于被截段落）。
+                turn: 1,
             },
         );
         state.store.save(&session).unwrap();

@@ -77,6 +77,10 @@ pub(crate) async fn turn(
     crate::observability_api::record_telemetry_counter("turn", 1);
     let session = crate::session_api::load_session(&state, &id)?;
     let mut effective_prompt = request.prompt.clone();
+    // A1-2 多模态（取优合并自远端 engine）：图片附件 → base64 data URL 进 images
+    // （真正进视觉上下文）；文本类附件维持路径注入。
+    let mut attachment_images: Vec<owo_agent_core::MessageImage> = Vec::new();
+    use base64::Engine as _;
     if !request.attachments.is_empty() {
         let dir = crate::session_api::attachment_dir(&session.workspace, &id);
         let mut lines = Vec::new();
@@ -90,6 +94,44 @@ pub(crate) async fn turn(
                 return Err((StatusCode::BAD_REQUEST, format!("附件不存在：{safe}")));
             }
             let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            let is_image = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "webp" | "gif"
+                    )
+                })
+                .unwrap_or(false);
+            if is_image {
+                const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+                if size > MAX_IMAGE_BYTES {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("图片附件过大（{size} 字节 > 5MB）：{safe}"),
+                    ));
+                }
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("附件读取失败：{e}")))?;
+                let media_type = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_ascii_lowercase())
+                    .map(|lower| match lower.as_str() {
+                        "jpg" => "jpeg".to_string(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_else(|| "png".to_string());
+                attachment_images.push(owo_agent_core::MessageImage {
+                    url: format!(
+                        "data:image/{media_type};base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                    ),
+                });
+                lines.push(format!("- {}（图片，{} 字节，已附到消息）", safe, size));
+                continue;
+            }
             lines.push(format!(
                 "- {}（{} 字节，路径 {}）",
                 safe,
@@ -233,13 +275,14 @@ pub(crate) async fn turn(
             receiver: producer_receiver.clone(),
         };
         match agent
-            .run_turn_with_asker(
+            .run_turn_with_images(
                 &mut current,
                 &effective_prompt,
+                &attachment_images,
                 &approver,
+                Some(&questioner),
                 &abort_flag,
                 &mut on_event,
-                Some(&questioner),
             )
             .await
         {

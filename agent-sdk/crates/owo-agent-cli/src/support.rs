@@ -114,8 +114,10 @@ pub(crate) fn build_agent_with_mcp(
 }
 
 /// §3.4（R3-B 契约）：桌面 `serve` 专用构建——缺少模型凭据时**不拒绝启动**，
-/// 降级为 `UnconfiguredModelProvider`（core ready，诊断/设置/会话/工具全部可用，
-/// 模型调用返回稳定码 `provider/not_configured`，UI 据此呈现模型配置引导）。
+/// 模型调用返回稳定码 `provider/not_configured`，UI 据此呈现模型配置引导。
+/// 主通道用 `ResilientProvider::from_deferred()`（取优合并自远端 engine）：
+/// 每次调用前重读环境配置并可按指纹热重建——设置页保存的模型/端点对新回合
+/// 即时生效，无需重启；凭据仍只来自环境变量（本地红线，不落盘密钥）。
 /// 其余 CLI 命令（chat/turn/repl/tui）走上面的严格路径：缺凭据立刻报错，行为不变。
 pub(crate) fn build_agent_with_mcp_serve(
     workspace: &std::path::Path,
@@ -125,19 +127,13 @@ pub(crate) fn build_agent_with_mcp_serve(
     skills: &SkillRegistry,
     deny_commands: &[String],
 ) -> Result<Agent, Box<dyn std::error::Error>> {
-    let provider: Arc<dyn owo_agent_core::ModelProvider> = match OpenAiCompatibleConfig::from_env()
-    {
-        Ok(mut config) => {
-            config.model = model.to_string();
-            Arc::new(owo_agent_core::gateway::ResilientProvider::from_config(
-                config,
-            )?)
-        }
-        Err(error) => {
-            eprintln!("警告：{error}——模型提供商降级为未配置（serve 继续提供诊断/设置/会话）");
-            Arc::new(owo_agent_core::UnconfiguredModelProvider::new(error))
-        }
-    };
+    if !owo_agent_core::gateway::provider_ready() {
+        eprintln!(
+            "警告：模型提供商未配置——serve 以延迟 provider 启动（调用时返回 provider/not_configured，设置/诊断/会话仍可用）"
+        );
+    }
+    let provider: Arc<dyn owo_agent_core::ModelProvider> =
+        Arc::new(owo_agent_core::gateway::ResilientProvider::from_deferred());
     assemble_agent(
         provider,
         workspace,

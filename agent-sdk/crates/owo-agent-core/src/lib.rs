@@ -337,7 +337,7 @@ pub use fleet_transport::{
     TransportTask, TransportWorker,
 };
 pub use gateway::{
-    budget_violation, parse_usage_value, ChatMessage, ModelOutput, ModelProvider,
+    budget_violation, parse_usage_value, ChatMessage, MessageImage, ModelOutput, ModelProvider,
     OpenAiCompatibleConfig, OpenAiCompatibleProvider, TokenUsage, ToolCall,
     UnconfiguredModelProvider,
 };

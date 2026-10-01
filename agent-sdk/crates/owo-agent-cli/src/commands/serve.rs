@@ -36,6 +36,10 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
     apply_egress_setting(&settings);
     settings.apply_usage_env();
     let model = resolve_model(None, settings.model.as_deref());
+    // DeferredProvider（取优合并自远端 engine）每次调用前重读 OPENAI_MODEL；把启动
+    // 解析出的模型写回进程环境，使保存的 settings.model 在重启后也生效（设置页保存
+    // 时同样写该变量，模型对新回合即时生效）。
+    std::env::set_var("OPENAI_MODEL", &model);
     // R3-B（§3.4 `storage/not_writable`）：桌面壳上下文（实例身份由壳注入）绝不允许
     // 静默把数据根迁移到工作区 `.owo-agent`——用户必须看到存储错误并"更换数据目录"。
     // 非桌面 CLI 保持既有回退行为不变。

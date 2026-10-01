@@ -325,6 +325,23 @@ impl ResilientProvider {
         ))
     }
 
+    /// 延迟解析入口（取优合并自远端 engine）：主通道 = [`DeferredProvider`]（每次
+    /// 调用前重读环境配置并可按指纹热重建），fallback 仍读
+    /// `OWO_MODEL_FALLBACK_BASE_URLS`。桌面 serve 用它——未配置时不拒绝启动
+    /// （调用点才返回 `provider/not_configured`），配置/换模型后无需重启即生效。
+    pub fn from_deferred() -> Self {
+        // 配置未就绪时用空种子构造 fallback 链；真正的主 provider 是 DeferredProvider。
+        let seed = OpenAiCompatibleConfig::from_env().unwrap_or_else(|_| OpenAiCompatibleConfig {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: std::env::var("OPENAI_MODEL")
+                .unwrap_or_else(|_| super::DEFAULT_MODEL_ID.to_string()),
+            cloud_enabled: true,
+        });
+        Self::from_primary(Arc::new(DeferredProvider::new()), &seed)
+            .expect("fallback 链构造不应失败")
+    }
+
     pub fn breaker(&self) -> &CircuitBreaker {
         &self.breaker
     }
@@ -506,4 +523,161 @@ fn wants_anthropic() -> bool {
     std::env::var("OWO_PROVIDER")
         .map(|value| value.trim().eq_ignore_ascii_case("anthropic"))
         .unwrap_or(false)
+}
+
+/// 未配置时的稳定错误面（R3-B 契约：`provider/not_configured` + 可操作中文指引；
+/// 与 [`super::UnconfiguredModelProvider`] 的用户文案一致）。
+fn provider_not_configured(error: String) -> String {
+    format!(
+        "{}：模型提供商未配置（{error}）。请在设置中选择云端或本地 Ollama，或经环境变量 OPENAI_API_KEY 配置凭据",
+        super::UnconfiguredModelProvider::CODE
+    )
+}
+
+/// 是否已有可用模型配置（诊断/首启门；只读配置，不发起网络）。
+///
+/// A1-1：`OWO_PROVIDER=anthropic` 时看 `ANTHROPIC_*`（`ANTHROPIC_API_KEY`），
+/// 否则看 OpenAI-compatible（`OPENAI_API_KEY` / 本地端点）。
+pub fn provider_ready() -> bool {
+    if wants_anthropic() {
+        return crate::anthropic::AnthropicConfig::from_env().is_ok();
+    }
+    OpenAiCompatibleConfig::from_env().is_ok()
+}
+
+/// 延迟解析模型 provider（取优合并自远端 engine）：每次调用前重读环境配置，
+/// 以「provider 种类 + 端点/密钥/模型」指纹缓存——配置任一变化即重建实例。
+///
+/// 存在的理由有两条：
+/// 1. **首启门不能把服务卡死**——未配置时服务仍要能起来，让设置页可访问、可填写；
+///    调用点才返回稳定码 `provider/not_configured`（R3-B：core ready，模型调用给引导）。
+/// 2. **保存后即时生效**——设置页写入 `OPENAI_MODEL` 等环境配置后，下一个回合就用新
+///    模型，无需重启（本仓库红线：凭据只来自环境变量，不在设置存储里落盘密钥）。
+pub struct DeferredProvider {
+    cached: std::sync::Mutex<Option<(String, Arc<dyn ModelProvider>)>>,
+}
+
+impl Default for DeferredProvider {
+    fn default() -> Self {
+        Self {
+            cached: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl DeferredProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 取当前配置对应的 provider；配置指纹变化则重建（设置保存后自动换新）。
+    fn resolve(&self) -> Result<Arc<dyn ModelProvider>, String> {
+        // 指纹 = provider 种类 + 配置摘要：种类或端点/密钥/模型任一变化即重建。
+        let (fingerprint, provider): (String, Arc<dyn ModelProvider>) = if wants_anthropic() {
+            let config =
+                crate::anthropic::AnthropicConfig::from_env().map_err(provider_not_configured)?;
+            let fingerprint = format!(
+                "anthropic|{}|{}|{}|{}",
+                config.base_url, config.api_key, config.model, config.cloud_enabled
+            );
+            let provider: Arc<dyn ModelProvider> =
+                Arc::new(crate::anthropic::AnthropicProvider::new(config)?);
+            (fingerprint, provider)
+        } else {
+            let config = OpenAiCompatibleConfig::from_env().map_err(provider_not_configured)?;
+            let fingerprint = format!(
+                "openai|{}|{}|{}|{}",
+                config.base_url, config.api_key, config.model, config.cloud_enabled
+            );
+            let provider: Arc<dyn ModelProvider> = Arc::new(OpenAiCompatibleProvider::new(config)?);
+            (fingerprint, provider)
+        };
+        let mut slot = self
+            .cached
+            .lock()
+            .map_err(|_| "provider 缓存锁中毒".to_string())?;
+        if let Some((cached_fingerprint, provider)) = slot.as_ref() {
+            if *cached_fingerprint == fingerprint {
+                return Ok(Arc::clone(provider));
+            }
+        }
+        *slot = Some((fingerprint, Arc::clone(&provider)));
+        Ok(provider)
+    }
+}
+
+#[async_trait]
+impl ModelProvider for DeferredProvider {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        self.resolve()?.complete(messages, tools).await
+    }
+
+    async fn complete_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        self.resolve()?
+            .complete_with_model(model, messages, tools)
+            .await
+    }
+
+    async fn complete_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.resolve()?
+            .complete_stream(messages, tools, on_delta)
+            .await
+    }
+
+    async fn complete_stream_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.resolve()?
+            .complete_stream_with_model(model, messages, tools, on_delta)
+            .await
+    }
+
+    async fn complete_stream_with_reasoning(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.resolve()?
+            .complete_stream_with_reasoning(messages, tools, on_chunk)
+            .await
+    }
+
+    async fn complete_stream_with_reasoning_and_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.resolve()?
+            .complete_stream_with_reasoning_and_model(model, messages, tools, on_chunk)
+            .await
+    }
+
+    /// 转发真实 provider 的用量累计（否则外层 ResilientProvider 聚合到零值，
+    /// 回合汇报卡的 token 消耗会一直缺失）。
+    fn usage_snapshot(&self) -> TokenUsage {
+        self.resolve()
+            .map(|provider| provider.usage_snapshot())
+            .unwrap_or_default()
+    }
 }

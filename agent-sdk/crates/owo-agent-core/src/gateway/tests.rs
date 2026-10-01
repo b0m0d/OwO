@@ -654,3 +654,71 @@ fn parse_sse_payload_reads_reasoning_channel() {
     // 空 reasoning_content 不产生事件（与空正文同口径）。
     assert!(parse_sse_payload(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#).is_none());
 }
+
+/// DeferredProvider（取优合并自远端 engine）：未配置时调用点返回稳定码
+/// `provider/not_configured`，且 `provider_ready()` 为 false——core 仍可用。
+#[tokio::test]
+async fn deferred_provider_reports_not_configured_without_credentials() {
+    let _guard = ENV_LOCK.lock().await;
+    let saved: Vec<(&str, Option<String>)> = [
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "OWO_PROVIDER",
+        "ANTHROPIC_API_KEY",
+    ]
+    .iter()
+    .map(|key| (*key, std::env::var(key).ok()))
+    .collect();
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::remove_var("OPENAI_BASE_URL");
+    std::env::remove_var("OPENAI_MODEL");
+    std::env::remove_var("OWO_PROVIDER");
+    std::env::remove_var("ANTHROPIC_API_KEY");
+
+    assert!(!provider_ready(), "无凭据时应报告未就绪");
+    let provider = DeferredProvider::new();
+    let error = provider
+        .complete(&[ChatMessage::user("hi".to_string())], &[])
+        .await
+        .expect_err("未配置时调用必须显式报错");
+    assert!(
+        error.contains(UnconfiguredModelProvider::CODE),
+        "错误面必须携带稳定码：{error}"
+    );
+
+    for (key, value) in saved {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
+/// DeferredProvider：配置就绪时报 ready，且未发网络请求即完成 provider 构造。
+#[tokio::test]
+async fn deferred_provider_ready_when_configured_and_reuses_instances() {
+    let _guard = ENV_LOCK.lock().await;
+    let saved: Vec<(&str, Option<String>)> = ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL"]
+        .iter()
+        .map(|key| (*key, std::env::var(key).ok()))
+        .collect();
+    std::env::set_var("OPENAI_API_KEY", "test-key");
+    std::env::set_var("OPENAI_BASE_URL", "https://api.example.com/v1");
+    std::env::set_var("OPENAI_MODEL", "model-a");
+    std::env::remove_var("OWO_PROVIDER");
+    std::env::remove_var("ANTHROPIC_API_KEY");
+
+    assert!(provider_ready(), "配置齐全时应报告就绪");
+    let provider = DeferredProvider::new();
+    // 两次 usage_snapshot（内部 resolve）在配置不变时命中同一缓存实例且不 panic。
+    assert_eq!(provider.usage_snapshot().total_tokens, 0);
+    assert_eq!(provider.usage_snapshot().total_tokens, 0);
+
+    for (key, value) in saved {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+}

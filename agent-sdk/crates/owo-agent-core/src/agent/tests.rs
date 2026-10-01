@@ -1160,3 +1160,60 @@ fn tool_call_signature_ignores_key_order() {
     };
     assert_eq!(tool_call_signature(&a), tool_call_signature(&b));
 }
+
+/// A1-2 多模态（取优合并自远端 engine）：`run_turn_with_images` 把图片以
+/// `MessageImage` 附到用户消息——provider 实际收到 data URL，而非仅路径文本。
+struct RecordingProvider {
+    seen: Mutex<Vec<ChatMessage>>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for RecordingProvider {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        self.seen.lock().unwrap().extend_from_slice(messages);
+        Ok(ModelOutput::Text("ok".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn run_turn_with_images_feeds_vision_message_to_provider() {
+    let provider = Arc::new(RecordingProvider {
+        seen: Mutex::new(Vec::new()),
+    });
+    let agent = Agent::new(
+        provider.clone(),
+        ToolRegistry::new(),
+        Policy::new("."),
+        AgentConfig::default(),
+    );
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let images = vec![crate::gateway::MessageImage::from_url(
+        "data:image/png;base64,AAAA",
+    )];
+    let outcome = agent
+        .run_turn_with_images(
+            &mut session,
+            "看图",
+            &images,
+            &approver,
+            None,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.final_text.as_deref(), Some("ok"));
+    let seen = provider.seen.lock().unwrap();
+    let user = seen
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .expect("provider 应收到用户消息");
+    assert_eq!(user.images.len(), 1);
+    assert_eq!(user.images[0].url, "data:image/png;base64,AAAA");
+}

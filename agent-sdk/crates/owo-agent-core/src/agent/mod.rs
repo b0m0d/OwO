@@ -458,6 +458,44 @@ impl Agent {
         on_event: &mut (dyn FnMut(&TurnEvent) + Send),
         questioner: Option<&dyn crate::question::Questioner>,
     ) -> Result<TurnOutcome, AgentError> {
+        self.run_turn_inner(session, prompt, &[], approver, abort, on_event, questioner)
+            .await
+    }
+
+    /// 带图片输入的回合（A1-2 多模态；取优合并自远端 engine）：`images` 为空时
+    /// 语义同 [`Agent::run_turn_with_asker`]；非空时用户消息携带视觉内容
+    /// （provider 层转成 image parts / image block）。
+    // 图片/提问/审批/中止/事件回调同为回合执行固有维度，参数数超过 clippy
+    // 默认阈值；打包成结构体反而让三处调用点可读性下降，故显式豁免。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_turn_with_images(
+        &self,
+        session: &mut Session,
+        prompt: &str,
+        images: &[crate::gateway::MessageImage],
+        approver: &dyn Approver,
+        questioner: Option<&dyn crate::question::Questioner>,
+        abort: &AtomicBool,
+        on_event: &mut (dyn FnMut(&TurnEvent) + Send),
+    ) -> Result<TurnOutcome, AgentError> {
+        self.run_turn_inner(
+            session, prompt, images, approver, abort, on_event, questioner,
+        )
+        .await
+    }
+
+    /// 回合执行主体：`run_turn` / `run_turn_with_asker` / `run_turn_with_images` 共用。
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn_inner(
+        &self,
+        session: &mut Session,
+        prompt: &str,
+        images: &[crate::gateway::MessageImage],
+        approver: &dyn Approver,
+        abort: &AtomicBool,
+        on_event: &mut (dyn FnMut(&TurnEvent) + Send),
+        questioner: Option<&dyn crate::question::Questioner>,
+    ) -> Result<TurnOutcome, AgentError> {
         let started_at = Utc::now().to_rfc3339();
         let started = std::time::Instant::now();
         let turn_id = uuid::Uuid::new_v4().to_string();
@@ -481,7 +519,14 @@ impl Agent {
         }
         let mut messages = vec![ChatMessage::system(system)];
         messages.extend(session.messages.iter().cloned());
-        messages.push(ChatMessage::user(prompt.to_string()));
+        if images.is_empty() {
+            messages.push(ChatMessage::user(prompt.to_string()));
+        } else {
+            messages.push(ChatMessage::user_with_images(
+                prompt.to_string(),
+                images.to_vec(),
+            ));
+        }
         // 存量历史可能带非法序列（压缩切分、中断半截、外部导入）：发请求前归一。
         sanitize_history(&mut messages);
         // A2-1 UserPromptSubmit hook：exit 2 = 拒绝本回合（敏感词门卫/强制工单号等

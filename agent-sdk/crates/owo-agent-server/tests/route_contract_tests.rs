@@ -612,6 +612,12 @@ async fn all_contract_endpoints_are_reachable() {
 
     let mut failed: Vec<String> = Vec::new();
     for (path, methods) in contract_endpoints() {
+        // /fs/pick-directory 会拉起系统原生「选择文件夹」对话框（阻塞至多 180s），
+        // 契约测试只校验路由登记与 OpenAPI 一致性，不实际调起 GUI（取优合并自远端
+        // engine 的同名跳过逻辑；漏掉会让本测试在桌面上真实弹窗直至 60s 超时）。
+        if path == "/fs/pick-directory" {
+            continue;
+        }
         for method in methods {
             let is_get_like = matches!(method.as_str(), "GET" | "DELETE");
             let body = if is_get_like {
