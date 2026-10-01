@@ -793,6 +793,15 @@ impl TuiApp {
         self.transcript.push((text, style));
     }
 
+    /// B2（取优合并自远端 engine）：流式正文去 Markdown 标记后再入 transcript
+    /// ——ratatui 无法消费 `**粗体**`/围栏等原始标记，直接渲染会很脏。
+    fn flush_streaming(&mut self) {
+        if !self.streaming.is_empty() {
+            let text = std::mem::take(&mut self.streaming);
+            self.push_line(crate::markdown::strip_markdown(&text), default());
+        }
+    }
+
     fn push_system(&mut self, text: String, style: Style) {
         self.push_line(text, style);
     }
@@ -840,10 +849,7 @@ impl TuiApp {
                     self.approval = None;
                     match result {
                         Ok(summary) => {
-                            if !self.streaming.is_empty() {
-                                let text = std::mem::take(&mut self.streaming);
-                                self.push_line(text, default());
-                            }
+                            self.flush_streaming();
                             if let Some(text) = &summary.final_text {
                                 self.push_line("── 结果 ──".to_string(), bold());
                                 self.push_line(text.clone(), default());
@@ -889,26 +895,17 @@ impl TuiApp {
             }
             SseEvent::Final { .. } => {}
             SseEvent::Progress { message } => {
-                if !self.streaming.is_empty() {
-                    let text = std::mem::take(&mut self.streaming);
-                    self.push_line(text, default());
-                }
+                self.flush_streaming();
                 self.push_line(format!("  ↻ {message}"), cyan());
             }
             SseEvent::ToolUse { tool, .. } => {
-                if !self.streaming.is_empty() {
-                    let text = std::mem::take(&mut self.streaming);
-                    self.push_line(text, default());
-                }
+                self.flush_streaming();
                 self.push_line(format!("  ▶ {tool} …"), blue());
             }
             SseEvent::ToolResult {
                 tool, ok, error, ..
             } => {
-                if !self.streaming.is_empty() {
-                    let text = std::mem::take(&mut self.streaming);
-                    self.push_line(text, default());
-                }
+                self.flush_streaming();
                 if ok {
                     self.push_line(format!("  ✔ {tool}"), green());
                 } else {
@@ -931,10 +928,7 @@ impl TuiApp {
             SseEvent::ReasoningDelta { .. } => {}
             // 计划更新（todo 工具）：清空流后提示步骤数。
             SseEvent::PlanUpdate { steps } => {
-                if !self.streaming.is_empty() {
-                    let text = std::mem::take(&mut self.streaming);
-                    self.push_line(text, default());
-                }
+                self.flush_streaming();
                 let count = steps.as_array().map(Vec::len).unwrap_or(0);
                 self.push_line(format!("  ☰ 计划已更新（{count} 步）"), cyan());
             }

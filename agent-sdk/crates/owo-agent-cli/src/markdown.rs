@@ -453,6 +453,60 @@ fn find_double(chars: &[char], from: usize, marker: char) -> Option<usize> {
     None
 }
 
+/// 去标记纯文本（B2，取优合并自远端 engine；TUI transcript 用）：
+/// 代码块内容保留（缩进两格）、标题 `#` 与列表标记剥掉、行内标记剥掉。
+pub(crate) fn strip_markdown(text: &str) -> String {
+    let mut out = String::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            out.push_str("  ");
+            out.push_str(line.trim_end());
+            out.push('\n');
+            continue;
+        }
+        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+        let body = if (1..=6).contains(&hashes) && trimmed.chars().nth(hashes) == Some(' ') {
+            trimmed[hashes..].trim()
+        } else if let Some(rest) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            out.push_str("  • ");
+            rest
+        } else {
+            trimmed
+        };
+        out.push_str(&strip_inline(body));
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
+/// 行内标记剥离：`**粗体**`/`` `代码` `` 去标记；`[文本](url)` → `文本 (url)`。
+fn strip_inline(text: &str) -> String {
+    let mut out = text.replace("**", "").replace('`', "");
+    while let Some(open) = out.find('[') {
+        let Some(close_rel) = out[open..].find("](") else {
+            break;
+        };
+        let close = open + close_rel;
+        let Some(paren_rel) = out[close + 2..].find(')') else {
+            break;
+        };
+        let paren = close + 2 + paren_rel;
+        let label = out[open + 1..close].to_string();
+        let url = out[close + 2..paren].to_string();
+        out.replace_range(open..=paren, &format!("{label} ({url})"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,5 +584,19 @@ mod tests {
         assert!(md.prefix.is_empty(), "短行必须立即输出，不得滞留缓冲");
         assert!(md.at_line_start);
         colored::control::unset_override();
+    }
+
+    /// B2（取优合并自远端 engine）：TUI 去标记——标题/列表/行内标记剥离，
+    /// 代码块内容保留（缩进两格）。
+    #[test]
+    fn strip_markdown_removes_markers_and_keeps_code() {
+        let stripped = strip_markdown("# 标题\n**粗体** 与 `代码`\n- 项目\n```sh\nls -la\n```\n");
+        assert!(stripped.contains("标题"), "{stripped}");
+        assert!(!stripped.contains('#'), "{stripped}");
+        assert!(!stripped.contains("**"), "{stripped}");
+        assert!(stripped.contains("粗体 与 代码"), "{stripped}");
+        assert!(stripped.contains("• 项目"), "{stripped}");
+        assert!(stripped.contains("  ls -la"), "{stripped}");
+        assert!(!stripped.contains("```"), "{stripped}");
     }
 }
