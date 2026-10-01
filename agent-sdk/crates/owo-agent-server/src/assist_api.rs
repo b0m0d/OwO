@@ -143,7 +143,13 @@ pub(super) async fn stt_transcribe(
 pub(super) struct CreateAutomationRequest {
     name: String,
     schedule: Schedule,
-    reminder: String,
+    /// 旧客户端字段：纯文本提醒（与新 action 二选一，两者都缺时报 400）。
+    #[serde(default)]
+    reminder: Option<String>,
+    /// 显式动作（`{"kind":"reminder","text":...}`；上游 be6298f 的工作台
+    /// 还会发 `{"kind":"run_prompt","prompt":...}`——执行器暂只支持提醒）。
+    #[serde(default)]
+    action: Option<AutomationAction>,
 }
 
 pub(super) async fn automations_list(
@@ -157,13 +163,21 @@ pub(super) async fn automations_create(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateAutomationRequest>,
 ) -> Result<Json<AutomationTask>, (StatusCode, String)> {
-    let task = AutomationTask::new(
-        &request.name,
-        request.schedule,
-        AutomationAction::Reminder {
-            text: request.reminder,
-        },
-    );
+    let action = request.action.or_else(|| {
+        request
+            .reminder
+            .clone()
+            .map(|text| AutomationAction::Reminder { text })
+    });
+    let Some(action) = action else {
+        return Err((StatusCode::BAD_REQUEST, "缺少动作：提供 action 或 reminder".into()));
+    };
+    if let AutomationAction::Reminder { text } = &action {
+        if text.trim().is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "提醒内容不能为空".into()));
+        }
+    }
+    let task = AutomationTask::new(&request.name, request.schedule, action);
     let mut automations = state.automations.lock().map_err(poison)?;
     automations
         .upsert(task.clone())

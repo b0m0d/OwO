@@ -9,12 +9,26 @@ window.OwoPanels.goal = (function () {
   var id = "goal";
 
   function defaultHelpers() {
-    var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || "http://127.0.0.1:4098";
+    var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
     function get(path) {
-      return window.OwoApi.get(path);
+      return fetch(baseUrl + path).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
     }
     function post(path, body) {
-      return window.OwoApi.post(path, body || {});
+      return fetch(baseUrl + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }).then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (j) {
+            throw new Error((j && j.error) || "HTTP " + r.status);
+          });
+        }
+        return r.json();
+      });
     }
     function esc(s) {
       return String(s == null ? "" : s)
@@ -45,15 +59,15 @@ window.OwoPanels.goal = (function () {
     return (
       '<section data-panel="' + id + '">' +
       '<style>' +
-      '.owo-goal-row{display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid #eee}' +
+      '.owo-goal-row{display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--border)}' +
       '.owo-goal-steps{width:100%;min-height:120px;font-family:monospace;font-size:12px}' +
       '.owo-goal-table{width:100%;border-collapse:collapse;font-size:12px}' +
-      '.owo-goal-table td,.owo-goal-table th{border:1px solid #ddd;padding:3px 6px;text-align:left}' +
-      '.owo-goal-badge{display:inline-block;padding:1px 6px;border-radius:8px;font-size:11px;color:#fff}' +
-      '.owo-goal-badge.ok{background:#2e7d32}.owo-goal-badge.bad{background:#c62828}' +
-      '.owo-goal-badge.warn{background:#ef6c00}' +
-      '.owo-goal-cloudlog{height:140px;overflow:auto;background:#111;color:#7cff9b;font-family:monospace;font-size:12px;padding:6px}' +
-      '.owo-goal-output{max-height:120px;overflow:auto;white-space:pre-wrap;font-family:monospace;font-size:11px;background:#f6f8fa;padding:4px;margin-top:2px}' +
+      '.owo-goal-table td,.owo-goal-table th{border:1px solid var(--border-strong);padding:3px 6px;text-align:left}' +
+      '.owo-goal-badge{display:inline-block;padding:1px 6px;border-radius:8px;font-size:11px;color:var(--accent-ink)}' +
+      '.owo-goal-badge.ok{background:var(--green)}.owo-goal-badge.bad{background:var(--red)}' +
+      '.owo-goal-badge.warn{background:var(--yellow)}' +
+      '.owo-goal-cloudlog{height:140px;overflow:auto;background:var(--surface-2);color:var(--green);font-family:monospace;font-size:12px;padding:6px}' +
+      '.owo-goal-output{max-height:120px;overflow:auto;white-space:pre-wrap;font-family:monospace;font-size:11px;background:var(--surface-2);padding:4px;margin-top:2px}' +
       '</style>' +
       '<div class="stack">' +
       '<div class="sub">编排目标（Goal/Plan）</div>' +
@@ -66,7 +80,7 @@ window.OwoPanels.goal = (function () {
       '<div class="sub">云端进度（SSE 订阅）</div>' +
       '<div class="owo-goal-row"><input id="owo-goal-cloud-task" placeholder="cloud task id（如 cloud-0001）" style="flex:1">' +
       '<button id="owo-goal-cloud-sub">订阅</button><button id="owo-goal-cloud-close">断开</button></div>' +
-      '<div class="owo-goal-cloudlog" id="owo-goal-cloudlog" title="技术详情：GET /cloud/tasks/{id}/events（SSE）">（输入 task id 后点「订阅」查看云端进度）</div>' +
+      '<div class="owo-goal-cloudlog" id="owo-goal-cloudlog">（输入 task id 订阅 /cloud/tasks/{id}/events）</div>' +
       '</div>'
     );
   }
@@ -186,12 +200,9 @@ window.OwoPanels.goal = (function () {
       : "（暂无计划）";
     el.innerHTML =
       '<div class="sub">目标：' + H.esc(goal.objective) + "（" + H.esc(goal.status) + "）</div>" +
-      '<details class="owo-dev-block" data-dev><summary>步骤定义（JSON · 开发者模式）</summary>' +
       '<div class="owo-goal-row"><span>步骤定义（JSON）</span>' +
       '<button id="owo-goal-save-plan">保存计划</button></div>' +
       '<textarea class="owo-goal-steps" id="owo-goal-steps">' + H.esc(stepsJson) + "</textarea>" +
-      "</details>" +
-      '<div class="sub hint">步骤计划由目标自动生成并按依赖分波执行；需要手工调整步骤 JSON 时，在设置中启用开发者模式后展开上述编辑器。</div>' +
       '<div class="owo-goal-row"><span>waves 预览</span>' +
       '<button id="owo-goal-run-now">运行（parallelism=2）</button>' +
       '<button id="owo-goal-poll">刷新状态</button></div>' +
@@ -337,37 +348,25 @@ window.OwoPanels.goal = (function () {
     var taskId = (input && input.value.trim()) || "";
     if (!taskId) return;
     closeCloud();
+    var base = H.baseUrl || window.location.origin;
     var log = document.getElementById("owo-goal-cloudlog");
     if (log) log.textContent = "订阅 " + taskId + " ...";
-    // §3.1：事件流要求 Bearer 认证，改用带 Authorization 头的 fetch-stream
-    // （EventSource 无法携带自定义头，token 也不允许进 URL 查询串）。
-    var api = window.OwoApi;
-    if (!api || typeof api.openEventStream !== "function") {
-      appendCloudLog("（当前环境不支持带认证的事件流）");
-      return;
-    }
-    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-    cloudSource = ctrl;
-    api.openEventStream("/cloud/tasks/" + encodeURIComponent(taskId) + "/events", {
-      signal: ctrl ? ctrl.signal : undefined,
-      onEvent: function (frame) {
-        if (frame && frame.data) appendCloudLog(frame.data);
-      },
-    }).then(function () {
-      if (cloudSource === ctrl) {
+    cloudSource = new EventSource(base + "/cloud/tasks/" + encodeURIComponent(taskId) + "/events");
+    cloudSource.onmessage = function (ev) {
+      appendCloudLog(ev.data);
+    };
+    cloudSource.onerror = function () {
+      appendCloudLog("（连接错误/关闭）");
+      if (cloudSource) {
+        cloudSource.close();
         cloudSource = null;
-        appendCloudLog("（流结束）");
       }
-    }).catch(function (e) {
-      if (cloudSource !== ctrl) return; // 已被新订阅/关闭取代
-      cloudSource = null;
-      appendCloudLog("（连接失败：" + String((e && e.message) || e) + "）");
-    });
+    };
   }
 
   function closeCloud() {
     if (cloudSource) {
-      if (typeof cloudSource.abort === "function") cloudSource.abort();
+      cloudSource.close();
       cloudSource = null;
     }
     appendCloudLog("（已断开）");

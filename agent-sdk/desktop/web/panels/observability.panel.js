@@ -13,9 +13,12 @@ window.OwoPanels.observability = (function () {
   var id = "observability";
 
   function defaultHelpers() {
-    var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || "http://127.0.0.1:4098";
+    var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
     function get(path) {
-      return window.OwoApi.get(path);
+      return fetch(baseUrl + path).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
     }
     function esc(s) {
       return String(s == null ? "" : s)
@@ -37,21 +40,26 @@ window.OwoPanels.observability = (function () {
     return (
       '<section data-panel="' + id + '">' +
       '<style>' +
-      '.owo-mtr-row{display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid #eee}' +
-      '.owo-mtr-card{display:inline-block;min-width:88px;padding:6px 10px;margin:2px;background:#f4f6f8;border-radius:6px;text-align:center}' +
-      '.owo-mtr-card b{display:block;font-size:16px}' +
-      '.owo-mtr-card span{font-size:11px;color:#666}' +
+      '.owo-mtr-row{display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--border)}' +
+      // KPI 卡片：自适应网格（此前 8 张 inline-block 挤成一行，数字与标签贴在一起）
+      '#owo-mtr-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(116px,1fr));gap:8px}' +
+      '.owo-mtr-card{display:flex;flex-direction:column;gap:2px;justify-content:center;padding:9px 12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md);text-align:left}' +
+      '.owo-mtr-card b{font-size:19px;font-variant-numeric:tabular-nums;line-height:1.1;color:var(--text);overflow-wrap:anywhere}' +
+      '.owo-mtr-card span{font-size:11px;color:var(--text-2)}' +
       '.owo-mtr-table{width:100%;border-collapse:collapse;font-size:12px}' +
-      '.owo-mtr-table td,.owo-mtr-table th{border:1px solid #ddd;padding:3px 6px;text-align:left}' +
-      '.owo-mtr-health b.ok{color:#2e7d32}.owo-mtr-health b.bad{color:#c62828}' +
+      '.owo-mtr-table td,.owo-mtr-table th{border:0;border-bottom:1px solid var(--border);padding:5px 9px;text-align:left}' +
+      '.owo-mtr-table th{background:var(--surface-2);color:var(--text-2);font-weight:650;white-space:nowrap}' +
+      '.owo-mtr-table tbody tr:nth-child(even){background:var(--surface-2)}' +
+      '.owo-mtr-table tbody tr:hover{background:var(--accent-soft)}' +
+      '.owo-mtr-table tbody tr:last-child td{border-bottom:0}' +
+      '.owo-mtr-table td:first-child{width:38%;color:var(--text-2)}' +
+      '.owo-mtr-health b.ok{color:var(--green)}.owo-mtr-health b.bad{color:var(--red)}' +
       '</style>' +
       '<div class="stack">' +
       '<div class="sub">可观测性 / 性能护栏</div>' +
       '<div class="owo-mtr-row"><button class="primary" id="owo-mtr-refresh">刷新</button>' +
       '<span id="owo-mtr-updated" class="sub">—</span></div>' +
       '<div id="owo-mtr-cards"></div>' +
-      '<div class="sub">事件流健康（§3.3，只读计数；hiddenWindowRefreshes 应恒为 0）</div>' +
-      '<div id="owo-mtr-eventstream" class="owo-mtr-eventstream">—</div>' +
       '<div class="sub">运行时韧性指标（Wave 1/2）</div>' +
       '<div id="owo-mtr-runtime" class="owo-mtr-runtime">—</div>' +
       '<div class="sub">SLO 基线（Wave 2）</div>' +
@@ -64,9 +72,6 @@ window.OwoPanels.observability = (function () {
       '<div id="owo-mtr-report" class="owo-mtr-report"><button class="primary" id="owo-mtr-report-refresh">加载周报</button></div>' +
       '<div class="sub">可选遥测（R10，默认关，仅聚合指标）</div>' +
       '<div id="owo-mtr-telemetry" class="owo-mtr-telemetry">—</div>' +
-      '<button id="owo-mtr-telemetry-toggle" class="primary">切换遥测开关</button>' +
-      '<div class="sub">阶段瀑布（§9.3，最近一条 trace：model/approval/tool/persistence）</div>' +
-      '<div id="owo-mtr-waterfall"><button id="owo-mtr-waterfall-load" class="primary">加载阶段瀑布</button></div>' +
       '<div class="sub">回合耗时（最近 50 次，ms）</div>' +
       '<div id="owo-mtr-chart">—</div>' +
       '<div class="sub">工具调用排行</div>' +
@@ -84,15 +89,10 @@ window.OwoPanels.observability = (function () {
     root.querySelector("#owo-mtr-refresh").addEventListener("click", refresh);
     var reportBtn = root.querySelector("#owo-mtr-report-refresh");
     if (reportBtn) reportBtn.addEventListener("click", loadReport);
-    var telemetryBtn = root.querySelector("#owo-mtr-telemetry-toggle");
-    if (telemetryBtn) telemetryBtn.addEventListener("click", toggleTelemetry);
-    var waterfallBtn = root.querySelector("#owo-mtr-waterfall-load");
-    if (waterfallBtn) waterfallBtn.addEventListener("click", loadWaterfall);
     refresh();
   }
 
   function refresh() {
-    renderEventStream();
     H.get("/metrics/overview")
       .then(function (data) {
         state.overview = data;
@@ -100,7 +100,7 @@ window.OwoPanels.observability = (function () {
       })
       .catch(function (e) {
         var el = document.getElementById("owo-mtr-cards");
-        if (el) el.innerHTML = '<span style="color:#c62828">' + H.esc(H.friendlyError(e)) + "</span>";
+        if (el) el.innerHTML = '<span style="color:var(--red)">' + H.esc(H.friendlyError(e)) + "</span>";
       });
     H.get("/metrics/turns?limit=50")
       .then(function (data) {
@@ -160,7 +160,7 @@ window.OwoPanels.observability = (function () {
       })
       .catch(function (e) {
         var el = document.getElementById("owo-mtr-report");
-        if (el) el.innerHTML = '<span style="color:#c62828">' + H.esc(H.friendlyError(e)) + "</span>";
+        if (el) el.innerHTML = '<span style="color:var(--red)">' + H.esc(H.friendlyError(e)) + "</span>";
       });
   }
 
@@ -206,8 +206,8 @@ window.OwoPanels.observability = (function () {
       .join(" ");
     el.innerHTML =
       '<svg width="100%" viewBox="0 0 ' + width + " " + height + '" style="max-width:560px">' +
-      '<polyline points="' + points + '" fill="none" stroke="#2e7d32" stroke-width="1.5"></polyline>' +
-      "<text x=\"4\" y=\"14\" font-size=\"10\" fill=\"#666\">峰值 " + max + " ms（最近 " + values.length + " 次）</text>" +
+      '<polyline points="' + points + '" fill="none" style="stroke:var(--green)" stroke-width="1.5"></polyline>' +
+      "<text x=\"4\" y=\"14\" font-size=\"10\" style=\"fill:var(--text-3)\">峰值 " + max + " ms（最近 " + values.length + " 次）</text>" +
       "</svg>";
   }
 
@@ -282,9 +282,12 @@ window.OwoPanels.observability = (function () {
         var target = item.target_ms == null ? (item.success_floor == null ? "—" : (item.success_floor * 100).toFixed(1) + "%") : item.target_ms + " ms";
         var p95 = item.p95_ms == null ? "—" : item.p95_ms + " ms";
         var rate = item.success_rate == null ? "—" : (item.success_rate * 100).toFixed(2) + "%";
-        var status = item.achieving
-          ? '<b class="ok" style="color:#2e7d32">达标</b>'
-          : '<b style="color:#c62828">未达标</b>';
+        // 样本为 0 时不能报"达标"：没有观测数据就无达标可言，显示灰色"样本不足"避免误判。
+        var status = (item.samples || 0) === 0
+          ? '<b style="color:var(--text-3)">样本不足</b>'
+          : item.achieving
+            ? '<b class="ok">达标</b>'
+            : '<b class="bad">未达标</b>';
         return (
           "<tr><td>" + H.esc(item.name) + "</td><td>" + H.esc(target) +
           "</td><td>" + p95 + "</td><td>" + rate +
@@ -312,7 +315,7 @@ window.OwoPanels.observability = (function () {
     var rows = dims
       .map(function (d) {
         var budget = d.budget ? "，预算 " + H.esc(String(d.budget.limit_usd)) + " USD" : "";
-        var exceeded = d.budget && d.budget.exceeded ? ' <b style="color:#c62828">超限</b>' : "";
+        var exceeded = d.budget && d.budget.exceeded ? ' <b class="bad">超限</b>' : "";
         return (
           "<tr><td>" + H.esc(d.dimension) + "</td><td>" + (d.calls || 0) +
           "</td><td>" + (d.total_tokens || 0) +
@@ -323,7 +326,7 @@ window.OwoPanels.observability = (function () {
       })
       .join("");
     var stop = u.hard_stop
-      ? ' <b style="color:#c62828">硬熔断中</b>' + (u.hard_stop_reason ? "（" + H.esc(u.hard_stop_reason) + "）" : "")
+      ? ' <b class="bad">硬熔断中</b>' + (u.hard_stop_reason ? "（" + H.esc(u.hard_stop_reason) + "）" : "")
       : "";
     el.innerHTML =
       "<div class=\"owo-mtr-row\">记录 " + (u.count || 0) + " 条，单价 " + H.esc(String(u.price_per_mtok)) + " $/Mtok" + stop + "</div>" +
@@ -352,7 +355,7 @@ window.OwoPanels.observability = (function () {
     var alerts = (data.alerts || []).slice(0, 8);
     var alertHtml = alerts
       .map(function (a) {
-        var color = a.kind === "recovered" ? "#2e7d32" : a.severity === "critical" ? "#c62828" : "#ef6c00";
+        var color = a.kind === "recovered" ? "var(--green)" : a.severity === "critical" ? "var(--red)" : "var(--yellow)";
         return "<div class=\"owo-mtr-row\"><span style=\"color:" + color + "\">[" + H.esc(a.kind) +
           "] " + H.esc(a.rule) + "</span><span class=\"sub\">" +
           H.esc(String(a.at || "").slice(11, 19)) + "</span></div><div class=\"sub\">" +
@@ -382,9 +385,12 @@ window.OwoPanels.observability = (function () {
       .map(function (item) {
         var p95 = item.p95_ms == null ? "—" : item.p95_ms + " ms";
         var rate = item.success_rate == null ? "—" : (item.success_rate * 100).toFixed(2) + "%";
-        var status = item.achieving
-          ? '<b style="color:#2e7d32">达标</b>'
-          : '<b style="color:#c62828">未达标</b>';
+        // 样本为 0 时不能报"达标"：没有观测数据就无达标可言，显示灰色"样本不足"避免误判。
+        var status = (item.samples || 0) === 0
+          ? '<b style="color:var(--text-3)">样本不足</b>'
+          : item.achieving
+            ? '<b class="ok">达标</b>'
+            : '<b class="bad">未达标</b>';
         return (
           "<tr><td>" + H.esc(item.name) + "</td><td>" + p95 +
           "</td><td>" + rate + "</td><td>" + (item.samples || 0) +
@@ -402,97 +408,6 @@ window.OwoPanels.observability = (function () {
     if (btn) btn.addEventListener("click", loadReport);
   }
 
-  function renderEventStream() {
-    // 任务 3 尾：事件流指标可见（§3.3 诊断页只读，读取不改变计数）。
-    // 访问器由 app.js startInvalidation 挂载：window.owoInvalidatorState()。
-    var el = document.getElementById("owo-mtr-eventstream");
-    if (!el) return;
-    var snap = null;
-    try {
-      snap = typeof window.owoInvalidatorState === "function" ? window.owoInvalidatorState() : null;
-    } catch (_) {
-      snap = null;
-    }
-    if (!snap) {
-      el.innerHTML = '<span class="sub">事件失效网络未启动（connection 未就绪或已停止）</span>';
-      return;
-    }
-    var stateChip =
-      snap.state === "live"
-        ? '<b style="color:#2e7d32">live</b>'
-        : snap.state === "degraded"
-          ? '<b style="color:#ef6c00">degraded（兜底轮询）</b>'
-          : '<span class="sub">' + H.esc(String(snap.state)) + "</span>";
-    var canary =
-      snap.hiddenWindowRefreshes > 0
-        ? '<b style="color:#c62828">异常（' + snap.hiddenWindowRefreshes + "，验收目标 0）</b>"
-        : '<b class="ok" style="color:#2e7d32">0</b>';
-    el.innerHTML =
-      '<table class="owo-mtr-table">' +
-      "<tr><td>连接状态</td><td>" + stateChip + "</td></tr>" +
-      "<tr><td>事件驱动刷新</td><td>" + snap.eventRefreshes + "</td></tr>" +
-      "<tr><td>防抖合并</td><td>" + snap.coalescedInvalidations + "</td></tr>" +
-      "<tr><td>重复失效丢弃</td><td>" + snap.duplicateInvalidations + "</td></tr>" +
-      "<tr><td>兜底轮询 tick</td><td>" + snap.pollFallbackRefreshes + "</td></tr>" +
-      "<tr><td>重连尝试</td><td>" + snap.reconnectAttempts + "</td></tr>" +
-      "<tr><td>续传位点（Last-Event-ID）</td><td>" + (snap.lastEventId == null ? "—" : snap.lastEventId) + "</td></tr>" +
-      "<tr><td>隐藏窗口业务刷新（canary）</td><td>" + canary + "</td></tr>" +
-      "</table>";
-  }
-
-  function loadWaterfall() {
-    // 任务 9 尾：阶段瀑布可见性——最近 trace 的 phase_timings（model/approval/tool/persistence，
-    // 含 model 首 token 时延）按发生顺序渲染为比例条；数据来自 /traces/0（§9.3 已落盘字段）。
-    var el = document.getElementById("owo-mtr-waterfall");
-    H.get("/traces/0")
-      .then(function (trace) {
-        var timings = (trace && trace.phase_timings) || [];
-        if (!timings.length) {
-          el.innerHTML = '<span class="sub">该 trace 无阶段计时（旧格式或未启用 turn_deadline）</span>';
-          return;
-        }
-        var total = timings.reduce(function (sum, t) { return sum + (t.elapsed_ms || 0); }, 0) || 1;
-        var colors = { model: "#1565c0", approval: "#ef6c00", tool: "#2e7d32", persistence: "#6a1b9a" };
-        var rows = timings.map(function (t) {
-          var pct = Math.max(1, Math.round(((t.elapsed_ms || 0) / total) * 100));
-          var color = colors[t.phase] || "#607d8b";
-          var label = H.esc(t.phase) + (t.target ? "：" + H.esc(t.target) : "") + " " + t.elapsed_ms + " ms";
-          var firstToken = t.first_token_ms != null ? "，首 token " + t.first_token_ms + " ms" : "";
-          return (
-            '<div style="margin:2px 0">' +
-            '<div style="height:14px;background:' + color + ';width:' + pct + '%;min-width:2px"></div>' +
-            '<span class="sub">' + label + "（" + pct + "%" + firstToken + "）</span>" +
-            "</div>"
-          );
-        });
-        el.innerHTML =
-          '<div class="sub">trace 总时长 ' + (trace.duration_ms || 0) + " ms，阶段合计 " + total + " ms</div>" +
-          rows.join("");
-      })
-      .catch(function (e) {
-        el.innerHTML = '<span style="color:#c62828">' + H.esc(H.friendlyError(e)) + "</span>";
-      });
-  }
-
-  function toggleTelemetry() {
-    // §8.2 任务 7 尾：遥测设置面板开关——读-改-写 /settings（POST 收全量 Settings，
-    // 服务端 settings_update 即时生效：apply_telemetry_setting，默认关）。
-    var el = document.getElementById("owo-mtr-telemetry");
-    H.get("/settings")
-      .then(function (settings) {
-        var next = Object.assign({}, settings, {
-          telemetry_enabled: settings.telemetry_enabled === true ? false : true,
-        });
-        return H.post("/settings", next);
-      })
-      .then(function () {
-        return refresh();
-      })
-      .catch(function (e) {
-        if (el) el.innerHTML = '<span style="color:#c62828">' + H.esc(H.friendlyError(e)) + "</span>";
-      });
-  }
-
   function renderTelemetry() {
     var el = document.getElementById("owo-mtr-telemetry");
     if (!el || !state.telemetry) return;
@@ -503,8 +418,8 @@ window.OwoPanels.observability = (function () {
     }
     var enabled = !!t.enabled;
     var status = enabled
-      ? '<b style="color:#ef6c00">开（仅聚合指标，不含内容）</b>'
-      : '<b class="ok" style="color:#2e7d32">关（默认）</b>';
+      ? '<b style="color:var(--yellow)">开（仅聚合指标，不含内容）</b>'
+      : '<b class="ok">关（默认）</b>';
     var counters = t.counters || {};
     var codes = t.error_codes || {};
     var perf = t.performance || {};

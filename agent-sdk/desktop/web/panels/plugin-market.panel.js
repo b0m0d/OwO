@@ -12,51 +12,77 @@
     nav: function () {
       return (
         '<section data-panel="plugin-market" class="owo-market-panel">' +
-        '<div class="owo-market-tools">' +
-        '<h3>目录</h3>' +
-        '<div class="inline" style="margin-bottom:6px">' +
-        '<button class="owo-market-refresh">刷新</button>' +
+        '<div class="owo-market-hero">' +
+        "<div>" +
+        "<h3>插件市场</h3>" +
         '<span class="owo-market-env sub"></span>' +
         "</div>" +
+        '<button class="owo-market-refresh">刷新</button>' +
+        "</div>" +
+        '<div class="owo-market-block">' +
+        "<h4>已安装</h4>" +
         '<ul class="owo-market-list list"></ul>' +
         "</div>" +
-        '<div class="owo-market-tools">' +
-        "<h3>操作</h3>" +
+        '<div class="owo-market-block">' +
+        "<h4>市场目录（可安装）</h4>" +
+        '<div class="owo-market-catalog"></div>' +
+        "</div>" +
+        '<details class="owo-market-advanced">' +
+        "<summary>高级工具（扫描 / 校验 / 目录安装 / 更新 / 卸载）</summary>" +
         '<div class="stack">' +
         '<div class="inline"><input class="owo-market-dir" placeholder="插件目录路径（相对 workspace 或绝对）"><button class="owo-market-scan">扫描</button><button class="owo-market-verify">校验</button></div>' +
         '<div class="inline"><input class="owo-market-dir2" placeholder="插件目录（安装/更新源）"><input class="owo-market-id" placeholder="更新目标 id（update 时）"><button class="owo-market-install">安装</button><button class="owo-market-update">更新</button></div>' +
         '<div class="inline"><input class="owo-market-uid" placeholder="卸载 id"><button class="owo-market-uninstall">卸载</button></div>' +
         '<div class="owo-market-result sub"></div>' +
         "</div>" +
-        "</div>" +
-        '<div class="owo-market-tools">' +
-        "<h3>远端市场</h3>" +
+        "</details>" +
+        '<details class="owo-market-advanced">' +
+        "<summary>远端市场（registry）</summary>" +
         '<div class="stack">' +
         '<div class="inline"><input class="owo-market-url" placeholder="市场 URL（OWO_MARKET_URL 缺省）"><button class="owo-market-refreshremote">拉取 registry</button></div>' +
         '<div class="inline"><input class="owo-market-rid" placeholder="远端插件 id"><input class="owo-market-rver" placeholder="版本（可选）"><button class="owo-market-installremote primary">下载并安装</button></div>' +
         "</div>" +
-        "</div>" +
-        '<div class="hint">市场条目由插件包安装时自动登记；手工写入 seed JSON 属开发者操作（仅开发者模式显示）。</div>' +
-        '<div class="owo-market-tools owo-dev-block" data-dev>' +
-        "<h3>Seed 示例市场条目</h3>" +
+        "</details>" +
+        '<details class="owo-market-advanced">' +
+        "<summary>Seed 示例市场条目</summary>" +
         '<div class="stack">' +
         '<textarea class="owo-market-seed" rows="4" spellcheck="false" placeholder=\'{"entries":[{"id":"owo.plugin.demo","name":"Demo","version":"1.0.0","min_app_version":"0.5.0"}]}\'></textarea>' +
         '<button class="owo-market-seedbtn">写入 seed</button>' +
         "</div>" +
-        "</div>" +
-        '<div class="owo-market-tools">' +
-        "<h3>审计尾部</h3>" +
+        "</details>" +
+        '<details class="owo-market-advanced">' +
+        "<summary>审计尾部</summary>" +
         '<pre class="owo-market-audit sub">—</pre>' +
-        "</div>" +
+        "</details>" +
         "<style>" +
-        ".owo-market-panel { display: flex; flex-direction: column; gap: 10px; }" +
-        ".owo-market-tools { border: 1px solid var(--border, #333); border-radius: 6px; padding: 8px; }" +
-        ".owo-market-tools h3 { margin: 0 0 6px; font-size: 13px; }" +
-        ".owo-market-list li { font-size: 12px; }" +
+        ".owo-market-panel { display: flex; flex-direction: column; gap: 12px; }" +
+        ".owo-market-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }" +
+        ".owo-market-hero h3 { margin: 0 0 2px; font-size: 14px; color: var(--text); }" +
+        ".owo-market-block h4 { margin: 0 0 8px; font-size: 12px; color: var(--text-2); font-weight: 600; }" +
+        ".owo-market-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 10px; margin: 0; padding: 0; list-style: none; }" +
+        ".owo-market-list li { display: flex; flex-direction: column; gap: 6px; padding: 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); cursor: default; }" +
+        ".owo-market-list li:hover { background: var(--surface); border-color: var(--border-strong); }" +
+        ".owo-market-item-top { display: flex; align-items: center; gap: 9px; }" +
+        ".owo-market-tile { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 15px; }" +
+        ".owo-market-item-meta { flex: 1; min-width: 0; }" +
+        ".owo-market-item-meta strong { display: block; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }" +
+        ".owo-market-item-meta .sub { margin-top: 1px; }" +
+        ".owo-market-item-desc { margin: 0; min-height: 32px; font-size: 12px; color: var(--text-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }" +
+        ".owo-market-item-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; }" +
+        ".owo-market-item-foot button { height: 24px; padding: 0 9px; font-size: 11.5px; }" +
+        ".owo-market-catalog { display: flex; flex-direction: column; gap: 6px; }" +
+        ".owo-market-cat-row { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }" +
+        ".owo-market-cat-row:hover { border-color: var(--border-strong); }" +
+        ".owo-market-cat-meta { flex: 1; min-width: 0; }" +
+        ".owo-market-cat-meta strong { display: block; font-size: 12.5px; }" +
+        ".owo-market-cat-meta .sub { margin-top: 1px; }" +
+        ".owo-market-cat-install { flex: none; height: 26px; padding: 0 12px; font-size: 11.5px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-color: transparent; }" +
+        ".owo-market-cat-install:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }" +
         ".owo-market-result { white-space: pre-wrap; max-height: 200px; overflow: auto; }" +
         ".owo-market-audit { white-space: pre-wrap; max-height: 180px; overflow: auto; }" +
+        ".owo-market-advanced > summary { font-size: 12px; }" +
         ".owo-market-panel input { flex: 1; min-width: 0; }" +
-        ".owo-market-risk { color: var(--red, #e5534b); }" +
+        ".owo-market-risk { color: var(--red); }" +
         "</style>" +
         "</section>"
       );
@@ -68,7 +94,7 @@
       this.baseUrl =
         this.helpers.baseUrl ||
         (window.OwoPanels && window.OwoPanels.baseUrl) ||
-        "http://127.0.0.1:4098";
+        window.location.origin;
       this.get = this.helpers.get || this._get;
       this.post = this.helpers.post || this._post;
       this.esc = this.helpers.esc || this._esc;
@@ -134,45 +160,113 @@
 
     renderCatalog: function (data) {
       var list = this._root().querySelector(".owo-market-list");
+      var catalog = this._root().querySelector(".owo-market-catalog");
       if (!list) return;
       var envEl = this._root().querySelector(".owo-market-env");
       if (envEl) {
         envEl.textContent =
           "App " + data.app_version + " ｜ 签名" + (data.require_signature ? "开启" : "关闭");
       }
-      list.innerHTML = "";
       var plugins = data.plugins || [];
-      for (var i = 0; i < plugins.length; i++) {
-        var plugin = plugins[i];
-        var li = document.createElement("li");
-        var risks = plugin.risks && plugin.risks.length ? plugin.risks.join("；") : "";
-        var riskBadge = risks
-          ? '<span class="owo-market-risk">⚠ ' + this.esc(risks) + "</span>"
-          : "";
-        var updateBadge = plugin.has_update
-          ? '<span class="sub">⬆ 可更新</span>'
-          : "";
-        li.innerHTML =
-          "<strong>" +
-          this.esc(plugin.name || plugin.id) +
-          "</strong>" +
-          '<span class="sub">' +
-          this.esc(plugin.id) +
-          " v" +
-          this.esc(plugin.version) +
-          " ｜ " +
-          this.esc(plugin.source) +
-          updateBadge +
-          "</span>" +
-          '<span class="sub">' +
-          this.esc(plugin.description || "") +
-          riskBadge +
-          "</span>";
-        list.appendChild(li);
+      var installed = plugins.filter(function (item) {
+        return item.source !== "market";
+      });
+      var market = plugins.filter(function (item) {
+        return item.source === "market";
+      });
+      list.innerHTML = "";
+      for (var i = 0; i < installed.length; i++) {
+        list.appendChild(this._installedItem(installed[i]));
       }
-      if (!plugins.length) {
-        list.innerHTML = '<li class="sub">暂无插件（本地无已发现插件，market.json 为空）</li>';
+      if (!installed.length) {
+        list.innerHTML = '<li class="sub">暂无已安装插件</li>';
       }
+      if (catalog) {
+        catalog.innerHTML = "";
+        if (!market.length) {
+          catalog.innerHTML = '<div class="sub">市场目录为空（可在「远端市场」中拉取 registry）</div>';
+        }
+        for (var j = 0; j < market.length; j++) {
+          catalog.appendChild(this._marketItem(market[j]));
+        }
+      }
+    },
+
+    _installedItem: function (plugin) {
+      var self = this;
+      var li = document.createElement("li");
+      var risks = plugin.risks && plugin.risks.length ? plugin.risks.join("；") : "";
+      var riskBadge = risks
+        ? '<span class="sub owo-market-risk">⚠ ' + this.esc(risks) + "</span>"
+        : "";
+      var updateBadge = plugin.has_update
+        ? '<span class="sub">⬆ 可更新</span>'
+        : "";
+      var initial = this.esc((plugin.name || plugin.id || "?").trim().slice(0, 1).toUpperCase());
+      li.innerHTML =
+        '<div class="owo-market-item-top">' +
+        '<span class="owo-market-tile" aria-hidden="true">' +
+        initial +
+        "</span>" +
+        '<div class="owo-market-item-meta">' +
+        "<strong>" +
+        this.esc(plugin.name || plugin.id) +
+        "</strong>" +
+        '<span class="sub">' +
+        this.esc(plugin.id) +
+        " v" +
+        this.esc(plugin.version) +
+        " ｜ " +
+        this.esc(plugin.source) +
+        updateBadge +
+        "</span>" +
+        "</div>" +
+        '<span class="ps-check" title="已安装">✓</span>' +
+        "</div>" +
+        '<p class="owo-market-item-desc">' +
+        this.esc(plugin.description || "暂无描述") +
+        riskBadge +
+        "</p>" +
+        '<div class="owo-market-item-foot">' +
+        '<span class="sub">' +
+        this.esc(plugin.path || "") +
+        "</span>" +
+        "<button type=\"button\">卸载</button>" +
+        "</div>";
+      li.querySelector("button").addEventListener("click", function () {
+        self.doUninstall(plugin.id);
+      });
+      return li;
+    },
+
+    _marketItem: function (entry) {
+      var self = this;
+      var row = document.createElement("div");
+      row.className = "owo-market-cat-row";
+      var initial = this.esc((entry.name || entry.id || "?").trim().slice(0, 1).toUpperCase());
+      row.innerHTML =
+        '<span class="owo-market-tile" aria-hidden="true">' +
+        initial +
+        "</span>" +
+        '<div class="owo-market-cat-meta">' +
+        "<strong>" +
+        this.esc(entry.name || entry.id) +
+        "</strong>" +
+        '<span class="sub">v' +
+        this.esc(entry.version || "?") +
+        " ｜ 最低支持 App " +
+        this.esc(entry.description || "—") +
+        "</span>" +
+        "</div>";
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "owo-market-cat-install";
+      button.textContent = "安装";
+      button.addEventListener("click", function () {
+        self.doInstallRemote(entry.id, entry.version || "", "");
+      });
+      row.appendChild(button);
+      return row;
     },
 
     doScan: function (dir) {
@@ -332,11 +426,29 @@
     // ---- helpers 缺省实现（防御性降级） ----
 
     _get: function (path) {
-      return window.OwoApi.get(path);
+      return fetch(this.baseUrl + path).then(function (response) {
+        if (!response.ok) {
+          return response.text().then(function (body) {
+            throw new Error(response.status + ": " + body);
+          });
+        }
+        return response.status === 204 ? null : response.json();
+      });
     },
 
     _post: function (path, body) {
-      return window.OwoApi.post(path, body || {});
+      return fetch(this.baseUrl + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }).then(function (response) {
+        if (!response.ok) {
+          return response.text().then(function (text) {
+            throw new Error(response.status + ": " + text);
+          });
+        }
+        return response.json();
+      });
     },
 
     _esc: function (text) {

@@ -5,7 +5,7 @@
 
   window.OwoPanels = window.OwoPanels || {};
 
-  var BASE = (window.OwoPanels && window.OwoPanels.baseUrl) || "http://127.0.0.1:4098";
+  var BASE = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
   var self = null; // 面板实例（模块级单例）
 
   function getHelpers() {
@@ -30,13 +30,28 @@
   function get(path) {
     var h = getHelpers();
     if (h && h.get) { return h.get(path); }
-    return window.OwoApi.get(path);
+    return fetch(BASE + path).then(function (r) {
+      if (!r.ok) { return r.json().then(function (j) { throw j; }); }
+      return r.json();
+    });
   }
 
   function post(path, body) {
     var h = getHelpers();
     if (h && h.post) { return h.post(path, body); }
-    return window.OwoApi.post(path, body == null ? {} : body);
+    return fetch(BASE + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body == null ? {} : body),
+    }).then(function (r) {
+      if (!r.ok) { return r.json().then(function (j) { throw j; }); }
+      return r.json();
+    });
+  }
+
+  function toast(text, kind) {
+    var t = window.showToast;
+    if (t) { t(text, kind || ""); }
   }
 
   function style() {
@@ -44,19 +59,33 @@
       "<style>" +
       ".owo-workflow-section{margin-bottom:14px}" +
       ".owo-workflow-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}" +
-      ".owo-workflow-card{border:1px solid #e2e2e2;border-radius:8px;padding:10px;margin-bottom:8px}" +
+      ".owo-workflow-card{border:1px solid var(--border-strong);border-radius:8px;padding:10px;margin-bottom:8px}" +
       ".owo-workflow-card h4{margin:0 0 6px 0}" +
       ".owo-workflow-name{font-weight:600}" +
       ".owo-workflow-badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px}" +
-      ".owo-workflow-badge-ok{background:#e6f4ea;color:#1e7e34}" +
-      ".owo-workflow-badge-bad{background:#fdecea;color:#b3261e}" +
-      ".owo-workflow-badge-run{background:#e8f0fe;color:#1a56db}" +
-      ".owo-workflow-json{background:#f6f8fa;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:220px;overflow:auto}" +
-      ".owo-workflow-step{display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px dashed #eee}" +
-      ".owo-workflow-step-ok{color:#1e7e34}.owo-workflow-step-fail{color:#b3261e}" +
+      ".owo-workflow-badge-ok{background:var(--green-soft);color:var(--green)}" +
+      ".owo-workflow-badge-bad{background:var(--red-soft);color:var(--red)}" +
+      ".owo-workflow-badge-run{background:var(--accent-soft);color:var(--accent)}" +
       ".owo-workflow-btn{margin-right:6px}" +
-      ".owo-workflow-input{width:100%;box-sizing:border-box;margin:4px 0;padding:6px;border:1px solid #ccc;border-radius:6px}" +
-      ".owo-workflow-audit{max-height:180px;overflow:auto;font-size:12px;font-family:monospace}" +
+      ".owo-workflow-input{width:100%;box-sizing:border-box;margin:4px 0;padding:6px;border:1px solid var(--border-strong);border-radius:6px}" +
+      ".owo-workflow-audit{max-height:180px;overflow:auto;font-size:12px}" +
+      /* 定义概览卡片 */
+      ".owo-wf-def{border:1px solid var(--border-strong);border-radius:10px;padding:12px;background:var(--surface)}" +
+      ".owo-wf-def-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}" +
+      ".owo-wf-def-head strong{font-size:13.5px}" +
+      ".owo-wf-chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}" +
+      ".owo-wf-chip{display:inline-block;padding:2px 9px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border);color:var(--text-2);font-size:11.5px}" +
+      ".owo-wf-step{display:flex;gap:9px;align-items:baseline;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface);margin-bottom:5px}" +
+      ".owo-wf-step-idx{flex:none;width:20px;height:20px;display:grid;place-items:center;border-radius:99px;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:700}" +
+      ".owo-wf-step-kind{flex:none;font-weight:600;font-size:12px;color:var(--accent)}" +
+      ".owo-wf-step-body{flex:1;min-width:0;font-size:12px;color:var(--text-2);word-break:break-word}" +
+      ".owo-wf-step-body code{font-size:11.5px;background:var(--surface-2);border-radius:4px;padding:0 4px}" +
+      /* 事件时间线 */
+      ".owo-wf-events{max-height:220px;overflow:auto;font-size:12px}" +
+      ".owo-wf-event{display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px dashed var(--border)}" +
+      ".owo-wf-event-time{flex:none;color:var(--text-3);font-size:11px;font-variant-numeric:tabular-nums}" +
+      ".owo-wf-event-kind{flex:none;font-weight:600;color:var(--accent)}" +
+      ".owo-wf-event-detail{flex:1;min-width:0;color:var(--text-2);word-break:break-word}" +
       "</style>"
     );
   }
@@ -84,11 +113,11 @@
       '</div>' +
       '<div class="owo-workflow-section">' +
       '<h4>Runs</h4>' +
-      '<div id="owo-workflow-runs">空</div>' +
+      '<div id="owo-workflow-runs" class="owo-empty">暂无运行记录：选中流程后点「运行」，这里会显示分步时间线</div>' +
       '</div>' +
       '<div class="owo-workflow-section">' +
       '<h4>实时事件（SSE）</h4>' +
-      '<div id="owo-workflow-events" class="owo-workflow-json">（运行后自动订阅 /events）</div>' +
+      '<div id="owo-workflow-events" class="owo-wf-events">（运行后自动订阅 /events）</div>' +
       '</div>' +
       '<div class="owo-workflow-section">' +
       '<h4>审批卡</h4>' +
@@ -96,7 +125,7 @@
       '</div>' +
       '<div class="owo-workflow-section">' +
       '<h4>审计尾部</h4>' +
-      '<div id="owo-workflow-audit" class="owo-workflow-audit">空</div>' +
+      '<div id="owo-workflow-audit" class="owo-workflow-audit owo-empty">暂无审计记录</div>' +
       '</div>' +
       '</section>'
     );
@@ -129,6 +158,91 @@
     });
   }
 
+  /* 单步摘要：serde tag enum（{ "Act": { id, spec } } 形式），防御未知结构 */
+  function stepSummary(kind, s) {
+    s = s || {};
+    var spec = s.spec || {};
+    switch (kind) {
+      case "Sense":
+      case "Locate":
+        return esc(spec.pattern || spec.target || spec.query || spec.name || brief(spec));
+      case "Act":
+        return (s.scope ? "[" + esc(s.scope) + "] " : "") + esc(spec.action || spec.name || brief(spec));
+      case "Assert":
+        return "条件 <code>" + esc(s.expr || "") + "</code>" + (s.timeout_ms ? " · 超时 " + esc(String(s.timeout_ms)) + "ms" : "");
+      case "InvokeSkill":
+        return "技能 <code>" + esc(s.skill || "") + "</code>" + (s.args && Object.keys(s.args).length ? " · " + esc(Object.keys(s.args).join(", ")) : "");
+      case "InvokeMcp":
+        return "MCP <code>" + esc((s.server || "?") + "." + (s.tool || "?")) + "</code>";
+      case "HumanApprove":
+        return "等待人工确认：" + esc(s.prompt || "");
+      case "Notify":
+        return esc(s.message || "");
+      case "Subflow":
+        return "子流程 <code>" + esc(s.flow || "") + "</code>";
+      case "Loop":
+        return "循环 " + esc(String((s.body || []).length)) + " 步" + (s.cond ? " · 条件 <code>" + esc(s.cond) + "</code>" : "");
+      case "Cond":
+        return "分支 <code>" + esc(s.expr || s.cond || "") + "</code>";
+      case "RollbackPoint":
+        return "检查点 " + esc(s.name || s.id || "");
+      default:
+        return esc(brief(s));
+    }
+  }
+
+  function brief(v) {
+    try {
+      var t = JSON.stringify(v);
+      return t && t !== "{}" ? t.slice(0, 60) : "";
+    } catch (e) { return ""; }
+  }
+
+  /* 定义概览：名称/版本/元信息 chips + 步骤时间线（替代裸 JSON） */
+  function renderDefinition(name, def, issues) {
+    var d = def || {};
+    var steps = Array.isArray(d.steps) ? d.steps : [];
+    var chips = [];
+    if (d.id) { chips.push('<span class="owo-wf-chip">id ' + esc(d.id) + "</span>"); }
+    chips.push('<span class="owo-wf-chip">v' + esc(String(d.version == null ? 1 : d.version)) + "</span>");
+    chips.push('<span class="owo-wf-chip">' + esc(String(steps.length)) + " 步</span>");
+    chips.push('<span class="owo-wf-chip">步数上限 ' + esc(String(d.max_steps == null ? 50 : d.max_steps)) + "</span>");
+    if (d.subflow_depth_limit != null) { chips.push('<span class="owo-wf-chip">子流程深度 ' + esc(String(d.subflow_depth_limit)) + "</span>"); }
+    if ((d.triggers || []).length) { chips.push('<span class="owo-wf-chip">触发器 ' + esc(String(d.triggers.length)) + "</span>"); }
+    if ((d.permissions || []).length) { chips.push('<span class="owo-wf-chip">权限声明 ' + esc(String(d.permissions.length)) + "</span>"); }
+    if ((d.preconditions || []).length) { chips.push('<span class="owo-wf-chip">前置条件 ' + esc(String(d.preconditions.length)) + "</span>"); }
+    if ((d.rollback_points || []).length) { chips.push('<span class="owo-wf-chip">回滚点 ' + esc(String(d.rollback_points.length)) + "</span>"); }
+    var rows = steps
+      .map(function (step, i) {
+        var kind = "";
+        var body = step;
+        if (step && typeof step === "object" && !Array.isArray(step)) {
+          var keys = Object.keys(step);
+          if (keys.length === 1) { kind = keys[0]; body = step[kind]; }
+        }
+        if (!kind) { kind = "Step"; }
+        return (
+          '<div class="owo-wf-step">' +
+          '<span class="owo-wf-step-idx">' + (i + 1) + "</span>" +
+          '<span class="owo-wf-step-kind">' + esc(kind) + "</span>" +
+          '<span class="owo-wf-step-body">' + stepSummary(kind, body) + "</span>" +
+          "</div>"
+        );
+      })
+      .join("") || '<div class="sub">（无步骤）</div>';
+    var issueRows = (issues || [])
+      .map(function (i) { return '<div class="owo-workflow-step owo-workflow-step-fail">' + esc(i) + "</div>"; })
+      .join("");
+    return (
+      '<div class="owo-wf-def">' +
+      '<div class="owo-wf-def-head"><strong>' + esc(name) + "</strong></div>" +
+      '<div class="owo-wf-chips">' + chips.join("") + "</div>" +
+      rows +
+      issueRows +
+      "</div>"
+    );
+  }
+
   function loadFlow(name) {
     var runner = document.getElementById("owo-workflow-runner");
     runner.innerHTML = "加载 " + esc(name) + "…";
@@ -137,11 +251,9 @@
         var badge = data.valid
           ? '<span class="owo-workflow-badge owo-workflow-badge-ok">valid</span>'
           : '<span class="owo-workflow-badge owo-workflow-badge-bad">invalid</span>';
-        var issues = (data.issues || []).map(function (i) { return "<div class='owo-workflow-step owo-workflow-step-fail'>" + esc(i) + "</div>"; }).join("");
         runner.innerHTML =
           "<h4>" + esc(name) + " " + badge + "</h4>" +
-          '<div class="owo-workflow-json">' + esc(JSON.stringify(data.definition, null, 2)) + "</div>" +
-          issues +
+          renderDefinition(name, data.definition, data.issues) +
           '<label>ctx（JSON 对象，可选）</label>' +
           '<input id="owo-workflow-ctx" class="owo-workflow-input" placeholder=\'{"key": "value"}\' />' +
           '<label>执行后端：</label>' +
@@ -162,7 +274,7 @@
   function runFlow(name, ctxText) {
     var ctx = {};
     if (ctxText && ctxText.trim()) {
-      try { ctx = JSON.parse(ctxText); } catch (e) { alert("ctx 不是合法 JSON：" + e.message); return; }
+      try { ctx = JSON.parse(ctxText); } catch (e) { toast("ctx 不是合法 JSON：" + e.message, "error"); return; }
     }
     var backendEl = document.getElementById("owo-workflow-backend");
     var backend = (backendEl && backendEl.value) || "mock";
@@ -176,39 +288,45 @@
         refreshRuns(name);
       })
       .catch(function (e) {
-        alert(friendlyError(e));
+        toast(friendlyError(e), "error");
       });
   }
 
   function connectEvents(runId) {
-    var handle = window.OwoWorkflowEventStream;
-    if (handle && typeof handle.abort === "function") { handle.abort(); }
+    var es = window.OwoWorkflowEventSource;
+    if (es) { es.close(); }
     var el = document.getElementById("owo-workflow-events");
     if (!el) { return; }
-    // §3.1：事件流要求 Bearer 认证，改用带 Authorization 头的 fetch-stream
-    // （EventSource 无法携带自定义头，token 不允许进 URL 查询串）。
-    var api = window.OwoApi;
-    if (!api || typeof api.openEventStream !== "function") {
-      appendEvent("[当前环境不支持带认证的事件流，已改用快照轮询]");
-      return;
-    }
-    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-    handle = { abort: function () { if (ctrl) ctrl.abort(); } };
-    window.OwoWorkflowEventStream = handle;
-    api.openEventStream("/workflow/run/" + encodeURIComponent(runId) + "/events", {
-      signal: ctrl ? ctrl.signal : undefined,
-      onEvent: function (frame) { if (frame && frame.data) appendEvent(frame.data); },
-    }).catch(function (e) {
-      if (window.OwoWorkflowEventStream === handle) {
-        appendEvent("[events 连接中断] " + String((e && e.message) || e));
-      }
-    });
+    var h = getHelpers();
+    var base = (h && h.baseUrl) || BASE;
+    es = new EventSource(base + "/workflow/run/" + encodeURIComponent(runId) + "/events");
+    window.OwoWorkflowEventSource = es;
+    es.onmessage = function (ev) { appendEvent(ev.data); };
+    es.onerror = function () { appendEvent("[events 连接中断]"); };
   }
 
   function appendEvent(frame) {
     var el = document.getElementById("owo-workflow-events");
     if (!el) { return; }
-    el.innerHTML += esc(frame) + "\n";
+    var time = "";
+    var kind = "";
+    var detail = "";
+    try {
+      var d = JSON.parse(frame);
+      time = d.ts || d.at || d.time || "";
+      kind = d.event || d.kind || d.type || "";
+      detail = d.detail || d.step_id || d.message || d.run_id || "";
+      if (!detail && typeof d === "object") { detail = brief(d); }
+    } catch (e) {
+      detail = String(frame);
+    }
+    var row = document.createElement("div");
+    row.className = "owo-wf-event";
+    row.innerHTML =
+      '<span class="owo-wf-event-time">' + esc(time) + "</span>" +
+      '<span class="owo-wf-event-kind">' + esc(kind || "event") + "</span>" +
+      '<span class="owo-wf-event-detail">' + esc(detail) + "</span>";
+    el.appendChild(row);
     el.scrollTop = el.scrollHeight;
   }
 
@@ -235,7 +353,7 @@
     el.innerHTML =
       '<div class="owo-workflow-card">' +
       '<h4>等待审批：' + esc(snap.run_id) + "</h4>" +
-      '<div class="owo-workflow-json">' + esc(pending.prompt || "") + "</div>" +
+      '<p style="margin:4px 0;white-space:pre-wrap">' + esc(pending.prompt || "") + "</p>" +
       '<div class="sub">' + esc(pending.created_at || "") + "</div>" +
       '<button id="owo-workflow-approve" class="primary">批准</button>' +
       '<button id="owo-workflow-reject" class="owo-workflow-btn">拒绝</button>' +
@@ -253,7 +371,7 @@
       .then(function () {
         pollRun(runId, 0);
       })
-      .catch(function (e) { alert(friendlyError(e)); });
+      .catch(function (e) { toast(friendlyError(e), "error"); });
   }
 
   function renderSnapshot(snap) {
@@ -283,7 +401,7 @@
     document.getElementById("owo-workflow-abort").addEventListener("click", function () {
       post("/workflow/run/" + encodeURIComponent(snap.run_id) + "/abort", {})
         .then(function () { pollRun(snap.run_id, 0); })
-        .catch(function (e) { alert(friendlyError(e)); });
+        .catch(function (e) { toast(friendlyError(e), "error"); });
     });
     document.getElementById("owo-workflow-audit-btn").addEventListener("click", function () {
       loadAudit(snap.run_id);
@@ -298,9 +416,12 @@
           .map(function (a) {
             return '<div>' + esc(a.ts || "") + " [" + esc(a.event || "") + "] " + esc(a.detail || "") + "</div>";
           })
-          .join("") || "（空）";
+          .join("") || '<div class="owo-empty">暂无审计记录</div>';
       })
-      .catch(function (e) { alert(friendlyError(e)); });
+      .catch(function (e) {
+        el.innerHTML = '<span class="owo-workflow-step owo-workflow-step-fail">' + esc(friendlyError(e)) + "</span>";
+        toast(friendlyError(e), "error");
+      });
   }
 
   function refreshRuns(name) {
@@ -309,7 +430,7 @@
     get("/workflow/" + encodeURIComponent(name) + "/runs")
       .then(function (data) {
         var runs = data.runs || [];
-        if (!runs.length) { el.innerHTML = "无"; return; }
+        if (!runs.length) { el.innerHTML = '<div class="owo-empty">暂无运行记录</div>'; return; }
         el.innerHTML = runs
           .map(function (r) {
             return (
@@ -368,9 +489,9 @@
       this.refresh();
       bindValidate();
       bindRefresh();
-      if (window.OwoWorkflowEventStream) {
-        if (typeof window.OwoWorkflowEventStream.abort === "function") window.OwoWorkflowEventStream.abort();
-        window.OwoWorkflowEventStream = null;
+      if (window.OwoWorkflowEventSource) {
+        window.OwoWorkflowEventSource.close();
+        window.OwoWorkflowEventSource = null;
       }
     },
     refresh: function () {

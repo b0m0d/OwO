@@ -3,20 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
   <title>OwO Agent 工作台</title>
-  <!-- 显式声明图标：避免浏览器默认请求 /favicon.ico 产生 404 控制台噪声（第三路 V1-R1-UI） -->
-  <link rel="icon" type="image/svg+xml" href="favicon.svg">
-  <link rel="alternate icon" href="favicon.svg">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6bdd'/%3E%3Ctext x='16' y='23' font-family='Arial,sans-serif' font-size='19' font-weight='bold' fill='white' text-anchor='middle'%3EO%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">O</span>
-      <h1>OwO <span>Agent</span></h1>
-      <span class="tag">本地优先</span>
+  <!-- 全局菜单栏（仿 Codex 桌面：文件/编辑/视图/帮助 + 连接状态 + 主题） -->
+  <div id="menubar">
+    <div class="menubar-side">
+      <span class="menubar-brand"><span class="brand-mark" aria-hidden="true">O</span><strong>OwO</strong></span>
+      <nav class="menubar-menus" aria-label="主菜单">
+        <button type="button" class="menubar-menu-btn" data-menu="file">文件</button>
+        <button type="button" class="menubar-menu-btn" data-menu="edit">编辑</button>
+        <button type="button" class="menubar-menu-btn" data-menu="view">视图</button>
+        <button type="button" class="menubar-menu-btn" data-menu="help">帮助</button>
+      </nav>
     </div>
+    <div class="menubar-side menubar-right">
+      <span id="menubarHealth" class="pill">连接中…</span>
+      <button id="menubarTheme" class="menubar-theme" type="button" title="切换深色主题" aria-label="切换深色主题">☾</button>
+    </div>
+    <!-- 下拉菜单（文件/编辑/视图/帮助与左下用户卡共用，JS 动态填充并定位） -->
+    <div id="menuPopover" class="menu-popover hidden" role="menu" aria-hidden="true"></div>
+  </div>
+
+  <header>
     <div class="project-label"><span class="project-dot"></span>当前工作区 <strong>本地项目</strong></div>
     <div class="header-right">
       <button id="themeToggle" class="theme-toggle" type="button" title="切换深色主题" aria-label="切换深色主题">☾</button>
@@ -26,403 +37,875 @@
     </div>
   </header>
 
-  <nav id="appRail" aria-label="工作台导航">
-    <button class="rail-button active" type="button" title="任务" data-rail-target="chat"><span>☰</span>任务</button>
-    <button class="rail-button" type="button" title="项目" data-rail-target="projects"><span>⌘</span>项目</button>
-    <button class="rail-button" type="button" title="WorkSwarm 团队" data-rail-target="workswarm"><span>◎</span>团队</button>
-    <button class="rail-button" type="button" title="产物与待办" data-rail-target="artifacts"><span>◇</span>产物</button>
-    <button class="rail-button" type="button" title="权限中心：审批、授权范围与撤销" data-rail-target="permissions"><span>⛨</span>权限</button>
-    <span class="rail-spacer"></span>
-    <button class="rail-button" type="button" title="模型：服务提供方、接口地址与模型名" data-rail-target="model"><span>✦</span>模型</button>
-    <button class="rail-button" type="button" title="设置" data-rail-target="settings"><span>⚙</span>设置</button>
-  </nav>
-
   <aside id="sidebar">
-    <section class="owo-sidebar-head">
-      <h2>工作区</h2>
-      <div class="owo-field-row">
-        <input id="workspace" placeholder="当前项目工作区" aria-label="当前项目工作区" list="workspaceCandidates">
-        <button id="chooseWorkspace" class="secondary" type="button">选择目录…</button>
+    <!-- Codex 侧栏：顶部图标行 / 新对话 / 导航 / 会话列表 / 底部用户卡 -->
+    <div class="codex-sidebar">
+      <div class="codex-sidebar-top">
+        <button id="sidebarSearchBtn" class="codex-icon-btn" type="button" title="搜索会话" aria-label="搜索会话">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 13.5 13.5"/></svg>
+        </button>
+        <span class="codex-sidebar-spacer"></span>
+        <button id="sidebarToolsBtn" class="codex-icon-btn" type="button" title="工具与设置" aria-label="工具与设置">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.2" y="2.2" width="5" height="5" rx="1.2"/><rect x="8.8" y="2.2" width="5" height="5" rx="1.2"/><rect x="2.2" y="8.8" width="5" height="5" rx="1.2"/><rect x="8.8" y="8.8" width="5" height="5" rx="1.2"/></svg>
+        </button>
       </div>
-      <p class="sub" id="workspacePickerHint">桌面版由原生目录选择器设定，不需要手输完整路径。</p>
-      <datalist id="workspaceCandidates"></datalist>
-    </section>
-    <section class="owo-sidebar-tasks">
-      <h2>任务</h2>
-      <button id="newSession" class="primary">＋ 新建会话</button>
-      <label class="inline"><input type="checkbox" id="showArchived"> 显示归档</label>
-      <ul id="sessionList" class="list"></ul>
-    </section>
-    <!--
-      侧栏只留"每天都要用"的东西：工作区、任务、技能。
-      R10（2026-09-22 用户反馈）：原先这里挂着「显示工具与设置」+ 开发者模式两个
-      开关，展开后是 Eval/Trace/MCP/插件/computer-use/操作学习/自动化/白名单/
-      扩展面板共 10 个表单区——普通用户看到的是"左侧一堆参数"。
-      现在这些全部移入设置页的子页（工具与自动化 / 开发者选项），
-      侧栏只保留技能中心与子代理入口。
-    -->
-    <section class="owo-sidebar-skills">
-      <h2>技能</h2>
-      <ul id="skillList" class="list owo-skill-list"></ul>
-      <details><summary>技能 SKILL.md</summary><pre id="skillDetail">—</pre></details>
-      <details><summary>技能健康度</summary><div id="healthList">—</div></details>
-    </section>
-    <section data-dev class="owo-sidebar-subagent">
-      <h2>子代理</h2>
-      <p class="hint">把一段调查交给独立子代理，结果回到当前会话。</p>
-      <select id="subagentMode">
-        <option value="read_only">只读探索（explore）</option>
-        <option value="full">通用子代理（subagent）</option>
-      </select>
-      <textarea id="subagentPrompt" rows="3" placeholder="子代理任务，如：调查 crates 目录结构并汇报"></textarea>
-      <button id="subagentRunBtn" class="primary">运行子代理</button>
-      <pre id="subagentResult" class="sub">—</pre>
-    </section>
-    <div class="owo-sidebar-foot">
-      <button id="openSettingsBtn" class="owo-sidebar-settings" type="button" title="模型、工具、诊断与存储">⚙ 设置与诊断</button>
-      <label class="dev-mode-toggle" title="开发者模式显示 MCP 原始配置、Trace、Eval 等内部能力">
-        <input type="checkbox" id="devModeToggle"> 开发者模式
-      </label>
+      <button id="newSession" class="codex-new-chat" type="button">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+        新对话
+      </button>
+      <nav class="codex-nav" aria-label="工作台导航">
+        <button type="button" data-codex-group="workspace">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h4.5c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H3.4c-.66 0-1.2-.54-1.2-1.2V4.4z"/></svg>
+          工作区
+        </button>
+        <button type="button" data-codex-group="intelligence">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M6.6 2.4 7.7 5l2.6 1.1-2.6 1.1-1.1 2.6-1.1-2.6L2.9 6.1 5.5 5z"/><path d="M11.6 9.2l.6 1.5 1.5.6-1.5.6-.6 1.5-.6-1.5-1.5-.6 1.5-.6z"/></svg>
+          智能
+        </button>
+        <button type="button" data-codex-group="automation">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.6"/></svg>
+          自动化
+        </button>
+        <button type="button" data-codex-group="system">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2.2 13.4 5.3v5.4L8 13.8 2.6 10.7V5.3z"/><path d="M2.6 5.3 8 8.4l5.4-3.1M8 8.4v5.4"/></svg>
+          插件
+        </button>
+      </nav>
+      <div class="codex-sessions-head">会话</div>
+      <input id="sessionSearch" class="codex-session-search" placeholder="搜索会话…" hidden>
+      <ul id="sessionList" class="list codex-sessions"></ul>
+      <label class="codex-archived"><input type="checkbox" id="showArchived"> 显示归档</label>
+      <div class="codex-sidebar-footer">
+        <button id="codexToolsEntry" class="codex-footer-btn" type="button">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.2" y="2.2" width="5" height="5" rx="1.2"/><rect x="8.8" y="2.2" width="5" height="5" rx="1.2"/><rect x="2.2" y="8.8" width="5" height="5" rx="1.2"/><rect x="8.8" y="8.8" width="5" height="5" rx="1.2"/></svg>
+          工具与设置
+        </button>
+        <button id="codexSettingsEntry" class="codex-footer-btn" type="button">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.1"/><path d="M8 2.6v1.6M8 11.8v1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M2.6 8h1.6M11.8 8h1.6M3.5 12.5l1.1-1.1M11.4 4.6l1.1-1.1"/></svg>
+          设置
+        </button>
+        <div class="codex-user" id="codexUserCard" role="button" tabindex="0" title="账户菜单">
+          <span class="codex-avatar" aria-hidden="true">用</span>
+          <div class="codex-user-meta"><strong>用户1</strong><span>本地账户</span></div>
+          <button id="themeToggleSide" class="codex-icon-btn" type="button" title="切换深色主题" aria-label="切换深色主题">☾</button>
+        </div>
+      </div>
     </div>
-    <!-- 工具/开发者分区容器：由 setSettingsLocation() 搬入设置页；聊天态留在侧栏但默认折叠。 -->
-    <div id="toolsPanel" class="tools-panel">
-    <section data-dev>
-      <h2>Eval 评估</h2>
-      <div class="inline">
-        <select id="evalSuite">
-          <option value="builtin">内置套件（builtin）</option>
-        </select>
-        <button id="evalRunBtn">运行</button>
-      </div>
-      <pre id="evalReport" class="sub">—</pre>
-    </section>
-    <section data-dev>
-      <h2>Traces（回合轨迹）</h2>
-      <button id="tracesRefreshBtn">刷新</button>
-      <ul id="traceList" class="list"></ul>
-      <details><summary>轨迹回放</summary><pre id="traceReplay" class="sub">点击上方轨迹查看</pre></details>
-    </section>
-    <section data-tools>
-      <h2>项目规则（AGENTS.md）</h2>
-      <div id="projectRulesInfo" class="sub">—</div>
-      <div class="inline" style="margin-bottom:6px">
-        <button id="agentsTemplateBtn" title="生成 AGENTS.md 模板（不存在时）">生成模板</button>
-      </div>
-      <textarea id="agentsEditor" rows="8" spellcheck="false" placeholder="# 项目规则&#10;&#10;- 工具调用必须经审批"></textarea>
-      <button id="agentsSaveBtn">保存 AGENTS.md</button>
-    </section>
-    <section data-dev>
-      <h2>MCP 服务器</h2>
-      <ul id="mcpList" class="list"></ul>
-      <form id="mcpForm" class="stack">
-        <input id="mcpName" placeholder="名称（如 my-files）" required>
-        <label for="mcpTransport">连接方式</label>
-        <select id="mcpTransport">
-          <option value="stdio">本地命令（stdio）</option>
-          <option value="http">远程服务（http）</option>
-        </select>
-        <div id="mcpCommandGroup" class="auto-group">
-          <label for="mcpCommand">启动命令（如 npx -y …）</label>
-          <input id="mcpCommand" placeholder="npx -y @modelcontextprotocol/server-filesystem">
+
+    <!-- 工具 / 设置视图的返回入口 -->
+    <button id="codexViewBack" class="codex-view-back" type="button">
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.6 3.6 5.2 8l4.4 4.4"/></svg>
+      返回会话
+    </button>
+
+    <!-- 工具视图吸顶分组导航：点分组只看该组卡片，点「全部」恢复所有卡片 -->
+    <nav class="tools-jump" id="toolsJump" aria-label="工具分组导航">
+      <button type="button" class="tools-jump-item active" data-jump="all">全部</button>
+      <button type="button" class="tools-jump-item" data-jump="workspace">工作区</button>
+      <button type="button" class="tools-jump-item" data-jump="intelligence">智能</button>
+      <button type="button" class="tools-jump-item" data-jump="automation">自动化</button>
+      <button type="button" class="tools-jump-item" data-jump="system">插件</button>
+    </nav>
+
+    <!-- 以下 section 仅在工具视图（可按分组聚焦）与设置页显示 -->
+    <div class="group-title tool-page-head" data-group="workspace" data-group-label="工作区">
+      <strong>工作区</strong>
+      <span>设置 agent 读写的本地目录，并管理会话与任务的入口</span>
+    </div>
+    <section class="tool-card" data-group="workspace">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h4.5c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H3.4c-.66 0-1.2-.54-1.2-1.2V4.4z"/></svg></span>
+        <div class="tool-card-title">
+          <strong>工作区目录</strong>
+          <span class="tool-card-desc">OwO 只在这个目录内读写文件、执行命令。新建会话与所有自动化任务都基于它运行，切换目录即可换一个项目。</span>
         </div>
-        <div id="mcpUrlGroup" class="auto-group" hidden>
-          <label for="mcpUrl">服务地址</label>
-          <input id="mcpUrl" placeholder="https://example.com/mcp">
-        </div>
-        <button type="submit">添加并连接</button>
-      </form>
-    </section>
-    <section data-dev>
-      <h2>插件</h2>
-      <ul id="pluginList" class="list"></ul>
-    </section>
-    <section data-dev>
-      <h2>Computer-use 任务（P2）</h2>
-      <form id="computerTaskForm" class="stack">
-        <input id="cuApp" placeholder="目标应用（如 qq）" required>
-        <input id="cuDesc" placeholder="任务描述" required>
-        <label for="cuActions">允许动作</label>
-        <div id="cuActionsChips" class="chip-group" role="group" aria-label="允许动作多选"></div>
-        <input id="cuMaxDur" placeholder="最长时长（秒，默认 120）" inputmode="numeric">
-        <button type="submit">创建任务（需任务级审批）</button>
-      </form>
-      <ul id="computerTaskList" class="list"></ul>
-    </section>
-    <section data-dev>
-      <h2>操作学习</h2>
-      <div class="inline">
-        <button id="learnStart">开始</button>
-        <button id="learnPause">暂停</button>
-        <button id="learnResume">恢复</button>
-        <button id="learnStop">结束</button>
       </div>
-      <button id="learnClear" style="margin-top:6px">清空样本</button>
-      <form id="sinkForm" class="stack">
-        <input id="sinkName" placeholder="技能名（如 send-file）" required>
-        <label for="sinkApps">目标应用</label>
-        <div id="sinkAppsChips" class="chip-group" role="group" aria-label="目标应用多选"></div>
-        <select id="sinkSensitivity">
-          <option value="low">低敏感</option>
-          <option value="medium">中敏感</option>
-          <option value="high">高敏感</option>
-        </select>
-        <input id="sinkDesc" placeholder="描述">
-        <button type="submit">沉淀为技能包</button>
-      </form>
-      <div class="inline" style="margin-top:6px">
-        <input type="file" id="skillImport" accept=".owskill,application/zip">
-        <button type="button" id="skillImportBtn">导入 .owskill</button>
+      <div class="tool-card-body">
+        <div class="tool-field">
+          <label for="workspace">目录绝对路径</label>
+          <div class="tool-actions">
+            <input id="workspace" placeholder="例如 D:\projects\my-app" spellcheck="false" autocomplete="off">
+            <button type="button" id="workspaceBrowseBtn" title="打开系统文件夹选择器">浏览…</button>
+          </div>
+        </div>
       </div>
-      <ul id="packageList" class="list"></ul>
-      <details><summary>流程技能包详情</summary><pre id="packageDetail">—</pre></details>
     </section>
-    <section data-tools>
-      <h2>自动化</h2>
-      <form id="automationForm" class="stack">
-        <input id="autoName" placeholder="任务名（如 每小时提醒）" required>
-        <label for="autoKind">触发方式</label>
-        <select id="autoKind">
-          <option value="interval">固定间隔</option>
-          <option value="daily">每天固定时刻</option>
-          <option value="oneshot">指定日期时刻</option>
-        </select>
-        <div id="autoIntervalGroup" class="auto-group">
-          <label for="autoIntervalSecs">间隔（秒）</label>
-          <input id="autoIntervalSecs" type="number" min="1" step="1" placeholder="如 3600（每秒）" inputmode="numeric">
+    <section class="tool-card" data-group="workspace">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5.2 4h7M5.2 8h7M5.2 12h7"/><circle cx="2.8" cy="4" r="0.9" fill="currentColor" stroke="none"/><circle cx="2.8" cy="8" r="0.9" fill="currentColor" stroke="none"/><circle cx="2.8" cy="12" r="0.9" fill="currentColor" stroke="none"/></svg></span>
+        <div class="tool-card-title">
+          <strong>会话与任务</strong>
+          <span class="tool-card-desc">每次对话是一个会话，agent 的工具调用、文件修改都记录在会话里，可随时中断、回退或导出。</span>
         </div>
-        <div id="autoDailyGroup" class="auto-group" hidden>
-          <label for="autoDailyTime">触发时刻</label>
-          <input id="autoDailyTime" type="time">
-        </div>
-        <div id="autoOnceGroup" class="auto-group" hidden>
-          <label for="autoOnceAt">触发时间</label>
-          <input id="autoOnceAt" type="datetime-local">
-        </div>
-        <input id="autoReminder" placeholder="提醒内容" required>
-        <button type="submit">创建任务</button>
-      </form>
-      <ul id="automationList" class="list"></ul>
-      <div class="inline" style="margin-top:6px">
-        <button id="clearReminders">清除提醒</button>
       </div>
-      <ul id="reminderList" class="list"></ul>
+      <div class="tool-card-body">
+        <p class="sub">新建会话请用左侧「新对话」；查看与恢复历史对话请用会话列表。会话内输入 <code>/</code> 可唤起命令菜单（新建、回退、导出等）。</p>
+      </div>
     </section>
-    <section data-tools>
-      <h2>应用白名单</h2>
-      <ul id="whitelistList" class="list"></ul>
-      <form id="whitelistForm" class="inline">
-        <input id="wlAppId" placeholder="应用标识（可从列表选择或输入新值）" required list="wlAppCandidates">
-        <datalist id="wlAppCandidates"></datalist>
-        <button type="submit">添加 P0</button>
-      </form>
-      <p class="hint">候选来自技能沉淀的能力注册表；不在列表中的标识输入后按新应用添加。</p>
+
+    <div class="group-title tool-page-head" data-group="intelligence" data-group-label="智能">
+      <strong>智能</strong>
+      <span>评估模型能力、回放回合轨迹、委派子代理与维护项目规则</span>
+    </div>
+    <section class="tool-card" data-group="intelligence">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 12.4V8.6M6.7 12.4V4.4M10.3 12.4V7M14 12.4v-3"/></svg></span>
+        <div class="tool-card-title">
+          <strong>Eval 评估</strong>
+          <span class="tool-card-desc">用内置测试套件对当前接入的模型跑一轮能力评估，输出每个用例的通过情况与错误原因，用来对比不同端点或模型的效果。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <div class="tool-field">
+          <label for="evalSuite">评估套件</label>
+          <div class="tool-actions">
+            <select id="evalSuite">
+              <option value="builtin">内置套件（builtin）</option>
+            </select>
+            <button id="evalRunBtn" class="primary">运行评估</button>
+          </div>
+        </div>
+        <div id="evalReport" class="owo-result">尚未运行，点击「运行评估」开始</div>
+      </div>
     </section>
-    <section data-dev>
+    <section class="tool-card" data-group="intelligence">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h2.6l1.8-4.2L9.2 12l1.8-4H14"/></svg></span>
+        <div class="tool-card-title">
+          <strong>Traces 回合轨迹</strong>
+          <span class="tool-card-desc">记录每个回合的完整事件流：模型调用、工具执行、审批与耗时。点开单条轨迹可回放，用来排查「它为什么这么做」。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <div class="tool-actions tool-actions-end">
+          <button id="tracesRefreshBtn">刷新列表</button>
+        </div>
+        <ul id="traceList" class="list"></ul>
+        <details><summary>轨迹回放</summary><div id="traceReplay" class="owo-result">点击上方轨迹查看</div></details>
+      </div>
+    </section>
+    <section class="tool-card" data-group="intelligence">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="4" r="1.7"/><circle cx="12" cy="4" r="1.7"/><circle cx="8" cy="12" r="1.7"/><path d="M5.4 5.1 6.7 10.4M10.6 5.1 9.3 10.4M5.7 4h4.6" stroke-linecap="round"/></svg></span>
+        <div class="tool-card-title">
+          <strong>子代理</strong>
+          <span class="tool-card-desc">把调研、检索类任务委派给独立上下文的子代理执行，结论带回主会话，不撑大主对话。「只读探索」不会修改任何文件。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <div class="tool-form-grid">
+          <div class="tool-field">
+            <label for="subagentMode">运行模式</label>
+            <select id="subagentMode">
+              <option value="read_only">只读探索（explore）</option>
+              <option value="full">通用子代理（subagent）</option>
+            </select>
+          </div>
+        </div>
+        <div class="tool-field">
+          <label for="subagentPrompt">子代理任务</label>
+          <textarea id="subagentPrompt" rows="3" placeholder="例如：调查 crates 目录结构并汇报"></textarea>
+        </div>
+        <div class="tool-actions tool-actions-end">
+          <button id="subagentRunBtn" class="primary">运行子代理</button>
+        </div>
+        <div id="subagentResult" class="owo-result">尚未运行</div>
+      </div>
+    </section>
+    <section class="tool-card" data-group="intelligence">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M9.2 1.9H4.6a1.7 1.7 0 0 0-1.7 1.7v8.8a1.7 1.7 0 0 0 1.7 1.7h6.8a1.7 1.7 0 0 0 1.7-1.7V5.5z"/><path d="M9.2 1.9v3.6h3.6M5.3 8.3h5.4M5.3 11h5.4"/></svg></span>
+        <div class="tool-card-title">
+          <strong>项目规则（AGENTS.md）</strong>
+          <span class="tool-card-desc">写入项目级规则，保存后每个新回合都会自动注入系统提示，相当于给 agent 的长期记忆与约束。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <div id="projectRulesInfo" class="sub">—</div>
+        <div class="tool-field">
+          <label for="agentsEditor">规则内容（Markdown）</label>
+          <textarea id="agentsEditor" rows="8" spellcheck="false" placeholder="# 项目规则&#10;&#10;- 工具调用必须经审批"></textarea>
+        </div>
+        <div class="tool-actions tool-actions-end">
+          <button id="agentsSaveBtn" class="primary">保存 AGENTS.md</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="group-title tool-page-head" data-group="automation" data-group-label="自动化">
+      <strong>自动化</strong>
+      <span>定时提醒、桌面操作学习与 computer-use 任务</span>
+    </div>
+    <section class="tool-card" data-group="automation">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="5.7"/><path d="M8 4.7V8l2.5 1.7"/></svg></span>
+        <div class="tool-card-title">
+          <strong>自动化任务</strong>
+          <span class="tool-card-desc">按「间隔 / 每天 / 单次」触发提醒或任务，到点后在会话中推送；支持执行记录回查。已迁入扩展面板「自动化」。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <div class="tool-actions">
+          <button id="openAutomationsPanel" class="primary">打开自动化面板</button>
+        </div>
+      </div>
+    </section>
+    <section class="tool-card" data-group="automation">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8a5.2 5.2 0 1 1-1.7-3.8"/><path d="M13.4 2.5v2.3h-2.3"/></svg></span>
+        <div class="tool-card-title">
+          <strong>操作学习</strong>
+          <span class="tool-card-desc">录制你在桌面应用里的操作序列，结束后沉淀成可复用的技能包（.owskill），之后可以一键重放同类操作。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <div class="tool-actions">
+          <button id="learnStart" class="primary">开始录制</button>
+          <button id="learnPause">暂停</button>
+          <button id="learnResume">恢复</button>
+          <button id="learnStop">结束</button>
+          <button id="learnClear" class="danger">清空样本</button>
+        </div>
+        <form id="sinkForm" class="tool-form-grid">
+          <div class="tool-field">
+            <label for="sinkName">技能名</label>
+            <input id="sinkName" placeholder="如 send-file" required>
+          </div>
+          <div class="tool-field">
+            <label for="sinkApps">目标应用</label>
+            <input id="sinkApps" placeholder="逗号分隔，如 qq, feishu" required>
+          </div>
+          <div class="tool-field">
+            <label for="sinkSensitivity">敏感级别</label>
+            <select id="sinkSensitivity">
+              <option value="low">低敏感</option>
+              <option value="medium">中敏感</option>
+              <option value="high">高敏感</option>
+            </select>
+          </div>
+          <div class="tool-field">
+            <label for="sinkDesc">描述（可选）</label>
+            <input id="sinkDesc" placeholder="这个技能包做什么">
+          </div>
+          <div class="tool-actions tool-actions-end tool-field-full">
+            <button type="submit" class="primary">沉淀为技能包</button>
+          </div>
+        </form>
+        <ul id="packageList" class="list"></ul>
+        <details><summary>流程技能包详情</summary><pre id="packageDetail">—</pre></details>
+      </div>
+    </section>
+    <section class="tool-card" data-group="automation">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="2" y="2.8" width="12" height="8.4" rx="1.2"/><path d="M5.8 13.6h4.4"/></svg></span>
+        <div class="tool-card-title">
+          <strong>Computer-use 任务</strong>
+          <span class="tool-card-desc">让 agent 直接操作指定桌面应用（点击、输入、滚动）完成任务。涉及真实桌面操作，创建后需任务级审批才会执行。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <form id="computerTaskForm" class="tool-form-grid">
+          <div class="tool-field">
+            <label for="cuApp">目标应用</label>
+            <input id="cuApp" placeholder="如 qq" required>
+          </div>
+          <div class="tool-field">
+            <label for="cuMaxDur">最长时长（秒）</label>
+            <input id="cuMaxDur" placeholder="默认 120" inputmode="numeric">
+          </div>
+          <div class="tool-field tool-field-full">
+            <label for="cuDesc">任务描述</label>
+            <input id="cuDesc" placeholder="要让 agent 在这个应用里做什么" required>
+          </div>
+          <div class="tool-field tool-field-full">
+            <label for="cuActions">允许的动作</label>
+            <input id="cuActions" placeholder="click/type/scroll，逗号分隔（留空为全部）">
+          </div>
+          <div class="tool-actions tool-actions-end tool-field-full">
+            <button type="submit" class="primary">创建任务</button>
+          </div>
+        </form>
+        <ul id="computerTaskList" class="list"></ul>
+      </div>
+    </section>
+
+    <div class="group-title tool-page-head" data-group="system" data-group-label="插件">
+      <strong>插件</strong>
+      <span>管理插件与技能、接入 MCP 服务器、维护应用白名单</span>
+    </div>
+    <section class="tool-card" data-group="system">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.2" y="2.2" width="5" height="5" rx="1.2"/><rect x="8.8" y="2.2" width="5" height="5" rx="1.2"/><rect x="2.2" y="8.8" width="5" height="5" rx="1.2"/><rect x="8.8" y="8.8" width="5" height="5" rx="1.2"/></svg></span>
+        <div class="tool-card-title">
+          <strong>插件与技能</strong>
+          <span class="tool-card-desc">「插件」是工作台的能力扩展，可从市场安装；「技能」是 agent 可调用的操作包，安装后即可在对话里使用，健康度反映调用成功率。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <div class="ps-tabs" role="tablist" aria-label="插件与技能">
+          <button type="button" class="ps-tab active" data-ps-tab="plugins" role="tab" aria-selected="true">插件</button>
+          <button type="button" class="ps-tab" data-ps-tab="skills" role="tab" aria-selected="false">技能</button>
+        </div>
+        <div class="ps-pane" data-ps-pane="plugins">
+          <div class="ps-head">
+            <div class="ps-head-title"><strong>已安装</strong><span class="sub" id="pluginCount">加载中…</span></div>
+            <button type="button" id="pluginRefreshBtn" class="ps-refresh">刷新</button>
+          </div>
+          <div id="pluginGrid" class="ps-grid"><div class="sub">加载中…</div></div>
+          <div class="ps-head ps-head-gap">
+            <div class="ps-head-title"><strong>热门推荐</strong><span class="sub">来自插件市场目录</span></div>
+            <button type="button" id="marketRefreshBtn" class="ps-refresh">刷新目录</button>
+          </div>
+          <div id="pluginPopular" class="ps-rows"><div class="sub">加载中…</div></div>
+        </div>
+        <div class="ps-pane" data-ps-pane="skills" hidden>
+          <div class="ps-head">
+            <div class="ps-head-title"><strong>已安装技能</strong><span class="sub" id="skillCount">加载中…</span></div>
+            <button type="button" id="skillRefreshBtn" class="ps-refresh">刷新</button>
+          </div>
+          <div id="skillGrid" class="ps-grid"><div class="sub">加载中…</div></div>
+          <div class="ps-head ps-head-gap">
+            <div class="ps-head-title"><strong>技能健康度</strong><span class="sub">调用成功率与模板命中</span></div>
+          </div>
+          <div id="skillHealth" class="ps-rows"><div class="sub">加载中…</div></div>
+          <p class="sub" style="margin-top:10px">导入 .owskill 技能包请在「设置 → 导入」中操作。</p>
+        </div>
+      </div>
+    </section>
+    <section class="tool-card" data-group="system">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="2.2" y="2.4" width="11.6" height="4.6" rx="1"/><rect x="2.2" y="9" width="11.6" height="4.6" rx="1"/><path d="M5.2 4.7h.02M5.2 11.3h.02"/></svg></span>
+        <div class="tool-card-title">
+          <strong>MCP 服务器</strong>
+          <span class="tool-card-desc">接入 Model Context Protocol 服务器即可扩展 agent 的工具箱（文件系统、数据库、浏览器等）。stdio 走本地命令，http 走远端地址。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <ul id="mcpList" class="list"></ul>
+        <form id="mcpForm" class="tool-form-grid">
+          <div class="tool-field">
+            <label for="mcpName">名称</label>
+            <input id="mcpName" placeholder="如 my-files" required>
+          </div>
+          <div class="tool-field">
+            <label for="mcpTransport">传输方式</label>
+            <select id="mcpTransport">
+              <option value="stdio">stdio</option>
+              <option value="http">http</option>
+            </select>
+          </div>
+          <div class="tool-field tool-field-full">
+            <label for="mcpCommand">启动命令（stdio）</label>
+            <input id="mcpCommand" placeholder="如 npx -y @modelcontextprotocol/server-filesystem">
+          </div>
+          <div class="tool-field tool-field-full">
+            <label for="mcpUrl">URL（http 传输）</label>
+            <input id="mcpUrl" placeholder="如 http://127.0.0.1:8000/mcp">
+          </div>
+          <div class="tool-actions tool-actions-end tool-field-full">
+            <button type="submit" class="primary">添加并连接</button>
+          </div>
+        </form>
+      </div>
+    </section>
+    <section class="tool-card" data-group="system">
+      <div class="tool-card-head">
+        <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 1.9 3.3 3.7v3.5c0 3 2 5.4 4.7 6.4 2.7-1 4.7-3.4 4.7-6.4V3.7z"/><path d="M5.9 7.9 7.3 9.3 10 6.5"/></svg></span>
+        <div class="tool-card-title">
+          <strong>应用白名单</strong>
+          <span class="tool-card-desc">把桌面应用加入 P0 白名单后，agent 操作这些应用时无需逐次审批，适合你完全信任的工具。</span>
+        </div>
+      </div>
+      <div class="tool-card-body">
+        <ul id="whitelistList" class="list"></ul>
+        <form id="whitelistForm" class="tool-actions">
+          <input id="wlAppId" placeholder="app_id" required>
+          <button type="submit" class="primary">添加 P0</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="span-all" data-group="panels">
       <h2>扩展面板</h2>
       <div id="panelNav" class="inline"></div>
       <div id="panelRoot"></div>
     </section>
-    </div>
-    <section id="settingsSection">
-      <h2>设置与诊断</h2>
-      <!-- R10：模型配置提到最前（用户反馈"找不到模型切换 / 自定义地址与名称"）。
-           这里的字段与 setup-guide 的提供商卡共用 set_provider 命令与校验口径。 -->
-      <div class="model-card" id="modelCard">
-        <div class="model-card-head">
-          <div>
-            <strong>模型</strong>
-            <span class="sub">选择服务提供方，可自定义接口地址与模型名</span>
+
+    <section class="settings-section" data-group="settings">
+      <div class="settings-layout">
+        <!-- 左侧分类导航（仿 Codex 设置页） -->
+        <nav class="settings-nav" id="settingsNav" aria-label="设置分类">
+          <div class="settings-nav-title">设置</div>
+          <button type="button" class="settings-nav-item active" data-settings-tab="general">常规</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="models">配置</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="appearance">外观</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="voice">语音</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="personalization">个性化</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="notifications">通知</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="shortcuts">快捷键</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="usage">使用情况和计费</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="import">导入</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="account">账户</button>
+        </nav>
+
+        <!-- 右侧表单页 -->
+        <div class="settings-content" id="settingsContent">
+
+          <!-- 常规 -->
+          <div class="settings-tab" data-settings-tab="general">
+            <div class="settings-page-title">
+              <div><strong>常规</strong><span>工作区、权限与本地偏好的默认行为</span></div>
+              <span class="connection-summary" id="connectionSummary">检查中…</span>
+            </div>
+            <div class="settings-card-list">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>云端模型（数据出境）</strong><span>关闭后仅使用本地 / 自建端点，数据不出本机</span></div>
+                <div class="settings-row-control">
+                  <button type="button" class="toggle" id="egressToggle" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>无项目任务文件夹</strong><span>未选择工作区时，新会话使用的默认目录</span></div>
+                <div class="settings-row-control settings-control-path">
+                  <code id="defaultWorkspacePath">未设置</code>
+                  <button type="button" id="changeWorkspaceBtn">更改…</button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>默认文件打开方式</strong><span>在工作区中双击文件时使用的程序（本地偏好）</span></div>
+                <div class="settings-row-control">
+                  <select id="prefFileOpener">
+                    <option value="system">系统默认程序</option>
+                    <option value="notepad">记事本</option>
+                    <option value="vscode">VS Code</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>集成终端 Shell</strong><span>执行命令类工具时使用的 shell（本地偏好）</span></div>
+                <div class="settings-row-control">
+                  <select id="prefShell">
+                    <option value="powershell">PowerShell</option>
+                    <option value="cmd">命令提示符 (CMD)</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>语言</strong><span>界面语言（本地偏好）</span></div>
+                <div class="settings-row-control">
+                  <select id="prefLanguage">
+                    <option value="zh-CN">中文（简体）</option>
+                    <option value="en-US">English</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>紧凑模式</strong><span>缩小间距，在同一屏展示更多内容（本地偏好）</span></div>
+                <div class="settings-row-control">
+                  <button type="button" class="toggle" id="prefCompact" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>速度</strong><span>本地模型推理与界面动效的档位（本地偏好）</span></div>
+                <div class="settings-row-control">
+                  <select id="prefSpeed">
+                    <option value="standard">标准</option>
+                    <option value="fast">快速</option>
+                    <option value="eco">节能</option>
+                  </select>
+                </div>
+              </div>
+            </div>
           </div>
-          <span class="connection-summary" id="connectionSummary">检查中…</span>
-        </div>
-        <div class="model-presets" id="modelPresets" role="group" aria-label="常用模型服务"></div>
-        <div class="model-grid">
-          <label class="field-label">服务提供方
-            <select id="settingsProvider">
-              <option value="bigmodel">智谱 BigModel</option>
-              <option value="openai">OpenAI</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="dashscope">阿里 DashScope 兼容</option>
-              <option value="ollama">本地 Ollama</option>
-              <option value="custom">自定义 / 自建（OpenAI 兼容）</option>
-              <option value="unset">稍后配置</option>
-            </select>
-          </label>
-          <label class="field-label">接口地址（base_url）
-            <input id="settingsBaseUrl" type="text" spellcheck="false" placeholder="https://open.bigmodel.cn/api/paas/v4" />
-          </label>
-          <label class="field-label">模型名称
-            <input id="settingsModelName" type="text" spellcheck="false" placeholder="glm-5.3-flash" list="modelNameCandidates" />
-            <datalist id="modelNameCandidates"></datalist>
-          </label>
-          <label class="field-label">API Key
-            <span class="key-row">
-              <input id="settingsApiKey" type="password" spellcheck="false" autocomplete="off" placeholder="留空则读环境变量 OPENAI_API_KEY" />
-              <button id="settingsApiKeyToggle" type="button" class="key-toggle" title="显示/隐藏">显示</button>
-            </span>
-          </label>
-          <label class="field-label">密钥环境变量名（可选）
-            <input id="settingsApiKeyEnv" type="text" spellcheck="false" placeholder="OPENAI_API_KEY" />
-          </label>
-          <label class="field-label">实际生效模型
-            <select id="settingsModel">
-              <option value="">读取实际运行模型…</option>
-            </select>
-          </label>
-        </div>
-        <!-- R13：可调参数全部来自配置文件（用户要求"不能写死"）：留空 = 用核心默认。 -->
-        <details class="model-advanced" id="modelAdvanced">
-          <summary>上下文与采样参数（留空 = 用核心默认，也可直接改 config.json）</summary>
-          <div class="model-grid">
-            <label class="field-label">上下文窗口（token）
-              <input id="settingsContextWindow" type="number" min="1" step="1" inputmode="numeric" placeholder="留空 = 核心默认（60000）" />
-            </label>
-            <label class="field-label">单次最大输出（token）
-              <input id="settingsMaxOutput" type="number" min="1" step="1" inputmode="numeric" placeholder="留空 = 由模型/服务商决定" />
-            </label>
-            <label class="field-label">温度（0–2）
-              <input id="settingsTemperature" type="number" min="0" max="2" step="0.1" inputmode="decimal" placeholder="留空 = 核心默认" />
-            </label>
-            <label class="field-label">请求超时（秒）
-              <input id="settingsTimeout" type="number" min="1" step="1" inputmode="numeric" placeholder="留空 = 核心默认" />
-            </label>
-            <label class="field-label">保留最近消息条数
-              <input id="settingsKeepRecent" type="number" min="1" step="1" inputmode="numeric" placeholder="留空 = 核心默认（20）" />
-            </label>
-            <label class="field-label">上下文压缩
-              <select id="settingsCompaction">
-                <option value="">跟随核心默认</option>
-                <option value="1">开启</option>
-                <option value="0">关闭</option>
-              </select>
-            </label>
+
+          <!-- 配置（模型管理） -->
+          <div class="settings-tab" data-settings-tab="models" hidden>
+            <div class="settings-page-title">
+              <div><strong>配置</strong><span>管理可用模型、服务商预设与自定义端点</span></div>
+            </div>
+            <div class="settings-card-list">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>默认模型</strong><span>新回合使用的模型</span></div>
+                <div class="settings-row-control">
+                  <select id="settingsModel">
+                    <option value="qwen3.8-max">qwen3.8-max</option>
+                    <option value="qwen3.7-plus">qwen3.7-plus</option>
+                    <option value="qwen3.7-max">qwen3.7-max</option>
+                    <option value="qwen3.6-flash">qwen3.6-flash</option>
+                    <option value="deepseek-v4-pro-0813">deepseek-v4-pro-0813</option>
+                    <option value="deepseek-v4-flash-0731">deepseek-v4-flash-0731</option>
+                    <option value="glm-5.2">glm-5.2</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>服务商预设</strong><span>一键套用端点与默认模型</span></div>
+                <div class="settings-row-control">
+                  <select id="providerPreset">
+                    <option value="">自定义 / 保持现状</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>API 端点</strong><span>OpenAI 兼容地址，留空则用启动终端的环境变量</span></div>
+                <div class="settings-row-control">
+                  <input id="providerBaseUrl" type="text" placeholder="https://api.deepseek.com/v1" spellcheck="false" autocomplete="off">
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>API 密钥</strong><span>加密保存到本机（DPAPI 信封），不明文写入工作区</span></div>
+                <div class="settings-row-control">
+                  <input id="providerApiKey" type="password" placeholder="未保存" spellcheck="false" autocomplete="off">
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>保存并连接</strong><span>写入本机设置，新回合即时生效</span></div>
+                <div class="settings-row-control">
+                  <span class="pill" id="providerKeyState">未保存</span>
+                  <button type="button" id="providerSaveBtn" class="primary">保存并连接</button>
+                </div>
+              </div>
+            </div>
+            <div id="presetInfo" class="preset-info hidden">
+              <div class="preset-info-row"><span class="preset-info-key">端点</span><code id="presetBaseUrl">—</code></div>
+              <div class="preset-info-row"><span class="preset-info-key">默认模型</span><code id="presetModel">—</code></div>
+              <div class="preset-info-row"><span class="preset-info-key">密钥环境变量</span><code id="presetKeyEnv">—</code></div>
+              <div class="preset-info-row preset-info-cmd"><span class="preset-info-key">启动命令</span><code id="presetCmdPreview">—</code></div>
+              <div class="inline">
+                <button id="presetApplyModelBtn" type="button">使用默认模型并保存</button>
+                <button id="presetCopyCmdBtn" type="button">复制 PowerShell 环境变量命令</button>
+              </div>
+              <p class="sub" id="presetHint">选预设会自动填入上方端点与模型；密钥请在「API 密钥」填写后点「保存并连接」。</p>
+            </div>
+            <div class="settings-block" style="margin-top:14px">
+              <div class="settings-block-head">
+                <strong>自定义模型</strong>
+                <button type="button" id="customModelAddBtn" class="primary">+ 自定义模型</button>
+              </div>
+              <div id="customModelList" class="model-list"><div class="sub">暂无自定义模型，点击右上角添加。</div></div>
+            </div>
+            <div class="settings-block" style="margin-top:14px">
+              <div class="settings-block-head"><strong>密钥</strong></div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>API 密钥来源</strong><span>已保存的密钥（DPAPI 信封，绑定本机账户）优先，其次启动终端的环境变量；任何形式都不明文落盘</span></div>
+                <div class="settings-row-control"><span class="pill">DPAPI 信封 / 环境变量</span></div>
+              </div>
+            </div>
           </div>
-          <p class="hint">
-            这些值可通过环境变量注入核心：<code>OWO_MODEL_CONTEXT_WINDOW</code>、<code>OWO_MODEL_MAX_OUTPUT_TOKENS</code>、
-            <code>OWO_MODEL_TEMPERATURE</code>、<code>OWO_MODEL_TIMEOUT_SECS</code>、<code>OWO_AGENT_KEEP_RECENT</code>、
-            <code>OWO_AGENT_COMPACTION</code>。保存后核心会按新值重启。
-          </p>
-        </details>
-        <div class="model-actions">
-          <button id="modelApplyBtn" class="primary" type="button">保存并重启核心</button>
-          <button id="modelReloadBtn" type="button" title="直接读取 config.json 并生效（手改文件后用这个）">从文件重载</button>
-          <button id="modelTestBtn" type="button">测试连接</button>
-          <button id="modelClearKeyBtn" type="button" title="清除配置文件里保存的 API Key（环境变量仍然可用）">清除已存密钥</button>
-          <span class="model-hint" id="modelHint"></span>
-        </div>
-        <p class="model-file-hint">
-          配置写在独立文件里，可直接手改：<code id="modelConfigPath">%LOCALAPPDATA%\OwO\Agent\config.json</code>
-          <button id="modelOpenConfigBtn" type="button" class="link-button" title="在资源管理器中定位配置文件">定位</button>
-        </p>
-        <div class="settings-grid">
-          <div class="settings-card"><span>提供商</span><strong id="runtimeProvider">读取中…</strong><small id="runtimeEndpoint">OpenAI 兼容接口</small></div>
-          <div class="settings-card"><span>凭据来源</span><strong id="runtimeCredential">读取中…</strong><small>密钥只读系统环境变量，不写入工作区或设置文件</small></div>
-        </div>
-      </div>
-      <div class="inline">
-        <span>云端模型（数据出境）</span>
-        <button id="egressToggle">…</button>
-      </div>
-      <!-- R10：会话级模型切换（POST /session/{id}/model，只改当前会话，不重启核心）。 -->
-      <div class="model-card" id="sessionModelCard">
-        <div class="model-card-head">
-          <div>
-            <strong>当前会话使用的模型</strong>
-            <span class="sub">只对当前会话生效，不重启核心；留空则跟随上面的默认模型</span>
+
+          <!-- 外观 -->
+          <div class="settings-tab" data-settings-tab="appearance" hidden>
+            <div class="settings-page-title">
+              <div><strong>外观</strong><span>主题、密度与布局</span></div>
+            </div>
+            <div class="settings-card-list">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>主题</strong><span>浅色 / 深色 / 跟随系统</span></div>
+                <div class="settings-row-control">
+                  <select id="prefTheme">
+                    <option value="light">浅色</option>
+                    <option value="dark">深色</option>
+                    <option value="system">跟随系统</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>界面密度</strong><span>紧凑模式会缩小列表与表单间距</span></div>
+                <div class="settings-row-control">
+                  <button type="button" class="toggle" id="prefCompactAppearance" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>会话栏宽度</strong><span>由拖拽分隔条调整；此处可恢复默认</span></div>
+                <div class="settings-row-control"><button type="button" id="resetLayoutBtn">恢复默认布局</button></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>显示桌面桌宠</strong><span>控制桌面端（灵犀）悬浮桌宠的显隐：随 agent 执行阶段切换表情与提示，右键菜单可快捷审批/中止/打开工作台。桌面端未运行时开关会先记下，待其启动后生效。<em id="petLinkNote"></em></span></div>
+                <div class="settings-row-control">
+                  <button type="button" class="toggle" id="prefPet" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
+                </div>
+              </div>
+            </div>
           </div>
+
+          <!-- 语音 -->
+          <div class="settings-tab" data-settings-tab="voice" hidden>
+            <div class="settings-page-title">
+              <div><strong>语音</strong><span>语音输入与识别</span></div>
+            </div>
+            <div class="settings-card-list">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>语音输入模式</strong><span>本地优先：麦克风 → 16k WAV → 本地 STT；本地不可用时回退系统识别</span></div>
+                <div class="settings-row-control"><span class="pill" id="sttModePill">检测中…</span></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>识别语言</strong><span>系统 Web Speech 回退模式使用的语言（本地偏好）</span></div>
+                <div class="settings-row-control">
+                  <select id="prefSpeechLang">
+                    <option value="zh-CN">中文（普通话）</option>
+                    <option value="en-US">English (US)</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>麦克风</strong><span>测试浏览器麦克风权限是否可用</span></div>
+                <div class="settings-row-control"><button type="button" id="micTestBtn">测试麦克风</button></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 个性化 -->
+          <div class="settings-tab" data-settings-tab="personalization" hidden>
+            <div class="settings-page-title">
+              <div><strong>个性化</strong><span>主动建议、记忆与语气</span></div>
+            </div>
+            <div class="settings-card-list">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>主动建议</strong><span>根据情景感知在检查器中推送下一步操作建议</span></div>
+                <div class="settings-row-control">
+                  <button type="button" class="toggle" id="prefProactive" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>情景记忆检索</strong><span>按语义检索历史观察与笔记</span></div>
+                <div class="settings-row-control settings-control-path">
+                  <input id="recallQ" placeholder="语义检索关键词">
+                  <button type="button" id="recallBtn">检索</button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>回复语气</strong><span>影响助手的表达风格（本地偏好）</span></div>
+                <div class="settings-row-control">
+                  <select id="prefTone">
+                    <option value="balanced">平衡</option>
+                    <option value="concise">简洁直接</option>
+                    <option value="detailed">详尽解释</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="settings-card-list" style="margin-top:10px">
+              <ul id="recallList" class="list"></ul>
+            </div>
+          </div>
+
+          <!-- 通知 -->
+          <div class="settings-tab" data-settings-tab="notifications" hidden>
+            <div class="settings-page-title">
+              <div><strong>通知</strong><span>提醒与提示方式（本地偏好）</span></div>
+            </div>
+            <div class="settings-card-list">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>任务提醒</strong><span>自动化任务到期时在界面内提醒</span></div>
+                <div class="settings-row-control">
+                  <button type="button" class="toggle" id="prefReminder" role="switch" aria-checked="true"><span class="toggle-knob"></span></button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>声音提示</strong><span>回合完成与审批请求时播放提示音</span></div>
+                <div class="settings-row-control">
+                  <button type="button" class="toggle" id="prefSound" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>审批请求置顶</strong><span>有待审批操作时，主界面优先显示审批条</span></div>
+                <div class="settings-row-control">
+                  <button type="button" class="toggle" id="prefApprovalPin" role="switch" aria-checked="true"><span class="toggle-knob"></span></button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 快捷键 -->
+          <div class="settings-tab" data-settings-tab="shortcuts" hidden>
+            <div class="settings-page-title">
+              <div><strong>快捷键</strong><span>全局键盘操作</span></div>
+            </div>
+            <div class="settings-card-list">
+              <table class="shortcut-table">
+                <thead><tr><th>快捷键</th><th>功能</th></tr></thead>
+                <tbody>
+                  <tr><td><kbd>Ctrl</kbd> + <kbd>N</kbd></td><td>新对话</td></tr>
+                  <tr><td><kbd>Ctrl</kbd> + <kbd>O</kbd></td><td>打开文件夹（选择工作区）</td></tr>
+                  <tr><td><kbd>Ctrl</kbd> + <kbd>B</kbd></td><td>显示 / 隐藏会话栏</td></tr>
+                  <tr><td><kbd>Ctrl</kbd> + <kbd>,</kbd></td><td>打开设置</td></tr>
+                  <tr><td><kbd>Ctrl</kbd> + <kbd>L</kbd></td><td>聚焦输入框</td></tr>
+                  <tr><td><kbd>F11</kbd></td><td>全屏 / 窗口</td></tr>
+                  <tr><td><kbd>Enter</kbd></td><td>发送（<kbd>Shift</kbd> + <kbd>Enter</kbd> 换行）</td></tr>
+                  <tr><td><kbd>Esc</kbd></td><td>关闭菜单 / 弹窗</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- 使用情况和计费 -->
+          <div class="settings-tab" data-settings-tab="usage" hidden>
+            <div class="settings-page-title">
+              <div><strong>使用情况和计费</strong><span>Token 用量、成本与预算</span></div>
+            </div>
+            <div class="settings-card-list">
+              <div id="usagePanel" class="usage-grid"><div class="sub">加载中…（若长期停留在此，说明核心服务的 /usage/summary 未响应，可在「帮助与关于」的诊断里查看）</div></div>
+            </div>
+          </div>
+
+          <!-- 导入 -->
+          <div class="settings-tab" data-settings-tab="import" hidden>
+            <div class="settings-page-title">
+              <div><strong>导入</strong><span>从文件或模板恢复配置</span></div>
+            </div>
+            <div class="settings-card-list">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>导入技能包（.owskill）</strong><span>导入流程技能包 zip，导入后在「技能」分组可见</span></div>
+                <div class="settings-row-control settings-control-path">
+                  <input type="file" id="skillImport" accept=".owskill,application/zip">
+                  <button type="button" id="skillImportBtn">导入</button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>生成 AGENTS.md 模板</strong><span>在工作区根目录生成项目规则模板（已存在则跳过）</span></div>
+                <div class="settings-row-control"><button type="button" id="agentsTemplateBtn">生成模板</button></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>从备份恢复（.zip）</strong><span>恢复 settings/notes/skills/workflows，恢复前自动备份</span></div>
+                <div class="settings-row-control settings-control-path">
+                  <input type="file" id="storageRestoreFile" accept=".zip,application/zip">
+                  <button type="button" id="storageRestoreBtn">恢复…</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 账户 -->
+          <div class="settings-tab" data-settings-tab="account" hidden>
+            <div class="settings-page-title">
+              <div><strong>账户</strong><span>本地账户、连接与数据管理</span></div>
+            </div>
+            <div class="settings-card-list">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>当前账户</strong><span>用户1 · 本地账户（数据保存在本机）</span></div>
+                <div class="settings-row-control">
+                  <button type="button" id="accountReconnectBtn">重新连接服务</button>
+                  <button type="button" id="accountLogoutBtn" class="danger">退出登录</button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>服务状态</strong><span>并发回合与存储健康度</span></div>
+                <div class="settings-row-control"><span id="serverStatusPanel" class="sub">—</span></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>数据备份与导出</strong><span>zip 备份 / 标准 JSON 全量导出</span></div>
+                <div class="settings-row-control">
+                  <button type="button" id="storageBackupBtn">备份</button>
+                  <button type="button" id="storageExportBtn">导出</button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>一键清空数据</strong><span>清空会话 / 审计 / 笔记 / 记忆 / 自动化（二次确认，不可恢复）</span></div>
+                <div class="settings-row-control"><button type="button" id="storageClearBtn" class="danger">一键清空数据…</button></div>
+              </div>
+              <div id="storageResult" class="settings-inline-result" hidden></div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>文档</strong><span>接口契约与隐私说明</span></div>
+                <div class="settings-row-control">
+                  <a href="openapi.json" target="_blank" rel="noopener">OpenAPI 3.1</a>
+                  <a href="privacy.md" target="_blank" rel="noopener">隐私声明</a>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>帮助与关于</strong><span>快捷键、斜杠命令、能力面速览、许可证与诊断信息</span></div>
+                <div class="settings-row-control"><button type="button" id="settingsHelpBtn">打开帮助页</button></div>
+              </div>
+            </div>
+          </div>
+
         </div>
-        <div class="model-grid">
-          <label class="field-label">会话模型
-            <input id="sessionModelName" list="modelNameCandidates" spellcheck="false" placeholder="跟随默认模型" />
-          </label>
-        </div>
-        <div class="model-actions">
-          <button id="sessionModelApplyBtn" class="primary" type="button">应用到此会话</button>
-          <button id="sessionModelClearBtn" type="button">恢复默认</button>
-          <span class="model-hint" id="sessionModelHint"></span>
-        </div>
       </div>
-      <h3>Agent 工具能力</h3>
-      <p class="hint">默认只启用文件、命令和委派等基础工具。可选能力只在明确开启后提供给模型；保存后需重启核心服务生效。</p>
-      <div class="tool-capabilities-grid">
-        <label class="tool-capability-card">
-          <span><input id="toolCapDesktopObservation" type="checkbox"> 屏幕与视觉观察</span>
-          <small>启用屏幕/窗口信息、OCR 与视觉定位，不会执行点击或键盘输入。</small>
-        </label>
-        <label class="tool-capability-card">
-          <span><input id="toolCapDesktopControl" type="checkbox"> 桌面控制</span>
-          <small>启用窗口激活、点击、键盘输入和启动程序；实际操作仍受权限审批约束。</small>
-        </label>
-        <label class="tool-capability-card">
-          <span><input id="toolCapBrowser" type="checkbox"> 浏览器操作</span>
-          <small>启用浏览器导航、搜索与交互；联网访问仍受数据出境和权限策略约束。</small>
-        </label>
-      </div>
-      <p id="toolCapabilityStatus" class="tool-capability-status" role="status" aria-live="polite">正在读取当前工具能力…</p>
-      <h3>模型用量与预算</h3>
-      <div id="usagePanel" class="sub">—</div>
-      <pre id="settingsPreview" class="json-fallback">—</pre>
-      <textarea id="settingsEditor" class="json-fallback" rows="10" spellcheck="false" placeholder='{"model": "...", "stt": {...}, ...}'></textarea>
-      <button id="settingsSave" class="primary">保存模型与设置</button>
-      <h3>存储与恢复</h3>
-      <div id="serverStatusPanel" class="sub">—</div>
-      <div class="inline">
-        <button id="storageBackupBtn" title="zip 打包 index.db/skills/workflows/notes/settings">备份</button>
-        <button id="storageExportBtn" title="全量标准 JSON 导出">导出</button>
-        <button id="storageRestoreBtn" title="选择备份 zip 文件恢复（恢复前自动备份）">恢复…</button>
-        <input type="file" id="storageRestoreFile" accept=".zip,application/zip" hidden>
-      </div>
-      <pre id="storageResult" class="sub">—</pre>
-      <div class="inline">
-        <button id="storageClearBtn" class="danger" title="二次确认后清空会话/审计/笔记/记忆/自动化">一键清空数据…</button>
-      </div>
-      <!-- §4.6 诊断请求台账：数据源 = GET /diagnostics/requests + GET /metrics/overview（壳侧仅用 IPC 快照）。 -->
-      <h3>诊断请求台账</h3>
-      <div id="diagnosticsLedger" class="owo-diagnostics-ledger">进入本页自动加载；也可手动刷新。</div>
-      <a id="openapiLink" href="openapi.json" target="_blank" rel="noopener" title="由本地核心服务提供（按当前连接构造绝对地址）">OpenAPI 3.1</a>
-      <a href="privacy.md" target="_blank" rel="noopener">隐私声明（数据字典/一键关闭/保留期）</a>
     </section>
+
+    <!-- 保留在 DOM 供状态机调用，视觉入口为 codexToolsEntry -->
+    <button id="toggleTools" class="tools-toggle hidden" type="button" aria-expanded="false">显示工具与设置</button>
   </aside>
   <div id="sidebarResize" class="resize-handle" role="separator" aria-label="调整会话栏宽度"></div>
 
   <main>
-    <!-- §4.3 全局状态条：后台/工作区/模型/权限/当前任务，五段全部可点击进入对应页面。 -->
-    <div id="globalStatusBar" class="global-status-bar" role="group" aria-label="全局状态条"></div>
-    <div id="routeView" hidden>
-      <div id="routeHeader" class="route-header"></div>
-      <div id="routeContent"></div>
-    </div>
-    <div id="contextBar" class="hidden" title="会话上下文状态">
-      <span id="contextLabel"></span>
-      <div id="contextMeter"><div id="contextFill"></div></div>
+    <button id="inspectorToggle" class="codex-inspector-toggle" type="button" title="检查器（情景感知 / 审计 / diff）" aria-label="切换检查器">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="1.6"/><path d="M9.6 2.8v10.4"/></svg>
+    </button>
+    <div id="serviceBanner" class="hidden" role="status" aria-live="polite">
+      <span class="service-dot" aria-hidden="true"></span>
+      <span id="serviceBannerText">本地服务未连接，正在重试…</span>
+      <button id="serviceBannerRetry" type="button">立即重试</button>
     </div>
     <div id="approvalBar" class="hidden">
-      <div id="approvalExplain"></div>
-      <span id="approvalText"></span>
-      <details id="approvalRaw" class="approval-raw">
-        <summary>开发者详情</summary>
-        <pre id="approvalRawJson"></pre>
-      </details>
-      <div class="approval-actions">
-        <button id="approveBtn" class="allow" data-scope="once">允许一次</button>
-        <button class="allow" data-scope="session">此会话</button>
-        <button class="allow" data-scope="one_hour">此项目一小时</button>
-        <button class="allow" id="alwaysAllowBtn" data-scope="always_readonly">始终允许此只读动作</button>
-        <button id="denyBtn" class="deny" data-scope="deny">拒绝</button>
-      </div>
+      <div id="approvalList"></div>
     </div>
-    <div id="messages"></div>
+    <div class="codex-stage">
+      <div id="emptyState" class="codex-empty">
+        <div class="codex-empty-logo" aria-hidden="true">
+          <svg viewBox="0 0 64 64" width="60" height="60" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round">
+            <path d="M32 11c11.6 0 21 9.4 21 21s-9.4 21-21 21-19.4-8.2-19.4-18.1C12.6 26.6 20.4 20 28.9 20c6.9 0 12 4.8 12 11.1 0 5-3.8 8.8-8.8 8.8-4 0-7-2.8-7-6.6"/>
+          </svg>
+        </div>
+        <h2>今天要构建什么？</h2>
+        <p>从左侧选择会话继续，或直接输入指令开始</p>
+      </div>
+      <div id="messages"></div>
+      <button type="button" id="scrollBottomBtn" class="scroll-bottom hidden" title="回到底部" aria-label="回到底部">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.4v8.4M4.6 8.6 8 12l3.4-3.4"/></svg>
+      </button>
+    </div>
     <form id="chatForm">
+      <div id="contextBar" class="hidden" title="会话上下文状态">
+        <span id="contextLabel"></span>
+        <div id="contextMeter"><div id="contextFill"></div></div>
+      </div>
+      <div id="runStatus" class="run-status hidden" role="status" aria-live="polite">
+        <span class="run-spinner" aria-hidden="true"></span>
+        <span id="runStatusText">正在思考…</span>
+        <span id="runStatusTimer" class="run-status-timer"></span>
+      </div>
       <div id="attachmentChips" class="inline"></div>
       <input type="file" id="attachmentInput" multiple hidden>
-      <textarea id="prompt" rows="3" placeholder="输入任务，Enter 发送（Shift+Enter 换行）；/new 建新会话"></textarea>
+      <div id="modelGate" class="model-gate hidden">
+        <div class="model-gate-text">
+          <strong>先连接你自己的模型服务</strong>
+          <span id="modelGateHint">填写你自己的 OpenAI 兼容端点与密钥即可开始，密钥只加密保存在本机。</span>
+        </div>
+        <button type="button" id="modelGateBtn" class="primary" data-model-gate-allow>去连接</button>
+      </div>
+      <button type="button" id="composerProjectBtn" class="codex-project-chip" title="选择工作区">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h4.5c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H3.4c-.66 0-1.2-.54-1.2-1.2V4.4z"/></svg>
+        <span id="composerProjectName">本地项目</span>
+      </button>
+      <textarea id="prompt" rows="1" placeholder="描述任务，Enter 发送（Shift+Enter 换行）；/new 建新会话"></textarea>
       <div class="prompt-toolbar">
         <div class="prompt-tools">
-          <button type="button" id="attachmentBtn" title="添加附件（图片/文件）">📎 添加文件</button>
-          <button type="button" id="micBtn" title="语音输入（系统语音服务）">🎤 语音</button>
-          <button type="button" id="abortBtn" title="中断当前回合">⏹ 停止</button>
+          <button type="button" id="attachmentBtn" title="添加附件（图片/文件）" aria-label="添加附件">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+          </button>
+          <button type="button" id="micBtn" title="语音输入" aria-label="语音输入"></button>
+          <button type="button" id="slashHint" class="slash-hint" title="输入 / 唤起命令（/new、/undo、/export…）">
+            <span>/</span> 命令
+          </button>
         </div>
-        <button type="submit" class="primary send-button">发送 <span>Ctrl ↵</span></button>
+        <div class="codex-composer-right">
+          <button type="button" id="accessChip" class="codex-access-chip" title="工具访问级别">
+            <span class="codex-access-dot" id="accessDot" aria-hidden="true"></span>
+            <span id="accessChipText">逐次询问</span>
+            <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
+          </button>
+          <button type="button" id="modelChip" class="codex-model-chip" title="选择模型">
+            <span id="modelChipText">默认模型</span>
+            <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
+          </button>
+          <button type="button" id="effortChip" class="codex-model-chip" title="推理档位（思考强度）">
+            <span id="effortChipText">推理默认</span>
+            <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
+          </button>
+          <button type="button" id="sendBtn" class="codex-send" title="发送" aria-label="发送">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12.4V4.2M4.6 7.6 8 4.2l3.4 3.4"/></svg>
+          </button>
+        </div>
       </div>
     </form>
   </main>
@@ -439,16 +922,12 @@
     </section>
     <section>
       <h2>情景记忆</h2>
-      <div class="inline">
-        <input id="recallQ" placeholder="语义检索关键词">
-        <button id="recallBtn">检索</button>
-      </div>
-      <details><summary>最近观察（observations）</summary><ul id="observationList" class="list"></ul></details>
-      <details><summary>检索结果（recall）</summary><ul id="recallList" class="list"></ul></details>
+      <details open><summary>最近观察（observations）</summary><ul id="observationList" class="list"></ul></details>
+      <p class="sub">语义检索历史记忆请在「设置 → 个性化」中使用。</p>
     </section>
     <section>
       <h2>审计日志</h2>
-      <div class="inline">
+      <div class="inline audit-filters">
         <input id="auditEvent" placeholder="事件过滤（permission/tool_call/model…）">
         <input id="auditTool" placeholder="工具过滤（read_file…）">
         <input id="auditQ" placeholder="关键词搜索">
@@ -467,47 +946,26 @@
     </section>
   </aside>
 
+  <!-- 通用模态框：自定义模型 / 确认对话 / 清空数据（替代 alert/confirm/prompt） -->
+  <div id="modalRoot" class="modal-root hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-mask" id="modalMask"></div>
+    <div class="modal-card">
+      <header class="modal-head">
+        <strong id="modalTitle">标题</strong>
+        <button type="button" id="modalClose" class="ghost modal-close" aria-label="关闭">✕</button>
+      </header>
+      <div class="modal-body" id="modalBody"></div>
+      <footer class="modal-foot" id="modalFoot"></footer>
+    </div>
+  </div>
+
   <script>
-    // Tauri 壳与静态调试页都直连常驻核心服务；仅当页面本身由核心服务
-    // 4096 同源托管时才保留空基址。否则 /health 会被误发给静态文件服务器。
-    (function () {
-      var localCore = "http://127.0.0.1:4096";
-      var sameCoreOrigin = /^https?:$/.test(window.location.protocol)
-        && window.location.hostname === "127.0.0.1"
-        && window.location.port === "4096";
-      window.OWO_API_BASE = window.OWO_API_BASE
-        || (window.__TAURI_INTERNALS__ || !sameCoreOrigin ? localCore : "");
-    })();
+    // Tauri 壳内加载时指向常驻核心服务；经核心服务同源托管时保持同源。
+    window.OWO_API_BASE = window.OWO_API_BASE || (window.__TAURI_INTERNALS__ ? "http://127.0.0.1:4096" : "");
   </script>
-  <script src="core/api-client.js"></script>
-  <script src="core/router.js"></script>
-  <script src="core/service-readiness.js"></script>
-  <script src="core/recovery.js"></script>
-  <script src="core/events.js"></script>
-  <script src="core/workspace-display.js"></script>
-  <script src="core/folder-picker.js"></script>
-  <script src="shell/connection.js"></script>
   <script src="config/provider-presets.js"></script>
-  <script src="shell/markdown.js"></script>
-  <script src="shell/speech.js"></script>
-  <script src="views/service-error.view.js"></script>
-  <script src="views/setup-guide.view.js"></script>
-  <script src="views/diagnostics-ledger.view.js"></script>
-  <script src="views/status-bar.view.js"></script>
-  <!-- R10：模型设置面板（模型切换 / 自定义接口地址 / 自定义模型名）。
-       必须在 app.js 之前注册到 window.OwoSettings。 -->
-  <script src="views/settings-panel.view.js"></script>
-  <!-- §4.5/§4.8 权限中心：四分模块按依赖顺序加载（domain → api → controller → view），
-       必须在 app.js 之前；页面数据只在进入该路由时按需请求，不进首屏链路。 -->
-  <script src="permissions/permissions.domain.js"></script>
-  <script src="permissions/permissions.api.js"></script>
-  <script src="permissions/permissions.controller.js"></script>
-  <script src="permissions/permissions.view.js"></script>
-  <script src="panels/capabilities.panel.js"></script>
-  <script src="panels/action-center.panel.js"></script>
-  <script src="panels/project-history.panel.js"></script>
-  <script src="panels/about.panel.js"></script>
   <script src="panels/notes.panel.js"></script>
+  <script src="panels/automations.panel.js"></script>
   <script src="panels/plugin-market.panel.js"></script>
   <script src="panels/workflow.panel.js"></script>
   <script src="panels/goal.panel.js"></script>
@@ -517,13 +975,15 @@
   <script src="panels/memory.panel.js"></script>
   <script src="panels/command.panel.js"></script>
   <script src="panels/fleet.panel.js"></script>
+  <script src="panels/about.panel.js"></script>
+  <script src="panels/capabilities.panel.js"></script>
+  <script src="panels/action-center.panel.js"></script>
+  <script src="panels/project-history.panel.js"></script>
+  <script src="panels/project-launcher.panel.js"></script>
   <script src="panels/workswarm/domain.js"></script>
   <script src="panels/workswarm/format.js"></script>
   <script src="panels/workswarm/render.js"></script>
   <script src="panels/workswarm.panel.js"></script>
-<script src="panels/project-launcher.panel.js"></script>
-  <script src="core/turn-sse.js"></script>
-  <script src="app-domain.js"></script>
-<script src="app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

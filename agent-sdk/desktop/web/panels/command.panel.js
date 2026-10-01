@@ -9,12 +9,26 @@ window.OwoPanels.command = (function () {
   var H = null;
 
   function defaultHelpers() {
-    var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || "http://127.0.0.1:4098";
+    var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
     function get(path) {
-      return window.OwoApi.get(path);
+      return fetch(baseUrl + path).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
     }
     function post(path, body) {
-      return window.OwoApi.post(path, body || {});
+      return fetch(baseUrl + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }).then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (j) {
+            throw new Error((j && j.error) || "HTTP " + r.status);
+          });
+        }
+        return r.json();
+      });
     }
     function esc(s) {
       return String(s == null ? "" : s)
@@ -36,15 +50,15 @@ window.OwoPanels.command = (function () {
     return (
       '<section data-panel="' + id + '">' +
       "<style>" +
-      ".owo-command-log{height:180px;overflow:auto;background:#111;color:#7cff9b;font-family:monospace;font-size:12px;padding:6px}" +
-      ".owo-command-result{border:1px solid #ddd;border-radius:6px;padding:6px;margin:4px 0;font-size:12px;background:#fafafa}" +
-      ".owo-command-tag{display:inline-block;padding:1px 8px;border-radius:8px;font-size:11px;background:#e3f2fd;margin-right:6px}" +
+      ".owo-command-log{height:180px;overflow:auto;background:var(--surface-2);color:var(--green);font-family:monospace;font-size:12px;padding:6px}" +
+      ".owo-command-result{border:1px solid var(--border-strong);border-radius:6px;padding:6px;margin:4px 0;font-size:12px;background:var(--surface-2)}" +
+      ".owo-command-tag{display:inline-block;padding:1px 8px;border-radius:8px;font-size:11px;background:var(--accent-soft);color:var(--accent);margin-right:6px}" +
       "</style>" +
       '<div class="stack">' +
-      '<div class="sub">统一命令入口（文本 / 语音 / 区域占位）</div>' +
+      '<div class="sub">统一命令入口（文本 / 语音 / 区域 OCR）</div>' +
       '<div class="owo-command-row" style="display:flex;gap:8px;align-items:center">' +
       '<select id="owo-command-mode" style="padding:4px"><option value="text">文本</option>' +
-      '<option value="voice">语音</option><option value="region" disabled>区域（占位）</option></select>' +
+      '<option value="voice">语音</option><option value="region">区域（OCR）</option></select>' +
       '<input id="owo-command-text" placeholder="例如：创建目标：整理桌面 / 搜索记忆：张子豪 / 运行工作流：报告" style="flex:1;padding:6px">' +
       '<button class="primary" id="owo-command-run">执行</button></div>' +
       '<input type="file" id="owo-command-wav" accept="audio/wav" style="display:none">' +
@@ -96,10 +110,48 @@ window.OwoPanels.command = (function () {
     });
   }
 
+  /// 区域 OCR：把屏幕上指定矩形里的文字识别出来当命令用（L2 视觉层需已授权）。
+  function captureRegionToText(done) {
+    var raw = window.prompt(
+      "区域 OCR：输入屏幕像素区域 x,y,width,height（例如 100,200,600,80）",
+      "0,0,800,200"
+    );
+    if (!raw) return;
+    var parts = String(raw)
+      .split(/[,\s]+/)
+      .filter(function (s) { return s.length; })
+      .map(Number);
+    if (parts.length !== 4 || parts.some(function (n) { return !isFinite(n); })) {
+      alert("格式应为 x,y,width,height 四个数字");
+      return;
+    }
+    H.post("/perception/ocr/region", { x: parts[0], y: parts[1], width: parts[2], height: parts[3] })
+      .then(function (data) {
+        var text = data && (data.text || (data.lines || []).join("\n"));
+        if (!text) {
+          alert("该区域未识别到文字");
+          return;
+        }
+        done(text);
+      })
+      .catch(function (e) {
+        var msg = (e && e.message) || String(e);
+        alert("区域 OCR 失败：" + msg + "\n提示：L2 视觉层默认关闭，需先在感知/设置里授权后再用。");
+      });
+  }
+
   function runCommand() {
     var mode = document.getElementById("owo-command-mode").value;
     var text = document.getElementById("owo-command-text").value;
     var body = { mode: mode };
+    if (mode === "region") {
+      captureRegionToText(function (ocrText) {
+        document.getElementById("owo-command-mode").value = "text";
+        document.getElementById("owo-command-text").value = ocrText;
+        runCommand();
+      });
+      return;
+    }
     if (mode === "voice") {
       var wavInput = document.getElementById("owo-command-wav");
       if (!wavInput.files || !wavInput.files.length) {

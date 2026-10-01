@@ -29,7 +29,10 @@
         '<button class="owo-notes-btn owo-notes-btn-export-html">导出 HTML</button>' +
         '<button class="owo-notes-btn owo-notes-btn-del">删除</button>' +
         "</div>" +
-        '<pre class="owo-notes-tree"></pre>' +
+        '<div class="owo-notes-detail-meta">' +
+        '<span class="owo-notes-meta-item" id="owo-notes-detail-count"></span>' +
+        "</div>" +
+        '<div class="owo-notes-tree"></div>' +
         "</div>" +
         "</section>"
       );
@@ -39,9 +42,34 @@
       var self = this;
       root.innerHTML = this.nav();
       this.helpers = helpers || {};
-      this.baseUrl = this.helpers.baseUrl || window.OwoPanels.baseUrl || "http://127.0.0.1:4098";
-      this.get = this.helpers.get || function (path) { return window.OwoApi.get(path); };
-      this.post = this.helpers.post || function (path, body) { return window.OwoApi.post(path, body || {}); };
+      this.baseUrl = this.helpers.baseUrl || window.OwoPanels.baseUrl || window.location.origin;
+      this.get = this.helpers.get || function (path) {
+        return fetch(self.baseUrl + path).then(function (r) { return r.json(); });
+      };
+      this.post = this.helpers.post || function (path, body) {
+        return fetch(self.baseUrl + path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body || {}),
+        }).then(function (r) { return r.json(); });
+      };
+      this.put = this.helpers.put || function (path, body) {
+        return fetch(self.baseUrl + path, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body || {}),
+        }).then(function (r) { return r.json(); });
+      };
+      this.del = this.helpers.del || function (path) {
+        return fetch(self.baseUrl + path, { method: "DELETE" }).then(function (r) { return r.json(); });
+      };
+      // 宿主提供样式化弹窗时优先使用（Promise<boolean> / Promise<string|null>）
+      this.confirm = this.helpers.confirm || function (opts) {
+        return Promise.resolve(window.confirm((opts && opts.message) || ""));
+      };
+      this.prompt = this.helpers.prompt || function (opts) {
+        return Promise.resolve(window.prompt((opts && opts.label) || "", (opts && opts.value) || ""));
+      };
       this.esc = this.helpers.esc || function (s) {
         return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
           return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -55,13 +83,27 @@
         ".owo-notes-search{flex:1;padding:6px}" +
         ".owo-notes-btn{padding:6px 10px;cursor:pointer}" +
         ".owo-notes-list{margin:0;padding:0;list-style:none}" +
-        ".owo-notes-list li{padding:6px 4px;border-bottom:1px solid #eee;cursor:pointer;display:flex;justify-content:space-between}" +
-        ".owo-notes-list li:hover{background:#f5f5f5}" +
-        ".owo-notes-editor{display:flex;flex-direction:column;gap:8px;border:1px solid #ddd;padding:10px}" +
+        ".owo-notes-list li{padding:6px 4px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;justify-content:space-between}" +
+        ".owo-notes-list li:hover{background:var(--surface-2)}" +
+        ".owo-notes-editor{display:flex;flex-direction:column;gap:8px;border:1px solid var(--border-strong);padding:10px}" +
+        ".owo-notes-editor[hidden]{display:none}" +
         ".owo-notes-title,.owo-notes-md{padding:6px}" +
-        ".owo-notes-detail{border:1px solid #ddd;padding:10px}" +
-        ".owo-notes-tree{background:#fafafa;padding:8px;max-height:50vh;overflow:auto;font-size:12px;white-space:pre-wrap}" +
-        ".owo-notes-hint{color:#888;font-size:12px}";
+        ".owo-notes-detail{border:1px solid var(--border-strong);padding:10px}" +
+        // 块树（原 pre JSON 直出 → 嵌套树卡片）
+        ".owo-notes-detail-meta{display:flex;gap:12px;flex-wrap:wrap;margin:6px 0;color:var(--text-3);font-size:12px}" +
+        ".owo-notes-tree{background:var(--surface-2);border-radius:8px;padding:8px;max-height:50vh;overflow:auto;font-size:12px}" +
+        ".owo-notes-block-tree,.owo-notes-block-tree ul{list-style:none;margin:0;padding:0}" +
+        ".owo-notes-block-tree ul{margin-left:14px;border-left:1px solid var(--border);padding-left:8px}" +
+        ".owo-notes-block{margin:2px 0}" +
+        ".owo-notes-block-row{display:flex;gap:8px;align-items:baseline;padding:2px 0}" +
+        ".owo-notes-kind{flex:none;font-size:11px;padding:0 8px;border-radius:999px;background:var(--surface-3);color:var(--text-2)}" +
+        ".owo-notes-kind.k-heading{background:var(--accent-soft);color:var(--accent)}" +
+        ".owo-notes-kind.k-code{background:var(--yellow-soft);color:var(--yellow)}" +
+        ".owo-notes-kind.k-table{background:var(--green-soft);color:var(--green)}" +
+        ".owo-notes-block-id{flex:none;font-size:11px;color:var(--text-3);font-family:monospace}" +
+        ".owo-notes-block-preview{color:var(--text-2);word-break:break-all}" +
+        ".owo-notes-block-missing{color:var(--red);font-size:11px}" +
+        ".owo-notes-hint{color:var(--text-3);font-size:12px}";
       root.appendChild(style);
       this.refresh();
       this.bind();
@@ -71,13 +113,12 @@
       var self = this;
       return this.get("/notes")
         .then(function (data) {
-          var panel = self.rootEl();
-          // 异步回包时面板可能已被切走（innerHTML 已替换）：rootEl() 为 null 时静默放弃，
-          // 不再抛 "Cannot read properties of null" 挂载错误。
-          if (!panel) return;
-          var list = data.notes || [];
-          var ul = panel.querySelector(".owo-notes-list");
+          // 面板可能已被切换/卸载（异步返回时），此时静默跳过
+          var section = self.rootEl();
+          if (!section) return;
+          var ul = section.querySelector(".owo-notes-list");
           if (!ul) return;
+          var list = data.notes || [];
           if (!list.length) {
             ul.innerHTML = '<li class="owo-notes-hint">（暂无笔记，点"新建"创建）</li>';
             return;
@@ -115,7 +156,7 @@
         var md = root.querySelector(".owo-notes-md").value;
         if (!title) { self.alert("标题不能为空"); return; }
         var detail = root.querySelector(".owo-notes-detail");
-        var editingId = detail && detail.dataset ? detail.dataset.id : null;
+        var editingId = detail.dataset.id;
         if (editingId) {
           self.post("/notes/" + editingId + "/reindex", {}).catch(function () {});
           self
@@ -148,7 +189,10 @@
         self
           .get("/notes/search?q=" + encodeURIComponent(q))
           .then(function (data) {
-            var ul = root.querySelector(".owo-notes-list");
+            var section = self.rootEl();
+            if (!section) return;
+            var ul = section.querySelector(".owo-notes-list");
+            if (!ul) return;
             var hits = data.hits || [];
             if (!hits.length) {
               ul.innerHTML = '<li class="owo-notes-hint">无命中</li>';
@@ -172,61 +216,145 @@
           .then(function (doc) { self.renderDetail(doc); })
           .catch(function (err) { self.alert("读取失败：" + self.friendlyError(err)); });
       });
-      var detailOf = function () { return root.querySelector(".owo-notes-detail"); };
-      var currentDetailId = function () {
-        var d = detailOf();
-        // 面板被切走后节点可能已被替换：无节点或无选中 id 时静默忽略点击。
-        return d && d.dataset ? d.dataset.id : null;
-      };
       on(".owo-notes-btn-export-md", "click", function () {
-        var id = currentDetailId();
-        if (!id) return;
+        var id = root.querySelector(".owo-notes-detail").dataset.id;
         self.get("/notes/" + id + "/export/md").then(function (r) { self.download(id + ".md", r.content); });
       });
       on(".owo-notes-btn-export-html", "click", function () {
-        var id = currentDetailId();
-        if (!id) return;
+        var id = root.querySelector(".owo-notes-detail").dataset.id;
         self.get("/notes/" + id + "/export/html").then(function (r) { self.download(id + ".html", r.content); });
       });
       on(".owo-notes-btn-del", "click", function () {
-        var detail = detailOf();
-        var id = currentDetailId();
-        if (!detail || !id) return;
-        if (!window.confirm("确认删除这篇笔记？")) return;
-        self.post("/notes/" + id + "/reindex", {}).catch(function () {});
-        window.OwoApi.delete("/notes/" + id)
-          .then(function () {
-            detail.hidden = true;
-            self.refresh();
-          })
-          .catch(function (err) { self.alert("删除失败：" + self.friendlyError(err)); });
+        var detail = root.querySelector(".owo-notes-detail");
+        var id = detail.dataset.id;
+        self.confirm({
+          title: "删除笔记",
+          message: "确认删除这篇笔记？",
+          confirmText: "删除",
+          kind: "danger",
+        }).then(function (ok) {
+          if (!ok) return;
+          self.post("/notes/" + id + "/reindex", {}).catch(function () {});
+          self
+            .del("/notes/" + id)
+            .then(function () {
+              detail.hidden = true;
+              self.refresh();
+            })
+            .catch(function (err) { self.alert("删除失败：" + self.friendlyError(err)); });
+        });
       });
       on(".owo-notes-detail-title", "dblclick", function () {
-        var detail = detailOf();
-        if (!detail || !detail.dataset || !detail.dataset.id) return;
-        var title = prompt("新标题：", detail.querySelector(".owo-notes-detail-title").textContent);
-        if (!title) return;
-        window.OwoApi.put("/notes/" + detail.dataset.id, { title: title })
-          .then(function () { self.refresh(); self.get("/notes/" + detail.dataset.id).then(function (d) { self.renderDetail(d); }); })
-          .catch(function (err) { self.alert("改标题失败：" + self.friendlyError(err)); });
+        var detail = root.querySelector(".owo-notes-detail");
+        var current = detail.querySelector(".owo-notes-detail-title").textContent;
+        self
+          .prompt({ title: "修改标题", label: "新标题：", value: current, confirmText: "保存" })
+          .then(function (title) {
+            if (!title) return;
+            self
+              .put("/notes/" + detail.dataset.id, { title: title })
+              .then(function () {
+                self.refresh();
+                self.get("/notes/" + detail.dataset.id).then(function (d) { self.renderDetail(d); });
+              })
+              .catch(function (err) { self.alert("改标题失败：" + self.friendlyError(err)); });
+          });
       });
     },
 
     renderDetail: function (doc) {
       var self = this;
-      var panel = self.rootEl();
-      if (!panel) return; // 面板已切走：无可渲染节点
-      var detail = panel.querySelector(".owo-notes-detail");
+      var section = this.rootEl();
+      if (!section) return;
+      var detail = section.querySelector(".owo-notes-detail");
       if (!detail) return;
       detail.hidden = false;
       detail.dataset.id = doc.id;
       detail.querySelector(".owo-notes-detail-title").textContent = doc.title || doc.id;
-      var lines = ["id: " + doc.id, "title: " + doc.title, "root: " + doc.root, "updated_at: " + doc.updated_at, "blocks:"];
-      Object.keys(doc.blocks || {}).forEach(function (bid) {
-        var b = doc.blocks[bid];
-        lines.push("  " + bid + " " + JSON.stringify(b.kind) + " children=" + JSON.stringify(b.children || []));
-      });
-      detail.querySelector(".owo-notes-tree").textContent = lines.join("\n");
+      var blocks = doc.blocks || {};
+      var meta = detail.querySelector("#owo-notes-detail-count");
+      if (meta) {
+        meta.textContent = Object.keys(blocks).length + " 个块 ｜ 更新于 " + (doc.updated_at || "—");
+      }
+      var tree = detail.querySelector(".owo-notes-tree");
+      if (!tree) return;
+      if (!blocks[doc.root]) {
+        tree.innerHTML = '<div class="owo-notes-hint">（根块缺失，无法渲染块树）</div>';
+        return;
+      }
+      tree.innerHTML = '<ul class="owo-notes-block-tree">' + self.blockList(blocks, [doc.root]) + "</ul>";
+    },
+
+    // 递归渲染块树：kind 徽章 + 块 id + 内容预览 + 子块缩进列表
+    blockList: function (blocks, ids) {
+      var self = this;
+      var html = "";
+      for (var i = 0; i < ids.length; i++) {
+        var b = blocks[ids[i]];
+        if (!b) {
+          html += '<li class="owo-notes-block"><span class="owo-notes-block-missing">缺失块 ' +
+            self.esc(ids[i]) + "</span></li>";
+          continue;
+        }
+        html +=
+          '<li class="owo-notes-block">' +
+          '<div class="owo-notes-block-row">' +
+          '<span class="owo-notes-kind ' + self.kindClass(b.kind) + '">' + self.esc(self.kindLabel(b.kind)) + "</span>" +
+          '<span class="owo-notes-block-id">' + self.esc(b.id || ids[i]) + "</span>" +
+          '<span class="owo-notes-block-preview">' + self.esc(self.kindPreview(b.kind)) + "</span>" +
+          "</div>" +
+          (b.children && b.children.length
+            ? "<ul>" + self.blockList(blocks, b.children) + "</ul>"
+            : "") +
+          "</li>";
+      }
+      return html;
+    },
+
+    // BlockKind（外标签 serde enum，如 {"Heading":{"level":1,"text":"…"}}）→ 中文标签
+    kindLabel: function (kind) {
+      var k = kind && typeof kind === "object" ? Object.keys(kind)[0] : "";
+      if (k === "Paragraph") return "段落";
+      if (k === "Heading") return "标题";
+      if (k === "List") return "列表";
+      if (k === "ListItem") return "列表项";
+      if (k === "Code") return "代码";
+      if (k === "Table") return "表格";
+      if (k === "Image") return "图片";
+      if (k === "File") return "文件";
+      if (k === "Quote") return "引用";
+      if (k === "HtmlEmbed") return "嵌入";
+      if (k === "Canvas") return "画布";
+      if (k === "AiGenerated") return "AI 生成";
+      return k || "未知";
+    },
+
+    kindClass: function (kind) {
+      var k = kind && typeof kind === "object" ? Object.keys(kind)[0] : "";
+      if (k === "Heading") return "k-heading";
+      if (k === "Code") return "k-code";
+      if (k === "Table") return "k-table";
+      return "";
+    },
+
+    // BlockKind → 单行内容预览
+    kindPreview: function (kind) {
+      var k = kind && typeof kind === "object" ? Object.keys(kind)[0] : "";
+      var v = kind && typeof kind === "object" ? kind[k] : null;
+      if (!v || typeof v !== "object") return "";
+      if (k === "Heading") return "H" + (v.level || 1) + " " + (v.text || "");
+      if (k === "Code") return (v.language ? "[" + v.language + "] " : "") + (v.text || "");
+      if (k === "Table") return (v.rows || []).length + " 行";
+      if (k === "Image") return (v.alt || "") + (v.src ? "（" + v.src + "）" : "");
+      if (k === "File") return (v.path || "") + (v.mime ? "（" + v.mime + "）" : "");
+      if (k === "List") return v.ordered ? "有序列表" : "无序列表";
+      if (k === "HtmlEmbed") return "已消毒 HTML 片段";
+      if (k === "Canvas") {
+        var d = v.data || {};
+        return (d.rects || []).length + " 矩形 / " + (d.notes || []).length + " 便签";
+      }
+      if (k === "AiGenerated") return (v.model || "") + "：" + (v.prompt || "");
+      return v.text || "";
     },
 
     download: function (name, content) {
@@ -244,7 +372,10 @@
     },
 
     rootEl: function () {
-      return document.querySelector('[data-panel="notes"]');
+      // 必须限定在 #panelRoot 内查找：全局 querySelector('[data-panel="notes"]')
+      // 会先匹配到 #panelNav 里的 tab 按钮（DOM 顺序在前），导致拿到错误元素。
+      var root = document.getElementById("panelRoot");
+      return root ? root.querySelector('[data-panel="notes"]') : null;
     },
   };
 })();

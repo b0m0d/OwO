@@ -9,12 +9,26 @@ window.OwoPanels.memory = (function () {
   var H = null;
 
   function defaultHelpers() {
-    var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || "http://127.0.0.1:4098";
+    var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
     function get(path) {
-      return window.OwoApi.get(path);
+      return fetch(baseUrl + path).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
     }
     function post(path, body) {
-      return window.OwoApi.post(path, body || {});
+      return fetch(baseUrl + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }).then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (j) {
+            throw new Error((j && j.error) || "HTTP " + r.status);
+          });
+        }
+        return r.json();
+      });
     }
     function esc(s) {
       return String(s == null ? "" : s)
@@ -36,13 +50,21 @@ window.OwoPanels.memory = (function () {
     return (
       '<section data-panel="' + id + '">' +
       "<style>" +
-      ".owo-memory-card{display:inline-block;margin:4px;padding:4px 10px;border:1px solid #bbb;border-radius:12px;font-size:12px;background:#f5f5f5}" +
-      ".owo-memory-row{display:flex;gap:8px;align-items:center;padding:3px 0;border-bottom:1px solid #eee;font-size:12px}" +
-      ".owo-memory-rel{display:inline-block;margin:2px;padding:2px 8px;border:1px solid #9cf;border-radius:8px;font-size:12px}" +
-      ".owo-memory-hit{background:#fff8dc;padding:2px 4px;border-radius:4px;font-size:12px}" +
+      ".owo-memory-card{display:inline-block;margin:4px;padding:4px 10px;border:1px solid var(--border-strong);border-radius:12px;font-size:12px;background:var(--surface-2)}" +
+      ".owo-memory-row{display:flex;gap:8px;align-items:center;padding:3px 0;border-bottom:1px solid var(--border);font-size:12px}" +
+      ".owo-memory-rel{display:inline-block;margin:2px;padding:2px 8px;border:1px solid var(--accent);border-radius:8px;font-size:12px}" +
+      ".owo-memory-hit{background:var(--yellow-soft);padding:2px 4px;border-radius:4px;font-size:12px}" +
+      ".owo-memory-row select{width:auto;flex:0 0 auto}" +
       "</style>" +
       '<div class="stack">' +
-      '<div class="sub">记忆图谱（结构化检索 / 时间线 / 实体 / 关系 / recall）</div>' +
+      '<div class="sub">从情景记忆挖掘技能包（观察动作序列 → 泛化 → 沉淀；需先有观察样本）</div>' +
+      '<div class="owo-memory-row"><input id="owo-memory-mine-name" placeholder="技能名（如 send-file）" style="flex:1">' +
+      '<select id="owo-memory-mine-sensitivity"><option value="low">低敏感</option><option value="medium">中敏感</option><option value="high">高敏感</option></select>' +
+      '<button class="primary" id="owo-memory-mine-btn">挖掘</button></div>' +
+      '<div class="owo-memory-row"><input id="owo-memory-mine-apps" placeholder="目标应用，逗号分隔（如 qq）" style="flex:1">' +
+      '<input id="owo-memory-mine-desc" placeholder="描述（可选）" style="flex:1"></div>' +
+      '<div id="owo-memory-mine-result" class="sub"></div>' +
+      '<div class="sub" style="margin-top:6px">记忆图谱（结构化检索 / 时间线 / 实体 / 关系 / recall）</div>' +
       '<div class="owo-memory-row"><input id="owo-memory-recall" placeholder="recall 查询（如：张子豪）" style="flex:1">' +
       '<button class="primary" id="owo-memory-recall-btn">检索</button></div>' +
       '<div id="owo-memory-recall-box"></div>' +
@@ -71,7 +93,57 @@ window.OwoPanels.memory = (function () {
     });
     root.querySelector("#owo-memory-rel-add").addEventListener("click", addRelation);
     root.querySelector("#owo-memory-refresh").addEventListener("click", refresh);
+    root.querySelector("#owo-memory-mine-btn").addEventListener("click", mineSkill);
+    root.querySelector("#owo-memory-mine-name").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") mineSkill();
+    });
     refresh();
+  }
+
+  /// 从情景记忆挖掘技能包：观察动作序列 → 泛化 → 沉淀（服务端 /memory/mine-skill）。
+  function mineSkill() {
+    var nameEl = document.getElementById("owo-memory-mine-name");
+    var name = (nameEl && nameEl.value.trim()) || "";
+    var result = document.getElementById("owo-memory-mine-result");
+    if (!name) {
+      if (result) result.textContent = "请先填写技能名";
+      return;
+    }
+    var appsEl = document.getElementById("owo-memory-mine-apps");
+    var descEl = document.getElementById("owo-memory-mine-desc");
+    var sensEl = document.getElementById("owo-memory-mine-sensitivity");
+    var targetApps = ((appsEl && appsEl.value) || "")
+      .split(",")
+      .map(function (s) {
+        return s.trim();
+      })
+      .filter(Boolean);
+    var button = document.getElementById("owo-memory-mine-btn");
+    if (button) button.disabled = true;
+    if (result) result.textContent = "正在挖掘…";
+    H.post("/memory/mine-skill", {
+      name: name,
+      target_apps: targetApps,
+      description: (descEl && descEl.value.trim()) || "",
+      sensitivity: (sensEl && sensEl.value) || "low",
+    })
+      .then(function (data) {
+        var el = document.getElementById("owo-memory-mine-result"); // 面板已卸载则跳过
+        if (!el) return;
+        var variables = (data && data.variables) || [];
+        el.innerHTML =
+          "已生成技能包 <b>" + H.esc(data && data.name) + "</b>" +
+          (variables.length ? "（变量 " + variables.length + " 个）" : "") +
+          "，可在「操作学习」区块查看 / 导出 / 导入。";
+      })
+      .catch(function (e) {
+        var el = document.getElementById("owo-memory-mine-result"); // 面板已卸载则跳过
+        if (el) el.textContent = H.friendlyError(e);
+      })
+      .then(function () {
+        var btn = document.getElementById("owo-memory-mine-btn"); // 面板已卸载则跳过
+        if (btn) btn.disabled = false;
+      });
   }
 
   function refresh() {
