@@ -277,6 +277,17 @@ async function importPackage(file) {
   }
 }
 
+/// 触发方式可读化（取优合并自上游 be6298f；此前列表里直接 JSON.stringify）。
+function describeSchedule(schedule) {
+  if (!schedule || typeof schedule !== "object") return "";
+  if (schedule.kind === "interval") return `每 ${schedule.every_secs} 秒`;
+  if (schedule.kind === "daily") return `每天 ${schedule.time || ""}`;
+  if (schedule.kind === "one_shot") {
+    return `单次 ${String(schedule.at || "").replace("T", " ").slice(0, 16)}`;
+  }
+  return JSON.stringify(schedule);
+}
+
 async function refreshAutomations() {
   try {
     const tasks = await api("/automations");
@@ -284,14 +295,53 @@ async function refreshAutomations() {
     list.innerHTML = "";
     for (const task of tasks) {
       const li = document.createElement("li");
-      const schedule = JSON.stringify(task.schedule);
-      li.innerHTML = `<strong>${esc(task.name)}</strong><span class="sub">${esc(schedule)} ｜ ${task.enabled ? "启用" : "停用"}</span>`;
+      li.innerHTML = `<strong>${esc(task.name)}</strong><span class="sub">${esc(
+        describeSchedule(task.schedule)
+      )} ｜ ${task.enabled ? "启用" : "停用"}</span>`;
       const toggleBtn = document.createElement("button");
       toggleBtn.textContent = task.enabled ? "停用" : "启用";
       toggleBtn.addEventListener("click", async (event) => {
         event.stopPropagation();
         await api(`/automations/${task.id}/toggle`, { method: "POST" });
         await refreshAutomations();
+      });
+      // A8-1（取优合并自上游 be6298f）：展开执行记录——次日可查「跑没跑、结果如何」。
+      const runsBtn = document.createElement("button");
+      runsBtn.textContent = "记录";
+      runsBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const existing = li.querySelector(".automation-runs");
+        if (existing) {
+          existing.remove();
+          runsBtn.textContent = "记录";
+          return;
+        }
+        const box = document.createElement("ul");
+        box.className = "list automation-runs";
+        box.innerHTML = '<li class="sub">加载中…</li>';
+        li.appendChild(box);
+        runsBtn.textContent = "收起";
+        try {
+          const runs = await api(
+            `/automations/runs?task_id=${encodeURIComponent(task.id)}&limit=10`
+          );
+          box.innerHTML = "";
+          if (!Array.isArray(runs) || !runs.length) {
+            box.innerHTML = '<li class="sub">尚无执行记录（到点触发后可见）</li>';
+            return;
+          }
+          for (const run of runs) {
+            const item = document.createElement("li");
+            const when = String(run.at || "").replace("T", " ").slice(0, 16);
+            const verdict = run.status === "ok" ? "✓ 成功" : "✗ 失败";
+            item.innerHTML = `<strong>${esc(verdict)} · ${esc(when)}</strong><span class="sub">${esc(
+              String(run.output || "（无输出）").slice(0, 400)
+            )}</span>`;
+            box.appendChild(item);
+          }
+        } catch (error) {
+          box.innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
+        }
       });
       const deleteBtn = document.createElement("button");
       deleteBtn.textContent = "删除";
@@ -301,6 +351,7 @@ async function refreshAutomations() {
         await refreshAutomations();
       });
       li.appendChild(toggleBtn);
+      li.appendChild(runsBtn);
       li.appendChild(deleteBtn);
       list.appendChild(li);
     }

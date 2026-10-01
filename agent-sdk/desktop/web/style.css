@@ -1689,3 +1689,79 @@ body.settings-open:not(.route-model) #sidebar { padding: 10px 10px 18px; }
   padding: 1px 5px; border: 1px solid var(--border); border-radius: 5px;
   background: var(--surface); font-size: 11px;
 }
+
+/* ---------- 扩展面板统一排版（取优合并自上游 be6298f；mountPanel 后由 layoutPanel 自动分栏） ---------- */
+/* 面板根容器：卡片型子元素排成响应式两列，宽内容由 .owo-span-all 整行跨列。
+   !important 是因为面板自带 <style> 在文档流后面（同权重会被覆盖）。 */
+#panelRoot .owo-cols {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)) !important;
+  gap: 14px;
+  align-items: start;
+}
+#panelRoot .owo-cols > .owo-span-all { grid-column: 1 / -1; }
+#panelRoot .owo-cols > * { min-width: 0; }
+/* 异常高的块（长表/图表/长编辑器）限高内滚：不让单个块把整页拉长 */
+#panelRoot .owo-cols > .owo-tall { max-height: 620px; overflow: auto; }
+
+/* ---------- 面板分区目录（左侧吸顶锚点，长面板快速跳转） ---------- */
+#panelRoot section[data-panel].owo-toc-layout {
+  display: grid;
+  grid-template-columns: 172px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+#panelRoot .owo-toc {
+  position: sticky;
+  top: 46px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: calc(100vh - 72px);
+  overflow: auto;
+  padding-right: 4px;
+}
+#panelRoot .owo-toc-item {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 400;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#panelRoot .owo-toc-item:hover { background: var(--accent-soft); color: var(--text); }
+#panelRoot .owo-toc-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+/* 长分区的「收起/展开」（内容级精简：不删内容，可展开） */
+#panelRoot .owo-fold {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 400;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+#panelRoot .owo-fold:hover { color: var(--text); border-color: var(--accent); }
+#panelRoot .owo-folded { display: none !important; }
+
+/* 锚点滚动时留出吸顶导航的高度，避免标题被压住 */
+#panelRoot .owo-cols .sub,
+#panelRoot .owo-cols h2,
+#panelRoot .owo-cols h3,
+#panelRoot .owo-cols h4 { scroll-margin-top: 64px; }
+@media (max-width: 1000px) {
+  #panelRoot section[data-panel].owo-toc-layout { grid-template-columns: minmax(0, 1fr); }
+  #panelRoot .owo-toc { position: static; flex-direction: row; flex-wrap: wrap; max-height: none; }
+}
+/* 面板内长列表限高内滚：列表越长页面越长是"一长条找不到内容"的主要来源 */
+#panelRoot ul,
+#panelRoot ol,
+#panelRoot .list { max-height: 320px; overflow: auto; }

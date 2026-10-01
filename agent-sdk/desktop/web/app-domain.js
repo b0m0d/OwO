@@ -1444,6 +1444,8 @@ const PANEL_ORDER = [
   "workswarm",
   "project-launcher",
   "project-history",
+  // 取优合并自上游 be6298f：帮助与关于（版本/能力面/快捷键/诊断/复制）。
+  "about",
 ];
 
 function panelHelpers(root = $("panelRoot")) {
@@ -1461,6 +1463,13 @@ function panelHelpers(root = $("panelRoot")) {
     },
     delete(path) {
       return api(path, { method: "DELETE" });
+    },
+    // 面板兼容别名：上游面板（automations/about 等）用 del/call 命名。
+    del(path) {
+      return api(path, { method: "DELETE" });
+    },
+    call(path, options) {
+      return api(path, options);
     },
     stream(path, options = {}) {
       return apiClient.stream(path, options);
@@ -1480,6 +1489,9 @@ function mountPanel(id, targetRoot = $("panelRoot")) {
     button.classList.toggle("active", button.dataset.panel === id);
   }
   panel.mount(targetRoot, panelHelpers(targetRoot));
+  // 上游（LingXi-Suite engine be6298f）取优：挂载后自动统一排版 +
+  // 生成分区目录/长分区折叠（卡片网格、锚点侧栏、内容级收起）。
+  layoutPanel(targetRoot);
 }
 
 function initPanels() {
@@ -1499,4 +1511,186 @@ function initPanels() {
   }
   // 首屏只准备工具导航，不在服务就绪前隐式挂载面板。
   // 具体面板由工具抽屉或一级路由按需挂载，避免启动阶段并发触发请求。
+}
+
+
+// ---------- 扩展面板统一排版（取优合并自上游 be6298f：卡片网格/分区目录/长分区折叠） ----------
+
+function layoutPanel(root) {
+  const section = root.querySelector("section[data-panel]");
+  if (!section) return;
+  const isBox = (el) => el.tagName === "DIV" || el.tagName === "SECTION";
+  const wrapper = Array.from(section.children).find(isBox);
+  if (wrapper) buildPanelToc(section, wrapper);
+  // 先试「单一根容器」（.stack 等），不行再退回把 section 自身当容器
+  // （notes/team/fleet/plugin-market 的骨架直接挂在 section 下）。
+  const candidates = [];
+  if (wrapper && wrapper.children.length >= 3) candidates.push(wrapper);
+  if (section !== wrapper) candidates.push(section);
+  for (const container of candidates) {
+    const children = Array.from(container.children).filter((el) => el.tagName !== "STYLE");
+    if (children.length < 3) continue;
+    const wideFlags = children.map((child) => panelBlockIsWide(child));
+    const cards = wideFlags.filter((flag) => !flag).length;
+    // 可分的卡片太少（几乎全是整行块）就不折腾，保持原单列。
+    if (cards < 2 || cards / children.length < 0.2) continue;
+    children.forEach((child, index) => {
+      if (wideFlags[index]) child.classList.add("owo-span-all");
+    });
+    container.classList.add("owo-cols");
+    // 自愈：① 内容溢出 → 整行跨列；② 异常高块 → 限高内滚。
+    // 面板内容多为异步加载，块高度在挂载后才长出来 → ResizeObserver 持续自愈。
+    const heal = () => {
+      for (const child of children) {
+        if (child.scrollWidth > child.clientWidth + 4) {
+          child.classList.add("owo-span-all");
+        } else if (child.getBoundingClientRect().height > 700) {
+          child.classList.add("owo-tall");
+        }
+      }
+    };
+    requestAnimationFrame(heal);
+    if (window.ResizeObserver) {
+      let pending = false;
+      const observer = new ResizeObserver(() => {
+        if (pending) return;
+        pending = true;
+        requestAnimationFrame(() => {
+          pending = false;
+          heal();
+        });
+      });
+      observer.observe(container);
+    }
+    return;
+  }
+}
+
+/// 当前面板目录的滚动联动函数（document 捕获阶段滚动监听只注册一次）。
+let panelTocSync = null;
+
+/// 面板分区目录（锚点侧栏）：分区标题（`.sub` / H2~H4）≥3 个时，
+/// 在面板左侧生成吸顶目录，点击滚到对应分区——长面板不必一路往下找。
+function buildPanelToc(section, container) {
+  const headings = Array.from(container.children).filter(
+    (el) => el.classList.contains("sub") || /^H[2-4]$/.test(el.tagName)
+  );
+  if (headings.length < 3) return;
+  const nav = document.createElement("nav");
+  nav.className = "owo-toc";
+  nav.setAttribute("aria-label", "面板分区");
+  const items = [];
+  headings.forEach((heading, index) => {
+    if (!heading.id) heading.id = `owo-sec-${index}-${Math.random().toString(36).slice(2, 7)}`;
+    const label = (heading.textContent || "").trim().replace(/\s+/g, " ");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "owo-toc-item";
+    button.textContent = label.length > 16 ? `${label.slice(0, 16)}…` : label || `分区 ${index + 1}`;
+    button.title = label;
+    button.addEventListener("click", () => {
+      heading.scrollIntoView({ behavior: "smooth", block: "start" });
+      setActiveTocItem(items, button);
+    });
+    items.push({ button, heading });
+    nav.appendChild(button);
+  });
+  // 滚动联动高亮（rAF 节流）：视口顶部最近的已越过分区即为当前分区。
+  // 滚动可能发生在内层滚动容器 → document 捕获阶段监听（scroll 不冒泡但可捕获）。
+  const sync = () => {
+    let current = items[0];
+    for (const item of items) {
+      if (item.heading.getBoundingClientRect().top <= 90) current = item;
+    }
+    setActiveTocItem(items, current && current.button);
+  };
+  panelTocSync = sync;
+  if (!document.body.dataset.owoTocBound) {
+    document.body.dataset.owoTocBound = "1";
+    let ticking = false;
+    document.addEventListener(
+      "scroll",
+      () => {
+        if (ticking || !panelTocSync) return;
+        ticking = true;
+        requestAnimationFrame(() => {
+          ticking = false;
+          panelTocSync();
+        });
+      },
+      { capture: true, passive: true }
+    );
+  }
+  section.insertBefore(nav, container);
+  section.classList.add("owo-toc-layout");
+  addSectionFolding(headings);
+  sync();
+  if (window.ResizeObserver) {
+    let revisiting = false;
+    const observer = new ResizeObserver(() => {
+      if (revisiting) return;
+      revisiting = true;
+      requestAnimationFrame(() => {
+        revisiting = false;
+        addSectionFolding(headings);
+        sync();
+      });
+    });
+    observer.observe(container);
+  }
+}
+
+/// 长分区折叠（内容级"精简短页"的安全做法：不删内容，可展开）：
+/// 某分区（标题到下一个标题之间）的块总高 >700px 且 ≥2 块时，标题尾加「收起/展开」。幂等。
+function addSectionFolding(headings) {
+  headings.forEach((heading, index) => {
+    if (heading.querySelector(".owo-fold")) return;
+    const next = headings[index + 1];
+    const blocks = [];
+    for (let el = heading.nextElementSibling; el && el !== next; el = el.nextElementSibling) {
+      if (el.tagName !== "STYLE") blocks.push(el);
+    }
+    if (blocks.length < 2) return;
+    const total = blocks.reduce((sum, el) => sum + el.getBoundingClientRect().height, 0);
+    if (total < 700) return;
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "owo-fold";
+    toggle.textContent = "收起";
+    toggle.title = "折叠该分区（内容不丢，可随时展开）";
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const collapsed = blocks.every((el) => el.classList.contains("owo-folded"));
+      for (const el of blocks) el.classList.toggle("owo-folded", !collapsed);
+      toggle.textContent = collapsed ? "收起" : "展开";
+    });
+    heading.appendChild(toggle);
+  });
+}
+
+function setActiveTocItem(items, button) {
+  for (const item of items) item.button.classList.toggle("active", item.button === button);
+}
+
+/// 该面板块是否应当整行跨列（宽内容 / 标题 / 工具条）。判定偏保守：宁可整行不破版。
+function panelBlockIsWide(el) {
+  if (/^(H[1-4]|BUTTON|FORM|TABLE|TEXTAREA|PRE)$/.test(el.tagName)) return true;
+  if (el.tagName === "UL" || el.tagName === "OL") return el.children.length > 6;
+  if (
+    el.matches("canvas, svg, .owo-editor") ||
+    el.querySelector("table, textarea, form, pre, canvas, iframe, .owo-editor, .owo-mtr-table")
+  ) {
+    return true;
+  }
+  const classes = String(el.className || "").split(/\s+/);
+  return classes.some(
+    (name) =>
+      name === "sub" ||
+      name === "toolbar" ||
+      name === "actions" ||
+      name.endsWith("-head") ||
+      name.endsWith("-toolbar") ||
+      name.endsWith("-actions") ||
+      name.endsWith("-bar")
+  );
 }
