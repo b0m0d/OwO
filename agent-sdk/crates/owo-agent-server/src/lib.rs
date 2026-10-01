@@ -46,6 +46,7 @@ mod eval_gate;
 /// 可靠事件流集线器（§3.1：公开给契约测试发布续传事件用；路由在 build_router 挂载）。
 pub mod event_stream;
 mod fleet_api;
+mod fs_api;
 mod goal_api;
 mod idempotency;
 mod intent_api;
@@ -575,6 +576,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/approvals/pending",
             get(activity_api::pending_approvals_list),
         )
+        // 本机文件系统动作（取优合并自远端 engine）：选择文件夹 / 用外部程序打开。
+        .route("/fs/pick-directory", post(fs_api::fs_pick_directory))
+        .route("/fs/open", post(fs_api::fs_open))
         .route(
             "/settings",
             get(settings_api::settings_get).post(settings_api::settings_update),

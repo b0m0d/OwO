@@ -3383,6 +3383,40 @@ async fn read_json_body(response: axum::response::Response) -> serde_json::Value
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// `/fs/open`（取优合并自远端 engine）：路由可达 + 工作区越界 403 + 空路径 400。
+/// 不实际调起外部程序（避免测试机弹窗）：只锁安全边界契约。
+#[tokio::test]
+async fn fs_open_enforces_workspace_scope_and_rejects_empty_path() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    // 空路径 → 400（路由可达，参数校验先于任何本机动作）。
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            "/fs/open",
+            Some(r#"{"path":"  "}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 400, "空路径应 400");
+
+    // 越界路径 → 403（本机动作只允许工作区内）。
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            "/fs/open",
+            Some(r#"{"path":"../escape.txt"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 403, "越界路径应 403");
+}
+
 /// A8（取优合并自远端 engine）：活跃回合快照 / 桌宠显隐中转 / 跨会话待审批 /
 /// 自动化执行记录——路由可达 + 状态机语义（期望/实际心跳双向）。
 #[tokio::test]
