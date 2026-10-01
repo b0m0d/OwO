@@ -20,6 +20,8 @@ pub mod fleet;
 pub mod fleet_node_protocol;
 pub mod fleet_transport;
 pub mod gateway;
+/// Git 只读工具（取优合并自远端 engine）：`git_status` / `git_diff` / `git_log`。
+pub mod git_tools;
 pub mod goal;
 pub mod node_agent;
 #[cfg(target_os = "windows")]

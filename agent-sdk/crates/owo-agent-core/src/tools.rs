@@ -436,6 +436,9 @@ impl ToolRegistry {
         registry.register(ListDirTool);
         registry.register(SearchFilesTool);
         registry.register(GrepTool);
+        registry.register(crate::git_tools::GitStatusTool);
+        registry.register(crate::git_tools::GitDiffTool);
+        registry.register(crate::git_tools::GitLogTool);
         registry.register_run_command();
         registry.register(ShellOutputTool);
         registry.register(KillShellTool);
@@ -474,6 +477,9 @@ impl ToolRegistry {
         registry.register(ListDirTool);
         registry.register(SearchFilesTool);
         registry.register(GrepTool);
+        registry.register(crate::git_tools::GitStatusTool);
+        registry.register(crate::git_tools::GitDiffTool);
+        registry.register(crate::git_tools::GitLogTool);
         registry.register(ReadImageTool);
         registry
     }
@@ -3297,6 +3303,9 @@ mod tests {
                 "list_dir",
                 "search_files",
                 "grep",
+                "git_status",
+                "git_diff",
+                "git_log",
                 "run_command",
                 "shell_output",
                 "kill_shell",

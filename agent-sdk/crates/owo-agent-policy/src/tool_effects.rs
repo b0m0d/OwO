@@ -299,7 +299,7 @@ pub fn classify_mcp_annotations(
 pub fn builtin_class_for(tool: &str) -> Option<EffectClass> {
     let class = match tool {
         "read_file" | "list_dir" | "search_files" | "grep" | "read_image" | "shell_output"
-        | "kill_shell" | "todo" => EffectClass::Read,
+        | "kill_shell" | "todo" | "git_status" | "git_diff" | "git_log" => EffectClass::Read,
         "write_file" | "edit_file" | "multi_edit" | "apply_patch" => EffectClass::Write,
         "run_command" | "web_fetch" | "web_search" => EffectClass::Execute,
         "text.inject" | "clipboard" => EffectClass::Inject,
@@ -337,6 +337,9 @@ fn builtin_effects() -> Vec<(&'static str, EffectClass)> {
         ("edit_file", EffectClass::Write),
         ("multi_edit", EffectClass::Write),
         ("apply_patch", EffectClass::Write),
+        ("git_status", EffectClass::Read),
+        ("git_diff", EffectClass::Read),
+        ("git_log", EffectClass::Read),
         ("web_fetch", EffectClass::Execute),
         ("web_search", EffectClass::Execute),
         ("screen_ocr", EffectClass::Read),
@@ -390,12 +393,18 @@ mod tests {
         assert_eq!(effect_class_for("grep"), EffectClass::Read);
         assert_eq!(effect_class_for("apply_patch"), EffectClass::Write);
         assert_eq!(effect_class_for("multi_edit"), EffectClass::Write);
+        assert_eq!(effect_class_for("git_status"), EffectClass::Read);
+        assert_eq!(effect_class_for("git_diff"), EffectClass::Read);
+        assert_eq!(effect_class_for("git_log"), EffectClass::Read);
         assert_eq!(effect_class_for("web_fetch"), EffectClass::Execute);
         let builtin = all_effects()
             .into_iter()
             .filter(|effect| effect.source == "builtin")
             .count();
-        assert_eq!(builtin, 43, "内置矩阵应完整播种 43 个工具（含 multi_edit）");
+        assert_eq!(
+            builtin, 46,
+            "内置矩阵应完整播种 46 个工具（含 multi_edit / git_status / git_diff / git_log）"
+        );
     }
 
     #[test]
