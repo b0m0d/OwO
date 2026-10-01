@@ -778,6 +778,14 @@ impl Agent {
                                     model: session.model_override.clone().unwrap_or_default(),
                                     events: Some(Arc::clone(&nested_sink)),
                                 };
+                                // A5-1：fan-out 通道（owned，'static 闭包约束）。
+                                let fanout = crate::subagent::FanOutRunner {
+                                    provider: Arc::clone(&self.provider),
+                                    workspace: workspace.clone(),
+                                    model: session_view.model_override.clone().unwrap_or_default(),
+                                    depth: self.config.subagent_depth,
+                                    max_turns: self.config.max_turns,
+                                };
                                 let sink = Arc::clone(&group_events);
                                 let call_id = call.id.clone();
                                 let tool_name = call.name.clone();
@@ -803,6 +811,8 @@ impl Agent {
                                         subagent: Some(subagent),
                                         skills: &self.skills,
                                         elements: &self.elements,
+                                        fanout: Some(fanout),
+                                        abort: Some(abort),
                                     };
                                     let outcome = match tool_host.issue(
                                         &tool_name,
@@ -944,6 +954,13 @@ impl Agent {
                                     model: session.model_override.clone().unwrap_or_default(),
                                     events: Some(Arc::clone(&nested_sink)),
                                 };
+                                let fanout = crate::subagent::FanOutRunner {
+                                    provider: Arc::clone(&self.provider),
+                                    workspace: workspace.clone(),
+                                    model: session.model_override.clone().unwrap_or_default(),
+                                    depth: self.config.subagent_depth,
+                                    max_turns: self.config.max_turns,
+                                };
                                 let mut ctx = ToolContext {
                                     workspace: &workspace,
                                     policy: &self.policy,
@@ -952,6 +969,8 @@ impl Agent {
                                     subagent: Some(subagent),
                                     skills: &self.skills,
                                     elements: &self.elements,
+                                    fanout: Some(fanout),
+                                    abort: Some(abort),
                                 };
                                 let tool_started = std::time::Instant::now();
                                 let outcome = match self.tool_host.issue(

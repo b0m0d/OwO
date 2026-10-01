@@ -17,7 +17,7 @@ use crate::mcp::{McpClient, McpTool};
 use crate::permissions::{Decision, PermissionRequest, Policy};
 use crate::session::Session;
 use crate::skill::SkillRegistry;
-use crate::subagent::SubagentRunner;
+use crate::subagent::{FanOutRunner, SubagentRunner};
 use crate::tool_effects::EffectClass;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -25,6 +25,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 // 工具参数取用助手（M1）：归属内核 `tool_args`，本文件多处工具实现共用。
 use owo_agent_kernel::required_string;
@@ -66,6 +67,10 @@ pub struct ToolContext<'a> {
     pub skills: &'a SkillRegistry,
     /// 窗口元素注册表（感知多源融合的稳定元素 ID 空间）。
     pub elements: &'a Arc<Mutex<crate::ElementRegistry>>,
+    /// A5-1：fan-out 只读子代理的注入通道（owned；子代理内/无通道场景为 None）。
+    pub fanout: Option<FanOutRunner>,
+    /// 回合取消标志：工具层桥接（fan-out 停止调度新子任务并 abort 在飞者）。
+    pub abort: Option<&'a AtomicBool>,
 }
 
 /// ToolHost 签发 capability 时必须绑定的运行上下文。
@@ -530,6 +535,7 @@ impl ToolRegistry {
     pub fn register_delegation_tools(&mut self) {
         self.register(ExploreTool);
         self.register(SubagentTool);
+        self.register(FanOutSubagentsTool);
         self.register(UseSkillTool);
     }
 
@@ -2602,6 +2608,129 @@ impl Tool for SubagentTool {
     }
 }
 
+/// A5-1 取优合并自远端 engine：并行 fan-out 只读子代理（2~6 个独立调研任务同时跑）。
+struct FanOutSubagentsTool;
+
+#[async_trait]
+impl Tool for FanOutSubagentsTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "fan_out_subagents".into(),
+            description: "并行派出 2~6 个只读探索子代理，同时调研多个**相互独立**的问题（多模块分别定位、多关键词并行检索、独立子问题调研），汇总各自结论。子代理只读（不改文件、不执行命令、不联网）；任务间不能有依赖（有依赖请串行 explore/subagent）。单任务失败不影响其余，结果按输入顺序返回。".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "子任务列表（每条一个独立问题/检索目标，2~6 条）"
+                    },
+                    "max_parallel": { "type": "integer", "description": "并发上限（默认 3，最大 4）" },
+                    "timeout_secs": { "type": "integer", "description": "单个子任务超时秒数（默认 300，范围 30~900）" }
+                },
+                "required": ["tasks"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let tasks: Vec<String> = args
+            .get("tasks")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if tasks.len() < 2 {
+            return Err("tasks 至少 2 条（单个任务请直接用 explore/subagent）".to_string());
+        }
+        if tasks.len() > 6 {
+            return Err(format!(
+                "tasks 过多（{} 条 > 6）。请拆成两批分别 fan-out",
+                tasks.len()
+            ));
+        }
+        let max_parallel = args
+            .get("max_parallel")
+            .and_then(Value::as_u64)
+            .unwrap_or(3)
+            .clamp(1, 4) as usize;
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(300)
+            .clamp(30, 900);
+        let fanout = ctx
+            .fanout
+            .clone()
+            .ok_or("当前环境不支持并行子代理（子代理内/CLI/评测环境不可用）")?;
+        let abort = ctx.abort;
+        // 取消桥：主回合 abort（用户急停/流断开）→ fan-out 取消标志 → 子代理 abort。
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let config = crate::fleet::FanOutConfig {
+            max_parallel,
+            budget: crate::fleet::Budget {
+                max_duration_secs: timeout_secs.saturating_mul(2).max(120),
+                ..Default::default()
+            },
+            per_worker_timeout: Some(std::time::Duration::from_secs(timeout_secs)),
+            cancelled: Some(std::sync::Arc::clone(&cancelled)),
+            ..Default::default()
+        };
+        let future = crate::subagent::fan_out_subagents(
+            fanout.provider,
+            fanout.workspace,
+            fanout.model,
+            fanout.depth,
+            fanout.max_turns,
+            tasks.clone(),
+            config,
+        );
+        tokio::pin!(future);
+        let report = loop {
+            tokio::select! {
+                result = &mut future => break result?,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => {
+                    if let Some(flag) = abort {
+                        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+        };
+        let succeeded = report.succeeded().len();
+        let failed = report.failed().len();
+        let results: Vec<Value> = report
+            .outcomes
+            .iter()
+            .enumerate()
+            .map(|(index, outcome)| {
+                json!({
+                    "index": index + 1,
+                    "task": tasks.get(index).cloned().unwrap_or_default(),
+                    "ok": outcome.ok,
+                    "status": outcome.status,
+                    "output": outcome.output,
+                    "error": outcome.error,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "succeeded": succeeded,
+            "failed": failed,
+            "results": results,
+        }))
+    }
+}
+
 struct UseSkillTool;
 
 #[async_trait]
@@ -2673,6 +2802,8 @@ mod tests {
             subagent: None,
             skills: &skills,
             elements: &elements,
+            fanout: None,
+            abort: None,
         };
 
         let result = SearchFilesTool
@@ -2706,6 +2837,8 @@ mod tests {
             subagent: None,
             skills: &skills,
             elements: &elements,
+            fanout: None,
+            abort: None,
         };
 
         write_file_body(&mut context, "shared.txt", &path, "agent version")
@@ -2821,6 +2954,8 @@ mod tests {
             subagent: None,
             skills: &skills,
             elements: &elements,
+            fanout: None,
+            abort: None,
         };
         let capability = host
             .issue(
@@ -2927,6 +3062,8 @@ mod tests {
             subagent: None,
             skills: &skills,
             elements: &elements,
+            fanout: None,
+            abort: None,
         };
         let capability = host.issue("write_file", args, approval, context).unwrap();
         let result = host.execute(capability, &mut tool_context).await.unwrap();
@@ -2978,6 +3115,8 @@ mod tests {
             subagent: None,
             skills: &skills,
             elements: &elements,
+            fanout: None,
+            abort: None,
         };
 
         let result = MultiEditTool
@@ -3022,6 +3161,8 @@ mod tests {
             subagent: None,
             skills: &skills,
             elements: &elements,
+            fanout: None,
+            abort: None,
         };
 
         // 第 2 处失败（old_string 不存在）：整批不落盘。
@@ -3165,6 +3306,7 @@ mod tests {
                 "read_image",
                 "explore",
                 "subagent",
+                "fan_out_subagents",
                 "use_skill",
             ]
         );
