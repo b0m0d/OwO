@@ -159,6 +159,10 @@ pub struct Settings {
     /// 额外危险命令片段（deny 优先）。
     #[serde(default)]
     pub deny_commands: Vec<String>,
+    /// A2-1 hooks 生命周期扩展点：`hooks` 数组（event / matcher? / command；
+    /// 命令经系统 shell 执行、事件 JSON 走 stdin、exit 2 = 阻断）。
+    #[serde(default)]
+    pub hooks: Vec<crate::hooks::HookConfig>,
     /// 按需暴露的可选 Agent 工具能力；缺字段的旧 settings.json 默认全部关闭。
     #[serde(default)]
     pub tool_capabilities: AgentToolCapabilities,

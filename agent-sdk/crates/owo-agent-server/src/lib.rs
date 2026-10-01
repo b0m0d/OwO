@@ -242,6 +242,10 @@ impl AppState {
         if let Some(spec) = settings.permission_spec.clone() {
             agent.policy().set_spec(spec);
         }
+        // A2-1：启动即装载 settings.json 的 hooks（设置页保存后热重灌）。
+        agent.set_hooks(owo_agent_core::hooks::HookManager::from_configs(
+            &settings.hooks,
+        ));
         // X03/R3（§8.2）：本地 API bearer token **每次启动换发**并覆盖写盘（+ ACL）；
         // 写盘失败降级为内存 token。旧代际 bearer 因此在新进程上必然 401。
         let auth_token = Arc::new(auth_token::AuthToken::mint_for_boot(&data_root));

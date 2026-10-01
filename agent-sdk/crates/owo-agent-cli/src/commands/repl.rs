@@ -113,6 +113,10 @@ impl Repl {
             &skills,
             &settings.deny_commands,
         )?);
+        // A2-1：本地 REPL 装载 settings.json 的 hooks（与 server 同一出口）。
+        agent.set_hooks(owo_agent_core::hooks::HookManager::from_configs(
+            &settings.hooks,
+        ));
         // §11：--no-approval 弃用告警（兼容期显式映射 + 高风险提示）。
         if args.no_approval {
             eprintln!(

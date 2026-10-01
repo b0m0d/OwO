@@ -14,6 +14,8 @@ pub enum AgentError {
     RevertConflict { paths: Vec<String> },
     #[error("tool error: {0}")]
     Tool(String),
+    #[error("hook blocked: {0}")]
+    HookBlocked(String),
     #[error("agent aborted by user")]
     Aborted,
 }

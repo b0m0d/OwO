@@ -127,6 +127,9 @@ pub struct Agent {
     elements: Arc<Mutex<crate::ElementRegistry>>,
     /// §9.3：超大工具结果 artifact store（CAS）；None = 维持盲截断旧行为。
     artifact_store: Option<Arc<crate::cas_store::CasStore>>,
+    /// A2-1 hooks 生命周期扩展点（settings.json 的 `hooks` 灌入；空 = 无 hook）。
+    /// RwLock：服务运行中（Arc<Agent>）也能重灌（settings 保存后热生效）。
+    hooks: RwLock<crate::hooks::HookManager>,
 }
 
 impl Agent {
@@ -155,7 +158,24 @@ impl Agent {
             skills: SkillRegistry::default(),
             elements: Arc::new(Mutex::new(crate::ElementRegistry::new())),
             artifact_store: None,
+            hooks: RwLock::new(crate::hooks::HookManager::default()),
         }
+    }
+
+    /// A2-1：灌入 hooks 配置（settings.json 的 `hooks` 数组；exit 2 = 阻断）。
+    /// 快照语义：clone 后释放锁，hook 执行（可达 10s）不阻塞重灌。
+    pub fn set_hooks(&self, hooks: crate::hooks::HookManager) {
+        if let Ok(mut slot) = self.hooks.write() {
+            *slot = hooks;
+        }
+    }
+
+    /// 当前 hooks 快照（读锁即取即放，避免跨 await 持锁）。
+    fn hooks_snapshot(&self) -> crate::hooks::HookManager {
+        self.hooks
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     /// §9.3：挂载 artifact store（CAS）。超大工具结果以「指针+预览」回填模型，
@@ -425,6 +445,30 @@ impl Agent {
         let mut messages = vec![ChatMessage::system(system)];
         messages.extend(session.messages.iter().cloned());
         messages.push(ChatMessage::user(prompt.to_string()));
+        // A2-1 UserPromptSubmit hook：exit 2 = 拒绝本回合（敏感词门卫/强制工单号等
+        // 确定性控制），stderr 回喂模型与用户。
+        let hooks = self.hooks_snapshot();
+        if !hooks.is_empty() {
+            let outcome = hooks
+                .run(
+                    crate::hooks::HookEvent::UserPromptSubmit,
+                    &serde_json::json!({ "prompt": prompt, "session_id": session.id }),
+                )
+                .await;
+            if let crate::hooks::HookOutcome::Blocked(stderr) = outcome {
+                self.audit
+                    .lock()
+                    .map_err(|_| AgentError::Session("审计锁中毒".into()))?
+                    .record(
+                        &session.id,
+                        "hook_user_prompt_submit",
+                        None,
+                        Some(false),
+                        format!("阻断：{stderr}"),
+                    );
+                return Err(AgentError::HookBlocked(stderr));
+            }
+        }
         let tools = self.visible_tool_specs();
         // §9.3：schema 预算——超限时压缩描述/剥离噪声键（不删工具），
         // 并计算稳定指纹（provider schema 缓存复用的 key 基础）。
@@ -457,6 +501,20 @@ impl Agent {
             if abort.load(Ordering::Relaxed) {
                 commit_turn_messages(session, &messages);
                 return Err(AgentError::Aborted);
+            }
+            // A2-1 PreCompact hook：通知性质（不阻断——压缩是保护性动作）。
+            let hooks = self.hooks_snapshot();
+            if !hooks.is_empty() {
+                let _ = hooks
+                    .run(
+                        crate::hooks::HookEvent::PreCompact,
+                        &serde_json::json!({
+                            "session_id": session.id,
+                            "messages": messages.len(),
+                            "estimated_tokens": estimate_tokens(&messages),
+                        }),
+                    )
+                    .await;
             }
             let compaction = self.maybe_compact(&mut messages, &session.id, false).await;
             let summary = match compaction {
@@ -623,6 +681,39 @@ impl Agent {
                                 guard_error: Some(reason),
                             });
                             continue;
+                        }
+                        // A2-1 PreToolUse hook：exit 2 = 阻断该次调用，stderr 原样作为
+                        // 拒绝原因回喂模型（模型可据此换策略），不终止回合。
+                        let hooks = self.hooks_snapshot();
+                        if !hooks.is_empty() {
+                            let outcome = hooks
+                                .run(
+                                    crate::hooks::HookEvent::PreToolUse,
+                                    &serde_json::json!({
+                                        "tool": call.name,
+                                        "args": call.arguments,
+                                        "session_id": session.id,
+                                    }),
+                                )
+                                .await;
+                            if let crate::hooks::HookOutcome::Blocked(stderr) = outcome {
+                                self.audit
+                                    .lock()
+                                    .map_err(|_| AgentError::Session("审计锁中毒".into()))?
+                                    .record(
+                                        &session.id,
+                                        "hook_pre_tool_use",
+                                        Some(call.name.clone()),
+                                        Some(false),
+                                        format!("阻断：{stderr}"),
+                                    );
+                                prepared.push(PreparedCall {
+                                    approval: None,
+                                    reason: format!("hook 阻断：{stderr}"),
+                                    guard_error: Some(format!("hook 阻断：{stderr}")),
+                                });
+                                continue;
+                            }
                         }
                         // §5.1：从注册表取出完整的 ToolSpec（含 effect 唯一事实源），
                         // 交给 Policy 判定，避免全局名字再查询。
@@ -1133,6 +1224,21 @@ impl Agent {
         }
         let persist_started = std::time::Instant::now();
         commit_turn_messages(session, &messages);
+        // A2-1 Stop hook：回合结束通知（finally 类动作如测试/通知）。
+        let hooks = self.hooks_snapshot();
+        if !hooks.is_empty() {
+            let _ = hooks
+                .run(
+                    crate::hooks::HookEvent::Stop,
+                    &serde_json::json!({
+                        "session_id": session.id,
+                        "stop_reason": final_text
+                            .as_deref()
+                            .map(|text| text.chars().take(120).collect::<String>()),
+                    }),
+                )
+                .await;
+        }
         let persist_elapsed = persist_started.elapsed();
         budget.record(Phase::Persistence, persist_elapsed);
         phase_timings.push(PhaseTiming {

@@ -23,6 +23,9 @@ pub mod gateway;
 /// Git 只读工具（取优合并自远端 engine）：`git_status` / `git_diff` / `git_log`。
 pub mod git_tools;
 pub mod goal;
+/// Hooks 生命周期扩展点（A2-1，取优合并自远端 engine）：settings.json 的
+/// `hooks: [{event, matcher?, command}]`，exit 2 = 阻断。
+pub mod hooks;
 pub mod node_agent;
 #[cfg(target_os = "windows")]
 pub mod remote_step;

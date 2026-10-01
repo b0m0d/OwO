@@ -700,6 +700,117 @@ async fn repeated_identical_tool_call_is_loop_guarded() {
     );
 }
 
+fn blocking_hook(event: &str, matcher: Option<&str>, reason: &str) -> crate::hooks::HookConfig {
+    let command = if cfg!(windows) {
+        format!("echo {reason} 1>&2 & exit /b 2")
+    } else {
+        format!("echo {reason} 1>&2; exit 2")
+    };
+    crate::hooks::HookConfig {
+        event: event.to_string(),
+        matcher: matcher.map(str::to_string),
+        command,
+    }
+}
+
+/// A2-1 hooks：UserPromptSubmit exit 2 = 拒绝本回合（stderr 回喂）。
+#[tokio::test]
+async fn user_prompt_submit_hook_blocks_turn() {
+    let outputs = Mutex::new(VecDeque::from(vec![ModelOutput::Text(
+        "不应到达".to_string(),
+    )]));
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider { outputs }),
+        ToolRegistry::new(),
+        Policy::new("."),
+        AgentConfig::default(),
+    );
+    agent.set_hooks(crate::hooks::HookManager::from_configs(&[blocking_hook(
+        "user_prompt_submit",
+        None,
+        "敏感词门卫",
+    )]));
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let error = agent
+        .run_turn(
+            &mut session,
+            "hi",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .unwrap_err();
+    match error {
+        AgentError::HookBlocked(message) => assert!(message.contains("敏感词门卫"), "{message}"),
+        other => panic!("应为 HookBlocked：{other:?}"),
+    }
+    assert!(session.messages.is_empty(), "被 hook 拒绝的回合不落历史");
+}
+
+/// A2-1 hooks：PreToolUse exit 2 = 阻断该次调用但回合继续（stderr 回喂模型）。
+#[tokio::test]
+async fn pre_tool_use_hook_blocks_call_but_keeps_turn() {
+    let state = ProbeState::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(ProbeTool {
+        label: "probe_a",
+        delay_ms: 0,
+        class: EffectClass::Read,
+        host_verified: true,
+        state: Arc::clone(&state),
+    });
+    let outputs = Mutex::new(VecDeque::from(vec![
+        ModelOutput::ToolCalls(vec![crate::gateway::ToolCall {
+            id: "call-a".to_string(),
+            name: "probe_a".to_string(),
+            arguments: serde_json::json!({}),
+        }]),
+        ModelOutput::Text("已按 hook 提示调整".to_string()),
+    ]));
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider { outputs }),
+        registry,
+        Policy::new("."),
+        AgentConfig::default(),
+    );
+    agent.set_hooks(crate::hooks::HookManager::from_configs(&[blocking_hook(
+        "pre_tool_use",
+        Some("probe_a"),
+        "该工具被策略组禁用",
+    )]));
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "跑探针",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("hook 阻断单次调用不应终止回合");
+    assert_eq!(outcome.final_text.as_deref(), Some("已按 hook 提示调整"));
+    let blocked = outcome
+        .events
+        .iter()
+        .find_map(|event| match event {
+            TurnEvent::ToolResult {
+                error: Some(error), ..
+            } if error.contains("hook 阻断") => Some(error.clone()),
+            _ => None,
+        })
+        .expect("应留下 hook 阻断的工具错误");
+    assert!(blocked.contains("该工具被策略组禁用"), "{blocked}");
+    assert_eq!(
+        state.completed.lock().unwrap().len(),
+        0,
+        "被 hook 拦截的工具不得执行"
+    );
+}
+
 /// 远端 agent.rs 取优：步数耗尽补一次不带工具的收尾总结，回合以可见结论结束
 /// （旧行为直接返回「达到最大回合数」错误，用户只看到思考过程后什么都没有）。
 #[tokio::test]
