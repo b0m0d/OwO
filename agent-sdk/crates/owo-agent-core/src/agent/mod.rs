@@ -50,6 +50,11 @@ pub enum TurnEvent {
         tool: String,
         ok: bool,
         error: Option<String>,
+        /// 结果预览（截断，纯展示）：随事件下发步骤时间线，前端 chip 可展开；
+        /// 写回模型上下文的净化仍由 `sanitize_tool_result` 负责。
+        /// 序列化向后兼容（缺省为 None）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
     },
     Final {
         text: String,
@@ -773,6 +778,7 @@ impl Agent {
                                             tool: tool_name,
                                             ok: outcome.is_ok(),
                                             error: outcome.as_ref().err().cloned(),
+                                            preview: tool_preview(&outcome),
                                         });
                                     }
                                     outcome
@@ -863,6 +869,8 @@ impl Agent {
                                         tool: call.name.clone(),
                                         ok: false,
                                         error: Some(guard.clone()),
+                                        // 未执行（宿主拦截）没有结果正文可预览。
+                                        preview: None,
                                     },
                                 );
                                 Err(guard)
@@ -956,6 +964,7 @@ impl Agent {
                                         tool: call.name.clone(),
                                         ok: outcome.is_ok(),
                                         error: outcome.as_ref().err().cloned(),
+                                        preview: tool_preview(&outcome),
                                     },
                                 );
                                 outcome
@@ -1171,6 +1180,23 @@ fn truncate_tool_result(content: &str, max_chars: usize) -> String {
     let mut truncated: String = content.chars().take(max_chars).collect();
     truncated.push_str("\n[工具输出已截断]");
     truncated
+}
+
+/// 步骤时间线的结果预览上限：够看清这步做了什么，又不会把 SSE 帧撑爆。
+const TOOL_PREVIEW_CHARS: usize = 1600;
+
+/// 工具结果预览（随 `ToolResult` 事件下发给前端 chip 展开区）。
+/// 纯展示用途：写回模型上下文的净化仍由 `sanitize_tool_result` 负责。
+fn tool_preview(outcome: &Result<serde_json::Value, String>) -> Option<String> {
+    let text = match outcome {
+        Ok(value) => value.to_string(),
+        Err(error) => format!("工具错误：{error}"),
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(truncate_tool_result(trimmed, TOOL_PREVIEW_CHARS))
 }
 
 /// 粗略 token 估算：字符数 / 2 + 每条消息固定开销。

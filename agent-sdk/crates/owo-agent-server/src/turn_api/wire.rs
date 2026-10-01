@@ -46,14 +46,14 @@ pub(crate) fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {
             tool,
             ok,
             error,
+            preview,
         } => Some(SseEvent::ToolResult {
             id: id.clone(),
             tool: tool.clone(),
             ok: *ok,
             error: error.clone(),
-            // preview 留给步骤 chip 展示结果正文；core 的 ToolResult 事件目前只带
-            // 错误摘要（结果正文在会话记录里），先置 None（字段已按远端协议就位）。
-            preview: None,
+            // 步骤 chip 展开区展示结果正文（core 已按属性截断到 1600 字符）。
+            preview: preview.clone(),
         }),
         owo_agent_core::TurnEvent::Final { text } => Some(SseEvent::Final { text: text.clone() }),
     }

@@ -212,6 +212,8 @@ impl StreamPrinter {
                 tool,
                 ok,
                 error,
+                // 预览由 TUI 步骤面板消费；行式 REPL 保持单行输出。
+                preview: _,
             } => {
                 self.clear_status();
                 let suffix = self.elapsed_suffix(id);

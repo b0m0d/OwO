@@ -338,11 +338,13 @@ impl ContractSubagentRunner<'_> {
                     tool,
                     ok,
                     error,
+                    preview,
                 } => sink(&TurnEvent::ToolResult {
                     id: id.clone(),
                     tool: format!("sub:{tool}"),
                     ok: *ok,
                     error: error.clone(),
+                    preview: preview.clone(),
                 }),
                 _ => {}
             }

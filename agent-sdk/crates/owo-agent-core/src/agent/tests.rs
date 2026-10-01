@@ -233,6 +233,48 @@ async fn two_verified_read_tools_execute_concurrently() {
     );
 }
 
+/// 远端 agent.rs 取优：`ToolResult` 事件带结果预览（截断，供步骤时间线 chip 展开）。
+#[tokio::test]
+async fn tool_result_events_carry_preview() {
+    let state = ProbeState::new();
+    let mut registry = ToolRegistry::new();
+    for label in ["probe_a", "probe_b"] {
+        registry.register(ProbeTool {
+            label,
+            delay_ms: 0,
+            class: EffectClass::Read,
+            host_verified: true,
+            state: Arc::clone(&state),
+        });
+    }
+    let (outcome, _) = run_with(
+        registry,
+        two_call_then_text("probe_a", "probe_b"),
+        &AtomicBool::new(false),
+    )
+    .await
+    .expect("回合应成功");
+    let previews: Vec<(String, String)> = outcome
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TurnEvent::ToolResult {
+                tool,
+                preview: Some(preview),
+                ..
+            } => Some((tool.clone(), preview.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(previews.len(), 2, "两个工具结果都应带预览：{previews:?}");
+    assert!(
+        previews
+            .iter()
+            .any(|(_, preview)| preview.contains("probe_a")),
+        "预览应含工具结果正文：{previews:?}"
+    );
+}
+
 /// M4.2：`session.model_override` 是请求级路由真相——显式覆盖进 wire，
 /// `"default"` 哨兵清除后透传 None（Provider 解析链）；展示模型与 wire 解耦。
 #[tokio::test]

@@ -125,6 +125,7 @@ async fn seed_five_traces(state: &Arc<owo_agent_server::AppState>) {
                 tool: "read_file".to_string(),
                 ok: true,
                 error: None,
+                preview: None,
             },
             TurnEvent::ToolStart {
                 id: format!("w{i}"),
@@ -136,6 +137,7 @@ async fn seed_five_traces(state: &Arc<owo_agent_server::AppState>) {
                 tool: "write_file".to_string(),
                 ok: i % 3 != 0,
                 error: (i % 3 == 0).then(|| "denied".to_string()),
+                preview: None,
             },
         ];
         let record = trace_record(
