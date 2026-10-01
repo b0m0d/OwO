@@ -9,7 +9,7 @@
 //! 类型一律写全限定名 `owo_agent_server::AppState`。
 
 use axum::body::Bytes;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use owo_agent_core::automation::{AutomationAction, AutomationTask, Schedule};
@@ -197,6 +197,21 @@ pub(super) async fn automations_delete(
     owo_agent_server::event_stream::hub()
         .publish_invalidate(owo_agent_server::event_stream::InvalidateDomain::Automations);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// A8-1（取优合并自远端 engine）：执行记录查询（`?task_id=&limit=`；时间倒序）。
+pub(super) async fn automations_runs(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<owo_agent_core::automation::AutomationRun>>, (StatusCode, String)> {
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50)
+        .min(200);
+    let task_id = params.get("task_id").map(String::as_str);
+    let automations = state.automations.lock().map_err(poison)?;
+    Ok(Json(automations.runs(task_id, limit)))
 }
 
 pub(super) async fn automations_reminders(

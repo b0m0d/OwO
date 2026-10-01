@@ -3376,6 +3376,103 @@ async fn diagnostics_requests_ledger_is_protected_and_privacy_safe() {
     );
 }
 
+async fn read_json_body(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// A8（取优合并自远端 engine）：活跃回合快照 / 桌宠显隐中转 / 跨会话待审批 /
+/// 自动化执行记录——路由可达 + 状态机语义（期望/实际心跳双向）。
+#[tokio::test]
+async fn a8_activity_pet_approvals_and_automation_runs_contract() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    // GET /activity：无活跃回合 → 空列表 + 0 待审批。
+    let response = app
+        .clone()
+        .oneshot(request(&state, "GET", "/activity", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200, "/activity 应可达");
+    let body = read_json_body(response).await;
+    assert_eq!(body["active"].as_array().map(Vec::len), Some(0), "{body}");
+    assert_eq!(body["pending_approvals"].as_u64(), Some(0), "{body}");
+
+    // GET /desktop/pet：初始无期望/实际值，桌面端不在线。
+    let response = app
+        .clone()
+        .oneshot(request(&state, "GET", "/desktop/pet", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200, "/desktop/pet 应可达");
+    let body = read_json_body(response).await;
+    assert_eq!(body["desired"], serde_json::Value::Null, "{body}");
+    assert_eq!(body["overlay_online"], serde_json::json!(false), "{body}");
+
+    // POST /desktop/pet：工作台写期望值。
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            "/desktop/pet",
+            Some(r#"{"visible":true}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body = read_json_body(response).await;
+    assert_eq!(body["desired"], serde_json::json!(true), "{body}");
+
+    // POST /desktop/pet/report：桌面端心跳上报实际值，回传期望值（差异化同步依据）。
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            "/desktop/pet/report",
+            Some(r#"{"visible":false}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body = read_json_body(response).await;
+    assert_eq!(body["desired"], serde_json::json!(true), "{body}");
+
+    // 心跳后 overlay_online=true，且 GET 返回 actual=false。
+    let response = app
+        .clone()
+        .oneshot(request(&state, "GET", "/desktop/pet", None))
+        .await
+        .unwrap();
+    let body = read_json_body(response).await;
+    assert_eq!(body["overlay_online"], serde_json::json!(true), "{body}");
+    assert_eq!(body["actual"], serde_json::json!(false), "{body}");
+
+    // GET /approvals/pending：跨会话待审批列表（无等待 → count=0）。
+    let response = app
+        .clone()
+        .oneshot(request(&state, "GET", "/approvals/pending", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body = read_json_body(response).await;
+    assert_eq!(body["count"].as_u64(), Some(0), "{body}");
+
+    // GET /automations/runs：执行记录（未触发过 → 空数组）。
+    let response = app
+        .clone()
+        .oneshot(request(&state, "GET", "/automations/runs", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body = read_json_body(response).await;
+    assert_eq!(body.as_array().map(Vec::len), Some(0), "{body}");
+}
+
 /// 桌宠静态面（远端 be6298f 取优）：`/pet` 与 `/pet-assets` 分目录挂载、
 /// 磁盘直读、全局 `Cache-Control: no-store`（改前端刷新即生效，免重新构建 overlay）。
 /// 环境变量是进程级共享：与 test_state 共用 STATE_ENV_LOCK 串行化，测试尾部必须清理。

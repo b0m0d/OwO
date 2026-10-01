@@ -166,6 +166,8 @@ pub(crate) async fn turn(
     let sessions = Arc::clone(&state.sessions);
     let traces_dir = state.traces_dir.clone();
     let state_for_audit = Arc::clone(&state);
+    // A8-2（取优合并自远端 engine）：活跃回合快照供 /activity 轮询。
+    let state_for_activity = Arc::clone(&state);
     let producer_store = Arc::clone(&store);
     let producer_session_id = session.id.clone();
     let producer_turn_id = turn_id.clone();
@@ -185,7 +187,10 @@ pub(crate) async fn turn(
         let producer_store = Arc::clone(&producer_store);
         let producer_session_id = producer_session_id.clone();
         let producer_turn_id = producer_turn_id.clone();
+        crate::activity_api::begin_activity(&state_for_activity, &current.id);
         let mut on_event = |event: &owo_agent_core::TurnEvent| {
+            // A8-2：活跃回合快照随事件推进（thinking/tool/waiting_approval…）。
+            crate::activity_api::update_activity(&state_for_activity, &producer_session_id, event);
             // §13 批次九：工具耗时埋点——ToolStart/ToolResult 以 id 配对，差值进
             // /metrics/runtime 的 tool_durations_ms 样本（超上限丢最旧，见 observability_api）。
             match event {
@@ -319,6 +324,8 @@ pub(crate) async fn turn(
                 );
             }
         }
+        // A8-2：回合结束（成功/失败）一律从活跃快照移除。
+        crate::activity_api::end_activity(&state_for_activity, &current.id);
         if let Ok(mut sessions) = sessions.lock() {
             sessions.insert(current.id.clone(), current.clone());
         }

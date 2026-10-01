@@ -24,6 +24,7 @@
 //! 优雅关闭 POST /server/shutdown + GET /server/status、CLI serve 强杀恢复 pid 文件）。
 
 /// V1 四期（第三路）：Artifact 评审闭环路由（review / history）。
+mod activity_api;
 pub mod artifact_review_api;
 mod assist_api;
 mod audit_api;
@@ -102,7 +103,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use owo_agent_core::automation::AutomationStore;
+use owo_agent_core::automation::{AutomationRun, AutomationStore};
 use owo_agent_core::learn::{
     ActionType, LearnPipeline, LearnState, ProactiveEngine, RecordedAction, SemanticAnchor,
 };
@@ -124,6 +125,19 @@ use tower_http::services::ServeDir;
 /// §5.4 待审批请求：request_id → (oneshot，PermissionRequest 副本)。
 /// 副本用于响应时按 scope 生成临时授权（Grant）。
 pub type PendingApproval = (tokio::sync::oneshot::Sender<Decision>, PermissionRequest);
+
+/// A8-3（取优合并自远端 engine）：桌宠显隐的期望/实际状态。
+#[derive(Debug, Default)]
+pub struct PetState {
+    /// 工作台开关写入的期望值。
+    pub desired: Option<bool>,
+    pub desired_at: Option<String>,
+    /// 桌面端心跳上报的实际值。
+    pub actual: Option<bool>,
+    pub actual_at: Option<String>,
+    /// 最近一次心跳时刻（判断桌面端是否在线）。
+    pub actual_seen: Option<std::time::Instant>,
+}
 
 pub struct AppState {
     pub agent: Arc<Agent>,
@@ -172,6 +186,11 @@ pub struct AppState {
     /// V1 四期（第三路）：Artifact 评审闭环存储（独立 SQLite 连接，
     /// 与 TeamCoordinator 的连接共存于 `data_root/workswarm/space.db`）。
     pub artifact_review: artifact_review_api::ArtifactReviewState,
+    /// A8-2（取优合并自远端 engine）：活跃回合快照（`/activity`）——
+    /// session_id → {phase, tool, started_at…}，由 turn handler 事件回调维护。
+    pub activities: Arc<Mutex<HashMap<String, serde_json::Value>>>,
+    /// A8-3：桌面挂件（桌宠）显隐中转——工作台写期望值，桌面端心跳上报实际值。
+    pub pet_state: Arc<Mutex<PetState>>,
 }
 
 impl AppState {
@@ -343,6 +362,9 @@ impl AppState {
             artifact_review: artifact_review_api::ArtifactReviewState::new(
                 workswarm_db_root.join("space.db"),
             ),
+            // A8-2 / A8-3（取优合并自远端 engine）。
+            activities: Arc::new(Mutex::new(HashMap::new())),
+            pet_state: Arc::new(Mutex::new(PetState::default())),
         }
     }
 }
@@ -524,6 +546,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/automations", get(assist_api::automations_list))
         .route("/automations", post(assist_api::automations_create))
+        // A8-1（取优合并自远端 engine）：执行记录查询。
+        .route("/automations/runs", get(assist_api::automations_runs))
         .route(
             "/automations/{id}/toggle",
             post(assist_api::automations_toggle),
@@ -539,6 +563,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/automations/reminders/clear",
             post(assist_api::automations_clear_reminders),
+        )
+        // A8-2 / A8-3（取优合并自远端 engine）：活跃回合快照 / 桌宠显隐 / 跨会话待审批。
+        .route("/activity", get(activity_api::activity_list))
+        .route(
+            "/desktop/pet",
+            get(activity_api::pet_state_get).post(activity_api::pet_state_set),
+        )
+        .route("/desktop/pet/report", post(activity_api::pet_state_report))
+        .route(
+            "/approvals/pending",
+            get(activity_api::pending_approvals_list),
         )
         .route(
             "/settings",
@@ -1076,8 +1111,32 @@ pub async fn start_automation_loop(state: Arc<AppState>) {
             let now = chrono::Utc::now();
             let mut fired = Vec::new();
             for id in automations.due_tasks(now) {
-                if let Ok(text) = automations.fire(&id, now) {
-                    fired.push(text);
+                let task_name = automations
+                    .get(&id)
+                    .map(|task| task.name.clone())
+                    .unwrap_or_default();
+                let at = now.to_rfc3339();
+                match automations.fire(&id, now) {
+                    Ok(text) => {
+                        // A8-1：执行记录落盘（/automations/runs 可查）。
+                        let _ = automations.record_run(AutomationRun {
+                            task_id: id.clone(),
+                            task_name,
+                            at,
+                            status: "ok".to_string(),
+                            output: Some(text.clone()),
+                        });
+                        fired.push(text);
+                    }
+                    Err(error) => {
+                        let _ = automations.record_run(AutomationRun {
+                            task_id: id.clone(),
+                            task_name,
+                            at,
+                            status: "failed".to_string(),
+                            output: Some(error),
+                        });
+                    }
                 }
             }
             fired

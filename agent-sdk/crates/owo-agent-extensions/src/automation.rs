@@ -22,6 +22,18 @@ pub enum AutomationAction {
     Reminder { text: String },
 }
 
+/// 一次自动化执行记录（A8-1 取优合并自远端 engine；任务中心可查）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AutomationRun {
+    pub task_id: String,
+    pub task_name: String,
+    pub at: String,
+    /// `ok` / `failed`
+    pub status: String,
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutomationTask {
     pub id: String,
@@ -96,11 +108,15 @@ impl AutomationTask {
     }
 }
 
+/// 执行记录封顶（超出丢弃最旧）。
+const RUNS_LIMIT: usize = 500;
+
 #[derive(Debug, Clone, Default)]
 pub struct AutomationStore {
     root: PathBuf,
     tasks: HashMap<String, AutomationTask>,
     reminders: Vec<String>,
+    runs: Vec<AutomationRun>,
 }
 
 impl AutomationStore {
@@ -109,6 +125,7 @@ impl AutomationStore {
             root,
             tasks: HashMap::new(),
             reminders: Vec::new(),
+            runs: Vec::new(),
         };
         store.load();
         store
@@ -135,6 +152,11 @@ impl AutomationStore {
             ) {
                 self.reminders = reminders;
             }
+            if let Ok(runs) = serde_json::from_value::<Vec<AutomationRun>>(
+                data.get("runs").cloned().unwrap_or_default(),
+            ) {
+                self.runs = runs;
+            }
         }
     }
 
@@ -145,6 +167,7 @@ impl AutomationStore {
         let data = serde_json::json!({
             "tasks": tasks,
             "reminders": self.reminders,
+            "runs": self.runs,
         });
         std::fs::write(
             self.path(),
@@ -210,6 +233,27 @@ impl AutomationStore {
         }
         self.save()?;
         Ok(text)
+    }
+
+    /// A8-1：记录一次执行结果（任务中心可查；封顶 [`RUNS_LIMIT`] 条，丢最旧）。
+    pub fn record_run(&mut self, run: AutomationRun) -> Result<(), String> {
+        self.runs.push(run);
+        if self.runs.len() > RUNS_LIMIT {
+            let drop_count = self.runs.len() - RUNS_LIMIT;
+            self.runs.drain(..drop_count);
+        }
+        self.save()
+    }
+
+    /// 执行记录（时间倒序；`task_id` 过滤可选）。
+    pub fn runs(&self, task_id: Option<&str>, limit: usize) -> Vec<AutomationRun> {
+        self.runs
+            .iter()
+            .rev()
+            .filter(|run| task_id.map(|id| run.task_id == id).unwrap_or(true))
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     pub fn reminders(&self) -> &[String] {
