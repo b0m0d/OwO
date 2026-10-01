@@ -962,13 +962,14 @@ async fn direct_general_subagent_uses_workspace_scoped_approver() {
 }
 
 #[tokio::test]
-async fn max_turns_returns_error_and_persists_partial_history() {
+async fn max_turns_runs_wrap_up_and_persists_partial_history() {
     let workspace = temp_workspace("max-turns");
-    let provider = ScriptedProvider::new(vec![call(
-        "read-1",
-        "read_file",
-        json!({ "path": "missing.txt" }),
-    )]);
+    // 远端 agent.rs 取优：步数耗尽不再直接报错，而是补一次不带工具的收尾总结，
+    // 回合必须以可见结论结束；脚本给工具调用轮 + 收尾文本轮各一次。
+    let provider = ScriptedProvider::new(vec![
+        call("read-1", "read_file", json!({ "path": "missing.txt" })),
+        ModelOutput::Text("收尾总结：missing.txt 不存在".to_string()),
+    ]);
     let policy = Policy::new(&workspace);
     let config = AgentConfig {
         max_turns: 1,
@@ -979,7 +980,7 @@ async fn max_turns_returns_error_and_persists_partial_history() {
     let abort = AtomicBool::new(false);
     let approver = AutoApprover { allow: true };
 
-    let error = agent
+    let outcome = agent
         .run_turn(
             &mut session,
             "读取 missing.txt",
@@ -988,9 +989,11 @@ async fn max_turns_returns_error_and_persists_partial_history() {
             &mut |_| {},
         )
         .await
-        .unwrap_err();
-
-    assert!(error.to_string().contains("最大回合数"));
+        .expect("收尾总结应让回合成功");
+    assert_eq!(
+        outcome.final_text.as_deref(),
+        Some("收尾总结：missing.txt 不存在")
+    );
     assert!(session.messages.iter().any(|message| {
         message.role == "user" && message.content.as_deref() == Some("读取 missing.txt")
     }));

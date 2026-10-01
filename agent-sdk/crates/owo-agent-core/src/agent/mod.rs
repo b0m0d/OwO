@@ -27,6 +27,25 @@ mod tests;
 pub use config::AgentConfig;
 use config::*;
 
+/// 达到最大回合数后的收尾指令：不再调用工具，强制产出可见结论
+/// （审查/分析类任务据此给出结构化报告；信息不足时列出需要用户澄清的问题）。
+const WRAP_UP_PROMPT: &str = "你已达到本次任务的最大执行步数上限，现在必须停止调用工具，\
+     直接用 Markdown 输出最终结论：1) 已完成的工作与关键发现（审查/分析类任务给出结构化报告：结论、证据、风险）；\
+     2) 仍未完成或未验证的部分；3) 如果信息不足，列出需要用户澄清的具体问题。不要再请求任何工具。";
+
+/// 空回答的静默重试次数：第一次空响应直接再问一次（不打扰用户），仍为空才走摘要兜底。
+const EMPTY_REPLY_RETRIES: usize = 1;
+
+/// 空回答重试时的追加指令：强制产出可见结论，而不是继续思考或调工具。
+const EMPTY_REPLY_RETRY_PROMPT: &str = "（系统提示）你上一条回复没有产生任何可见内容。\
+     请不要再调用工具，立即用 Markdown 直接输出：1) 当前已完成的工作与结论；\
+     2) 仍未完成或不确定的部分。";
+
+/// 兜底摘要中单条工具动作的参数预览长度上限。
+const FALLBACK_ACTION_PREVIEW_CHARS: usize = 90;
+/// 兜底摘要中最多列出的工具动作条数（去重后）。
+const FALLBACK_ACTION_LIMIT: usize = 20;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TurnEvent {
     ModelCall,
@@ -415,6 +434,8 @@ impl Agent {
         let mut events = Vec::new();
         let mut final_text = None;
         let mut steps = 0usize;
+        // 空回答静默重试计数（见 EMPTY_REPLY_RETRIES）。
+        let mut empty_retries = 0usize;
         // 循环保护状态（本回合内）：工具调用总量 + 「同一 name/参数」重复计数。
         let mut tool_calls_seen = 0usize;
         let mut call_signatures: HashMap<String, usize> = HashMap::new();
@@ -539,6 +560,28 @@ impl Agent {
             });
 
             match output {
+                // 空回答（网关截断/模型超载）不再直接当正常完成：先静默重试一次，
+                // 仍为空则用「本回合已执行工具动作摘要」兜底，保证用户总有可见回复。
+                ModelOutput::Text(text) if text.trim().is_empty() => {
+                    if empty_retries < EMPTY_REPLY_RETRIES {
+                        empty_retries += 1;
+                        messages.push(ChatMessage::user(EMPTY_REPLY_RETRY_PROMPT.to_string()));
+                        continue;
+                    }
+                    let fallback = synthesize_fallback_reply(
+                        &messages,
+                        steps,
+                        "模型连续返回空回答（可能被网关截断或超载）",
+                    );
+                    messages.push(ChatMessage::assistant_text(fallback.clone()));
+                    final_text = Some(fallback.clone());
+                    emit(
+                        &mut events,
+                        &event_cell,
+                        TurnEvent::Final { text: fallback },
+                    );
+                    break;
+                }
                 ModelOutput::Text(text) => {
                     messages.push(ChatMessage::assistant_text(text.clone()));
                     final_text = Some(text.clone());
@@ -1021,11 +1064,53 @@ impl Agent {
         }
 
         if final_text.is_none() {
-            commit_turn_messages(session, &messages);
-            return Err(AgentError::Gateway(format!(
-                "达到最大回合数（{}），任务未正常结束",
-                self.config.max_turns
-            )));
+            // 步数耗尽不能只甩一句「达到最大回合数」：再补一次不带工具的收尾总结，
+            // 保证回合一定有可见结论（审查/分析类任务据此产出报告），
+            // 而不是让用户看到「思考完就停住」。
+            if abort.load(Ordering::Relaxed) {
+                commit_turn_messages(session, &messages);
+                return Err(AgentError::Aborted);
+            }
+            emit(&mut events, &event_cell, TurnEvent::ModelCall);
+            let mut wrap_messages = messages.clone();
+            wrap_messages.push(ChatMessage::user(WRAP_UP_PROMPT.to_string()));
+            let wrap_model = session.model_override.clone();
+            let mut emit_wrap_delta = |delta: String| {
+                emit(&mut events, &event_cell, TurnEvent::TokenDelta { delta });
+            };
+            let wrap_up = self
+                .provider
+                .complete_stream_with_model(
+                    wrap_model.as_deref(),
+                    &wrap_messages,
+                    &[],
+                    &mut emit_wrap_delta,
+                )
+                .await;
+            // 收尾总结同样不允许「空手而归」：模型没产出内容（或调用失败）时，
+            // 用本回合已执行的工具动作摘要兜底——回合必须以可见结论结束。
+            let text = match wrap_up {
+                Ok(ModelOutput::Text(text)) if !text.trim().is_empty() => text,
+                Ok(_) => synthesize_fallback_reply(
+                    &messages,
+                    steps,
+                    &format!(
+                        "达到最大回合数（{}）且收尾总结未产出内容",
+                        self.config.max_turns
+                    ),
+                ),
+                Err(error) => synthesize_fallback_reply(
+                    &messages,
+                    steps,
+                    &format!(
+                        "达到最大回合数（{}）且收尾总结调用失败：{error}",
+                        self.config.max_turns
+                    ),
+                ),
+            };
+            messages.push(ChatMessage::assistant_text(text.clone()));
+            final_text = Some(text.clone());
+            emit(&mut events, &event_cell, TurnEvent::Final { text });
         }
         let persist_started = std::time::Instant::now();
         commit_turn_messages(session, &messages);
@@ -1197,6 +1282,74 @@ fn tool_preview(outcome: &Result<serde_json::Value, String>) -> Option<String> {
         return None;
     }
     Some(truncate_tool_result(trimmed, TOOL_PREVIEW_CHARS))
+}
+
+/// 合成兜底回复：模型在回合结束时没有产出任何内容（空回答/收尾失败）时，
+/// 把本回合已执行的工具动作整理成可读摘要，保证用户总能得到明确结论，
+/// 而不是只看到一段越来越长的「思考过程」后什么都没有。
+fn synthesize_fallback_reply(messages: &[ChatMessage], steps: usize, reason: &str) -> String {
+    let mut actions: Vec<String> = Vec::new();
+    for message in messages {
+        let Some(calls) = &message.tool_calls else {
+            continue;
+        };
+        for call in calls {
+            let preview = tool_call_preview(&call.arguments);
+            let line = if preview.is_empty() {
+                format!("- `{}`", call.name)
+            } else {
+                format!("- `{}`：{preview}", call.name)
+            };
+            if !actions.contains(&line) {
+                actions.push(line);
+            }
+        }
+    }
+    let shown = actions.len().min(FALLBACK_ACTION_LIMIT);
+    let mut body = String::new();
+    body.push_str("> ⚠️ 本回合模型没有产出正式回答（");
+    body.push_str(reason);
+    body.push_str("）。以下为系统自动整理的工作摘要，供你确认或让我继续。\n\n");
+    if actions.is_empty() {
+        body.push_str("**本轮没有执行任何工具操作，也没有产出文本内容。**\n\n");
+    } else {
+        body.push_str(&format!(
+            "**本回合共执行 {steps} 步工具操作（列出前 {shown} 条）：**\n\n"
+        ));
+        for line in actions.iter().take(shown) {
+            body.push_str(line);
+            body.push('\n');
+        }
+        if actions.len() > shown {
+            body.push_str(&format!("- …（其余 {} 条已省略）\n", actions.len() - shown));
+        }
+        body.push('\n');
+    }
+    body.push_str("你可以直接回复「继续」让我接着完成剩余部分，或指出需要调整的地方。");
+    body
+}
+
+/// 工具调用参数摘要：优先取路径/命令等最具信息量的字段，截断到预览长度上限。
+fn tool_call_preview(arguments: &serde_json::Value) -> String {
+    const KEYS: [&str; 6] = ["path", "command", "file", "pattern", "query", "url"];
+    let raw = KEYS
+        .iter()
+        .find_map(|key| arguments.get(key).and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            arguments
+                .as_object()
+                .and_then(|map| map.values().find_map(serde_json::Value::as_str))
+        })
+        .unwrap_or_default()
+        .trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let mut preview: String = raw.chars().take(FALLBACK_ACTION_PREVIEW_CHARS).collect();
+    if raw.chars().count() > FALLBACK_ACTION_PREVIEW_CHARS {
+        preview.push('…');
+    }
+    preview.replace('\n', " ")
 }
 
 /// 粗略 token 估算：字符数 / 2 + 每条消息固定开销。

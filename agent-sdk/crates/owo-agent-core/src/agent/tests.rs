@@ -700,6 +700,113 @@ async fn repeated_identical_tool_call_is_loop_guarded() {
     );
 }
 
+/// 远端 agent.rs 取优：步数耗尽补一次不带工具的收尾总结，回合以可见结论结束
+/// （旧行为直接返回「达到最大回合数」错误，用户只看到思考过程后什么都没有）。
+#[tokio::test]
+async fn max_turns_exhaustion_runs_wrap_up_and_returns_final_text() {
+    let state = ProbeState::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(ProbeTool {
+        label: "probe_a",
+        delay_ms: 0,
+        class: EffectClass::Read,
+        host_verified: true,
+        state: Arc::clone(&state),
+    });
+    let call = |index: &str| crate::gateway::ToolCall {
+        id: format!("call-{index}"),
+        name: "probe_a".to_string(),
+        arguments: serde_json::json!({ "path": format!("{index}.txt") }),
+    };
+    let outputs = Mutex::new(VecDeque::from(vec![
+        ModelOutput::ToolCalls(vec![call("a")]),
+        ModelOutput::ToolCalls(vec![call("b")]),
+        ModelOutput::Text("收尾总结报告".to_string()),
+    ]));
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider { outputs }),
+        registry,
+        Policy::new("."),
+        AgentConfig {
+            max_turns: 2,
+            ..Default::default()
+        },
+    );
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "跑两个探针",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("收尾总结应让回合成功");
+    assert_eq!(outcome.final_text.as_deref(), Some("收尾总结报告"));
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::Final { text } if text == "收尾总结报告")),
+        "收尾总结必须以 Final 事件外发"
+    );
+}
+
+/// 远端 agent.rs 取优：连续空回答走兜底摘要（含本回合工具动作），不静默失败。
+#[tokio::test]
+async fn empty_reply_falls_back_to_tool_action_summary() {
+    let state = ProbeState::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(ProbeTool {
+        label: "probe_a",
+        delay_ms: 0,
+        class: EffectClass::Read,
+        host_verified: true,
+        state: Arc::clone(&state),
+    });
+    let outputs = Mutex::new(VecDeque::from(vec![
+        ModelOutput::ToolCalls(vec![crate::gateway::ToolCall {
+            id: "call-a".to_string(),
+            name: "probe_a".to_string(),
+            arguments: serde_json::json!({ "path": "fallback.txt" }),
+        }]),
+        ModelOutput::Text("   ".to_string()),
+        ModelOutput::Text(String::new()),
+    ]));
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider { outputs }),
+        registry,
+        Policy::new("."),
+        AgentConfig {
+            max_turns: 4,
+            ..Default::default()
+        },
+    );
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "跑探针",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("兜底摘要应让回合成功");
+    let text = outcome.final_text.expect("必须有可见回复");
+    assert!(
+        text.contains("本回合模型没有产出正式回答"),
+        "空回答应走兜底摘要：{text}"
+    );
+    assert!(
+        text.contains("fallback.txt"),
+        "兜底摘要应列出工具动作参数：{text}"
+    );
+}
+
 /// 签名稳定性：参数键序不同但语义相同 → 视为同一调用（否则弱模型换键序即可绕过）。
 #[test]
 fn tool_call_signature_ignores_key_order() {
