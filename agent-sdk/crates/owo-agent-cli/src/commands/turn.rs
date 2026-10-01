@@ -21,8 +21,9 @@ use std::sync::Arc;
 pub(crate) struct TurnArgs {
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
+    /// 任务提示词；传 `-` 或省略（stdin 非终端）时从 stdin 读取（B4）
     #[arg(long)]
-    prompt: String,
+    prompt: Option<String>,
     #[arg(long)]
     model: Option<String>,
     /// 自动允许所有审批（仅测试用；等价 --permissions trusted）
@@ -31,6 +32,41 @@ pub(crate) struct TurnArgs {
     /// 数据根（缺省用户级数据目录）；用于发现/启动共享 Daemon。
     #[arg(long)]
     data_dir: Option<PathBuf>,
+}
+
+/// B4（取优合并自远端 engine）：解析一次性任务的提示词来源——
+/// `--prompt X` > `--prompt -`（stdin）> stdin 管道（未显式传入且非终端）。
+fn resolve_turn_prompt(option: Option<String>) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::{IsTerminal, Read};
+    let explicit = option.as_deref().map(str::trim);
+    let needs_stdin =
+        matches!(explicit, Some("-")) || (explicit.is_none() && !std::io::stdin().is_terminal());
+    let stdin_text = if needs_stdin {
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer)?;
+        Some(buffer)
+    } else {
+        None
+    };
+    resolve_prompt_value(explicit, stdin_text).map_err(Into::into)
+}
+
+/// [`resolve_turn_prompt`] 的纯函数部分（IO 之外可单测）：
+/// 显式文本优先；`-`/省略时取 stdin；空文本返回可读错误。
+fn resolve_prompt_value(
+    explicit: Option<&str>,
+    stdin_text: Option<String>,
+) -> Result<String, String> {
+    let prompt = match explicit {
+        Some("-") => stdin_text.unwrap_or_default(),
+        Some(text) if !text.is_empty() => text.to_string(),
+        Some(_) => String::new(),
+        None => stdin_text.unwrap_or_default(),
+    };
+    if prompt.trim().is_empty() {
+        return Err("提示词为空：用 --prompt 传入，或从 stdin 喂入（--prompt -）".to_string());
+    }
+    Ok(prompt)
 }
 
 pub(crate) async fn run_turn(
@@ -63,7 +99,8 @@ pub(crate) async fn run_turn(
         eprintln!("⚠ 已弃用：--no-approval 将在未来版本移除；兼容期等价 --permissions trusted（高风险：全部操作自动批准）");
     }
 
-    let mut stream = client.open_turn(&session.id, &args.prompt).await?;
+    let prompt = resolve_turn_prompt(args.prompt.clone())?;
+    let mut stream = client.open_turn(&session.id, &prompt).await?;
     let mut steps = 0usize;
     let mut final_text: Option<String> = None;
     let mut stream_error: Option<String> = None;
@@ -238,4 +275,40 @@ fn decide_permission(
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(parse_approval_response(&line))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_prompt_value;
+
+    /// B4：显式 `--prompt X` 优先，不触碰 stdin。
+    #[test]
+    fn explicit_prompt_wins_over_stdin() {
+        let prompt = resolve_prompt_value(Some("写一个测试"), Some("stdin 内容".to_string()))
+            .expect("显式提示词可用");
+        assert_eq!(prompt, "写一个测试");
+    }
+
+    /// B4：`--prompt -` 读 stdin；stdin 为空 → 可读错误而非空提示词。
+    #[test]
+    fn dash_reads_stdin_and_empty_is_rejected() {
+        let prompt = resolve_prompt_value(Some("-"), Some("来自管道".to_string()))
+            .expect("stdin 提示词可用");
+        assert_eq!(prompt, "来自管道");
+
+        let error =
+            resolve_prompt_value(Some("-"), Some(String::new())).expect_err("空 stdin 必须报错");
+        assert!(error.contains("提示词为空"), "{error}");
+    }
+
+    /// B4：省略 `--prompt` 且提供了 stdin 管道内容 → 整体读入；都没有 → 报错。
+    #[test]
+    fn missing_prompt_uses_pipe_or_errors() {
+        let prompt =
+            resolve_prompt_value(None, Some("管道内容".to_string())).expect("管道内容可用");
+        assert_eq!(prompt, "管道内容");
+
+        let error = resolve_prompt_value(None, None).expect_err("无提示词必须报错");
+        assert!(error.contains("提示词为空"), "{error}");
+    }
 }
