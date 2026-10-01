@@ -927,6 +927,31 @@ impl TuiApp {
             SseEvent::TurnFailed { message } => {
                 self.push_line(format!("  ✘ 回合失败：{message}"), red());
             }
+            // 思考通道（取优合并自远端 engine）：TUI 折叠（不打断回答流）。
+            SseEvent::ReasoningDelta { .. } => {}
+            // 计划更新（todo 工具）：清空流后提示步骤数。
+            SseEvent::PlanUpdate { steps } => {
+                if !self.streaming.is_empty() {
+                    let text = std::mem::take(&mut self.streaming);
+                    self.push_line(text, default());
+                }
+                let count = steps.as_array().map(Vec::len).unwrap_or(0);
+                self.push_line(format!("  ☰ 计划已更新（{count} 步）"), cyan());
+            }
+            // 回合统计（取优合并自远端 engine）：汇报耗时/步数/token。
+            SseEvent::TurnStats {
+                steps,
+                duration_ms,
+                total_tokens,
+                ..
+            } => {
+                self.push_line(
+                    format!("  ⏱ {steps} 步 / {duration_ms} ms / {total_tokens} tokens"),
+                    cyan(),
+                );
+            }
+            // 提问卡（ask_user）：TUI 暂未接线，忽略（由 daemon 行式 REPL/前端处理）。
+            SseEvent::UserQuestion { .. } | SseEvent::UserAnswered { .. } => {}
         }
     }
 }

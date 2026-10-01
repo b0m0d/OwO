@@ -13,6 +13,12 @@ pub(crate) fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {
         owo_agent_core::TurnEvent::TokenDelta { delta } => Some(SseEvent::TokenDelta {
             delta: delta.clone(),
         }),
+        owo_agent_core::TurnEvent::ReasoningDelta { delta } => Some(SseEvent::ReasoningDelta {
+            delta: delta.clone(),
+        }),
+        owo_agent_core::TurnEvent::PlanUpdate { steps } => Some(SseEvent::PlanUpdate {
+            steps: steps.clone(),
+        }),
         owo_agent_core::TurnEvent::Compaction { summary } => Some(SseEvent::Compaction {
             summary: summary.clone(),
         }),
@@ -69,7 +75,12 @@ pub(crate) fn to_event(seq: Option<u64>, sse: SseEvent) -> Result<Event, Infalli
         SseEvent::TokenDelta { .. } => "token_delta",
         SseEvent::Compaction { .. } => "compaction",
         SseEvent::PermissionResolved { .. } => "permission_resolved",
+        SseEvent::ReasoningDelta { .. } => "reasoning_delta",
+        SseEvent::PlanUpdate { .. } => "plan_update",
+        SseEvent::UserQuestion { .. } => "user_question",
+        SseEvent::UserAnswered { .. } => "user_answered",
         SseEvent::TurnFailed { .. } => "turn_failed",
+        SseEvent::TurnStats { .. } => "turn_stats",
     };
     // R10：SSE 事件统一携带协议版本 v（见 protocol::SSE_PROTOCOL_VERSION）。
     let mut payload = serde_json::to_value(&sse).unwrap_or_else(|_| json!({}));

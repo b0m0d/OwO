@@ -363,6 +363,47 @@ impl ModelProvider for OpenAiCompatibleProvider {
         tools: &[ToolSpec],
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelOutput, String> {
+        // 兼容入口：只转发正文增量（思考通道经 reasoning 变体消费）。
+        let mut forward = |chunk: StreamChunk| {
+            if let StreamChunk::Content(text) = chunk {
+                on_delta(text);
+            }
+        };
+        self.stream_completion(model, messages, tools, &mut forward)
+            .await
+    }
+
+    async fn complete_stream_with_reasoning(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.stream_completion(None, messages, tools, on_chunk)
+            .await
+    }
+
+    async fn complete_stream_with_reasoning_and_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.stream_completion(model, messages, tools, on_chunk)
+            .await
+    }
+}
+
+impl OpenAiCompatibleProvider {
+    /// 流式补全唯一实现：正文与思考通道统一经 `on_chunk` 回调（类型区分）。
+    async fn stream_completion(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
         if !self.cloud_enabled() {
             return Err("云端模型已禁用（数据出境开关关闭）".to_string());
         }
@@ -394,7 +435,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 &mut buffer,
                 &mut content,
                 &mut accumulators,
-                on_delta,
+                on_chunk,
                 &mut saw_sse,
             ) {
                 self.record_usage(&json!({
@@ -418,7 +459,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 &mut buffer,
                 &mut content,
                 &mut accumulators,
-                on_delta,
+                on_chunk,
                 &mut saw_sse,
             ) {
                 self.record_usage(&json!({

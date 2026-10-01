@@ -131,7 +131,7 @@ pub(super) fn consume_stream_buffer(
     buffer: &mut String,
     content: &mut String,
     accumulators: &mut HashMap<usize, ToolCallAccumulator>,
-    on_delta: &mut (dyn FnMut(String) + Send),
+    on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
     saw_sse: &mut bool,
 ) -> Option<TokenUsage> {
     let mut usage = None;
@@ -151,7 +151,11 @@ pub(super) fn consume_stream_buffer(
             }
             if let Some(delta_content) = delta.content {
                 content.push_str(&delta_content);
-                on_delta(delta_content);
+                on_chunk(StreamChunk::Content(delta_content));
+            }
+            // 思考通道（GLM/DeepSeek）：与正文分开回调，由上层决定展示方式。
+            if let Some(reasoning) = delta.reasoning {
+                on_chunk(StreamChunk::Reasoning(reasoning));
             }
             accumulate_tool_fragments(accumulators, &delta.tool_call_fragments);
         }

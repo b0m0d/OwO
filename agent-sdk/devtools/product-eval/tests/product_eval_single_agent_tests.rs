@@ -190,6 +190,8 @@ macro_rules! call_tool {
             subagent: None,
             skills: &skills,
             elements: &elements,
+            fanout: None,
+            abort: None,
         };
         $tool.run(&mut ctx, $args).await
     }};

@@ -251,6 +251,20 @@ pub trait ModelProvider: Send + Sync {
         self.complete_stream(messages, tools, &mut forward).await
     }
 
+    /// 带模型覆盖的思考通道流式补全（会话 `/model` 与思考展示并存）。
+    /// 默认实现忽略思考通道，委托 `complete_stream_with_model`。
+    async fn complete_stream_with_reasoning_and_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        let mut forward = |text: String| on_chunk(StreamChunk::Content(text));
+        self.complete_stream_with_model(model, messages, tools, &mut forward)
+            .await
+    }
+
     async fn complete_stream_with_model(
         &self,
         model: Option<&str>,

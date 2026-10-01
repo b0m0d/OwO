@@ -774,7 +774,10 @@ impl CaseExecutor for SingleAgentExecutor {
                 }
                 TurnEvent::PermissionRequest(_) => state.approval_requests += 1,
                 TurnEvent::Final { text } => state.final_text = Some(text.clone()),
-                TurnEvent::TokenDelta { .. } | TurnEvent::Compaction { .. } => {}
+                TurnEvent::TokenDelta { .. }
+                | TurnEvent::ReasoningDelta { .. }
+                | TurnEvent::PlanUpdate { .. }
+                | TurnEvent::Compaction { .. } => {}
             }
         };
 

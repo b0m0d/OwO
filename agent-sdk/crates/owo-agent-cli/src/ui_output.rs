@@ -243,6 +243,30 @@ impl StreamPrinter {
                 self.clear_status();
                 println!("  {}（上下文已压缩：{}）", "✦".yellow(), summary);
             }
+            TurnEvent::ReasoningDelta { delta } => {
+                // 思考通道（取优合并自远端 engine）：行式 REPL 以暗色实时输出，
+                // 与正文区分；不写入最终回答文本。
+                use std::io::Write;
+                print!("{}", delta.dimmed());
+                let _ = std::io::stdout().flush();
+            }
+            TurnEvent::PlanUpdate { steps } => {
+                // 计划更新：行式 REPL 打印变更后的步骤清单（取优合并自远端 engine）。
+                self.clear_status();
+                let rendered = steps
+                    .as_array()
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.get("content").and_then(|value| value.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("；")
+                    })
+                    .unwrap_or_default();
+                if !rendered.is_empty() {
+                    println!("  {} 计划更新：{rendered}", "☰".cyan());
+                }
+            }
             TurnEvent::Final { text } => self.finish_final(text),
         }
     }
@@ -317,6 +341,52 @@ impl StreamPrinter {
             SseEvent::Compaction { summary } => {
                 self.clear_status();
                 println!("  {}（上下文已压缩：{}）", "✦".yellow(), summary);
+            }
+            // 思考通道（取优合并自远端 engine）：暗色流式，不进入最终回答。
+            SseEvent::ReasoningDelta { delta } => {
+                self.clear_status();
+                use std::io::Write;
+                print!("{}", delta.dimmed());
+                let _ = std::io::stdout().flush();
+            }
+            SseEvent::PlanUpdate { steps } => {
+                self.clear_status();
+                let count = steps.as_array().map(Vec::len).unwrap_or(0);
+                println!("  {} 计划已更新（{count} 步）", "☰".cyan());
+            }
+            SseEvent::TurnStats {
+                steps,
+                duration_ms,
+                total_tokens,
+                ..
+            } => {
+                self.clear_status();
+                println!(
+                    "  {} {steps} 步 / {duration_ms} ms / {total_tokens} tokens",
+                    "⏱".cyan()
+                );
+            }
+            SseEvent::UserQuestion {
+                question_id,
+                question,
+                options,
+            } => {
+                self.clear_status();
+                println!("  {} 模型提问（{question_id}）：{question}", "?".yellow());
+                if !options.is_empty() {
+                    println!("     选项：{}", options.join(" / "));
+                }
+            }
+            SseEvent::UserAnswered {
+                question_id,
+                answer,
+                source,
+            } => {
+                self.clear_status();
+                println!(
+                    "  {} 已答复（{question_id}/{source}）：{answer}",
+                    "✔".green()
+                );
             }
             SseEvent::Final { text } => self.finish_final(text),
         }

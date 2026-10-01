@@ -3,7 +3,7 @@ use crate::autoreview::{ReviewVerdict, Reviewer};
 use crate::context::{build_system_prompt, load_project_rules};
 use crate::deadline::{DeadlineBudget, Phase, PhaseBudgets, PhaseTiming};
 use crate::error::AgentError;
-use crate::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage};
+use crate::gateway::{ChatMessage, ModelOutput, ModelProvider, StreamChunk, TokenUsage};
 use crate::injection::sanitize_tool_result;
 use crate::permissions::{Approver, Decision, PermissionRequest, Policy};
 use crate::session::Session;
@@ -51,6 +51,14 @@ pub enum TurnEvent {
     ModelCall,
     TokenDelta {
         delta: String,
+    },
+    /// 深度思考增量（模型 reasoning；不写入对话历史，仅 UI 展示）。
+    ReasoningDelta {
+        delta: String,
+    },
+    /// 任务计划更新（todo 工具整表替换后外发）：前端渲染步骤进度。
+    PlanUpdate {
+        steps: serde_json::Value,
     },
     Compaction {
         summary: String,
@@ -546,7 +554,7 @@ impl Agent {
             const FIRST_TOKEN_UNSET: u64 = u64::MAX;
             // 声明须先于 emit_delta 闭包（闭包捕获引用）。
             let first_token_ms = std::sync::atomic::AtomicU64::new(FIRST_TOKEN_UNSET);
-            let mut emit_delta = |delta: String| {
+            let mut emit_chunk = |chunk: StreamChunk| {
                 // §9.3 瀑布：首个增量到达即记录首 token 时延（compare_exchange 保证只记首次）。
                 let _ = first_token_ms.compare_exchange(
                     FIRST_TOKEN_UNSET,
@@ -554,11 +562,12 @@ impl Agent {
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                 );
-                emit(
-                    &mut events,
-                    on_event_reborrow,
-                    TurnEvent::TokenDelta { delta },
-                );
+                // 思考通道单独事件外发（不写入对话历史；CLI/前端可折叠展示）。
+                let event = match chunk {
+                    StreamChunk::Content(delta) => TurnEvent::TokenDelta { delta },
+                    StreamChunk::Reasoning(delta) => TurnEvent::ReasoningDelta { delta },
+                };
+                emit(&mut events, on_event_reborrow, event);
             };
             // §9.2：每次模型调用（即下一回合的 retry 点）前复查剩余预算；
             // 激活时以阶段剩余预算包裹超时，超时即结构化失败。
@@ -568,11 +577,11 @@ impl Agent {
             let wire_model = session.model_override.clone();
             let attempt = async {
                 tokio::select! {
-                    output = self.provider.complete_stream_with_model(
+                    output = self.provider.complete_stream_with_reasoning_and_model(
                         wire_model.as_deref(),
                         &messages,
                         &tools,
-                        &mut emit_delta,
+                        &mut emit_chunk,
                     ) => {
                         output.map_err(AgentError::Gateway)
                     }
@@ -1052,6 +1061,9 @@ impl Agent {
                                     depth: self.config.subagent_depth,
                                     max_turns: self.config.max_turns,
                                 };
+                                // P2-5：计划快照——工具执行后清单变化即发 PlanUpdate
+                                //（前端渲染步骤进度；todo 工具为整表替换语义）。
+                                let plan_before = session.todos.clone();
                                 let mut ctx = ToolContext {
                                     workspace: &workspace,
                                     policy: &self.policy,
@@ -1120,6 +1132,15 @@ impl Agent {
                                         preview: tool_preview(&outcome),
                                     },
                                 );
+                                if ctx.session.todos != plan_before {
+                                    if let Ok(steps) = serde_json::to_value(&ctx.session.todos) {
+                                        emit(
+                                            &mut events,
+                                            &event_cell,
+                                            TurnEvent::PlanUpdate { steps },
+                                        );
+                                    }
+                                }
                                 outcome
                             } else {
                                 Err(format!("permission denied: {}", prepared[index].reason))

@@ -233,6 +233,7 @@ pub(crate) async fn turn(
                 // §3.2：trace 落盘后发布 traces 域失效（每个回合至多一次）。
                 crate::event_stream::hub()
                     .publish_invalidate(crate::event_stream::InvalidateDomain::Traces);
+                let mut cost_usd = 0.0f64;
                 if outcome.usage.total_tokens > 0 {
                     let input_price = std::env::var("OWO_MODEL_INPUT_PRICE_PER_MTOK")
                         .ok()
@@ -243,6 +244,7 @@ pub(crate) async fn turn(
                         .and_then(|value| value.parse::<f64>().ok())
                         .unwrap_or(0.0);
                     let cost = outcome.usage.cost_estimate_usd(input_price, output_price);
+                    cost_usd = cost;
                     if let Ok(mut audit) = state_for_audit.agent.audit_log().lock() {
                         audit.record(
                             "model",
@@ -267,6 +269,23 @@ pub(crate) async fn turn(
                         outcome.usage.completion_tokens,
                     );
                 }
+                // 取优合并（远端 engine）：回合结束补发 TurnStats，前端汇报卡展示
+                // 耗时/步数/消耗；失败在此前已由 TurnFailed 终态收口。
+                let _ = persist_and_queue_event(
+                    producer_store.as_ref(),
+                    &producer_session_id,
+                    &producer_turn_id,
+                    &producer_queue,
+                    &producer_receiver,
+                    SseEvent::TurnStats {
+                        steps: outcome.steps,
+                        duration_ms: outcome.duration_ms,
+                        prompt_tokens: outcome.usage.prompt_tokens,
+                        completion_tokens: outcome.usage.completion_tokens,
+                        total_tokens: outcome.usage.total_tokens,
+                        cost_usd,
+                    },
+                );
             }
             Err(error) => {
                 let error_text = error.to_string();

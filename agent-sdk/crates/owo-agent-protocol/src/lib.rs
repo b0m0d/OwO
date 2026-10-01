@@ -800,6 +800,15 @@ pub enum SseEvent {
     TokenDelta {
         delta: String,
     },
+    /// 深度思考增量（模型 reasoning_content；不写入对话历史）。
+    ReasoningDelta {
+        delta: String,
+    },
+    /// 任务计划更新（P2-5，`todo` 工具）：前端渲染步骤进度。
+    PlanUpdate {
+        /// `[{ "content": "...", "status": "pending|in_progress|completed" }]`。
+        steps: Value,
+    },
     Compaction {
         summary: String,
     },
@@ -814,9 +823,38 @@ pub enum SseEvent {
         #[serde(default)]
         allowed: bool,
     },
+    /// 模型请求向用户提问（ask_user 工具）：前端展示提问卡，回合挂起等待回答。
+    /// 用户通过 `POST /session/{id}/answer/{question_id}` 提交答案。
+    UserQuestion {
+        question_id: String,
+        question: String,
+        #[serde(default)]
+        options: Vec<String>,
+    },
+    /// 用户已回答（或提问超时/中止）：前端关闭提问卡并回显答案。
+    UserAnswered {
+        question_id: String,
+        answer: String,
+        /// 回答来源：user=用户提交；timeout=超时未答；aborted=回合中止。
+        #[serde(default)]
+        source: String,
+    },
     /// 回合失败终态（异常/中断）：必须显式下发，避免前端停留在"执行中"。
     TurnFailed {
         message: String,
+    },
+    /// 回合统计（`run_turn` 结束后补发）：前端回合汇报卡展示耗时/步数/消耗。
+    TurnStats {
+        steps: usize,
+        duration_ms: u64,
+        #[serde(default)]
+        prompt_tokens: u64,
+        #[serde(default)]
+        completion_tokens: u64,
+        #[serde(default)]
+        total_tokens: u64,
+        #[serde(default)]
+        cost_usd: f64,
     },
 }
 

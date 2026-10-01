@@ -700,6 +700,133 @@ async fn repeated_identical_tool_call_is_loop_guarded() {
     );
 }
 
+/// 取优合并（远端 engine）：思考通道增量以 ReasoningDelta 事件外发。
+struct ReasoningProvider;
+
+#[async_trait::async_trait]
+impl crate::gateway::ModelProvider for ReasoningProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        Ok(ModelOutput::Text("答复".to_string()))
+    }
+
+    async fn complete_stream_with_reasoning_and_model(
+        &self,
+        _model: Option<&str>,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        on_chunk(StreamChunk::Reasoning("先想一步。".to_string()));
+        on_chunk(StreamChunk::Content("答复".to_string()));
+        Ok(ModelOutput::Text("答复".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn reasoning_chunks_are_emitted_as_events() {
+    let agent = Agent::new(
+        Arc::new(ReasoningProvider),
+        ToolRegistry::new(),
+        Policy::new("."),
+        AgentConfig::default(),
+    );
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "问",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("回合应成功");
+    let reasoning: Vec<&str> = outcome
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TurnEvent::ReasoningDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, vec!["先想一步。"]);
+    assert_eq!(outcome.final_text.as_deref(), Some("答复"));
+}
+
+/// 写计划清单的测试工具（模拟 todo 工具的整表替换语义）。
+struct PlanWriteTool;
+
+#[async_trait::async_trait]
+impl Tool for PlanWriteTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "plan_write".into(),
+            description: "写计划".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            effect: None,
+        }
+    }
+
+    async fn run(
+        &self,
+        ctx: &mut ToolContext<'_>,
+        _args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        ctx.session.todos = vec![crate::session::TodoItem {
+            content: "步骤A".to_string(),
+            status: "in_progress".to_string(),
+        }];
+        Ok(serde_json::json!({ "ok": true }))
+    }
+}
+
+#[tokio::test]
+async fn todo_change_emits_plan_update() {
+    let mut registry = ToolRegistry::new();
+    registry.register(PlanWriteTool);
+    let outputs = Mutex::new(VecDeque::from(vec![
+        ModelOutput::ToolCalls(vec![crate::gateway::ToolCall {
+            id: "plan-1".to_string(),
+            name: "plan_write".to_string(),
+            arguments: serde_json::json!({}),
+        }]),
+        ModelOutput::Text("好了".to_string()),
+    ]));
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider { outputs }),
+        registry,
+        Policy::new("."),
+        AgentConfig::default(),
+    );
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "写计划",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("回合应成功");
+    let plan = outcome
+        .events
+        .iter()
+        .find_map(|event| match event {
+            TurnEvent::PlanUpdate { steps } => Some(steps.clone()),
+            _ => None,
+        })
+        .expect("todo 变化应外发 PlanUpdate");
+    assert_eq!(plan[0]["content"], serde_json::json!("步骤A"));
+    assert_eq!(plan[0]["status"], serde_json::json!("in_progress"));
+}
+
 fn blocking_hook(event: &str, matcher: Option<&str>, reason: &str) -> crate::hooks::HookConfig {
     let command = if cfg!(windows) {
         format!("echo {reason} 1>&2 & exit /b 2")
