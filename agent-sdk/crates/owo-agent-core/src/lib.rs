@@ -352,7 +352,7 @@ pub use learn::{
     SuggestionAction,
 };
 pub use lease::{Lease, LeaseConfig, LeaseError, LeaseManager};
-pub use mcp::{McpClient, McpRegistry, McpTool};
+pub use mcp::{McpClient, McpPrompt, McpRegistry, McpResource, McpTool};
 // McpServerConfig 现属插件域（owo-agent-plugins），由下面的 plugin 别名转出。
 pub use node_agent::{NodeAgent, NodeStatus};
 pub use notes::{

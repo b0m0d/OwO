@@ -13,7 +13,7 @@
 
 use crate::audit::AuditLog;
 use crate::external_tools;
-use crate::mcp::{McpClient, McpTool};
+use crate::mcp::{McpClient, McpPrompt, McpResource, McpTool};
 use crate::permissions::{Decision, PermissionRequest, Policy};
 use crate::session::Session;
 use crate::skill::SkillRegistry;
@@ -693,11 +693,92 @@ impl ToolRegistry {
         }
     }
 
+    /// A2-2：把 MCP 服务器的 resources/prompts 注册为**泛化工具**——
+    /// 每服务器至多 2 个（`{server}_read_resource` / `{server}_get_prompt`），
+    /// 逐资源/逐模板开工具会撑爆工具表；目录摘要放在描述里供模型选 URI/模板名。
+    /// 副作用按「未声明注解的 MCP 工具」登记（Execute，deny-by-default），
+    /// 不因名字里带 read 就自动降级。
+    pub fn register_mcp_extras(
+        &mut self,
+        server_name: &str,
+        client: Arc<tokio::sync::Mutex<McpClient>>,
+        resources: Vec<McpResource>,
+        prompts: Vec<McpPrompt>,
+    ) {
+        let prefix = sanitize_tool_name(server_name);
+        if !resources.is_empty() {
+            let catalog: Vec<String> = resources
+                .iter()
+                .take(12)
+                .map(|resource| {
+                    if resource.name.is_empty() {
+                        resource.uri.clone()
+                    } else {
+                        format!("{}（{}）", resource.uri, resource.name)
+                    }
+                })
+                .collect();
+            let full_name = format!("{prefix}_read_resource");
+            let effect =
+                crate::tool_effects::register_mcp_effect(server_name, "read_resource", None, false);
+            self.tools.push(Arc::new(McpResourceAdapter {
+                full_name: full_name.clone(),
+                server_name: server_name.to_string(),
+                spec: ToolSpec {
+                    name: full_name,
+                    description: format!(
+                        "读取 MCP 服务器 {server_name} 的资源内容（resources/read）。可用资源：{}",
+                        catalog.join("；")
+                    ),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "uri": { "type": "string", "description": "资源 URI（见工具描述里的目录）" }
+                        },
+                        "required": ["uri"]
+                    }),
+                    effect: Some(effect),
+                },
+                client: Arc::clone(&client),
+            }));
+        }
+        if !prompts.is_empty() {
+            let catalog: Vec<String> = prompts
+                .iter()
+                .take(12)
+                .map(|prompt| prompt.name.clone())
+                .collect();
+            let full_name = format!("{prefix}_get_prompt");
+            let effect =
+                crate::tool_effects::register_mcp_effect(server_name, "get_prompt", None, false);
+            self.tools.push(Arc::new(McpPromptAdapter {
+                full_name: full_name.clone(),
+                server_name: server_name.to_string(),
+                spec: ToolSpec {
+                    name: full_name,
+                    description: format!(
+                        "获取 MCP 服务器 {server_name} 的提示模板（prompts/get）。可用模板：{}",
+                        catalog.join("；")
+                    ),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "模板名" },
+                            "arguments": { "type": "object", "description": "模板参数（可选，键值对）" }
+                        },
+                        "required": ["name"]
+                    }),
+                    effect: Some(effect),
+                },
+                client,
+            }));
+        }
+    }
+
     /// 按需取 MCP 工具的完整 schema（压缩注册时保留；小 schema 工具不重复存储）。
     pub fn full_schema(&self, name: &str) -> Option<Value> {
         self.full_schemas.get(name).cloned()
     }
-
     /// 移除工具时同步清理完整 schema 副本与副作用注册。
     fn remove_prefix_inner(&mut self, prefix: &str) -> usize {
         let before = self.tools.len();
@@ -2468,6 +2549,73 @@ impl std::fmt::Debug for McpToolAdapter {
             .debug_struct("McpToolAdapter")
             .field("full_name", &self.full_name)
             .finish()
+    }
+}
+
+/// A2-2：MCP 资源读取的泛化工具（`{server}_read_resource`）。
+struct McpResourceAdapter {
+    full_name: String,
+    server_name: String,
+    spec: ToolSpec,
+    client: Arc<tokio::sync::Mutex<McpClient>>,
+}
+
+#[async_trait]
+impl Tool for McpResourceAdapter {
+    fn spec(&self) -> ToolSpec {
+        self.spec.clone()
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let uri = required_string(&args, "uri")?;
+        let mut client = self.client.lock().await;
+        client
+            .read_resource(&uri)
+            .await
+            .map_err(|error| format!("MCP 资源读取失败（{}:{}）：{error}", self.server_name, uri))
+    }
+}
+
+impl std::fmt::Debug for McpResourceAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpResourceAdapter")
+            .field("full_name", &self.full_name)
+            .finish()
+    }
+}
+
+/// A2-2：MCP 提示模板获取的泛化工具（`{server}_get_prompt`）。
+struct McpPromptAdapter {
+    full_name: String,
+    server_name: String,
+    spec: ToolSpec,
+    client: Arc<tokio::sync::Mutex<McpClient>>,
+}
+
+impl std::fmt::Debug for McpPromptAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpPromptAdapter")
+            .field("full_name", &self.full_name)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl Tool for McpPromptAdapter {
+    fn spec(&self) -> ToolSpec {
+        self.spec.clone()
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let name = required_string(&args, "name")?;
+        let arguments = args.get("arguments").cloned();
+        let mut client = self.client.lock().await;
+        client
+            .get_prompt(&name, arguments)
+            .await
+            .map_err(|error| format!("MCP 模板获取失败（{}:{}）：{error}", self.server_name, name))
     }
 }
 

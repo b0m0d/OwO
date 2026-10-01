@@ -1935,6 +1935,7 @@ dependencies = [
  "owo-agent-plugins",
  "owo-agent-tool-safety",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

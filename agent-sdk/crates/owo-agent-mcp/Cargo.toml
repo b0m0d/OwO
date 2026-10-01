@@ -22,6 +22,7 @@ owo-agent-plugins.workspace = true
 owo-agent-tool-safety.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 # 内联全限定路径（`mcp.rs:285` 的 `tracing::info!`）不会出现在 `use` 行里，
 # 因此依赖清单必须按「use 行 + 内联全限定路径」两遍核（M5/M3 都踩过）。

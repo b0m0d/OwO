@@ -225,6 +225,19 @@ impl Agent {
         }
     }
 
+    /// A2-2：注册 MCP resources/prompts 泛化工具（与 tools 一并热注册）。
+    pub fn register_mcp_extras(
+        &self,
+        server_name: &str,
+        client: Arc<tokio::sync::Mutex<crate::mcp::McpClient>>,
+        resources: Vec<crate::mcp::McpResource>,
+        prompts: Vec<crate::mcp::McpPrompt>,
+    ) {
+        if let Ok(mut registry) = self.registry.write() {
+            registry.register_mcp_extras(server_name, client, resources, prompts);
+        }
+    }
+
     /// MCP 客户端进程注册表（进程级热卸载/状态查询）。
     pub fn mcp_clients(&self) -> Arc<crate::mcp::McpRegistry> {
         Arc::clone(&self.mcp_clients)
@@ -242,15 +255,15 @@ impl Agent {
     ) -> Result<usize, String> {
         let client = crate::mcp::McpClient::connect(config).await?;
         let tools = client.tools();
+        let resources = client.resources();
+        let prompts = client.prompts();
         // §5.2：先按 config 声明宿主可信只读（server+tool+schema hash），
         // 随后 register 时 hash 匹配的 readOnlyHint 才能降级为 Read。
         crate::tool_effects::declare_trusted_from_config(config, &tools);
         let tool_count = tools.len();
-        self.register_mcp_tools(
-            &config.name,
-            Arc::new(tokio::sync::Mutex::new(client)),
-            tools,
-        );
+        let client = Arc::new(tokio::sync::Mutex::new(client));
+        self.register_mcp_tools(&config.name, Arc::clone(&client), tools);
+        self.register_mcp_extras(&config.name, client, resources, prompts);
         Ok(tool_count)
     }
 

@@ -1,6 +1,7 @@
 //! MCP（Model Context Protocol）客户端：stdio 与 HTTP 双传输，JSON-RPC 2.0。
 
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,6 +62,29 @@ pub struct McpTool {
     pub annotations: Option<Value>,
 }
 
+/// A2-2：MCP 资源（resources/list 条目）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpResource {
+    pub uri: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+}
+
+/// A2-2：MCP 提示模板（prompts/list 条目）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpPrompt {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// 模板参数声明（[{name, description?, required?}]，原样透传给模型）。
+    #[serde(default)]
+    pub arguments: Vec<Value>,
+}
+
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
 struct StdioTransport {
@@ -85,6 +109,10 @@ enum Transport {
 pub struct McpClient {
     transport: Transport,
     tools: Vec<McpTool>,
+    /// A2-2：resources/list 缓存（连接时按能力协商拉取）。
+    resources: Vec<McpResource>,
+    /// A2-2：prompts/list 缓存。
+    prompts: Vec<McpPrompt>,
     config: McpServerConfig,
 }
 
@@ -238,6 +266,8 @@ impl McpClient {
         let mut client = Self {
             transport,
             tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
             config: config.clone(),
         };
         let initialize = client
@@ -282,17 +312,127 @@ impl McpClient {
                     .collect()
             })
             .unwrap_or_default();
+        // A2-2：resources/prompts 按能力协商条件拉取——服务器未声明能力时
+        // 不发送对应请求（防老服务器对未知方法报错导致连接失败）。
+        let capabilities = initialize
+            .get("capabilities")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if capabilities.get("resources").is_some() {
+            if let Err(error) = client.reload_resources().await {
+                tracing::warn!(?error, server = %config.name, "MCP resources/list 失败");
+            }
+        }
+        if capabilities.get("prompts").is_some() {
+            if let Err(error) = client.reload_prompts().await {
+                tracing::warn!(?error, server = %config.name, "MCP prompts/list 失败");
+            }
+        }
         tracing::info!(
-            "MCP 服务器 {}（{server_version}，{}）已连接，工具 {} 个",
+            "MCP 服务器 {}（{server_version}，{}）已连接，工具 {} 个、资源 {} 个、模板 {} 个",
             config.name,
             config.transport,
-            client.tools.len()
+            client.tools.len(),
+            client.resources.len(),
+            client.prompts.len()
         );
         Ok(client)
     }
 
     pub fn tools(&self) -> Vec<McpTool> {
         self.tools.clone()
+    }
+
+    /// A2-2：已发现的资源列表。
+    pub fn resources(&self) -> Vec<McpResource> {
+        self.resources.clone()
+    }
+
+    /// A2-2：已发现的提示模板列表。
+    pub fn prompts(&self) -> Vec<McpPrompt> {
+        self.prompts.clone()
+    }
+
+    /// A2-2：重新拉取 resources/list（刷新缓存；失败返回错误、保留旧缓存）。
+    pub async fn reload_resources(&mut self) -> Result<usize, String> {
+        let result = self.request("resources/list", json!({})).await?;
+        self.resources = result
+            .get("resources")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some(McpResource {
+                            uri: item.get("uri")?.as_str()?.to_string(),
+                            name: item
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            description: item
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            mime_type: item
+                                .get("mimeType")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(self.resources.len())
+    }
+
+    /// A2-2：读取资源（resources/read），返回原始 result（contents 数组等）。
+    pub async fn read_resource(&mut self, uri: &str) -> Result<Value, String> {
+        self.request("resources/read", json!({ "uri": uri })).await
+    }
+
+    /// A2-2：重新拉取 prompts/list（刷新缓存；失败返回错误、保留旧缓存）。
+    pub async fn reload_prompts(&mut self) -> Result<usize, String> {
+        let result = self.request("prompts/list", json!({})).await?;
+        self.prompts = result
+            .get("prompts")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some(McpPrompt {
+                            name: item.get("name")?.as_str()?.to_string(),
+                            description: item
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            arguments: item
+                                .get("arguments")
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(self.prompts.len())
+    }
+
+    /// A2-2：获取提示模板（prompts/get），返回原始 result（messages 数组）。
+    pub async fn get_prompt(
+        &mut self,
+        name: &str,
+        arguments: Option<Value>,
+    ) -> Result<Value, String> {
+        let mut params = json!({ "name": name });
+        if let Some(arguments) = arguments {
+            params["arguments"] = arguments;
+        }
+        self.request("prompts/get", params).await
     }
 
     /// stdio 子进程是否仍在运行（HTTP 传输恒为 true——无进程可查）。

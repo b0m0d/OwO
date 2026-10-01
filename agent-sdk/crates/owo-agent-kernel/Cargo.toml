@@ -45,3 +45,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     "Win32_Storage_Xps",
 ] }
+
+[dev-dependencies]
+# crypto_contract 集成测试手构历史信封夹具（与库内单元测试同口径）。
+hmac = "0.12"
+sha2.workspace = true
