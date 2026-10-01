@@ -2,6 +2,9 @@
 //! Agent loop、工具注册表、权限审批、会话、审计、模型网关。
 
 pub mod agent;
+/// Anthropic 原生 provider（A1-1 取优合并自远端 engine）：`OWO_PROVIDER=anthropic`
+/// 且 `ANTHROPIC_API_KEY` 可用时启用（prompt caching / 原生 tool_use / 多模态）。
+pub mod anthropic;
 /// Artifact 校验与交付管线（七期 · 第三路）：格式门控（json/csv/research/
 /// markdown）+ 交付元数据（media_type/file_name/sha256/size_bytes）+ 证据链。
 pub mod artifact_pipeline;

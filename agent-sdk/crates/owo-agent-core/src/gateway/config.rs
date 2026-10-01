@@ -109,6 +109,48 @@ impl OpenAiCompatibleConfig {
 /// 归因留给"core 早退/握手超时"是历史缺陷 R3-BUG-05：用户看到的是无法修复的
 /// 模糊报错。UI 侧据此呈现模型配置引导（§4.8 Unset 语义：core ready，模型调用
 /// 在引导后生效）。
+/// 模型 HTTP 客户端统一构造（取优合并自远端 engine；A1-4）：
+/// 代理按 OWO_HTTP_PROXY/HTTPS_PROXY/HTTP_PROXY 优先，`NO_PROXY` 排除列表
+/// （127.0.0.1/localhost 等本地端点必须直连）。返回 (client, has_proxy)。
+pub(crate) fn build_model_http_client(
+    connect_timeout_secs: u64,
+    total_timeout_secs: u64,
+) -> Result<(reqwest::Client, bool), String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
+        .timeout(std::time::Duration::from_secs(total_timeout_secs));
+    let mut has_proxy = false;
+    for name in [
+        "OWO_HTTP_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+    ] {
+        if let Ok(proxy) = std::env::var(name) {
+            if !proxy.trim().is_empty() {
+                let mut proxy = reqwest::Proxy::all(proxy)
+                    .map_err(|e| format!("代理配置无效（{name}）：{e}"))?;
+                has_proxy = true;
+                let no_proxy = std::env::var("NO_PROXY")
+                    .or_else(|_| std::env::var("no_proxy"))
+                    .unwrap_or_default();
+                if !no_proxy.trim().is_empty() {
+                    if let Some(exclusions) = reqwest::NoProxy::from_string(&no_proxy) {
+                        proxy = proxy.no_proxy(Some(exclusions));
+                    }
+                }
+                builder = builder.proxy(proxy);
+                break;
+            }
+        }
+    }
+    let client = builder
+        .build()
+        .map_err(|e| format!("HTTP 客户端创建失败：{e}"))?;
+    Ok((client, has_proxy))
+}
+
 pub struct UnconfiguredModelProvider {
     reason: String,
 }

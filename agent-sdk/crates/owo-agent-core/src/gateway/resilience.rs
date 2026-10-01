@@ -268,8 +268,21 @@ impl ResilientProvider {
     }
 
     /// 环境变量构造：主 = OPENAI_BASE_URL/OPENAI_API_KEY/OPENAI_MODEL；
+    /// `OWO_PROVIDER=anthropic` 且 ANTHROPIC_* 可用时改走 Anthropic 原生通道（A1-1）；
     /// fallback = OWO_MODEL_FALLBACK_BASE_URLS（逗号分隔；本地端点无需 key）。
     pub fn from_env() -> Result<Self, String> {
+        if wants_anthropic() {
+            let config = crate::anthropic::AnthropicConfig::from_env()?;
+            let seed = OpenAiCompatibleConfig {
+                base_url: config.base_url.clone(),
+                api_key: config.api_key.clone(),
+                model: config.model.clone(),
+                cloud_enabled: config.cloud_enabled,
+            };
+            let primary: Arc<dyn ModelProvider> =
+                Arc::new(crate::anthropic::AnthropicProvider::new(config)?);
+            return Self::from_primary(primary, &seed);
+        }
         let config = OpenAiCompatibleConfig::from_env()?;
         Self::from_config(config)
     }
@@ -277,7 +290,16 @@ impl ResilientProvider {
     /// 以显式主配置构造（CLI 接线用，主配置的 model/api_key 已确定）；
     /// fallback 仍读 OWO_MODEL_FALLBACK_BASE_URLS（同 model；本地端点无需 key）。
     pub fn from_config(config: OpenAiCompatibleConfig) -> Result<Self, String> {
-        let primary = Arc::new(OpenAiCompatibleProvider::new(config.clone())?);
+        let primary: Arc<dyn ModelProvider> =
+            Arc::new(OpenAiCompatibleProvider::new(config.clone())?);
+        Self::from_primary(primary, &config)
+    }
+
+    /// 以给定主 provider 构造（fallback 链共用；Anthropic/OpenAI 只差主通道）。
+    pub fn from_primary(
+        primary: Arc<dyn ModelProvider>,
+        config: &OpenAiCompatibleConfig,
+    ) -> Result<Self, String> {
         let mut fallbacks: Vec<Arc<dyn ModelProvider>> = Vec::new();
         if let Ok(urls) = std::env::var("OWO_MODEL_FALLBACK_BASE_URLS") {
             for url in urls.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -477,4 +499,11 @@ impl ModelProvider for ResilientProvider {
     fn usage_snapshot(&self) -> TokenUsage {
         self.aggregate_usage()
     }
+}
+
+/// 是否要求 Anthropic 原生通道（`OWO_PROVIDER=anthropic`，大小写不敏感）。
+fn wants_anthropic() -> bool {
+    std::env::var("OWO_PROVIDER")
+        .map(|value| value.trim().eq_ignore_ascii_case("anthropic"))
+        .unwrap_or(false)
 }
