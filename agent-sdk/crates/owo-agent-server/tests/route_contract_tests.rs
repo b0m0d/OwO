@@ -3383,6 +3383,54 @@ async fn read_json_body(response: axum::response::Response) -> serde_json::Value
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// ask_user 应答路由（取优合并自远端 engine）：答案回填挂起中的回合；
+/// 未知/已回答的 question_id 一律 404（重复提交零副作用）。
+#[tokio::test]
+async fn answer_question_routes_to_pending_sender() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state
+        .pending_questions
+        .lock()
+        .unwrap()
+        .insert("q-1".to_string(), tx);
+    state
+        .pending_question_sessions
+        .lock()
+        .unwrap()
+        .insert("q-1".to_string(), "session-x".to_string());
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            "/session/session-x/answer/q-1",
+            Some(r#"{"question_id":"q-1","answer":"选 A"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200, "应答应送达");
+    let answer = rx.await.expect("挂起回合应收到答案");
+    assert_eq!(answer.answer, "选 A");
+    assert_eq!(answer.question_id, "q-1");
+
+    // 重复提交（或未知提问）→ 404。
+    let response = app
+        .clone()
+        .oneshot(request(
+            &state,
+            "POST",
+            "/session/session-x/answer/q-1",
+            Some(r#"{"question_id":"q-1","answer":"再来一次"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 404, "已回答的提问应 404");
+}
+
 /// `/fs/open`（取优合并自远端 engine）：路由可达 + 工作区越界 403 + 空路径 400。
 /// 不实际调起外部程序（避免测试机弹窗）：只锁安全边界契约。
 #[tokio::test]

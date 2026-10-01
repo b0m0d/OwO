@@ -665,3 +665,50 @@ pub(super) async fn compact_session(
         "messages_after": session.messages.len(),
     })))
 }
+
+/// ask_user 应答路由（取优合并自远端 engine）：把用户答案送回挂起中的回合。
+///
+/// 与审批响应同策略：request_id（question_id）为 uuid v4 且服务仅监听本机，
+/// 会话归属只做软校验；提问不存在/已回答一律 404（幂等拒绝重复提交）。
+pub(super) async fn respond_question(
+    State(state): State<Arc<AppState>>,
+    AxumPath((session_id, question_id)): AxumPath<(String, String)>,
+    Json(response): Json<owo_agent_core::question::QuestionAnswer>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let sender = state
+        .pending_questions
+        .lock()
+        .map_err(poison)?
+        .remove(&question_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("提问不存在或已回答：{question_id}"),
+            )
+        })?;
+    let registered_session = state
+        .pending_question_sessions
+        .lock()
+        .map_err(poison)?
+        .remove(&question_id);
+    if registered_session.as_deref() != Some(session_id.as_str()) {
+        // 软校验：跨会话响应不硬拒绝（与审批一致），但记审计便于溯源。
+        if let Ok(mut audit) = state.agent.audit_log().lock() {
+            audit.record(
+                &session_id,
+                "question_session_mismatch",
+                None,
+                Some(false),
+                format!(
+                    "提问归属 {} 但由 {session_id} 应答",
+                    registered_session.as_deref().unwrap_or("unknown")
+                ),
+            );
+        }
+    }
+    let _ = sender.send(owo_agent_core::question::QuestionAnswer {
+        question_id,
+        answer: response.answer,
+    });
+    Ok(Json(json!({ "ok": true })))
+}

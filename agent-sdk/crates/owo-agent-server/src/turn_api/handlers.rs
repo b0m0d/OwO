@@ -222,13 +222,24 @@ pub(crate) async fn turn(
                 }
             }
         };
+        // ask_user（取优合并自远端 engine）：提问经 SSE 下发，答案经
+        // POST /session/{id}/answer/{question_id} 回填；超时 300s 自动收口。
+        let questioner = TurnQuestioner {
+            state: Arc::clone(&state_for_activity),
+            session_id: current.id.clone(),
+            turn_id: producer_turn_id.clone(),
+            store: Arc::clone(&producer_store),
+            queue: Arc::clone(&producer_queue),
+            receiver: producer_receiver.clone(),
+        };
         match agent
-            .run_turn(
+            .run_turn_with_asker(
                 &mut current,
                 &effective_prompt,
                 &approver,
                 &abort_flag,
                 &mut on_event,
+                Some(&questioner),
             )
             .await
         {
@@ -441,4 +452,77 @@ pub(crate) async fn respond_permission(
         .send(decision)
         .map_err(|_| (StatusCode::GONE, "审批通道已关闭".to_string()))?;
     Ok(Json(json!({ "ok": true, "granted": response.allow })))
+}
+
+/// ask_user 的 SSE 提问通道（取优合并自远端 engine）：
+/// 展示问题（UserQuestion）→ 等待应答（oneshot，300s 超时）→ UserAnswered 收口。
+/// 任一环节失败都返回 None，工具层转成明确结果，回合不会静默挂死。
+struct TurnQuestioner {
+    state: Arc<AppState>,
+    session_id: String,
+    turn_id: String,
+    store: Arc<dyn owo_agent_core::SessionStore>,
+    queue: Arc<TurnEventQueue>,
+    receiver: std::sync::Weak<()>,
+}
+
+impl TurnQuestioner {
+    fn emit(&self, event: SseEvent) {
+        let _ = persist_and_queue_event(
+            self.store.as_ref(),
+            &self.session_id,
+            &self.turn_id,
+            &self.queue,
+            &self.receiver,
+            event,
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl owo_agent_core::question::Questioner for TurnQuestioner {
+    async fn ask(
+        &self,
+        question: &owo_agent_core::question::UserQuestion,
+    ) -> Option<owo_agent_core::question::QuestionAnswer> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut pending = self.state.pending_questions.lock().ok()?;
+            pending.insert(question.question_id.clone(), tx);
+        }
+        {
+            let mut sessions = self.state.pending_question_sessions.lock().ok()?;
+            sessions.insert(question.question_id.clone(), self.session_id.clone());
+        }
+        self.emit(SseEvent::UserQuestion {
+            question_id: question.question_id.clone(),
+            question: question.question.clone(),
+            options: question.options.clone(),
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+            Ok(Ok(answer)) => {
+                self.emit(SseEvent::UserAnswered {
+                    question_id: answer.question_id.clone(),
+                    answer: answer.answer.clone(),
+                    source: "user".to_string(),
+                });
+                Some(answer)
+            }
+            _ => {
+                // 超时/通道销毁/回合中止：清注册并告知前端（提问必须最终有结果）。
+                if let Ok(mut pending) = self.state.pending_questions.lock() {
+                    pending.remove(&question.question_id);
+                }
+                if let Ok(mut sessions) = self.state.pending_question_sessions.lock() {
+                    sessions.remove(&question.question_id);
+                }
+                self.emit(SseEvent::UserAnswered {
+                    question_id: question.question_id.clone(),
+                    answer: String::new(),
+                    source: "timeout".to_string(),
+                });
+                None
+            }
+        }
+    }
 }

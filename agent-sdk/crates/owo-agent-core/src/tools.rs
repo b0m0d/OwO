@@ -71,6 +71,9 @@ pub struct ToolContext<'a> {
     pub fanout: Option<FanOutRunner>,
     /// 回合取消标志：工具层桥接（fan-out 停止调度新子任务并 abort 在飞者）。
     pub abort: Option<&'a AtomicBool>,
+    /// 用户提问通道（ask_user 工具）：None 表示当前环境没有 UI 通道（CLI/子代理），
+    /// 工具会明确报错并提示模型改为书面提问。
+    pub questioner: Option<&'a dyn crate::question::Questioner>,
 }
 
 /// ToolHost 签发 capability 时必须绑定的运行上下文。
@@ -542,6 +545,7 @@ impl ToolRegistry {
         self.register(ExploreTool);
         self.register(SubagentTool);
         self.register(FanOutSubagentsTool);
+        self.register(AskUserTool);
         self.register(UseSkillTool);
     }
 
@@ -2737,6 +2741,76 @@ impl Tool for FanOutSubagentsTool {
     }
 }
 
+/// 向用户提问并等待回答（信息不足/需求含糊/关键分歧时使用；取优合并自远端 engine）。
+/// 回合会挂起直到用户答复或超时；无 UI 通道时明确报错，让模型改为书面提问。
+struct AskUserTool;
+
+#[async_trait]
+impl Tool for AskUserTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "ask_user".into(),
+            description: "信息不足、需求含糊或存在会显著影响结果的关键分歧时，向用户提问并等待回答（回合暂停直到用户答复）。问题要具体、一次只问最关键的一两个点；能用选项固定答案时给出 options。已经明确的常规操作不要用它确认。".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "要向用户提出的问题（简洁明确，一次只问一件事）" },
+                    "options": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "可选：2-4 个备选答案，用户可直接点选"
+                    }
+                },
+                "required": ["question"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let question = args
+            .get("question")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or("参数缺少字符串字段：question")?
+            .to_string();
+        let options: Vec<String> = args
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string)
+                    .take(4)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(questioner) = ctx.questioner else {
+            return Err("当前运行环境没有可用的用户问答通道（无 UI 连接）。请把你的问题直接写进最终回复向用户提出，并给出你建议的默认方案。".to_string());
+        };
+        let request = crate::question::UserQuestion {
+            question_id: uuid::Uuid::new_v4().to_string(),
+            question,
+            options,
+        };
+        match questioner.ask(&request).await {
+            Some(answer) if !answer.answer.trim().is_empty() => Ok(json!({
+                "answered": true,
+                "answer": answer.answer,
+            })),
+            // 超时/中止/空回答：不给模型「卡住」的机会——明确告知并允许继续。
+            _ => Ok(json!({
+                "answered": false,
+                "note": "用户未在时限内回答。请基于已有信息继续执行，并在最终回复里把不确定的部分标注出来。",
+            })),
+        }
+    }
+}
+
 struct UseSkillTool;
 
 #[async_trait]
@@ -2810,6 +2884,7 @@ mod tests {
             elements: &elements,
             fanout: None,
             abort: None,
+            questioner: None,
         };
 
         let result = SearchFilesTool
@@ -2845,6 +2920,7 @@ mod tests {
             elements: &elements,
             fanout: None,
             abort: None,
+            questioner: None,
         };
 
         write_file_body(&mut context, "shared.txt", &path, "agent version")
@@ -2962,6 +3038,7 @@ mod tests {
             elements: &elements,
             fanout: None,
             abort: None,
+            questioner: None,
         };
         let capability = host
             .issue(
@@ -3070,6 +3147,7 @@ mod tests {
             elements: &elements,
             fanout: None,
             abort: None,
+            questioner: None,
         };
         let capability = host.issue("write_file", args, approval, context).unwrap();
         let result = host.execute(capability, &mut tool_context).await.unwrap();
@@ -3123,6 +3201,7 @@ mod tests {
             elements: &elements,
             fanout: None,
             abort: None,
+            questioner: None,
         };
 
         let result = MultiEditTool
@@ -3169,6 +3248,7 @@ mod tests {
             elements: &elements,
             fanout: None,
             abort: None,
+            questioner: None,
         };
 
         // 第 2 处失败（old_string 不存在）：整批不落盘。
@@ -3212,6 +3292,91 @@ mod tests {
             std::fs::read_to_string(workspace.join("data.txt")).unwrap(),
             "same\nsame\n"
         );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// ask_user（取优合并自远端 engine）：无 UI 通道时明确报错，模型改为书面提问。
+    #[tokio::test]
+    async fn ask_user_without_channel_reports_error() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-ask-user-none-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let policy = crate::Policy::new(&workspace);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let mut context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+            fanout: None,
+            abort: None,
+            questioner: None,
+        };
+        let error = AskUserTool
+            .run(&mut context, json!({ "question": "先做 A 还是 B？" }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("没有可用的用户问答通道"), "{error}");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// 回显提问通道：直接返回答案，模拟用户在提问卡上作答。
+    struct EchoQuestioner;
+
+    #[async_trait]
+    impl crate::question::Questioner for EchoQuestioner {
+        async fn ask(
+            &self,
+            question: &crate::question::UserQuestion,
+        ) -> Option<crate::question::QuestionAnswer> {
+            Some(crate::question::QuestionAnswer {
+                question_id: question.question_id.clone(),
+                answer: format!("已收到：{}", question.question),
+            })
+        }
+    }
+
+    /// ask_user：有通道时提问经 Questioner 拿回用户答案（answered=true）。
+    #[tokio::test]
+    async fn ask_user_returns_answer_through_channel() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-ask-user-ok-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let policy = crate::Policy::new(&workspace);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let questioner = EchoQuestioner;
+        let result = {
+            let mut context = ToolContext {
+                workspace: &workspace,
+                policy: &policy,
+                session: &mut session,
+                audit: &audit,
+                subagent: None,
+                skills: &skills,
+                elements: &elements,
+                fanout: None,
+                abort: None,
+                questioner: Some(&questioner),
+            };
+            AskUserTool
+                .run(
+                    &mut context,
+                    json!({ "question": "先做 A 还是 B？", "options": ["A", "B"] }),
+                )
+                .await
+                .unwrap()
+        };
+        assert_eq!(result["answered"], true);
+        assert_eq!(result["answer"], "已收到：先做 A 还是 B？");
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
@@ -3316,6 +3481,7 @@ mod tests {
                 "explore",
                 "subagent",
                 "fan_out_subagents",
+                "ask_user",
                 "use_skill",
             ]
         );

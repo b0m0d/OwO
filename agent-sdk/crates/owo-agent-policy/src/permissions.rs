@@ -590,6 +590,7 @@ impl Policy {
             ("git_status", Level::Read),
             ("git_diff", Level::Read),
             ("git_log", Level::Read),
+            ("ask_user", Level::Read),
             ("screen_ocr", Level::Read),
             ("desktop_window_ocr", Level::Read),
             ("ocr_region", Level::Read),

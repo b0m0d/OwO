@@ -429,6 +429,22 @@ impl Agent {
         abort: &AtomicBool,
         on_event: &mut (dyn FnMut(&TurnEvent) + Send),
     ) -> Result<TurnOutcome, AgentError> {
+        self.run_turn_with_asker(session, prompt, approver, abort, on_event, None)
+            .await
+    }
+
+    /// 带用户提问通道的回合（ask_user 工具；取优合并自远端 engine）：
+    /// `questioner` 为 None 时语义同 [`Agent::run_turn`]（工具会明确报错，
+    /// 模型改为在最终回复里书面提问）。
+    pub async fn run_turn_with_asker(
+        &self,
+        session: &mut Session,
+        prompt: &str,
+        approver: &dyn Approver,
+        abort: &AtomicBool,
+        on_event: &mut (dyn FnMut(&TurnEvent) + Send),
+        questioner: Option<&dyn crate::question::Questioner>,
+    ) -> Result<TurnOutcome, AgentError> {
         let started_at = Utc::now().to_rfc3339();
         let started = std::time::Instant::now();
         let turn_id = uuid::Uuid::new_v4().to_string();
@@ -915,6 +931,8 @@ impl Agent {
                                         elements: &self.elements,
                                         fanout: Some(fanout),
                                         abort: Some(abort),
+                                        // 并行只读组不参与提问（无 mut session/UI 通道）。
+                                        questioner: None,
                                     };
                                     let outcome = match tool_host.issue(
                                         &tool_name,
@@ -1076,6 +1094,7 @@ impl Agent {
                                     elements: &self.elements,
                                     fanout: Some(fanout),
                                     abort: Some(abort),
+                                    questioner,
                                 };
                                 let tool_started = std::time::Instant::now();
                                 let outcome = match self.tool_host.issue(

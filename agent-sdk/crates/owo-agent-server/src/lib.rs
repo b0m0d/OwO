@@ -192,6 +192,15 @@ pub struct AppState {
     pub activities: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     /// A8-3：桌面挂件（桌宠）显隐中转——工作台写期望值，桌面端心跳上报实际值。
     pub pet_state: Arc<Mutex<PetState>>,
+    /// ask_user（取优合并自远端 engine）：等待用户回答的提问
+    /// （question_id → 一次性应答通道）。
+    pub pending_questions: Arc<
+        Mutex<
+            HashMap<String, tokio::sync::oneshot::Sender<owo_agent_core::question::QuestionAnswer>>,
+        >,
+    >,
+    /// 提问归属会话（应答路由校验用）。
+    pub pending_question_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -366,6 +375,9 @@ impl AppState {
             // A8-2 / A8-3（取优合并自远端 engine）。
             activities: Arc::new(Mutex::new(HashMap::new())),
             pet_state: Arc::new(Mutex::new(PetState::default())),
+            // ask_user（取优合并自远端 engine）。
+            pending_questions: Arc::new(Mutex::new(HashMap::new())),
+            pending_question_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -415,6 +427,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/session/{id}/permission/{request_id}",
             post(turn_api::respond_permission),
+        )
+        // ask_user 应答（取优合并自远端 engine）：把答案送回挂起中的回合。
+        .route(
+            "/session/{id}/answer/{question_id}",
+            post(session_api::respond_question),
         )
         // 全权限模式（运行时开关）：写开关文件 + 读当前状态。界面在输入框下面切换，
         // 不需要重启核心（见 turn_api::auto_approve_enabled 的注释）。

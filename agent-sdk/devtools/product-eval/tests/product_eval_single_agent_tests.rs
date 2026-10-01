@@ -192,6 +192,7 @@ macro_rules! call_tool {
             elements: &elements,
             fanout: None,
             abort: None,
+            questioner: None,
         };
         $tool.run(&mut ctx, $args).await
     }};
