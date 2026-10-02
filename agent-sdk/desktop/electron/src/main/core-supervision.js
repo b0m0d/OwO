@@ -7,6 +7,10 @@
 "use strict";
 
 const CORE_API_VERSION = "0.7";
+// 桌面实例头名（服务端 auth_token.rs:41 同名常量）：壳拉起核心时注入实例身份，
+// 此后所有取 token 的请求都必须带同一个值，否则被 instance_gate_allows 判为
+// "另一个桌面实例" → 403 auth/instance_mismatch → 渲染层全线 401。
+const DESKTOP_INSTANCE_HEADER = "x-owo-desktop-instance";
 
 // ---------- 握手行解析（§4.2） ----------
 
@@ -218,10 +222,44 @@ function validateConfig(config, options) {
   return { ok: errors.length === 0, errors, warnings };
 }
 
+// ---------- 日志写入的容错封装 ----------
+
+/**
+ * 包一层"永不抛"的写入函数。
+ *
+ * 背景（真实崩溃）：壳把核心 stdout 转发到自身 stdout（`[core] …`），并落盘到
+ * core.log。这两处写入都发生在核心进程的 `'data'` 回调里 —— 一旦抛出，异常无人
+ * 接管，Electron 主进程直接挂掉，表现为「A JavaScript error occurred in the main
+ * process」，窗口直接消失。已实测的触发条件：
+ *   * stdout 对端消失 → `EPIPE: broken pipe, write`（管道被 `head` 之类截断、
+ *     重定向目标提前退出、CI 里跑壳）；
+ *   * 日志流句柄失效 / 磁盘满 / 只读文件系统 → `write` 同步抛错。
+ *
+ * 日志只是诊断手段，写不进去绝不能影响壳的可用性，所以两条写入路径都必须过这里。
+ *
+ * @param {(text: string) => any} write 底层写入（process.stdout.write / stream.write）
+ * @returns {(text: string) => boolean} 同签名写入；返回是否真的写成功
+ */
+function safeLogWrite(write) {
+  return function safeWrite(text) {
+    if (typeof write !== "function") return false;
+    try {
+      write(text);
+      return true;
+    } catch (_) {
+      return false; // 丢这一行，不影响调用方继续跑
+    }
+  };
+}
+
 module.exports = {
   CORE_API_VERSION,
   HEALTH_POLL_MS,
   RESTART_BACKOFF_MS,
+  // 桌面实例头名：必须与服务端 auth_token.rs::DESKTOP_INSTANCE_HEADER 逐字一致，
+  // 否则注入实例身份的核心会认为"不是同一个桌面实例"→ 403 instance_mismatch。
+  DESKTOP_INSTANCE_HEADER,
+  safeLogWrite,
   parseReadyLine,
   parseFatalLine,
   evaluateHealth,

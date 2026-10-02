@@ -23,6 +23,29 @@
 // 纯逻辑在 `core-supervision.js`（带 node --test 单测），本文件只做编排。
 //
 // 不弹控制台：Windows 上以 `windowsHide: true` + `CREATE_NO_WINDOW` 语义启动核心。
+//
+// ELECTRON_RUN_AS_NODE=1 会让 electron.exe 退化成纯 Node 解释器：此时
+// require("electron") 只返回一段路径字符串（内容是 electron.exe 的可执行路径），
+// 下面的解构会得到一堆 undefined，随后第一处 ipcMain.handle(...) 抛
+// "TypeError: Cannot read properties of undefined (reading 'handle')"，壳起不来。
+//
+// **注意：主进程内无法自愈。** 该变量由 electron.exe 在**进程启动时**读取并决定运行模式，
+// 等本文件执行到时模式已定——清掉它只影响子进程继承（例如 spawn 出的核心），
+// 对当前进程无效。因此正确做法是**在启动前**清（start.ps1 已做；`npm start` 等
+// 其它入口需自行 `unset ELECTRON_RUN_AS_NODE`）。
+// 这里的检查只是把原本晦涩的 undefined TypeError 换成一句能照着做的诊断。
+const electronApi = require("electron");
+if (!electronApi || typeof electronApi !== "object" || !electronApi.app) {
+  console.error(
+    '[fatal] require("electron") 未返回 Electron 模块对象 —— electron.exe 退化成了普通 Node。\n' +
+      "        最可能的原因：环境变量 ELECTRON_RUN_AS_NODE 被设成了非空值。\n" +
+      "        它在进程启动时生效，主进程内无法清除，请在启动 shell 里先清掉：\n" +
+      "          PowerShell:  Remove-Item Env:\\ELECTRON_RUN_AS_NODE\n" +
+      "          bash:        unset ELECTRON_RUN_AS_NODE\n" +
+      "        或直接用包装脚本： pwsh -File desktop\\electron\\start.ps1（已内置清理）"
+  );
+  process.exit(78); // EX_CONFIG
+}
 const {
   app,
   BrowserWindow,
@@ -33,7 +56,7 @@ const {
   Tray,
   nativeImage,
   globalShortcut,
-} = require("electron");
+} = electronApi;
 const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -67,6 +90,14 @@ const HEALTH_TIMEOUT_MS = 8000;
 // 本地 token 引导开放给任意本地浏览器，因此这里保持与旧壳同强度。
 const PAIRING_SECRET = `${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`;
 const PAIRING_HEADER = "x-owo-desktop-pairing";
+// 实例身份头（auth_token.rs::DESKTOP_INSTANCE_HEADER）：服务端在注入了实例身份时，
+// 只允许**同一桌面实例**的引导请求取 token（instance_gate_allows），防"旧核心仍在 +
+// 新壳新密钥"组合下静默 403 空壳。壳拉起核心时把 instanceId 记在这里，HTTP 请求带上。
+//
+// 这是 ADR-003 S6/M13 移植时的遗漏：配对头搬过来了，实例头没搬 →
+// 主进程与渲染层取 token 全部 403 → 全线 401 → 界面显示"服务未连接"+"Failed to fetch"。
+let currentInstanceId = "";
+const INSTANCE_HEADER = supervision.DESKTOP_INSTANCE_HEADER;
 
 let mainWindow = null;
 let tray = null;
@@ -340,7 +371,11 @@ function coreEnv(config, extra = {}) {
 
 // M2：壳侧请求统一带 ledger 来源标签 + 配对证明（配对见 PAIRING_SECRET 说明）。
 function shellHeaders(headers) {
-  return { ...headers, "x-owo-client": "shell", [PAIRING_HEADER]: PAIRING_SECRET };
+  const out = { ...headers, "x-owo-client": "shell", [PAIRING_HEADER]: PAIRING_SECRET };
+  // 实例头只在身份已知时带：接管已存活核心（M5）时那个核心属于别的实例，
+  // 带了反而会被 instance_gate_allows 拒掉。
+  if (currentInstanceId) out[INSTANCE_HEADER] = currentInstanceId;
+  return out;
 }
 
 function httpGet(port, urlPath, headers = {}) {
@@ -457,6 +492,9 @@ async function adoptExistingCore(myGeneration, apiVersion = CORE_API_VERSION) {
     }
     return false;
   }
+  // 接管的核心属于**别的**桌面实例（本壳没注入过它的 OWO_DESKTOP_INSTANCE_ID），
+  // 必须清掉实例头，否则 shellHeaders 带上一个对不上的 id → instance_mismatch 403。
+  currentInstanceId = "";
   core = { proc: null, pid: health.pid || 0, port, token, adopted: true };
   restartAttempts = 0;
   coreState = {
@@ -559,6 +597,8 @@ async function startCore({ reason = "auto", userInitiated = false } = {}) {
   const workspace = workspacePath();
   // M3：本轮身份。核心把它从 /health 公开，壳据此确认"这个端口确实是我拉起的那个核心"。
   const instanceId = `shell-${crypto.randomUUID()}`;
+  // 记到模块级：shellHeaders 拿不到局部变量，但取 token 必须带实例头（见 INSTANCE_HEADER 注释）。
+  currentInstanceId = instanceId;
   coreState = { state: "starting", executable: exe, configPath: configPath(), workspace };
   notifyState();
 
@@ -576,11 +616,17 @@ async function startCore({ reason = "auto", userInitiated = false } = {}) {
   });
 
   // 核心 stdout/stderr 追加写入日志文件（见 coreLogPath 的说明）。
+  // 写入统一走 safeLogWrite（见 core-supervision.js）：磁盘满、句柄被外部关闭、
+  // 只读文件系统等情况下 write 可能同步抛错，而调用点在核心 stdout 的 'data'
+  // 回调里，抛出去就是主进程崩。
   let logStream = null;
+  const writeLogFile = supervision.safeLogWrite((text) => {
+    if (logStream) logStream.write(text);
+  });
   try {
     fs.mkdirSync(logDir(), { recursive: true });
     logStream = fs.createWriteStream(coreLogPath(), { flags: "a" });
-    logStream.write(
+    writeLogFile(
       `\n===== [${new Date().toISOString()}] 拉起核心 generation=${myGeneration} instance=${instanceId} exe=${exe} =====\n`,
     );
   } catch (_) {
@@ -591,7 +637,7 @@ async function startCore({ reason = "auto", userInitiated = false } = {}) {
     const text = String(line || "").trim();
     if (!text) return;
     if (core && core.log) core.log(text);
-    if (logStream) logStream.write(`${redactSecrets(text)}\n`);
+    writeLogFile(`${redactSecrets(text)}\n`);
 
     const fatal = parseFatalLine(text);
     if (fatal) {
@@ -618,12 +664,23 @@ async function startCore({ reason = "auto", userInitiated = false } = {}) {
       return;
     }
 
+    // 主进程自己先取一次 token，成功则注入渲染层（省掉渲染层那次 /auth/token 引导）。
+    // 注意 httpGet 只 resolve 不 reject：非 2xx 时 body 是错误 JSON，`.token` 为 undefined，
+    // 旧写法 `JSON.parse(auth.body).token || ""` 会**静默**退化成空串，
+    // 渲染层拿不到注入 token 就退回自己引导 → 配对门 403 → 全线 401 → 界面"服务未连接"。
+    // 这里显式判状态码并记日志，否则这类失败没有任何痕迹。
     let token = "";
     try {
       const auth = await httpGet(ready.port, "/auth/token");
-      token = JSON.parse(auth.body).token || "";
-    } catch (_) {
-      /* token 拿不到时渲染层会退回 /auth/token 引导 */
+      if (auth.status === 200 && auth.body) {
+        token = JSON.parse(auth.body).token || "";
+      } else {
+        writeLogFile(
+          `[shell] /auth/token 返回 ${auth.status}：${String(auth.body || "").slice(0, 200)}\n`
+        );
+      }
+    } catch (error) {
+      writeLogFile(`[shell] /auth/token 请求异常：${error && error.message}\n`);
     }
     if (myGeneration !== generation) return;
 
@@ -656,9 +713,13 @@ async function startCore({ reason = "auto", userInitiated = false } = {}) {
   });
   proc.stderr.on("data", (chunk) => handleLine(chunk.toString("utf8")));
   proc.on("exit", (code) => {
-    if (logStream) {
-      logStream.write(`===== [${new Date().toISOString()}] 核心退出 code=${code} =====\n`);
-      logStream.end();
+    writeLogFile(`===== [${new Date().toISOString()}] 核心退出 code=${code} =====\n`);
+    // 关流防句柄泄漏：自动重启会再开一个新流（flags "a"），不关的话每次重启泄漏一个 fd。
+    // end() 本身也可能抛（句柄已失效），同样不能让它掀翻主进程。
+    try {
+      if (logStream) logStream.end();
+    } catch (_) {
+      /* 已关闭或失效：无所谓 */
     }
     if (myGeneration !== generation) return; // 已被新一轮（重启/接管）取代
     if (coreState.state === "ready" || coreState.state === "restarting") {
@@ -669,7 +730,13 @@ async function startCore({ reason = "auto", userInitiated = false } = {}) {
     notifyState();
     scheduleAutoRestart(myGeneration);
   });
-  core = { proc, log: (line) => process.stdout.write(`[core] ${line}\n`) };
+  // 日志转发到本进程 stdout。**必须过 safeLogWrite**：stdout 的对端可能随时消失
+  // （管道被上游截断、重定向到已退处的程序、CI 里跑），此时 write 抛 EPIPE，
+  // 而这里处在核心 stdout 的 'data' 回调里 —— 一次未捕获异常就会崩掉整个主进程
+  //（表现为「A JavaScript error occurred in the main process」，窗口直接消失）。
+  // 日志只是诊断手段，写不进去绝不能影响壳的可用性。
+  const writeStdout = supervision.safeLogWrite((text) => process.stdout.write(text));
+  core = { proc, log: (line) => writeStdout(`[core] ${line}\n`) };
   return coreState;
 }
 
@@ -701,12 +768,19 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: "#f6f7f9",
     title: "OwO Agent 工作台",
+    // 去掉 Electron 默认菜单栏（File/Edit/View/Window/Help 那几项英文）。
+    // 工作台页面自带中文导航（OwO logo + 文件/编辑/视图/帮助），两层菜单并存
+    // 既重复又是英文，与"壳与工作台界面一致"的目标不符。旧 Tauri 壳也没有菜单栏。
+    // 说明：这不是"隐藏"而是置空——autoHideMenuBar 仍会在 Alt 键按下时把默认菜单唤出来。
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+  // 彻底移除默认菜单（含 Alt 唤出）。必须在 createWindow 早期调用。
+  Menu.setApplicationMenu(null);
   // ADR-003：先给占位页，core ready 后由 notifyState 导航到核心托管的工作台。
   mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(bootPage(coreState))}`);
   bootShown = true;

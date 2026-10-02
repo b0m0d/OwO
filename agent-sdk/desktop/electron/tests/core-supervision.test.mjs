@@ -131,3 +131,72 @@ test("配置校验：合法配置放行，缺凭据只告警不阻断", () => {
   const quiet = sup.validateConfig({ version: 1, model: { provider: "openai" } }, { envHas: () => true });
   assert.equal(quiet.warnings.length, 0, "环境变量存在时不得误报");
 });
+
+// ---------- 日志写入容错（回归：EPIPE 崩主进程） ----------
+//
+// 这条契约来自一次真实崩溃：壳把核心日志裸写 process.stdout，stdout 对端消失
+// （管道被 `head` 截断 / 重定向目标提前退出 / CI 里跑）时 write 抛 EPIPE，
+// 而调用点在核心 'data' 回调里 → 未捕获异常掀翻 Electron 主进程，窗口直接消失。
+
+test("safeLogWrite：写入正常时透传并报告成功", () => {
+  const seen = [];
+  const write = sup.safeLogWrite((text) => {
+    seen.push(text);
+  });
+  assert.equal(write("[core] hello\n"), true);
+  assert.equal(write("[core] world\n"), true);
+  assert.deepEqual(seen, ["[core] hello\n", "[core] world\n"]);
+});
+
+test("safeLogWrite：EPIPE 等写入异常被吞掉，不向上抛", () => {
+  // 复刻崩溃现场：write 同步抛 EPIPE。
+  const boom = () => {
+    const err = new Error("write EPIPE");
+    err.code = "EPIPE";
+    throw err;
+  };
+  const write = sup.safeLogWrite(boom);
+  assert.doesNotThrow(() => write("[core] x\n"), "写入异常不得向上抛（否则主进程崩）");
+  assert.equal(write("[core] x\n"), false, "应报告失败而不是抛错");
+});
+
+test("safeLogWrite：底层非函数 / 流已关闭时静默降级", () => {
+  assert.doesNotThrow(() => sup.safeLogWrite(null)("x"), "写入器缺失应静默");
+  assert.equal(sup.safeLogWrite(null)("x"), false);
+  // stream 已 end() 后再 write 会抛 ERR_STREAM_WRITE_AFTER_END
+  const closed = sup.safeLogWrite(() => {
+    throw new Error("write after end");
+  });
+  assert.equal(closed("x"), false);
+  // 反复调用不累积状态（自动重启会反复建流）
+  const flaky = sup.safeLogWrite((text) => {
+    if (text.includes("boom")) throw new Error("disk full");
+  });
+  for (let i = 0; i < 50; i += 1) flaky("ok\n");
+  assert.equal(flaky("boom\n"), false);
+  assert.equal(flaky("ok\n"), true, "单次失败后仍应继续可用");
+});
+
+// ---------- 桌面实例头（回归：instance_mismatch 403） ----------
+//
+// 这条契约来自一次真实故障：壳拉起核心后，主进程与渲染层取 token 全部 403
+// （auth/instance_mismatch/not_retryable「桌面实例身份不匹配」），随后所有业务请求
+// 401，界面表现为"服务未连接"+"列表加载失败：Failed to fetch"。
+// 根因：ADR-003 S6/M13 移植时只搬了配对头 x-owo-desktop-pairing，漏了实例头
+// x-owo-desktop-instance（服务端 auth_token.rs::DESKTOP_INSTANCE_HEADER）。
+// 门控在 instance_gate_allows：注入了实例身份时，只允许同一实例的引导请求取 token。
+
+test("实例头常量与服务端口头名一致", () => {
+  // 服务端 auth_token.rs:41 `pub const DESKTOP_INSTANCE_HEADER: &str = "x-owo-desktop-instance"`
+  assert.equal(sup.DESKTOP_INSTANCE_HEADER, "x-owo-desktop-instance");
+});
+
+test("实例头语义：身份已知才带，接管外部核心必须清空", () => {
+  // 复刻 shellHeaders 的实例头决策：仅当本壳确实注入过 OWO_DESKTOP_INSTANCE_ID 才带。
+  // 接管已存活核心（M5 adopt）时那个核心属于别的实例，带上必然被 instance_gate_allows 拒。
+  const headerFor = (instanceId) => (instanceId ? { [sup.DESKTOP_INSTANCE_HEADER]: instanceId } : {});
+  const own = headerFor("shell-abc");
+  assert.equal(own[sup.DESKTOP_INSTANCE_HEADER], "shell-abc", "自己拉起的核心必须带头");
+  assert.deepEqual(headerFor(""), {}, "接管外部核心时不得带头");
+  assert.deepEqual(headerFor(null), {}, "身份未知时不得带头");
+});
