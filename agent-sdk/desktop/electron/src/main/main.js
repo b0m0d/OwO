@@ -1,7 +1,7 @@
-// Electron 主进程：OwO Agent 桌面壳（替代 Tauri 壳）。
+// Electron 主进程：OwO Agent 桌面壳（替代 Tauri 壳，见 docs/adr/ADR-003）。
 //
-// 为什么换：用户明确要求"别再用 Rust 壳、前端改成组件化动态渲染"。Electron 的
-// 关键好处是**渲染层（Vue）从磁盘加载**——改 UI 只需刷新，不必重新编译，
+// 为什么换：用户明确要求"别再用 Rust 壳、前端改成组件化动态渲染"。关键好处是
+// **渲染层从磁盘加载（核心服务托管 desktop/web）**——改 UI 只需刷新，不必重新编译，
 // 这正好治住"改一次编译半天"这个痛点。
 //
 // 职责（与旧 Tauri 壳对齐，语义不变）：
@@ -12,19 +12,107 @@
 //   4. 提供 IPC：读/写配置、重载配置、重启核心；
 //   5. 退出时优雅关闭核心（POST /server/shutdown，兜底 taskkill）。
 //
+// ADR-003 增补（自旧 Tauri 监管栈移植，语义与 core_supervisor.rs / core_runtime.rs
+// / provider.rs / single_instance.rs 对齐）：
+//   M2 ledger：壳侧 loopback 请求统一 `x-owo-client: shell`
+//   M3 身份：注入 OWO_DESKTOP_INSTANCE_ID，/health 双重校验实例身份 + API 版本
+//   M4 监管：generation 代际守卫 + 崩溃指数退避自动重启（上限 3 次）
+//   M5 复用：启动时若发现已存活的兼容核心则直接接管，不重复拉起
+//   M6 校验：保存配置前做结构性校验（凭据缺失只告警）+ 旧 provider.json 迁移
+//   M7 壳：单实例锁、托盘（显示/隐藏/重启核心/开机自启）、外链走系统浏览器
+// 纯逻辑在 `core-supervision.js`（带 node --test 单测），本文件只做编排。
+//
 // 不弹控制台：Windows 上以 `windowsHide: true` + `CREATE_NO_WINDOW` 语义启动核心。
-const { app, BrowserWindow, ipcMain, shell, dialog } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  shell,
+  dialog,
+  Menu,
+  Tray,
+  nativeImage,
+  globalShortcut,
+} = require("electron");
 const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const http = require("node:http");
+const crypto = require("node:crypto");
+const supervision = require("./core-supervision.js");
+const shellCommands = require("./shell-commands.js");
 
-const CORE_API_VERSION = "0.7";
+const {
+  CORE_API_VERSION,
+  parseReadyLine,
+  parseFatalLine,
+  evaluateHealth,
+  healthReasonText,
+  pollDelayMs,
+  nextBackoffMs,
+  shouldAutoRestart,
+  discoveryPort,
+  validateConfig,
+} = supervision;
+
+// 自动重启上限：连续崩溃超过这个次数就停在 failed，交给用户决定（避免崩溃—重启风暴）。
+const MAX_AUTO_RESTART = 3;
+const HEALTH_TIMEOUT_MS = 8000;
+
+// 进程配对证明（对齐旧 Tauri 壳的 CoreRuntime::pairing）：两个 UUID 去掉连字符，
+// 共 64 位十六进制。经 OWO_DESKTOP_PAIRING_SECRET 注入核心，壳的 HTTP 请求再带
+// x-owo-desktop-pairing 头——服务端据此把「领 token」限定给本壳拉起的那个核心
+// （auth_token.rs::pairing_gate_allows）。不注入也能跑（服务端放行），但等于把
+// 本地 token 引导开放给任意本地浏览器，因此这里保持与旧壳同强度。
+const PAIRING_SECRET = `${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`;
+const PAIRING_HEADER = "x-owo-desktop-pairing";
 
 let mainWindow = null;
+let tray = null;
 let core = null; // { proc, pid, port, token }
 let coreState = { state: "starting" };
+
+// ---------- 监管状态 ----------
+let generation = 0; // 每次拉起核心 +1：过期那一轮的异步回调一律失效
+let restartAttempts = 0; // 连续失败计数，ready 成功后归零
+let shuttingDown = false; // 壳退出中：不再自动重启
+
+// ---------- 渲染层：核心服务托管的工作台（ADR-003） ----------
+//
+// 核心服务在 `/` 静态托管 web 工作台（server lib.rs：`fallback_service(ServeDir::new(desktop_web_dir()))`），
+// 因此壳不再自带任何前端代码——core ready 后直接导航到核心根路径即可，加载的是与
+// 浏览器/旧 Tauri 壳**完全相同的同一份 desktop/web 文件**（服务端全局 no-store，
+// 改 UI 后 Ctrl+R 立刻生效，"改一次编译半天"依然治得住）。
+let uiPort = null; // 已导航过的端口：核心每次重启都是 --port 0 重分配，端口变了必须重新导航
+let bootShown = false;
+
+function webUiUrl(port) {
+  return `http://127.0.0.1:${port}/`;
+}
+
+// 核心起来之前的占位页：只有"正在拉起/失败原因"两态，不承担任何业务 UI。
+function bootPage(state) {
+  let detail = "正在拉起核心服务…";
+  if (state.state === "failed") {
+    detail = `核心启动失败<br/>错误码：${state.errorCode || "unknown"}<br/>${state.message || ""}`;
+  } else if (state.state === "exited") {
+    detail = `核心已退出：${state.message || ""}`;
+  } else if (state.state === "restarting") {
+    detail = `${state.message || "正在重启核心…"}`;
+  }
+  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#f6f7f9;font:14px/1.7 system-ui,-apple-system,Segoe UI,sans-serif">
+    <div style="text-align:center;max-width:560px;padding:24px">
+      <div style="font-size:16px;font-weight:600;margin-bottom:10px">OwO Agent 工作台</div>
+      <div style="color:#5b6570">${detail}</div>
+    </div></body></html>`;
+}
+
+function showBootPage() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  bootShown = true;
+  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(bootPage(coreState))}`);
+}
 
 // ---------- 路径解析 ----------
 
@@ -32,12 +120,69 @@ function localAppData() {
   return process.env.LOCALAPPDATA || process.env.TEMP || os.tmpdir();
 }
 
-function dataRoot() {
+// 缺省数据根（%LOCALAPPDATA%\OwO\Agent）。
+function defaultDataRoot() {
   return path.join(localAppData(), "OwO", "Agent");
+}
+
+// 数据目录可被用户改指（旧 Tauri 的 choose_data_directory / load_data_root_override）：
+// 指针文件固定放在**缺省**数据根下，因此读它不能用 dataRoot()（否则自指）。
+function dataRootPointerPath() {
+  return path.join(defaultDataRoot(), "data_root.json");
+}
+
+function loadDataRootOverride() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(dataRootPointerPath(), "utf8"));
+    const target = parsed && typeof parsed.path === "string" ? parsed.path : "";
+    if (target && fs.statSync(target).isDirectory()) return target;
+  } catch (_) {
+    /* 没改过就用缺省 */
+  }
+  return null;
+}
+
+function dataRoot() {
+  return loadDataRootOverride() || defaultDataRoot();
+}
+
+function saveDataRootOverride(target) {
+  const canonical = fs.realpathSync(path.resolve(target));
+  if (!fs.statSync(canonical).isDirectory()) throw new Error("所选路径不是目录");
+  const pointer = dataRootPointerPath();
+  fs.mkdirSync(path.dirname(pointer), { recursive: true });
+  fs.writeFileSync(pointer, JSON.stringify({ path: canonical }, null, 2));
+  return canonical;
 }
 
 function configPath() {
   return process.env.OWO_CONFIG_FILE || path.join(dataRoot(), "config.json");
+}
+
+// 旧壳遗留：`<data_root>/provider.json`（ADR-003 M6 的一次性迁移来源）。
+function legacyProviderPath() {
+  return path.join(dataRoot(), "provider.json");
+}
+
+function agentDataDir() {
+  return process.env.OWO_AGENT_DATA || path.join(dataRoot(), "data");
+}
+
+// 核心日志落盘（对齐旧 Tauri 壳的 runtime.log_path()）。
+// 打包形态没有终端，stdout 不落盘就等于日志全丢；web 的诊断页/错误卡会把这个
+// 路径展示给用户，托盘排障与 `open_core_logs` 也以它为唯一来源。
+function logDir() {
+  return path.join(dataRoot(), "logs");
+}
+
+function coreLogPath() {
+  return path.join(logDir(), "core.log");
+}
+
+// 配对证明绝不能落进日志（旧壳 core_runtime.rs::redact 同一职责）：
+// 核心若把环境或请求回显出来，日志就成了凭据泄漏面。
+function redactSecrets(text) {
+  return String(text).split(PAIRING_SECRET).join("***pairing***");
 }
 
 function workspacePath() {
@@ -95,6 +240,31 @@ const DEFAULT_CONFIG = {
   },
 };
 
+// M6：首次启动（config.json 尚不存在）时把旧壳的 provider.json 迁进来，只做一次。
+function migrateLegacyProvider() {
+  if (fs.existsSync(configPath())) return;
+  try {
+    const text = fs.readFileSync(legacyProviderPath(), "utf8");
+    const legacy = JSON.parse(text);
+    const model = legacy && legacy.model ? legacy.model : legacy;
+    if (!model || typeof model !== "object") return;
+    const merged = {
+      version: 1,
+      model: {
+        ...DEFAULT_CONFIG.model,
+        provider: model.provider || model.mode || "unset",
+        base_url: model.base_url || "",
+        name: model.name || model.model || "",
+        api_key: model.api_key || "",
+        api_key_env: model.api_key_env || "OPENAI_API_KEY",
+      },
+    };
+    writeConfig(merged);
+  } catch (_) {
+    /* 没有旧配置或格式不符：按默认走 */
+  }
+}
+
 function readConfig() {
   try {
     const text = fs.readFileSync(configPath(), "utf8");
@@ -128,8 +298,10 @@ function coreEnv(config, extra = {}) {
   const model = config.model || {};
   const env = {
     ...process.env,
-    OWO_AGENT_DATA: path.join(dataRoot(), "data"),
+    OWO_AGENT_DATA: agentDataDir(),
     OWO_DESKTOP_RELEASE: "1",
+    // 配对证明：核心据此收紧 /auth/token 引导（见 PAIRING_SECRET 的说明）。
+    OWO_DESKTOP_PAIRING_SECRET: PAIRING_SECRET,
     ...extra,
   };
   const provider = String(model.provider || "unset");
@@ -164,12 +336,17 @@ function coreEnv(config, extra = {}) {
   return env;
 }
 
-// ---------- 核心：启动 / 就绪 / 关闭 ----------
+// ---------- HTTP（M2：壳侧请求统一带 ledger 来源标签） ----------
+
+// M2：壳侧请求统一带 ledger 来源标签 + 配对证明（配对见 PAIRING_SECRET 说明）。
+function shellHeaders(headers) {
+  return { ...headers, "x-owo-client": "shell", [PAIRING_HEADER]: PAIRING_SECRET };
+}
 
 function httpGet(port, urlPath, headers = {}) {
   return new Promise((resolve, reject) => {
     const request = http.request(
-      { host: "127.0.0.1", port, path: urlPath, method: "GET", headers, timeout: 5000 },
+      { host: "127.0.0.1", port, path: urlPath, method: "GET", headers: shellHeaders(headers), timeout: 5000 },
       (response) => {
         let body = "";
         response.on("data", (chunk) => (body += chunk));
@@ -193,7 +370,7 @@ function httpPost(port, urlPath, headers = {}, payload = null) {
         method: "POST",
         timeout: 8000,
         headers: {
-          ...headers,
+          ...shellHeaders(headers),
           ...(data ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) } : {}),
         },
       },
@@ -209,8 +386,102 @@ function httpPost(port, urlPath, headers = {}, payload = null) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// M3：只接受 /health 返回 200 且能解析成 JSON 的响应，其余按"还没起来"处理。
+async function probeHealth(port) {
+  try {
+    const result = await httpGet(port, "/health");
+    if (result.status !== 200) return null;
+    const parsed = JSON.parse(result.body);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// M3：core_ready 之后仍要握手——端口可能属于上一轮没退干净（或别的）核心。
+async function waitForInstance(port, instanceId, timeoutMs = HEALTH_TIMEOUT_MS) {
+  const started = Date.now();
+  let attempt = 0;
+  let lastReason = "no_response";
+  while (Date.now() - started < timeoutMs) {
+    const health = await probeHealth(port);
+    const verdict = evaluateHealth(health, { instanceId, apiVersion: CORE_API_VERSION });
+    if (verdict.ok) return { ok: true, health };
+    lastReason = verdict.reason;
+    await sleep(pollDelayMs(attempt));
+    attempt += 1;
+  }
+  return { ok: false, reason: lastReason };
+}
+
+// M5：壳崩溃后重启时，别把还活着的核心杀掉再拉一个——先尝试接管。
+async function adoptExistingCore(myGeneration, apiVersion = CORE_API_VERSION) {
+  let descriptor = null;
+  try {
+    descriptor = JSON.parse(fs.readFileSync(path.join(agentDataDir(), "runtime", "daemon.json"), "utf8"));
+  } catch (_) {
+    return false;
+  }
+  const port = discoveryPort(descriptor);
+  if (!port) return false;
+  const health = await probeHealth(port);
+  // 接管的是"别人拉起的核心"，因此不能用实例身份校验，只校验健康与 API 版本。
+  const verdict = evaluateHealth(health, { apiVersion });
+  if (!verdict.ok) return false;
+  let token = "";
+  try {
+    const auth = await httpGet(port, "/auth/token");
+    token = JSON.parse(auth.body).token || "";
+  } catch (_) {
+    /* 见下方：拿不到 token 的核心不能接管 */
+  }
+  if (myGeneration !== generation) return false; // 代际已被新一轮取代
+
+  // 配对证明校验（M13 连带）：/auth/token 会校验壳的 pairing。能拿到 token，
+  // 说明这个核心"我们认证得了"（手动 owo-agent serve 起的核心没有 pairing
+  // 约束，同样拿得到）。拿不到 token 却仍然接管是错的：web 的每条认证请求
+  // 都要带本壳的 pairing，对不上就是永久 401，且重启壳也无法自愈（新随机值
+  // 仍然对不上）。此时这个核心只可能属于一个已死掉的壳 → 杀掉重拉。
+  if (!token) {
+    const stalePid = Number(health && health.pid) || 0;
+    if (stalePid > 0) {
+      try {
+        execFile("taskkill", ["/PID", String(stalePid), "/T", "/F"], { windowsHide: true }, () => {});
+      } catch (_) {
+        /* 杀不掉也继续：新核心 --port 0 换端口，不冲突 */
+      }
+    }
+    return false;
+  }
+  core = { proc: null, pid: health.pid || 0, port, token, adopted: true };
+  restartAttempts = 0;
+  coreState = {
+    state: "ready",
+    port,
+    token,
+    pid: health.pid || 0,
+    apiVersion: health.api_version,
+    buildId: "",
+    adopted: true,
+    executable: "",
+    configPath: configPath(),
+    workspace: workspacePath(),
+  };
+  notifyState();
+  return true;
+}
+
+// ---------- 核心：启动 / 就绪 / 关闭 ----------
+
 function killCore() {
-  if (!core || !core.proc) return;
+  if (!core || !core.proc) {
+    core = null;
+    return;
+  }
   const { proc, port, token } = core;
   core = null;
   // 先请它优雅退出；给 1.5s，再强杀兜底（与旧壳同语义）。
@@ -235,8 +506,48 @@ function killCore() {
   }
 }
 
-async function startCore() {
+// M4：核心意外退出后的自动重启——代际守卫 + 指数退避 + 上限。
+function scheduleAutoRestart(myGeneration) {
+  const decision = shouldAutoRestart({
+    generation: myGeneration,
+    currentGeneration: generation,
+    attempts: restartAttempts,
+    maxAttempts: MAX_AUTO_RESTART,
+    shuttingDown,
+    userInitiated: false,
+  });
+  if (!decision) {
+    coreState = {
+      state: "failed",
+      errorCode: "core/restart_exhausted",
+      message: `核心连续退出 ${restartAttempts} 次，已停止自动重启（可在托盘菜单手动重试）`,
+    };
+    notifyState();
+    return;
+  }
+  restartAttempts += 1;
+  const delay = nextBackoffMs(restartAttempts - 1);
+  coreState = { state: "restarting", message: `${delay}ms 后自动重启（第 ${restartAttempts}/${MAX_AUTO_RESTART} 次）` };
+  notifyState();
+  setTimeout(() => {
+    if (myGeneration === generation && !shuttingDown) startCore({ reason: "auto" });
+  }, delay);
+}
+
+async function startCore({ reason = "auto", userInitiated = false } = {}) {
+  const myGeneration = ++generation;
   killCore();
+
+  // M5：仅在启动/自动重启路径尝试接管已存活核心；用户显式要求重启则必须重开。
+  if (!userInitiated) {
+    try {
+      const adopted = await adoptExistingCore(myGeneration);
+      if (adopted) return coreState;
+    } catch (_) {
+      /* 接管失败按正常拉起处理 */
+    }
+  }
+
   const candidates = coreCandidates();
   if (!candidates.length) {
     coreState = { state: "failed", errorCode: "core/binary_missing", message: "找不到核心服务 owo-agent.exe" };
@@ -246,51 +557,91 @@ async function startCore() {
   const exe = candidates[0];
   const config = readConfig();
   const workspace = workspacePath();
+  // M3：本轮身份。核心把它从 /health 公开，壳据此确认"这个端口确实是我拉起的那个核心"。
+  const instanceId = `shell-${crypto.randomUUID()}`;
   coreState = { state: "starting", executable: exe, configPath: configPath(), workspace };
   notifyState();
 
+  // 打包形态：web 工作台随包携带在 resources/web，指给核心，避免回落到编译期源码路径。
+  const extraEnv = { OWO_DESKTOP_INSTANCE_ID: instanceId };
+  if (app.isPackaged) {
+    extraEnv.OWO_WEB_UI_DIR = path.join(process.resourcesPath, "web");
+  }
+
   const proc = spawn(exe, ["serve", "--port", "0", "--workspace", workspace], {
     cwd: path.dirname(exe),
-    env: coreEnv(config),
+    env: coreEnv(config, extraEnv),
     windowsHide: true, // 不弹控制台窗口
     stdio: ["ignore", "pipe", "pipe"],
   });
+
+  // 核心 stdout/stderr 追加写入日志文件（见 coreLogPath 的说明）。
+  let logStream = null;
+  try {
+    fs.mkdirSync(logDir(), { recursive: true });
+    logStream = fs.createWriteStream(coreLogPath(), { flags: "a" });
+    logStream.write(
+      `\n===== [${new Date().toISOString()}] 拉起核心 generation=${myGeneration} instance=${instanceId} exe=${exe} =====\n`,
+    );
+  } catch (_) {
+    /* 日志落盘失败不阻断拉起：控制台输出仍在 */
+  }
 
   const handleLine = async (line) => {
     const text = String(line || "").trim();
     if (!text) return;
     if (core && core.log) core.log(text);
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed.event === "core_ready" && parsed.port) {
-        const port = Number(parsed.port);
-        let token = "";
-        try {
-          const auth = await httpGet(port, "/auth/token");
-          token = JSON.parse(auth.body).token || "";
-        } catch (_) {
-          /* token 拿不到时渲染层会退回 /auth/token 引导 */
-        }
-        core = { proc, port, token, pid: proc.pid, version: parsed.api_version, buildId: parsed.build_id, log: core && core.log };
-        coreState = {
-          state: "ready",
-          port,
-          token,
-          pid: proc.pid,
-          apiVersion: parsed.api_version,
-          buildId: parsed.build_id,
-          executable: exe,
-          configPath: configPath(),
-          workspace,
-        };
-        notifyState();
-      } else if (parsed.event === "core_fatal") {
-        coreState = { state: "failed", errorCode: parsed.code, message: parsed.message };
-        notifyState();
-      }
-    } catch (_) {
-      /* 非 JSON 行：仅进日志 */
+    if (logStream) logStream.write(`${redactSecrets(text)}\n`);
+
+    const fatal = parseFatalLine(text);
+    if (fatal) {
+      if (myGeneration !== generation) return;
+      coreState = { state: "failed", errorCode: fatal.code, message: fatal.message };
+      notifyState();
+      return;
     }
+
+    const ready = parseReadyLine(text);
+    if (!ready) return; // 非握手行：仅进日志
+    if (myGeneration !== generation) return; // 代际守卫
+
+    // M3：core_ready 只是"端口出来了"，还要用实例身份 + API 版本确认是不是自己那一个。
+    const handshake = await waitForInstance(ready.port, instanceId);
+    if (myGeneration !== generation) return;
+    if (!handshake.ok) {
+      coreState = {
+        state: "failed",
+        errorCode: `core/${handshake.reason}`,
+        message: healthReasonText(handshake.reason, { apiVersion: CORE_API_VERSION }),
+      };
+      notifyState();
+      return;
+    }
+
+    let token = "";
+    try {
+      const auth = await httpGet(ready.port, "/auth/token");
+      token = JSON.parse(auth.body).token || "";
+    } catch (_) {
+      /* token 拿不到时渲染层会退回 /auth/token 引导 */
+    }
+    if (myGeneration !== generation) return;
+
+    core = { proc, port: ready.port, token, pid: proc.pid, version: ready.api_version, buildId: ready.build_id, log: core && core.log };
+    restartAttempts = 0; // 真正 ready 了，清空失败预算
+    coreState = {
+      state: "ready",
+      port: ready.port,
+      token,
+      pid: proc.pid,
+      apiVersion: ready.api_version,
+      buildId: ready.build_id,
+      executable: exe,
+      configPath: configPath(),
+      workspace,
+      instanceId,
+    };
+    notifyState();
   };
 
   let buffer = "";
@@ -305,20 +656,38 @@ async function startCore() {
   });
   proc.stderr.on("data", (chunk) => handleLine(chunk.toString("utf8")));
   proc.on("exit", (code) => {
-    if (coreState.state === "ready") {
+    if (logStream) {
+      logStream.write(`===== [${new Date().toISOString()}] 核心退出 code=${code} =====\n`);
+      logStream.end();
+    }
+    if (myGeneration !== generation) return; // 已被新一轮（重启/接管）取代
+    if (coreState.state === "ready" || coreState.state === "restarting") {
       coreState = { state: "exited", errorCode: "core/exited", message: `核心已退出（code=${code}）` };
     } else if (coreState.state === "starting") {
       coreState = { state: "failed", errorCode: "core/exited", message: `核心启动失败（code=${code}）` };
     }
     notifyState();
+    scheduleAutoRestart(myGeneration);
   });
   core = { proc, log: (line) => process.stdout.write(`[core] ${line}\n`) };
   return coreState;
 }
 
 function notifyState() {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("core:state", coreState);
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("core:state", coreState);
+  if (tray) refreshTrayMenu();
+
+  // ready → 导航到核心托管的工作台；端口变了（核心重启后重新分配）必须重新导航。
+  if (coreState.state === "ready" && coreState.port && uiPort !== coreState.port) {
+    uiPort = coreState.port;
+    mainWindow.loadURL(webUiUrl(coreState.port));
+    return;
+  }
+  // 还没进过工作台时，由壳页负责把启动失败说清楚；
+  // 已经进过工作台之后核心崩溃，交给工作台自带的 recovery / service-error 处理，不抢它的画面。
+  if (uiPort === null && (!bootShown || coreState.state === "failed" || coreState.state === "exited")) {
+    showBootPage();
   }
 }
 
@@ -338,29 +707,141 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  mainWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
+  // ADR-003：先给占位页，core ready 后由 notifyState 导航到核心托管的工作台。
+  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(bootPage(coreState))}`);
+  bootShown = true;
+  // 工作台里的外链交给系统浏览器，壳内不新开窗口。
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//.test(String(url))) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  // 关闭窗口 = 收进托盘（有托盘时），退出走托盘菜单。
+  mainWindow.on("close", (event) => {
+    if (tray && !app.isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+  });
   if (process.argv.includes("--dev")) {
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
+}
+
+// ---------- 托盘（M7） ----------
+
+function trayIconPath() {
+  return path.join(__dirname, "..", "..", "assets", "icon.png");
+}
+
+function refreshTrayMenu() {
+  if (!tray) return;
+  const stateText =
+    coreState.state === "ready"
+      ? `核心就绪（端口 ${coreState.port}）`
+      : coreState.state === "starting"
+        ? "核心启动中"
+        : coreState.state === "restarting"
+          ? "核心重启中"
+          : `核心异常：${coreState.errorCode || coreState.state}`;
+  const menu = Menu.buildFromTemplate([
+    { label: "显示 / 隐藏工作台", click: () => toggleWindow() },
+    { label: stateText, enabled: false },
+    { type: "separator" },
+    { label: "重启核心服务", click: () => startCore({ reason: "manual", userInitiated: true }) },
+    { label: "打开配置目录", click: () => shell.openPath(path.dirname(configPath())) },
+    {
+      label: "开机自启",
+      type: "checkbox",
+      checked: app.isPackaged ? app.getLoginItemSettings().openAtLogin === true : false,
+      enabled: app.isPackaged, // 开发态不往注册表里塞开发版路径
+      click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
+    },
+    { type: "separator" },
+    { label: "退出", click: () => quitApp() },
+  ]);
+  tray.setContextMenu(menu);
+  tray.setToolTip(`OwO Agent · ${stateText}`);
+}
+
+function createTray() {
+  const iconFile = trayIconPath();
+  if (!fs.existsSync(iconFile)) {
+    // 图标缺失不该让壳起不来：降级为无托盘，行为与旧版一致（关窗即退出）。
+    console.warn(`[tray] 缺少图标 ${iconFile}，跳过托盘`);
+    return;
+  }
+  tray = new Tray(nativeImage.createFromPath(iconFile));
+  refreshTrayMenu();
+  tray.on("click", () => toggleWindow());
+}
+
+function toggleWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isVisible()) {
+    mainWindow.hide();
+  } else {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
+function quitApp() {
+  app.isQuitting = true;
+  shuttingDown = true;
+  killCore();
+  app.quit();
+}
+
+// ---------- 全局快捷键（对齐旧 Tauri 壳：Ctrl+Alt+Shift+O 唤起工作台） ----------
+
+const WORKSPACE_ACCELERATOR = "Ctrl+Alt+Shift+O";
+
+function showWorkspace() {
+  // 窗口已被销毁（例如无托盘模式关过窗）时重建，而不是静默失效。
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+function registerGlobalShortcut() {
+  // 与旧壳同一策略：注册失败（被其它程序占用）只降级并记日志，不阻断启动。
+  const registered = globalShortcut.register(WORKSPACE_ACCELERATOR, () => showWorkspace());
+  if (registered) {
+    console.log(`[shortcut] 已注册 ${WORKSPACE_ACCELERATOR}`);
+  } else {
+    console.warn(`[shortcut] ${WORKSPACE_ACCELERATOR} 注册失败（可能被占用），继续启动`);
+  }
+  return registered;
 }
 
 // ---------- IPC ----------
 
 ipcMain.handle("core:get", () => coreState);
 ipcMain.handle("core:restart", async () => {
-  await startCore();
+  restartAttempts = 0; // 用户主动重启：清空失败预算
+  await startCore({ reason: "manual", userInitiated: true });
   return coreState;
 });
 ipcMain.handle("config:read", () => ({ path: configPath(), config: readConfig() }));
 ipcMain.handle("config:write", (_event, config) => {
+  // M6：结构性错误直接拒绝写入（凭据缺失只返回 warnings，不阻断）。
+  const verdict = validateConfig(config, { envHas: (name) => Boolean(process.env[name]) });
+  if (!verdict.ok) return { ok: false, errors: verdict.errors, warnings: verdict.warnings };
   writeConfig(config);
-  return { ok: true, path: configPath() };
+  return { ok: true, path: configPath(), warnings: verdict.warnings };
 });
 // 保存配置并重启核心：改文件/界面保存走同一条路，避免两份真相。
 ipcMain.handle("config:apply", async (_event, config) => {
+  const verdict = validateConfig(config, { envHas: (name) => Boolean(process.env[name]) });
+  if (!verdict.ok) return { ok: false, errors: verdict.errors, warnings: verdict.warnings };
   writeConfig(config);
-  await startCore();
-  return { ok: true, path: configPath(), state: coreState };
+  restartAttempts = 0;
+  await startCore({ reason: "manual", userInitiated: true });
+  return { ok: true, path: configPath(), state: coreState, warnings: verdict.warnings };
 });
 ipcMain.handle("config:reveal", () => {
   const file = configPath();
@@ -379,7 +860,7 @@ ipcMain.handle("workspace:choose", async () => {
   });
   if (result.canceled || !result.filePaths.length) return { ok: false, canceled: true };
   const target = saveWorkspace(result.filePaths[0]);
-  await startCore();
+  await startCore({ reason: "manual", userInitiated: true });
   return { ok: true, workspace: target };
 });
 ipcMain.handle("app:openExternal", (_event, url) => {
@@ -387,21 +868,233 @@ ipcMain.handle("app:openExternal", (_event, url) => {
   return { ok: true };
 });
 
+// ---------- Tauri 兼容命令桥（ADR-003） ----------
+//
+// desktop/web 通过 `window.__TAURI_INTERNALS__.invoke(name, args)` 调壳：14 个命令
+// 散落在 api-client.js / folder-picker.js / settings-panel.view.js /
+// setup-guide.view.js / service-error.view.js / status-bar.view.js。Tauri 壳移除后
+// 这个全局对象消失，会让「模型配置保存」「原生目录选择器」「诊断页重启/开日志」
+// 全部静默降级为"非桌面环境"——UI 一模一样，功能却少一半。
+//
+// 对策：主进程按**同名同形状**实现这 14 个命令（形状与旧 commands.rs 逐字段对齐），
+// preload 原样暴露该全局对象。desktop/web 一行不改，这是"UI 与功能一模一样"的
+// 实现前提。纯语义（默认值/掩码/读改写）在 shell-commands.js，可 node --test。
+
+// shell.openPath 返回空串表示成功，非空串是错误信息。
+async function openPathInExplorer(target, select) {
+  if (!target) return false;
+  if (select) {
+    shell.showItemInFolder(target);
+    return true;
+  }
+  const error = await shell.openPath(target);
+  return !error;
+}
+
+// get_core_state 的形状：ready 带 port，非 ready 一律 port=0（web 据此判断能否连）。
+function coreStateValue() {
+  const base = { ...coreState, logPath: coreLogPath() };
+  if (base.state === "ready") return base;
+  return { ...base, port: 0 };
+}
+
+function providerStatus() {
+  return shellCommands.providerStatusValue(readConfig().model || {}, {
+    envGet: (name) => process.env[name],
+    configPath: configPath(),
+  });
+}
+
+async function pickDirectory(title) {
+  const result = await dialog.showOpenDialog(mainWindow, { title, properties: ["openDirectory"] });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+}
+
+// 写配置 → 受控重启核心（新值经环境变量注入生效）。设置页与引导页共用这一条。
+async function applyModelConfig(args) {
+  const patched = shellCommands.applyModelConfigPatch(readConfig(), args);
+  if (!patched.ok) return { ok: false, error: patched.error };
+  writeConfig(patched.config);
+  restartAttempts = 0;
+  await startCore({ reason: "manual", userInitiated: true });
+  return { ok: true, ...providerStatus() };
+}
+
+async function setWorkspaceTarget(target) {
+  let canonical;
+  try {
+    canonical = fs.realpathSync(path.resolve(target));
+  } catch (_) {
+    return { ok: false, error: `路径不可用：${target}` };
+  }
+  if (!fs.statSync(canonical).isDirectory()) return { ok: false, error: "所选路径不是目录" };
+  saveWorkspace(canonical);
+  restartAttempts = 0;
+  await startCore({ reason: "manual", userInitiated: true });
+  return { ok: true, workspace: canonical, state: coreState.state, generation };
+}
+
+const SHELL_COMMAND_HANDLERS = {
+  get_core_state: () => coreStateValue(),
+
+  get_core_connection: () => {
+    if (coreState.state === "ready" && coreState.port) {
+      return {
+        port: coreState.port,
+        instanceId: coreState.instanceId || "",
+        // 配对证明：api-client 拿到后随请求带 x-owo-desktop-pairing（长度 ≥32 才采纳）。
+        pairing: PAIRING_SECRET,
+        apiVersion: coreState.apiVersion || CORE_API_VERSION,
+        pid: coreState.pid || 0,
+        buildId: coreState.buildId || "",
+        // 诊断页据此比对 buildId != expectedBuildId 提示"安装包与核心版本错配"
+        // （旧壳用编译期 commit，Electron 侧以包版本号承担同一职责）。
+        expectedBuildId: app.getVersion(),
+        state: "ready",
+        generation,
+        token: coreState.token || "",
+        logPath: coreLogPath(),
+      };
+    }
+    return coreStateValue();
+  },
+
+  retry_core_start: async () => {
+    restartAttempts = 0;
+    await startCore({ reason: "manual", userInitiated: true });
+    return coreStateValue();
+  },
+
+  open_core_logs: async () => {
+    const opened = await openPathInExplorer(logDir(), false);
+    return { opened: coreLogPath(), ok: opened };
+  },
+
+  get_workspace: () => ({ workspace: workspacePath(), state: coreState.state }),
+
+  set_workspace: async (args) => {
+    const target = String((args && args.path) || "").trim();
+    if (!target) return { ok: false, error: "路径为空" };
+    return setWorkspaceTarget(target);
+  },
+
+  choose_project_directory: async () => {
+    const picked = await pickDirectory("选择项目工作区");
+    if (!picked) return { ok: false, canceled: true };
+    return setWorkspaceTarget(picked);
+  },
+
+  choose_data_directory: async () => {
+    const picked = await pickDirectory("选择新的数据目录");
+    if (!picked) return { ok: false, canceled: true };
+    let canonical;
+    try {
+      canonical = saveDataRootOverride(picked);
+    } catch (error) {
+      return { ok: false, error: String((error && error.message) || error) };
+    }
+    restartAttempts = 0;
+    await startCore({ reason: "manual", userInitiated: true });
+    return { ok: true, data_root: canonical, state: coreState.state };
+  },
+
+  get_provider_status: () => providerStatus(),
+
+  // api-client 的 desktopPairingProof 走这条（旧壳在 main.rs::desktop_pairing）。
+  desktop_pairing: () => PAIRING_SECRET,
+
+  set_model_config: (args) => applyModelConfig(args),
+
+  // 兼容旧调用点（引导页）：等价于 set_model_config，但只传 mode/base_url/model，
+  // 密钥字段一律不动（旧前端没有密钥输入框）。
+  set_provider: (args) => applyModelConfig(args),
+
+  reveal_model_config: async () => {
+    const file = configPath();
+    if (!fs.existsSync(file)) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      writeConfig(readConfig());
+      await openPathInExplorer(path.dirname(file), false);
+      return {
+        ok: true,
+        created: false,
+        path: file,
+        detail: "配置文件尚未生成：在设置页点一次「保存并重启核心」即可创建",
+      };
+    }
+    const opened = await openPathInExplorer(file, true);
+    return { ok: opened, created: true, path: file };
+  },
+
+  reload_model_config: async () => {
+    const file = configPath();
+    if (!fs.existsSync(file)) {
+      return {
+        ok: false,
+        error: `配置文件不存在：${file}（先在设置页保存一次即可创建）`,
+        configPath: file,
+      };
+    }
+    // 从磁盘重读（用户可能手改过 config.json），再受控重启让新值经环境变量生效。
+    // startCore 内部会自己 readConfig()，这里无需传递。
+    restartAttempts = 0;
+    await startCore({ reason: "manual", userInitiated: true });
+    return { ok: true, reloaded: true, configPath: file, ...providerStatus() };
+  },
+};
+
+ipcMain.handle("shell:invoke", async (_event, name, args) => {
+  const handler = SHELL_COMMAND_HANDLERS[name];
+  // 未知命令返回错误对象而不是抛异常：web 侧多处对 invoke 只做 .catch，
+  // 抛出去会把整条链路打成 unhandled rejection。
+  if (!handler) return { ok: false, error: `未知壳命令：${name}` };
+  try {
+    return await handler(args || {});
+  } catch (error) {
+    return { ok: false, error: String((error && error.message) || error) };
+  }
+});
+
 // ---------- 生命周期 ----------
 
+// M7：单实例——第二次启动唤醒既有的那个窗口，而不是再拉一个核心。
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
 app.whenReady().then(async () => {
+  migrateLegacyProvider(); // M6：一次性迁移旧壳配置
+  createTray();
+  registerGlobalShortcut();
   createWindow();
-  await startCore();
+  await startCore({ reason: "launch" });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on("window-all-closed", () => {
-  // 关窗即退出（并把核心一起收干净）；要常驻可以改成托盘模式。
-  killCore();
-  app.quit();
+  // 有托盘时窗口关闭只是隐藏；真正退出走托盘菜单（quitApp）。
+  if (!tray) {
+    shuttingDown = true;
+    killCore();
+    app.quit();
+  }
 });
 
-app.on("before-quit", () => killCore());
+app.on("before-quit", () => {
+  shuttingDown = true;
+  globalShortcut.unregisterAll();
+  killCore();
+});
 process.on("exit", () => killCore());

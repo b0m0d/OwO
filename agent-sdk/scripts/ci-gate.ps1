@@ -311,9 +311,9 @@ if (-not $SkipNode) {
 #     请求预算这些契约全靠 node --test 断言，一旦漂移无人拦（AGENTS.md：契约测试
 #     随功能提交）。§2.4 不适用：纯 JavaScript 不调用 Rust 编译器。
 if (-not $SkipWebTests) {
-    Invoke-CiStep -Name "桌面 web 契约测试（node --test desktop/web/tests/*.test.mjs）" -Id "web-tests" -Cwd $root -LogDir $LogDir -Block {
+    Invoke-CiStep -Name "桌面 web + Electron 壳契约测试（node --test）" -Id "web-tests" -Cwd $root -LogDir $LogDir -Block {
         $log = if ($LogDir) { Join-Path $LogDir "web-tests.stream.log" } else { "" }
-        Invoke-CiLoggedCommand -Exe node -Arguments @('--test', 'desktop/web/tests/*.test.mjs') `
+        Invoke-CiLoggedCommand -Exe node -Arguments @('--test', 'desktop/web/tests/*.test.mjs', 'desktop/electron/tests/*.test.mjs') `
             -Cwd $root -TimeoutSec 900 -HeartbeatSec $HeartbeatSec -LogFile $log -Label 'web-tests'
     }
 }

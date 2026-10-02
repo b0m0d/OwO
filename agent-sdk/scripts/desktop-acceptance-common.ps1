@@ -694,7 +694,11 @@ function New-OwoAcceptanceRun {
     )
     if (-not $Stamp) { $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss' }
     if (-not $ShellExe) {
-        $ShellExe = Join-Path $SdkRoot "desktop\tauri\src-tauri\target\$Configuration\owo-agent-desktop.exe"
+        # ADR-003：桌面壳已由 Tauri 收敛为 Electron。旧壳是"单个 exe + 同级 dll"，
+        # Electron 是"目录形态"（app + node_modules 或 win-unpacked），本原语的
+        # 复制/启动模型不再适用，因此不再给出已失效的默认路径——直接要求调用方
+        # 显式指定，避免把迁移缺口伪装成"文件缺失"。
+        throw "ADR-003：桌面壳已换 Electron，$($MyInvocation.MyCommand) 的旧默认路径 desktop\tauri\src-tauri\...\owo-agent-desktop.exe 已不存在。请显式传 -ShellExe（Electron 壳入口）并完成本脚本迁移。"
     }
     if (-not $SidecarExe) {
         $SidecarExe = Join-Path $SdkRoot "target\$Configuration\owo-agent.exe"

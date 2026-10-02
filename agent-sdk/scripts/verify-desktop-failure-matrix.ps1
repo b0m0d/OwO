@@ -44,7 +44,9 @@ $sdkRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "stage-desktop-sidecar.ps1")
 
 if (-not $ShellExe) {
-    $ShellExe = Join-Path $sdkRoot 'desktop\tauri\src-tauri\target\debug\owo-agent-desktop.exe'
+    # ADR-003：桌面壳已换 Electron（目录形态），旧的单一 exe 路径不再存在。
+    # 显式要求 -ShellExe，避免把迁移缺口伪装成"文件缺失"。
+    throw "ADR-003：桌面壳已换 Electron，旧默认路径 desktop\tauri\src-tauri\target\debug\owo-agent-desktop.exe 已不存在。请显式传 -ShellExe（Electron 壳入口）并完成本脚本迁移。"
 }
 # 壳内嵌前端资产：不新鲜就是测旧界面（与 §8.2 冷启动共用同一道门）。
 $null = Assert-OwoShellEmbedsCurrentWeb -ShellExe $ShellExe -WebRoot (Join-Path $sdkRoot 'desktop\web')

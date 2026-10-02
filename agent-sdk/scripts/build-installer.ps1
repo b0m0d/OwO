@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $root = Split-Path $PSScriptRoot -Parent
-$tauriDir = Join-Path $root "desktop\tauri\src-tauri"
+$electronDir = Join-Path $root "desktop\electron"
 $cargo = if ($env:OWO_CARGO) { $env:OWO_CARGO } else { Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe" }
 $npx = if ($env:OWO_NPX) {
     $env:OWO_NPX
@@ -73,81 +73,36 @@ Write-Host "[installer] 随包 core 就位：$($staged.destination)"
 Write-Host "[installer] sidecar 身份：$($staged.identity)"
 Write-Host "[installer] sidecar 复制哈希核对通过：$($staged.sha256)"
 
-Push-Location $tauriDir
+# ADR-003：NSIS 打包由 Tauri bundler 改为 electron-builder（配置见
+# desktop/electron/electron-builder.yml）。壳不再编译 Rust，因此原先那段
+# "临时移开 .cargo/config.toml、清空 rustflags"的补丁随之作废——它是为绕开
+# tauri-build 的 static_vcruntime 冲突（/NODEFAULTLIB:LIBCMT 屏蔽 libcmt 导致
+# 成批 LNK2001），Electron 侧不存在该链路。
+$electronDir = Join-Path $root "desktop\electron"
+$buildExitCode = 0
+Push-Location $electronDir
 try {
-    Write-Host "[installer] 打包 NSIS（npx @tauri-apps/cli build）..."
-    # Tauri 2 的 tauri-build 会为壳注入 static_vcruntime 的 CRT 参数。
-    # agent-sdk/.cargo/config.toml 中用于 ORT 核心服务的 /NODEFAULTLIB:LIBCMT
-    # 不能传给壳，否则会屏蔽壳所需的 libcmt，触发 mainCRTStartup/__chkstk 等
-    # 成批 LNK2001。Cargo 会合并 workspace rustflags，环境变量无法可靠删除
-    # 配置数组，因此只在 Tauri 子构建期间临时移开配置文件，并在 finally 原位恢复。
-    $cargoConfig = Join-Path $root '.cargo\config.toml'
-    $cargoConfigBackup = Join-Path $root '.cargo\config.toml.build-installer-backup'
-    $hadCargoConfig = Test-Path -LiteralPath $cargoConfig
-    if ($hadCargoConfig) {
-        if (Test-Path -LiteralPath $cargoConfigBackup) {
-            throw "发现未清理的 Cargo 配置备份：$cargoConfigBackup；拒绝覆盖，先确认上一次发布脚本已恢复"
-        }
-        Move-Item -LiteralPath $cargoConfig -Destination $cargoConfigBackup -Force
-    }
-    $oldTargetRustFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
-    $oldEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
-    $oldGenericRustFlags = $env:RUSTFLAGS
-    $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = ''
-    $env:RUSTFLAGS = ''
-    $env:CARGO_ENCODED_RUSTFLAGS = ''
-    # R10（2026-09-22 实测缺陷）：`npx tauri build` 会重新编译桌面壳，而壳的
-    # `owo-build-info` 构建脚本在 release 档同样会拒绝 dirty 工作树。本脚本开头
-    # 的 `Assert-OwoCleanTree` 只是**本进程**的门禁，覆盖开关 OWO_ALLOW_DIRTY_RELEASE
-    # 不会自动传进 npx 子进程——于是"本地显式允许 dirty 打包"仍然在壳编译阶段
-    # panic，报错却显示成"NSIS 打包失败"，排查成本极高（实测卡了两轮）。
-    # 这里显式传递：父进程允许 → 子构建也允许，语义一致且可追溯。
-    $dirtyOverride = $env:OWO_ALLOW_DIRTY_RELEASE
-    if ($dirtyOverride -eq "1") {
-        Write-Host "[installer] OWO_ALLOW_DIRTY_RELEASE=1：透传给 tauri 子构建（壳的 build.rs 同样门禁）"
-    }
-    # ⚠ PowerShell 5.1 陷阱（2026-09-22 实测两次踩到）：本脚本顶部设了
-    # `$ErrorActionPreference = "Stop"`，而 5.1 会把**外部程序的 stderr 输出**
-    # 包装成 ErrorRecord——npx/npm 每次都会往 stderr 打
-    # `npm warn Unknown env config "manage-package-manager-versions"`，
-    # 于是这一行在 npx 真正跑起来之前就被当成终止性错误抛出，脚本以 exit 1 收场，
-    # 现象是"NSIS 打包失败"，而 bundler 其实一次都没执行。
-    # 处置：把调用与恢复合并成**一条** try/finally（continue 语义：stderr 仍原样透传，
-    # 不吞输出），之后**只认 $LASTEXITCODE**——退出码才是打包成败的唯一权威判据。
+    Write-Host "[installer] 打包 NSIS（npm run dist → electron-builder）..."
+    # 随包 core 的校验不再在这里单独 stage：npm 的 predist 会自动跑
+    # stage-desktop-sidecar.ps1（唯一实现），避免两处实现漂移。
+    # ⚠ PowerShell 5.1 陷阱（2026-09-22 实测两次踩到）：顶部设了
+    # `$ErrorActionPreference = "Stop"`，而 5.1 会把**外部程序的 stderr**包装成
+    # 终止性错误——npm 每次都往 stderr 打 warning，于是命令还没跑起来就被判定
+    # 失败，现象是"打包失败"而 bundler 一次都没执行。处置：临时改 Continue，
+    # 之后**只认 $LASTEXITCODE**——退出码才是打包成败的唯一权威判据。
     $savedErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $npx --yes @tauri-apps/cli@2 build
+        & npm.cmd run dist
         $buildExitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $savedErrorAction
-        if ($null -eq $oldTargetRustFlags) {
-            Remove-Item Env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
-        } else {
-            $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $oldTargetRustFlags
-        }
-        if ($null -eq $oldEncodedRustFlags) {
-            Remove-Item Env:CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
-        } else {
-            $env:CARGO_ENCODED_RUSTFLAGS = $oldEncodedRustFlags
-        }
-        if ($null -eq $oldGenericRustFlags) {
-            Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
-        } else {
-            $env:RUSTFLAGS = $oldGenericRustFlags
-        }
-        if ($hadCargoConfig) {
-            if (Test-Path -LiteralPath $cargoConfig) {
-                throw "Tauri 子构建后 Cargo 配置路径出现意外文件：$cargoConfig；拒绝覆盖"
-            }
-            Move-Item -LiteralPath $cargoConfigBackup -Destination $cargoConfig -Force
-        }
-    }
-    if ($buildExitCode -ne 0) {
-        throw "NSIS 打包失败（npx @tauri-apps/cli build exit=$buildExitCode）"
     }
 } finally {
     Pop-Location
 }
+if ($buildExitCode -ne 0) {
+    throw "NSIS 打包失败（npm run dist exit=$buildExitCode）"
+}
 
-Write-Host "[installer] 完成：desktop\tauri\src-tauri\target\release\bundle\nsis\"
+Write-Host "[installer] 完成：dist\electron\"

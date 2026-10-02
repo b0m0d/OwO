@@ -27,9 +27,11 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'desktop-acceptance-common.ps1')
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$shellExe = Join-Path $repoRoot 'desktop\tauri\src-tauri\target\debug\owo-agent-desktop.exe'
+# ADR-003：桌面壳已换 Electron（目录形态），旧的单一 exe 路径不再存在。
+# 本脚本待迁移：改为启动 Electron 壳（desktop/electron 或 dist\electron\win-unpacked）
+# 后再走同样的故障注入/取证流程。
+throw "ADR-003：桌面壳已换 Electron，probe-desktop-failure-state.ps1 待迁移（旧路径 desktop\tauri\src-tauri\target\debug\owo-agent-desktop.exe 已不存在）。"
 $sidecarExe = Join-Path $repoRoot 'target\debug\owo-agent.exe'
-if (-not (Test-Path -LiteralPath $shellExe)) { throw "缺少桌面壳：$shellExe" }
 $apiKey = [Environment]::GetEnvironmentVariable('OPENAI_API_KEY', 'User')
 
 $runId = 'probe-' + (Get-Date).ToString('yyyyMMdd-HHmmss')

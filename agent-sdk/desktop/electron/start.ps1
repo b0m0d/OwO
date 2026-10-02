@@ -1,6 +1,6 @@
 ﻿# 启动 OwO Agent（Electron 版）。
 #
-# 与旧 Tauri 壳最大的不同：**前端从磁盘加载**。改 `src/renderer/**` 之后
+# 与旧 Tauri 壳最大的不同：**前端从磁盘加载**（core 静态托管 desktop/web）。改 `desktop/web/**` 之后
 # 在窗口里按 Ctrl+R 就能看到效果，不需要重新编译（这是用户明确要求的）。
 #
 # 用法：pwsh -NoProfile -File agent-sdk\desktop\electron\start.ps1

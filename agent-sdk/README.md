@@ -29,7 +29,7 @@ Codex 式 Agent 智能体 SDK（当前基线 v0.6，桌面工作台 + 全流程�
 - 内置技能包（`skills/`）：documents / spreadsheets / pdf / browser，遵循 SKILL.md + manifest.json + tests/ 契约，启动时自动安装到数据目录。
 - HTTP 新接口：`GET /context/snapshot`、`GET /perception/events`（SSE）、`POST /learn/record|pause|resume|clear`、`GET /learn/status`、`POST /skill/verify`、`POST /proactive/observe|decide`、`GET /whitelist`、`POST /whitelist/manage`。
 - 设置组：`stt` / `explore` / `proactive` / `skills` / `whitelist` / `egress`（参考 `settings.example.json`）。
-- 桌面工作台 Web 壳（P1 骨架）：`desktop/web/`（任务列表/对话 SSE 流式/审批条/diff 审阅/技能中心/感知状态区/白名单管理），由 HTTP 服务在 `/` 静态托管，后续用 Tauri 2 封装为桌面主客户端。
+- 桌面工作台 Web 壳（P1 骨架）：`desktop/web/`（任务列表/对话 SSE 流式/审批条/diff 审阅/技能中心/感知状态区/白名单管理），由 HTTP 服务在 `/` 静态托管，桌面主客户端为 Electron 壳（ADR-003），加载同一份工作台。
 - L0 前台窗口事件源（Windows）：`platform.rs` 用 Win32 轮询前台应用（app_id + 标题），`/context/snapshot` 自动刷新并去重写入情景快照。
 - L0 剪贴板事件源：轮询 `GetClipboardSequenceNumber`，只记录“内容已变化”（掩码），不读取/不保存剪贴板内容。
 - L2 按需截图：GDI `BitBlt` + `GetDIBits` 抓屏为内存 BMP，进环形缓冲（最多 5 帧、不落盘），任务结束 `discard_captures` 即毁；快照只暴露元数据（大小/时间），不暴露像素。
@@ -50,7 +50,7 @@ Codex 式 Agent 智能体 SDK（当前基线 v0.6，桌面工作台 + 全流程�
 - 技能中心（P1）：技能启用/禁用（运行时共享禁用集合，切换即时生效并持久化到 `settings.json`；系统提示注入与 `use_skill` 均只放行启用技能）；`GET /skills/{name}` 查看、`POST /skills/{name}` 编辑 SKILL.md；`GET /learn/packages/{name}` 流程技能包详情、`DELETE /learn/packages/{name}` 删除（写审计）；Web 技能中心含启用/禁用、查看、编辑、导出、删除按钮。
 - 对话附件（P1）：`POST /session/{id}/attachments` 上传（base64 JSON、文件名清洗防穿越、50MB 上限、保存到工作区 `.owo-attachments/<会话>/`），`GET /session/{id}/attachments` 列表；`TurnRequest.attachments` 发送时自动注入附件路径上下文（Agent 可用内置文件工具读取）；Web 📎 多选上传 + 附件 chips（可移除）。
 - 桌面操作迭代（P3/computer-use）：动作图新增 `launch`（主动打开应用/URL）与 `click_at`（按屏幕坐标点击，配合 OCR 定位自绘控件）；修复 `inject` handle=0 失效；新增 `POST /perception/tree`（深度树，节点含屏幕边界框）、`POST /perception/ocr`（全屏 OCR + 逐词坐标框）、`POST /perception/ocr/region`（裁剪+放大区域 OCR，小字验证窗口用）、`GET /perception/ocr/status`（引擎诊断）；修复 OCR 根因：WIC 无法解码 GDI BMP，改为直接构造 SoftwareBitmap（实测 1636 字符/647 框）；`SemanticAnchor.parent` 父容器约束；`ui:`/`value:` 验证谓词；`qq-send-file` 技能包按 NTQQ 实测锚点重写。
-- 桌面自启：Tauri 托盘新增“开机自启：开/关”，写入/删除 HKCU Run 注册表项，启动时自动拉起核心服务常驻。
+- 桌面自启：托盘新增（Electron 壳）“开机自启：开/关”，经 app.setLoginItemSettings 写入开机自启，启动时自动拉起核心服务常驻。
 - 本地 STT（D20）：`stt.rs` 集成 sherpa-onnx + SenseVoice-Small（默认离线，`settings.stt.model` 可换），模型目录 `<data>/models/stt/<model>/`，`scripts/download-stt-model.ps1` 一键下载（约 240MB）；接口 `POST /stt/transcribe`（raw WAV → 文本 + 耗时）；模型未就绪返回明确错误，不静默降级云端。
 - 桌面/浏览器双表面工具（v0.4.1）：`screen_ocr`/`ocr_region` 返回整行文本（`lines` + 坐标 + `role_hint`），
   `desktop_click/type/key/shortcut/activate/window_list/foreground/launch/wait` 走 SendInput/UIA/窗口枚举，
@@ -155,10 +155,11 @@ powershell -ExecutionPolicy Bypass -File scripts\package-desktop.ps1 -Configurat
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
-# 产物：desktop\tauri\src-tauri\target\release\bundle\nsis\OwO Agent_0.1.0_x64-setup.exe
+cd desktop\electron && npm install && npm run dist
+# 产物：dist\electron\OwO Agent-Setup-0.1.0.exe（electron-builder + NSIS，见 electron-builder.yml）
 ```
 
-安装包通过 Tauri externalBin 内置核心服务（`owo-agent-x64.exe`），桌面壳自动定位同目录核心服务；支持简体中文/英文安装界面、当前用户安装。
+安装包通过 electron-builder 的 `extraResources` 内置核心服务（`owo-agent.exe`）与 web 工作台（`resources/web`，壳用 `OWO_WEB_UI_DIR` 指给核心）；支持简体中文安装界面、当前用户安装。打包前需先 `cargo build --release`（核心产物）。
 
 ### 自动更新（updater）
 
@@ -168,7 +169,7 @@ powershell -ExecutionPolicy Bypass -File scripts\generate-update-manifest.ps1 `
 # 产物：dist\updates\latest.json（version/notes/pub_date/platforms.windows-x86_64.url+signature）
 ```
 
-桌面托盘“检查更新”调用 tauri-plugin-updater；签名公钥已内置，私钥在 `desktop/tauri/src-tauri/.secrets/`（gitignore，请妥善保管）。把安装包与 `latest.json` 托管到任意静态服务器并替换 `tauri.conf.json` 的 `plugins.updater.endpoints` 即可启用更新。
+桌面托盘“检查更新”调用 更新通道（当前为占位，Electron 侧待接入 electron-updater）；签名公钥已内置，私钥在 `（原 Tauri 私钥目录已随壳退场移除）`（gitignore，请妥善保管）。把安装包与 `latest.json` 托管到任意静态服务器并替换 `electron-builder.yml` 的 `plugins.updater.endpoints` 即可启用更新。
 
 ### 内置技能门禁
 
@@ -191,18 +192,30 @@ owo-agent serve --port 4096 --workspace .
 # 浏览器打开 http://127.0.0.1:4096/
 ```
 
-### 桌面主客户端（Tauri 2 壳）
+### 桌面主客户端（Electron 壳，ADR-003）
+
+> 2026-10-02：桌面壳由 Tauri 2 迁移为 Electron（`docs/adr/ADR-003-desktop-shell-merge.md`）。
+> 监管能力（实例身份校验、崩溃自动重启、单实例、托盘自启、NSIS 打包）已全部移植，
+> 渲染层统一为核心服务托管的 `desktop/web` 工作台——与浏览器打开看到的完全一致。
 
 ```powershell
-cargo build -p owo-agent-cli                    # 先编译核心服务
-cd desktop\tauri\src-tauri
-cargo build
-.\target\debug\owo-agent-desktop.exe            # 自动拉起核心服务，Ctrl+Alt+Shift+O 唤起
+cargo build -p owo-agent-cli                    # 先编译核心服务（产出 owo-agent.exe）
+cd desktop\electron
+npm install                                     # 拉 Electron 运行时（国内可用 ELECTRON_MIRROR）
+npm start                                       # 或 pwsh -File start.ps1
 ```
 
-Tauri 壳为无状态窗口：加载 `desktop/web/` 工作台，启动时自动拉起
-`owo-agent serve`（127.0.0.1:4096），退出时回收子进程；含系统托盘（显示/退出）。
-核心服务已开启 CORS（本机回环），供 WebView 跨源访问。
+Electron 壳为无状态窗口，职责只有"把核心服务拉起来并看好它"：
+
+- 拉起 `owo-agent.exe serve --port 0`，解析 stdout 的 `core_ready` 行取端口；
+- 用 `OWO_DESKTOP_INSTANCE_ID` + `/health` 双重校验，只认自己拉起的那个核心；
+- 核心意外退出时指数退避自动重启（上限 3 次），端口重分配后自动重新导航；
+- core ready 后导航到 `http://127.0.0.1:<port>/`，加载核心托管的 web 工作台
+  （**改 `desktop/web` 后 Ctrl+R 即生效，不需要重新编译**）；
+- 单实例锁、系统托盘（显示/隐藏、重启核心、开机自启、退出）、外链走系统浏览器。
+
+监管纯逻辑在 `desktop/electron/src/main/core-supervision.js`，配套 `node --test`
+单测在 `desktop/electron/tests/`（已进 `ci-gate.ps1` 门禁）。
 
 ## 环境变量
 

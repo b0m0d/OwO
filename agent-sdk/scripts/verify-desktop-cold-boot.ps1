@@ -37,7 +37,10 @@ $sdkRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "desktop-acceptance-common.ps1")
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 if (-not $ShellExe) {
-    $ShellExe = Join-Path $sdkRoot 'desktop\tauri\src-tauri\target\debug\owo-agent-desktop.exe'
+    # ADR-003：桌面壳已换 Electron（目录形态），旧的"复制 owo-agent-desktop.exe +
+    # 同级 dll 到私有 bin"模型不再适用。显式要求 -ShellExe，避免把迁移缺口
+    # 伪装成"文件缺失"。
+    throw "ADR-003：桌面壳已换 Electron，旧默认路径 desktop\tauri\src-tauri\target\debug\owo-agent-desktop.exe 已不存在。请显式传 -ShellExe（Electron 壳入口）并完成本脚本迁移。"
 }
 if (-not $SidecarExe) {
     $SidecarExe = Join-Path $sdkRoot 'target\debug\owo-agent.exe'

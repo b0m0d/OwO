@@ -22,6 +22,13 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $root = Split-Path $PSScriptRoot -Parent
+
+# ADR-003：桌面壳已由 Tauri 收敛为 Electron，本脚本依赖的
+# `@tauri-apps/cli signer` + tauri.conf.json 的 updater 端点随之失效。
+# 现状（与 electron-builder.yml 的 `publish: []` 一致）：Electron 侧**尚未接入**
+# 真实发布通道，自动更新暂不支持。迁移路径：改用 electron-builder 的 publish
+# 配置（如 generic/github provider）并对其产物签名，本脚本再按新产物形态重写。
+throw "ADR-003：桌面壳已换 Electron，generate-update-manifest.ps1 依赖的 Tauri signer 不再适用（自动更新通道目前是占位，见 electron-builder.yml 的 publish: []）。接入真实发布地址前请勿声称支持自动更新。"
 $tauriDir = Join-Path $root "desktop\tauri\src-tauri"
 $key = Join-Path $tauriDir ".secrets\owo-update.key"
 $passFile = Join-Path $tauriDir ".secrets\owo-update.pass"

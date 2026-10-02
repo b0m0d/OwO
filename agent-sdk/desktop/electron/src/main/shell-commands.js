@@ -1,0 +1,245 @@
+"use strict";
+
+// ADR-003：Tauri 兼容命令桥的**纯逻辑层**。
+//
+// 背景（为什么要这层）：web 工作台（desktop/web）对壳的调用面是
+// `window.__TAURI_INTERNALS__.invoke(name, args)`，散落在 api-client.js、
+// folder-picker.js、settings-panel.view.js、setup-guide.view.js、
+// service-error.view.js、status-bar.view.js 六处共 14 个命令。Tauri 壳移除后
+// 这个全局对象消失，会让「模型配置保存」「原生目录选择器」「诊断页操作」全部
+// 静默降级成"非桌面环境"——UI 长得一模一样，功能却丢了一半。
+//
+// 对策：主进程按**同名同形状**实现这 14 个命令，并在 preload 里原样暴露该全局
+// 对象。desktop/web 一行不改 —— 这正是"UI 与功能一模一样"的实现方式。
+//
+// 本文件刻意不 import electron：语义（默认值、掩码、读改写、状态形状）全部可
+// 由 node --test 直接断言（见 tests/shell-commands.test.mjs）。
+
+const supervision = require("./core-supervision.js");
+
+// 与旧 Tauri provider.rs 的 ProviderMode::default_base_url / default_model 逐字一致。
+const PROVIDER_DEFAULTS = {
+  bigmodel: { base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-5.3-flash" },
+  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  deepseek: { base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  dashscope: { base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
+  ollama: { base_url: "http://127.0.0.1:11434/v1", model: "local" },
+  custom: { base_url: "", model: "" },
+  unset: { base_url: "", model: "" },
+};
+
+const DEFAULT_KEY_ENV = "OPENAI_API_KEY";
+const LEGACY_KEY_ENV = "DASHSCOPE_API_KEY";
+
+// 旧壳的 14 个命令名。加命令必须同步这里（测试据此对账 web 侧的实际调用）。
+const SHELL_COMMANDS = [
+  "choose_data_directory",
+  "choose_project_directory",
+  "desktop_pairing",
+  "get_core_connection",
+  "get_core_state",
+  "get_provider_status",
+  "get_workspace",
+  "open_core_logs",
+  "reload_model_config",
+  "retry_core_start",
+  "reveal_model_config",
+  "set_model_config",
+  "set_provider",
+  "set_workspace",
+];
+
+function canonicalProvider(model) {
+  const raw = model && typeof model.provider === "string" ? model.provider : "";
+  return supervision.normalizeProvider(raw) || "unset";
+}
+
+function effectiveBaseUrl(model) {
+  const explicit = model && typeof model.base_url === "string" ? model.base_url.trim() : "";
+  if (explicit) return explicit;
+  return PROVIDER_DEFAULTS[canonicalProvider(model)].base_url;
+}
+
+function effectiveModel(model) {
+  // 历史字段别名：文件里可能写作 model（provider.rs 的 serde alias）。
+  const explicit = model && typeof model.name === "string" ? model.name.trim() : "";
+  if (explicit) return explicit;
+  return PROVIDER_DEFAULTS[canonicalProvider(model)].model;
+}
+
+function keyEnvName(model) {
+  const raw = model && typeof model.api_key_env === "string" ? model.api_key_env.trim() : "";
+  return raw || DEFAULT_KEY_ENV;
+}
+
+// 掩码展示：sk-1234…cdef（前后各 4 位；长度不足则整体星号）。密钥本体永不外传。
+function maskKey(key) {
+  const text = String(key == null ? "" : key).trim();
+  if (text.length <= 8) return "*".repeat(Math.max(text.length, 4));
+  return `${text.slice(0, 4)}…${text.slice(-4)}`;
+}
+
+// 解析凭据（单一实现，等价于 provider.rs::resolve_api_key）。
+// `envGet(name)` 由调用方注入，纯函数不直接读 process.env。
+function resolveApiKey(model, envGet) {
+  const get = typeof envGet === "function" ? envGet : () => "";
+  const fileKey = model && typeof model.api_key === "string" ? model.api_key.trim() : "";
+  if (fileKey) return { key: fileKey, source: "config_file" };
+
+  const envName = keyEnvName(model);
+  const fromNamed = String(get(envName) || "").trim();
+  if (fromNamed) {
+    return { key: fromNamed, source: envName === DEFAULT_KEY_ENV ? "environment" : "config_env" };
+  }
+  if (envName !== DEFAULT_KEY_ENV) {
+    const fromDefault = String(get(DEFAULT_KEY_ENV) || "").trim();
+    if (fromDefault) return { key: fromDefault, source: "environment" };
+  }
+  if (!model || model.api_key_env === undefined || model.api_key_env === null) {
+    const fromLegacy = String(get(LEGACY_KEY_ENV) || "").trim();
+    if (fromLegacy) return { key: fromLegacy, source: "legacy_env" };
+  }
+  return { key: "", source: "none" };
+}
+
+// get_provider_status 的返回形状（等价于 provider.rs::provider_status）。
+// 注意 keyMasked 只给掩码，keyConfigured 只给布尔——前端拿不到可用凭据。
+function providerStatusValue(model, options = {}) {
+  const source = model && typeof model === "object" ? model : {};
+  const provider = canonicalProvider(source);
+  const resolved = resolveApiKey(source, options.envGet);
+  const local = provider === "ollama";
+  const ready = provider === "unset" ? Boolean(resolved.key) : local || Boolean(resolved.key);
+  return {
+    provider,
+    baseUrl: effectiveBaseUrl(source),
+    model: effectiveModel(source),
+    keyConfigured: Boolean(resolved.key),
+    keySource: resolved.source,
+    keyMasked: resolved.key ? maskKey(resolved.key) : "",
+    keyEnv: keyEnvName(source),
+    ready,
+    configPath: options.configPath || "",
+    models: Array.isArray(source.models) ? source.models : [],
+    contextWindow: numOrNull(source.context_window),
+    maxOutputTokens: numOrNull(source.max_output_tokens),
+    temperature: numOrNull(source.temperature),
+    timeoutSecs: numOrNull(source.timeout_secs),
+    keepRecent: numOrNull(source.keep_recent),
+    compaction: typeof source.compaction === "boolean" ? source.compaction : null,
+  };
+}
+
+function numOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+// ---- 数值/布尔字段解析（空串、0、非法值 = 清除，回到核心默认） ----
+
+function parsePositive(raw) {
+  if (raw === null || raw === undefined) return { present: false };
+  const parsed = Number(String(raw).trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) return { present: true, value: null };
+  return { present: true, value: parsed };
+}
+
+function parseTemperature(raw) {
+  if (raw === null || raw === undefined) return { present: false };
+  const parsed = Number(String(raw).trim());
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 2) return { present: true, value: null };
+  return { present: true, value: parsed };
+}
+
+function parseCompaction(raw) {
+  if (raw === null || raw === undefined) return { present: false };
+  const key = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(key)) return { present: true, value: true };
+  if (["0", "false", "no", "off"].includes(key)) return { present: true, value: false };
+  if (typeof raw === "boolean") return { present: true, value: raw };
+  return { present: true, value: null };
+}
+
+function parseModelList(raw) {
+  if (!Array.isArray(raw)) return { present: false };
+  const cleaned = [];
+  for (const item of raw) {
+    const name = String(item == null ? "" : item).trim();
+    if (name && !cleaned.includes(name)) cleaned.push(name);
+  }
+  return { present: true, value: cleaned };
+}
+
+// set_model_config 的读改写（等价于 commands.rs::set_model_config 的参数语义）：
+// 未传（undefined）= 保持原样；空串 = 显式清除。密钥字段同理，避免前端
+// "没传字段"把用户已存的密钥抹掉。
+function applyModelConfigPatch(config, args) {
+  const input = args && typeof args === "object" ? args : {};
+  const model = { ...(config && config.model ? config.model : {}) };
+
+  if (typeof input.mode === "string") {
+    const canonical = supervision.normalizeProvider(input.mode);
+    if (!canonical) return { ok: false, error: `未知模型提供方：${input.mode}` };
+    model.provider = canonical;
+  }
+  if (input.base_url !== undefined) {
+    const text = String(input.base_url == null ? "" : input.base_url).trim();
+    model.base_url = text || null;
+  }
+  if (input.model !== undefined || input.name !== undefined) {
+    const raw = input.model !== undefined ? input.model : input.name;
+    const text = String(raw == null ? "" : raw).trim();
+    model.name = text || null;
+  }
+  if (input.api_key !== undefined) {
+    const text = String(input.api_key == null ? "" : input.api_key).trim();
+    model.api_key = text || null;
+  }
+  if (input.api_key_env !== undefined) {
+    const text = String(input.api_key_env == null ? "" : input.api_key_env).trim();
+    model.api_key_env = text || null;
+  }
+
+  const numericFields = {
+    context_window: input.context_window,
+    max_output_tokens: input.max_output_tokens,
+    timeout_secs: input.timeout_secs,
+    keep_recent: input.keep_recent,
+  };
+  for (const [field, raw] of Object.entries(numericFields)) {
+    if (raw === undefined) continue;
+    model[field] = parsePositive(raw).value;
+  }
+  if (input.temperature !== undefined) {
+    model.temperature = parseTemperature(input.temperature).value;
+  }
+  if (input.compaction !== undefined) {
+    model.compaction = parseCompaction(input.compaction).value;
+  }
+  const list = parseModelList(input.models);
+  if (list.present) model.models = list.value;
+
+  const next = { ...(config && typeof config === "object" ? config : {}), version: 1, model };
+  const verdict = supervision.validateConfig(next, {});
+  if (!verdict.ok) return { ok: false, error: verdict.errors.join("；"), config: next };
+  return { ok: true, config: next };
+}
+
+module.exports = {
+  PROVIDER_DEFAULTS,
+  DEFAULT_KEY_ENV,
+  SHELL_COMMANDS,
+  canonicalProvider,
+  effectiveBaseUrl,
+  effectiveModel,
+  keyEnvName,
+  maskKey,
+  resolveApiKey,
+  providerStatusValue,
+  applyModelConfigPatch,
+  parsePositive,
+  parseTemperature,
+  parseCompaction,
+  parseModelList,
+};

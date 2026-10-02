@@ -19,7 +19,7 @@
 | 编排 | goal（计划→步骤→重规划）、workflow（DSL + 审批 + 检查点回滚）、workswarm（团队/角色 DAG）、fleet（远程节点）、subagent（深度限制） | core `goal`/`workflow`/`workswarm`/`fleet`/`subagent`、server 对应 api |
 | 记忆与技能 | 语义记忆（JSONL + 剪枝 + 检索）、观察流、操作学习与主动建议、`.owskill` 技能包分享、`skills/` 内置 5 个（browser/documents/pdf/spreadsheets/user） | `owo-agent-memory`（M11）、`skills/` |
 | 插件 | 清单 + 签名校验 + 风险扫描 + 生命周期（安装/启用/更新/回滚/撤销）、市场（本地 + 远端 registry） | `owo-agent-plugins`（M7）、server `plugin_api`/`plugin_market_api`（16 测试） |
-| 客户端形态 | Rust CLI（40+ 子命令）+ TUI、Tauri 桌面壳、Web UI（panels/permissions/views）、TypeScript SDK（含 openapi.json + 单测） | `crates/owo-agent-cli`、`desktop/tauri`、`desktop/web`、`clients/ts` |
+| 客户端形态 | Rust CLI（40+ 子命令）+ TUI、**Electron 桌面壳**（ADR-003：由 Tauri 收敛而来，经 Tauri 兼容桥复用同一份 Web UI）、Web UI（panels/permissions/views）、TypeScript SDK（含 openapi.json + 单测） | `crates/owo-agent-cli`、`desktop/electron`、`desktop/web`、`clients/ts` |
 | 可观测性 | `/health`、Prometheus 指标、SLO 五条基线 + 错误预算、请求台账（隐私安全）、traces、审计链（HMAC + 锚点，可导出可验签） | server `observability_api`（26 测试）、`request_ledger_api`、`traces_api`、`owo-agent-tool-safety::audit_chain`（26 测试） |
 | 评测 | ProductEval devtool（独立 workspace，20/20 参考运行）、配对对照报告、dataset builder | `devtools/product-eval`（M1）、server `product_eval_api`（10 测试） |
 | 安全边界 | 沙箱（Job Object + AppContainer + 网络策略）、拒绝即不执行、拒绝必留收据、写前快照/diff/revert、无半写 | `owo-agent-tool-safety`（M3）、core `execution_boundary_contract_tests`（4 条契约） |

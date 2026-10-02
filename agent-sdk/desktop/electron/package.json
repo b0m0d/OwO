@@ -2,13 +2,18 @@
   "name": "owo-agent-electron",
   "private": true,
   "version": "0.1.0",
-  "description": "OwO Agent 桌面客户端（Electron + Vue）：前端从磁盘加载，改 UI 不需要重新编译",
+  "description": "OwO Agent 桌面客户端（Electron）：渲染层为核心服务托管的 web 工作台（desktop/web，磁盘加载，改 UI 刷新即生效，见 ADR-003）",
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
-    "start:dev": "electron . --dev"
+    "start:dev": "electron . --dev",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "predist": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\stage-desktop-sidecar.ps1 -Configuration release -NoBuild",
+    "dist": "electron-builder --win --config electron-builder.yml",
+    "dist:dir": "electron-builder --win --dir --config electron-builder.yml"
   },
   "devDependencies": {
-    "electron": "^33.2.0"
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
   }
 }

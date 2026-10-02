@@ -170,7 +170,10 @@ pub(super) async fn automations_create(
             .map(|text| AutomationAction::Reminder { text })
     });
     let Some(action) = action else {
-        return Err((StatusCode::BAD_REQUEST, "缺少动作：提供 action 或 reminder".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "缺少动作：提供 action 或 reminder".into(),
+        ));
     };
     if let AutomationAction::Reminder { text } = &action {
         if text.trim().is_empty() {

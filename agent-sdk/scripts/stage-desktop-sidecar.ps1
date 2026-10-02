@@ -1,9 +1,14 @@
 ﻿#requires -Version 5.1
 <#
-stage-desktop-sidecar.ps1 — 桌面壳随包 core（Tauri externalBin）唯一预置入口（R3/§7.3）。
+stage-desktop-sidecar.ps1 — 桌面壳随包 core（Electron extraResources）唯一预置入口（R3/§7.3）。
 
-问题背景（实测缺陷链）：
-  tauri.conf.json 声明 `externalBin: ["binaries/owo-agent"]`，`tauri_build::build()`
+ADR-003：桌面壳由 Tauri 收敛为 Electron 后，随包 core 的目的地从
+`desktop/tauri/src-tauri/binaries/owo-agent-<triple>.exe` 改为
+`desktop/electron/binaries/owo-agent.exe`（electron-builder 的 extraResources 取它，
+见 electron-builder.yml；npm run dist 经 predist 自动调用本脚本）。
+
+问题背景（实测缺陷链，保留作为"为什么要这道门"的依据）：
+  旧 tauri.conf.json 声明 `externalBin: ["binaries/owo-agent"]`，`tauri_build::build()`
   要求 `binaries/owo-agent-<target-triple>.exe` **必须存在**，否则壳连编译都过不了。
   这个约束催生了三件事，全都发生在门禁看不见的目录里（binaries/ 被 gitignore）：
     1. 有人手工复制一份旧 core 进去救火（实测：2026-08-31 的产物，无构建身份）；
@@ -128,7 +133,7 @@ function Stage-OwoDesktopSidecar {
     }
 
     $triple = Get-OwoRustcHostTriple
-    $binDir = Join-Path $sdkRoot 'desktop\tauri\src-tauri\binaries'
+    $binDir = Join-Path $sdkRoot 'desktop\electron\binaries'
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
     # 清残留：错命名/上一代/无身份的历史文件全部删除（这正是安装包错包的源头）。
     Get-ChildItem -LiteralPath $binDir -Filter 'owo-agent*' -Force -ErrorAction SilentlyContinue |
@@ -136,7 +141,9 @@ function Stage-OwoDesktopSidecar {
             if (-not $Quiet) { Write-Host "[stage] 清理 binaries 残留：$($_.Name)" }
             Remove-Item -LiteralPath $_.FullName -Force
         }
-    $destination = Join-Path $binDir "owo-agent-$triple.exe"
+    # Electron 的 extraResources 不做三元组取包，固定名 owo-agent.exe；
+    # $triple 仍随返回对象带出，供排障确认宿主目标。
+    $destination = Join-Path $binDir "owo-agent.exe"
     Copy-Item -LiteralPath $source -Destination $destination -Force
 
     $srcHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
@@ -151,7 +158,7 @@ function Stage-OwoDesktopSidecar {
         throw "staged sidecar 身份与源产物不一致（源=「$sourceIdentity」 目标=「$($stagedIdentityText.Trim())」）"
     }
     if (-not $Quiet) {
-        Write-Host "[stage] 随包 core 就位：binaries\owo-agent-$triple.exe（sha256=$dstHash）"
+        Write-Host "[stage] 随包 core 就位：desktop\electron\binaries\owo-agent.exe（triple=$triple, sha256=$dstHash）"
         Write-Host "[stage] 身份：$sourceIdentity"
     }
     return [pscustomobject]@{

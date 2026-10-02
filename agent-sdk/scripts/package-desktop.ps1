@@ -87,13 +87,34 @@ New-Item -ItemType Directory -Path $dist -Force | Out-Null
 Invoke-OwoPackageBuild -Stage "构建核心服务（$Configuration）" -WorkingDir $root `
     -CargoArgs (@("-p", "owo-agent-cli") + $configArgs)
 
-Invoke-OwoPackageBuild -Stage "构建桌面壳（$Configuration）" `
-    -WorkingDir (Join-Path $root "desktop\tauri\src-tauri") -CargoArgs $configArgs
+# ADR-003：桌面壳由 Tauri（cargo 构建 src-tauri）改为 Electron（electron-builder）。
+# 壳本体不再经 cargo；`--dir` 产出 win-unpacked，其中 resources/ 已随包核心与 web
+# 工作台（npm 的 predist 会先跑 stage-desktop-sidecar.ps1 校验随包 core）。
+$electronDir = Join-Path $root "desktop\electron"
+Write-Host "[package] 构建桌面壳（electron-builder --dir）..."
+$buildExitCode = 0
+Push-Location $electronDir
+try {
+    # ⚠ PowerShell 5.1 陷阱（与 build-installer.ps1 同源，2026-09-22 实测）：
+    # 顶部 $ErrorActionPreference = "Stop" 会把外部程序的 stderr 包装成终止性
+    # 错误——npm 每次都往 stderr 打 warning，命令没跑起来就被判失败。处置：
+    # 临时改 Continue，之后只认 $LASTEXITCODE（退出码才是成败唯一权威判据）。
+    $savedErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & npm.cmd run dist:dir
+        $buildExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorAction
+    }
+    if ($buildExitCode -ne 0) { throw "桌面壳打包失败（npm run dist:dir exit=$buildExitCode）" }
+} finally {
+    Pop-Location
+}
 
-$targetDir = Join-Path $root "target\$Configuration"
-$desktopTarget = Join-Path $root "desktop\tauri\src-tauri\target\$Configuration"
-Copy-Item -LiteralPath (Join-Path $targetDir "owo-agent.exe") -Destination $dist
-Copy-Item -LiteralPath (Join-Path $desktopTarget "owo-agent-desktop.exe") -Destination $dist
+$desktopUnpacked = Join-Path $root "dist\electron\win-unpacked"
+if (-not (Test-Path $desktopUnpacked)) { throw "未找到 Electron 产物目录：$desktopUnpacked" }
+Copy-Item -LiteralPath (Join-Path $desktopUnpacked "*") -Destination $dist -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root "skills") -Destination $dist -Recurse
 Copy-Item -LiteralPath (Join-Path $root "settings.example.json") -Destination (Join-Path $dist "settings.example.json")
 if (Test-Path (Join-Path $root "models\ocr")) {
@@ -112,7 +133,7 @@ if (Test-Path (Join-Path $root "models\ocr")) {
 # 现在只做一次事实核对：若产物真的动态依赖 onnxruntime.dll，就在日志里明确说出来，
 # 而不是去下载一个可能并不需要的文件。
 $onnxRuntimeDll = Join-Path $dist "onnxruntime.dll"
-foreach ($binary in @("owo-agent.exe", "owo-agent-desktop.exe")) {
+foreach ($binary in @("OwO Agent.exe", "resources\owo-agent.exe")) {
     $binaryPath = Join-Path $dist $binary
     if (-not (Test-Path $binaryPath)) { continue }
     $bytes = [System.IO.File]::ReadAllBytes($binaryPath)
@@ -125,10 +146,11 @@ foreach ($binary in @("owo-agent.exe", "owo-agent-desktop.exe")) {
 @"
 OwO Agent 便携版（v0.4 P1/P2/P3 + v0.5 M-E）
 
-运行：双击 owo-agent-desktop.exe（自动拉起同目录 owo-agent.exe 核心服务；端口由系统动态分配，实际地址写入日志）。
+运行：双击 OwO Agent.exe（Electron 壳自动拉起随包核心 resources\owo-agent.exe；
+      核心端口由系统动态分配，工作台由核心静态托管，壳拿到端口后自动导航）。
 快捷键：Ctrl+Alt+Shift+O 唤起工作台。
-排障：核心拉起失败/身份不符时界面会给出错误页；日志在 %LOCALAPPDATA%\OwO\Agent\logs\，
-      可用 `owo-agent.exe --version` 核对随包核心构建身份（commit/dirty/built_at）。
+排障：核心拉起失败/身份不符时界面会给出错误页；日志在 %LOCALAPPDATA%\OwO\Agent\logs\core.log，
+      可用 `resources\owo-agent.exe --version` 核对随包核心构建身份（commit/dirty/built_at）。
 
 环境变量（可选）：
   OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL  模型凭据（缺省内置 BigModel 端点与模型，仅需提供密钥）

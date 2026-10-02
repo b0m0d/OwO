@@ -923,7 +923,17 @@ fn origin_allowed(origin: &[u8]) -> bool {
 }
 
 /// 开发环境下的桌面工作台静态目录：`<repo>/agent-sdk/desktop/web`。
+/// ADR-003：打包形态下 web 工作台随包携带在 `resources/web`，由桌面壳经
+/// `OWO_WEB_UI_DIR` 指过来（`main.js` 在 `app.isPackaged` 时注入），
+/// 避免回落到 `CARGO_MANIFEST_DIR` 这个编译期源码树路径（打包后不存在）。
+/// 与 `pet_ui_dir()` 同一套约定：目录里必须有 index.html 才采纳。
 fn desktop_web_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("OWO_WEB_UI_DIR") {
+        let path = PathBuf::from(dir);
+        if path.join("index.html").is_file() {
+            return path;
+        }
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|parent| parent.parent())
