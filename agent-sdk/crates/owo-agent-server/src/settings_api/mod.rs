@@ -35,6 +35,37 @@ pub(super) async fn settings_get(
         if let Some(runtime) = runtime.as_object_mut() {
             runtime.insert("active_tool_names".to_string(), json!(active_tools));
         }
+        // provider_ready 从上面这份 runtime 取（它就是 effective_runtime_config 的产物）。
+        // **不能回头读 `value.get("runtime")`**：此刻 `object` 是 value 的可变借用，
+        // 再不可变借一次会触发 E0502。
+        let ready = runtime
+            .get("provider_ready")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        // provider 段投影成「存在性 + 掩码」形状回前端：设置页要用它回填表单，
+        // 但明文密钥绝不能过网（仓库红线：凭据只经环境变量 / 本机信封）。
+        // 这里只给 api_key_set 布尔与 base_url；前端据此显示"已保存（加密）"。
+        let provider_view = json!({
+            "base_url": settings
+                .provider
+                .base_url
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("OPENAI_BASE_URL")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                }),
+            "api_key_set": settings.provider.has_api_key()
+                || std::env::var_os("OPENAI_API_KEY")
+                    .map(|value| !value.to_string_lossy().trim().is_empty())
+                    .unwrap_or(false),
+            "api_key_env": settings.provider.api_key_env.clone(),
+        });
+        object.insert("provider".to_string(), provider_view);
+        // 顶层便捷字段：工作台首启门直接读它（历史上只读 settings.runtime，
+        // 缺 provider_ready 时恒判未就绪 → 发送按钮永远禁用）。
+        object.insert("provider_ready".to_string(), json!(ready));
         object.insert("runtime".to_string(), runtime);
     }
     Ok(Json(value))
@@ -43,8 +74,22 @@ pub(super) async fn settings_get(
 /// 只读有效运行配置：前端不得用历史表单默认值冒充当前 provider/model。
 /// 凭据只暴露来源，不暴露内容。
 pub(super) fn effective_runtime_config(settings: &owo_agent_core::Settings) -> Value {
+    // 优先级：环境变量（已注入/已保存即时生效） > settings.json 的 provider 段。
+    // 两者都缺省才回落内置默认端点。**不能只看环境变量**：浏览器开发模式下没有壳注入，
+    // 用户在设置页填的端点只落在 settings.json。
     let base_url = std::env::var("OPENAI_BASE_URL")
-        .unwrap_or_else(|_| "https://open.bigmodel.cn/api/paas/v4".to_string());
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            settings
+                .provider
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "https://open.bigmodel.cn/api/paas/v4".to_string());
     let model = std::env::var("OPENAI_MODEL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -68,13 +113,29 @@ pub(super) fn effective_runtime_config(settings: &owo_agent_core::Settings) -> V
         .ok()
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(settings.egress.cloud_enabled);
+    // 凭据来源：环境变量优先，其次 settings.json 的 provider 段（浏览器开发模式）。
+    let key_present = std::env::var_os("OPENAI_API_KEY")
+        .map(|value| !value.to_string_lossy().trim().is_empty())
+        .unwrap_or(false)
+        || settings.provider.has_api_key();
     json!({
         "provider": provider,
         "model": model,
         "endpoint_kind": if local { "local" } else { "cloud" },
-        "credential_source": if local { "not_required" } else if std::env::var_os("OPENAI_API_KEY").is_some() { "environment" } else { "missing" },
+        "credential_source": if local {
+            "not_required"
+        } else if key_present {
+            "environment"
+        } else {
+            "missing"
+        },
         "cloud_enabled": cloud_enabled,
         "available_models": [model],
+        // 前端首启门与设置页回填用；服务端从不回显明文密钥。
+        "provider_ready": local || key_present,
+        "base_url_set": settings.provider.has_base_url()
+            || std::env::var("OPENAI_BASE_URL").is_ok_and(|v| !v.trim().is_empty()),
+        "api_key_set": key_present,
     })
 }
 
@@ -620,6 +681,27 @@ pub(super) async fn settings_update(
     if let Some(model) = &settings.model {
         if !model.trim().is_empty() {
             std::env::set_var("OPENAI_MODEL", model);
+        }
+    }
+    // Provider 段（设置页「模型」面板）写回环境变量：provider_ready() 只认
+    // OPENAI_BASE_URL / OPENAI_API_KEY，不看 settings.json。此前这里不写，导致
+    // 用户保存端点与密钥后首启门仍判定未就绪、发送按钮一直禁用。
+    // 留空 = 不覆盖（保留进程启动时继承的环境变量）。
+    let provider = &settings.provider;
+    if provider.has_base_url() {
+        if let Some(base_url) = provider.base_url.as_deref() {
+            std::env::set_var("OPENAI_BASE_URL", base_url.trim());
+        }
+    }
+    if provider.has_api_key() {
+        if let Some(api_key) = provider.api_key.as_deref() {
+            std::env::set_var("OPENAI_API_KEY", api_key.trim());
+        }
+    }
+    if let Some(env_name) = provider.api_key_env.as_deref() {
+        let name = env_name.trim();
+        if !name.is_empty() {
+            std::env::set_var("OWO_PROVIDER_API_KEY_ENV", name);
         }
     }
     std::env::set_var(

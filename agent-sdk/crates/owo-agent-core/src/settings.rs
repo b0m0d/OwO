@@ -125,6 +125,50 @@ pub struct UsageSettings {
     pub output_price_per_mtok: f64,
 }
 
+/// 模型提供商接入配置（设置页「模型」面板写入，运行时投影为环境变量）。
+///
+/// **存在理由**：`Settings` 此前没有 provider 段，而工作台（desktop/web）保存模型时
+/// 会提交 `{"provider": {"base_url": ..., "api_key": ...}}`。serde 对未知字段**静默忽略**，
+/// 于是用户填的端点与密钥从未落盘 —— 表现为「测试连接通过，但发送仍被首启门拦住」
+/// （首启门读 runtime.credential_source，而它只看环境变量）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProviderSettings {
+    /// OpenAI 兼容端点（如 https://api.deepseek.com/v1）。空 = 用内置默认。
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// API 密钥。**明文只在本机 settings.json**，仓库红线要求它不得进版本库；
+    /// 服务端 `settings_get` 只回 `api_key_set` 布尔，不回明文。
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// 凭据来源的环境变量名（默认 OPENAI_API_KEY）。
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+}
+
+impl ProviderSettings {
+    /// 是否已填端点（首启门与设置页回填共用）。
+    pub fn has_base_url(&self) -> bool {
+        self.base_url
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// 是否已填密钥（明文，不用于回显）。
+    pub fn has_api_key(&self) -> bool {
+        self.api_key
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// 清除明文密钥（保存时留空密钥 = 保留旧值，故需要显式清除路径）。
+    pub fn clear_api_key(&mut self) {
+        self.api_key = None;
+    }
+}
+
 /// 可选内置工具能力。默认关闭；改动在下一次 Daemon 启动时装配到 Agent 工具表。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -143,6 +187,9 @@ pub struct Settings {
     /// 默认模型（低于环境变量与命令行参数）。
     #[serde(default)]
     pub model: Option<String>,
+    /// 模型提供商接入（端点 / 密钥）。缺失时 provider_ready 仍可由环境变量满足。
+    #[serde(default)]
+    pub provider: ProviderSettings,
     /// 启动默认只读（plan）模式。
     #[serde(default)]
     pub read_only: bool,
@@ -513,5 +560,72 @@ mod tests {
 
         Settings::default().apply_reasoning_env();
         assert!(std::env::var("OWO_REASONING_EFFORT").is_err());
+    }
+
+    /// 回归：工作台保存模型时提交 `{"provider": {"base_url", "api_key"}}`。
+    /// 此前 `Settings` 没有 provider 段，serde 对未知字段静默忽略 → 用户填的端点与
+    /// 密钥从未落盘，表现为「测试连接通过，但首启门仍拦着发不出消息」。
+    #[test]
+    fn round_trips_provider_segment_from_workspace_json() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-provider-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("settings.json"),
+            r#"{
+                "model": "deepseek-chat",
+                "provider": {
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "sk-test-123",
+                    "api_key_env": "DEEPSEEK_API_KEY"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load(&workspace);
+        assert_eq!(
+            settings.provider.base_url.as_deref(),
+            Some("https://api.deepseek.com/v1"),
+            "provider.base_url 必须能从 settings.json 读回（否则保存后丢失）"
+        );
+        assert!(settings.provider.has_api_key(), "api_key 应被读回");
+        assert!(settings.provider.has_base_url());
+        assert_eq!(
+            settings.provider.api_key_env.as_deref(),
+            Some("DEEPSEEK_API_KEY")
+        );
+
+        // 空串视同未填（前端留空密钥 = 保留旧值，不应被当成"已配置"）。
+        let blank = ProviderSettings {
+            base_url: Some("   ".to_string()),
+            api_key: Some("".to_string()),
+            api_key_env: None,
+        };
+        assert!(!blank.has_base_url());
+        assert!(!blank.has_api_key());
+
+        // 默认值：缺 provider 段的旧 settings.json 必须能正常加载。
+        let legacy =
+            std::fs::write(workspace.join("settings.json"), r#"{"model":"glm-5.3-flash"}"#);
+        legacy.unwrap();
+        let old = Settings::load(&workspace);
+        assert!(!old.provider.has_base_url());
+        assert!(!old.provider.has_api_key());
+
+        std::fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[test]
+    fn provider_clear_api_key_drops_plaintext() {
+        let mut provider = ProviderSettings {
+            base_url: Some("https://api.deepseek.com/v1".to_string()),
+            api_key: Some("sk-secret".to_string()),
+            api_key_env: None,
+        };
+        assert!(provider.has_api_key());
+        provider.clear_api_key();
+        assert!(!provider.has_api_key(), "清除后不得残留明文密钥");
+        assert!(provider.has_base_url(), "清除密钥不影响端点");
     }
 }
