@@ -1,6 +1,19 @@
 // OwO Agent 工作台（v0.4 P1 桌面壳，纯静态，直连本地 HTTP API + SSE）
 "use strict";
 
+// 侧栏项目分组的折叠状态（存工作区原文，localStorage 持久化）。
+// 刻意放在模块级而非 state：它只影响列表渲染，不参与任何业务判定。
+const collapsedGroups = new Set(
+  (() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem("owo.collapsedGroups") || "[]");
+      return Array.isArray(raw) ? raw.map(String) : [];
+    } catch (_) {
+      return [];
+    }
+  })()
+);
+
 const state = {
   sessionId: null,
   pendingApproval: null,
@@ -28,8 +41,68 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
-// 由 Tauri 壳注入核心服务地址；经核心服务同源托管时为空字符串。
-const API_BASE = (window.OWO_API_BASE || "").replace(/\/+$/, "");
+// 由壳注入核心服务地址；经核心服务同源托管时为空字符串。
+// 桌面壳下会在拿到 get_core_connection 后改写成壳的真实端口（壳用 --port 0 随机分配）。
+let API_BASE = (window.OWO_API_BASE || "").replace(/\/+$/, "");
+
+// ---------- 桌面壳能力（Electron / Tauri 通用） ----------
+//
+// 核心服务对「领 token」有两道门（crates/owo-agent-server/src/auth_token.rs）：
+//   * pairing_gate_allows —— 需 x-owo-desktop-pairing（壳注入核心的共享秘密）；
+//   * instance_gate_allows —— 需 x-owo-desktop-instance（本次桌面实例身份）。
+// 两者任一缺失都返回 403 auth/pairing_required | auth/instance_mismatch，
+// 表现为界面「服务未连接」+「列表加载失败：Failed to fetch」。
+// 浏览器直接开（无壳）时两道门都放行，裸请求即可；桌面壳下必须先把两头补齐。
+//
+// 认证头的实现**只在 core/api-client.js 一处**（契约测试「业务脚本不绕过统一 API
+// 客户端」硬性要求全站仅它可 fetch），下面通过 OwoApi 单例复用，不再各自实现。
+
+// 取壳给出的连接信息（pairing + 实例 id + 可选注入 token）。
+//
+// 认证头的**唯一实现**在 core/api-client.js —— 契约测试「业务脚本不绕过统一 API 客户端」
+// 规定全站只有它可以直接 fetch。本函数只做一件事：把壳的真实端口同步到 API_BASE
+// （壳用 --port 0 随机分配，页面若停在旧端口会全线 401）。
+//
+// 关键：**未就绪时不缓存**。窗口刷新瞬间核心可能仍是 starting，此时返回 null；
+// 若把 null 缓存下来，此后永远拿不到 pairing → /auth/token 恒 403 → 界面"服务未连接"。
+// 症状是"首次打开正常、刷新后必坏"，极难定位。
+async function shellConnection() {
+  const client = window.OwoApi;
+  if (!client || typeof client.ensureCoreConnection !== "function") return null;
+  const connection = await client.ensureCoreConnection();
+  if (connection && connection.state === "ready" && connection.port) {
+    const url = "http://127.0.0.1:" + connection.port;
+    if (API_BASE !== url) {
+      API_BASE = url;
+      window.OWO_API_BASE = url;
+      if (client.baseUrl !== url) client.baseUrl = url;
+    }
+  }
+  return connection;
+}
+
+// 领 token：桌面壳下由 ApiClient 补齐 pairing / 实例头（它内部已实现），
+// 并在壳已注入 token 时直接复用；浏览器模式则是裸请求。
+async function requestApiToken() {
+  const connection = await shellConnection();
+  if (connection && typeof connection.token === "string" && connection.token) {
+    return { token: connection.token, injected: true };
+  }
+  const headers = {};
+  if (connection) {
+    if (typeof connection.pairing === "string" && connection.pairing.length >= 32) {
+      headers["X-Owo-Desktop-Pairing"] = connection.pairing;
+    }
+    if (typeof connection.instanceId === "string" && connection.instanceId) {
+      headers["x-owo-desktop-instance"] = connection.instanceId;
+    }
+  }
+  const response = await globalThis.fetch(API_BASE + "/auth/token", { headers });
+  if (!response.ok) throw new Error(`token 引导失败（HTTP ${response.status}）`);
+  const data = await response.json();
+  if (!data || !data.token) throw new Error("token 引导响应缺少 token");
+  return { token: data.token, injected: false };
+}
 
 let recognition = null;
 let listening = false;
@@ -287,10 +360,8 @@ async function ensureApiToken() {
   if (apiTokenRequest) return apiTokenRequest;
   apiTokenRequest = (async () => {
     try {
-      const response = await fetch(API_BASE + "/auth/token");
-      if (!response.ok) throw new Error(`token 引导失败（HTTP ${response.status}）`);
-      const data = await response.json();
-      apiToken = data && data.token ? data.token : null;
+      const result = await requestApiToken();
+      apiToken = result.token || null;
       if (!apiToken) throw new Error("token 引导响应缺少 token");
       connectionUnavailableUntil = 0;
       return apiToken;
@@ -2806,13 +2877,33 @@ function initProviderPresets() {
 }
 
 // ---------- 首启门：未接入自己的模型服务前，拦住发送 ----------
-// 判定完全以服务端 /settings 的 provider_ready 为准（已保存配置或环境变量任一可用即放行）。
-
+//
+// 判定以服务端 `GET /settings` 的 `runtime` 段为准（settings_api::effective_runtime_config）：
+//   * provider           —— 由 base_url 推断（bigmodel/qwen/deepseek/ollama/openai-compatible）
+//   * endpoint_kind      —— "local" | "cloud"
+//   * credential_source  —— "not_required"（本地）| "environment" | "missing"
+//   * cloud_enabled      —— 出网开关
+//
+// **不要读 `settings.provider_ready` / `settings.provider.base_url`**：服务端从未返回这两个
+// 字段（`Settings` 结构里根本没有 provider 项，provider 信息只以 runtime 投影存在）。
+// 读了不存在的字段 → 恒为 undefined → modelGateMissing() 恒 true → **无论用户是否已正确
+// 配置并保存模型，发送按钮永远禁用、提示条永远挂着**，且"测试连接通过"也不放行
+// （连接测试只做 TCP 探测，不落盘配置）。
 function modelGateMissing() {
   const settings = state.settings || {};
-  if (settings.provider_ready) return false;
+  const runtime = settings.runtime || {};
+  // 显式布尔优先（服务端若将来补上该字段）。
+  if (typeof runtime.provider_ready === "boolean") return !runtime.provider_ready;
+  if (typeof settings.provider_ready === "boolean") return !settings.provider_ready;
+  // 本地端点不需要凭据（Ollama 之类），因此 endpoint_kind=local 即视为就绪。
+  if (runtime.endpoint_kind === "local") return false;
+  // 云端：拿到凭据即视为就绪（来源可能是环境变量，也可能是设置页保存后写入的）。
+  const source = String(runtime.credential_source || "").trim();
+  if (source === "environment" || source === "not_required") return false;
+  // 兜底：兼容旧形状（若未来 provider 段被提升到顶层）。
   const provider = settings.provider || {};
-  return !provider.base_url && !provider.api_key_set;
+  if (provider.base_url || provider.api_key_set) return false;
+  return true;
 }
 
 function updateModelGate() {
@@ -2823,10 +2914,14 @@ function updateModelGate() {
     if (missing) {
       const hint = $("modelGateHint");
       if (hint) {
+        const runtime = (state.settings && state.settings.runtime) || {};
+        const source = String(runtime.credential_source || "").trim();
         hint.textContent =
-          state.settings && state.settings.provider_ready === false
-            ? "服务端报告模型接入未就绪：请填写端点与密钥后保存。"
-            : "填写你自己的 OpenAI 兼容端点与密钥即可开始，密钥只加密保存在本机。";
+          source === "missing"
+            ? "服务端报告凭据缺失：填入 API 密钥并保存，或设置 OPENAI_API_KEY 环境变量后重启核心。"
+            : runtime.endpoint_kind === "local"
+              ? "本地端点已就绪。若仍无法发送，请确认该端点已在「模型」页保存。"
+              : "填写你自己的 OpenAI 兼容端点与密钥即可开始，密钥只加密保存在本机。";
       }
     }
   }
@@ -3309,12 +3404,61 @@ async function refreshSessionsImpl(selectId) {
     groups.get(key).roots.push(session);
   }
   for (const group of groups.values()) {
+    // 项目分组可折叠：组头点击折叠/展开，展开状态按「工作区名」记忆在 localStorage，
+    // 刷新后保持。多项目并行时默认全部展开（同屏可见），用户可自行收起。
+    const groupId = "grp:" + (group.workspace || "").toLowerCase();
     const header = document.createElement("li");
     header.className = "codex-session-group";
-    header.textContent = workspaceLabel(group.workspace);
-    header.title = group.workspace || "该会话未记录工作区";
+    const collapsed = collapsedGroups.has(group.workspace || "");
+    header.setAttribute("role", "button");
+    header.setAttribute("tabindex", "0");
+    header.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    header.title = (group.workspace || "该会话未记录工作区") + (collapsed ? "（点击展开）" : "（点击折叠）");
+
+    const caret = document.createElement("span");
+    caret.className = "codex-group-caret" + (collapsed ? " collapsed" : "");
+    caret.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "codex-group-label";
+    label.textContent = workspaceLabel(group.workspace);
+    const count = document.createElement("span");
+    count.className = "codex-group-count";
+    count.textContent = String(group.roots.length);
+    header.append(caret, label, count);
+
+    const children = [];
+    for (const session of group.roots) children.push(session);
+
+    const toggle = () => {
+      const nowCollapsed = !collapsedGroups.has(group.workspace || "");
+      if (nowCollapsed) collapsedGroups.add(group.workspace || "");
+      else collapsedGroups.delete(group.workspace || "");
+      localStorage.setItem(
+        "owo.collapsedGroups",
+        JSON.stringify([...collapsedGroups])
+      );
+      // 只重渲染列表，保留当前会话与滚动位置。
+      refreshSessions(state.sessionId);
+    };
+    header.addEventListener("click", toggle);
+    header.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        event.stopPropagation();
+        toggle();
+      }
+    });
     list.appendChild(header);
-    for (const session of group.roots) renderSession(session, 0);
+    for (const session of children) renderSession(session, 0);
+    if (collapsed) {
+      // 折叠：隐藏本组标题之后、下一个组标题之前的全部条目（含 fork 子树）。
+      let node = header.nextElementSibling;
+      while (node && !node.classList.contains("codex-session-group")) {
+        const next = node.nextElementSibling;
+        node.classList.add("hidden");
+        node = next;
+      }
+    }
   }
   if (!list.children.length) list.innerHTML = '<li class="sub">暂无会话</li>';
   filterSessionList();
@@ -3329,13 +3473,19 @@ function workspaceLabel(workspace) {
 }
 
 // 会话列表搜索过滤（Codex 侧栏搜索框）
+//
+// 注意与折叠态的关系：搜索是"临时看全部"，因此**搜索期间忽略折叠**——
+// 否则用户会抱怨"明明折叠了却又冒出来"。query 非空时按搜索结果判定可见性，
+// query 清空时恢复折叠态（由 refreshSessions 重渲染时统一处理）。
 function filterSessionList() {
   const input = $("sessionSearch");
   const query = (input.value || "").trim().toLowerCase();
   const items = [...$("sessionList").querySelectorAll("li")];
   for (const li of items) {
     if (li.classList.contains("codex-session-group")) continue;
-    li.classList.toggle("hidden", !!query && !li.textContent.toLowerCase().includes(query));
+    // 搜索期间：命中的显示，未命中的隐藏（忽略折叠标记）。
+    // 非搜索期间：不动 hidden，折叠态由 refreshSessions 负责。
+    if (query) li.classList.toggle("hidden", !li.textContent.toLowerCase().includes(query));
   }
   // 组标题：搜索后没有可见子项的组一并隐藏，不留空标题。
   for (const li of items) {
@@ -3350,6 +3500,15 @@ function filterSessionList() {
       node = node.nextElementSibling;
     }
     li.classList.toggle("hidden", !anyVisible);
+  }
+  // 搜索时把组标题的折叠箭头显示成"展开"态，避免误导（内容其实已强制展开）。
+  if (query) {
+    for (const li of items) {
+      if (!li.classList.contains("codex-session-group")) continue;
+      const caret = li.querySelector(".codex-group-caret");
+      if (caret) caret.classList.add("searching");
+      li.setAttribute("aria-expanded", "true");
+    }
   }
 }
 
@@ -3527,8 +3686,11 @@ async function refreshSessionContext(sessionId) {
 async function newSession() {
   const workspace = $("workspace").value.trim();
   if (!workspace) {
-    showToast("请先填写工作区绝对路径", "error");
-    return;
+    // 静默 return 会让 sendPrompt 的自动新建路径"看起来什么也没发生"，
+    // 用户只看到消息没发出去却没有任何提示。改为显式抛错，由调用方转成 toast。
+    const error = new Error("请先在工作区填写绝对路径（设置 → 工作区），再新建会话");
+    error.userFacing = true;
+    throw error;
   }
   localStorage.setItem("owo.workspace", workspace);
   const session = await api("/session", {
@@ -3571,9 +3733,17 @@ function parseSseBlock(block) {
 }
 
 async function sendPrompt() {
+  // 无会话时**自动新建**再发，而不是甩一句"请先新建或选择一个会话"。
+  // 用户按下回车的意图是"把这句话说出去"，让他先点一次"新建对话"是多余的一步
+  // （Codex 的做法：输入框永远可用，发送时兜底建线程）。
   if (!state.sessionId) {
-    addMessage("system", "请先新建或选择一个会话");
-    return;
+    try {
+      await newSession();
+    } catch (error) {
+      showToast(`创建会话失败：${friendlyError(error)}`, "error");
+      return;
+    }
+    if (!state.sessionId) return; // newSession 内部可能因工作区为空而放弃
   }
   // 只有「本会话」已有回合才拒绝：其它会话在跑不影响这里（并行对话互不干扰）。
   if (currentTurn()) {
@@ -5759,7 +5929,11 @@ $("workspace").addEventListener("change", () => {
   syncProjectChip();
 });
 $("newSession").addEventListener("click", () => {
-  newSession().catch((error) => addMessage("error", `创建会话失败：${error.message || error}`));
+  newSession().catch((error) =>
+    error && error.userFacing
+      ? showToast(error.message, "error")
+      : addMessage("error", `创建会话失败：${friendlyError(error)}`)
+  );
 });
 $("showArchived").addEventListener("change", () => refreshSessions(state.sessionId));
 $("attachmentBtn").addEventListener("click", () => $("attachmentInput").click());

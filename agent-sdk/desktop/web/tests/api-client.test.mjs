@@ -620,3 +620,98 @@ test("§3.1 openEventStream：Last-Event-ID 头随请求发送", async () => {
     global.fetch = original;
   }
 });
+
+// ---------- 桌面认证回归（真实故障） ----------
+//
+// 故障：窗口刷新后界面立刻退化为「服务未连接」+「列表加载失败：Failed to fetch」。
+// 链路：刷新瞬间核心可能仍处于 starting → get_core_connection 返回 state!=ready
+// → 若把这个 null 缓存下来，页面此后永远拿不到 pairing/instanceId
+// → /auth/token 恒 403 → 业务请求恒 401。
+// 症状特征是「首次打开正常、刷新后必坏」，最容易被误判成后端挂了。
+
+test("index.html 引入 core/api-client.js（认证头唯一实现）", () => {
+  const index = readFileSync(join(here, "../index.html"), "utf8");
+  // 契约测试「业务脚本不绕过统一 API 客户端」规定全站仅 core/api-client.js 可 fetch，
+  // 它承担桌面壳的 pairing / instance 两道认证门；不引入则 token 永远拿不到。
+  assert.match(index, /<script src="core\/api-client\.js"><\/script>/);
+});
+
+test("index.html 不再按 __TAURI_INTERNALS__ 把 baseUrl 钉死到硬编码端口", () => {
+  const index = readFileSync(join(here, "../index.html"), "utf8");
+  // 壳用 `serve --port 0` 随机分配核心端口（实测出现过 10720/15201/27644/33885/38552/63797…）。
+  // Electron 侧也提供 __TAURI_INTERNALS__（M11 兼容桥），据此判定"在壳内"就会把
+  // baseUrl 钉死在 4096 之类的常量上 → 请求打错端口 → 全线 401。
+  assert.doesNotMatch(
+    index,
+    /OWO_API_BASE\s*=\s*window\.OWO_API_BASE\s*\|\|\s*\([^)]*__TAURI_INTERNALS__[^)]*\)/,
+    "不得依据 __TAURI_INTERNALS__ 回落硬编码端口"
+  );
+  assert.match(index, /window\.OWO_API_BASE\s*=\s*window\.OWO_API_BASE\s*\|\|\s*"";/);
+});
+
+test("app.js 的 token 引导复用 ApiClient，不自带实例/配对实现", () => {
+  const app = readFileSync(join(here, "../app.js"), "utf8");
+  // 认证头只在 core/api-client.js 实现；app.js 通过 OwoApi.ensureCoreConnection 复用。
+  assert.match(app, /window\.OwoApi/);
+  assert.match(app, /ensureCoreConnection/);
+  // 不得出现"把失败结果缓存下来"的形态：未就绪必须能重试。
+  assert.doesNotMatch(
+    app,
+    /shellConnectionPromise\s*=\s*null;[\s\S]{0,80}state\s*===\s*"starting"/,
+    "不得缓存未就绪的连接信息"
+  );
+});
+
+test("发送时无会话会自动新建，而不是提示后放弃", () => {
+  const app = readFileSync(join(here, "../app.js"), "utf8");
+  // 用户按回车的意图是"把这句话说出去"，不该要求他先点一次「新建对话」。
+  assert.doesNotMatch(
+    app,
+    /async function sendPrompt\(\)\s*\{\s*if \(!state\.sessionId\)\s*\{\s*addMessage\("system",\s*"请先新建或选择一个会话"\)/,
+    "sendPrompt 不应在无会话时只提示而不新建"
+  );
+  assert.match(app, /async function sendPrompt\(\)[\s\S]{0,400}await newSession\(\)/);
+});
+
+test("侧栏项目分组可折叠且折叠态持久化", () => {
+  const app = readFileSync(join(here, "../app.js"), "utf8");
+  const css = readFileSync(join(here, "../style.css"), "utf8");
+  assert.match(app, /collapsedGroups/, "折叠状态集合");
+  assert.match(app, /owo\.collapsedGroups/, "折叠状态持久化到 localStorage");
+  assert.match(app, /codex-group-caret/, "折叠箭头");
+  assert.match(css, /\.codex-group-caret/, "折叠箭头样式");
+  // 折叠只在「非搜索」期间生效，搜索应临时展开全部。
+  assert.match(app, /if \(query\)[\s\S]{0,400}classList\.toggle\("hidden",\s*!li\.textContent/);
+});
+
+// ---------- 首启门回归（真实故障：配好模型仍发不出） ----------
+//
+// 故障：用户在设置页填好端点与密钥、「测试连接」通过，发送按钮却仍禁用、
+// 提示条"先连接你自己的模型服务"一直挂着。根因是前后端字段脱节：
+//   * 前端 modelGateMissing() 读 settings.provider_ready / settings.provider.base_url；
+//   * 服务端 Settings 结构里**没有 provider 段**，provider 信息只以 runtime 投影存在，
+//     settings_get 也从不返回 provider_ready。
+// 于是前端读的永远是 undefined → 恒判"未就绪"。
+// 修法两侧配套：core 加 ProviderSettings + settings_get 投影 provider 段/provider_ready；
+// 前端改读 runtime.{endpoint_kind,credential_source,provider_ready}。
+
+test("首启门读服务端真实字段，不读不存在的 settings.provider_ready", () => {
+  const app = readFileSync(join(here, "../app.js"), "utf8");
+  const body = app.slice(app.indexOf("function modelGateMissing"), app.indexOf("function updateModelGate"));
+  assert.ok(body.length > 0, "应能找到 modelGateMissing 实现");
+  // 必须优先看 runtime 段（服务端 effective_runtime_config 的产物）。
+  assert.match(body, /settings\.runtime|runtime\s*=\s*settings\.runtime/);
+  assert.match(body, /endpoint_kind\s*===\s*"local"/, "本地端点无需凭据，应放行");
+  assert.match(body, /credential_source/);
+});
+
+test("本地端点（Ollama）不因缺密钥被拦", () => {
+  const app = readFileSync(join(here, "../app.js"), "utf8");
+  const body = app.slice(app.indexOf("function modelGateMissing"), app.indexOf("function updateModelGate"));
+  // endpoint_kind=local 即放行：Ollama 之类本地服务不需要 API 密钥。
+  assert.doesNotMatch(
+    body,
+    /endpoint_kind\s*===\s*"local"[\s\S]{0,40}return true/,
+    "本地端点不得被判为缺配置"
+  );
+});

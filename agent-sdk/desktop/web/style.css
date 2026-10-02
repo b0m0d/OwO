@@ -445,20 +445,62 @@ body.inspector-open #right, body.inspector-open #rightResize { display: block; }
 .codex-session-search { margin: 0 4px 8px; background: var(--surface); }
 .codex-sessions { flex: 1; min-height: 0; overflow-y: auto; margin: 0; padding: 0 2px; }
 .codex-sessions li { padding: 7px 9px; border-radius: 8px; }
-/* 项目（工作区）分桶标题：Codex 侧栏一级分组的等价物 */
+/* 项目（工作区）分桶标题：Codex 侧栏一级分组的等价物。
+   可点击折叠/展开：整行是热区，右侧显示该组会话数。 */
 .codex-sessions li.codex-session-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 12px 7px 4px;
   color: var(--text-3);
   font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.codex-sessions li.codex-session-group:hover { background: transparent; }
+.codex-sessions li.codex-session-group:hover { background: var(--sidebar-hover); }
 #sidebar .codex-sessions li.codex-session-group:first-child { padding-top: 2px; }
+.codex-sessions li.codex-session-group:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.codex-group-caret {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transform: rotate(90deg);
+  transition: transform 120ms ease;
+  opacity: 0.75;
+}
+.codex-group-caret.collapsed { transform: rotate(0deg); }
+/* 搜索期间折叠被临时忽略，箭头改为「展开中」的提示态 */
+.codex-group-caret.searching { transform: rotate(90deg); opacity: 0.35; }
+.codex-group-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.codex-group-count {
+  flex: none;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-3);
+  opacity: 0.7;
+  min-width: 14px;
+  text-align: right;
+}
+@media (prefers-reduced-motion: reduce) {
+  .codex-group-caret { transition: none; }
+}
 .codex-sessions li .inline button.danger { color: var(--red); }
 /* 米色侧栏上的悬停态用暖色遮罩，避免列表通用 cool-gray 悬停色破坏色调统一 */
 #sidebar .codex-sessions li:hover { background: var(--sidebar-hover); }
