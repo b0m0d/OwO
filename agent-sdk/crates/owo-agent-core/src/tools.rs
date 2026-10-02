@@ -870,11 +870,26 @@ pub(crate) fn resolve_session_path(ctx: &ToolContext, path: &str) -> Result<Path
         base.join(path)
     };
     let candidate = candidate.canonicalize().unwrap_or(candidate);
-    let policy_workspace = ctx
-        .policy
-        .workspace()
-        .canonicalize()
-        .unwrap_or_else(|_| ctx.policy.workspace().to_path_buf());
+    // 越界边界取**本会话的工作区**，不是 `Policy` 的工作区。
+    //
+    // 两者的来源不同：`ctx.workspace` 来自 `session.workspace`（每个会话都可以在 UI
+    // 里选不同目录），而 `Policy` 的工作区来自服务启动参数——**全局唯一**。只要两者
+    // 不相等，选过其它目录的会话就会**所有文件类工具一律"路径越界"**：`list_dir` /
+    // `read_file` / `search_files` 全废，而 `run_command` 照常能用（命令工具不走这条
+    // 判定），表象极像"Agent 整体坏了"。
+    //
+    // 实测成因：桌面壳在 `workspace.json` 未配置时 `workspacePath()` 回落
+    // `process.cwd()`（= electron 安装目录），核心便以那个目录为工作区启动；用户在
+    // 会话里选 `D:\OwO-master`，于是每一次读文件都被判越界。
+    //
+    // 安全口径不变：read_only 档位、deny 命令、审批链都由 `Policy` 独立把关，这里只
+    // 决定"文件类工具的活动范围 = 本会话工作区"。
+    let boundary = if ctx.workspace.as_os_str().is_empty() {
+        ctx.policy.workspace()
+    } else {
+        ctx.workspace
+    };
+    let policy_workspace = boundary.canonicalize().unwrap_or_else(|_| boundary.to_path_buf());
     // 两侧统一去 Windows verbatim 前缀再比对（`\\?\C:\x` vs `C:\x` 否则恒不匹配）。
     let candidate_cmp = strip_verbatim_prefix(&candidate);
     let workspace_cmp = strip_verbatim_prefix(&policy_workspace);
@@ -3044,6 +3059,57 @@ mod tests {
         assert_eq!(result["matches"][0], "nested/AlphaMarker.TXT");
         drop(context);
         let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    /// 回归：文件类工具的越界边界必须是**本会话的工作区**，而不是服务启动时的全局工作区。
+    ///
+    /// 线上事故：桌面壳在 `workspace.json` 未配置时回落 `process.cwd()`（= electron
+    /// 安装目录）来启动核心，用户在会话里选 `D:\OwO-master`，于是 `list_dir` /
+    /// `read_file` / `search_files` 全部报"路径越界"；`run_command` 不受影响（命令
+    /// 工具不走这条判定），所以整件事看起来像"Agent 只坏了一半"。
+    #[tokio::test]
+    async fn session_workspace_is_the_boundary_when_it_differs_from_policy_workspace() {
+        let root = std::env::temp_dir().join(format!("owo-scope-{}", uuid::Uuid::new_v4()));
+        let session_ws = root.join("chosen-by-user");
+        let service_ws = root.join("service-launch-cwd");
+        std::fs::create_dir_all(session_ws.join("nested")).unwrap();
+        std::fs::create_dir_all(&service_ws).unwrap();
+        std::fs::write(session_ws.join("nested").join("note.txt"), b"hello").unwrap();
+
+        // Policy 用服务级工作区（模拟 `--workspace` 是壳的 cwd，与会话不同的目录）。
+        let policy = crate::Policy::new(&service_ws);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&session_ws, "mock", None);
+        let context = ToolContext {
+            workspace: &session_ws,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+            fanout: None,
+            abort: None,
+            questioner: None,
+        };
+
+        // 1) 会话工作区自身（"."）不得越界——事故现场就是这里恒失败。
+        assert!(
+            resolve_session_path(&context, ".").is_ok(),
+            "会话工作区内的 '.' 被误判越界"
+        );
+        // 2) 会话工作区内的相对路径可用。
+        assert!(resolve_session_path(&context, "nested/note.txt").is_ok());
+        // 3) 真正跳出会话工作区的路径仍须拒绝（安全口径不放松）。
+        let escaped = resolve_session_path(&context, "../service-launch-cwd");
+        if context.policy.profile() != crate::permissions::PermissionProfile::Unrestricted {
+            assert!(escaped.is_err(), "跳出会话工作区的路径必须仍被拒绝");
+        }
+
+        drop(context);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

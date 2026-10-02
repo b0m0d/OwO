@@ -45,7 +45,76 @@ fn align_keep_start_pulls_in_tool_call_message() {
     assert_eq!(align_keep_start(&orphan, 2), 3);
 }
 
-/// 取优合并（远端 engine）：脏历史归一（丢孤立 tool、补缺失结果且紧跟调用）。
+/// 回归：**摘要压缩的切点也必须对齐 tool 群组**。
+///
+/// 线上事故：跑了 33 个工具的回合，压缩提示刚出现，下一轮请求整体失败——
+/// `Messages with role 'tool' must be a response to a preceding message with
+/// 'tool_calls'`。根因是 `maybe_compact` 用 `messages[head_end..]` 直接切片，
+/// 而 `keep_recent` 是按条数切的，切点落进 assistant(tool_calls) 与它的 tool
+/// 结果之间就切出了孤立的 tool 开头。同文件另两条裁剪路径都做了对齐，只有这条漏了。
+#[test]
+fn compaction_split_never_starts_tail_with_orphan_tool() {
+    // 复刻现场形状：大量「user → assistant(tool_calls) → tool」交错。
+    let mut messages = vec![ChatMessage::system("系统".to_string())];
+    for index in 0..20 {
+        messages.push(ChatMessage::user(format!("请求{index}")));
+        let call_id = format!("c{index}");
+        messages.push(ChatMessage::assistant_tool_calls(vec![
+            crate::gateway::ToolCall {
+                id: call_id.clone(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({ "path": "a.txt" }),
+            },
+        ]));
+        messages.push(ChatMessage::tool(call_id, format!("结果{index}")));
+    }
+    let mut checked = 0;
+    for keep_recent in 1..=messages.len() {
+        let Some(tail_start) = compaction_split(&messages, keep_recent) else {
+            continue;
+        };
+        checked += 1;
+        // 1) 保留段绝不能以孤立 tool 开头（否则模型 400）。
+        assert_ne!(
+            messages[tail_start].role, "tool",
+            "keep_recent={keep_recent} 切出了孤立 tool 开头的保留段（tail_start={tail_start}）"
+        );
+        // 2) head 与 tail 必须互补，不得静默丢历史。
+        let head_len = tail_start - 1; // messages[1..tail_start]
+        let tail_len = messages.len() - tail_start;
+        assert_eq!(
+            head_len + tail_len + 1,
+            messages.len(),
+            "keep_recent={keep_recent} 时 head/tail 不互补，历史被静默丢弃"
+        );
+    }
+    assert!(checked > 0, "所有 keep_recent 都拒绝压缩，测试等于没跑");
+}
+
+/// 切点恰好落在 assistant(tool_calls) 自身时也不动它（群组头本来就是合法起点）。
+#[test]
+fn compaction_split_keeps_assistant_tool_calls_boundary() {
+    let messages = vec![
+        ChatMessage::system("系统".to_string()),
+        ChatMessage::user("请求一".to_string()),
+        ChatMessage::assistant_text("好的。".to_string()),
+        ChatMessage::user("请求二".to_string()),
+        ChatMessage::assistant_tool_calls(vec![crate::gateway::ToolCall {
+            id: "c1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": "a.txt" }),
+        }]),
+        ChatMessage::tool("c1".to_string(), "结果".to_string()),
+        ChatMessage::assistant_text("完成。".to_string()),
+        ChatMessage::user("谢谢".to_string()),
+    ];
+    // keep_recent=4 → head_end=4，正好是 assistant(tool_calls)：原样保留。
+    assert_eq!(compaction_split(&messages, 4), Some(4));
+    // keep_recent=3 → head_end=5 落在 tool 上：回退到群组头 4。
+    assert_eq!(compaction_split(&messages, 3), Some(4));
+}
+
+/// 存量脏历史归一：丢孤立 tool、补缺失结果且紧跟调用。
 #[test]
 fn sanitize_history_drops_orphan_tool_and_fills_missing_results() {
     let mut messages = vec![

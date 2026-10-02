@@ -1579,9 +1579,23 @@ pub(crate) mod win {
             command: &SandboxCommand,
             job: Handle,
         ) -> Result<OsChild, SandboxError> {
+            // raw_arg（`CommandExt`）用于 cmd 命令体原样透传，见下方说明。
+            use std::os::windows::process::CommandExt as _;
             let mut cmd = std::process::Command::new(&command.program);
-            cmd.args(&command.args)
-                .stdin(std::process::Stdio::null())
+            // `cmd /C|/K <命令体>`：命令体必须用 raw_arg 原样透传。
+            // std 的 Windows 参数转义会给含空格的参数加引号并把内部 `"` 写成 `\"`，
+            // cmd 的 /C 旧行为再剥掉首尾引号，模型最常写的
+            // `python -c "print(2+2)"` 就变成 `python -c \"print(2+2)\"` →
+            // python 实际执行的是**字符串字面量**，`exit_code=0` 却 stdout 全空
+            // （带分号的变体则直接 SyntaxError）。这类"静默成功"最难排查。
+            if is_cmd_shell(&command.program) && command.args.iter().any(|arg| is_cmd_switch(arg)) {
+                for arg in &command.args {
+                    cmd.raw_arg(arg);
+                }
+            } else {
+                cmd.args(&command.args);
+            }
+            cmd.stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
             if let Some(cwd) = &command.cwd {
@@ -1849,8 +1863,24 @@ pub(crate) mod win {
 
     /// 命令行拼接（lpCommandLine）：程序 + 参数；含空白参数加双引号。
     pub fn command_line(program: &str, args: &[String]) -> Vec<u16> {
-        let joined = std::iter::once(program.to_string())
-            .chain(args.iter().cloned())
+        to_wide(&command_line_string(program, args))
+    }
+
+    /// 命令行拼接的字符串形态（可单测；[`command_line`] 只负责转 UTF-16）。
+    ///
+    /// `cmd /C|/K <命令体>` 是**唯一例外**：命令体必须原样透传，不能套引号、
+    /// 更不能把内部 `"` 翻倍成 `""`。否则 cmd 的 `/C` 旧行为会剥掉首尾引号，
+    /// 残留的 `""` 再被解释成字面 `"`，于是模型最常写的
+    /// `python -c "print(2+2)"` 实际执行成 `python -c ""print(2+2)""` ——
+    /// python 拿到空的 `-c` 参数，静默无输出（审计里 exit_code=0 却 stdout 为空），
+    /// 带引号的 `python -c "import pptx; print(...)"` 则直接 SyntaxError。
+    /// 实测证据见 2026-10-02 的 run_command 审计（PPT 请求因此连续失败）。
+    pub fn command_line_string(program: &str, args: &[String]) -> String {
+        let parts = std::iter::once(program.to_string()).chain(args.iter().cloned());
+        if is_cmd_shell(program) && args.iter().any(|arg| is_cmd_switch(arg)) {
+            return parts.collect::<Vec<_>>().join(" ");
+        }
+        parts
             .map(|part| {
                 if part.contains(' ') || part.contains('\t') {
                     format!("\"{}\"", part.replace('"', "\"\""))
@@ -1859,8 +1889,23 @@ pub(crate) mod win {
                 }
             })
             .collect::<Vec<_>>()
-            .join(" ");
-        to_wide(&joined)
+            .join(" ")
+    }
+
+    /// 程序是否为 Windows 命令解释器（`cmd` / `cmd.exe`，忽略路径与大小写）。
+    pub(crate) fn is_cmd_shell(program: &str) -> bool {
+        let stem = program
+            .rsplit(|c| c == '\\' || c == '/')
+            .next()
+            .unwrap_or(program);
+        let stem = stem.strip_suffix(".exe").unwrap_or(stem);
+        stem.eq_ignore_ascii_case("cmd")
+    }
+
+    /// 参数是否为 cmd 的命令串开关（`/C` / `/K`，忽略大小写）。
+    pub(crate) fn is_cmd_switch(arg: &str) -> bool {
+        let trimmed = arg.trim();
+        trimmed.eq_ignore_ascii_case("/c") || trimmed.eq_ignore_ascii_case("/k")
     }
 
     /// 管道对（父侧读端 + 子侧写端）。
@@ -2184,5 +2229,61 @@ pub(crate) mod win {
             ok &= std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 112;
         }
         ok
+    }
+}
+
+#[cfg(test)]
+mod command_line_tests {
+    // command_line 家族是 `win` 模块下的自由函数（Windows 平台实现）。
+    use super::win::{command_line_string, is_cmd_shell, is_cmd_switch};
+
+    /// 普通参数：含空白的照旧加双引号（既有行为不得回归）。
+    #[test]
+    fn quotes_plain_args_containing_whitespace() {
+        let args = vec![
+            "C:\\Program Files\\tool.exe".to_string(),
+            "a b".to_string(),
+            "plain".to_string(),
+        ];
+        assert_eq!(
+            command_line_string("runner", &args),
+            "runner \"C:\\Program Files\\tool.exe\" \"a b\" plain"
+        );
+    }
+
+    /// 回归：`cmd /C` 的命令体必须原样透传——套引号 + 内部引号翻倍会让
+    /// `python -c "..."` 静默失败（审计里 exit_code=0 但 stdout 为空）。
+    #[test]
+    fn cmd_c_body_passed_verbatim_without_doubling_quotes() {
+        let body = "python -c \"import pptx; print(pptx.__version__)\"".to_string();
+        let line = command_line_string("cmd", &["/C".to_string(), body.clone()]);
+        assert!(line.ends_with(&body), "命令体必须原样结尾：{line}");
+        assert_eq!(line, format!("cmd /C {body}"));
+        assert!(!line.contains("\"\""), "内部引号不得翻倍：{line}");
+    }
+
+    #[test]
+    fn cmd_k_body_also_passed_verbatim() {
+        let body = "echo \"a b\" & echo done".to_string();
+        let line = command_line_string("cmd.exe", &["/k".to_string(), body.clone()]);
+        assert_eq!(line, format!("cmd.exe /k {body}"));
+    }
+
+    /// 非 cmd 程序仍走既有引号逻辑（透传只对 cmd 生效）。
+    #[test]
+    fn non_cmd_program_keeps_quoting_rules() {
+        let args = vec!["/C".to_string(), "python -c \"print(1)\"".to_string()];
+        let line = command_line_string("powershell", &args);
+        assert!(line.contains("\"\""), "非 cmd 程序保持原引号策略：{line}");
+    }
+
+    #[test]
+    fn detects_cmd_shell_and_switches() {
+        assert!(is_cmd_shell("cmd"));
+        assert!(is_cmd_shell("C:\\Windows\\System32\\cmd.exe"));
+        assert!(!is_cmd_shell("powershell"));
+        assert!(is_cmd_switch("/C"));
+        assert!(is_cmd_switch("/k"));
+        assert!(!is_cmd_switch("-Command"));
     }
 }

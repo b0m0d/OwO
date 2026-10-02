@@ -1375,11 +1375,14 @@ impl Agent {
         if !force && estimate_tokens(messages) <= self.config.token_budget {
             return Ok(None);
         }
-        let head_end = messages.len().saturating_sub(self.config.keep_recent);
-        if head_end < 4 {
+        // 切点必须对齐 tool 群组（A4-2 同源规则），且必须在**生成摘要之前**确定：
+        // 摘要是 head、保留段是 tail，两者必须严格互补。若先按 head_end 生成摘要、
+        // 再对齐 tail，被对齐让出去的那几条消息就既不在摘要里也不在保留段里——等于
+        // 静默丢历史。
+        let Some(tail_start) = compaction_split(messages, self.config.keep_recent) else {
             return Ok(None);
-        }
-        let head = messages[1..head_end].to_vec();
+        };
+        let head = messages[1..tail_start].to_vec();
         let prompt = format!(
             "请把以下 Agent 会话历史压缩成一份简洁的进展摘要（保留：已完成的动作、\
              未完成事项、关键决策、当前上下文；不要编造新信息）：\n\n{}",
@@ -1421,7 +1424,12 @@ impl Agent {
         compacted.push(ChatMessage::system(format!(
             "历史摘要（已压缩）：\n{summary}"
         )));
-        compacted.extend(messages[head_end..].to_vec());
+        // 保留段起点用对齐后的 tail_start（不是 head_end）：见上方说明，
+        // 这条是"压缩后历史仍能发出去"的关键。
+        compacted.extend(messages[tail_start..].to_vec());
+        // 兜底归一：任何压缩路径（含摘要模型异常、未来新增切分）都不该产出非法序列。
+        // 这一步只处理非法配对，正常情况下是空操作。
+        sanitize_history(&mut compacted);
         *messages = compacted;
         self.audit
             .lock()
@@ -1666,6 +1674,29 @@ fn align_keep_start(messages: &[ChatMessage], start: usize) -> usize {
         after += 1;
     }
     after
+}
+
+/// 摘要压缩的切分点：返回保留段起点，`None` 表示不该压缩（历史太短或对齐后无内容）。
+///
+/// 为什么单独抽出来：`keep_recent` 是**按条数**切的，而一个工具回合里
+/// `assistant(tool_calls)` 与它的若干 `tool` 结果是多条消息。切点若落进群组中间，
+/// 保留段会以**孤立 tool 消息**开头，拼上摘要直接发模型就是 400：
+///   "Messages with role 'tool' must be a response to a preceding message with
+///    'tool_calls'"
+/// 实测症状：跑了 33 个工具的回合，压缩提示刚出现，下一轮请求整体失败。
+/// 同文件另两条裁剪路径（[`compact_truncate`] / [`compact_truncate_to_budget`]）
+/// 都已对齐，只有摘要压缩这条漏了；抽成纯函数也便于回归测试钉住。
+fn compaction_split(messages: &[ChatMessage], keep_recent: usize) -> Option<usize> {
+    let head_end = messages.len().saturating_sub(keep_recent);
+    if head_end < 4 {
+        return None;
+    }
+    let tail_start = align_keep_start(messages, head_end);
+    // 对齐把整段都让出去了（切点后全是孤儿 tool 群组）：不压缩，保持原样。
+    if tail_start >= messages.len() {
+        return None;
+    }
+    Some(tail_start)
 }
 
 /// 存量脏历史归一（取优合并自远端 engine）：发请求前调用——
