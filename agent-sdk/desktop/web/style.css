@@ -937,6 +937,28 @@ body.inspector-open #right, body.inspector-open #rightResize { display: block; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 审批倒计时：超时引擎按拒绝处理，剩余时间必须显式可见；末段转红并整条呼吸闪烁，
+   避免用户没注意到顶部审批条 → 5 分钟后回合静默失败（实测已丢过两次请求）。 */
+.approval-timer {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  color: var(--yellow);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+}
+.approval-timer.urgent {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: var(--red);
+}
+#approvalBar.urgent { animation: approvalPulse 1.2s ease-in-out infinite; }
+@keyframes approvalPulse {
+  0%, 100% { background: var(--yellow-soft); }
+  50% { background: var(--red-soft); }
+}
 /* 会话列表：并行执行中的会话显示运行徽标 */
 #sessionList li.running::after {
   content: "●";

@@ -56,6 +56,7 @@ const {
   Tray,
   nativeImage,
   globalShortcut,
+  screen,
 } = electronApi;
 const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs");
@@ -104,6 +105,15 @@ let tray = null;
 let core = null; // { proc, pid, port, token }
 let coreState = { state: "starting" };
 
+// 桌宠窗口：不再是独立桌面端，而是壳的第二个窗口 + 核心托管的一份静态页
+// （`GET /pet` → desktop/web/pet）。它的数据全部来自核心 HTTP  API，只有"移动/
+// 隐藏/拉起工作台"三件事需要主进程代劳——因为桌宠页面没有 Node 权限，自己开不
+// 了窗也移动不了 Window。
+let petWindow = null;
+let petUiPort = null; // 与 uiPort 同理：核心重启换端口后必须重新导航
+let petWatchdog = null; // 显隐看门狗（见 startPetWatchdog）
+const PET_SIZE = { width: 220, height: 262 };
+
 // ---------- 监管状态 ----------
 let generation = 0; // 每次拉起核心 +1：过期那一轮的异步回调一律失效
 let restartAttempts = 0; // 连续失败计数，ready 成功后归零
@@ -120,6 +130,10 @@ let bootShown = false;
 
 function webUiUrl(port) {
   return `http://127.0.0.1:${port}/`;
+}
+
+function petUrl(port) {
+  return `http://127.0.0.1:${port}/pet/`;
 }
 
 // 核心起来之前的占位页：只有"正在拉起/失败原因"两态，不承担任何业务 UI。
@@ -227,7 +241,16 @@ function workspacePath() {
   } catch (_) {
     /* 没配置过就走下面的默认 */
   }
-  return process.cwd();
+  // 默认**不能**用 `process.cwd()`：那个值是 electron 的启动目录（
+  // `desktop/electron` 甚至 electron 安装目录），作为"用户工作区"毫无意义——
+  // 实测它会让核心以程序目录为工作区启动，而用户在会话里选自己的项目目录后，
+  // 两者不一致会连累一批文件类工具（详见 core `resolve_session_path` 注释）。
+  // 用户主目录是唯一无歧义、有意义且一定存在的默认值。
+  try {
+    return app.getPath("home");
+  } catch (_) {
+    return process.cwd();
+  }
 }
 
 function saveWorkspace(target) {
@@ -749,6 +772,7 @@ function notifyState() {
   if (coreState.state === "ready" && coreState.port && uiPort !== coreState.port) {
     uiPort = coreState.port;
     mainWindow.loadURL(webUiUrl(coreState.port));
+    syncPetWindow(coreState.port);
     return;
   }
   // 还没进过工作台时，由壳页负责把启动失败说清楚；
@@ -801,6 +825,124 @@ function createWindow() {
   }
 }
 
+// ---------- 桌宠窗口（第二个窗口，不是独立进程） ----------
+//
+// 三个不能省的 Windows/Electron 细节：
+//  1. `backgroundThrottling: false` —— 窗口被遮挡/隐藏时 Chromium 会把定时器降频到
+//     每分钟一次。桌宠靠 10s 心跳让服务端认为 `overlay_online`（判据是"最近 15 秒
+//     收到过心跳"），一旦被节流，工作台的桌宠开关就会一直显示"桌面端离线"。
+//  2. `transparent: true` + `#00000000` —— 桌宠是不规则形状，背景必须真透明；只写
+//     transparent 不写背景色会出现黑块。
+//  3. `movable: false` —— 由 PointerEvents 算出位移后走 IPC `pet:move` 调
+//     setPosition，避免 Electron 自己的拖拽与自定义手势打架。
+
+function petDefaultBounds() {
+  const area = screen.getPrimaryDisplay().workArea;
+  return {
+    x: Math.max(area.x, area.x + area.width - PET_SIZE.width - 24),
+    y: Math.max(area.y, area.y + area.height - PET_SIZE.height - 24),
+  };
+}
+
+function createPetWindow(port) {
+  if (petWindow && !petWindow.isDestroyed()) return petWindow;
+  petWindow = new BrowserWindow({
+    ...PET_SIZE,
+    ...petDefaultBounds(),
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    hasShadow: false,
+    skipTaskbar: true, // 桌宠不进任务栏，也不该出现在 Alt+Tab 里干扰工作
+    alwaysOnTop: true,
+    // Windows 上 alwaysOnTop 会盖住开始菜单/通知，用 'screen-saver' 之上的层级
+    // 保证可见，同时残留在普通应用之上；这里取 Electron 的最高档。
+    title: "OwO 桌宠",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+  // 页面内的链接/新窗口一律不外开：桌宠不是浏览器。
+  petWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // 关闭桌宠 = 隐藏（与工作台同语义），真正的退出走托盘。
+  petWindow.on("close", (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      petWindow.hide();
+    }
+  });
+  petWindow.loadURL(petUrl(port));
+  return petWindow;
+}
+
+/// 核心 ready 时挂上桌宠；端口变（核心重启）则重新导航。
+function syncPetWindow(port) {
+  if (!petWindow || petWindow.isDestroyed()) {
+    createPetWindow(port);
+    petUiPort = port;
+    return;
+  }
+  if (petUiPort !== port) {
+    petUiPort = port;
+    petWindow.loadURL(petUrl(port));
+  }
+}
+
+/// 唯一的显隐开关：**只写内核的期望值，不自己决定窗口可见性**。
+///
+/// 为什么绕一趟内核：显隐有三个来源（工作台设置开关、托盘菜单、桌宠自己的菜单），
+/// 如果谁都直接 hide()/show()，就会出现"页面以为可见、窗口其实被藏了"的错位——
+/// 页面继续报 visible:true，而屏幕上一个像素都没有，两个真相源互相骗。
+/// 统一写 `POST /desktop/pet` 之后，桌宠页心跳读到 desired 再执行，全链路只有一个真相。
+async function setPetDesired(visible) {
+  if (!coreState.port) return { ok: false, reason: "core_not_ready" };
+  try {
+    await httpPost(coreState.port, "/desktop/pet", {}, { visible });
+  } catch (error) {
+    return { ok: false, reason: String(error && error.message ? error.message : error) };
+  }
+  // 顺手立刻应用到窗口，不必等桌宠页下一次心跳（最多 10s，手感太差）。
+  if (petWindow && !petWindow.isDestroyed()) {
+    if (visible) petWindow.show();
+    else petWindow.hide();
+  }
+  return { ok: true };
+}
+
+/// 显隐看门狗：**不依赖桌宠页**，由壳自己把窗口可见性对齐到内核的 desired。
+///
+/// 为什么需要它：桌宠页在窗口隐藏后会继续跑心跳（实测 10s 一次没停），但它
+/// `setVisible(true)` 那一步不可靠——只要这一环出问题，桌宠就会永远回不来，
+/// 表现为"点了显示但什么都不出现"。显隐是用户能直接感知的功能，绝不能建立在
+/// "页面一定会照做"的假设上：壳负责执行，页面只负责上报实际值。
+function startPetWatchdog() {
+  clearInterval(petWatchdog);
+  petWatchdog = setInterval(async () => {
+    if (!coreState.port || !petWindow || petWindow.isDestroyed()) return;
+    try {
+      const response = await httpGet(coreState.port, "/desktop/pet");
+      if (response.status !== 200) return;
+      const data = JSON.parse(response.body);
+      if (typeof data.desired !== "boolean") return;
+      const visible = petWindow.isVisible();
+      if (visible !== data.desired) {
+        console.log(`[pet] watchdog: desired=${data.desired} visible=${visible} → 纠正`);
+        if (data.desired) petWindow.show();
+        else petWindow.hide();
+      }
+    } catch (_) {
+      /* 核心不可达：下一轮再试 */
+    }
+  }, 8000);
+}
+
 // ---------- 托盘（M7） ----------
 
 function trayIconPath() {
@@ -819,9 +961,16 @@ function refreshTrayMenu() {
           : `核心异常：${coreState.errorCode || coreState.state}`;
   const menu = Menu.buildFromTemplate([
     { label: "显示 / 隐藏工作台", click: () => toggleWindow() },
+    {
+      label: "显示 / 隐藏桌宠",
+      click: () => {
+        if (!petWindow || petWindow.isDestroyed()) return;
+        // 当前可见性取自窗口本身，写回的却是内核期望值（见 setPetDesired 说明）。
+        void setPetDesired(!petWindow.isVisible());
+      },
+    },
     { label: stateText, enabled: false },
     { type: "separator" },
-    { label: "重启核心服务", click: () => startCore({ reason: "manual", userInitiated: true }) },
     { label: "打开配置目录", click: () => shell.openPath(path.dirname(configPath())) },
     {
       label: "开机自启",
@@ -940,6 +1089,87 @@ ipcMain.handle("workspace:choose", async () => {
 ipcMain.handle("app:openExternal", (_event, url) => {
   if (/^https?:\/\//.test(String(url))) shell.openExternal(url);
   return { ok: true };
+});
+
+// ---------- 桌宠 IPC ----------
+// 桌宠页面无 Node 权限，这三件事只能主进程代劳。与旧 Tauri 壳的
+// `move_pet_by` / `set_pet_visible` / `open_workbench` 语义一致。
+
+ipcMain.handle("pet:move", (_event, dx, dy) => {
+  if (!petWindow || petWindow.isDestroyed()) return { ok: false };
+  const [x, y] = petWindow.getPosition();
+  // Clamp 在显示器工作区内：无限拖动会把桌宠拖到屏幕外找不回来。
+  const area = screen.getPrimaryDisplay().workArea;
+  const nextX = Math.min(Math.max(x + Number(dx || 0), area.x), area.x + area.width - PET_SIZE.width);
+  const nextY = Math.min(Math.max(y + Number(dy || 0), area.y), area.y + area.height - PET_SIZE.height);
+  petWindow.setPosition(nextX, nextY);
+  return { ok: true };
+});
+
+ipcMain.handle("pet:visible", (_event, visible) => {
+  if (!petWindow || petWindow.isDestroyed()) return { ok: false };
+  console.log(`[pet] setVisible(${visible})`);
+  if (visible) petWindow.show();
+  else petWindow.hide();
+  return { ok: true };
+});
+
+ipcMain.handle("pet:workbench", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+    return { ok: true };
+  }
+  createWindow();
+  return { ok: true };
+});
+
+// 桌宠页每次心跳都会问一次真实可见性并与期望值对账。没有这个对账，任何一次
+// 未经页面的隐藏（外部 hide、窗口被移出可视区）都会让桌宠静默消失且永不回来。
+ipcMain.handle("pet:query", () => {
+  if (!petWindow || petWindow.isDestroyed()) return { visible: false, alive: false };
+  return { visible: petWindow.isVisible(), alive: true };
+});
+
+ipcMain.handle("pet:reset", () => {
+  if (!petWindow || petWindow.isDestroyed()) return { ok: false };
+  const bounds = petDefaultBounds();
+  petWindow.setBounds({ ...PET_SIZE, ...bounds });
+  petWindow.show();
+  return { ok: true, bounds };
+});
+
+// 桌宠偏好（当前皮肤等）落在壳侧文件，**不能放 localStorage**：
+// 桌宠页来自 `http://127.0.0.1:<端口>`，而核心每次启动都用 `--port 0` 重新分配端口
+// —— origin 一变，localStorage 就是另一个存储区，用户换的皮肤每次重启都会被忘掉。
+function petPrefPath() {
+  return path.join(dataRoot(), "pet.json");
+}
+
+ipcMain.handle("pet:pref:get", () => {
+  try {
+    return JSON.parse(fs.readFileSync(petPrefPath(), "utf8"));
+  } catch (_) {
+    return {};
+  }
+});
+
+ipcMain.handle("pet:pref:set", (_event, patch) => {
+  const file = petPrefPath();
+  let current = {};
+  try {
+    current = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (_) {
+    /* 首次写入或文件损坏：从空对象重建 */
+  }
+  const next = { ...current, ...(patch && typeof patch === "object" ? patch : {}) };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(next, null, 2), "utf8");
+    return { ok: true, pref: next };
+  } catch (error) {
+    return { ok: false, error: String(error && error.message ? error.message : error) };
+  }
 });
 
 // ---------- Tauri 兼容命令桥（ADR-003） ----------
@@ -1152,6 +1382,7 @@ app.whenReady().then(async () => {
   registerGlobalShortcut();
   createWindow();
   await startCore({ reason: "launch" });
+  startPetWatchdog();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -1168,6 +1399,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   shuttingDown = true;
+  clearInterval(petWatchdog);
   globalShortcut.unregisterAll();
   killCore();
 });

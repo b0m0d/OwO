@@ -18,6 +18,21 @@ contextBridge.exposeInMainWorld("owo", {
   },
 });
 
+// 桌宠页与壳之间唯一的三个动作。桌宠由核心静态托管（`GET /pet`），页面本身不带
+// Node 权限，所以移动/隐藏/拉起工作台必须经主进程。缺了这层桥，桌宠只能"看得见
+// 状态、做不了动作"，也就失去了「替用户省一步」的价值。
+contextBridge.exposeInMainWorld("petShell", {
+  moveBy: (dx, dy) => ipcRenderer.invoke("pet:move", dx, dy),
+  setVisible: (visible) => ipcRenderer.invoke("pet:visible", visible),
+  showWorkbench: () => ipcRenderer.invoke("pet:workbench"),
+  // 真实可见性 + 归位：桌宠页用心跳对账（见 main.js pet:query 注释）。
+  query: () => ipcRenderer.invoke("pet:query"),
+  resetPosition: () => ipcRenderer.invoke("pet:reset"),
+  // 偏好存壳侧文件，不存 localStorage（origin 绑随机端口，见 main.js petPrefPath）。
+  getPref: () => ipcRenderer.invoke("pet:pref:get"),
+  setPref: (patch) => ipcRenderer.invoke("pet:pref:set", patch),
+});
+
 // ADR-003：Tauri 兼容桥。
 //
 // desktop/web 对壳的调用面是 `window.__TAURI_INTERNALS__.invoke(command, args)`

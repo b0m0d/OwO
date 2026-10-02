@@ -61,14 +61,20 @@ Write-Host "[start] 提示：壳用 --port 0 拉起核心（随机端口），�
 $arguments = @(".")
 if ($DevTools) { $arguments += "--dev" }
 if ($DisableGpu) {
+    # 注意：这里**不能**加 `--disable-software-rasterizer`。
+    #
+    # 桌宠是不规则形状的透明窗口（`transparent: true`），它必须有一条合成路径
+    # 才能把像素画出来。`--disable-gpu` 掐掉硬件路径后，唯一的兜底就是 SwiftShader
+    # 软件光栅化；再把软件光栅化也禁掉，窗口会变成**完全透明**——进程在、句柄在、
+    # IsWindowVisible 返回 true、页面定时器照跑，就是屏幕上一个像素都没有，
+    # 极难判断（实测踩过：桌宠整只消失，而 /desktop/pet 显示 online）。
     $arguments += @(
         "--disable-gpu",
         "--disable-gpu-compositing",
-        "--disable-software-rasterizer",
         "--in-process-gpu",
         "--no-sandbox"
     )
-    Write-Host "[start] 已禁用 GPU 加速（-DisableGpu）"
+    Write-Host "[start] 已禁用 GPU 加速（-DisableGpu，保留软件光栅化以支持透明窗口）"
 }
 Push-Location $PSScriptRoot
 try {

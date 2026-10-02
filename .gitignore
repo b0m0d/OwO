@@ -89,3 +89,7 @@ tmp_path_keys.txt
 # 仓库红线：凭据只经环境变量 / 本机信封，任何配置文件都不得进版本库。
 /agent-sdk/desktop/electron/settings.json
 /agent-sdk/desktop/electron/config.json
+
+# 本机工作台记忆与验收产物：属于本机状态（含调试截图、会话记忆），不入库。
+/.workbuddy/
+/deliverables/

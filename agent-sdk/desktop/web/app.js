@@ -4026,6 +4026,12 @@ async function uploadAttachments(files) {
 
 // ---------- 审批条 ----------
 // 访问级别（composer 下拉）：ask 逐次询问；auto 自动放行只读类工具；full 全部放行。
+// 审批超时预算（与引擎侧一致）：超时即按拒绝处理，因此卡片必须自带倒计时，
+// 否则用户一旦没注意到顶部审批条，回合会在 5 分钟后静默失败（实测因此丢了两次 PPT 请求）。
+const APPROVAL_TIMEOUT_MS = 300000;
+const APPROVAL_URGENT_MS = 60000;
+// 原始标题（无待审批时恢复用）；取不到就留空，标题改写自动跳过。
+const BASE_DOC_TITLE = typeof document !== "undefined" ? document.title || "" : "";
 
 function showApproval(payload) {
   const requestId = payload.request_id;
@@ -4035,6 +4041,8 @@ function showApproval(payload) {
     reason: payload.reason || "",
     // 流帧驱动时 writeTargetSid 即发起回合的会话（跨会话审批归属正确）。
     sessionId: writeTargetSid || state.sessionId,
+    // 计时起点只在此处落一次：后续 5s 轮询同步不会重置已有的倒计时。
+    requestedAt: Date.now(),
   });
   const mode = getAccessMode();
   if (mode !== "ask") {
@@ -4052,6 +4060,7 @@ function showApproval(payload) {
 }
 
 // 渲染审批队列：当前会话与其它会话的待审批卡并存，各自独立允许/拒绝。
+// 每张卡带剩余秒数：超时引擎按拒绝处理，必须让"还多久过期"可见。
 function renderApprovals() {
   const list = $("approvalList");
   const bar = $("approvalBar");
@@ -4059,6 +4068,7 @@ function renderApprovals() {
   list.innerHTML = "";
   const items = [...state.pendingApprovals.entries()];
   bar.classList.toggle("hidden", items.length === 0);
+  let anyUrgent = false;
   for (const [requestId, entry] of items) {
     const row = document.createElement("div");
     row.className = "approval-item";
@@ -4072,6 +4082,14 @@ function renderApprovals() {
     text.textContent = `${prefix}需要审批：${entry.tool || "未知工具"}${
       entry.reason ? `（${entry.reason}）` : ""
     }`;
+    const timer = document.createElement("span");
+    timer.className = "approval-timer";
+    const remain = approvalRemainingMs(entry);
+    if (remain <= APPROVAL_URGENT_MS) {
+      timer.classList.add("urgent");
+      anyUrgent = true;
+    }
+    timer.textContent = approvalTimerText(remain);
     const allow = document.createElement("button");
     allow.className = "allow";
     allow.textContent = "允许";
@@ -4080,10 +4098,55 @@ function renderApprovals() {
     deny.className = "deny";
     deny.textContent = "拒绝";
     deny.dataset.rid = requestId;
-    row.append(text, allow, deny);
+    row.append(text, timer, allow, deny);
     list.appendChild(row);
   }
+  bar.classList.toggle("urgent", anyUrgent);
+  // 用户可能已切到别的窗口：把待审批数量写进标题栏，任务栏也看得见。
+  if (typeof document !== "undefined" && BASE_DOC_TITLE) {
+    document.title = items.length
+      ? `⚠ 待审批（${items.length}） · ${BASE_DOC_TITLE}`
+      : BASE_DOC_TITLE;
+  }
 }
+
+function approvalRemainingMs(entry) {
+  const start = Number(entry && entry.requestedAt) || Date.now();
+  return Math.max(0, APPROVAL_TIMEOUT_MS - (Date.now() - start));
+}
+
+function approvalTimerText(remainMs) {
+  const seconds = Math.max(0, Math.ceil(remainMs / 1000));
+  if (seconds <= 0) return "已超时";
+  if (seconds >= 60) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `剩余 ${m}:${String(s).padStart(2, "0")}`;
+  }
+  return `剩余 ${seconds}s`;
+}
+
+// 每秒刷新倒计时文本（不整体重建 DOM，避免打断点击焦点）。
+function tickApprovalTimers() {
+  if (state.pendingApprovals.size === 0) return;
+  const rows = [...document.querySelectorAll("#approvalList .approval-item")];
+  const entries = [...state.pendingApprovals.values()];
+  let anyUrgent = false;
+  rows.forEach((row, index) => {
+    const entry = entries[index];
+    if (!entry) return;
+    const timer = row.querySelector(".approval-timer");
+    if (!timer) return;
+    const remain = approvalRemainingMs(entry);
+    timer.textContent = approvalTimerText(remain);
+    const urgent = remain <= APPROVAL_URGENT_MS;
+    timer.classList.toggle("urgent", urgent);
+    if (urgent) anyUrgent = true;
+  });
+  const bar = $("approvalBar");
+  if (bar) bar.classList.toggle("urgent", anyUrgent);
+}
+setInterval(tickApprovalTimers, 1000);
 
 // 跨会话待审批同步：轮询服务端 pending 列表，把错过 SSE 事件/其它会话的审批并入队列；
 // 服务端已不存在的（已响应/超时/会话结束）同步移除，避免点了必 404 的僵尸卡。
@@ -4099,6 +4162,9 @@ async function syncPendingApprovals() {
         tool: item.tool || "",
         reason: item.args_summary || "",
         sessionId: item.session_id || "",
+        // 轮询补入的卡片拿不到真实发起时刻，保守按"刚发起"计（宁可少显示剩余时间，
+        // 也不让倒计时虚高到真实超时之后）。
+        requestedAt: Date.now(),
       });
       changed = true;
     }
