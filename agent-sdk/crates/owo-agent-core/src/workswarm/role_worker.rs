@@ -39,47 +39,23 @@ fn apply_retry_context(ctx: &mut Value, input: &Value) {
     );
 }
 
-fn apply_assigned_task_context(ctx: &mut Value, input: &Value) {
-    let Some(task) = input.get("assigned_task").and_then(Value::as_str) else {
-        return;
+fn apply_assigned_task_context(
+    ctx: &mut Value,
+    task: &crate::task_context::ResolvedTaskContext,
+) -> Result<(), String> {
+    let Some(task_text) = task.objective.as_deref() else {
+        if task.task_id.is_some() {
+            return Err("TaskGraph 任务缺少宿主解析的任务目标".to_string());
+        }
+        return Ok(());
     };
     let Some(context) = ctx.as_object_mut() else {
-        return;
+        return Err("团队上下文不是可修改对象".to_string());
     };
-    let acceptance = input
-        .get("assigned_acceptance")
-        .and_then(Value::as_str)
-        .unwrap_or("按任务目标交付");
-    let verification = input
-        .get("assigned_verification")
-        .map(|value| match value {
-            Value::String(verification) => verification.clone(),
-            structured => structured.to_string(),
-        })
-        .unwrap_or_else(|| "non_empty".to_string());
-    let paths = input
-        .get("assigned_write_paths")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let read_refs = input
-        .get("assigned_read_refs")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let contract_refs = input
-        .get("assigned_contract_refs")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let capabilities = input
-        .get("required_capabilities")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-
-    // 显式 TaskSpec 是宿主批准的执行边界；模型只拿当前任务目标，
-    // 不重复接收整队目标。原目标仍保留在 GoalRunState 中用于审计与恢复。
-    context.insert("objective_text".into(), json!(task));
-    let task_contract = format!(
-        "当前任务：{task}。验收：{acceptance}。确定性验证：{verification}。读取参考：{read_refs}。接口契约：{contract_refs}。所需能力：{capabilities}。写入白名单：{paths}。仅完成这个任务并提供证据。"
-    );
+    let paths = json!(task.write_paths.clone().unwrap_or_default());
+    let task_contract = task
+        .prompt_contract()
+        .ok_or_else(|| "TaskGraph 任务提示契约无法编译".to_string())?;
     let role_contract = context
         .get("handoff_contract")
         .and_then(Value::as_str)
@@ -91,6 +67,8 @@ fn apply_assigned_task_context(ctx: &mut Value, input: &Value) {
     context.insert("handoff_contract".into(), json!(handoff_contract));
     context.insert("write_paths".into(), paths);
     context.insert("task_scoped".into(), json!(true));
+    context.insert("_resolved_task_context".into(), task.to_value()?);
+    Ok(())
 }
 
 impl RoleWorker {
@@ -135,21 +113,11 @@ impl Worker for RoleWorker {
     }
 
     async fn run(&self, input: &Value) -> Result<String, String> {
-        let step_id = input
-            .get("_workswarm")
-            .and_then(|w| w.get("step_id"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let task_context = crate::task_context::ResolvedTaskContext::from_worker_input(input)?;
+        let step_id = task_context.step_id.clone().unwrap_or_default();
         // 领取代次：cancel/retry/replace 接管现场后，旧阶段回传凭此被拒收。
-        let phase_epoch = input
-            .get("_workswarm")
-            .and_then(|w| w.get("phase_epoch"))
-            .and_then(Value::as_u64);
-        let attempt_id = input
-            .get("_workswarm")
-            .and_then(|w| w.get("attempt_id"))
-            .and_then(Value::as_str);
+        let phase_epoch = task_context.phase_epoch;
+        let attempt_id = task_context.attempt_id.clone();
         let ctx = match self
             .coordinator
             .assemble_context_slice(&self.team_id, &self.member_id, &step_id)
@@ -160,7 +128,7 @@ impl Worker for RoleWorker {
         };
         let worker_kind = self.inner.name().to_string();
         let mut ctx = ctx;
-        apply_assigned_task_context(&mut ctx, input);
+        apply_assigned_task_context(&mut ctx, &task_context)?;
         apply_retry_context(&mut ctx, input);
         let reviewed_sources = ctx
             .get("upstream")
@@ -237,7 +205,7 @@ impl Worker for RoleWorker {
                             &output,
                             OutputAttemptBinding {
                                 phase_epoch,
-                                attempt_id,
+                                attempt_id: attempt_id.as_deref(),
                                 reviewed_sources: Some(&reviewed_sources),
                             },
                         )
@@ -262,7 +230,7 @@ impl Worker for RoleWorker {
                                     &output,
                                     OutputAttemptBinding {
                                         phase_epoch,
-                                        attempt_id,
+                                        attempt_id: attempt_id.as_deref(),
                                         reviewed_sources: Some(&reviewed_sources),
                                     },
                                 )
@@ -292,7 +260,7 @@ impl Worker for RoleWorker {
                         &out,
                         OutputAttemptBinding {
                             phase_epoch,
-                            attempt_id,
+                            attempt_id: attempt_id.as_deref(),
                             reviewed_sources: Some(&reviewed_sources),
                         },
                     )
@@ -328,7 +296,8 @@ mod tests {
             "required_capabilities": ["read", "write"],
         });
 
-        apply_assigned_task_context(&mut context, &input);
+        let task = crate::task_context::ResolvedTaskContext::from_worker_input(&input).unwrap();
+        apply_assigned_task_context(&mut context, &task).unwrap();
         let (prompt, _) = TeamCoordinator::compile_role_prompt_with_meta(&context);
 
         assert!(prompt.contains("实现 posts API 分页"));

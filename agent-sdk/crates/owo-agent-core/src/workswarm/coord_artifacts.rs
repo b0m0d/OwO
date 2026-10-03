@@ -1142,13 +1142,37 @@ impl TeamCoordinator {
                 .cloned()
                 .unwrap_or_else(|| json!([])),
         );
+        if let Some(resolved) = ctx.get("_resolved_task_context") {
+            obj.insert("resolved_task_context".to_string(), resolved.clone());
+        }
         if worker_kind == "agent" {
             let has_prompt = obj
                 .get("prompt")
                 .and_then(Value::as_str)
                 .map(|p| !p.trim().is_empty())
                 .unwrap_or(false);
-            if !has_prompt {
+            if has_prompt {
+                let task_contract = ctx
+                    .get("_resolved_task_context")
+                    .and_then(|value| {
+                        serde_json::from_value::<crate::task_context::ResolvedTaskContext>(
+                            value.clone(),
+                        )
+                        .ok()
+                    })
+                    .and_then(|task| task.prompt_contract());
+                if let (Some(prompt), Some(task_contract)) = (
+                    obj.get("prompt").and_then(Value::as_str),
+                    task_contract,
+                ) {
+                    if !prompt.contains(&task_contract) {
+                        let enriched = format!(
+                            "{prompt}\n\n## 宿主解析的当前任务与验收范围\n{task_contract}"
+                        );
+                        obj.insert("prompt".to_string(), json!(enriched));
+                    }
+                }
+            } else {
                 // 八期一路：角色专属 Prompt 由 TeamPromptCompiler 编译（模板段 +
                 // 上下文字节预算 + 截断记录）；prompt 元数据随步骤输入回传，
                 // RoleWorker 转报自适应指标（best-effort，不阻塞执行）。

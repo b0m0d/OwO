@@ -131,6 +131,32 @@ fn template_adopt_is_idempotent_and_reject_blocks() {
 }
 
 #[test]
+fn existing_agent_prompt_receives_the_host_resolved_task_contract() {
+    let task = crate::task_context::ResolvedTaskContext::from_worker_input(&json!({
+        "assigned_task_id": "task-api",
+        "assigned_task": "实现 posts API 分页",
+        "assigned_acceptance": "覆盖默认值和上限",
+        "assigned_verification": {"requirements": ["page boundary"]},
+        "assigned_write_paths": ["apps/api"],
+        "required_capabilities": ["write_file", "run_command"]
+    }))
+    .unwrap();
+    let ctx = json!({
+        "role": "implementer",
+        "capabilities": ["implement"],
+        "_resolved_task_context": task.to_value().unwrap()
+    });
+    let input = json!({ "prompt": "已存在的角色提示", "_workswarm": {} });
+    let enriched = TeamCoordinator::build_enriched_input(&ctx, &input, "agent");
+    let prompt = enriched["prompt"].as_str().unwrap();
+    assert!(prompt.contains("已存在的角色提示"));
+    assert!(prompt.contains("实现 posts API 分页"));
+    assert!(prompt.contains("覆盖默认值和上限"));
+    assert!(prompt.contains("apps/api"));
+    assert_eq!(enriched["resolved_task_context"]["task_id"], "task-api");
+}
+
+#[test]
 fn enriched_input_agent_and_echo_paths() {
     let ctx = json!({
         "team_id": "t", "objective_text": "O", "role": "critic",

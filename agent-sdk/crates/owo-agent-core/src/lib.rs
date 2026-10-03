@@ -43,6 +43,7 @@ pub mod skill_pack;
 pub mod sqlite_store;
 pub mod subagent;
 pub mod team_prompt;
+pub mod task_context;
 /// 自适应组队策略引擎（R3 第一路：single/team/auto 判定 + 可展示理由）。
 pub mod team_strategy;
 pub mod tools;

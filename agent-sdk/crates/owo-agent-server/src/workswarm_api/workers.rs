@@ -6,6 +6,7 @@ use owo_agent_core::gateway::ModelProvider;
 use owo_agent_core::goal::Worker;
 use owo_agent_core::permissions::AutoApprover;
 use owo_agent_core::subagent::SubagentRunner;
+use owo_agent_core::task_context::ResolvedTaskContext;
 use owo_agent_core::tool_effects::{EffectClass, ToolEffect};
 use owo_agent_core::tools::{Tool, ToolContext, ToolSpec};
 use owo_agent_core::worker_profile::{ProfileSubagentRunner, TurnEventSink, WorkerProfile};
@@ -68,6 +69,7 @@ impl Worker for AgentSubagentWorker {
             .get("read_only")
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        let task_context = ResolvedTaskContext::from_worker_input(input)?;
         // 只读三层叠加（七期 · 二路）：步骤输入 → 团队绑定只读（团队级上限）→
         // 角色画像只读（角色级上限）。任一只读即只读。
         let read_only = input_read_only
@@ -78,9 +80,9 @@ impl Worker for AgentSubagentWorker {
                 .unwrap_or(false)
             || self.profile.as_ref().map(|p| p.read_only).unwrap_or(false);
         let task_write_allowed =
-            assigned_task_write_allowlist(input, &self.workspace, &self.write_allowed)?;
+            assigned_task_write_allowlist(&task_context, &self.workspace, &self.write_allowed)?;
         let task_has_no_write_path = task_write_allowed.as_ref().is_some_and(Vec::is_empty);
-        let task_has_no_write_capability = task_lacks_file_write_capability(input);
+        let task_has_no_write_capability = task_lacks_file_write_capability(&task_context);
         let task_has_no_write_scope = task_has_no_write_path || task_has_no_write_capability;
         let read_only = read_only || task_has_no_write_scope;
         let effective_write_allowed = task_write_allowed
@@ -112,15 +114,8 @@ impl Worker for AgentSubagentWorker {
                     Arc::clone(counter),
                     Arc::clone(request_usage),
                     workswarm_metrics::request_scope_key(
-                        input
-                            .get("_workswarm")
-                            .and_then(|meta| meta.get("step_id"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown"),
-                        input
-                            .get("_workswarm")
-                            .and_then(|meta| meta.get("phase_epoch"))
-                            .and_then(Value::as_u64),
+                        task_context.step_id.as_deref().unwrap_or("unknown"),
+                        task_context.phase_epoch,
                     ),
                 ))
             }
@@ -166,16 +161,20 @@ impl Worker for AgentSubagentWorker {
         let output = match &self.profile {
             Some(profile) => {
                 let mut task_profile = profile.clone();
-                let is_task_graph_work = input.get("assigned_task_id").is_some();
+                let is_task_graph_work = task_context.is_task_graph_assignment();
                 if is_task_graph_work {
-                    apply_task_capability_scope(&mut task_profile, input, task_has_no_write_scope);
+                    apply_task_capability_scope(
+                        &mut task_profile,
+                        &task_context,
+                        task_has_no_write_scope,
+                    );
                 }
                 if task_write_allowed.is_some() {
-                    let command_was_assigned = input
-                        .get("required_capabilities")
-                        .and_then(Value::as_array)
+                    let command_was_assigned = task_context
+                        .required_capabilities
+                        .as_deref()
                         .is_some_and(|capabilities| {
-                            capabilities.iter().any(|item| item.as_str() == Some("run_command"))
+                            capabilities.iter().any(|item| item == "run_command")
                         });
                     task_profile.can_run_command &= command_was_assigned;
                     if !command_was_assigned {
@@ -187,14 +186,18 @@ impl Worker for AgentSubagentWorker {
                         task_profile.read_only = true;
                     }
                 }
-                let workswarm = input.get("_workswarm");
-                let raw_step_id = workswarm.and_then(|meta| meta.get("step_id"))
-                    .and_then(Value::as_str).unwrap_or("unknown").to_string();
-                let assigned_task_id = input.get("assigned_task_id")
-                    .and_then(Value::as_str).map(str::to_string);
-                let refs = ["assigned_read_refs", "assigned_contract_refs"].iter()
-                    .filter_map(|key| input.get(*key).and_then(Value::as_array))
-                    .flatten().filter_map(Value::as_str).map(str::to_string).collect();
+                let raw_step_id = task_context
+                    .step_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let assigned_task_id = task_context.task_id.clone();
+                let refs = task_context
+                    .read_refs
+                    .iter()
+                    .chain(task_context.contract_refs.iter())
+                    .flatten()
+                    .cloned()
+                    .collect();
                 let context_tool: Arc<dyn Tool> = Arc::new(TeamContextReadTool {
                     coordinator: Arc::clone(&self.coordinator),
                     team_id: self.team_id.clone(),
@@ -211,13 +214,13 @@ impl Worker for AgentSubagentWorker {
                     step_id: raw_step_id.clone(),
                 });
                 let mut extra_tools: Vec<Arc<dyn Tool>> = vec![context_tool, artifact_tool];
-                let can_publish_context = input
-                    .get("required_capabilities")
-                    .and_then(Value::as_array)
+                let can_publish_context = task_context
+                    .required_capabilities
+                    .as_deref()
                     .map(|capabilities| {
-                        capabilities.iter().any(|capability| {
-                            capability.as_str() == Some("team_context_publish")
-                        })
+                        capabilities
+                            .iter()
+                            .any(|capability| capability == "team_context_publish")
                     })
                     .unwrap_or(true);
                 if !task_profile.read_only && allow_writes && can_publish_context {
@@ -234,10 +237,7 @@ impl Worker for AgentSubagentWorker {
                 let role = self.role.clone();
                 let event_step_id = raw_step_id.clone();
                 let event_task_id = assigned_task_id.clone().unwrap_or_else(|| raw_step_id.clone());
-                let event_attempt_id = workswarm
-                    .and_then(|meta| meta.get("attempt_id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                let event_attempt_id = task_context.attempt_id.clone();
                 let event_sink: TurnEventSink = Arc::new(move |event| {
                     if let TurnEvent::ToolResult {
                         command_receipt: Some(receipt),
@@ -697,26 +697,17 @@ fn canonicalize_task_path(path: &std::path::Path) -> PathBuf {
     workspace_change_tracker::simplify_path(&canonical)
 }
 
-fn task_lacks_file_write_capability(input: &Value) -> bool {
-    if input.get("assigned_task_id").is_none() {
-        return false;
-    }
-    let Some(capabilities) = input.get("required_capabilities").and_then(Value::as_array) else {
-        return true;
-    };
-    !capabilities
-        .iter()
-        .filter_map(Value::as_str)
-        .any(|capability| matches!(capability, "write_file" | "apply_patch"))
+fn task_lacks_file_write_capability(task: &ResolvedTaskContext) -> bool {
+    task.lacks_file_write_capability()
 }
 
 /// Narrow a role profile to the exact capabilities approved on this TaskGraph task.
 fn apply_task_capability_scope(
     profile: &mut WorkerProfile,
-    input: &Value,
+    task: &ResolvedTaskContext,
     task_has_no_write_scope: bool,
 ) {
-    let Some(capabilities) = input.get("required_capabilities").and_then(Value::as_array) else {
+    let Some(capabilities) = task.required_capabilities.as_deref() else {
         profile.read_only = true;
         profile.can_run_command = false;
         profile
@@ -729,13 +720,10 @@ fn apply_task_capability_scope(
         }
         return;
     };
-    let required = capabilities
-        .iter()
-        .filter_map(Value::as_str)
-        .collect::<HashSet<_>>();
-    profile.verification_timeout_ms = input
-        .get("assigned_verification")
-        .or_else(|| input.get("verification"))
+    let required = capabilities.iter().map(String::as_str).collect::<HashSet<_>>();
+    profile.verification_timeout_ms = task
+        .verification
+        .as_ref()
         .and_then(|plan| plan.get("requirements"))
         .and_then(Value::as_array)
         .into_iter()
@@ -775,11 +763,11 @@ fn apply_task_capability_scope(
 
 /// Resolve a task-local allowlist and intersect it with the role/workspace allowlist.
 fn assigned_task_write_allowlist(
-    input: &Value,
+    task: &ResolvedTaskContext,
     workspace_root: &std::path::Path,
     role_allowed: &[PathBuf],
 ) -> Result<Option<Vec<PathBuf>>, String> {
-    let Some(value) = input.get("assigned_write_paths") else {
+    let Some(paths) = task.write_paths.as_ref() else {
         return Ok(None);
     };
     // canonicalize() on Windows returns a verbatim path (\\?\...). Normalize
@@ -789,18 +777,11 @@ fn assigned_task_write_allowlist(
             .canonicalize()
             .unwrap_or_else(|_| workspace_root.to_path_buf()),
     );
-    let paths = value
-        .as_array()
-        .ok_or_else(|| "任务 assigned_write_paths 必须是数组".to_string())?;
     let mut resolved = Vec::with_capacity(paths.len());
-    for value in paths {
-        let raw = value
-            .as_str()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| "任务写范围含空路径或非字符串".to_string())?;
+    for raw in paths {
         let relative = std::path::Path::new(raw);
-        if relative.is_absolute()
+        if raw.trim().is_empty()
+            || relative.is_absolute()
             || !relative
                 .components()
                 .any(|part| matches!(part, std::path::Component::Normal(_)))
@@ -846,15 +827,19 @@ mod team_context_scope_tests {
         assert_eq!(first.len(), 71);
     }
 
+    fn resolved_task(value: &Value) -> ResolvedTaskContext {
+        ResolvedTaskContext::from_worker_input(value).expect("test task context must parse")
+    }
+
     #[test]
     fn task_capabilities_narrow_role_tools_and_do_not_grant_write() {
         let mut profile = WorkerProfile::explicit_writer(4);
         apply_task_capability_scope(
             &mut profile,
-            &json!({
+            &resolved_task(&json!({
                 "required_capabilities": ["read_file"],
                 "assigned_write_paths": ["apps/api"]
-            }),
+            })),
             false,
         );
         assert!(profile.read_only);
@@ -871,7 +856,7 @@ mod team_context_scope_tests {
         let mut writer = WorkerProfile::explicit_writer(4);
         apply_task_capability_scope(
             &mut writer,
-            &json!({ "required_capabilities": ["write_file"] }),
+            &resolved_task(&json!({ "required_capabilities": ["write_file"] })),
             false,
         );
         assert!(!writer.read_only);
@@ -887,7 +872,7 @@ mod team_context_scope_tests {
         let mut scoped_out = WorkerProfile::explicit_writer(4);
         apply_task_capability_scope(
             &mut scoped_out,
-            &json!({ "required_capabilities": ["write_file"] }),
+            &resolved_task(&json!({ "required_capabilities": ["write_file"] })),
             true,
         );
         assert!(scoped_out.read_only);
@@ -899,7 +884,7 @@ mod team_context_scope_tests {
         let mut bounded = WorkerProfile::explicit_writer(4);
         apply_task_capability_scope(
             &mut bounded,
-            &json!({
+            &resolved_task(&json!({
                 "required_capabilities": ["write_file", "run_command"],
                 "assigned_verification": {
                     "requirements": [{
@@ -907,34 +892,38 @@ mod team_context_scope_tests {
                         "resources": {"timeout_ms": 1234}
                     }]
                 }
-            }),
+            })),
             false,
         );
         assert_eq!(bounded.verification_timeout_ms, Some(1234));
 
         let mut empty = WorkerProfile::explicit_writer(4);
-        apply_task_capability_scope(&mut empty, &json!({ "required_capabilities": [] }), false);
-        assert!(empty.read_only);
-        assert_eq!(
-            empty.visible_tools,
-            vec!["__owo_no_task_tool__".to_string()]
+        apply_task_capability_scope(
+            &mut empty,
+            &resolved_task(&json!({ "required_capabilities": [] })),
+            false,
         );
+        assert!(empty.read_only);
+        assert_eq!(empty.visible_tools, vec!["__owo_no_task_tool__".to_string()]);
         assert!(empty.build_registry(Vec::new()).specs().is_empty());
 
-        assert!(task_lacks_file_write_capability(&json!({
+        assert!(task_lacks_file_write_capability(&resolved_task(&json!({
             "assigned_task_id": "read-only",
+            "assigned_task": "read task",
             "required_capabilities": ["read_file"]
-        })));
-        assert!(!task_lacks_file_write_capability(&json!({
+        }))));
+        assert!(!task_lacks_file_write_capability(&resolved_task(&json!({
             "assigned_task_id": "writer",
+            "assigned_task": "write task",
             "required_capabilities": ["write_file"]
-        })));
-        assert!(!task_lacks_file_write_capability(&json!({
+        }))));
+        assert!(!task_lacks_file_write_capability(&resolved_task(&json!({
             "required_capabilities": []
-        })));
-        assert!(task_lacks_file_write_capability(&json!({
-            "assigned_task_id": "missing-capabilities"
-        })));
+        }))));
+        assert!(task_lacks_file_write_capability(&resolved_task(&json!({
+            "assigned_task_id": "missing-capabilities",
+            "assigned_task": "task with omitted capabilities"
+        }))));
     }
 
     #[test]
@@ -1165,12 +1154,13 @@ impl Worker for TrackedRoleWorker {
         let Some(mut tracking) = self.tracking.clone() else {
             return self.inner.run(input).await;
         };
-        let task_graph = input.get("assigned_task_id").is_some();
+        let task_context = ResolvedTaskContext::from_worker_input(input)?;
+        let task_graph = task_context.is_task_graph_assignment();
         if task_graph {
             let task_paths =
-                assigned_task_write_allowlist(input, &tracking.root, &tracking.allowed)?
+                assigned_task_write_allowlist(&task_context, &tracking.root, &tracking.allowed)?
                     .ok_or_else(|| "TaskGraph 任务缺少 assigned_write_paths".to_string())?;
-            if task_lacks_file_write_capability(input) || task_paths.is_empty() {
+            if task_lacks_file_write_capability(&task_context) || task_paths.is_empty() {
                 return self.inner.run(input).await;
             }
             tracking.allowed = task_paths;
@@ -1180,17 +1170,8 @@ impl Worker for TrackedRoleWorker {
         // 十期·四路 R1：租约覆盖「前快照 → 执行 → 后快照 → 变更登记」全程——
         // 变更登记（record + ChangeSet upsert）完成前不释放：并发写步骤若在
         // 本步骤后快照前插窗口，会把本步骤的变更误算进它的前基线，反之亦然。
-        let workswarm = input.get("_workswarm");
-        let step_id = workswarm
-            .and_then(|meta| meta.get("step_id"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let scope_key = workswarm_metrics::request_scope_key(
-            step_id,
-            workswarm
-                .and_then(|meta| meta.get("phase_epoch"))
-                .and_then(Value::as_u64),
-        );
+        let step_id = task_context.step_id.as_deref().unwrap_or("unknown");
+        let scope_key = workswarm_metrics::request_scope_key(step_id, task_context.phase_epoch);
         let task_lease = if task_graph {
             self.lease
                 .as_ref()
@@ -1606,6 +1587,7 @@ mod tracked_worker_parallel_tests {
         let task_input = |task: &str, path: &str| {
             json!({
                 "assigned_task_id": task,
+                "assigned_task": format!("edit {task}"),
                 "required_capabilities": ["write_file"],
                 "assigned_write_paths": [path],
                 "_workswarm": {"step_id": format!("s-{task}"), "phase_epoch": 1}
