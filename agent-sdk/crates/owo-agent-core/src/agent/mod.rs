@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 mod config;
+mod single_review;
 
 #[cfg(test)]
 mod tests;
@@ -826,7 +827,7 @@ impl Agent {
                     break;
                 }
                 ModelOutput::Text(text) => {
-                    let completion_status = assess_single_turn_completion(
+                    let mut completion_status = assess_single_turn_completion(
                         session,
                         prompt,
                         &turn_id,
@@ -834,6 +835,59 @@ impl Agent {
                         false,
                         Some(&text),
                     );
+                    if completion_status == owo_agent_protocol::CompletionStatusV1::Accepted {
+                        let candidate_paths = single_review::accepted_candidate_paths(session, &turn_id);
+                        if single_review::is_required(prompt, &candidate_paths) {
+                            let review = single_review::review_candidate(
+                                &self.provider,
+                                session.model_override.as_deref(),
+                                session,
+                                prompt,
+                                &turn_id,
+                                &crate::CasStore::hash_of(prompt.as_bytes()),
+                                &candidate_paths,
+                                self.config.max_turns == 0 || model_turns < self.config.max_turns,
+                            )
+                            .await;
+                            if let Some(request) = review.request {
+                                emit(&mut events, &event_cell, TurnEvent::ModelCall);
+                                model_turns = model_turns.saturating_add(1);
+                                model_requests = model_requests.saturating_add(1);
+                                session.transient_model_calls.push(request.clone());
+                                model_calls.push(request);
+                                if let Some(request_usage) = review.usage {
+                                    usage.add(&request_usage);
+                                }
+                                usage_known &= review.usage_known;
+                            }
+                            let review_passed =
+                                review.receipt.verdict == crate::plan::ValidationVerdictV1::Passed;
+                            session.validation_receipts.push(review.receipt);
+                            if !review_passed {
+                                let current_validation_ids = session
+                                    .validation_receipts
+                                    .iter()
+                                    .filter(|receipt| {
+                                        receipt.attempt_id == turn_id
+                                            && receipt.validator_id != "workspace-independent-review-v1"
+                                            && receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+                                    })
+                                    .map(|receipt| receipt.receipt_id.clone())
+                                    .collect::<std::collections::HashSet<_>>();
+                                for execution in &mut session.execution_receipts {
+                                    if execution.status == "accepted"
+                                        && execution.validation_receipt_id.as_ref().is_some_and(|id| {
+                                            current_validation_ids.contains(id)
+                                        })
+                                    {
+                                        execution.status = "executed".to_string();
+                                        execution.validation_receipt_id = None;
+                                    }
+                                }
+                                completion_status = owo_agent_protocol::CompletionStatusV1::Unverified;
+                            }
+                        }
+                    }
                     let plan_is_current =
                         single_verification_plan_matches_turn(session, prompt, &turn_id);
                     let retry_feedback = if plan_is_current
@@ -1996,7 +2050,8 @@ fn single_validation_retry_feedback(session: &Session, turn_id: &str) -> Option<
     let failures = latest
         .into_iter()
         .filter(|(requirement_id, receipt)| {
-            required_ids.contains(requirement_id)
+            (required_ids.contains(requirement_id)
+                || receipt.validator_id == "workspace-independent-review-v1")
                 && !matches!(
                     receipt.verdict,
                     crate::plan::ValidationVerdictV1::Passed
@@ -2010,14 +2065,30 @@ fn single_validation_retry_feedback(session: &Session, turn_id: &str) -> Option<
                 "detail": receipt.detail,
                 "subject_sha256": receipt.subject_sha256,
                 "changeset_sha256": receipt.changeset_sha256,
+                "evidence_refs": receipt.evidence_refs,
             })
         })
         .collect::<Vec<_>>();
     if failures.is_empty() {
         return None;
     }
+    let fingerprint_failures = failures
+        .iter()
+        .map(|failure| {
+            let mut value = failure.clone();
+            if value.get("requirement_id").and_then(serde_json::Value::as_str)
+                == Some("host-independent-review")
+            {
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("detail");
+                    object.remove("evidence_refs");
+                }
+            }
+            value
+        })
+        .collect::<Vec<_>>();
     let fingerprint = crate::CasStore::hash_of(
-        serde_json::to_vec(&failures).unwrap_or_default().as_slice(),
+        serde_json::to_vec(&fingerprint_failures).unwrap_or_default().as_slice(),
     );
     let details = failures
         .iter()
