@@ -7,6 +7,101 @@ pub(super) fn is_code_artifact_kind(kind: &str) -> bool {
     )
 }
 
+/// Classify source paths from host-observed writes; model-declared Artifact.kind is not trusted.
+pub(super) fn is_source_code_path(raw: &str) -> bool {
+    let normalized = raw.replace('\\', "/");
+    let path = std::path::Path::new(&normalized);
+    let extension = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let source_extensions = [
+        "rs", "c", "h", "cc", "hh", "cpp", "hpp", "cxx", "hxx", "cs", "fs", "vb",
+        "java", "kt", "kts", "scala", "go", "py", "pyi", "js", "jsx", "mjs", "cjs",
+        "ts", "tsx", "vue", "svelte", "html", "css", "scss", "sass", "less", "sql",
+        "sh", "bash", "ps1", "psm1", "bat", "cmd", "lua", "rb", "php", "swift", "dart",
+        "ex", "exs", "hs", "lhs", "clj", "cljs", "cljc", "proto", "graphql", "gql",
+    ];
+    if source_extensions.contains(&extension.as_str()) {
+        return true;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        file_name.as_str(),
+        "cargo.toml" | "go.mod" | "go.sum" | "package.json" | "pnpm-lock.yaml"
+            | "yarn.lock" | "package-lock.json" | "tsconfig.json" | "pyproject.toml"
+            | "requirements.txt" | "pom.xml" | "build.gradle" | "build.gradle.kts"
+    ) {
+        return true;
+    }
+    false
+}
+
+pub(super) fn attempt_changeset_contains_code(
+    change_sets: &[owo_agent_protocol::ChangeSet],
+    team_id: &str,
+    step_id: &str,
+    attempt_id: &str,
+) -> bool {
+    change_sets.iter().any(|change_set| {
+        change_set.team_id == team_id
+            && change_set.step_id == step_id
+            && change_set.attempt_id.as_deref() == Some(attempt_id)
+            && change_set
+                .changed_files
+                .iter()
+                .chain(change_set.result_hashes.iter().map(|file| &file.path))
+                .any(|path| is_source_code_path(path))
+    })
+}
+
+pub(super) fn uncovered_source_paths(
+    change_sets: &[owo_agent_protocol::ChangeSet],
+    team_id: &str,
+    step_id: &str,
+    attempt_id: &str,
+    plan: &crate::plan::VerificationPlanV1,
+) -> Vec<String> {
+    let source_paths = change_sets
+        .iter()
+        .filter(|change_set| {
+            change_set.team_id == team_id
+                && change_set.step_id == step_id
+                && change_set.attempt_id.as_deref() == Some(attempt_id)
+        })
+        .flat_map(|change_set| {
+            change_set
+                .changed_files
+                .iter()
+                .chain(change_set.result_hashes.iter().map(|file| &file.path))
+        })
+        .filter(|path| is_source_code_path(path))
+        .map(|path| path.replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let behavior_scope = plan
+        .requirements
+        .iter()
+        .filter(|requirement| {
+            requirement.required
+                && requirement.validator_id == "workspace-command-success-v1"
+        })
+        .filter_map(|requirement| match &requirement.scope {
+            crate::plan::VerificationScopeV1::WorkspacePaths { relative_paths } => {
+                Some(relative_paths)
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|path| path.replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+    source_paths.difference(&behavior_scope).cloned().collect()
+}
+
 /// Host-generated review binding for the exact ChangeSet lineage and workspace bytes
 /// visible when a reviewer context is assembled. ChangeSet decision status is omitted:
 /// accepting a reviewed change must not invalidate the source snapshot.
@@ -64,8 +159,8 @@ pub(super) fn review_source_snapshot(
     }
     let root = workspace.and_then(|path| path.canonicalize().ok());
     let mut source_hashes = std::collections::BTreeMap::new();
-    for path in paths {
-        let relative = std::path::Path::new(&path);
+    for path in &paths {
+        let relative = std::path::Path::new(path);
         let observation = if relative.is_absolute()
             || relative.components().any(|component| {
                 matches!(
@@ -101,7 +196,7 @@ pub(super) fn review_source_snapshot(
         } else {
             json!({"observed": false, "exists": Value::Null, "sha256": Value::Null})
         };
-        source_hashes.insert(path, observation);
+        source_hashes.insert(path.clone(), observation);
     }
     let mut expected_hashes = std::collections::BTreeMap::new();
     let mut changeset_source_consistent = true;
@@ -153,6 +248,7 @@ pub(super) fn review_source_snapshot(
         "source_hashes": source_hashes,
         "workspace_observed": root.is_some(),
         "changeset_source_consistent": changeset_source_consistent,
+        "contains_source_code": paths.iter().any(|path| is_source_code_path(path)),
     })
 }
 

@@ -231,6 +231,38 @@ impl TeamCoordinator {
                     step.id
                 ))
             })?;
+            let changeset_contains_code =
+                super::delivery_gate_evidence::attempt_changeset_contains_code(
+                    &change_sets,
+                    team_id,
+                    &step.id,
+                    attempt_id,
+                );
+            let has_behavior_command = verification_plan.requirements.iter().any(|requirement| {
+                requirement.required
+                    && requirement.validator_id == "workspace-command-success-v1"
+            });
+            if changeset_contains_code && !has_behavior_command {
+                return Err(WorkSwarmError::Conflict(format!(
+                    "任务 {} 的实际 ChangeSet 修改了源代码，但没有必需的宿主行为验证命令",
+                    step.id
+                )));
+            }
+            let uncovered_source_paths =
+                super::delivery_gate_evidence::uncovered_source_paths(
+                    &change_sets,
+                    team_id,
+                    &step.id,
+                    attempt_id,
+                    verification_plan,
+                );
+            if !uncovered_source_paths.is_empty() {
+                return Err(WorkSwarmError::Conflict(format!(
+                    "任务 {} 的行为验证范围未覆盖所有已修改源码：{}",
+                    step.id,
+                    uncovered_source_paths.join(", ")
+                )));
+            }
             let input_snapshot = json!({
                 "task_input": &step.input,
                 "attempt_id": attempt_id,
@@ -240,15 +272,17 @@ impl TeamCoordinator {
             let input_sha256 = CasStore::hash_of(&input_bytes);
             for artifact_id in &handoff.output_artifact_refs {
                 let artifact = self.store.get_artifact(artifact_id).await?;
-                if step.input.get("assigned_task_id").is_some()
-                    && super::delivery_gate_evidence::is_code_artifact_kind(&artifact.kind)
-                    && !verification_plan
-                        .requirements
-                        .iter()
-                        .any(|requirement| requirement.validator_id == "workspace-command-success-v1")
-                {
+                let code_artifact =
+                    super::delivery_gate_evidence::is_code_artifact_kind(&artifact.kind);
+                if code_artifact && !changeset_contains_code {
                     return Err(WorkSwarmError::Conflict(format!(
-                        "动态代码任务 {} 缺少宿主行为验证命令，静态文件检查不能通过交付门",
+                        "代码产物 {} 没有关联当前 attempt 的源文件 ChangeSet，不能作为交付",
+                        artifact.artifact_id
+                    )));
+                }
+                if (changeset_contains_code || code_artifact) && !has_behavior_command {
+                    return Err(WorkSwarmError::Conflict(format!(
+                        "代码任务 {} 缺少必需的宿主行为验证命令，静态文件检查不能通过交付门",
                         step.id
                     )));
                 }
@@ -421,7 +455,12 @@ impl TeamCoordinator {
                                 artifact.artifact_id
                             )));
                         }
-                        if super::delivery_gate_evidence::is_code_artifact_kind(&kind) {
+                        if super::delivery_gate_evidence::is_code_artifact_kind(&kind)
+                            || reviewed_source
+                                .get("contains_source_code")
+                                .and_then(Value::as_bool)
+                                == Some(true)
+                        {
                             let source_hashes = reviewed_source
                                 .get("source_hashes")
                                 .and_then(Value::as_object);
@@ -893,6 +932,9 @@ mod validation_receipt_identity_tests {
     use super::{
         collect_attempt_changeset_evidence, make_validation_receipt, ValidationReceiptInput,
     };
+    use crate::workswarm::delivery_gate_evidence::{
+        attempt_changeset_contains_code, is_source_code_path, uncovered_source_paths,
+    };
     use crate::plan::{ValidationVerdictV1, VerificationScopeV1};
 
     const STEP_SCOPE: VerificationScopeV1 = VerificationScopeV1::StepOutput;
@@ -925,6 +967,108 @@ mod validation_receipt_identity_tests {
             }),
             conflicts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn behavior_validation_scope_must_cover_every_changed_source_path() {
+        use owo_agent_protocol::{ChangeSetFileHash, ChangeSetStatus};
+        use crate::plan::{VerificationRequirementV1, VerificationResourcesV1, VerificationScopeV1};
+
+        let mut change_set = changeset(
+            "cs-source",
+            ChangeSetStatus::Accepted,
+            "2026-10-04",
+        );
+        change_set.changed_files = vec!["src/lib.rs".to_string(), "src/api.rs".to_string()];
+        change_set.result_hashes = change_set
+            .changed_files
+            .iter()
+            .map(|path| ChangeSetFileHash {
+                path: path.clone(),
+                sha256: Some("final-hash".to_string()),
+                content_available: false,
+            })
+            .collect();
+        let requirement = |paths: Vec<String>| VerificationRequirementV1 {
+            requirement_id: "source-behavior".to_string(),
+            covers_requirement_ids: Vec::new(),
+            validator_id: "workspace-command-success-v1".to_string(),
+            validator_version: Some("1".to_string()),
+            scope: VerificationScopeV1::WorkspacePaths {
+                relative_paths: paths,
+            },
+            arguments: serde_json::json!({"command":"cargo test -p owo-agent-core"}),
+            required: true,
+            resources: VerificationResourcesV1 {
+                cpu_slots: 1,
+                memory_mb: 8,
+                exclusive_workspace: false,
+                timeout_ms: 30_000,
+            },
+        };
+        let plan = crate::plan::VerificationPlanV1 {
+            plan_id: "source-plan".to_string(),
+            requirements: vec![requirement(vec!["src/lib.rs".to_string()])],
+        };
+        assert_eq!(
+            uncovered_source_paths(
+                std::slice::from_ref(&change_set),
+                "team-1",
+                "task-1",
+                "attempt-1",
+                &plan,
+            ),
+            vec!["src/api.rs".to_string()]
+        );
+        let covered = crate::plan::VerificationPlanV1 {
+            plan_id: "source-plan".to_string(),
+            requirements: vec![requirement(vec![
+                "src/lib.rs".to_string(),
+                "src/api.rs".to_string(),
+            ])],
+        };
+        assert!(uncovered_source_paths(
+            std::slice::from_ref(&change_set),
+            "team-1",
+            "task-1",
+            "attempt-1",
+            &covered,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn host_classifies_source_from_paths_and_exact_attempt_not_artifact_label() {
+        assert!(is_source_code_path("src/lib.rs"));
+        assert!(is_source_code_path("apps/web/src/App.tsx"));
+        assert!(is_source_code_path("package.json"));
+        assert!(!is_source_code_path("docs/design.md"));
+        assert!(!is_source_code_path("src"));
+
+        let mut source_change = changeset(
+            "cs-source",
+            owo_agent_protocol::ChangeSetStatus::Accepted,
+            "2026-10-04",
+        );
+        source_change.changed_files = vec!["src/lib.rs".to_string()];
+        assert!(attempt_changeset_contains_code(
+            std::slice::from_ref(&source_change),
+            "team-1",
+            "task-1",
+            "attempt-1",
+        ));
+        assert!(!attempt_changeset_contains_code(
+            std::slice::from_ref(&source_change),
+            "team-1",
+            "task-1",
+            "attempt-stale",
+        ));
+        assert!(!attempt_changeset_contains_code(
+            std::slice::from_ref(&source_change),
+            "other-team",
+            "task-1",
+            "attempt-1",
+        ));
     }
 
     fn input() -> ValidationReceiptInput<'static> {
@@ -1124,6 +1268,12 @@ mod validation_receipt_identity_tests {
         assert_eq!(
             accepted_snapshot
                 .get("changeset_source_consistent")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            accepted_snapshot
+                .get("contains_source_code")
                 .and_then(serde_json::Value::as_bool),
             Some(true)
         );

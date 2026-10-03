@@ -247,9 +247,13 @@ impl TeamCoordinator {
                         .get("reviewed_source")
                         .cloned()
                         .unwrap_or(Value::Null);
-                    if super::delivery_gate_evidence::is_code_artifact_kind(
+                    if (super::delivery_gate_evidence::is_code_artifact_kind(
                         artifact.get("kind").and_then(Value::as_str).unwrap_or_default(),
-                    ) && (reviewed_source.get("workspace_observed").and_then(Value::as_bool) != Some(true)
+                    ) || reviewed_source
+                        .get("contains_source_code")
+                        .and_then(Value::as_bool)
+                        == Some(true))
+                        && (reviewed_source.get("workspace_observed").and_then(Value::as_bool) != Some(true)
                         || reviewed_source.get("change_set_ids").and_then(Value::as_array).is_none_or(Vec::is_empty)
                         || reviewed_source.get("changeset_source_consistent").and_then(Value::as_bool) != Some(true)
                         || reviewed_source

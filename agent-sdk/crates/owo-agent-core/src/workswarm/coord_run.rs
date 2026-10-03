@@ -2151,6 +2151,14 @@ fn validate_parallel_subtasks(
         let requires_command_capability = required_capabilities
             .iter()
             .any(|capability| capability == "run_command");
+        let declared_source_code = paths
+            .iter()
+            .any(|path| super::delivery_gate_evidence::is_source_code_path(path));
+        if declared_source_code && !has_command_validator {
+            return Err(format!(
+                "task {task_id} declares a source-code write scope but no registered behavior command"
+            ));
+        }
         if has_command_validator != requires_command_capability {
             return Err(format!(
                 "task {task_id} must request run_command exactly when its VerificationPlan includes workspace-command-success-v1"
@@ -2699,6 +2707,44 @@ mod parallel_assignment_validation_tests {
             false,
         )
         .is_err());
+    }
+
+    #[test]
+    fn declared_source_code_scope_requires_registered_behavior_command() {
+        let mut task = serde_json::json!({
+            "task_id":"source-file",
+            "worker":"w1",
+            "task":"implement the module",
+            "acceptance":"module behavior passes its tests",
+            "write_paths":["src/lib.rs"],
+            "required_capabilities":["write_file"],
+            "verification": {
+                "plan_id":"source-plan",
+                "requirements":[{
+                    "requirement_id":"source-file-ready",
+                    "validator_id":"workspace-file-non-empty-v1",
+                    "validator_version":"1",
+                    "scope":{"kind":"workspace_paths","relative_paths":["src/lib.rs"]},
+                    "arguments":{},
+                    "required":true,
+                    "resources":{"cpu_slots":1,"memory_mb":8,"exclusive_workspace":false,"timeout_ms":5000}
+                }]
+            }
+        });
+        let error = validate_parallel_subtasks(&roles(), &[task.clone()], false).unwrap_err();
+        assert!(error.contains("source-code write scope"), "{error}");
+
+        task["required_capabilities"] = serde_json::json!(["write_file", "run_command"]);
+        task["verification"]["requirements"].as_array_mut().unwrap().push(serde_json::json!({
+            "requirement_id":"source-behavior",
+            "validator_id":"workspace-command-success-v1",
+            "validator_version":"1",
+            "scope":{"kind":"workspace_paths","relative_paths":["src/lib.rs"]},
+            "arguments":{"command":"cargo test -p owo-agent-core"},
+            "required":true,
+            "resources":{"cpu_slots":1,"memory_mb":8,"exclusive_workspace":false,"timeout_ms":30000}
+        }));
+        assert!(validate_parallel_subtasks(&roles(), &[task], false).is_ok());
     }
 
     #[test]
