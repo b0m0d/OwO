@@ -74,6 +74,8 @@ pub struct Session {
     pub(crate) active_turn_id: Option<String>,
     #[serde(skip)]
     pub(crate) active_turn_input_sha256: Option<String>,
+    #[serde(skip)]
+    pub(crate) active_turn_input_text: Option<String>,
     /// Ephemeral model-request observations for building an error trace before a TurnOutcome exists.
     #[serde(skip)]
     pub(crate) transient_model_calls: Vec<crate::agent::ModelCallRecord>,
@@ -139,6 +141,7 @@ impl Session {
             single_verification_plan_turn_id: None,
             active_turn_id: None,
             active_turn_input_sha256: None,
+            active_turn_input_text: None,
             transient_model_calls: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
@@ -531,6 +534,7 @@ impl Session {
             single_verification_plan_turn_id: self.single_verification_plan_turn_id.clone(),
             active_turn_id: None,
             active_turn_input_sha256: None,
+            active_turn_input_text: None,
             transient_model_calls: Vec::new(),
             created_at: now.clone(),
             updated_at: now,

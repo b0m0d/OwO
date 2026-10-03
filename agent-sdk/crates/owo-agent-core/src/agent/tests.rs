@@ -72,7 +72,7 @@ async fn failed_host_validation_is_fed_back_and_repaired_before_final() {
                     "plan_id": "readme-acceptance",
                     "requirements": [{
                         "requirement_id": "readme-has-acceptance",
-                        "covers_requirement_ids": ["user-request:acceptance-marker"],
+                        "covers_requirement_ids": ["user-request:包含验收通过"],
                         "validator_id": "workspace-file-contains-v1",
                         "validator_version": "1",
                         "scope": {

@@ -1687,9 +1687,14 @@ fn validate_single_verification_plan(
         return Err("VerificationPlan 超过宿主的 plan_id/requirement 数量上限".to_string());
     }
     for requirement in &plan.requirements {
-        if requirement.covers_requirement_ids.is_empty() {
+        if requirement.covers_requirement_ids.is_empty()
+            || requirement.covers_requirement_ids.iter().any(|id| {
+                id.strip_prefix("user-request:")
+                    .is_none_or(|quote| quote.trim().is_empty())
+            })
+        {
             return Err(format!(
-                "requirement {} 必须声明覆盖的用户验收点",
+                "requirement {} 的 covers_requirement_ids 必须使用 user-request:<用户原文验收片段>",
                 requirement.requirement_id
             ));
         }
@@ -1735,12 +1740,34 @@ fn validate_single_verification_plan(
     Ok(())
 }
 
+fn validate_single_request_coverage(
+    plan: &crate::plan::VerificationPlanV1,
+    request: &str,
+) -> Result<(), String> {
+    for requirement in plan.requirements.iter().filter(|requirement| requirement.required) {
+        for coverage_id in &requirement.covers_requirement_ids {
+            let quote = coverage_id
+                .strip_prefix("user-request:")
+                .map(str::trim)
+                .filter(|quote| !quote.is_empty())
+                .ok_or_else(|| format!("验收点 {coverage_id} 不是有效的用户原文引用"))?;
+            if !request.contains(quote) {
+                return Err(format!(
+                    "验收要求 {} 引用了不在本回合用户输入中的片段：{}",
+                    requirement.requirement_id, quote
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Tool for SingleVerificationPlanTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "verification_plan".into(),
-            description: "登记本次任务的宿主验收要求。每项都要填写 covers_requirement_ids 对应用户验收点；代码任务的源码路径必须被 workspace-command-success-v1 覆盖，arguments.command 必须与本回合实际 run_command 一致。计划不是通过证据；宿主在回合结束时按绑定源码执行检查并生成回执。resources 四个字段均须显式填写。".into(),
+            description: "开始任何工作区写入前，先登记本次任务的宿主验收要求。计划首次写入后不可替换。每个必需 covers_requirement_ids 都必须写成 user-request:<用户原文中的精确验收片段>，宿主会核对它确实出现在本回合输入中；不要编造或只填泛化 ID。代码任务的源码路径必须被 workspace-command-success-v1 覆盖，arguments.command 必须与本回合实际 run_command 一致。计划不是通过证据；宿主在回合结束时按绑定源码执行检查并生成回执。resources 四个字段均须显式填写。".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1754,7 +1781,11 @@ impl Tool for SingleVerificationPlanTool {
                                     "type": "object",
                                     "properties": {
                                         "requirement_id": {"type": "string"},
-                                        "covers_requirement_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                                        "covers_requirement_ids": {
+                                            "type": "array",
+                                            "items": {"type": "string", "description": "user-request:<用户原文中的精确验收片段>"},
+                                            "minItems": 1
+                                        },
                                         "validator_id": {"type": "string", "enum": ["workspace-file-exists-v1", "workspace-file-non-empty-v1", "workspace-file-contains-v1", "workspace-json-field-equals-v1", "workspace-command-success-v1"]},
                                         "validator_version": {"type": "string", "enum": ["1"]},
                                         "scope": {
@@ -1806,6 +1837,12 @@ impl Tool for SingleVerificationPlanTool {
             .active_turn_id
             .clone()
             .ok_or("当前 Agent 回合没有可绑定的 turn_id")?;
+        let request = ctx
+            .session
+            .active_turn_input_text
+            .as_deref()
+            .ok_or("当前 Agent 回合没有可核对的原始用户输入")?;
+        validate_single_request_coverage(&plan, request)?;
         let has_current_turn_writes = ctx
             .session
             .execution_receipts
@@ -3591,7 +3628,7 @@ mod tests {
             plan_id: "single-plan".to_string(),
             requirements: vec![crate::plan::VerificationRequirementV1 {
                 requirement_id: "req-user-visible".to_string(),
-                covers_requirement_ids: vec!["user-request:req-user-visible".to_string()],
+                covers_requirement_ids: vec!["user-request:用户要求功能正常运行".to_string()],
                 validator_id: validator_id.to_string(),
                 validator_version: Some("1".to_string()),
                 scope: crate::plan::VerificationScopeV1::WorkspacePaths {
@@ -3607,6 +3644,20 @@ mod tests {
                 },
             }],
         }
+    }
+
+    #[test]
+    fn single_verification_coverage_must_quote_the_current_user_request() {
+        let plan = sample_single_plan(
+            "workspace-command-success-v1",
+            json!({"command":"cargo test -p owo-agent-core"}),
+        );
+        assert!(validate_single_request_coverage(
+            &plan,
+            "请实现并确保用户要求功能正常运行"
+        )
+        .is_ok());
+        assert!(validate_single_request_coverage(&plan, "请更新文档并运行检查").is_err());
     }
 
     #[test]

@@ -510,6 +510,7 @@ impl SqliteSessionStore {
             single_verification_plan_turn_id: row.20,
             active_turn_id: None,
             active_turn_input_sha256: None,
+            active_turn_input_text: None,
             transient_model_calls: Vec::new(),
             created_at: row.7,
             updated_at: row.8,
