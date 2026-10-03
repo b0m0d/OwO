@@ -302,9 +302,7 @@ impl TeamCoordinator {
             let blocking_issues = result
                 .findings
                 .iter()
-                .filter(|finding| {
-                    finding.severity == crate::workswarm_output::WorkerReviewSeverity::Blocker
-                })
+                .filter(|finding| finding.severity.blocks_approval())
                 .map(|finding| finding.detail.clone())
                 .collect::<Vec<_>>();
             let mut review_evidence_refs = evidence_refs_of(&output.evidence);

@@ -1288,6 +1288,16 @@ mod validation_receipt_identity_tests {
                 .contains("blocker")
         );
 
+        let hidden_major = serde_json::json!({
+            "verdict":"approved",
+            "findings":[{"severity":"major", "detail":"required behavior is missing", "evidence_refs":[]}]
+        });
+        assert!(
+            super::super::delivery_gate_evidence::validate_review_approval(&hidden_major)
+                .unwrap_err()
+                .contains("major")
+        );
+
         let malformed = serde_json::json!({
             "verdict":"approved",
             "findings":[{"severity":"urgent", "detail":"unknown severity"}]

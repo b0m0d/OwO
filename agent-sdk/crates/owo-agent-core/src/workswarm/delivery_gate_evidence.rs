@@ -280,9 +280,9 @@ pub(super) fn validate_review_approval(result: &Value) -> Result<(), String> {
     if result
         .findings
         .iter()
-        .any(|finding| finding.severity == owo_agent_workswarm::WorkerReviewSeverity::Blocker)
+        .any(|finding| finding.severity.blocks_approval())
     {
-        return Err("ReviewResult 含 blocker finding，不能批准交付".to_string());
+        return Err("ReviewResult 含 blocker/major finding，不能批准交付".to_string());
     }
     Ok(())
 }

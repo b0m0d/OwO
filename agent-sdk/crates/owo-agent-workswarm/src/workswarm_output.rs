@@ -107,6 +107,13 @@ pub enum WorkerReviewSeverity {
     Note,
 }
 
+impl WorkerReviewSeverity {
+    /// Blocker and major findings always prevent approval across all delivery paths.
+    pub fn blocks_approval(self) -> bool {
+        matches!(self, Self::Blocker | Self::Major)
+    }
+}
+
 /// Worker 结构化输出（V1 契约本体）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerOutputV1 {
@@ -198,9 +205,9 @@ impl WorkerOutputV1 {
                 && review
                     .findings
                     .iter()
-                    .any(|finding| finding.severity == WorkerReviewSeverity::Blocker)
+                    .any(|finding| finding.severity.blocks_approval())
             {
-                return Err("存在 blocker finding 时 verdict 不得为 approved".to_string());
+                return Err("存在 blocker/major finding 时 verdict 不得为 approved".to_string());
             }
         }
         Ok(())
@@ -458,6 +465,14 @@ mod tests {
     }
 
     #[test]
+    fn blocker_and_major_severities_share_one_approval_barrier() {
+        assert!(WorkerReviewSeverity::Blocker.blocks_approval());
+        assert!(WorkerReviewSeverity::Major.blocks_approval());
+        assert!(!WorkerReviewSeverity::Minor.blocks_approval());
+        assert!(!WorkerReviewSeverity::Note.blocks_approval());
+    }
+
+    #[test]
     fn reviewer_cannot_approve_with_blocker_finding() {
         let output = WorkerOutputV1 {
             status: WorkerOutputStatus::Done,
@@ -480,6 +495,31 @@ mod tests {
             }),
         };
         assert!(output.validate_critic().unwrap_err().contains("blocker"));
+    }
+
+    #[test]
+    fn reviewer_cannot_approve_with_major_finding() {
+        let output = WorkerOutputV1 {
+            status: WorkerOutputStatus::Done,
+            summary: "发现主要问题".to_string(),
+            artifact: None,
+            evidence: Vec::new(),
+            open_issues: Vec::new(),
+            handoff: None,
+            review_result: Some(WorkerReviewResultV1 {
+                verdict: WorkerReviewVerdict::Approved,
+                findings: vec![WorkerReviewFindingV1 {
+                    severity: WorkerReviewSeverity::Major,
+                    detail: "核心验收行为没有覆盖".to_string(),
+                    requirement_id: Some("pagination-boundary".to_string()),
+                    evidence_refs: vec!["src/pagination.rs".to_string()],
+                    suggested_owner: None,
+                    target_task_id: None,
+                    target_artifact_id: None,
+                }],
+            }),
+        };
+        assert!(output.validate_critic().unwrap_err().contains("major"));
     }
 
     #[test]

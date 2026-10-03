@@ -395,9 +395,10 @@ fn parse_review_output(
         owo_agent_workswarm::WorkerReviewVerdict::Approved
             if worker.status == owo_agent_workswarm::WorkerOutputStatus::Done
                 && worker.open_issues.is_empty()
-                && review.findings.iter().all(|finding| {
-                    finding.severity != owo_agent_workswarm::WorkerReviewSeverity::Blocker
-                })
+                && review
+                    .findings
+                    .iter()
+                    .all(|finding| !finding.severity.blocks_approval())
                 && snapshot.keys().all(|path| {
                     worker.evidence.iter().any(|evidence| evidence.source.contains(path))
                 }) =>
@@ -448,6 +449,34 @@ mod tests {
             "修改支付说明文档",
             &BTreeMap::from([("docs/payment.md".to_string(), "hash".to_string())])
         ));
+    }
+
+    #[test]
+    fn reviewer_major_finding_cannot_be_accepted_as_approved() {
+        let snapshot = BTreeMap::from([(
+            "src/pagination.rs".to_string(),
+            ("hash-a".to_string(), "source".to_string()),
+        )]);
+        let output = serde_json::json!({
+            "status": "done",
+            "summary": "发现边界问题",
+            "review_result": {
+                "verdict": "approved",
+                "findings": [{
+                    "severity": "major",
+                    "detail": "没有处理最后一页之外的请求",
+                    "requirement_id": "pagination-boundary",
+                    "evidence_refs": ["src/pagination.rs"]
+                }]
+            },
+            "evidence": [{"source":"src/pagination.rs", "note":"已检查"}]
+        });
+        let (verdict, detail, _) = parse_review_output(
+            crate::gateway::ModelOutput::Text(output.to_string()),
+            &snapshot,
+        );
+        assert_eq!(verdict, ValidationVerdictV1::Unverified);
+        assert!(detail.contains("major") || detail.contains("主要"));
     }
 
     #[test]
