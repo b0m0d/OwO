@@ -44,6 +44,31 @@ pub fn decide_completion(evidence: CompletionEvidence) -> CompletionStatusV1 {
     CompletionStatusV1::Accepted
 }
 
+/// Fold a required, host-issued independent-review receipt into an already
+/// accepted candidate. Review evidence cannot promote an unaccepted candidate.
+pub fn apply_required_review(
+    validation_status: CompletionStatusV1,
+    review_verdict: crate::plan::ValidationVerdictV1,
+) -> CompletionStatusV1 {
+    if validation_status != CompletionStatusV1::Accepted {
+        return validation_status;
+    }
+
+    let passed = usize::from(review_verdict == crate::plan::ValidationVerdictV1::Passed);
+    let failed = usize::from(review_verdict == crate::plan::ValidationVerdictV1::Failed);
+    decide_completion(CompletionEvidence {
+        response_finished: true,
+        has_candidate_changes: true,
+        required_validation_count: 2,
+        passed_required_validation_count: 1 + passed,
+        failed_required_validation_count: failed,
+        stale_evidence: review_verdict == crate::plan::ValidationVerdictV1::Stale,
+        independent_review_required: true,
+        independent_review_passed: passed == 1,
+        ..CompletionEvidence::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +121,32 @@ mod tests {
                 ..base
             }),
             CompletionStatusV1::Unverified
+        );
+    }
+
+    #[test]
+    fn required_review_receipt_is_part_of_shared_completion() {
+        use crate::plan::ValidationVerdictV1;
+
+        assert_eq!(
+            apply_required_review(CompletionStatusV1::Accepted, ValidationVerdictV1::Passed),
+            CompletionStatusV1::Accepted
+        );
+        assert_eq!(
+            apply_required_review(CompletionStatusV1::Accepted, ValidationVerdictV1::Failed),
+            CompletionStatusV1::Blocked
+        );
+        assert_eq!(
+            apply_required_review(CompletionStatusV1::Accepted, ValidationVerdictV1::Stale),
+            CompletionStatusV1::Unverified
+        );
+        assert_eq!(
+            apply_required_review(CompletionStatusV1::Accepted, ValidationVerdictV1::Unverified),
+            CompletionStatusV1::Unverified
+        );
+        assert_eq!(
+            apply_required_review(CompletionStatusV1::Candidate, ValidationVerdictV1::Passed),
+            CompletionStatusV1::Candidate
         );
     }
 

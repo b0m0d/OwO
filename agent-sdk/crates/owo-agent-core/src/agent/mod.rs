@@ -860,8 +860,9 @@ impl Agent {
                                 }
                                 usage_known &= review.usage_known;
                             }
+                            let review_verdict = review.receipt.verdict;
                             let review_passed =
-                                review.receipt.verdict == crate::plan::ValidationVerdictV1::Passed;
+                                review_verdict == crate::plan::ValidationVerdictV1::Passed;
                             session.validation_receipts.push(review.receipt);
                             if !review_passed {
                                 let current_validation_ids = session
@@ -884,8 +885,11 @@ impl Agent {
                                         execution.validation_receipt_id = None;
                                     }
                                 }
-                                completion_status = owo_agent_protocol::CompletionStatusV1::Unverified;
                             }
+                            completion_status = crate::completion::apply_required_review(
+                                completion_status,
+                                review_verdict,
+                            );
                         }
                     }
                     let plan_is_current =
