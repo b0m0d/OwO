@@ -178,7 +178,7 @@ fn fullstack_web_v1() -> BuiltinTemplateDescriptor {
             "只读协调者：先读取任务简报与必要入口，只输出版本化 TaskGraphV1 JSON，不实现代码、不修改文件。\n",
             "本模板包含前端槽位 w1（只允许 apps/web）和后端槽位 w2（只允许 apps/api）。\n",
             "按目标拆成两个边界清晰、可并行验收的任务；明确任务、验收、验证、读取引用与写入路径。\n",
-            "两边共享响应契约：items、page、limit、total、totalPages；不要拆出第三个集成任务，集成由宿主检查与 project_integrator 处理。\n",
+            "只在目标和现有代码要求时定义共享接口契约，明确数据形状、错误语义与边界；不得套用预设业务字段。集成由宿主检查与 project_integrator 处理。\n",
             "保留目标要求的页面状态、搜索/分页语义和移动端样式要求。任务依赖只在真实需要先后关系时填写。"
         ),
         "non_empty",
@@ -188,7 +188,7 @@ fn fullstack_web_v1() -> BuiltinTemplateDescriptor {
         &["lead"],
         concat!(
             "前端任务槽位：只实现 apps/web 内用户明确要求的前端功能，沿用现有页面、布局、样式与 API。\n",
-            "使用 items/page/limit/total/totalPages 响应契约，将页面连接真实后端；保留现有移动端 @media 断点。\n",
+            "依据用户目标和仓库现有接口完成页面行为，并连接真实后端；延续项目已有布局、样式与无障碍约定。\n",
             "只写 apps/web 与必要测试源码；只有当前任务明确声明宿主验证命令时才运行该命令，不重建脚手架或生成无关报告。"
         ),
         "non_empty",
@@ -199,8 +199,8 @@ fn fullstack_web_v1() -> BuiltinTemplateDescriptor {
         &["lead"],
         concat!(
             "后端任务槽位：只实现 apps/api 内目标明确要求的行为，沿用现有路由、数据层与验证方式。\n",
-            "列表响应必须符合 items/page/limit/total/totalPages；page/limit 为 0 或负数时回退默认值，limit 大于 12 时钳制到 12。\n",
-            "搜索语义覆盖标题、摘要或正文；只写 apps/api 与必要测试源码，不新增未经要求的存储、认证或服务。"
+            "按任务契约实现 API 行为与关键边界；不得自行添加任务未要求的业务字段、搜索规则或数值限制。\n",
+            "只写 apps/api 与必要测试源码；不新增未经要求的存储、认证或服务。"
         ),
         "non_empty",
     );
@@ -210,19 +210,14 @@ fn fullstack_web_v1() -> BuiltinTemplateDescriptor {
         &["w1", "w2"],
         concat!(
             "集成与故障修复 owner：等 w1/w2 的 TaskGraph 任务都完成后再运行检查。\n",
-            "先核对 packages/shared 与 items/page/limit/total/totalPages 契约，再只运行 npm test。\n",
+            "先核对前后端实际共享契约，再执行任务计划中宿主登记的行为检查。\n",
             "若失败，只按真实错误在既有集成白名单文件做最小修复，最多复跑 2 轮；不得扩大功能或弱化测试、样式和安全语义。"
         ),
         "non_empty",
     );
     integrator.write_paths = vec![
         "packages/shared".to_string(),
-        "apps/api/posts.mjs".to_string(),
-        "apps/api/posts.test.mjs".to_string(),
-        "apps/web/api.mjs".to_string(),
-        "apps/web/blog.mjs".to_string(),
         "apps/web/styles.css".to_string(),
-        "apps/web/api.test.mjs".to_string(),
         "package.json".to_string(),
         "package-lock.json".to_string(),
         "README.md".to_string(),
@@ -273,7 +268,7 @@ fn fullstack_web_v1() -> BuiltinTemplateDescriptor {
             "TaskGraph 任务全部结束后运行宿主行为检查；失败只返工对应 owner 或集成者".to_string(),
             "独立 reviewer 对稳定的前后端任务产物评审；集成修复后必须刷新受影响评审".to_string(),
         ],
-        tool_scope: "lead 只读规划；w1 仅 apps/web；w2 仅 apps/api；project_integrator 主责 shared/根集成文件与 npm test 修复白名单；reviewer 只读".to_string(),
+        tool_scope: "lead 只读规划；w1 仅 apps/web；w2 仅 apps/api；project_integrator 主责 shared/根集成文件与登记验证；reviewer 只读".to_string(),
         template,
     }
 }
@@ -548,7 +543,7 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
             must_do: vec![
                 "只读检查任务简报与必要入口，拆分为边界清晰、可并行验收的前后端任务。".to_string(),
                 "输出带稳定任务 ID、验收要求、验证计划、读取引用和写入范围的版本化 TaskGraphV1 JSON。".to_string(),
-                "仅当存在真实先后依赖、共享写范围或接口集成需求时才建立依赖；由宿主验证计划和写入范围。".to_string(),
+                "仅当存在真实先后依赖、共享写范围或接口集成需求时才建立依赖；接口字段与行为以用户目标和仓库事实为准。".to_string(),
             ],
             must_not_do: vec![
                 "只读协调：不修改文件、不实现代码、不运行命令；前端只分配 apps/web，后端只分配 apps/api。".to_string(),
@@ -597,8 +592,8 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
             must_do: vec![
                 "仅实现目标明确要求的前端功能，复用 apps/web 既有页面、技术栈和设计。".to_string(),
                 "候选提交与 open_issues 只覆盖当前前端任务范围；其他角色负责的 API/shared/集成事项不得写成自己的未解决问题，真实接口冲突要给出证据并交由 owner 处理。".to_string(),
-                "使用目标中约定的 API 与 shared 类型；将页面接通真实后端接口。".to_string(),
-                "只对本次变更写实现和测试源码；不要调用 run_command 或 apply_patch，不要生成无关页面、报告或重建脚手架。集成者在双方文件稳定后统一运行一次根 npm test。".to_string(),
+                "使用目标中约定的 API 与 shared 类型；连接任务契约指定的真实后端接口。".to_string(),
+                "只对本次变更写实现和测试源码；不要调用 run_command 或 apply_patch，不要生成无关页面、报告或重建脚手架。集成者在双方文件稳定后执行任务计划中的宿主登记行为检查。".to_string(),
             ],
             must_not_do: vec![
                 "只写 apps/web；不得修改 apps/api、packages/shared、根配置或文档；保留现有 CSS 移动端 @media 断点。".to_string(),
@@ -615,10 +610,10 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
                 "仅实现目标明确要求的 API 行为，复用 apps/api 现有路由、数据层和验证方式。".to_string(),
                 "候选提交与 open_issues 只覆盖当前后端任务范围；其他角色负责的前端/shared/集成事项不得写成自己的未解决问题，真实接口冲突要给出证据并交由 owner 处理。".to_string(),
                 "按约定接口提供前端所需行为；只有目标要求时才新增持久化或权限机制。".to_string(),
-                "用 write_file 在白名单内直接落盘；不要调用 run_command 或 apply_patch。只编写后端测试源码，不自行运行命令；集成者统一执行一次根 npm test。不要创建报告文件。".to_string(),
+                "用 write_file 在白名单内直接落盘；不要调用 run_command 或 apply_patch。只编写后端测试源码，不自行运行命令；集成者执行任务计划中的宿主登记行为检查。不要创建报告文件。".to_string(),
             ],
             must_not_do: vec![
-                "只写 apps/api；不得修改 apps/web、packages/shared、根配置或文档；HTTP 搜索断言覆盖 title/excerpt/body 的匹配语义。".to_string(),
+                "只写 apps/api；不得修改 apps/web、packages/shared、根配置或文档。".to_string(),
                 "不得声称运行过未实际执行的测试。".to_string(),
             ],
             output_format: "契约 JSON：artifact.kind=backend、format=markdown，content 写接口、数据和验证摘要；后端源文件必须真实落盘。".to_string(),
@@ -630,8 +625,8 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
         (FULLSTACK_WEB_V1, "project_integrator") => RolePromptSections {
             must_do: vec![
                 "等待 w1 与 w2 的所有动态任务完成后再开始集成。".to_string(),
-                "以 packages/shared 为主；npm test 证实 producer 缺陷时，只在明确白名单源文件内做最小修复，不扩大功能范围。".to_string(),
-                "核对本次前后端接口，特别确认 shared 响应 schema 含 items/page/limit/total/totalPages；只运行任务要求的根 npm test，按完整错误做最小局部修复并复跑最多 2 轮。".to_string(),
+                "以 packages/shared 为主；宿主登记检查证实 producer 缺陷时，只在明确白名单源文件内做最小修复，不扩大功能范围。".to_string(),
+                "核对本次前后端接口与 shared schema；执行任务计划中的宿主登记检查，按真实错误做最小局部修复并复跑最多 2 轮。".to_string(),
             ],
             must_not_do: vec![
                 "不得重写 apps/web 或 apps/api；只允许对测试确证的缺陷做最小修复，保留原范围、样式和安全语义。".to_string(),
@@ -639,14 +634,14 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
             ],
             output_format: "契约 JSON：artifact.kind=integrated、format=markdown，content 列出接口契约、集成改动与真实验证结果。".to_string(),
             acceptance: vec![
-                "共享 API/schema 契约包含 items/page/limit/total/totalPages，分页边界与前后端一致，npm test 实际通过。".to_string(),
+                "共享 API/schema 契约与用户目标及仓库既有实现一致，所有要求的宿主行为检查实际通过。".to_string(),
                 "根脚本和安装说明可复现；每项验证带真实退出结果。".to_string(),
             ],
         },
         (FULLSTACK_WEB_V1, "reviewer") => RolePromptSections {
             must_do: vec![
                 "在 w1/w2 动态任务完成后只读检查 apps/web、apps/api 及各自测试文件。".to_string(),
-                "不要读取集成者正在修改的 packages/shared 或根配置；npm test 未由你执行时标为未验证。".to_string(),
+                "不要读取集成者正在修改的 packages/shared 或根配置；宿主登记检查未由你执行时标为未验证。".to_string(),
                 "按功能验收逐项列出通过、失败、未验证和可定位证据。".to_string(),
             ],
             must_not_do: vec![
@@ -1086,6 +1081,23 @@ mod tests {
                 .must_do
                 .iter()
                 .any(|line| line.contains("其他角色负责")));
+        }
+    }
+
+    #[test]
+    fn fullstack_prompts_do_not_impose_blog_specific_contracts() {
+        for role in ["lead", "w1", "w2", "project_integrator"] {
+            let sections = prompt_sections_for(FULLSTACK_WEB_V1, role).unwrap();
+            let prompt = sections
+                .must_do
+                .iter()
+                .chain(sections.must_not_do.iter())
+                .chain(sections.acceptance.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!prompt.contains("totalPages"), "{role} 应按任务定义契约");
+            assert!(!prompt.contains("title/excerpt/body"), "{role} 不应预设搜索字段");
         }
     }
 
