@@ -369,12 +369,14 @@ impl StreamPrinter {
                 duration_ms,
                 total_tokens,
                 completion_status,
+                model_calls,
                 ..
             } => {
                 self.clear_status();
                 println!(
-                    "  {} {steps} 步 / {duration_ms} ms / {total_tokens} tokens{}",
+                    "  {} {steps} 步 / {duration_ms} ms / {total_tokens} tokens / {} 次模型请求{}",
                     "⏱".cyan(),
+                    model_calls.len(),
                     completion_status_label(*completion_status)
                 );
             }

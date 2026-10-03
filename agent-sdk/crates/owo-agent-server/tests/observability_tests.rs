@@ -51,6 +51,7 @@ fn trace_record(
         final_text: None,
         reached_model_turn_limit: false,
         events,
+        model_calls: Vec::new(),
         usage: TokenUsage {
             prompt_tokens: 10,
             completion_tokens: 5,

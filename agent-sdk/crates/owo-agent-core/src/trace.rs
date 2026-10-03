@@ -1,6 +1,6 @@
 //! Traces：回合轨迹的结构化记录与持久化（可回放、可审计）。
 
-use crate::agent::{TurnEvent, TurnOutcome};
+use crate::agent::{ModelCallRecord, TurnEvent, TurnOutcome};
 use crate::error::AgentError;
 use crate::gateway::TokenUsage;
 use crate::session::Session;
@@ -35,6 +35,9 @@ pub struct TraceRecord {
     pub events: Vec<TurnEvent>,
     #[serde(default)]
     pub usage: TokenUsage,
+    /// Attributable provider call records; legacy traces deserialize as empty.
+    #[serde(default)]
+    pub model_calls: Vec<ModelCallRecord>,
     /// §9.3 瀑布：同一 trace 内各阶段耗时（按发生顺序；含 model 首 token 时延）。
     #[serde(default)]
     pub phase_timings: Vec<crate::deadline::PhaseTiming>,
@@ -66,6 +69,7 @@ impl TraceRecord {
             reached_model_turn_limit: outcome.reached_model_turn_limit,
             events: outcome.events.clone(),
             usage: outcome.usage,
+            model_calls: outcome.model_calls.clone(),
             phase_timings: outcome.phase_timings.clone(),
             error: None,
             performance_task: configured_performance_task(),
@@ -97,6 +101,7 @@ impl TraceRecord {
             reached_model_turn_limit: false,
             events: Vec::new(),
             usage: TokenUsage::default(),
+            model_calls: Vec::new(),
             phase_timings: Vec::new(),
             error: Some(error.to_string()),
             performance_task: configured_performance_task(),
@@ -155,6 +160,19 @@ mod tests {
         let mut session = Session::new(".", "mock", None);
         session.push(ChatMessage::user("你好".to_string()));
         let outcome = TurnOutcome {
+            model_calls: vec![crate::agent::ModelCallRecord {
+                metadata: crate::gateway::ModelCallMetadata {
+                    request_id: Some("req-1".to_string()),
+                    model: Some("served-model".to_string()),
+                    usage: Some(TokenUsage {
+                        prompt_tokens: 100,
+                        completion_tokens: 50,
+                        total_tokens: 150,
+                    }),
+                    latency_ms: Some(25),
+                },
+                succeeded: true,
+            }],
             final_text: Some("收到".to_string()),
             completion_status: owo_agent_protocol::CompletionStatusV1::ResponseComplete,
             reached_model_turn_limit: false,
@@ -185,6 +203,11 @@ mod tests {
         assert_eq!(loaded.final_text.as_deref(), Some("收到"));
         assert_eq!(loaded.events.len(), 2);
         assert_eq!(loaded.usage.total_tokens, 150);
+        assert_eq!(loaded.model_calls.len(), 1);
+        assert_eq!(
+            loaded.model_calls[0].metadata.request_id.as_deref(),
+            Some("req-1")
+        );
         assert_eq!(
             loaded.performance_task.as_deref(),
             Some("short_text_conversation")
@@ -200,6 +223,7 @@ mod tests {
         let mut session = Session::new(".", "mock", None);
         session.push(ChatMessage::user("你好".to_string()));
         let outcome = TurnOutcome {
+            model_calls: Vec::new(),
             final_text: Some("收到".to_string()),
             completion_status: owo_agent_protocol::CompletionStatusV1::ResponseComplete,
             reached_model_turn_limit: false,

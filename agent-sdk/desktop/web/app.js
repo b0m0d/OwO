@@ -1096,7 +1096,10 @@ function fillTurnSummaryMeta(turn) {
   else if (completionStatus === "unverified") parts.push("结果未验证");
   else if (completionStatus === "blocked") parts.push("存在阻断问题");
   else if (completionStatus === "accepted") parts.push("宿主验收通过");
-  if (turn.modelCalls) parts.push(`模型调用 ${turn.modelCalls} 轮`);
+  const modelCallCount = Array.isArray(server.model_calls)
+    ? server.model_calls.length
+    : turn.modelCalls;
+  if (modelCallCount) parts.push(`模型请求 ${modelCallCount} 次`);
   if (server.steps) parts.push(`共 ${server.steps} 步`);
   if (server.total_tokens) {
     const tokens =

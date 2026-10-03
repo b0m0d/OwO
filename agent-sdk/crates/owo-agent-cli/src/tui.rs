@@ -938,6 +938,7 @@ impl TuiApp {
                 duration_ms,
                 total_tokens,
                 completion_status,
+                model_calls,
                 ..
             } => {
                 let status = match completion_status {
@@ -948,7 +949,10 @@ impl TuiApp {
                     owo_agent_protocol::CompletionStatusV1::Blocked => " · 存在阻断问题",
                 };
                 self.push_line(
-                    format!("  ⏱ {steps} 步 / {duration_ms} ms / {total_tokens} tokens{status}"),
+                    format!(
+                        "  ⏱ {steps} 步 / {duration_ms} ms / {total_tokens} tokens / {} 次模型请求{status}",
+                        model_calls.len()
+                    ),
                     cyan(),
                 );
             }

@@ -837,6 +837,30 @@ mod tests {
         session.rename("SQLite 会话".to_string());
         session.set_pinned(true);
         session.set_archived(true);
+        session
+            .validation_receipts
+            .push(crate::plan::ValidationReceiptV1 {
+                receipt_id: "single-validation-test".to_string(),
+                task_id: session.id.clone(),
+                attempt_id: "turn-1".to_string(),
+                epoch: 1,
+                requirement_id: "single-behavior-validation".to_string(),
+                validator_id: "workspace-command-success-v1".to_string(),
+                validator_version: "1".to_string(),
+                arguments_sha256: "command-hash".to_string(),
+                input_sha256: "input-hash".to_string(),
+                environment_id: "environment-hash".to_string(),
+                changeset_sha256: Some("changeset-hash".to_string()),
+                detail: Some("host test passed".to_string()),
+                subject_sha256: std::collections::HashMap::from([(
+                    "workspace-path:src/lib.rs".to_string(),
+                    "source-hash".to_string(),
+                )]),
+                verdict: crate::plan::ValidationVerdictV1::Passed,
+                evidence_refs: vec!["command-result:sha256:result-hash".to_string()],
+                started_at: "2026-10-04T00:00:00Z".to_string(),
+                completed_at: "2026-10-04T00:00:01Z".to_string(),
+            });
         store.save(&session).unwrap();
         let child = session.fork(1);
         store.save(&child).unwrap();
@@ -847,6 +871,7 @@ mod tests {
         assert_eq!(loaded.title.as_deref(), Some("SQLite 会话"));
         assert!(loaded.pinned);
         assert!(loaded.archived);
+        assert_eq!(loaded.validation_receipts, session.validation_receipts);
         let loaded_child = store.load(&child.id).unwrap();
         assert_eq!(loaded_child.parent_id.as_deref(), Some(session.id.as_str()));
         assert_eq!(loaded_child.fork_point, Some(1));
@@ -960,20 +985,20 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("owo-sqlite-migrate-{}.db", uuid::Uuid::new_v4()));
         let store = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(store.migration_status().schema_version, 4);
+        assert_eq!(store.migration_status().schema_version, 5);
         assert!(store.migration_status().pending.is_empty());
         assert!(!store.is_read_only());
         drop(store);
         // 再次打开：无新迁移应用，schema_version 保持。
         let reopened = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(reopened.migration_status().schema_version, 4);
+        assert_eq!(reopened.migration_status().schema_version, 5);
         assert!(reopened.migration_status().applied.is_empty());
         assert!(!reopened.is_read_only());
         let conn = Connection::open(&path).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
@@ -1010,6 +1035,7 @@ mod tests {
                 "v2: sessions 列补齐（model_override：M4.2 会话级模型路由）",
                 "v3: session turn events 持久化与单调 seq",
                 "v4: session execution receipts 持久化",
+                "v5: session behavior validation receipts 持久化",
             ]
         );
         let mut session = store.create(Path::new("."), "mock", None).unwrap();

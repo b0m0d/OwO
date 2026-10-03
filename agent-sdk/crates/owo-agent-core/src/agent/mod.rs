@@ -3,7 +3,9 @@ use crate::autoreview::{ReviewVerdict, Reviewer};
 use crate::context::{build_system_prompt, load_project_rules};
 use crate::deadline::{DeadlineBudget, Phase, PhaseBudgets, PhaseTiming};
 use crate::error::AgentError;
-use crate::gateway::{ChatMessage, ModelOutput, ModelProvider, StreamChunk, TokenUsage};
+use crate::gateway::{
+    ChatMessage, ModelCallMetadata, ModelOutput, ModelProvider, StreamChunk, TokenUsage,
+};
 use crate::injection::sanitize_tool_result;
 use crate::permissions::{Approver, Decision, PermissionRequest, Policy};
 use crate::session::Session;
@@ -121,6 +123,9 @@ pub enum TurnEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnOutcome {
+    /// Per-request model identity, provider request id, usage, latency, and outcome.
+    #[serde(default)]
+    pub model_calls: Vec<ModelCallRecord>,
     pub final_text: Option<String>,
     /// Host assessment: response completion never implies code delivery acceptance.
     #[serde(default)]
@@ -145,6 +150,12 @@ pub struct TurnOutcome {
     /// §9.3：工具面稳定指纹（SHA-256；schema 缓存复用的 key 基础）。
     #[serde(default)]
     pub tools_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCallRecord {
+    pub metadata: ModelCallMetadata,
+    pub succeeded: bool,
 }
 
 /// Agent 核心：执行循环 + 工具注册表 + 权限策略 + 审计。
@@ -540,6 +551,7 @@ impl Agent {
         let started = std::time::Instant::now();
         let turn_id = uuid::Uuid::new_v4().to_string();
         let mut usage = TokenUsage::default();
+        let mut model_calls = Vec::new();
         let mut usage_known = true;
         let mut model_requests = 0usize;
         // §9.2：turn 入口建立统一预算（None = 不限时，仅记账不强制）；
@@ -742,13 +754,19 @@ impl Agent {
                 }
             };
             model_requests = model_requests.saturating_add(1);
+            let model_elapsed = model_started.elapsed();
+            let mut request_metadata = observed.metadata.clone();
+            request_metadata.latency_ms.get_or_insert(model_elapsed.as_millis() as u64);
+            model_calls.push(ModelCallRecord {
+                metadata: request_metadata,
+                succeeded: true,
+            });
             if let Some(request_usage) = observed.metadata.usage {
                 usage.add(&request_usage);
             } else {
                 usage_known = false;
             }
             let output = observed.output;
-            let model_elapsed = model_started.elapsed();
             budget.record(Phase::Model, model_elapsed);
             phase_timings.push(PhaseTiming {
                 phase: Phase::Model.as_str().to_string(),
@@ -1366,6 +1384,7 @@ impl Agent {
                     emit_wrap_delta(delta);
                 }
             };
+            let wrap_up_started = std::time::Instant::now();
             let wrap_up = self
                 .provider
                 .complete_stream_with_reasoning_and_model_observed(
@@ -1378,6 +1397,14 @@ impl Agent {
             model_requests = model_requests.saturating_add(1);
             let wrap_up = match wrap_up {
                 Ok(observed) => {
+                    let mut request_metadata = observed.metadata.clone();
+                    request_metadata
+                        .latency_ms
+                        .get_or_insert(wrap_up_started.elapsed().as_millis() as u64);
+                    model_calls.push(ModelCallRecord {
+                        metadata: request_metadata,
+                        succeeded: true,
+                    });
                     if let Some(request_usage) = observed.metadata.usage {
                         usage.add(&request_usage);
                     } else {
@@ -1387,6 +1414,13 @@ impl Agent {
                 }
                 Err(error) => {
                     usage_known = false;
+                    model_calls.push(ModelCallRecord {
+                        metadata: ModelCallMetadata {
+                            latency_ms: Some(wrap_up_started.elapsed().as_millis() as u64),
+                            ..ModelCallMetadata::default()
+                        },
+                        succeeded: false,
+                    });
                     Err(error)
                 }
             };
@@ -1450,6 +1484,7 @@ impl Agent {
             final_text.as_deref(),
         );
         Ok(TurnOutcome {
+            model_calls,
             final_text,
             completion_status,
             reached_model_turn_limit,

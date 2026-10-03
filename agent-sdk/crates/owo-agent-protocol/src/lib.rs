@@ -799,6 +799,29 @@ pub struct DaemonDescriptor {
 /// 变更策略：破坏性事件结构变更 → 递增版本并登记 RFC 注释（弃用期 ≥2 个 minor）。
 pub const SSE_PROTOCOL_VERSION: u32 = 1;
 
+/// Per-request token usage reported by a provider; None means unknown, never zero-filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelTokenUsageV1 {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+/// Redacted model request telemetry exposed with a completed turn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRequestMetricV1 {
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub usage: Option<ModelTokenUsageV1>,
+    #[serde(default)]
+    pub latency_ms: Option<u64>,
+    #[serde(default)]
+    pub succeeded: bool,
+}
+
 /// Shared completion meaning across ordinary Agent turns and Team delivery.
 /// A finished response is not the same claim as an accepted code change.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -922,6 +945,9 @@ pub enum SseEvent {
         /// Completion state shared with Team DeliveryGate; older clients may ignore it.
         #[serde(default)]
         completion_status: CompletionStatusV1,
+        /// Request-level provider usage and latency; unknown values remain absent.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        model_calls: Vec<ModelRequestMetricV1>,
     },
 }
 

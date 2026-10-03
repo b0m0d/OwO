@@ -344,6 +344,22 @@ pub(crate) async fn turn(
                         total_tokens: outcome.usage.total_tokens,
                         cost_usd,
                         completion_status: outcome.completion_status,
+                        model_calls: outcome.model_calls.iter().map(|call| {
+                            owo_agent_protocol::ModelRequestMetricV1 {
+                                request_id: call.metadata.request_id.clone(),
+                                model: call.metadata.model.clone(),
+                                usage: call.metadata.usage.map(|usage| {
+                                    owo_agent_protocol::ModelTokenUsageV1 {
+                                        prompt_tokens: usage.prompt_tokens,
+                                        completion_tokens: usage.completion_tokens,
+                                        total_tokens: usage.total_tokens,
+                                    }
+                                }),
+                                latency_ms: call.metadata.latency_ms,
+                                succeeded: call.succeeded,
+                            }
+                        })
+                        .collect(),
                     },
                 );
             }
