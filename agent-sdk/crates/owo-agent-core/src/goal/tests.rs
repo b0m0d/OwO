@@ -129,6 +129,37 @@ fn unsupported_goal_verifier_is_recorded_and_cannot_succeed() {
     );
 }
 
+#[test]
+fn goal_with_executed_steps_and_no_validation_plan_is_not_accepted() {
+    let mut runner = GoalRunner::new(
+        Goal::new("g-no-plan", "缺少宿主验收计划的目标"),
+        Plan::new("p-no-plan", "g-no-plan"),
+        RunnerConfig::default(),
+    );
+    runner.state.records.insert(
+        "step-1".to_string(),
+        StepRecord {
+            step_id: "step-1".to_string(),
+            status: StepStatus::Succeeded,
+            attempts: 1,
+            attempt_id: Some("attempt-1".to_string()),
+            output: Some("implementation candidate".to_string()),
+            error: None,
+            skip_reason: None,
+            phase_epoch: Some(1),
+            validation_receipts: Vec::new(),
+        },
+    );
+
+    assert_eq!(runner.verify_goal().unwrap(), GoalStatus::Failed);
+    assert!(runner
+        .state
+        .goal
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("共享完成条件")));
+}
+
 struct FixedOutputWorker(&'static str);
 
 #[async_trait::async_trait]

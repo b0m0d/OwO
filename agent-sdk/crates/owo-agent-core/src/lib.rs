@@ -16,6 +16,7 @@ pub mod builtin_team_templates;
 pub mod bus_store;
 pub mod computer_use;
 pub mod contract_worker;
+pub mod completion;
 pub mod critic;
 pub mod execution_target;
 pub mod external_tools;

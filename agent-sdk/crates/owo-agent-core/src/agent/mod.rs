@@ -1771,6 +1771,25 @@ fn assess_single_turn_completion(
 ) -> owo_agent_protocol::CompletionStatusV1 {
     use crate::plan::{ValidationReceiptV1, ValidationVerdictV1};
 
+    let decide = |response_finished,
+                  reached_turn_limit,
+                  has_candidate_changes,
+                  required_validation_count,
+                  passed_required_validation_count,
+                  failed_required_validation_count,
+                  stale_evidence| {
+        crate::completion::decide_completion(crate::completion::CompletionEvidence {
+            response_finished,
+            reached_turn_limit,
+            has_candidate_changes,
+            required_validation_count,
+            passed_required_validation_count,
+            failed_required_validation_count,
+            stale_evidence,
+            ..crate::completion::CompletionEvidence::default()
+        })
+    };
+
     let root = session.workspace.canonicalize().ok();
     if let Some(root) = root.as_deref() {
         for receipt in &mut session.validation_receipts {
@@ -1798,7 +1817,7 @@ fn assess_single_turn_completion(
     }
 
     if reached_turn_limit || final_text.is_none_or(|text| text.trim().is_empty()) {
-        return owo_agent_protocol::CompletionStatusV1::Unverified;
+        return decide(false, reached_turn_limit, true, 0, 0, 0, false);
     }
 
     let mut pending_hashes = std::collections::BTreeMap::new();
@@ -1829,14 +1848,10 @@ fn assess_single_turn_completion(
         }
     }
     if pending_hashes.is_empty() {
-        return if stale_candidate {
-            owo_agent_protocol::CompletionStatusV1::Unverified
-        } else {
-            owo_agent_protocol::CompletionStatusV1::ResponseComplete
-        };
+        return decide(true, false, false, 0, 0, 0, stale_candidate);
     }
     if missing_write_hash || root.is_none() {
-        return owo_agent_protocol::CompletionStatusV1::Unverified;
+        return decide(true, false, true, 1, 0, 0, true);
     }
     let root = root.expect("checked above");
 
@@ -1854,14 +1869,14 @@ fn assess_single_turn_completion(
         .last();
     let Some((command_event_index, Some(command_receipt))) = last_command else {
         return match last_command {
-            Some((_, None)) => owo_agent_protocol::CompletionStatusV1::Unverified,
-            _ => owo_agent_protocol::CompletionStatusV1::Candidate,
+            Some((_, None)) => decide(true, false, true, 1, 0, 0, false),
+            _ => decide(true, false, true, 0, 0, 0, false),
         };
     };
     if command_receipt.validator_id.as_deref() != Some("workspace-command-success-v1")
         || command_receipt.validator_version.as_deref() != Some("1")
     {
-        return owo_agent_protocol::CompletionStatusV1::Candidate;
+        return decide(true, false, true, 0, 0, 0, false);
     }
 
     let mut subject_hashes = std::collections::HashMap::new();
@@ -1950,7 +1965,7 @@ fn assess_single_turn_completion(
     let receipt_id = validation.receipt_id.clone();
     session.validation_receipts.push(validation);
 
-    match verdict {
+    let completion_status = match verdict {
         ValidationVerdictV1::Passed => {
             for (index, execution) in session.execution_receipts.iter_mut().enumerate() {
                 let paths = execution
@@ -1982,14 +1997,13 @@ fn assess_single_turn_completion(
                     execution.status = "superseded".to_string();
                 }
             }
-            owo_agent_protocol::CompletionStatusV1::Accepted
+            decide(true, false, true, 1, 1, 0, false)
         }
-        ValidationVerdictV1::Failed => owo_agent_protocol::CompletionStatusV1::Blocked,
-        ValidationVerdictV1::Stale | ValidationVerdictV1::Unverified => {
-            owo_agent_protocol::CompletionStatusV1::Unverified
-        }
-        _ => owo_agent_protocol::CompletionStatusV1::Unverified,
-    }
+        ValidationVerdictV1::Failed => decide(true, false, true, 1, 0, 1, false),
+        ValidationVerdictV1::Stale => decide(true, false, true, 1, 0, 0, true),
+        _ => decide(true, false, true, 1, 0, 0, false),
+    };
+    completion_status
 }
 
 fn tool_preview(outcome: &Result<serde_json::Value, String>) -> Option<String> {

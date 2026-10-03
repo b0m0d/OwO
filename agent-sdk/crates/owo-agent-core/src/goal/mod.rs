@@ -809,6 +809,42 @@ impl GoalRunner {
                 &self.state.goal.acceptance,
             ))
         };
+        let has_candidate_changes = self.state.plan.steps.iter().any(|step| {
+            self.state
+                .records
+                .get(&step.id)
+                .is_some_and(|record| record.status == StepStatus::Succeeded)
+        });
+        let mut required_validation_count = 0usize;
+        let mut passed_required_validation_count = 0usize;
+        let mut failed_required_validation_count = 0usize;
+        for step in &self.state.plan.steps {
+            let Some(step_plan) = &step.verification_plan else {
+                continue;
+            };
+            let receipts = self
+                .state
+                .records
+                .get(&step.id)
+                .map(|record| record.validation_receipts.as_slice())
+                .unwrap_or_default();
+            for requirement in step_plan.requirements.iter().filter(|item| item.required) {
+                required_validation_count += 1;
+                match receipts
+                    .iter()
+                    .find(|receipt| receipt.requirement_id == requirement.requirement_id)
+                    .map(|receipt| receipt.verdict)
+                {
+                    Some(crate::plan::ValidationVerdictV1::Passed) => {
+                        passed_required_validation_count += 1;
+                    }
+                    Some(crate::plan::ValidationVerdictV1::Failed) => {
+                        failed_required_validation_count += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
         if let Some(plan) = plan {
             if let Err(reason) = plan.validate() {
                 return self.fail_goal(format!("目标 VerificationPlan 非法：{reason}"));
@@ -915,14 +951,45 @@ impl GoalRunner {
                 {
                     self.state.validation_receipts.push(receipt);
                 }
-                if requirement.required && verdict != crate::plan::ValidationVerdictV1::Passed {
-                    return self.fail_goal(format!(
-                        "目标验收要求 {} 未通过或未验证：{}",
-                        requirement.requirement_id,
-                        detail.as_deref().unwrap_or("验证器未返回通过")
-                    ));
+                if requirement.required {
+                    required_validation_count += 1;
+                    match verdict {
+                        crate::plan::ValidationVerdictV1::Passed => {
+                            passed_required_validation_count += 1;
+                        }
+                        crate::plan::ValidationVerdictV1::Failed => {
+                            failed_required_validation_count += 1;
+                        }
+                        _ => {}
+                    }
+                    if verdict != crate::plan::ValidationVerdictV1::Passed {
+                        return self.fail_goal(format!(
+                            "目标验收要求 {} 未通过或未验证：{}",
+                            requirement.requirement_id,
+                            detail.as_deref().unwrap_or("验证器未返回通过")
+                        ));
+                    }
                 }
             }
+        }
+        let completion_status = crate::completion::decide_completion(
+            crate::completion::CompletionEvidence {
+                response_finished: true,
+                has_candidate_changes,
+                required_validation_count,
+                passed_required_validation_count,
+                failed_required_validation_count,
+                ..crate::completion::CompletionEvidence::default()
+            },
+        );
+        if !matches!(
+            completion_status,
+            owo_agent_protocol::CompletionStatusV1::ResponseComplete
+                | owo_agent_protocol::CompletionStatusV1::Accepted
+        ) {
+            return self.fail_goal(format!(
+                "目标候选结果未达到共享完成条件：{completion_status:?}；需要宿主验证计划或人工验收"
+            ));
         }
         self.state.goal.transition(GoalStatus::Succeeded);
         self.log("goal.succeeded", "目标验收通过");

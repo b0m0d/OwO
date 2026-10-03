@@ -141,6 +141,18 @@ impl TeamCoordinator {
             .map_err(|error| WorkSwarmError::Run(format!("ChangeSet 读取失败：{error}")))?;
         let runtime_command_receipts =
             self.runtime_event_details(team_id, "team.command.executed");
+        let reviewer_step_count = state
+            .plan
+            .steps
+            .iter()
+            .filter(|step| {
+                run_meta.roles.iter().any(|role| {
+                    step.worker == format!("m-{}", role.role) && role.is_reviewer()
+                })
+            })
+            .count();
+        let mut has_code_changes = false;
+        let mut validated_review_count = 0usize;
         let mut acceptance_receipts = Vec::new();
         for step in state.plan.steps.clone() {
             let record = state.records.get(&step.id).cloned().ok_or_else(|| {
@@ -238,6 +250,7 @@ impl TeamCoordinator {
                     &step.id,
                     attempt_id,
                 );
+            has_code_changes |= changeset_contains_code;
             let has_behavior_command = verification_plan.requirements.iter().any(|requirement| {
                 requirement.required
                     && requirement.validator_id == "workspace-command-success-v1"
@@ -646,8 +659,54 @@ impl TeamCoordinator {
                         )));
                     }
                 }
+                let required_validation_count = 1 + verification_plan
+                    .requirements
+                    .iter()
+                    .filter(|requirement| requirement.required)
+                    .count();
+                let passed_required_validation_count = 1 + verification_plan
+                    .requirements
+                    .iter()
+                    .filter(|requirement| requirement.required)
+                    .filter(|requirement| {
+                        validation_receipts.iter().any(|receipt| {
+                            receipt.requirement_id == requirement.requirement_id
+                                && receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+                        })
+                    })
+                    .count();
+                let failed_required_validation_count = verification_plan
+                    .requirements
+                    .iter()
+                    .filter(|requirement| requirement.required)
+                    .filter(|requirement| {
+                        validation_receipts.iter().any(|receipt| {
+                            receipt.requirement_id == requirement.requirement_id
+                                && receipt.verdict == crate::plan::ValidationVerdictV1::Failed
+                        })
+                    })
+                    .count();
+                let completion_status = crate::completion::decide_completion(
+                    crate::completion::CompletionEvidence {
+                        response_finished: true,
+                        has_candidate_changes: true,
+                        required_validation_count,
+                        passed_required_validation_count,
+                        failed_required_validation_count,
+                        ..crate::completion::CompletionEvidence::default()
+                    },
+                );
+                if completion_status != owo_agent_protocol::CompletionStatusV1::Accepted {
+                    return Err(WorkSwarmError::Conflict(format!(
+                        "任务 {} 的共享完成裁决没有接受该候选结果：{completion_status:?}",
+                        step.id
+                    )));
+                }
+                if reviewer {
+                    validated_review_count += 1;
+                }
                 acceptance_receipts.push(json!({
-                    "completion_status": owo_agent_protocol::CompletionStatusV1::Accepted,
+                    "completion_status": completion_status,
                     "step_id": &step.id,
                     "attempt_id": attempt_id,
                     "artifact_id": &artifact.artifact_id,
@@ -661,6 +720,25 @@ impl TeamCoordinator {
                     "validation_receipts": validation_receipts,
                 }));
             }
+        }
+
+        let required_validation_count = acceptance_receipts.len();
+        let independent_review_required = has_code_changes && reviewer_step_count > 0;
+        let completion_status = crate::completion::decide_completion(
+            crate::completion::CompletionEvidence {
+                response_finished: true,
+                has_candidate_changes: !acceptance_receipts.is_empty(),
+                required_validation_count,
+                passed_required_validation_count: required_validation_count,
+                independent_review_required,
+                independent_review_passed: validated_review_count >= reviewer_step_count,
+                ..crate::completion::CompletionEvidence::default()
+            },
+        );
+        if completion_status != owo_agent_protocol::CompletionStatusV1::Accepted {
+            return Err(WorkSwarmError::Conflict(format!(
+                "Team DeliveryGate 的共享完成裁决未接受最终候选版本：{completion_status:?}"
+            )));
         }
 
         // 仅检查本次 ProjectSpace 产物，确保传入空间仍属于本次运行。
