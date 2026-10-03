@@ -945,6 +945,7 @@ fn compare_reports_flags_regressions_and_mismatched_execution() {
         tags: vec![],
         run_contract_sha256: None,
         evaluator_binary_sha256: None,
+        provider_endpoint_sha256: None,
         generated_at: "t1".into(),
         runs: vec![],
         pending: vec![],
@@ -1170,6 +1171,7 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         tags: vec!["tag1".into()],
         run_contract_sha256: Some("contract-v1".into()),
         evaluator_binary_sha256: Some("binary-v1".into()),
+        provider_endpoint_sha256: Some("endpoint-v1".into()),
         generated_at: "t1".into(),
         runs: vec![a.clone()],
         pending: vec![],
@@ -1186,6 +1188,7 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         tags: vec!["tag1".into()],
         run_contract_sha256: Some("contract-v1".into()),
         evaluator_binary_sha256: Some("binary-v1".into()),
+        provider_endpoint_sha256: Some("endpoint-v1".into()),
         generated_at: "t2".into(),
         runs: vec![b.clone()],
         pending: vec![],
@@ -1242,6 +1245,15 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         different_binary["run_alignment"]["configuration_aligned"],
         serde_json::Value::Bool(false)
     );
+    let mut different_endpoint_multi = multi.clone();
+    different_endpoint_multi.provider_endpoint_sha256 = Some("endpoint-v2".into());
+    let different_endpoint =
+        build_paired_report_json(&single, &different_endpoint_multi, &opts, Some("t-endpoint"));
+    assert_eq!(
+        different_endpoint["run_alignment"]["configuration_aligned"],
+        serde_json::Value::Bool(false)
+    );
+
     let mut legacy_multi = multi.clone();
     legacy_multi.evaluator_binary_sha256 = None;
     let legacy_pair =

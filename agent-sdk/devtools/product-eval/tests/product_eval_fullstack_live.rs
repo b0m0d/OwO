@@ -15,13 +15,14 @@ fn required_path(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("missing {name}")))
 }
 
-fn options(mode: AgentMode) -> RunOptions {
+fn options(mode: AgentMode, endpoint_sha256: &str) -> RunOptions {
     RunOptions {
         modes: vec![mode],
         reps_override: Some(1),
         only: Some(CASE_ID.to_string()),
         fresh: true,
         batch_label: Some("team-refactor-20261003-r20-bounded-8turns-1retry".into()),
+        provider_endpoint_sha256: Some(endpoint_sha256.to_string()),
         ..RunOptions::default()
     }
 }
@@ -40,7 +41,7 @@ async fn live_fullstack_single_vs_team_one_rep() {
         !out_root.exists(),
         "output root must be new; refusing to overwrite it"
     );
-    let (provider, model) = build_live_provider(Some(MODEL)).expect("build configured provider");
+    let (provider, model, endpoint_sha256) = build_live_provider(Some(MODEL)).expect("build configured provider");
     println!("paired full-stack run: model={model}, case={CASE_ID}, repetitions=1");
     let cancel = Arc::new(AtomicBool::new(false));
 
@@ -52,7 +53,7 @@ async fn live_fullstack_single_vs_team_one_rep() {
             )) as Arc<dyn CaseExecutor>,
             "live-single",
             Some(model.clone()),
-            &options(AgentMode::Single),
+            &options(AgentMode::Single, &endpoint_sha256),
             Arc::clone(&cancel),
         )
         .await
@@ -82,7 +83,7 @@ async fn live_fullstack_single_vs_team_one_rep() {
             Arc::new(team_executor) as Arc<dyn CaseExecutor>,
             "live-team",
             Some(model.clone()),
-            &options(AgentMode::Multi),
+            &options(AgentMode::Multi, &endpoint_sha256),
             cancel,
         )
         .await

@@ -199,6 +199,7 @@ async fn run_matrix(
         category: None,
         fresh: true,
         batch_label: None,
+        provider_endpoint_sha256: None,
         tags: Vec::new(),
     };
     let report = runner
@@ -786,6 +787,7 @@ async fn all_ten_tasks_pass_dry_reference_self_check() {
         category: None,
         fresh: true,
         batch_label: None,
+        provider_endpoint_sha256: None,
         tags: Vec::new(),
     };
     let report = runner

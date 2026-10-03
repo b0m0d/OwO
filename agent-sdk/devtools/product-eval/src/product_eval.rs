@@ -617,6 +617,9 @@ pub struct ProductEvalReport {
     /// SHA-256 of the executable that produced the report.
     #[serde(default)]
     pub evaluator_binary_sha256: Option<String>,
+    /// SHA-256 of the configured provider endpoint; the URL itself is never stored.
+    #[serde(default)]
+    pub provider_endpoint_sha256: Option<String>,
     pub generated_at: String,
     pub runs: Vec<ProductEvalRun>,
     /// 计划中但尚未完成的矩阵单元格（中断续跑的目标集）。
@@ -644,6 +647,8 @@ struct RunDirMeta {
     run_contract_sha256: Option<String>,
     #[serde(default)]
     evaluator_binary_sha256: Option<String>,
+    #[serde(default)]
+    provider_endpoint_sha256: Option<String>,
     created_at: String,
 }
 
@@ -2059,6 +2064,8 @@ pub struct RunOptions {
     pub fresh: bool,
     /// 批次标签（写入 meta/报告；同目录批次不一致拒绝续跑）。
     pub batch_label: Option<String>,
+    /// Hash of the configured model provider endpoint; never stores the URL.
+    pub provider_endpoint_sha256: Option<String>,
     /// 附加标签（溯源用）。
     pub tags: Vec<String>,
 }
@@ -2072,6 +2079,7 @@ impl Default for RunOptions {
             category: None,
             fresh: false,
             batch_label: None,
+            provider_endpoint_sha256: None,
             tags: Vec::new(),
         }
     }
@@ -2172,6 +2180,7 @@ impl MatrixRunner {
         opts: &RunOptions,
         run_contract_sha256: &str,
         evaluator_binary_sha256: &str,
+        provider_endpoint_sha256: Option<&str>,
     ) -> Result<(), ProductEvalError> {
         let hash = suite_hash(&self.bundle);
         let fresh = opts.fresh;
@@ -2227,6 +2236,12 @@ impl MatrixRunner {
                     self.out_dir.display()
                 ));
             }
+            if meta.provider_endpoint_sha256.as_deref() != provider_endpoint_sha256 {
+                return err(format!(
+                    "out 目录模型服务端点身份与本次运行不一致：换 --out 或加 --fresh。目录：{}",
+                    self.out_dir.display()
+                ));
+            }
         } else {
             if self.journal_path().exists() {
                 return err(format!(
@@ -2244,6 +2259,7 @@ impl MatrixRunner {
                 tags: opts.tags.clone(),
                 run_contract_sha256: Some(run_contract_sha256.to_string()),
                 evaluator_binary_sha256: Some(evaluator_binary_sha256.to_string()),
+                provider_endpoint_sha256: provider_endpoint_sha256.map(str::to_string),
                 created_at: now_rfc3339(),
             };
             let text = serde_json::to_string_pretty(&meta)
@@ -2325,6 +2341,7 @@ impl MatrixRunner {
             opts,
             &run_contract_sha256,
             &evaluator_binary_sha256,
+            opts.provider_endpoint_sha256.as_deref(),
         )?;
         let mut runs = self.load_runs()?;
         let completed: std::collections::BTreeSet<MatrixKey> =
@@ -2563,6 +2580,7 @@ impl MatrixRunner {
                 execution,
                 &model,
                 &evaluator_binary_sha256,
+                opts.provider_endpoint_sha256.as_deref(),
             )?;
             write_report(&self.out_dir, &report)?;
             tracing::info!(
@@ -2580,6 +2598,7 @@ impl MatrixRunner {
             execution,
             &model,
             &evaluator_binary_sha256,
+            opts.provider_endpoint_sha256.as_deref(),
         )
     }
 
@@ -2591,6 +2610,7 @@ impl MatrixRunner {
         execution: &str,
         model: &Option<String>,
         evaluator_binary_sha256: &str,
+        provider_endpoint_sha256: Option<&str>,
     ) -> Result<ProductEvalReport, ProductEvalError> {
         let completed: std::collections::BTreeSet<MatrixKey> =
             runs.iter().map(|run| run.key.clone()).collect();
@@ -2610,6 +2630,7 @@ impl MatrixRunner {
             tags: opts.tags.clone(),
             run_contract_sha256: Some(self.run_contract_sha256(cases, opts)),
             evaluator_binary_sha256: Some(evaluator_binary_sha256.to_string()),
+            provider_endpoint_sha256: provider_endpoint_sha256.map(str::to_string),
             generated_at: now_rfc3339(),
             runs: runs.to_vec(),
             pending,
@@ -2980,15 +3001,16 @@ pub fn compare_reports(a: &ProductEvalReport, b: &ProductEvalReport, as_json: bo
 /// 模型解析顺序：显式覆盖 > OPENAI_MODEL > 内置默认（GLM）。
 pub fn build_live_provider(
     model_override: Option<&str>,
-) -> Result<(Arc<dyn ModelProvider>, String), ProductEvalError> {
+) -> Result<(Arc<dyn ModelProvider>, String, String), ProductEvalError> {
     let mut config = OpenAiCompatibleConfig::from_env().map_err(ProductEvalError)?;
     if let Some(model) = model_override {
         config.model = model.to_string();
     }
     let model = config.model.clone();
+    let endpoint_sha256 = format!("{:x}", Sha256::digest(config.base_url.as_bytes()));
     let provider = owo_agent_core::gateway::ResilientProvider::from_config(config)
         .map_err(ProductEvalError)?;
-    Ok((Arc::new(provider), model))
+    Ok((Arc::new(provider), model, endpoint_sha256))
 }
 
 // ---------------------------------------------------------------------------
@@ -3411,6 +3433,11 @@ fn paired_run_alignment(
     {
         reasons.push("Single/Team 评测器二进制身份缺失或不一致".to_string());
     }
+    if single.provider_endpoint_sha256.as_deref().is_none_or(str::is_empty)
+        || single.provider_endpoint_sha256 != multi.provider_endpoint_sha256
+    {
+        reasons.push("Single/Team 模型服务端点身份缺失或不一致".to_string());
+    }
     if single.model.as_deref().is_none_or(str::is_empty)
         || single.model != multi.model
         || single.model != opts.model
@@ -3572,6 +3599,7 @@ pub fn build_paired_report_json(
             "execution": single.execution,
             "run_contract_sha256": single.run_contract_sha256,
             "evaluator_binary_sha256": single.evaluator_binary_sha256,
+            "provider_endpoint_sha256": single.provider_endpoint_sha256,
             "batch_label": single.batch_label,
             "generated_at": single.generated_at,
             "metrics": single.metrics,
@@ -3582,6 +3610,7 @@ pub fn build_paired_report_json(
             "execution": multi.execution,
             "run_contract_sha256": multi.run_contract_sha256,
             "evaluator_binary_sha256": multi.evaluator_binary_sha256,
+            "provider_endpoint_sha256": multi.provider_endpoint_sha256,
             "batch_label": multi.batch_label,
             "generated_at": multi.generated_at,
             "metrics": multi.metrics,

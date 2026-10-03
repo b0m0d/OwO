@@ -331,7 +331,7 @@ impl AppState {
                 {
                     let workswarm_work_root = data_root.join("product_eval").join("workswarm");
                     Arc::new(move || {
-                        let (provider, model) =
+                        let (provider, model, _endpoint_sha256) =
                             owo_agent_eval_facade::product_eval::build_live_provider(None)
                                 .map_err(|e| {
                                     format!(

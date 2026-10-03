@@ -38,7 +38,7 @@ async fn live_single_vs_workswarm_three_categories() {
     {
         panic!("live 对照需要 OPENAI_API_KEY 环境变量（凭据仅经环境注入）");
     }
-    let (provider, model) =
+    let (provider, model, endpoint_sha256) =
         owo_agent_product_eval::product_eval::build_live_provider(None).unwrap();
     println!("live 对照模型：{model}");
 
@@ -66,6 +66,7 @@ async fn live_single_vs_workswarm_three_categories() {
                     reps_override: Some(1),
                     only: Some(case_id.to_string()),
                     fresh: true,
+                    provider_endpoint_sha256: Some(endpoint_sha256.clone()),
                     ..RunOptions::default()
                 },
                 Arc::new(AtomicBool::new(false)),
@@ -96,6 +97,7 @@ async fn live_single_vs_workswarm_three_categories() {
                     reps_override: Some(1),
                     only: Some(case_id.to_string()),
                     fresh: true,
+                    provider_endpoint_sha256: Some(endpoint_sha256.clone()),
                     ..RunOptions::default()
                 },
                 Arc::new(AtomicBool::new(false)),

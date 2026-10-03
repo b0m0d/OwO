@@ -628,12 +628,14 @@ async fn run_matrix_cmd(
     });
     println!("输出目录：{}（{}）", out_dir.display(), exec);
 
-    let (executor, execution, model_label): (
+    let (executor, execution, model_label, provider_endpoint_sha256): (
         Arc<dyn owo_agent_eval_facade::product_eval::CaseExecutor>,
         String,
         Option<String>,
+        Option<String>,
     ) = if exec == "live" {
-        let (provider, resolved_model) = build_live_provider(model.as_deref())?;
+        let (provider, resolved_model, endpoint_sha256) =
+            build_live_provider(model.as_deref())?;
         (
             Arc::new(GenerativeExecutor {
                 provider,
@@ -641,16 +643,20 @@ async fn run_matrix_cmd(
             }),
             "live-generative".to_string(),
             Some(resolved_model),
+            Some(endpoint_sha256),
         )
     } else if exec == "agent" {
-        let (provider, resolved_model) = build_live_provider(model.as_deref())?;
+        let (provider, resolved_model, endpoint_sha256) =
+            build_live_provider(model.as_deref())?;
         (
             Arc::new(SingleAgentExecutor::new(provider, resolved_model.clone())),
             "live-agent".to_string(),
             Some(resolved_model),
+            Some(endpoint_sha256),
         )
     } else if exec == "workswarm" {
-        let (provider, resolved_model) = build_live_provider(model.as_deref())?;
+        let (provider, resolved_model, endpoint_sha256) =
+            build_live_provider(model.as_deref())?;
         // 每个单元格独立 TeamRun 工作目录（CAS/sqlite/状态互不串扰）。
         let work_root = out_dir.join("workswarm-teams");
         let mut ws_executor = WorkSwarmExecutor::new(provider, resolved_model.clone(), work_root);
@@ -663,12 +669,14 @@ async fn run_matrix_cmd(
             Arc::new(ws_executor),
             "live-workswarm".to_string(),
             Some(resolved_model),
+            Some(endpoint_sha256),
         )
     } else {
         (
             Arc::new(ReferenceDryExecutor),
             "dry-reference".to_string(),
             Some(crate::support::resolve_model(model, None)),
+            None,
         )
     };
 
@@ -680,6 +688,7 @@ async fn run_matrix_cmd(
         category,
         fresh,
         batch_label: label,
+        provider_endpoint_sha256,
         tags: tag,
     };
     let cancel = Arc::new(AtomicBool::new(false));

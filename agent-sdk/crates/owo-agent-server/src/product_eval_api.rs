@@ -171,6 +171,7 @@ impl ProductEvalHub {
             category: params.category,
             fresh: false,
             batch_label: None,
+            provider_endpoint_sha256: None,
             tags: Vec::new(),
         };
         let cases = product_eval::filter_cases(&bundle, &opts);
@@ -364,6 +365,7 @@ async fn run_job(
         category: params.category,
         fresh: false,
         batch_label: None,
+        provider_endpoint_sha256: None,
         tags: Vec::new(),
     };
     let model = handle
