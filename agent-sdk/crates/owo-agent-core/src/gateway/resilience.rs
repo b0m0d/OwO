@@ -513,8 +513,123 @@ impl ModelProvider for ResilientProvider {
         Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
 
+    /// 思考通道流式（无模型覆盖）：见 [`ResilientProvider::stream_with_reasoning`]。
+    async fn complete_stream_with_reasoning(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.stream_with_reasoning(None, messages, tools, on_chunk)
+            .await
+    }
+
+    /// 思考通道流式（带模型覆盖）：回合主循环走的就是这条路径。
+    async fn complete_stream_with_reasoning_and_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.stream_with_reasoning(model, messages, tools, on_chunk)
+            .await
+    }
+
     fn usage_snapshot(&self) -> TokenUsage {
         self.aggregate_usage()
+    }
+}
+
+/// `ResilientProvider` 的思考通道流式补全。
+///
+/// **为什么必须显式实现**：`ModelProvider` 的默认实现把正文包一层就转发
+/// （"默认实现忽略思考通道"），而回合主循环调的是
+/// `complete_stream_with_reasoning_and_model` —— serve 路径挂的正是本类型，
+/// 于是**推理增量在这一层被静默丢弃**（trace/CLI/UI 全都看不到深度思考，
+/// 而请求其实带上了推理模型）。`DeferredProvider` 与 `OpenAiCompatibleProvider`
+/// 都有正确实现，但外层没转发过来，永远走不到。
+///
+/// 语义与 [`ResilientProvider::complete_stream_with_model`] 完全一致
+/// （熔断门 + 重试 + 降级 + "已输出增量则不重试"），只是把回调换成带类型的
+/// `StreamChunk`，让思考增量能透出。
+impl ResilientProvider {
+    async fn stream_with_reasoning(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        if !self.breaker.allow_request() {
+            return Err(format!(
+                "模型网关熔断器打开（连续失败 {} 次），请稍后重试",
+                self.breaker.consecutive_failures()
+            ));
+        }
+        let mut errors: Vec<String> = Vec::new();
+        let mut retriable_seen = false;
+        for provider in self.providers() {
+            let mut attempt = 0;
+            let outcome = loop {
+                let mut emitted = false;
+                let result = {
+                    let mut forward = |chunk: StreamChunk| {
+                        emitted = true;
+                        on_chunk(chunk);
+                    };
+                    match model {
+                        Some(model) => {
+                            provider
+                                .complete_stream_with_reasoning_and_model(
+                                    Some(model),
+                                    messages,
+                                    tools,
+                                    &mut forward,
+                                )
+                                .await
+                        }
+                        None => {
+                            provider
+                                .complete_stream_with_reasoning(messages, tools, &mut forward)
+                                .await
+                        }
+                    }
+                };
+                match result {
+                    Ok(output) => {
+                        self.breaker.record_success();
+                        return Ok(output);
+                    }
+                    Err(error) => {
+                        if emitted {
+                            break (error, false, true);
+                        }
+                        let retriable = is_retriable(&error, &self.retry);
+                        if !retriable || attempt >= self.retry.max_retries {
+                            break (error, retriable, false);
+                        }
+                        tokio::time::sleep(self.retry.delay_for(attempt)).await;
+                        attempt += 1;
+                    }
+                }
+            };
+            let (error, retriable, partial) = outcome;
+            if partial {
+                errors.push(format!(
+                    "{error}（流式中断：已输出部分内容，不再重试以免重复）"
+                ));
+                break;
+            }
+            errors.push(error);
+            retriable_seen = retriable_seen || retriable;
+            if !retriable {
+                break;
+            }
+        }
+        let _ = retriable_seen;
+        self.breaker.record_failure();
+        Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
 }
 

@@ -655,6 +655,128 @@ fn parse_sse_payload_reads_reasoning_channel() {
     assert!(parse_sse_payload(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#).is_none());
 }
 
+/// 回归：**思考通道必须穿过 ResilientProvider**（serve 路径挂的就是这一层）。
+///
+/// 缺陷形态：`ModelProvider` 的默认 `complete_stream_with_reasoning_and_model`
+/// 明确"忽略思考通道"（只把正文包一层转发），而回合主循环调的是思考版方法。
+/// ResilientProvider 当时没重写它 → 推理增量在这一层被静默丢弃：
+/// 明明挂了推理模型、请求也带上了 reasoning，UI 却永远看不到深度思考。
+#[tokio::test]
+async fn resilient_chain_forwards_reasoning_chunks() {
+    struct ReasoningProvider {
+        seen: StdMutex<Vec<Option<String>>>,
+    }
+    impl ReasoningProvider {
+        /// 两个流式入口共用同一套发射逻辑——真实 provider（OpenAiCompatibleProvider /
+        /// DeferredProvider）也是两版都实现的。**只实现其中一版是不合格的**：
+        /// trait 的默认桥接会把推理增量降级成正文，这就是本缺陷的形态。
+        fn emit_all(
+            &self,
+            model: Option<&str>,
+            on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+        ) -> Result<ModelOutput, String> {
+            self.seen
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(model.map(str::to_string));
+            on_chunk(StreamChunk::Reasoning("先想一步。".to_string()));
+            on_chunk(StreamChunk::Content("答案".to_string()));
+            Ok(ModelOutput::Text("答案".to_string()))
+        }
+    }
+    #[async_trait]
+    impl ModelProvider for ReasoningProvider {
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            self.complete_stream_with_reasoning_and_model(None, messages, tools, &mut |_| {})
+                .await
+        }
+        async fn complete_stream_with_reasoning(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+            on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+        ) -> Result<ModelOutput, String> {
+            self.emit_all(None, on_chunk)
+        }
+        async fn complete_stream_with_reasoning_and_model(
+            &self,
+            model: Option<&str>,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+            on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+        ) -> Result<ModelOutput, String> {
+            self.emit_all(model, on_chunk)
+        }
+    }
+    let primary = Arc::new(ReasoningProvider {
+        seen: StdMutex::new(Vec::new()),
+    });
+    let resilient = ResilientProvider::new(
+        Arc::clone(&primary) as Arc<dyn ModelProvider>,
+        Vec::new(),
+        CircuitBreaker::from_env(),
+        RetryPolicy::from_env(),
+    );
+
+    let mut chunks: Vec<StreamChunk> = Vec::new();
+    let output = resilient
+        .complete_stream_with_reasoning_and_model(
+            Some("deepseek-reasoner"),
+            &[],
+            &[],
+            &mut |chunk| chunks.push(chunk),
+        )
+        .await
+        .expect("思考版流式应成功");
+    assert!(matches!(output, ModelOutput::Text(ref t) if t == "答案"));
+    assert!(
+        chunks
+            .iter()
+            .any(|c| matches!(c, StreamChunk::Reasoning(t) if t.contains("先想一步"))),
+        "推理增量必须透传给调用方，实际收到：{chunks:?}"
+    );
+    assert!(
+        chunks
+            .iter()
+            .any(|c| matches!(c, StreamChunk::Content(t) if t == "答案")),
+        "正文增量必须照常透传，实际收到：{chunks:?}"
+    );
+    // 请求级模型覆盖同样要穿过这一层（会话切推理模型后必须真的生效）。
+    assert_eq!(
+        primary
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_slice(),
+        &[Some("deepseek-reasoner".to_string())],
+        "带覆盖的入口必须把模型覆盖传到内层 provider"
+    );
+
+    // 无覆盖入口同样走思考通道（不得退回默认实现丢推理）。
+    let mut plain: Vec<StreamChunk> = Vec::new();
+    resilient
+        .complete_stream_with_reasoning(&[], &[], &mut |chunk| plain.push(chunk))
+        .await
+        .expect("无覆盖思考流式应成功");
+    assert!(
+        plain.iter().any(|c| matches!(c, StreamChunk::Reasoning(_))),
+        "无覆盖入口也必须透出推理增量"
+    );
+    assert_eq!(
+        primary
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_slice(),
+        &[Some("deepseek-reasoner".to_string()), None],
+        "无覆盖入口应传 None（由内层 provider 解析默认模型）"
+    );
+}
+
 /// DeferredProvider（取优合并自远端 engine）：未配置时调用点返回稳定码
 /// `provider/not_configured`，且 `provider_ready()` 为 false——core 仍可用。
 #[tokio::test]
