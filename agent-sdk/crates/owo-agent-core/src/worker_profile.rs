@@ -401,34 +401,6 @@ pub struct ProfileSubagentRunError {
     pub output_repairs: u32,
 }
 
-impl From<crate::worker_runtime::WorkerRuntimeError> for ProfileSubagentRunError {
-    fn from(error: crate::worker_runtime::WorkerRuntimeError) -> Self {
-        Self {
-            message: error.message,
-            duration_ms: error.duration_ms,
-            steps: error.steps,
-            model_calls: error.model_calls,
-            usage: error.usage,
-            usage_known: error.usage_known,
-            output_repairs: error.output_repairs,
-        }
-    }
-}
-
-impl From<crate::worker_runtime::WorkerRuntimeReport> for ProfileSubagentRunReport {
-    fn from(report: crate::worker_runtime::WorkerRuntimeReport) -> Self {
-        Self {
-            output: report.output,
-            duration_ms: report.duration_ms,
-            steps: report.steps,
-            model_calls: report.model_calls,
-            usage: report.usage,
-            usage_known: report.usage_known,
-            output_repairs: report.output_repairs,
-        }
-    }
-}
-
 impl From<String> for ProfileSubagentRunError {
     fn from(message: String) -> Self {
         Self {
@@ -523,8 +495,24 @@ impl ProfileSubagentRunner<'_> {
         runtime
             .run_report(prompt)
             .await
-            .map(Into::into)
-            .map_err(Into::into)
+            .map(|report| ProfileSubagentRunReport {
+                output: report.output,
+                duration_ms: report.duration_ms,
+                steps: report.steps,
+                model_calls: report.model_calls,
+                usage: report.usage,
+                usage_known: report.usage_known,
+                output_repairs: report.output_repairs,
+            })
+            .map_err(|error| ProfileSubagentRunError {
+                message: error.message,
+                duration_ms: error.duration_ms,
+                steps: error.steps,
+                model_calls: error.model_calls,
+                usage: error.usage,
+                usage_known: error.usage_known,
+                output_repairs: error.output_repairs,
+            })
     }
 }
 
