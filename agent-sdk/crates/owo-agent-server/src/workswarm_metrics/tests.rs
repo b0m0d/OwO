@@ -238,15 +238,16 @@ fn request_scoped_usage_is_accepted_by_cost_budget_gate() {
     record.usage_attribution = "request_id_scoped".to_string();
     record
         .requests
-        .push(owo_agent_core::gateway::ModelCallMetadata {
+        .push(owo_agent_protocol::ModelRequestMetricV1 {
             request_id: Some("req-safe-id".to_string()),
             model: Some("model-test".to_string()),
-            usage: Some(owo_agent_core::gateway::TokenUsage {
+            usage: Some(owo_agent_protocol::ModelTokenUsageV1 {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
             }),
             latency_ms: Some(25),
+            succeeded: true,
         });
     assert_eq!(
         budget_exhaustion_reason(&json!({"max_cost_usd": 10.0}), &[record], 2_000),
@@ -314,10 +315,42 @@ async fn measured_provider_preserves_request_metadata_once() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(observed.output, ModelOutput::Text("ok".to_string()));
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].request_id.as_deref(), Some("req-42"));
-    assert_eq!(records[0].model.as_deref(), Some("model-actual"));
-    assert_eq!(records[0].usage.unwrap().total_tokens, 20);
-    assert!(records[0].latency_ms.unwrap_or(0) >= 5);
+    assert_eq!(records[0].0.request_id.as_deref(), Some("req-42"));
+    assert_eq!(records[0].0.model.as_deref(), Some("model-actual"));
+    assert_eq!(records[0].0.usage.unwrap().total_tokens, 20);
+    assert!(records[0].0.latency_ms.unwrap_or(0) >= 5);
+    assert!(records[0].1, "成功的 observed provider call 保留逐请求 outcome");
+}
+
+
+#[tokio::test]
+async fn failed_provider_call_is_retained_as_failed_request_metric() {
+    struct FailedProvider;
+    #[async_trait]
+    impl ModelProvider for FailedProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            Err("provider unavailable".to_string())
+        }
+    }
+
+    let calls = Arc::new(AtomicU64::new(0));
+    let collector = Arc::new(RequestUsageCollector::default());
+    let measured = MeasuredProvider::new_with_request_usage(
+        Arc::new(FailedProvider),
+        Arc::clone(&calls),
+        Arc::clone(&collector),
+        "step-failed".to_string(),
+    );
+    assert!(measured.complete(&[], &[]).await.is_err());
+    let records = collector.take("step-failed");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(records.len(), 1);
+    assert!(!records[0].1);
+    assert!(records[0].0.usage.is_none());
 }
 
 #[tokio::test]
@@ -411,10 +444,10 @@ async fn concurrent_measured_providers_keep_request_usage_scoped_to_each_step() 
     assert_eq!(calls_b.load(Ordering::Relaxed), 1);
     assert_eq!(records_a.len(), 1);
     assert_eq!(records_b.len(), 1);
-    assert_eq!(records_a[0].request_id.as_deref(), Some("req-a"));
-    assert_eq!(records_b[0].request_id.as_deref(), Some("req-b"));
-    assert_eq!(records_a[0].usage.unwrap().total_tokens, 14);
-    assert_eq!(records_b[0].usage.unwrap().total_tokens, 36);
+    assert_eq!(records_a[0].0.request_id.as_deref(), Some("req-a"));
+    assert_eq!(records_b[0].0.request_id.as_deref(), Some("req-b"));
+    assert_eq!(records_a[0].0.usage.unwrap().total_tokens, 14);
+    assert_eq!(records_b[0].0.usage.unwrap().total_tokens, 36);
 }
 
 #[test]

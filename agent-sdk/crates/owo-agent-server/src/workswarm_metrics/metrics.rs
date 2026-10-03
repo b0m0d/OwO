@@ -51,7 +51,7 @@ pub struct WorkerSpanRecord {
     pub usage_attribution: String,
     /// Per-request IDs/model/usage only; never prompt or response content.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub requests: Vec<ModelCallMetadata>,
+    pub requests: Vec<owo_agent_protocol::ModelRequestMetricV1>,
     #[serde(default)]
     pub cost_usd: f64,
     /// 该步骤的第几次尝试（1 起；>1 = 返工/重试 span）。
@@ -143,7 +143,7 @@ impl MetricsJournal {
 /// ModelProvider 计数装饰器：`complete`/`complete_stream` 各计一次（每次模型调用
 /// 恰好经过其一），`usage_snapshot` 透传内层（token 快照差值归因不受影响）。
 pub(crate) struct RequestUsageCollector {
-    by_step: Mutex<HashMap<String, Vec<ModelCallMetadata>>>,
+    by_step: Mutex<HashMap<String, Vec<(ModelCallMetadata, bool)>>>,
 }
 
 impl Default for RequestUsageCollector {
@@ -166,16 +166,16 @@ impl RequestUsageCollector {
             .remove(step_id);
     }
 
-    pub(crate) fn record(&self, step_id: &str, metadata: ModelCallMetadata) {
+    pub(crate) fn record(&self, step_id: &str, metadata: ModelCallMetadata, succeeded: bool) {
         self.by_step
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(step_id.to_string())
             .or_default()
-            .push(metadata);
+            .push((metadata, succeeded));
     }
 
-    pub(crate) fn take(&self, step_id: &str) -> Vec<ModelCallMetadata> {
+    pub(crate) fn take(&self, step_id: &str) -> Vec<(ModelCallMetadata, bool)> {
         self.by_step
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -244,7 +244,7 @@ impl MeasuredProvider {
         }
     }
 
-    fn record_unknown_request(&self, latency_ms: u64) {
+    fn record_unknown_request(&self, latency_ms: u64, succeeded: bool) {
         if let (Some(collector), Some(step_id)) = (&self.request_usage, &self.step_id) {
             collector.record(
                 step_id,
@@ -252,6 +252,7 @@ impl MeasuredProvider {
                     latency_ms: Some(latency_ms),
                     ..ModelCallMetadata::default()
                 },
+                succeeded,
             );
         }
     }
@@ -267,7 +268,7 @@ impl ModelProvider for MeasuredProvider {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
         let result = self.inner.complete(messages, tools).await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
         result
     }
 
@@ -280,7 +281,7 @@ impl ModelProvider for MeasuredProvider {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
         let result = self.inner.complete_stream(messages, tools, on_delta).await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
         result
     }
 
@@ -293,7 +294,7 @@ impl ModelProvider for MeasuredProvider {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
         let result = self.inner.complete_with_model(model, messages, tools).await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
         result
     }
 
@@ -310,7 +311,7 @@ impl ModelProvider for MeasuredProvider {
             .inner
             .complete_stream_with_model(model, messages, tools, on_delta)
             .await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
         result
     }
 
@@ -326,7 +327,7 @@ impl ModelProvider for MeasuredProvider {
             .inner
             .complete_stream_with_reasoning(messages, tools, on_chunk)
             .await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
         result
     }
 
@@ -359,12 +360,12 @@ impl ModelProvider for MeasuredProvider {
             Ok(mut observed) => {
                 observed.metadata.latency_ms = Some(started.elapsed().as_millis() as u64);
                 if let (Some(collector), Some(step_id)) = (&self.request_usage, &self.step_id) {
-                    collector.record(step_id, observed.metadata.clone());
+                    collector.record(step_id, observed.metadata.clone(), true);
                 }
                 Ok(observed)
             }
             Err(error) => {
-                self.record_unknown_request(started.elapsed().as_millis() as u64);
+                self.record_unknown_request(started.elapsed().as_millis() as u64, false);
                 Err(error)
             }
         }
@@ -573,22 +574,22 @@ impl Worker for MeasuredRoleWorker {
             .as_ref()
             .map(|c| c.load(Ordering::Relaxed).saturating_sub(calls_before))
             .unwrap_or(0);
-        let requests = self
+        let request_observations = self
             .request_usage
             .as_ref()
             .map(|collector| collector.take(&scope_key))
             .unwrap_or_default();
         let model_calls = if self.request_usage.is_some() {
-            requests.len() as u64
+            request_observations.len() as u64
         } else {
             atomic_call_delta
         };
         let request_usage = if model_calls > 0
-            && requests.len() as u64 == model_calls
-            && requests.iter().all(|request| request.usage.is_some())
+            && request_observations.len() as u64 == model_calls
+            && request_observations.iter().all(|(request, _)| request.usage.is_some())
         {
             let mut total = TokenUsage::default();
-            for request in &requests {
+            for (request, _) in &request_observations {
                 if let Some(usage) = &request.usage {
                     total.add(usage);
                 }
@@ -597,6 +598,20 @@ impl Worker for MeasuredRoleWorker {
         } else {
             None
         };
+        let requests = request_observations
+            .iter()
+            .map(|(request, succeeded)| owo_agent_protocol::ModelRequestMetricV1 {
+                request_id: request.request_id.clone(),
+                model: request.model.clone(),
+                usage: request.usage.map(|usage| owo_agent_protocol::ModelTokenUsageV1 {
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    total_tokens: usage.total_tokens,
+                }),
+                latency_ms: request.latency_ms,
+                succeeded: *succeeded,
+            })
+            .collect::<Vec<_>>();
         let usage_delta = request_usage.or_else(|| match (&usage_before, &usage_after) {
             (Some(before), Some(after)) if !overlapped => {
                 let delta = after.saturating_sub(before);
@@ -608,7 +623,7 @@ impl Worker for MeasuredRoleWorker {
         });
         let request_usage_complete = model_calls > 0
             && requests.len() as u64 == model_calls
-            && requests.iter().all(|request| request.usage.is_some());
+            && request_observations.iter().all(|(request, _)| request.usage.is_some());
         let usage_attribution = if self.provider.is_none() {
             "not_applicable"
         } else if request_usage_complete {
