@@ -51,13 +51,13 @@ async fn run_git(workspace: &Path, args: &[&str], timeout_secs: u64) -> Result<S
         })?
         .map_err(|e| format!("git 启动失败（未安装或不在 PATH？）：{e}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = crate::tools::decode_process_output(&output.stderr);
         if stderr.contains("not a git repository") {
             return Err("当前工作区不是 git 仓库（可在会话里切换到仓库目录，或用 run_command 执行 git init）".to_string());
         }
         return Err(format!("git 失败：{}", truncate_chars(stderr.trim(), 500)));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(crate::tools::decode_process_output(&output.stdout).to_string())
 }
 
 async fn git_status_impl(workspace: &Path, args: Value) -> Result<Value, String> {
@@ -233,7 +233,7 @@ mod tests {
             assert!(
                 output.status.success(),
                 "git {args:?} 失败：{}",
-                String::from_utf8_lossy(&output.stderr)
+                crate::tools::decode_process_output(&output.stderr)
             );
         };
         run(&["init", "-q"]);

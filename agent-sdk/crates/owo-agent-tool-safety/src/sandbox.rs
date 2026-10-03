@@ -156,6 +156,22 @@ impl SandboxPolicy {
     }
 }
 
+/// 剥掉 Windows verbatim 路径前缀（`\\?\`）。
+///
+/// `canonicalize()` 在 Windows 上返回 verbatim 形式（`\\?\D:\ws\x`），而工作区边界
+/// 常是原始路径（`D:\ws\x`）。两者混用做前缀比较会恒 false，把合法路径判成越界。
+///
+/// 与 `owo-agent-core::tools::strip_verbatim_prefix` 是**同口径的两份实现**：
+/// sandbox 是 core 的依赖，不能反向引用，只能各持一份。
+/// 修改任一侧都必须同步另一侧（core 侧有对应单测钉住）。
+fn strip_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(stripped) => std::path::PathBuf::from(stripped.to_string()),
+        None => path.to_path_buf(),
+    }
+}
+
 /// 待执行的沙箱命令。
 #[derive(Debug, Clone)]
 pub struct SandboxCommand {
@@ -201,7 +217,20 @@ impl SandboxCommand {
         self.policy.validate()?;
         if self.policy.file_scope == FileScope::WorkspaceOnly {
             if let (Some(cwd), Some(root)) = (&self.cwd, &self.policy.workspace) {
-                if cwd.is_absolute() && !cwd.starts_with(root) {
+                // 比对前必须剥掉 Windows verbatim 前缀（`\\?\`）。
+                //
+                // `cwd` 一般来自 canonicalize（Windows 上会返回 `\\?\D:\ws\x`），而
+                // `workspace` 往往是用户/调用方给的原始路径（`D:\ws\x`）。直接
+                // `starts_with` 会得出"自己不在自己里面"的荒谬结论，把**合法命令**
+                // 判成越界——实测模型因此连续被拒，只能改写脚本文件绕开：
+                //
+                //   工作目录越界：\\?\D:\ws\sandbox 不在工作区 D:\ws\sandbox 内
+                //
+                // core 侧 `resolve_session_path` 早就在做同口径剥离，这里漏了；
+                // 两个 crate 不能互相引用，故各自持有一份等价实现（改一处必须改两处）。
+                let cwd_cmp = strip_verbatim_prefix(cwd);
+                let root_cmp = strip_verbatim_prefix(root);
+                if cwd_cmp.is_absolute() && !cwd_cmp.starts_with(&root_cmp) {
                     return Err(SandboxError::PolicyViolation(format!(
                         "工作目录越界：{} 不在工作区 {} 内",
                         cwd.display(),
@@ -2229,6 +2258,56 @@ pub(crate) mod win {
             ok &= std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 112;
         }
         ok
+    }
+}
+
+#[cfg(test)]
+mod sandbox_workspace_scope_tests {
+    use super::*;
+
+    /// 回归：canonicalize 产出的 `\\?\` 前缀不得让"工作目录在自己工作区内"判成越界。
+    ///
+    /// 线上事故：模型执行 `python3 -c "多行脚本"`，cwd 来自 canonicalize
+    /// （`\\?\D:\...\sandbox-test`），workspace 是原始路径（`D:\...\sandbox-test`），
+    /// 直接 `starts_with` 恒 false → 合法命令被拒，模型只能改写脚本文件绕开。
+    #[test]
+    fn verbatim_prefixed_cwd_is_not_out_of_workspace() {
+        let root = std::path::PathBuf::from(r"D:\ws\sandbox");
+        let policy = SandboxPolicy {
+            workspace: Some(root.clone()),
+            file_scope: FileScope::WorkspaceOnly,
+            ..Default::default()
+        };
+        // canonicalize 形态（Windows）：带 verbatim 前缀。
+        let verbatim_cwd = std::path::PathBuf::from(r"\\?\D:\ws\sandbox\sub");
+        let command = SandboxCommand::new("python", policy.clone()).with_cwd(verbatim_cwd);
+        assert!(
+            command.validate().is_ok(),
+            "带 \\\\?\\ 前缀的工作目录被误判越界：{:?}",
+            command.validate()
+        );
+
+        // 反向：真的跑到工作区外仍必须拒绝（安全口径不放松）。
+        let outside = std::path::PathBuf::from(r"\\?\D:\other\place");
+        let escaped = SandboxCommand::new("python", policy).with_cwd(outside);
+        assert!(escaped.validate().is_err(), "工作区外的 cwd 必须仍被拒绝");
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_only_touches_verbatim_paths() {
+        assert_eq!(
+            strip_verbatim_prefix(std::path::Path::new(r"\\?\D:\ws\x")),
+            std::path::PathBuf::from(r"D:\ws\x")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(std::path::Path::new(r"D:\ws\x")),
+            std::path::PathBuf::from(r"D:\ws\x")
+        );
+        // UNC 形式的 verbatim 前缀（`\\?\UNC\server\share`）不该被误剥成 `UNC\...`。
+        assert_eq!(
+            strip_verbatim_prefix(std::path::Path::new(r"\\?\UNC\srv\share")),
+            std::path::PathBuf::from(r"UNC\srv\share")
+        );
     }
 }
 

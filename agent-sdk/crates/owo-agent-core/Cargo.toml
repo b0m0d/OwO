@@ -100,6 +100,9 @@ owo-agent-eval-facade.workspace = true
 futures = "0.3"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    # 解码子进程输出用：Windows 控制台按 OEM 代码页（简中 936/GBK）输出，
+    # 直接用 UTF-8 解会让所有中文命令输出变成替换字符（见 tools::decode_process_output）。
+    "Win32_Globalization",
     "Win32_System_Com",
     "Win32_UI_Accessibility",
     "Win32_UI_Input",

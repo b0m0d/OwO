@@ -189,7 +189,9 @@ async fn run_one(config: &HookConfig, payload: &Value) -> HookOutcome {
             return HookOutcome::Proceed;
         }
     };
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = crate::tools::decode_process_output(&output.stderr)
+        .trim()
+        .to_string();
     match output.status.code() {
         Some(0) => HookOutcome::Proceed,
         Some(2) => HookOutcome::Blocked(if stderr.is_empty() {

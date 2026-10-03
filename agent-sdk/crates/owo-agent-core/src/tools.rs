@@ -889,7 +889,9 @@ pub(crate) fn resolve_session_path(ctx: &ToolContext, path: &str) -> Result<Path
     } else {
         ctx.workspace
     };
-    let policy_workspace = boundary.canonicalize().unwrap_or_else(|_| boundary.to_path_buf());
+    let policy_workspace = boundary
+        .canonicalize()
+        .unwrap_or_else(|_| boundary.to_path_buf());
     // 两侧统一去 Windows verbatim 前缀再比对（`\\?\C:\x` vs `C:\x` 否则恒不匹配）。
     let candidate_cmp = strip_verbatim_prefix(&candidate);
     let workspace_cmp = strip_verbatim_prefix(&policy_workspace);
@@ -1626,11 +1628,78 @@ fn html_to_text(html: &str) -> String {
     decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// 解码来路不明的字节（子进程输出 / 未声明 charset 的响应体等）。
+///
+/// Windows 控制台程序按**系统代码页**输出（简中为 OEM 936/GBK），而这里曾经一律用
+/// `String::from_utf8_lossy` 解码——非 UTF-8 字节会变成替换字符，于是**所有中文命令
+/// 输出都乱码**。实测审计原文：
+///
+/// ```text
+/// 命令  : echo 中文输出测试
+/// stdout: '�����������'
+/// ```
+///
+/// 顺序：UTF-8 严格 → 系统代码页 → lossy 兜底。UTF-8 优先保证现代工具（git / rg /
+/// python / 多数 API）的中文输出不被二次误解；只有严格解析失败才认为它是本机代码页。
+pub(crate) fn decode_process_output(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    #[cfg(windows)]
+    if let Some(text) = decode_with_system_codepage(bytes) {
+        return text;
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// 按 Windows 系统 OEM 代码页（`GetOEMCP`）把字节转成 UTF-8。
+///
+/// 用 OEM 而非 ANSI 代码页：控制台程序（cmd / 批处理 / 多数 CLI）输出走 OEM 代码页，
+/// 简中环境下是 936（GBK）。
+#[cfg(windows)]
+fn decode_with_system_codepage(bytes: &[u8]) -> Option<String> {
+    use windows::Win32::Globalization::{
+        GetOEMCP, MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
+    };
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    unsafe {
+        let codepage = GetOEMCP();
+        let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+        let len = MultiByteToWideChar(codepage, flags, bytes, None);
+        if len <= 0 {
+            return None;
+        }
+        let mut wide = vec![0u16; len as usize];
+        let written = MultiByteToWideChar(codepage, flags, bytes, Some(&mut wide));
+        if written <= 0 {
+            return None;
+        }
+        wide.truncate(written as usize);
+        Some(String::from_utf16_lossy(&wide))
+    }
+}
+
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::limited(5))
-        .user_agent("OwO-Agent/1.0 (+web)")
+        .user_agent("OwO-Agent/1.0 (+web)");
+    // 显式代理优先：仓库把 `OWO_HTTP_PROXY` 定为出网代理开关（AGENTS.md），
+    // 但 reqwest 只自动识别 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY，不认这个前缀——
+    // 于是"文档说配了代理、实际没走"，在受限网络里表现为所有网络工具静默失败。
+    if let Some(proxy) = std::env::var("OWO_HTTP_PROXY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        builder = builder.proxy(
+            reqwest::Proxy::all(&proxy)
+                .map_err(|error| format!("代理配置无效（OWO_HTTP_PROXY={proxy}）：{error}"))?,
+        );
+    }
+    builder
         .build()
         .map_err(|error| format!("HTTP 客户端构造失败：{error}"))
 }
@@ -1685,7 +1754,8 @@ impl Tool for WebFetchTool {
             .await
             .map_err(|error| format!("读取响应失败：{error}"))?;
         let truncated = bytes.len() > max_bytes;
-        let raw = String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).to_string();
+        // 响应体未必是 UTF-8：国内站点常见 GBK 且不带 charset 声明，用 lossy 解会整页乱码。
+        let raw = decode_process_output(&bytes[..bytes.len().min(max_bytes)]);
         let text = if content_type.contains("html") {
             html_to_text(&raw)
         } else {
@@ -1710,7 +1780,8 @@ impl Tool for WebSearchTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "web_search".into(),
-            description: "网页搜索（默认 DuckDuckGo HTML；可用 OWO_WEB_SEARCH_URL 覆盖端点）"
+            description: "网页搜索（按 DuckDuckGo → Bing → DDG Lite 顺序自动选择可用端点；\
+                          可用 OWO_WEB_SEARCH_URL 指定端点、OWO_HTTP_PROXY 指定出网代理）"
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -1723,35 +1794,135 @@ impl Tool for WebSearchTool {
 
     async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
         let query = required_string(&args, "query")?;
-        let endpoint = std::env::var("OWO_WEB_SEARCH_URL")
+        // 显式配置优先；未配置时按候选顺序尝试（见 SEARCH_ENDPOINTS 说明）。
+        let configured = std::env::var("OWO_WEB_SEARCH_URL")
             .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "https://html.duckduckgo.com/html/".to_string());
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let endpoints: Vec<String> = match configured {
+            Some(endpoint) => vec![endpoint],
+            None => SEARCH_ENDPOINTS
+                .iter()
+                .map(|item| item.to_string())
+                .collect(),
+        };
         let client = http_client()?;
-        let response = client
-            .get(&endpoint)
-            .query(&[("q", query.as_str())])
-            .send()
-            .await
-            .map_err(|error| format!("搜索请求失败：{error}"))?;
-        let status = response.status().as_u16();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| format!("读取搜索结果失败：{error}"))?;
-        let results = parse_search_results(&body);
-        Ok(json!({
-            "query": query,
-            "engine": endpoint,
-            "status": status,
-            "count": results.len(),
-            "results": results,
-        }))
+        let mut attempts: Vec<String> = Vec::new();
+        for endpoint in &endpoints {
+            match client
+                .get(endpoint)
+                .query(&[("q", query.as_str())])
+                .send()
+                .await
+            {
+                Err(error) => attempts.push(format!("{endpoint} → 请求失败：{error}")),
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    if !(200..300).contains(&status) {
+                        attempts.push(format!("{endpoint} → HTTP {status}"));
+                        continue;
+                    }
+                    let body = match response.text().await {
+                        Ok(body) => body,
+                        Err(error) => {
+                            attempts.push(format!("{endpoint} → 读取响应失败：{error}"));
+                            continue;
+                        }
+                    };
+                    let results = parse_search_results(endpoint, &body);
+                    if results.is_empty() {
+                        attempts.push(format!("{endpoint} → 无结果（页面结构可能已变）"));
+                        continue;
+                    }
+                    return Ok(json!({
+                        "query": query,
+                        "engine": endpoint,
+                        "status": status,
+                        "count": results.len(),
+                        "results": results,
+                    }));
+                }
+            }
+        }
+        // 全部候选都失败：把每一次的原因列出来，并给出可操作的下一步，
+        // 而不是丢一句笼统的"搜索请求失败"让调用方猜。
+        Err(format!(
+            "搜索失败：{}。排查建议：① 若在受限网络，设置 OWO_HTTP_PROXY 指向可用代理；\
+             ② 或用 OWO_WEB_SEARCH_URL 指定可达的搜索端点（如 https://cn.bing.com/search）。",
+            attempts.join("；")
+        ))
     }
 }
 
-/// 解析 DuckDuckGo HTML 结果（`class="result__a"`）；最多 10 条。
-fn parse_search_results(html: &str) -> Vec<Value> {
+/// 搜索端点候选：按顺序尝试，第一个返回可解析结果的胜出。
+///
+/// 为什么必须 fallback：默认的 DuckDuckGo HTML 端点在部分网络环境**完全不可达**
+/// （实测 3 次尝试全部 `error sending request`，而同期 `web_fetch` 抓 example.com /
+/// crates.io 均 200——是站点级不可达，不是网络故障）。搜索是高频工具，不该因为一个
+/// 境外站点就整体不可用；国内可达的 Bing 作为第二档，DDG Lite 作为第三档（结构更简）。
+const SEARCH_ENDPOINTS: &[&str] = &[
+    "https://html.duckduckgo.com/html/",
+    "https://cn.bing.com/search",
+    "https://lite.duckduckgo.com/lite/",
+];
+
+/// 按端点选择解析器：不同引擎的 HTML 结构完全不同，不能共用一套规则。
+fn parse_search_results(endpoint: &str, html: &str) -> Vec<Value> {
+    if endpoint.contains("bing.com") {
+        parse_bing_results(html)
+    } else {
+        parse_ddg_results(html)
+    }
+}
+
+/// 解析 Bing 结果（`<li class="b_algo">` 内的 `<h2><a href=…>`）。
+///
+/// 候选端点里的 cn.bing.com 是为了在 DuckDuckGo 不可达的网络下仍能搜索；
+/// 它的结构是「结果块 → h2 → 锚点」，与 DDG 的 `class="result__a"` 无关。
+fn parse_bing_results(html: &str) -> Vec<Value> {
+    let mut results = Vec::new();
+    let mut rest = html;
+    while let Some(position) = rest.find("class=\"b_algo\"") {
+        let block = &rest[position..];
+        let Some(h2) = block.find("<h2") else {
+            break;
+        };
+        let scoped = &block[h2..];
+        let Some(anchor) = scoped.find("<a ") else {
+            break;
+        };
+        let Some(href_offset) = scoped[anchor..].find("href=\"") else {
+            break;
+        };
+        let href_start = anchor + href_offset + 6;
+        let Some(href_end) = scoped[href_start..].find('"') else {
+            break;
+        };
+        let url = scoped[href_start..href_start + href_end].to_string();
+        let Some(gt) = scoped[href_start..].find('>') else {
+            break;
+        };
+        let title_start = href_start + gt + 1;
+        let Some(close) = scoped[title_start..].find("</a>") else {
+            break;
+        };
+        let title = html_to_text(&scoped[title_start..title_start + close]);
+        let consumed = position + title_start + close;
+        // 只收外链结果：Bing 内嵌了不少站内导航锚点，它们也是 <a>。
+        if url.starts_with("http") && !title.is_empty() {
+            results.push(json!({ "title": title, "url": url }));
+            if results.len() >= 10 {
+                break;
+            }
+        }
+        // 无论是否采纳都要前进，否则同一块会被反复解析（死循环）。
+        rest = &rest[consumed.min(rest.len())..];
+    }
+    results
+}
+
+/// 解析 DuckDuckGo HTML（`class="result__a"`）与 DDG Lite；最多 10 条。
+fn parse_ddg_results(html: &str) -> Vec<Value> {
     let mut results = Vec::new();
     let mut rest = html;
     while let Some(position) = rest.find("class=\"result__a\"") {
@@ -1931,7 +2102,7 @@ impl Tool for ShellOutputTool {
             "running": !done,
             "exit_code": exit_code,
             "log_path": shell.log_path.display().to_string(),
-            "output": String::from_utf8_lossy(slice),
+            "output": decode_process_output(slice),
         }))
     }
 }
@@ -2120,10 +2291,17 @@ impl Tool for SearchFilesTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "search_files".into(),
-            description: "使用随包 ripgrep 按文件名关键字递归搜索工作区文件（只读）".into(),
+            description: "使用随包 ripgrep 按**文件名关键字**递归搜索工作区文件（只读）。\
+                          关键字是字面量匹配，不是正则——传 `\\.(txt|md)$` 之类的正则会搜不到东西"
+                .into(),
             input_schema: json!({
                 "type": "object",
-                "properties": { "pattern": { "type": "string" } },
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "文件名关键字（字面量，非正则），例如 notes、.md、config"
+                    }
+                },
                 "required": ["pattern"]
             }),
             effect: None,
@@ -2187,10 +2365,10 @@ impl Tool for SearchFilesTool {
             return Err(format!(
                 "ripgrep 搜索失败（exit_code={}）：{}",
                 output.exit_code,
-                String::from_utf8_lossy(&output.stderr).trim()
+                decode_process_output(&output.stderr).trim()
             ));
         }
-        let matches = String::from_utf8_lossy(&output.stdout)
+        let matches = decode_process_output(&output.stdout)
             .lines()
             .filter(|line| !line.is_empty())
             .take(200)
@@ -2302,11 +2480,11 @@ impl Tool for GrepTool {
             return Err(format!(
                 "ripgrep 检索失败（exit_code={}）：{}",
                 output.exit_code,
-                String::from_utf8_lossy(&output.stderr).trim()
+                decode_process_output(&output.stderr).trim()
             ));
         }
         // `--json` 输出逐行解析，避免 Windows 盘符冒号破坏 `path:line:text` 切分。
-        let mut matches: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        let mut matches: Vec<Value> = decode_process_output(&output.stdout)
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter(|value| value.get("type").and_then(Value::as_str) == Some("match"))
@@ -2487,8 +2665,8 @@ impl Tool for RunCommandTool {
         Ok(json!({
             "command": command,
             "exit_code": output.exit_code,
-            "stdout": String::from_utf8_lossy(&output.stdout),
-            "stderr": String::from_utf8_lossy(&output.stderr),
+            "stdout": decode_process_output(&output.stdout),
+            "stderr": decode_process_output(&output.stderr),
         }))
     }
 }
@@ -3024,6 +3202,22 @@ impl Tool for UseSkillTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归：UTF-8 输出不得被二次误解，OEM 代码页（GBK）输出不得变成替换字符。
+    #[test]
+    fn decode_process_output_prefers_utf8_then_oem_codepage() {
+        // 现代工具（git / rg / python）输出 UTF-8：原样保留。
+        assert_eq!(decode_process_output("中文输出".as_bytes()), "中文输出");
+        assert_eq!(decode_process_output(b"plain ascii\n"), "plain ascii\n");
+        assert_eq!(decode_process_output(b""), "");
+        // 「中文」的 GBK 字节（D6D0 CEC4）：严格 UTF-8 解不了，须按系统代码页还原。
+        #[cfg(windows)]
+        assert_eq!(
+            decode_process_output(&[0xD6, 0xD0, 0xCE, 0xC4]),
+            "中文",
+            "GBK 字节未按系统代码页解码（中文命令输出会乱码）"
+        );
+    }
 
     #[tokio::test]
     async fn search_files_uses_bundled_ripgrep_with_workspace_scope() {
