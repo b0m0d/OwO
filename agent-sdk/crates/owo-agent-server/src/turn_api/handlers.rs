@@ -388,6 +388,11 @@ pub(crate) async fn turn(
                         &error_text,
                     )
                 };
+                let completion_status = trace
+                    .completion_record
+                    .as_ref()
+                    .map(|record| record.status)
+                    .unwrap_or(owo_agent_protocol::CompletionStatusV1::Unverified);
                 let _ = owo_agent_core::save_trace(&traces_dir, &trace);
                 crate::event_stream::hub()
                     .publish_invalidate(crate::event_stream::InvalidateDomain::Traces);
@@ -401,6 +406,7 @@ pub(crate) async fn turn(
                     // 「执行中」；`is_turn_failed_event` 同时识别旧的 Progress 前缀。
                     SseEvent::TurnFailed {
                         message: error_text.to_string(),
+                        completion_status,
                     },
                 );
             }

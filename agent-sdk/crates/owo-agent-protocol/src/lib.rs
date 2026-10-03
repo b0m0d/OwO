@@ -950,6 +950,8 @@ pub enum SseEvent {
     /// 回合失败终态（异常/中断）：必须显式下发，避免前端停留在"执行中"。
     TurnFailed {
         message: String,
+        #[serde(default)]
+        completion_status: CompletionStatusV1,
     },
     /// 回合统计（`run_turn` 结束后补发）：前端回合汇报卡展示耗时/步数/消耗。
     TurnStats {
@@ -1079,5 +1081,29 @@ mod health_build_tests {
             old.api_version.is_empty(),
             "旧载荷保持可解析，但不会通过桌面版本握手"
         );
+    }
+}
+
+#[cfg(test)]
+mod turn_failed_completion_status_tests {
+    use super::{CompletionStatusV1, SseEvent};
+
+    #[test]
+    fn turn_failed_status_is_backward_compatible_and_round_trips() {
+        let legacy: SseEvent =
+            serde_json::from_str(r#"{"type":"turn_failed","message":"cancelled"}"#).unwrap();
+        match legacy {
+            SseEvent::TurnFailed {
+                completion_status, ..
+            } => assert_eq!(completion_status, CompletionStatusV1::Unverified),
+            _ => panic!("expected TurnFailed"),
+        }
+
+        let current = SseEvent::TurnFailed {
+            message: "cancelled".to_string(),
+            completion_status: CompletionStatusV1::Aborted,
+        };
+        let json = serde_json::to_value(&current).unwrap();
+        assert_eq!(json["completion_status"], "aborted");
     }
 }

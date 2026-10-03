@@ -4300,13 +4300,22 @@ async function sendPrompt() {
           if (state.turn) renderTurnSummary(state.sessionId, state.turn);
           break;
         }
-        case "turn_failed":
-          // 服务端失败终态：明确告诉用户失败原因并补汇报卡，不让界面停在「执行中」。
+        case "turn_failed": {
+          // 服务端失败终态：明确告诉用户失败原因与真实完成状态，不留在「执行中」。
           finished = true;
           stopRunStatus();
           state.toolRun = null;
-          showTurnFailure(payload.message || "未知原因");
+          const completionLabel = ({
+            response_complete: "",
+            candidate: " · 代码变更待验收",
+            accepted: " · 宿主验收通过",
+            unverified: " · 结果未验证",
+            blocked: " · 存在阻断问题",
+            aborted: " · 已取消",
+          })[payload.completion_status] || "";
+          showTurnFailure((payload.message || "未知原因") + completionLabel);
           break;
+        }
         case "compaction":
           addEventChip("compact", "上下文已自动压缩", payload.summary || "");
           break;

@@ -345,9 +345,16 @@ impl StreamPrinter {
             }
             SseEvent::PermissionResolved { .. } => {}
             // 回合失败终态（取优合并自远端 engine）：明确打印失败，不留在「执行中」。
-            SseEvent::TurnFailed { message } => {
+            SseEvent::TurnFailed {
+                message,
+                completion_status,
+            } => {
                 self.clear_status();
-                println!("  {} 回合失败：{message}", "✘".red());
+                println!(
+                    "  {} 回合失败：{message}{}",
+                    "✘".red(),
+                    completion_status_label(*completion_status)
+                );
             }
             SseEvent::Compaction { summary } => {
                 self.clear_status();

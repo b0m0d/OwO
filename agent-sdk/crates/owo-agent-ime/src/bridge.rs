@@ -329,7 +329,7 @@ fn apply_frame(frame: &SseFrame, accumulator: &mut TurnAccumulator, slot: &Arc<P
         SseEvent::Final { text } => {
             accumulator.final_text = text;
         }
-        SseEvent::TurnFailed { message } => {
+        SseEvent::TurnFailed { message, .. } => {
             accumulator.failed = Some(message);
         }
         SseEvent::PermissionRequest {

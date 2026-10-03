@@ -921,8 +921,19 @@ impl TuiApp {
             SseEvent::PermissionRequest { .. } => {}
             SseEvent::PermissionResolved { .. } => {}
             // 回合失败终态（取优合并自远端 engine）。
-            SseEvent::TurnFailed { message } => {
-                self.push_line(format!("  ✘ 回合失败：{message}"), red());
+            SseEvent::TurnFailed {
+                message,
+                completion_status,
+            } => {
+                let status = match completion_status {
+                    owo_agent_protocol::CompletionStatusV1::ResponseComplete => "",
+                    owo_agent_protocol::CompletionStatusV1::Candidate => " · 代码变更待验收",
+                    owo_agent_protocol::CompletionStatusV1::Accepted => " · 宿主验收通过",
+                    owo_agent_protocol::CompletionStatusV1::Unverified => " · 结果未验证",
+                    owo_agent_protocol::CompletionStatusV1::Blocked => " · 存在阻断问题",
+                    owo_agent_protocol::CompletionStatusV1::Aborted => " · 已取消",
+                };
+                self.push_line(format!("  ✘ 回合失败：{message}{status}"), red());
             }
             // 思考通道（取优合并自远端 engine）：TUI 折叠（不打断回答流）。
             SseEvent::ReasoningDelta { .. } => {}
