@@ -840,6 +840,8 @@ pub enum CompletionStatusV1 {
     Unverified,
     /// A required validation or blocking issue prevents acceptance.
     Blocked,
+    /// The caller explicitly cancelled the run before delivery was committed.
+    Aborted,
 }
 
 /// Durable, host-produced completion decision shared by Single and Team.

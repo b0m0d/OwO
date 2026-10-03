@@ -371,13 +371,23 @@ pub(crate) async fn turn(
                     "回合执行失败",
                     &[("session_id", serde_json::json!(current.id))],
                 );
-                let trace = owo_agent_core::TraceRecord::from_error(
-                    &current,
-                    &trace_prompt,
-                    &trace_started_at,
-                    trace_started.elapsed().as_millis() as u64,
-                    &error_text,
-                );
+                let trace = if matches!(&error, owo_agent_core::AgentError::Aborted) {
+                    owo_agent_core::TraceRecord::from_aborted(
+                        &current,
+                        &trace_prompt,
+                        &trace_started_at,
+                        trace_started.elapsed().as_millis() as u64,
+                        &error_text,
+                    )
+                } else {
+                    owo_agent_core::TraceRecord::from_error(
+                        &current,
+                        &trace_prompt,
+                        &trace_started_at,
+                        trace_started.elapsed().as_millis() as u64,
+                        &error_text,
+                    )
+                };
                 let _ = owo_agent_core::save_trace(&traces_dir, &trace);
                 crate::event_stream::hub()
                     .publish_invalidate(crate::event_stream::InvalidateDomain::Traces);

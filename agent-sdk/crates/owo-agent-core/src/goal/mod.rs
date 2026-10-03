@@ -203,6 +203,31 @@ impl GoalRunner {
         self.state.aborted || self.aborted_flag.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    fn record_aborted_completion(&mut self) {
+        let evidence_receipt_ids = self
+            .state
+            .validation_receipts
+            .iter()
+            .chain(
+                self.state
+                    .records
+                    .values()
+                    .flat_map(|record| record.validation_receipts.iter()),
+            )
+            .map(|receipt| receipt.receipt_id.clone())
+            .collect::<Vec<_>>();
+        self.state.completion_record = Some(crate::completion::build_completion_record(
+            &self.state.goal.id,
+            &self.state.run_id,
+            crate::completion::decide_completion(crate::completion::CompletionEvidence {
+                aborted: true,
+                ..crate::completion::CompletionEvidence::default()
+            }),
+            evidence_receipt_ids,
+            None,
+        ));
+    }
+
     /// 进入 Aborted 终态（状态 + 未完成步骤 + 落盘），幂等。
     fn enter_aborted(&mut self) {
         if !self.state.aborted {
@@ -210,6 +235,7 @@ impl GoalRunner {
         }
         self.mark_remaining(StepStatus::Aborted);
         self.state.goal.transition(GoalStatus::Aborted);
+        self.record_aborted_completion();
         self.persist_if_needed();
         self.notify_all_step_progress();
         self.log("goal.abort", "协调器取消：协作退出并保留已完成产物");
@@ -223,6 +249,7 @@ impl GoalRunner {
         self.mark_remaining(StepStatus::Aborted);
         self.log("goal.abort", "调度器收到 abort 请求");
         self.state.goal.transition(GoalStatus::Aborted);
+        self.record_aborted_completion();
         self.persist_if_needed();
         self.notify_all_step_progress();
     }

@@ -101,7 +101,10 @@ impl TeamCoordinator {
         state.completion_record = Some(crate::completion::build_completion_record(
             team_id,
             &state.run_id,
-            owo_agent_protocol::CompletionStatusV1::Unverified,
+            crate::completion::decide_completion(crate::completion::CompletionEvidence {
+                aborted: true,
+                ..crate::completion::CompletionEvidence::default()
+            }),
             evidence_receipt_ids,
             None,
         ));

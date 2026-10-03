@@ -128,6 +128,27 @@ impl TraceRecord {
             completion_record: single_completion_record(session, owo_agent_protocol::CompletionStatusV1::Unverified),
         }
     }
+
+    /// Build a cancellation trace with an explicit Aborted completion record.
+    pub fn from_aborted(
+        session: &Session,
+        prompt: &str,
+        started_at: &str,
+        duration_ms: u64,
+        error: &str,
+    ) -> Self {
+        let mut trace = Self::from_error(session, prompt, started_at, duration_ms, error);
+        if let Some(record) = trace.completion_record.as_mut() {
+            record.status = crate::completion::decide_completion(
+                crate::completion::CompletionEvidence {
+                    aborted: true,
+                    ..crate::completion::CompletionEvidence::default()
+                },
+            );
+            record.decided_at = chrono::Utc::now().to_rfc3339();
+        }
+        trace
+    }
 }
 
 fn single_completion_record(
@@ -293,6 +314,28 @@ mod tests {
         let restored: TraceRecord = serde_json::from_value(serde_json::to_value(trace).unwrap()).unwrap();
         assert_eq!(restored.model_calls.len(), 2);
         assert!(!restored.model_calls[1].succeeded);
+    }
+
+    #[test]
+    fn aborted_trace_persists_an_explicit_aborted_completion_status() {
+        let mut session = Session::new(".", "mock", None);
+        session.active_task_context = Some(
+            crate::task_context::ResolvedTaskContext::for_single_turn(
+                "turn-cancelled",
+                "完成这项代码任务",
+            ),
+        );
+        let trace = TraceRecord::from_aborted(
+            &session,
+            "完成这项代码任务",
+            "2026-10-04T00:00:00Z",
+            100,
+            "agent aborted by user",
+        );
+        assert_eq!(
+            trace.completion_record.unwrap().status,
+            owo_agent_protocol::CompletionStatusV1::Aborted
+        );
     }
 
     #[test]

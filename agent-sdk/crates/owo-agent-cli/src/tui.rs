@@ -947,6 +947,7 @@ impl TuiApp {
                     owo_agent_protocol::CompletionStatusV1::Accepted => " · 宿主验收通过",
                     owo_agent_protocol::CompletionStatusV1::Unverified => " · 结果未验证",
                     owo_agent_protocol::CompletionStatusV1::Blocked => " · 存在阻断问题",
+                    owo_agent_protocol::CompletionStatusV1::Aborted => " · 已取消",
                 };
                 self.push_line(
                     format!(

@@ -46,6 +46,7 @@ fn completion_status_label(status: owo_agent_protocol::CompletionStatusV1) -> St
         owo_agent_protocol::CompletionStatusV1::Accepted => " · 宿主验收通过".to_string(),
         owo_agent_protocol::CompletionStatusV1::Unverified => " · 结果未验证".to_string(),
         owo_agent_protocol::CompletionStatusV1::Blocked => " · 存在阻断问题".to_string(),
+        owo_agent_protocol::CompletionStatusV1::Aborted => " · 已取消".to_string(),
     }
 }
 

@@ -4,10 +4,11 @@
 
 use owo_agent_protocol::CompletionStatusV1;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub const SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID: &str = "single-human-acceptance-v1";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompletionEvidence {
+    pub aborted: bool,
     pub response_finished: bool,
     pub reached_turn_limit: bool,
     pub has_candidate_changes: bool,
@@ -60,6 +61,9 @@ pub fn build_completion_record(
 /// validation. A failed required check or blocking issue is terminally Blocked;
 /// incomplete, stale, or missing evidence remains Unverified.
 pub fn decide_completion(evidence: CompletionEvidence) -> CompletionStatusV1 {
+    if evidence.aborted {
+        return CompletionStatusV1::Aborted;
+    }
     if evidence.blocking_issue_count > 0 || evidence.failed_required_validation_count > 0 {
         return CompletionStatusV1::Blocked;
     }
@@ -223,6 +227,21 @@ mod tests {
         assert_eq!(
             apply_required_review(CompletionStatusV1::Candidate, ValidationVerdictV1::Passed),
             CompletionStatusV1::Candidate
+        );
+    }
+
+    #[test]
+    fn explicit_cancellation_has_its_own_non_success_status() {
+        assert_eq!(
+            decide_completion(CompletionEvidence {
+                aborted: true,
+                response_finished: true,
+                has_candidate_changes: true,
+                required_validation_count: 1,
+                passed_required_validation_count: 1,
+                ..CompletionEvidence::default()
+            }),
+            CompletionStatusV1::Aborted
         );
     }
 
