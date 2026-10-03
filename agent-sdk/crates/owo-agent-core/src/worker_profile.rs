@@ -8,24 +8,18 @@
 //!   权限边界**：读角色的注册表里根本没有写/执行工具，而非注册后靠审批拒绝；
 //! - [`intersect_paths`]：角色写白名单 ∩ 团队绑定写白名单（任一侧为空 = 取非空一侧；
 //!   两侧都空 = 工作区内可写，仍受审批约束）；
-//! - [`ProfileSubagentRunner`]：画像驱动子代理执行器——与一路
-//!   `ContractSubagentRunner` 同口径（完整回合循环 + `WorkerOutputV1` 输出契约 +
-//!   至多一次定向修复；`is_critic` 为 critic 角色代理），区别仅在工具注册表由画像
-//!   装配、回合上限取画像值、写面为交集白名单。一路冻结口径不受影响：
-//!   `SubagentRunner` / `ContractSubagentRunner` 签名与字段零改动。
+//! - `ProfileSubagentRunner` 与 `ContractSubagentRunner` 是 capability-resolution adapters；
+//!   两者均把已解析的策略/工具/预算注入 core `WorkerRuntime`。Runtime 统一 Agent 回合、
+//!   任务会话、取消、WorkerOutputV1 修复和逐请求用量，不推断角色或授予工具权限。
 
-use crate::agent::{Agent, AgentConfig, TurnEvent};
-use crate::contract_worker::enforce_worker_output_contract_with_model;
+use crate::agent::{AgentConfig, TurnEvent};
 use crate::gateway::ModelProvider;
 use crate::permissions::{Approver, Policy};
-use crate::session::Session;
-use crate::subagent::MAX_SUBAGENT_DEPTH;
 use crate::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// 可选 Worker 回合事件回调；事件使用方应只记录安全元数据。
 pub type TurnEventSink = Arc<dyn Fn(&TurnEvent) + Send + Sync>;
@@ -407,6 +401,34 @@ pub struct ProfileSubagentRunError {
     pub output_repairs: u32,
 }
 
+impl From<crate::worker_runtime::WorkerRuntimeError> for ProfileSubagentRunError {
+    fn from(error: crate::worker_runtime::WorkerRuntimeError) -> Self {
+        Self {
+            message: error.message,
+            duration_ms: error.duration_ms,
+            steps: error.steps,
+            model_calls: error.model_calls,
+            usage: error.usage,
+            usage_known: error.usage_known,
+            output_repairs: error.output_repairs,
+        }
+    }
+}
+
+impl From<crate::worker_runtime::WorkerRuntimeReport> for ProfileSubagentRunReport {
+    fn from(report: crate::worker_runtime::WorkerRuntimeReport) -> Self {
+        Self {
+            output: report.output,
+            duration_ms: report.duration_ms,
+            steps: report.steps,
+            model_calls: report.model_calls,
+            usage: report.usage,
+            usage_known: report.usage_known,
+            output_repairs: report.output_repairs,
+        }
+    }
+}
+
 impl From<String> for ProfileSubagentRunError {
     fn from(message: String) -> Self {
         Self {
@@ -430,16 +452,12 @@ impl ProfileSubagentRunner<'_> {
             .map_err(|error| error.message)
     }
 
-    /// Run the shared worker loop and output contract while retaining per-invocation telemetry.
+    /// Resolve the capability profile here, then delegate all worker execution to WorkerRuntime.
     pub async fn run_report(
         &self,
         workspace: &Path,
         prompt: &str,
     ) -> Result<ProfileSubagentRunReport, ProfileSubagentRunError> {
-        let started = Instant::now();
-        if self.depth >= MAX_SUBAGENT_DEPTH {
-            return Err(format!("子代理深度超限（最多 {MAX_SUBAGENT_DEPTH} 层）").into());
-        }
         let policy = if self.profile.read_only {
             Policy::read_only(workspace.to_path_buf())
         } else {
@@ -472,8 +490,6 @@ impl ProfileSubagentRunner<'_> {
             );
         }
         config.subagent_depth = self.depth + 1;
-        let configured_turn_cap = config.max_turns;
-        let agent = Agent::new(Arc::clone(&self.provider), registry, policy, config);
         let budget_note = self.budget_note_override.clone().unwrap_or_else(|| {
             format!(
                 "你的回合预算为 {} 回合：前 {} 回合完成必要的读取、写入和任务要求的定向验证；最后一个回合必须直接输出最终 JSON（不要再调用任何工具）。尽量少花回合。\n",
@@ -487,131 +503,28 @@ impl ProfileSubagentRunner<'_> {
             &budget_note,
             self.extra_system_prompt.as_deref(),
         );
-        let mut session = if let (Some(store), Some(session_id)) =
-            (&self.session_store, &self.worker_session_id)
-        {
-            if store
-                .exists(session_id)
-                .map_err(|error| format!("Worker 会话索引查询失败：{error}"))?
-            {
-                let loaded = store
-                    .load(session_id)
-                    .map_err(|error| format!("Worker 会话 {session_id} 恢复失败：{error}"))?;
-                if loaded.workspace != workspace
-                    || loaded.id != *session_id
-                    || loaded.parent_id != self.parent_session_id
-                {
-                    return Err(
-                        format!("Worker 会话 {session_id} 的工作区或父会话归属不匹配").into(),
-                    );
-                }
-                loaded.with_model_override(Some(self.model.clone()))
-            } else {
-                Session::new(workspace, self.model.clone(), Some(system_prompt))
-                    .with_model_override(Some(self.model.clone()))
-            }
-        } else {
-            Session::new(workspace, self.model.clone(), Some(system_prompt))
-                .with_model_override(Some(self.model.clone()))
+        let runtime = crate::worker_runtime::WorkerRuntime {
+            provider: Arc::clone(&self.provider),
+            approver: self.approver,
+            abort: self.abort,
+            depth: self.depth,
+            model: self.model.clone(),
+            workspace: workspace.to_path_buf(),
+            registry,
+            policy,
+            config,
+            system_prompt: Some(system_prompt),
+            is_critic: self.is_critic,
+            event_sink: self.event_sink.clone(),
+            session_store: self.session_store.clone(),
+            worker_session_id: self.worker_session_id.clone(),
+            parent_session_id: self.parent_session_id.clone(),
         };
-        if let Some(session_id) = &self.worker_session_id {
-            session.id = session_id.clone();
-        }
-        session.parent_id = self.parent_session_id.clone();
-        if let (Some(store), Some(_)) = (&self.session_store, &self.worker_session_id) {
-            store
-                .save(&session)
-                .map_err(|error| format!("Worker 会话初始化保存失败：{error}"))?;
-        }
-        let event_sink = self.event_sink.clone();
-        let mut on_event = move |event: &TurnEvent| {
-            if let Some(sink) = &event_sink {
-                sink(event);
-            }
-        };
-        let outcome = agent
-            .run_turn(
-                &mut session,
-                prompt,
-                self.approver,
-                self.abort,
-                &mut on_event,
-            )
-            .await;
-        if let (Some(store), Some(_)) = (&self.session_store, &self.worker_session_id) {
-            store
-                .save(&session)
-                .map_err(|error| format!("Worker 会话执行后保存失败：{error}"))?;
-        }
-        let outcome = outcome.map_err(|error| format!("子代理执行失败：{error}"))?;
-        if outcome.reached_model_turn_limit {
-            return Err(ProfileSubagentRunError {
-                message: format!(
-                    "worker_turn_budget_exhausted:模型在 {} 轮预算内未自行给出最终答复",
-                    configured_turn_cap
-                ),
-                duration_ms: started.elapsed().as_millis() as u64,
-                steps: outcome.steps,
-                model_calls: outcome.events.iter().filter(|event| matches!(event, TurnEvent::ModelCall)).count() as u32,
-                usage: outcome.usage,
-                usage_known: outcome.usage_known,
-                output_repairs: 0,
-            });
-        }
-        let model_calls_from_turn = outcome
-            .events
-            .iter()
-            .filter(|event| matches!(event, TurnEvent::ModelCall))
-            .count() as u32;
-        let steps = outcome.steps;
-        let mut usage = outcome.usage;
-        let mut usage_known = outcome.usage_known;
-        let text = outcome
-            .final_text
-            .unwrap_or_else(|| format!("（子代理无最终文本，共 {} 步）", outcome.steps));
-        let enforced = match enforce_worker_output_contract_with_model(
-            &self.provider,
-            Some(&self.model),
-            &text,
-            self.is_critic,
-        )
-        .await
-        {
-            Ok(enforced) => enforced,
-            Err(error) => {
-                let repair_usage_known = error.repairs == 0 || error.usage.is_some();
-                let mut failure_usage = usage;
-                if let Some(repair_usage) = error.usage {
-                    failure_usage.add(&repair_usage);
-                }
-                return Err(ProfileSubagentRunError {
-                    message: error.message,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    steps,
-                    model_calls: model_calls_from_turn.saturating_add(error.repairs),
-                    usage: failure_usage,
-                    usage_known: usage_known && repair_usage_known,
-                    output_repairs: error.repairs,
-                });
-            }
-        };
-        let output_repairs = enforced.repairs;
-        if output_repairs > 0 {
-            if let Some(repair_usage) = enforced.usage {
-                usage.add(&repair_usage);
-            } else {
-                usage_known = false;
-            }
-        }
-        Ok(ProfileSubagentRunReport {
-            output: enforced.text,
-            duration_ms: started.elapsed().as_millis() as u64,
-            steps,
-            model_calls: model_calls_from_turn.saturating_add(output_repairs),
-            usage,
-            usage_known,
-            output_repairs,
-        })
+        runtime
+            .run_report(prompt)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
     }
 }
 

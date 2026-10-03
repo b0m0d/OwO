@@ -1,8 +1,8 @@
-//! 生产 Worker 输出契约执行器（七期一路）：真实 Agent Worker 两路的共享契约层。
+//! WorkerOutputV1 输出契约与定向修复原语；执行循环由 core WorkerRuntime 统一承载。
 //!
-//! 统一生产 `SubagentRunner`（`agent.rs`/`tools.rs` 的 subagent 工具、`workswarm_api.rs`
-//! 的 Agent 执行后端）与 ProductEval `EvalAgentWorker`（`product_eval/workswarm_executor.rs`）
-//! 的输出契约执行：**最终结果必须是合法的 `WorkerOutputV1` 契约 JSON，自由文本交付路径彻底关闭**。
+//! 生产 `SubagentRunner`、Team `ProfileSubagentRunner` 与 ProductEval `EvalAgentWorker`
+//! 共用此处的输出契约检查；各自解析工具权限后，通过 WorkerRuntime 执行同一回合循环。
+//! **最终结果必须是合法的 `WorkerOutputV1` 契约 JSON，自由文本交付路径彻底关闭**。
 //!
 //! 七期契约冻结口径：
 //! 1. 先经 [`parse_worker_output`] 解析，再按角色规则校验（`read_only` 参数是两路的
@@ -17,11 +17,10 @@
 //! Producer 正文只取自 `artifact.content`）；连「无最终文本」的兜底文本也走契约执行，
 //! 不豁免。
 
-use crate::agent::{Agent, AgentConfig, TurnEvent};
+use crate::agent::{AgentConfig, TurnEvent};
 use crate::gateway::{ChatMessage, ModelOutput, ModelProvider};
 use crate::permissions::{Approver, Policy};
-use crate::session::Session;
-use crate::subagent::{TurnEventSink, MAX_SUBAGENT_DEPTH};
+use crate::subagent::TurnEventSink;
 use crate::tools::ToolRegistry;
 use crate::workswarm_output::{
     contract_repair_prompt, contract_system_prompt, parse_worker_output, strip_code_fences,
@@ -298,17 +297,14 @@ pub struct ContractSubagentRunner<'a> {
 impl ContractSubagentRunner<'_> {
     /// 运行一个只读或通用子代理会话，返回契约校验后的 JSON 本体。
     ///
-    /// `read_only` 是角色代理：true = critic 角色（只读探索，不交付，禁带 artifact）；
-    /// false = producer 角色（通用子代理，done 必须携带 artifact）。
+    /// Capability resolution stays in this adapter; Agent loop, task-session handling,
+    /// budget exhaustion, output repair, and telemetry are shared by WorkerRuntime.
     pub async fn run(
         &self,
         workspace: &Path,
         prompt: &str,
         read_only: bool,
     ) -> Result<String, String> {
-        if self.depth >= MAX_SUBAGENT_DEPTH {
-            return Err(format!("子代理深度超限（最多 {MAX_SUBAGENT_DEPTH} 层）"));
-        }
         let policy = if read_only {
             Policy::read_only(workspace.to_path_buf())
         } else {
@@ -332,26 +328,16 @@ impl ContractSubagentRunner<'_> {
             subagent_depth: self.depth + 1,
             ..Default::default()
         };
-        let agent = Agent::new(Arc::clone(&self.provider), registry, policy, config);
         let base_prompt = if read_only {
             "你是只读探索子代理：只能读取/搜索工作区文件，禁止写入或执行命令；调查完成后用简洁中文汇报发现。\n"
         } else {
             "你是通用子代理：独立完成委派任务，工具调用仍需审批，完成后汇报结果。\n\
-             **验收纪律**：先明确任务里的验收标准；每一项结论都要有证据（读到的文件路径、命令输出、\n\
+             **验收纪律**：先明确任务里的验收标准；每一项结论都要有证据（读到的文件路径、命令输出、\
              测试结果），写进 evidence 字段；无证据的完成声明会被独立复核判为未完成。\n"
         };
-        // 输出契约（V1）：system prompt 追加契约条款，让模型首轮即可按
-        // WorkerOutputV1 JSON 输出；不合规时共享执行器最多定向修复一次。
         let system_prompt = format!("{base_prompt}{}", contract_system_prompt(read_only));
-        // M4.2：调用方给出的模型显式进入请求体（非空且非 `"default"` 哨兵即固定）；
-        // 空串/哨兵表示自动——回退 Provider 解析链（OPENAI_MODEL 热切换 → 启动配置 → 内置默认）。
-        let mut session = Session::new(workspace, self.model.clone(), Some(system_prompt))
-            .with_model_override(Some(self.model.clone()));
-        // 嵌套事件转发：工具进度 + 审批请求即时到达父回合的客户端。
-        // 过滤：子代理的 TokenDelta/Final/Compaction 不外发——否则子代理的流式
-        // 文本会混进父代理的回答（工具事件用 `sub:` 前缀标明来源，id 保持配对）。
         let sink = self.events.clone();
-        let mut on_event = |event: &TurnEvent| {
+        let event_sink = Arc::new(move |event: &TurnEvent| {
             let Some(sink) = sink.as_ref() else {
                 return;
             };
@@ -383,36 +369,29 @@ impl ContractSubagentRunner<'_> {
                 }),
                 _ => {}
             }
+        });
+        let runtime = crate::worker_runtime::WorkerRuntime {
+            provider: Arc::clone(&self.provider),
+            approver: self.approver,
+            abort: self.abort,
+            depth: self.depth,
+            model: self.model.clone(),
+            workspace: workspace.to_path_buf(),
+            registry,
+            policy,
+            config,
+            system_prompt: Some(system_prompt),
+            is_critic: read_only,
+            event_sink: Some(event_sink),
+            session_store: None,
+            worker_session_id: None,
+            parent_session_id: None,
         };
-        let outcome = agent
-            .run_turn(
-                &mut session,
-                prompt,
-                self.approver,
-                self.abort,
-                &mut on_event,
-            )
+        runtime
+            .run_report(prompt)
             .await
-            .map_err(|error| format!("子代理执行失败：{error}"))?;
-        if outcome.reached_model_turn_limit {
-            return Err("worker_turn_budget_exhausted:模型在任务预算内未自行给出最终答复".to_string());
-        }
-        // 连兜底文本（无最终文本）也走契约执行——自由文本路径不豁免
-        // （至多修复一次，否则 output_contract_invalid）。
-        let text = outcome
-            .final_text
-            .unwrap_or_else(|| format!("（子代理无最终文本，共 {} 步）", outcome.steps));
-        match enforce_worker_output_contract_with_model(
-            &self.provider,
-            Some(&self.model),
-            &text,
-            read_only,
-        )
-        .await
-        {
-            Ok(result) => Ok(result.text),
-            Err(error) => Err(error.message),
-        }
+            .map(|report| report.output)
+            .map_err(|error| error.message)
     }
 }
 
