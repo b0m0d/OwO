@@ -62,6 +62,9 @@ pub struct Session {
     /// Host-produced behavior validation evidence for ordinary Agent work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+    /// Ephemeral model-request observations for building an error trace before a TurnOutcome exists.
+    #[serde(skip)]
+    pub(crate) transient_model_calls: Vec<crate::agent::ModelCallRecord>,
     pub created_at: String,
     pub updated_at: String,
     /// 父会话（由 fork 产生时）。
@@ -119,6 +122,7 @@ impl Session {
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
             validation_receipts: Vec::new(),
+            transient_model_calls: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
             parent_id: None,
@@ -505,6 +509,7 @@ impl Session {
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
             validation_receipts: Vec::new(),
+            transient_model_calls: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
             parent_id: Some(self.id.clone()),

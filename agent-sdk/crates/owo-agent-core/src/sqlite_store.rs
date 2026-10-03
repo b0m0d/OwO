@@ -458,6 +458,7 @@ impl SqliteSessionStore {
                 .map_err(json_error)?,
             execution_receipts: serde_json::from_str(&row.6).map_err(json_error)?,
             validation_receipts: serde_json::from_str(&row.17).map_err(json_error)?,
+            transient_model_calls: Vec::new(),
             created_at: row.7,
             updated_at: row.8,
             parent_id: row.9,

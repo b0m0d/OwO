@@ -35,6 +35,9 @@ pub struct TraceRecord {
     pub events: Vec<TurnEvent>,
     #[serde(default)]
     pub usage: TokenUsage,
+    /// True only when every recorded provider request returned attributable usage.
+    #[serde(default)]
+    pub usage_known: bool,
     /// Attributable provider call records; legacy traces deserialize as empty.
     #[serde(default)]
     pub model_calls: Vec<ModelCallRecord>,
@@ -69,6 +72,7 @@ impl TraceRecord {
             reached_model_turn_limit: outcome.reached_model_turn_limit,
             events: outcome.events.clone(),
             usage: outcome.usage,
+            usage_known: outcome.usage_known,
             model_calls: outcome.model_calls.clone(),
             phase_timings: outcome.phase_timings.clone(),
             error: None,
@@ -89,6 +93,17 @@ impl TraceRecord {
             .strip_prefix(r"\\?\")
             .unwrap_or(&workspace)
             .to_string();
+        let model_calls = session.transient_model_calls.clone();
+        let usage_known = !model_calls.is_empty()
+            && model_calls
+                .iter()
+                .all(|call| call.metadata.usage.is_some());
+        let mut usage = TokenUsage::default();
+        for call in &model_calls {
+            if let Some(request_usage) = call.metadata.usage {
+                usage.add(&request_usage);
+            }
+        }
         Self {
             session_id: session.id.clone(),
             workspace,
@@ -100,8 +115,9 @@ impl TraceRecord {
             final_text: None,
             reached_model_turn_limit: false,
             events: Vec::new(),
-            usage: TokenUsage::default(),
-            model_calls: Vec::new(),
+            usage,
+            usage_known,
+            model_calls,
             phase_timings: Vec::new(),
             error: Some(error.to_string()),
             performance_task: configured_performance_task(),
@@ -154,6 +170,51 @@ pub fn list_traces(dir: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::gateway::ChatMessage;
+
+    #[test]
+    fn error_trace_preserves_successful_and_failed_provider_requests() {
+        let mut session = Session::new(".", "mock", None);
+        session.transient_model_calls = vec![
+            crate::agent::ModelCallRecord {
+                metadata: crate::gateway::ModelCallMetadata {
+                    request_id: Some("req-before-error".to_string()),
+                    model: Some("served-model".to_string()),
+                    usage: Some(TokenUsage {
+                        prompt_tokens: 30,
+                        completion_tokens: 5,
+                        total_tokens: 35,
+                    }),
+                    latency_ms: Some(120),
+                },
+                succeeded: true,
+            },
+            crate::agent::ModelCallRecord {
+                metadata: crate::gateway::ModelCallMetadata {
+                    model: Some("served-model".to_string()),
+                    latency_ms: Some(5000),
+                    ..crate::gateway::ModelCallMetadata::default()
+                },
+                succeeded: false,
+            },
+        ];
+        let trace = TraceRecord::from_error(
+            &session,
+            "implement feature",
+            "2026-10-04T00:00:00Z",
+            5120,
+            "provider timeout",
+        );
+        assert_eq!(trace.model_calls.len(), 2);
+        assert!(trace.model_calls[0].succeeded);
+        assert!(!trace.model_calls[1].succeeded);
+        assert_eq!(trace.model_calls[0].metadata.usage.unwrap().total_tokens, 35);
+        assert_eq!(trace.usage.total_tokens, 35);
+        assert!(!trace.usage_known, "失败请求 usage 未知时不得将部分合计标为完整");
+        assert_eq!(trace.model_calls[1].metadata.latency_ms, Some(5000));
+        let restored: TraceRecord = serde_json::from_value(serde_json::to_value(trace).unwrap()).unwrap();
+        assert_eq!(restored.model_calls.len(), 2);
+        assert!(!restored.model_calls[1].succeeded);
+    }
 
     #[test]
     fn trace_round_trip_and_persistence() {

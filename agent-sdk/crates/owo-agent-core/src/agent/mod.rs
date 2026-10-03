@@ -552,6 +552,7 @@ impl Agent {
         let turn_id = uuid::Uuid::new_v4().to_string();
         let mut usage = TokenUsage::default();
         let mut model_calls = Vec::new();
+        session.transient_model_calls.clear();
         let mut usage_known = true;
         let mut model_requests = 0usize;
         // §9.2：turn 入口建立统一预算（None = 不限时，仅记账不强制）；
@@ -736,6 +737,14 @@ impl Agent {
                     match tokio::time::timeout(model_budget, attempt).await {
                         Ok(result) => result,
                         Err(_) => {
+                            session.transient_model_calls.push(ModelCallRecord {
+                                metadata: ModelCallMetadata {
+                                    model: wire_model.clone(),
+                                    latency_ms: Some(model_started.elapsed().as_millis() as u64),
+                                    ..ModelCallMetadata::default()
+                                },
+                                succeeded: false,
+                            });
                             commit_turn_messages(session, &messages);
                             return Err(AgentError::Gateway(format!(
                                 "预算耗尽：phase=model elapsed_ms={}（§9.2 DeadlineBudget）",
@@ -749,6 +758,14 @@ impl Agent {
             let observed = match output {
                 Ok(observed) => observed,
                 Err(error) => {
+                    session.transient_model_calls.push(ModelCallRecord {
+                        metadata: ModelCallMetadata {
+                            model: wire_model.clone(),
+                            latency_ms: Some(model_started.elapsed().as_millis() as u64),
+                            ..ModelCallMetadata::default()
+                        },
+                        succeeded: false,
+                    });
                     commit_turn_messages(session, &messages);
                     return Err(error);
                 }
@@ -757,10 +774,12 @@ impl Agent {
             let model_elapsed = model_started.elapsed();
             let mut request_metadata = observed.metadata.clone();
             request_metadata.latency_ms.get_or_insert(model_elapsed.as_millis() as u64);
-            model_calls.push(ModelCallRecord {
+            let request_record = ModelCallRecord {
                 metadata: request_metadata,
                 succeeded: true,
-            });
+            };
+            session.transient_model_calls.push(request_record.clone());
+            model_calls.push(request_record);
             if let Some(request_usage) = observed.metadata.usage {
                 usage.add(&request_usage);
             } else {
@@ -1401,10 +1420,12 @@ impl Agent {
                     request_metadata
                         .latency_ms
                         .get_or_insert(wrap_up_started.elapsed().as_millis() as u64);
-                    model_calls.push(ModelCallRecord {
+                    let request_record = ModelCallRecord {
                         metadata: request_metadata,
                         succeeded: true,
-                    });
+                    };
+                    session.transient_model_calls.push(request_record.clone());
+                    model_calls.push(request_record);
                     if let Some(request_usage) = observed.metadata.usage {
                         usage.add(&request_usage);
                     } else {
@@ -1414,13 +1435,16 @@ impl Agent {
                 }
                 Err(error) => {
                     usage_known = false;
-                    model_calls.push(ModelCallRecord {
+                    let request_record = ModelCallRecord {
                         metadata: ModelCallMetadata {
+                            model: wrap_model.clone(),
                             latency_ms: Some(wrap_up_started.elapsed().as_millis() as u64),
                             ..ModelCallMetadata::default()
                         },
                         succeeded: false,
-                    });
+                    };
+                    session.transient_model_calls.push(request_record.clone());
+                    model_calls.push(request_record);
                     Err(error)
                 }
             };

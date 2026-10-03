@@ -57,6 +57,7 @@ fn trace_record(
             completion_tokens: 5,
             total_tokens: 15,
         },
+        usage_known: true,
         phase_timings: Vec::new(),
         error: None,
         performance_task: None,
