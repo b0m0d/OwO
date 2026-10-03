@@ -63,6 +63,9 @@ pub(super) fn is_required(prompt: &str, paths: &BTreeMap<String, String>) -> boo
     if !paths.keys().any(|path| super::single_path_is_source_code(path)) {
         return false;
     }
+    if request_has_multiple_acceptance_clauses(prompt) {
+        return true;
+    }
     const HIGH_RISK_TERMS: &[&str] = &[
         "安全", "权限", "授权", "鉴权", "认证", "登录", "密钥", "加密", "密码",
         "支付", "扣费", "账单", "迁移", "删除", "隐私", "个人信息", "用户数据",
@@ -80,6 +83,36 @@ pub(super) fn is_required(prompt: &str, paths: &BTreeMap<String, String>) -> boo
             term.len() >= 4 && path.contains(term)
         })
     })
+}
+
+/// Conservative complexity signal for explicit multi-part user requests.
+/// Code fences are excluded so pasted examples do not trigger review by themselves.
+fn request_has_multiple_acceptance_clauses(prompt: &str) -> bool {
+    let mut prose = String::new();
+    let mut in_code_fence = false;
+    for line in prompt.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(&char::from(96).to_string().repeat(3)) || trimmed.starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if !in_code_fence {
+            prose.push_str(trimmed);
+            prose.push('\n');
+        }
+    }
+    let clauses = prose
+        .split(|ch: char| matches!(ch, '\n' | '。' | '！' | '？' | '；' | ';'))
+        .map(str::trim)
+        .filter(|clause| clause.chars().filter(|ch| !ch.is_whitespace()).count() >= 3)
+        .count();
+    if clauses >= 2 {
+        return true;
+    }
+    let lower = prose.to_lowercase();
+    ["并且", "同时", "以及", "此外", "还要", "另外", " and ", "also "]
+        .iter()
+        .any(|connector| lower.contains(connector))
 }
 
 pub(super) async fn review_candidate(
@@ -394,10 +427,19 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn independent_review_is_limited_to_high_risk_source_changes() {
+    fn independent_review_covers_high_risk_and_explicit_multi_part_source_changes() {
         let ordinary_source = BTreeMap::from([("src/lib.rs".to_string(), "hash".to_string())]);
         assert!(is_required("修改登录认证逻辑", &ordinary_source));
         assert!(!is_required("解释 Rust 所有权", &ordinary_source));
+        assert!(!is_required("实现分页功能", &ordinary_source));
+        assert!(is_required(
+            "实现分页功能。默认页码为1。每页最多100条。",
+            &ordinary_source
+        ));
+        assert!(is_required(
+            "实现分页功能，并覆盖页码越界和空结果。",
+            &ordinary_source
+        ));
         assert!(is_required(
             "解释 Rust 所有权",
             &BTreeMap::from([("src/auth.rs".to_string(), "hash".to_string())])
