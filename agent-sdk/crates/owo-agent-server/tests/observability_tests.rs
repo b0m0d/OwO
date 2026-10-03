@@ -61,6 +61,7 @@ fn trace_record(
         phase_timings: Vec::new(),
         error: None,
         performance_task: None,
+        completion_record: None,
     }
 }
 

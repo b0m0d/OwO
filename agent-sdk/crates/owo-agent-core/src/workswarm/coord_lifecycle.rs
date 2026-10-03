@@ -22,6 +22,24 @@ impl TeamCoordinator {
             state.goal.transition(GoalStatus::Failed);
         }
         state.goal.error = Some(reason.to_string());
+        let evidence_receipt_ids = state
+            .validation_receipts
+            .iter()
+            .chain(
+                state
+                    .records
+                    .values()
+                    .flat_map(|record| record.validation_receipts.iter()),
+            )
+            .map(|receipt| receipt.receipt_id.clone())
+            .collect::<Vec<_>>();
+        state.completion_record = Some(crate::completion::build_completion_record(
+            team_id,
+            &state.run_id,
+            owo_agent_protocol::CompletionStatusV1::Blocked,
+            evidence_receipt_ids,
+            None,
+        ));
         self.persist_state(state)?;
         let failed_members: Vec<String> = state
             .records
@@ -69,6 +87,24 @@ impl TeamCoordinator {
         if !state.goal.status.is_terminal() {
             state.goal.transition(GoalStatus::Aborted);
         }
+        let evidence_receipt_ids = state
+            .validation_receipts
+            .iter()
+            .chain(
+                state
+                    .records
+                    .values()
+                    .flat_map(|record| record.validation_receipts.iter()),
+            )
+            .map(|receipt| receipt.receipt_id.clone())
+            .collect::<Vec<_>>();
+        state.completion_record = Some(crate::completion::build_completion_record(
+            team_id,
+            &state.run_id,
+            owo_agent_protocol::CompletionStatusV1::Unverified,
+            evidence_receipt_ids,
+            None,
+        ));
         self.persist_state(state)?;
         team.status = TeamRunStatus::Cancelled;
         team.updated_at = now_ts();
@@ -894,6 +930,21 @@ impl TeamCoordinator {
                 return Err(error);
             }
         };
+        let evidence_receipt_ids = acceptance_receipts
+            .iter()
+            .filter_map(|item| item.get("validation_receipts").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|receipt| receipt.get("receipt_id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let acceptance_bytes = serde_json::to_vec(&acceptance_receipts)?;
+        let completion_record = crate::completion::build_completion_record(
+            team_id,
+            &state.run_id,
+            owo_agent_protocol::CompletionStatusV1::Accepted,
+            evidence_receipt_ids,
+            Some(crate::CasStore::hash_of(&acceptance_bytes)),
+        );
         // ValidationReceipt 与失败/成功的 task state 一起落盘；若后续发布清单失败，
         // 也不能丢失刚刚执行过的宿主验收证据。
         self.persist_state(&state)?;
@@ -954,6 +1005,7 @@ impl TeamCoordinator {
             "artifacts": final_artifacts,
             "acceptance_receipts": acceptance_receipts,
             "delivery_issues": &state.delivery_issues,
+            "completion_record": &completion_record,
             "created_at": now_ts(),
         });
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -963,6 +1015,7 @@ impl TeamCoordinator {
             .map_err(|e| WorkSwarmError::Run(format!("交付清单 CAS 落盘失败：{e}")))?;
 
         let mut succeeded_state = state.clone();
+        succeeded_state.completion_record = Some(completion_record);
         succeeded_state.goal.transition(GoalStatus::Succeeded);
         self.persist_state(&succeeded_state)?;
         team.status = TeamRunStatus::Succeeded;

@@ -842,6 +842,23 @@ pub enum CompletionStatusV1 {
     Blocked,
 }
 
+/// Durable, host-produced completion decision shared by Single and Team.
+///
+/// The record identifies the task attempt, decision, evidence receipts, and the
+/// candidate version those receipts cover. It records a decision; it does not
+/// replace the validators that produced the referenced evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskCompletionRecordV1 {
+    pub task_id: String,
+    pub attempt_id: String,
+    pub status: CompletionStatusV1,
+    #[serde(default)]
+    pub evidence_receipt_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_version_sha256: Option<String>,
+    pub decided_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseEvent {

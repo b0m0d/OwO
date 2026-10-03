@@ -991,6 +991,58 @@ impl GoalRunner {
                 "目标候选结果未达到共享完成条件：{completion_status:?}；需要宿主验证计划或人工验收"
             ));
         }
+        let step_receipts = self
+            .state
+            .records
+            .values()
+            .flat_map(|record| record.validation_receipts.iter())
+            .collect::<Vec<_>>();
+        let receipts = self
+            .state
+            .validation_receipts
+            .iter()
+            .chain(step_receipts)
+            .collect::<Vec<_>>();
+        let evidence_receipt_ids = receipts
+            .iter()
+            .map(|receipt| receipt.receipt_id.clone())
+            .collect::<Vec<_>>();
+        let candidate_version_sha256 = if has_candidate_changes {
+            let accepted_outputs = self
+                .state
+                .plan
+                .steps
+                .iter()
+                .filter_map(|step| {
+                    let record = self.state.records.get(&step.id)?;
+                    (record.status == StepStatus::Succeeded).then(|| {
+                        serde_json::json!({
+                            "step_id": step.id,
+                            "attempt_id": record.attempt_id,
+                            "output_sha256": record.output.as_deref().map(|output| {
+                                crate::cas_store::CasStore::hash_of(output.as_bytes())
+                            }),
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            let bundle = serde_json::json!({
+                "accepted_outputs": accepted_outputs,
+                "validation_receipts": receipts,
+            });
+            Some(crate::cas_store::CasStore::hash_of(
+                &serde_json::to_vec(&bundle).unwrap_or_default(),
+            ))
+        } else {
+            None
+        };
+        self.state.completion_record = Some(crate::completion::build_completion_record(
+            &self.state.goal.id,
+            &self.state.run_id,
+            completion_status,
+            evidence_receipt_ids,
+            candidate_version_sha256,
+        ));
         self.state.goal.transition(GoalStatus::Succeeded);
         self.log("goal.succeeded", "目标验收通过");
         self.persist_if_needed();
@@ -998,6 +1050,25 @@ impl GoalRunner {
     }
 
     fn fail_goal(&mut self, reason: String) -> Result<GoalStatus, String> {
+        let evidence_receipt_ids = self
+            .state
+            .validation_receipts
+            .iter()
+            .chain(
+                self.state
+                    .records
+                    .values()
+                    .flat_map(|record| record.validation_receipts.iter()),
+            )
+            .map(|receipt| receipt.receipt_id.clone())
+            .collect::<Vec<_>>();
+        self.state.completion_record = Some(crate::completion::build_completion_record(
+            &self.state.goal.id,
+            &self.state.run_id,
+            owo_agent_protocol::CompletionStatusV1::Blocked,
+            evidence_receipt_ids,
+            None,
+        ));
         self.state.goal.error = Some(reason.clone());
         self.state.goal.transition(GoalStatus::Failed);
         self.log("goal.failed", reason);

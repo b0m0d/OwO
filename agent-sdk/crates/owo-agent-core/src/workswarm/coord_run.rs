@@ -937,6 +937,7 @@ impl TeamCoordinator {
                 },
                 records: sub_records,
                 validation_receipts: Vec::new(),
+                completion_record: None,
                 delivery_issues: Vec::new(),
                 steps_taken: 0,
                 total_retries: 0,

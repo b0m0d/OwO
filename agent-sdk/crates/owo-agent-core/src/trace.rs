@@ -51,6 +51,9 @@ pub struct TraceRecord {
     /// the environment variable is intended for isolated benchmark daemon processes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub performance_task: Option<String>,
+    /// Durable Single completion decision with host evidence and candidate version identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_record: Option<owo_agent_protocol::TaskCompletionRecordV1>,
 }
 
 impl TraceRecord {
@@ -77,6 +80,7 @@ impl TraceRecord {
             phase_timings: outcome.phase_timings.clone(),
             error: None,
             performance_task: configured_performance_task(),
+            completion_record: single_completion_record(session, outcome.completion_status),
         }
     }
 
@@ -121,8 +125,59 @@ impl TraceRecord {
             phase_timings: Vec::new(),
             error: Some(error.to_string()),
             performance_task: configured_performance_task(),
+            completion_record: single_completion_record(session, owo_agent_protocol::CompletionStatusV1::Unverified),
         }
     }
+}
+
+fn single_completion_record(
+    session: &Session,
+    status: owo_agent_protocol::CompletionStatusV1,
+) -> Option<owo_agent_protocol::TaskCompletionRecordV1> {
+    let context = session.active_task_context.as_ref()?;
+    let task_id = context.task_id.as_deref()?;
+    let attempt_id = context.attempt_id.as_deref()?;
+    let mut evidence_ids = std::collections::BTreeSet::new();
+    let mut changed_paths = std::collections::BTreeMap::new();
+    for receipt in session
+        .execution_receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.turn_id == attempt_id && receipt.status != "reverted" && receipt.status != "stale"
+        })
+    {
+        evidence_ids.insert(receipt.receipt_id.clone());
+        for path in &receipt.changed_files {
+            let normalized = path.replace('\\', "/");
+            let after_hash = receipt
+                .after_hashes
+                .iter()
+                .find(|(candidate, _)| candidate.replace('\\', "/") == normalized)
+                .map(|(_, hash)| hash.clone())
+                .unwrap_or(None);
+            changed_paths.insert(normalized, after_hash);
+        }
+    }
+    for receipt in session
+        .validation_receipts
+        .iter()
+        .filter(|receipt| receipt.attempt_id == attempt_id)
+    {
+        evidence_ids.insert(receipt.receipt_id.clone());
+    }
+    let candidate_version_sha256 = if changed_paths.is_empty() {
+        None
+    } else {
+        let bytes = serde_json::to_vec(&changed_paths).unwrap_or_default();
+        Some(crate::CasStore::hash_of(&bytes))
+    };
+    Some(crate::completion::build_completion_record(
+        task_id,
+        attempt_id,
+        status,
+        evidence_ids,
+        candidate_version_sha256,
+    ))
 }
 
 fn configured_performance_task() -> Option<String> {
@@ -220,6 +275,9 @@ mod tests {
     fn trace_round_trip_and_persistence() {
         let mut session = Session::new(".", "mock", None);
         session.push(ChatMessage::user("你好".to_string()));
+        session.active_task_context = Some(
+            crate::task_context::ResolvedTaskContext::for_single_turn("turn-trace-1", "你好"),
+        );
         let outcome = TurnOutcome {
             model_calls: vec![crate::agent::ModelCallRecord {
                 metadata: crate::gateway::ModelCallMetadata {
@@ -261,6 +319,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("owo-trace-test-{}", uuid::Uuid::new_v4()));
         let path = save_trace(&dir, &record).unwrap();
         let loaded = load_trace(&path).unwrap();
+        let completion = loaded.completion_record.as_ref().unwrap();
+        assert_eq!(completion.task_id, "single-turn:turn-trace-1");
+        assert_eq!(completion.attempt_id, "turn-trace-1");
+        assert_eq!(completion.status, owo_agent_protocol::CompletionStatusV1::ResponseComplete);
         assert_eq!(loaded.final_text.as_deref(), Some("收到"));
         assert_eq!(loaded.events.len(), 2);
         assert_eq!(loaded.usage.total_tokens, 150);
@@ -323,6 +385,7 @@ mod tests {
                 .expect("旧 trace 应兼容加载");
         assert!(legacy.phase_timings.is_empty());
         assert!(legacy.performance_task.is_none());
+        assert!(legacy.completion_record.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

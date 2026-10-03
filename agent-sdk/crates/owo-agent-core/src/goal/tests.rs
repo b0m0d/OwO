@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn shared_completion_record_survives_goal_run_persistence() {
+    let plan = Plan::new("completion-plan", "completion-goal");
+    let mut state = GoalRunState::new(Goal::new("completion-goal", "persist acceptance"), plan);
+    state.completion_record = Some(crate::completion::build_completion_record(
+        "completion-goal",
+        &state.run_id,
+        owo_agent_protocol::CompletionStatusV1::Accepted,
+        vec!["validation-receipt-1".to_string()],
+        Some("candidate-sha256".to_string()),
+    ));
+    let directory = tempfile::tempdir().unwrap();
+    state.persist(directory.path()).unwrap();
+    let loaded = GoalRunState::load(directory.path(), &state.run_id).unwrap();
+    assert_eq!(loaded.completion_record, state.completion_record);
+}
+
+#[test]
 fn goal_status_machine_transitions() {
     let mut goal = Goal::new("g1", "测试目标");
     assert_eq!(goal.status, GoalStatus::Pending);
@@ -28,6 +45,7 @@ fn run_state_serde_roundtrip() {
         .unwrap()
         .remove("validation_receipts");
     legacy.as_object_mut().unwrap().remove("delivery_issues");
+    legacy.as_object_mut().unwrap().remove("completion_record");
     legacy["goal"]
         .as_object_mut()
         .unwrap()

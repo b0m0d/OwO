@@ -18,6 +18,31 @@ pub struct CompletionEvidence {
     pub independent_review_passed: bool,
 }
 
+/// Build the durable record after callers have gathered and validated host evidence.
+/// Receipt IDs are normalized and sorted so retries do not create order-dependent records.
+pub fn build_completion_record(
+    task_id: &str,
+    attempt_id: &str,
+    status: CompletionStatusV1,
+    evidence_receipt_ids: impl IntoIterator<Item = String>,
+    candidate_version_sha256: Option<String>,
+) -> owo_agent_protocol::TaskCompletionRecordV1 {
+    let evidence_receipt_ids = evidence_receipt_ids
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    owo_agent_protocol::TaskCompletionRecordV1 {
+        task_id: task_id.to_string(),
+        attempt_id: attempt_id.to_string(),
+        status,
+        evidence_receipt_ids,
+        candidate_version_sha256,
+        decided_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
 /// Apply the shared completion contract to host-collected evidence.
 ///
 /// Candidate changes cannot become Accepted without at least one required host
@@ -72,6 +97,28 @@ pub fn apply_required_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_completion_record_sorts_and_deduplicates_host_receipts() {
+        let record = build_completion_record(
+            "task-1",
+            "attempt-7",
+            CompletionStatusV1::Accepted,
+            vec![
+                "receipt-b".to_string(),
+                "".to_string(),
+                "receipt-a".to_string(),
+                "receipt-b".to_string(),
+            ],
+            Some("candidate-sha256".to_string()),
+        );
+        assert_eq!(record.task_id, "task-1");
+        assert_eq!(record.attempt_id, "attempt-7");
+        assert_eq!(record.status, CompletionStatusV1::Accepted);
+        assert_eq!(record.evidence_receipt_ids, vec!["receipt-a".to_string(), "receipt-b".to_string()]);
+        assert_eq!(record.candidate_version_sha256.as_deref(), Some("candidate-sha256"));
+        assert!(!record.decided_at.is_empty());
+    }
 
     #[test]
     fn no_candidate_is_only_a_completed_response() {

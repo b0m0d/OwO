@@ -222,6 +222,9 @@ pub struct GoalRunState {
     /// Host-produced goal-level receipts; legacy snapshots load with no receipts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+    /// Shared durable Single/Team completion decision for this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_record: Option<owo_agent_protocol::TaskCompletionRecordV1>,
     /// Durable review findings and their owner-repair/re-review closure.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivery_issues: Vec<DeliveryIssueV1>,
@@ -266,6 +269,7 @@ impl GoalRunState {
             plan,
             records,
             validation_receipts: Vec::new(),
+            completion_record: None,
             delivery_issues: Vec::new(),
             steps_taken: 0,
             total_retries: 0,
