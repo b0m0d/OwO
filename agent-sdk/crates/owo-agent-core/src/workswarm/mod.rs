@@ -152,4 +152,6 @@ pub(crate) struct StepOutput {
 pub(crate) struct OutputAttemptBinding<'a> {
     pub(crate) phase_epoch: Option<u64>,
     pub(crate) attempt_id: Option<&'a str>,
+    /// Host context snapshot actually supplied to this reviewer invocation.
+    pub(crate) reviewed_sources: Option<&'a [serde_json::Value]>,
 }

@@ -86,6 +86,7 @@ pub(crate) struct ToolCapabilityContext {
     pub session_id: String,
     pub turn_id: String,
     pub scope: String,
+    pub max_command_timeout_ms: Option<u64>,
 }
 
 /// Policy 放行后的类型化凭证。
@@ -126,7 +127,16 @@ impl ToolCapabilityContext {
             session_id: session_id.into(),
             turn_id: turn_id.into(),
             scope: format!("workspace:{}", workspace.to_string_lossy()),
+            max_command_timeout_ms: None,
         }
+    }
+
+    pub(crate) fn with_command_timeout(mut self, timeout_ms: Option<u64>) -> Self {
+        self.max_command_timeout_ms = timeout_ms;
+        if let Some(timeout_ms) = timeout_ms {
+            self.scope.push_str(&format!(";command_timeout_ms={timeout_ms}"));
+        }
+        self
     }
 }
 
@@ -145,6 +155,7 @@ pub(crate) struct ToolCapability {
     turn_id: String,
     effect: EffectClass,
     scope: String,
+    max_command_timeout_ms: Option<u64>,
     /// 短时效能力：审批结果不能被无限期重放。
     expires_at_unix: u64,
     /// 每次签发的不可预测调用标识，写入收据用于关联但不写原始参数。
@@ -297,6 +308,7 @@ impl ToolHostService {
             turn_id: context.turn_id,
             effect,
             scope: context.scope,
+            max_command_timeout_ms: context.max_command_timeout_ms,
             expires_at_unix: issued_at_unix.saturating_add(60),
             nonce: format!("{}:{}", approval.request_id, uuid::Uuid::new_v4()),
         })
@@ -342,8 +354,16 @@ impl ToolHostService {
         } else if now_unix >= capability.expires_at_unix {
             Err(format!("approval expired: {}", capability.tool))
         } else {
+            let mut tool_args = capability.args.clone();
+            if capability.tool == "run_command" {
+                if let (Some(timeout_ms), Some(arguments)) =
+                    (capability.max_command_timeout_ms, tool_args.as_object_mut())
+                {
+                    arguments.insert("_host_timeout_ms".to_string(), json!(timeout_ms));
+                }
+            }
             match tool {
-                Some(tool) => tool.run(ctx, capability.args).await,
+                Some(tool) => tool.run(ctx, tool_args).await,
                 None => Err(format!("未知工具：{}", capability.tool)),
             }
         };
@@ -2713,6 +2733,11 @@ impl Tool for RunCommandTool {
 
     async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
         let command = required_string(&args, "command")?;
+        let timeout_ms = args
+            .get("_host_timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(60_000)
+            .clamp(1, 60_000);
         let cwd = args
             .get("cwd")
             .and_then(Value::as_str)
@@ -2830,21 +2855,45 @@ impl Tool for RunCommandTool {
         };
 
         // 同步等待放在 blocking 线程；超时仅报错，进程仍在 Job 内受限（CPU/内存上限兜底）。
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            tokio::task::spawn_blocking(move || {
-                let mut process = process;
-                process.wait_output()
-            }),
+        let process_handle = process.handle.clone();
+        let command_started = std::time::Instant::now();
+        let mut wait_task = tokio::task::spawn_blocking(move || {
+            let mut process = process;
+            process.wait_output()
+        });
+        let output = match tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            &mut wait_task,
         )
         .await
-        .map_err(|_| "命令执行超时（60s，进程仍在受限 Job 内，将被资源上限终止）".to_string())?
-        .map_err(|join_error| format!("命令等待失败：{join_error}"))?
-        .map_err(|error| format!("沙箱执行失败：{error}"))?;
+        {
+            Ok(joined) => joined
+                .map_err(|join_error| format!("命令等待失败：{join_error}"))?
+                .map_err(|error| format!("沙箱执行失败：{error}"))?,
+            Err(_) => {
+                let kill_result = {
+                    let manager = crate::sandbox::default_manager();
+                    let mut manager = manager
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    manager.kill(&process_handle)
+                };
+                let _ = wait_task.await;
+                return Err(match kill_result {
+                    Ok(()) => format!(
+                        "命令执行超过宿主任务预算 {timeout_ms}ms，沙箱进程已终止"
+                    ),
+                    Err(error) => format!(
+                        "命令执行超过宿主任务预算 {timeout_ms}ms，终止沙箱进程失败：{error}"
+                    ),
+                });
+            }
+        };
 
         Ok(json!({
             "command": command,
             "exit_code": output.exit_code,
+            "duration_ms": command_started.elapsed().as_millis() as u64,
             "stdout": decode_process_output(&output.stdout),
             "stderr": decode_process_output(&output.stderr),
         }))

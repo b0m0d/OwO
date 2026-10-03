@@ -203,14 +203,51 @@ pub fn is_registered_behavior_command(command: &str) -> bool {
         || command.len() > 512
         || !command.is_ascii()
         || command.chars().any(|ch| {
-            matches!(ch as u32, 38 | 124 | 60 | 62 | 94 | 37 | 40 | 41 | 59 | 96 | 34 | 39 | 33 | 10 | 13)
+            matches!(
+                ch as u32,
+                38 | 124 | 60 | 62 | 94 | 37 | 40 | 41 | 59 | 96 | 34 | 39 | 33 | 10 | 13
+            )
         })
     {
         return false;
     }
     let tokens: Vec<_> = command.split_whitespace().collect();
+    let bypass_flags = [
+        "--no-run",
+        "--list",
+        "--help",
+        "-h",
+        "/?",
+        "/help",
+        "--dry-run",
+        "--collect-only",
+        "--co",
+        "--if-present",
+        "--passwithnotests",
+        "--skip",
+        "--exclude-task",
+        "-x",
+        "-dskiptests",
+        "-dmaven.test.skip=true",
+    ];
+    if tokens.iter().any(|token| {
+        let normalized = token.to_ascii_lowercase();
+        bypass_flags.contains(&normalized.as_str())
+            || normalized.starts_with("--no-run=")
+            || normalized.starts_with("--collect-only=")
+            || normalized.starts_with("-dmaven.test.skip=")
+            || normalized == "--"
+                && tokens.iter().any(|candidate| {
+                    matches!(
+                        candidate.to_ascii_lowercase().as_str(),
+                        "--list" | "--help" | "-h" | "--collect-only" | "--co"
+                    )
+                })
+    }) {
+        return false;
+    }
     match tokens.as_slice() {
-        ["cargo", "test", ..] | ["cargo", "check", ..] => true,
+        ["cargo", "test", ..] => true,
         ["npm", "test"] | ["npm", "run", "test", ..] => true,
         ["pnpm", "test", ..] | ["yarn", "test", ..] | ["bun", "test", ..] => true,
         ["pytest", ..] | ["python", "-m", "pytest", ..] => true,
@@ -639,6 +676,9 @@ mod tests {
         assert!(is_registered_behavior_command("python -m pytest tests/test_api.py"));
         assert!(!is_registered_behavior_command("echo passed"));
         assert!(!is_registered_behavior_command("cargo test --no-run"));
+        assert!(!is_registered_behavior_command("cargo test -- --list"));
+        assert!(!is_registered_behavior_command("npm test --if-present"));
+        assert!(!is_registered_behavior_command("pytest --collect-only"));
         assert!(!is_registered_behavior_command("npm test && echo passed"));
         assert!(!is_registered_behavior_command("cargo check"));
     }

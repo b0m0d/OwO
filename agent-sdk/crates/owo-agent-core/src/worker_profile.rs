@@ -73,6 +73,9 @@ pub struct WorkerProfile {
     pub can_use_browser: bool,
     /// 允许受控命令（run_command；仍经沙箱 + 审批策略约束）。
     pub can_run_command: bool,
+    /// Host-enforced timeout for the task's registered behavior command.
+    #[serde(default)]
+    pub verification_timeout_ms: Option<u64>,
 }
 
 impl WorkerProfile {
@@ -162,6 +165,7 @@ impl WorkerProfile {
                 max_turns,
                 can_use_browser: true,
                 can_run_command: false,
+                verification_timeout_ms: None,
             }
         } else if is_implementer {
             Self {
@@ -183,6 +187,7 @@ impl WorkerProfile {
                 max_turns,
                 can_use_browser: false,
                 can_run_command: true,
+                verification_timeout_ms: None,
             }
         } else {
             Self {
@@ -195,6 +200,7 @@ impl WorkerProfile {
                 max_turns,
                 can_use_browser: false,
                 can_run_command: false,
+                verification_timeout_ms: None,
             }
         }
     }
@@ -457,6 +463,13 @@ impl ProfileSubagentRunner<'_> {
         };
         if config.max_tool_calls_per_turn == 0 {
             config.max_tool_calls_per_turn = crate::agent::DEFAULT_BOUNDED_TOOL_CALL_CAP;
+        }
+        if let Some(task_timeout_ms) = self.profile.verification_timeout_ms {
+            config.max_command_timeout_ms = Some(
+                config
+                    .max_command_timeout_ms
+                    .map_or(task_timeout_ms, |configured| configured.min(task_timeout_ms)),
+            );
         }
         config.subagent_depth = self.depth + 1;
         let configured_turn_cap = config.max_turns;
@@ -898,6 +911,7 @@ mod tests {
             max_turns: 3,
             can_use_browser: false,
             can_run_command: false,
+            verification_timeout_ms: None,
         };
         assert!(empty.prompt_guard_lines()[0].contains("未声明"));
     }

@@ -354,6 +354,7 @@ impl TeamCoordinator {
                                 "ReviewResult 缺少宿主绑定的 reviewed_artifacts".to_string(),
                             )
                         })?;
+                    let review_workspace = self.verification_workspace(team_id);
                     let mut expected = Vec::new();
                     for dependency in &step.depends_on {
                         let Some(dep_step) =
@@ -368,7 +369,25 @@ impl TeamCoordinator {
                             .latest_artifact_for_step(space, state, &dep_step.id)
                             .await
                         {
-                            expected.push((current.artifact_id, current.sha256, current.producer));
+                            let current_attempt = state
+                                .records
+                                .get(&dep_step.id)
+                                .and_then(|record| record.attempt_id.as_deref())
+                                .unwrap_or_default();
+                            let reviewed_source =
+                                super::delivery_gate_evidence::review_source_snapshot(
+                                    &dep_step.id,
+                                    current_attempt,
+                                    &change_sets,
+                                    review_workspace.as_deref(),
+                                );
+                            expected.push((
+                                current.artifact_id,
+                                current.sha256,
+                                current.producer,
+                                current.kind,
+                                reviewed_source,
+                            ));
                         }
                     }
                     if expected.is_empty() || bound.len() != expected.len() {
@@ -377,7 +396,7 @@ impl TeamCoordinator {
                             artifact.artifact_id
                         )));
                     }
-                    for (artifact_id, hash, producer) in expected {
+                    for (artifact_id, hash, producer, kind, reviewed_source) in expected {
                         let Some(binding) = bound.iter().find(|item| {
                             item.get("artifact_id").and_then(Value::as_str)
                                 == Some(artifact_id.as_str())
@@ -394,12 +413,39 @@ impl TeamCoordinator {
                         if binding.get("sha256").and_then(Value::as_str) != Some(hash.as_str())
                             || binding.get("producer").and_then(Value::as_str)
                                 != Some(producer.as_str())
+                            || binding.get("reviewed_source") != Some(&reviewed_source)
                             || producer == artifact.producer
                         {
                             return Err(WorkSwarmError::Conflict(format!(
-                                "ReviewResult {} 的快照哈希或独立评审身份已过期",
+                                "ReviewResult {} 的 Artifact、源码快照或独立评审身份已过期",
                                 artifact.artifact_id
                             )));
+                        }
+                        if super::delivery_gate_evidence::is_code_artifact_kind(&kind) {
+                            let source_hashes = reviewed_source
+                                .get("source_hashes")
+                                .and_then(Value::as_object);
+                            if reviewed_source
+                                .get("workspace_observed")
+                                .and_then(Value::as_bool)
+                                != Some(true)
+                                || reviewed_source
+                                    .get("changeset_source_consistent")
+                                    .and_then(Value::as_bool)
+                                    != Some(true)
+                                || source_hashes.is_none_or(|hashes| {
+                                    hashes.is_empty()
+                                        || hashes.values().any(|entry| {
+                                            entry.get("observed").and_then(Value::as_bool)
+                                                != Some(true)
+                                        })
+                                })
+                            {
+                                return Err(WorkSwarmError::Conflict(format!(
+                                    "ReviewResult {} 没有完整的最终源码读取证据",
+                                    artifact.artifact_id
+                                )));
+                            }
                         }
                     }
                 }
@@ -1049,6 +1095,74 @@ mod validation_receipt_identity_tests {
     }
 
     #[test]
+    fn review_source_snapshot_binds_the_seen_workspace_and_stable_changeset_bytes() {
+        use owo_agent_protocol::{ChangeSetFileHash, ChangeSetStatus};
+
+        let workspace = std::env::temp_dir().join(format!(
+            "owo-review-snapshot-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+        let source_path = workspace.join("src").join("task-1.rs");
+        std::fs::write(&source_path, b"final source").expect("initial source");
+        let mut accepted = changeset("cs-source", ChangeSetStatus::Accepted, "2026-10-03");
+        accepted.changed_files = vec!["src/task-1.rs".to_string()];
+        accepted.result_hashes = vec![ChangeSetFileHash {
+            path: "src/task-1.rs".to_string(),
+            sha256: Some(crate::CasStore::hash_of(b"final source")),
+            content_available: false,
+        }];
+
+        let accepted_snapshot =
+            super::super::delivery_gate_evidence::review_source_snapshot(
+                "task-1",
+                "attempt-1",
+                std::slice::from_ref(&accepted),
+                Some(&workspace),
+            );
+        assert_eq!(
+            accepted_snapshot
+                .get("changeset_source_consistent")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+
+        let mut pending = accepted.clone();
+        pending.status = ChangeSetStatus::PendingReview;
+        pending.decision = None;
+        let pending_snapshot = super::super::delivery_gate_evidence::review_source_snapshot(
+            "task-1",
+            "attempt-1",
+            &[pending],
+            Some(&workspace),
+        );
+        assert_eq!(
+            accepted_snapshot.get("change_set_sha256"),
+            pending_snapshot.get("change_set_sha256"),
+            "accept/review status transitions do not alter the reviewed source identity"
+        );
+
+        std::fs::write(&source_path, b"edited after review").expect("changed source");
+        let stale_snapshot = super::super::delivery_gate_evidence::review_source_snapshot(
+            "task-1",
+            "attempt-1",
+            std::slice::from_ref(&accepted),
+            Some(&workspace),
+        );
+        assert_ne!(
+            accepted_snapshot.get("source_hashes"),
+            stale_snapshot.get("source_hashes")
+        );
+        assert_eq!(
+            stale_snapshot
+                .get("changeset_source_consistent")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        std::fs::remove_dir_all(workspace).expect("remove temporary workspace");
+    }
+
+    #[test]
     fn behavior_receipts_require_approved_matching_attempt_and_final_source_hashes() {
         use owo_agent_protocol::{ChangeSetFileHash, ChangeSetStatus};
         use crate::plan::{VerificationRequirementV1, VerificationResourcesV1, VerificationScopeV1};
@@ -1085,6 +1199,7 @@ mod validation_receipt_identity_tests {
                 "command_sha256":command_hash,
                 "exit_code":0,
                 "result_sha256":"command-output-hash",
+                "duration_ms":12,
                 "workspace_hashes":{"src/lib.rs":"source-final"}
             }
         })
@@ -1100,6 +1215,17 @@ mod validation_receipt_identity_tests {
         assert_eq!(verdict, ValidationVerdictV1::Passed);
         assert_eq!(subjects.get("workspace-path:src/lib.rs"), Some(&"source-final".to_string()));
         assert_eq!(output_ref.as_deref(), Some("command-result:sha256:command-output-hash"));
+
+        let over_budget = event.replace("\"duration_ms\":12", "\"duration_ms\":30001");
+        let (verdict, detail, _, _) = evaluate(
+            &requirement,
+            &[over_budget],
+            "task-1",
+            "attempt-1",
+            &[accepted.clone()],
+        );
+        assert_eq!(verdict, ValidationVerdictV1::Failed);
+        assert!(detail.unwrap().contains("超过验证计划预算"));
 
         let (verdict, _, _, _) = evaluate(
             &requirement,

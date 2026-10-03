@@ -162,6 +162,11 @@ impl Worker for RoleWorker {
         let mut ctx = ctx;
         apply_assigned_task_context(&mut ctx, input);
         apply_retry_context(&mut ctx, input);
+        let reviewed_sources = ctx
+            .get("upstream")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let effective_capabilities = ctx
             .get("capabilities")
             .and_then(Value::as_array)
@@ -233,6 +238,7 @@ impl Worker for RoleWorker {
                             OutputAttemptBinding {
                                 phase_epoch,
                                 attempt_id,
+                                reviewed_sources: Some(&reviewed_sources),
                             },
                         )
                         .await
@@ -257,6 +263,7 @@ impl Worker for RoleWorker {
                                     OutputAttemptBinding {
                                         phase_epoch,
                                         attempt_id,
+                                        reviewed_sources: Some(&reviewed_sources),
                                     },
                                 )
                                 .await
@@ -286,6 +293,7 @@ impl Worker for RoleWorker {
                         OutputAttemptBinding {
                             phase_epoch,
                             attempt_id,
+                            reviewed_sources: Some(&reviewed_sources),
                         },
                     )
                     .await

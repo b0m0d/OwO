@@ -110,6 +110,7 @@ impl TeamCoordinator {
             OutputAttemptBinding {
                 phase_epoch,
                 attempt_id: None,
+                reviewed_sources: None,
             },
         )
         .await
@@ -171,6 +172,7 @@ impl TeamCoordinator {
             OutputAttemptBinding {
                 phase_epoch,
                 attempt_id: None,
+                reviewed_sources: None,
             },
         )
         .await
@@ -199,15 +201,21 @@ impl TeamCoordinator {
                     "review capability 必须提交结构化 review_result".to_string(),
                 )
             })?;
-            // 审查范围由宿主从本步骤当前依赖快照计算，模型不能自报身份或哈希。
+            // 审查范围必须是 Worker 实际收到的宿主上下文快照，且在提交时仍然有效。
             let context = self
                 .assemble_context_slice(team_id, member_id, step_id)
                 .await?;
-            let reviewed_artifacts = context
+            let supplied_sources = attempt.reviewed_sources.ok_or_else(|| {
+                WorkSwarmError::Validation(
+                    "review capability 缺少 Worker 实际读取的宿主源码快照".to_string(),
+                )
+            })?;
+            let current_upstream = context
                 .get("upstream")
                 .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
+                .ok_or_else(|| WorkSwarmError::Validation("review context 缺少 upstream".to_string()))?;
+            let reviewed_artifacts = current_upstream
+                .iter()
                 .map(|artifact| {
                     let producer = artifact
                         .get("producer")
@@ -218,14 +226,60 @@ impl TeamCoordinator {
                             "独立 reviewer 不能评审自己生产的产物".to_string(),
                         ));
                     }
+                    let artifact_id = artifact
+                        .get("artifact_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| WorkSwarmError::Validation("上游产物缺少 artifact_id".to_string()))?;
+                    let seen = supplied_sources
+                        .iter()
+                        .find(|item| item.get("artifact_id").and_then(Value::as_str) == Some(artifact_id))
+                        .ok_or_else(|| WorkSwarmError::Conflict(format!(
+                            "reviewer 未收到当前上游产物 {artifact_id}"
+                        )))?;
+                    if seen.get("sha256") != artifact.get("sha256")
+                        || seen.get("reviewed_source") != artifact.get("reviewed_source")
+                    {
+                        return Err(WorkSwarmError::Conflict(format!(
+                            "reviewer 的 Artifact 或源码快照已过期：{artifact_id}"
+                        )));
+                    }
+                    let reviewed_source = artifact
+                        .get("reviewed_source")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    if super::delivery_gate_evidence::is_code_artifact_kind(
+                        artifact.get("kind").and_then(Value::as_str).unwrap_or_default(),
+                    ) && (reviewed_source.get("workspace_observed").and_then(Value::as_bool) != Some(true)
+                        || reviewed_source.get("change_set_ids").and_then(Value::as_array).is_none_or(Vec::is_empty)
+                        || reviewed_source.get("changeset_source_consistent").and_then(Value::as_bool) != Some(true)
+                        || reviewed_source
+                            .get("source_hashes")
+                            .and_then(Value::as_object)
+                            .is_none_or(|hashes| {
+                                hashes.is_empty()
+                                    || hashes.values().any(|entry| {
+                                        entry.get("observed").and_then(Value::as_bool) != Some(true)
+                                    })
+                            })
+                    ) {
+                        return Err(WorkSwarmError::Validation(
+                            "代码评审没有可核对的 ChangeSet 与工作区源码快照".to_string(),
+                        ));
+                    }
                     Ok(json!({
                         "artifact_id": artifact.get("artifact_id").cloned().unwrap_or(Value::Null),
                         "version": artifact.get("version").cloned().unwrap_or(Value::Null),
                         "sha256": artifact.get("sha256").cloned().unwrap_or(Value::Null),
                         "producer": producer,
+                        "reviewed_source": reviewed_source,
                     }))
                 })
                 .collect::<WorkSwarmResult<Vec<_>>>()?;
+            if supplied_sources.len() != current_upstream.len() {
+                return Err(WorkSwarmError::Conflict(
+                    "reviewer 上下文包含的上游产物集合已变化".to_string(),
+                ));
+            }
             if reviewed_artifacts.is_empty() {
                 return Err(WorkSwarmError::Validation(
                     "review capability 没有可绑定的上游产物快照".to_string(),
@@ -759,6 +813,10 @@ impl TeamCoordinator {
                 "status": fact.status
             }));
         }
+        let review_change_sets = crate::change_set_store::ChangeSetStore::new(&self.run_dir)
+            .list_for_team(team_id)
+            .map_err(|error| WorkSwarmError::Run(format!("Review ChangeSet 读取失败：{error}")))?;
+        let review_workspace = self.verification_workspace(team_id);
         let mut upstream = Vec::new();
         for dep in &step.depends_on {
             let dep_step = match state
@@ -783,6 +841,13 @@ impl TeamCoordinator {
                     "task_id": a.task_id,
                     "attempt_id": a.attempt_id,
                     "artifact_id": a.artifact_id,
+                    "kind": a.kind,
+                    "reviewed_source": super::delivery_gate_evidence::review_source_snapshot(
+                        &dep_step.id,
+                        a.attempt_id.as_deref().unwrap_or_default(),
+                        &review_change_sets,
+                        review_workspace.as_deref(),
+                    ),
                     "version": a.version,
                     "content": content,
                     // 评审绑定实际读取到的 CAS 字节，不信任模型声明或可变角色索引。
@@ -794,6 +859,45 @@ impl TeamCoordinator {
                 }));
             }
         }
+        let mut review_handoff_contract = spec.handoff_contract.clone();
+        if super::util::is_review_role(&spec.role, &spec.capabilities) {
+            let source_manifest = upstream
+                .iter()
+                .filter_map(|artifact| {
+                    let source = artifact.get("reviewed_source")?;
+                    let hashes = source.get("source_hashes")?.as_object()?;
+                    (!hashes.is_empty()).then(|| {
+                        json!({
+                            "artifact_id": artifact.get("artifact_id"),
+                            "task_id": artifact.get("task_id"),
+                            "attempt_id": artifact.get("attempt_id"),
+                            "kind": artifact.get("kind"),
+                            "change_set_ids": source.get("change_set_ids"),
+                            "change_set_sha256": source.get("change_set_sha256"),
+                            "source_hashes": hashes,
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            let manifest = serde_json::to_string(&source_manifest)
+                .map_err(|error| WorkSwarmError::Serialization(error.to_string()))?;
+            if manifest.len() > 64 * 1024 {
+                return Err(WorkSwarmError::Validation(
+                    "Reviewer 源码快照超过 64 KiB 上限，拒绝以不完整清单继续评审".to_string(),
+                ));
+            }
+            if !source_manifest.is_empty() {
+                let base = review_handoff_contract
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim();
+                review_handoff_contract = Some(format!(
+                    "{base}
+
+宿主绑定的最终源码审查清单（只读）：{manifest}。请逐个读取清单中的工作区文件，按实际源码提交 findings；交付门会校验这些哈希在评审期间和交付时未变化。"
+                ));
+            }
+        }
         Ok(json!({
             "team_id": team_id,
             "objective_text": state.goal.objective,
@@ -801,7 +905,7 @@ impl TeamCoordinator {
             "capabilities": spec.capabilities,
             "write_paths": spec.write_paths,
             "member_id": member_id,
-            "handoff_contract": spec.handoff_contract,
+            "handoff_contract": review_handoff_contract,
             "core_spec": core_specs,
             "shared_context_revision": shared_context.revision,
             "shared_facts": shared_facts,

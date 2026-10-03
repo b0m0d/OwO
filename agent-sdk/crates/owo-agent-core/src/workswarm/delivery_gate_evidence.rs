@@ -7,6 +7,155 @@ pub(super) fn is_code_artifact_kind(kind: &str) -> bool {
     )
 }
 
+/// Host-generated review binding for the exact ChangeSet lineage and workspace bytes
+/// visible when a reviewer context is assembled. ChangeSet decision status is omitted:
+/// accepting a reviewed change must not invalidate the source snapshot.
+pub(super) fn review_source_snapshot(
+    step_id: &str,
+    attempt_id: &str,
+    change_sets: &[owo_agent_protocol::ChangeSet],
+    workspace: Option<&std::path::Path>,
+) -> Value {
+    let mut matching = change_sets
+        .iter()
+        .filter(|change_set| {
+            change_set.step_id == step_id && change_set.attempt_id.as_deref() == Some(attempt_id)
+        })
+        .collect::<Vec<_>>();
+    matching.sort_by(|left, right| left.change_set_id.cmp(&right.change_set_id));
+
+    let change_set_ids = matching
+        .iter()
+        .map(|change_set| change_set.change_set_id.clone())
+        .collect::<Vec<_>>();
+    let stable_change_sets = matching
+        .iter()
+        .map(|change_set| {
+            let mut changed_files = change_set
+                .changed_files
+                .iter()
+                .map(|path| path.replace('\\', "/"))
+                .collect::<Vec<_>>();
+            changed_files.sort();
+            let mut result_hashes = change_set.result_hashes.clone();
+            result_hashes.sort_by(|left, right| left.path.cmp(&right.path));
+            json!({
+                "change_set_id": change_set.change_set_id,
+                "step_id": change_set.step_id,
+                "attempt_id": change_set.attempt_id,
+                "changed_files": changed_files,
+                "result_hashes": result_hashes,
+            })
+        })
+        .collect::<Vec<_>>();
+    let change_set_sha256 = CasStore::hash_of(
+        &serde_json::to_vec(&stable_change_sets).unwrap_or_default(),
+    );
+
+    let mut paths = std::collections::BTreeSet::new();
+    for change_set in &matching {
+        paths.extend(change_set.changed_files.iter().map(|path| path.replace('\\', "/")));
+        paths.extend(
+            change_set
+                .result_hashes
+                .iter()
+                .map(|file| file.path.replace('\\', "/")),
+        );
+    }
+    let root = workspace.and_then(|path| path.canonicalize().ok());
+    let mut source_hashes = std::collections::BTreeMap::new();
+    for path in paths {
+        let relative = std::path::Path::new(&path);
+        let observation = if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
+                )
+            })
+        {
+            json!({"observed": false, "exists": Value::Null, "sha256": Value::Null})
+        } else if let Some(root) = root.as_ref() {
+            let target = root.join(relative);
+            match std::fs::symlink_metadata(&target) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    json!({"observed": true, "exists": false, "sha256": Value::Null})
+                }
+                Err(_) => json!({"observed": false, "exists": Value::Null, "sha256": Value::Null}),
+                Ok(_) => match target.canonicalize() {
+                    Ok(canonical) if canonical.starts_with(root) && canonical.is_file() => {
+                        match std::fs::read(canonical) {
+                            Ok(bytes) => json!({
+                                "observed": true,
+                                "exists": true,
+                                "sha256": CasStore::hash_of(&bytes),
+                            }),
+                            Err(_) => json!({"observed": false, "exists": true, "sha256": Value::Null}),
+                        }
+                    }
+                    _ => json!({"observed": false, "exists": true, "sha256": Value::Null}),
+                },
+            }
+        } else {
+            json!({"observed": false, "exists": Value::Null, "sha256": Value::Null})
+        };
+        source_hashes.insert(path, observation);
+    }
+    let mut expected_hashes = std::collections::BTreeMap::new();
+    let mut changeset_source_consistent = true;
+    for change_set in &matching {
+        for path in &change_set.changed_files {
+            if !change_set
+                .result_hashes
+                .iter()
+                .any(|file| file.path.replace('\\', "/") == path.replace('\\', "/"))
+            {
+                changeset_source_consistent = false;
+            }
+        }
+        for file in &change_set.result_hashes {
+            let path = file.path.replace('\\', "/");
+            if expected_hashes
+                .insert(path, file.sha256.clone())
+                .is_some_and(|previous| previous != file.sha256)
+            {
+                changeset_source_consistent = false;
+            }
+        }
+    }
+    for (path, expected_hash) in &expected_hashes {
+        let Some(observation) = source_hashes.get(path) else {
+            changeset_source_consistent = false;
+            continue;
+        };
+        if observation.get("observed").and_then(Value::as_bool) != Some(true) {
+            changeset_source_consistent = false;
+            continue;
+        }
+        let actual_hash = observation
+            .get("sha256")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let exists = observation.get("exists").and_then(Value::as_bool);
+        match expected_hash {
+            Some(expected) if exists == Some(true) && actual_hash.as_deref() == Some(expected) => {}
+            None if exists == Some(false) && actual_hash.is_none() => {}
+            _ => changeset_source_consistent = false,
+        }
+    }
+    json!({
+        "step_id": step_id,
+        "attempt_id": attempt_id,
+        "change_set_ids": change_set_ids,
+        "change_set_sha256": change_set_sha256,
+        "source_hashes": source_hashes,
+        "workspace_observed": root.is_some(),
+        "changeset_source_consistent": changeset_source_consistent,
+    })
+}
+
 pub(super) fn validate_review_artifact_kind(is_reviewer: bool, kind: &str) -> Result<(), String> {
     match (is_reviewer, kind == "review") {
         (true, true) | (false, false) => Ok(()),
@@ -187,6 +336,25 @@ pub(super) fn evaluate_workspace_command_receipt(
         Ok(receipt) => receipt,
         Err(error) => return unsupported(format!("宿主命令回执结构无效：{error}")),
     };
+    let Some(duration_ms) = receipt.duration_ms else {
+        return (
+            ValidationVerdictV1::Unverified,
+            Some("命令回执缺少宿主计时数据，无法验证声明的超时预算".to_string()),
+            std::collections::BTreeMap::new(),
+            Some(format!("command-result:sha256:{}", receipt.result_sha256)),
+        );
+    };
+    if duration_ms > u64::from(requirement.resources.timeout_ms) {
+        return (
+            ValidationVerdictV1::Failed,
+            Some(format!(
+                "宿主命令耗时 {duration_ms}ms，超过验证计划预算 {}ms",
+                requirement.resources.timeout_ms
+            )),
+            std::collections::BTreeMap::new(),
+            Some(format!("command-result:sha256:{}", receipt.result_sha256)),
+        );
+    }
     let mut subject_hashes = std::collections::BTreeMap::new();
     for raw_path in relative_paths {
         let path = raw_path.replace('\\', "/");

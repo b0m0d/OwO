@@ -62,6 +62,9 @@ pub struct CommandExecutionReceipt {
     pub command_sha256: String,
     pub exit_code: i32,
     pub result_sha256: String,
+    /// ToolHost execution duration; None means this is a legacy receipt without budget evidence.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     #[serde(default)]
     pub workspace_hashes: std::collections::BTreeMap<String, Option<String>>,
 }
@@ -985,11 +988,13 @@ impl Agent {
                                     .clone()
                                     .expect("eligible tool call must have approval grant");
                                 let workspace = session.workspace.clone();
+                                let max_command_timeout_ms = self.config.max_command_timeout_ms;
                                 let capability_context = ToolCapabilityContext::for_workspace(
                                     &workspace,
                                     session.id.clone(),
                                     turn_id.clone(),
-                                );
+                                )
+                                .with_command_timeout(max_command_timeout_ms);
                                 // 并发组内全部为宿主验证只读工具（经审计不改变会话
                                 // 状态）；Session 按值克隆以满足 ToolContext 的 &mut
                                 // 签名，克隆上的任何变更被有意丢弃（读取语义不变）。
@@ -1167,7 +1172,8 @@ impl Agent {
                                     &workspace,
                                     session.id.clone(),
                                     turn_id.clone(),
-                                );
+                                )
+                                .with_command_timeout(self.config.max_command_timeout_ms);
                                 emit(
                                     &mut events,
                                     &event_cell,
@@ -1610,7 +1616,7 @@ fn command_execution_receipt(
     tool: &str,
     outcome: &Result<serde_json::Value, String>,
     session: &Session,
-    turn_id: &str,
+    _turn_id: &str,
 ) -> Option<CommandExecutionReceipt> {
     if tool != "run_command" {
         return None;
@@ -1618,11 +1624,13 @@ fn command_execution_receipt(
     let value = outcome.as_ref().ok()?;
     let command = value.get("command")?.as_str()?.trim();
     let exit_code = i32::try_from(value.get("exit_code")?.as_i64()?).ok()?;
+    let duration_ms = value.get("duration_ms").and_then(serde_json::Value::as_u64);
     let mut workspace_hashes = std::collections::BTreeMap::new();
     let root = session.workspace.canonicalize().ok()?;
-    for receipt in session.execution_receipts.iter().filter(|receipt| {
-        receipt.turn_id == turn_id && receipt.status == "executed"
-    }) {
+    // Agent edits and the corresponding test commonly occur in different model turns.
+    // Snapshot every still-executed write receipt in this worker session, then bind its
+    // current bytes to the accepted ChangeSet in DeliveryGate.
+    for receipt in session.execution_receipts.iter().filter(|receipt| receipt.status == "executed") {
         for relative in &receipt.changed_files {
             let normalized = relative.replace('\\', "/");
             let digest = match root.join(relative).canonicalize() {
@@ -1638,6 +1646,7 @@ fn command_execution_receipt(
         command_sha256: crate::CasStore::hash_of(command.as_bytes()),
         exit_code,
         result_sha256: crate::CasStore::hash_of(value.to_string().as_bytes()),
+        duration_ms,
         workspace_hashes,
     })
 }

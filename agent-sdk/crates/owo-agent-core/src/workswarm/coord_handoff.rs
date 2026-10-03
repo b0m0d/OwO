@@ -62,6 +62,7 @@ impl TeamCoordinator {
                 OutputAttemptBinding {
                     phase_epoch: Some(epoch),
                     attempt_id: state.records[step_id].attempt_id.as_deref(),
+                    reviewed_sources: None,
                 },
             )
             .await?;

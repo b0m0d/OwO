@@ -1691,16 +1691,10 @@ impl TeamCoordinator {
                 "high-risk TaskGraph has no scheduled independent reviewer step".to_string(),
             ));
         }
-        let required_reviewer_step_ids = if high_risk_task_step_ids.is_empty() {
-            Vec::new()
-        } else {
-            scheduled_reviewer_step_ids.clone()
-        };
         bind_dynamic_follow_up_dependencies(
             &mut state.plan.steps,
             &assignment_step_ids,
             &scheduled_reviewer_step_ids,
-            &required_reviewer_step_ids,
         );
         for role in meta
             .roles
@@ -1785,31 +1779,42 @@ fn bind_dynamic_follow_up_dependencies(
     steps: &mut [StepSpec],
     assignment_step_ids: &[String],
     scheduled_reviewer_step_ids: &[String],
-    required_reviewer_step_ids: &[String],
 ) {
     let available_step_ids = steps
         .iter()
         .map(|step| step.id.clone())
         .collect::<std::collections::BTreeSet<_>>();
+    let integration_step_ids = steps
+        .iter()
+        .filter(|step| {
+            worker_role(&step.worker)
+                .is_some_and(|role| matches!(role.as_str(), "leader" | "project_integrator"))
+        })
+        .map(|step| step.id.clone())
+        .collect::<Vec<_>>();
     for step in steps {
         let role = worker_role(&step.worker);
         let Some(role) = role.as_deref() else {
             continue;
         };
         let is_scheduled_reviewer = scheduled_reviewer_step_ids.contains(&step.id);
-        if is_scheduled_reviewer || role == "leader" || role == "project_integrator" {
-            // Retain unrelated template prerequisites; dynamic task edges supplement
-            // the original DAG instead of replacing requirements such as a contract
-            // preparation or coordinator handoff.
+        let is_integrator = matches!(role, "leader" | "project_integrator");
+        if is_scheduled_reviewer || is_integrator {
+            // Review the integrated source snapshot: validators wait for every dynamic
+            // task and every integration step. Integrators consume candidate artifacts
+            // without waiting for review, so the final review cannot precede later edits.
             let mut dependencies = step
                 .depends_on
                 .iter()
-                .filter(|dependency| available_step_ids.contains(*dependency))
+                .filter(|dependency| {
+                    available_step_ids.contains(*dependency)
+                        && !(is_integrator && scheduled_reviewer_step_ids.contains(*dependency))
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             dependencies.extend(assignment_step_ids.iter().cloned());
-            if role == "leader" {
-                dependencies.extend(required_reviewer_step_ids.iter().cloned());
+            if is_scheduled_reviewer {
+                dependencies.extend(integration_step_ids.iter().cloned());
             }
             dependencies.retain(|dependency| dependency != &step.id);
             dependencies.sort();
@@ -2608,7 +2613,7 @@ mod parallel_assignment_validation_tests {
             "s-w2".to_string(),
         ];
         let reviewer_ids = vec!["s-reviewer".to_string()];
-        bind_dynamic_follow_up_dependencies(&mut steps, &task_ids, &reviewer_ids, &reviewer_ids);
+        bind_dynamic_follow_up_dependencies(&mut steps, &task_ids, &reviewer_ids);
 
         assert_eq!(
             steps[3].depends_on,
@@ -2630,7 +2635,6 @@ mod parallel_assignment_validation_tests {
             steps[4].depends_on,
             vec![
                 "s-coordinator".to_string(),
-                "s-reviewer".to_string(),
                 "s-task-c".to_string(),
                 "s-w1".to_string(),
                 "s-w2".to_string(),
@@ -2639,6 +2643,7 @@ mod parallel_assignment_validation_tests {
         assert_eq!(
             steps[5].depends_on,
             vec![
+                "s-project_integrator".to_string(),
                 "s-review-brief".to_string(),
                 "s-task-c".to_string(),
                 "s-w1".to_string(),

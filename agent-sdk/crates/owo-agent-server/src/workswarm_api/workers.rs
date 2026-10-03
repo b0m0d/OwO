@@ -733,6 +733,23 @@ fn apply_task_capability_scope(
         .iter()
         .filter_map(Value::as_str)
         .collect::<HashSet<_>>();
+    profile.verification_timeout_ms = input
+        .get("assigned_verification")
+        .or_else(|| input.get("verification"))
+        .and_then(|plan| plan.get("requirements"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|requirement| {
+            requirement.get("validator_id").and_then(Value::as_str)
+                == Some("workspace-command-success-v1")
+        })
+        .filter_map(|requirement| {
+            requirement
+                .pointer("/resources/timeout_ms")
+                .and_then(Value::as_u64)
+        })
+        .min();
     let can_write_files = !task_has_no_write_scope
         && (required.contains("write_file") || required.contains("apply_patch"));
     profile
@@ -878,6 +895,22 @@ mod team_context_scope_tests {
             .visible_tools
             .iter()
             .any(|tool| tool == "write_file"));
+
+        let mut bounded = WorkerProfile::explicit_writer(4);
+        apply_task_capability_scope(
+            &mut bounded,
+            &json!({
+                "required_capabilities": ["write_file", "run_command"],
+                "assigned_verification": {
+                    "requirements": [{
+                        "validator_id": "workspace-command-success-v1",
+                        "resources": {"timeout_ms": 1234}
+                    }]
+                }
+            }),
+            false,
+        );
+        assert_eq!(bounded.verification_timeout_ms, Some(1234));
 
         let mut empty = WorkerProfile::explicit_writer(4);
         apply_task_capability_scope(&mut empty, &json!({ "required_capabilities": [] }), false);

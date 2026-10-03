@@ -32,6 +32,8 @@ pub struct AgentConfig {
     /// Normal conversations may keep using tools until the model finishes.
     /// Worker/evaluation budgets remain explicit in their runtime profiles.
     pub max_tool_calls_per_turn: usize,
+    /// Host-enforced upper bound for run_command in a task-specific validation plan.
+    pub max_command_timeout_ms: Option<u64>,
     /// 循环保护：同一 `name + 规范化参数` 的调用在同一回合内允许重复的次数（默认 3）。
     /// 超过即拦截该调用并回灌"改变策略"提示，不再执行。
     pub max_repeated_tool_calls: usize,
@@ -126,6 +128,7 @@ impl Default for AgentConfig {
             compaction_enabled: true,
             tool_concurrency: 4,
             max_tool_calls_per_turn: 0,
+            max_command_timeout_ms: None,
             max_repeated_tool_calls: 3,
             turn_deadline: None,
             max_output_tokens: None,
