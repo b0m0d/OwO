@@ -567,8 +567,7 @@ mod tests {
     /// 密钥从未落盘，表现为「测试连接通过，但首启门仍拦着发不出消息」。
     #[test]
     fn round_trips_provider_segment_from_workspace_json() {
-        let workspace =
-            std::env::temp_dir().join(format!("owo-provider-{}", uuid::Uuid::new_v4()));
+        let workspace = std::env::temp_dir().join(format!("owo-provider-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(
             workspace.join("settings.json"),
@@ -606,8 +605,10 @@ mod tests {
         assert!(!blank.has_api_key());
 
         // 默认值：缺 provider 段的旧 settings.json 必须能正常加载。
-        let legacy =
-            std::fs::write(workspace.join("settings.json"), r#"{"model":"glm-5.3-flash"}"#);
+        let legacy = std::fs::write(
+            workspace.join("settings.json"),
+            r#"{"model":"glm-5.3-flash"}"#,
+        );
         legacy.unwrap();
         let old = Settings::load(&workspace);
         assert!(!old.provider.has_base_url());
