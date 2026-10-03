@@ -640,6 +640,8 @@ impl Agent {
 
         let mut model_turns = 0usize;
         let mut reached_model_turn_limit = false;
+        let mut turn_completion_status = None;
+        let mut validation_feedback_fingerprints = std::collections::BTreeSet::new();
         loop {
             if self.config.max_turns > 0 && model_turns >= self.config.max_turns {
                 reached_model_turn_limit = true;
@@ -823,6 +825,42 @@ impl Agent {
                     break;
                 }
                 ModelOutput::Text(text) => {
+                    let completion_status = assess_single_turn_completion(
+                        session,
+                        prompt,
+                        &turn_id,
+                        &events,
+                        false,
+                        Some(&text),
+                    );
+                    let plan_is_current =
+                        single_verification_plan_matches_turn(session, prompt, &turn_id);
+                    let retry_feedback = if plan_is_current
+                        && matches!(
+                            completion_status,
+                            owo_agent_protocol::CompletionStatusV1::Unverified
+                                | owo_agent_protocol::CompletionStatusV1::Blocked
+                        )
+                    {
+                        single_validation_retry_feedback(session, &turn_id)
+                    } else {
+                        None
+                    };
+                    if let Some((fingerprint, feedback)) = retry_feedback {
+                        let repeated_failure =
+                            !validation_feedback_fingerprints.insert(fingerprint.clone());
+                        turn_completion_status = Some(completion_status);
+                        messages.push(ChatMessage::assistant_text(text.clone()));
+                        if repeated_failure {
+                            final_text = Some(text.clone());
+                            emit(&mut events, &event_cell, TurnEvent::Final { text });
+                            break;
+                        }
+                        messages.push(ChatMessage::system(feedback));
+                        final_text = None;
+                        continue;
+                    }
+                    turn_completion_status = Some(completion_status);
                     messages.push(ChatMessage::assistant_text(text.clone()));
                     final_text = Some(text.clone());
                     emit(&mut events, &event_cell, TurnEvent::Final { text });
@@ -1501,14 +1539,27 @@ impl Agent {
             first_token_ms: None,
         });
         usage_known &= model_requests > 0;
-        let completion_status = assess_single_turn_completion(
-            session,
-            prompt,
-            &turn_id,
-            &events,
-            reached_model_turn_limit,
-            final_text.as_deref(),
-        );
+        let completion_status = if reached_model_turn_limit {
+            assess_single_turn_completion(
+                session,
+                prompt,
+                &turn_id,
+                &events,
+                true,
+                final_text.as_deref(),
+            )
+        } else if let Some(status) = turn_completion_status {
+            status
+        } else {
+            assess_single_turn_completion(
+                session,
+                prompt,
+                &turn_id,
+                &events,
+                false,
+                final_text.as_deref(),
+            )
+        };
         Ok(TurnOutcome {
             model_calls,
             final_text,
@@ -1918,6 +1969,68 @@ fn assess_single_turn_completion(
     )
 }
 
+fn single_verification_plan_matches_turn(session: &Session, prompt: &str, turn_id: &str) -> bool {
+    let input_sha256 = crate::CasStore::hash_of(prompt.as_bytes());
+    session.single_verification_plan.is_some()
+        && session.single_verification_plan_input_sha256.as_deref() == Some(input_sha256.as_str())
+        && session.single_verification_plan_turn_id.as_deref() == Some(turn_id)
+}
+
+fn single_validation_retry_feedback(session: &Session, turn_id: &str) -> Option<(String, String)> {
+    let plan = session.single_verification_plan.as_ref()?;
+    let required_ids = plan
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.required)
+        .map(|requirement| requirement.requirement_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut latest = std::collections::BTreeMap::new();
+    for receipt in session
+        .validation_receipts
+        .iter()
+        .filter(|receipt| receipt.attempt_id.as_str() == turn_id)
+    {
+        latest.insert(receipt.requirement_id.as_str(), receipt);
+    }
+    let failures = latest
+        .into_iter()
+        .filter(|(requirement_id, receipt)| {
+            required_ids.contains(requirement_id)
+                && !matches!(
+                    receipt.verdict,
+                    crate::plan::ValidationVerdictV1::Passed
+                        | crate::plan::ValidationVerdictV1::ManualAccepted
+                )
+        })
+        .map(|(requirement_id, receipt)| {
+            serde_json::json!({
+                "requirement_id": requirement_id,
+                "verdict": format!("{:?}", receipt.verdict),
+                "detail": receipt.detail,
+                "subject_sha256": receipt.subject_sha256,
+                "changeset_sha256": receipt.changeset_sha256,
+            })
+        })
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        return None;
+    }
+    let fingerprint = crate::CasStore::hash_of(
+        serde_json::to_vec(&failures).unwrap_or_default().as_slice(),
+    );
+    let details = failures
+        .iter()
+        .map(|failure| serde_json::to_string(failure).unwrap_or_else(|_| "{}".to_string()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((
+        fingerprint,
+        format!(
+            "宿主已按本回合冻结的 VerificationPlan 检查最终工作区，但必需验收尚未通过。请依据以下结构化结果修复实现；如果需要行为命令，使用计划登记的命令，并在所有写入之后运行。不要替换或降低计划，也不要声称任务已验证通过。\n{details}"
+        ),
+    ))
+}
+
 fn single_path_is_source_code(path: &str) -> bool {
     let extension = std::path::Path::new(path)
         .extension()
@@ -2000,6 +2113,7 @@ fn execute_single_verification_plan(
     let changeset_bytes = serde_json::to_vec(pending_hashes).unwrap_or_default();
     let changeset_sha256 = crate::CasStore::hash_of(&changeset_bytes);
     let environment_id = crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
+    let validation_epoch = session.validation_receipts.len() as u64 + 1;
     let mut required_count = required_requirements.len();
     let mut passed_count = 0usize;
     let mut failed_count = 0usize;
@@ -2103,7 +2217,8 @@ fn execute_single_verification_plan(
         } else if workspace_validator_arguments_supported(&requirement.validator_id, &requirement.arguments) {
             let (workspace_verdict, workspace_detail, hashes) = execute_workspace_requirement(requirement, root);
             let mut matches_pending = true;
-            for (relative, actual_hash) in hashes {
+            for (subject, actual_hash) in hashes {
+                let relative = subject.strip_prefix("workspace-path:").unwrap_or(&subject);
                 let normalized = relative.replace('\\', "/");
                 subjects.insert(format!("workspace-path:{normalized}"), actual_hash.clone());
                 if pending_hashes.get(&normalized).is_some_and(|expected| expected.as_deref() != Some(actual_hash.as_str())) {
@@ -2151,7 +2266,7 @@ fn execute_single_verification_plan(
             receipt_id,
             task_id: session.id.clone(),
             attempt_id: turn_id.to_string(),
-            epoch: session.messages.len() as u64,
+            epoch: validation_epoch,
             requirement_id: requirement.requirement_id.clone(),
             validator_id: requirement.validator_id.clone(),
             validator_version: requirement.validator_version.clone().unwrap_or_else(|| "unknown".to_string()),
@@ -2180,7 +2295,7 @@ fn execute_single_verification_plan(
             receipt_id: format!("single-coverage-{}", uuid::Uuid::new_v4()),
             task_id: session.id.clone(),
             attempt_id: turn_id.to_string(),
-            epoch: session.messages.len() as u64,
+            epoch: validation_epoch,
             requirement_id: "host-change-scope-coverage".to_string(),
             validator_id: "host-change-scope-coverage-v1".to_string(),
             validator_version: "1".to_string(),
@@ -2213,13 +2328,20 @@ fn execute_single_verification_plan(
         let accepted_receipt_id = first_passed_receipt_id.unwrap_or_default();
         for (index, execution) in session.execution_receipts.iter_mut().enumerate() {
             let paths = execution.changed_files.iter().map(|path| path.replace('\\', "/")).collect::<Vec<_>>();
-            if execution.status == "executed"
-                && !paths.is_empty()
-                && paths.iter().all(|path| pending_hashes.contains_key(path)
-                    && latest_receipt_by_path.get(path) == Some(&index))
-            {
+            if execution.status != "executed" || paths.is_empty() {
+                continue;
+            }
+            let all_paths_are_latest = paths.iter().all(|path| {
+                pending_hashes.contains_key(path)
+                    && latest_receipt_by_path.get(path) == Some(&index)
+            });
+            if all_paths_are_latest {
                 execution.status = "accepted".to_string();
                 execution.validation_receipt_id = Some(accepted_receipt_id.clone());
+            } else if paths.iter().any(|path| {
+                latest_receipt_by_path.get(path).is_some_and(|latest_index| latest_index != &index)
+            }) {
+                execution.status = "stale".to_string();
             }
         }
     }

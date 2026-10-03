@@ -53,6 +53,117 @@ async fn default_user_turn_can_run_more_than_sixty_five_model_tool_rounds() {
     assert_eq!(state.completed.lock().unwrap().len(), 65);
 }
 
+#[tokio::test]
+async fn failed_host_validation_is_fed_back_and_repaired_before_final() {
+    let workspace = tempfile::tempdir().unwrap();
+    let call = |id: &str, name: &str, arguments: serde_json::Value| {
+        crate::gateway::ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments,
+        }
+    };
+    let outputs = Mutex::new(VecDeque::from(vec![
+        ModelOutput::ToolCalls(vec![call(
+            "plan",
+            "verification_plan",
+            serde_json::json!({
+                "plan": {
+                    "plan_id": "readme-acceptance",
+                    "requirements": [{
+                        "requirement_id": "readme-has-acceptance",
+                        "covers_requirement_ids": ["user-request:acceptance-marker"],
+                        "validator_id": "workspace-file-contains-v1",
+                        "validator_version": "1",
+                        "scope": {
+                            "kind": "workspace_paths",
+                            "relative_paths": ["README.md"]
+                        },
+                        "arguments": {"text": "验收通过"},
+                        "required": true,
+                        "resources": {
+                            "cpu_slots": 1,
+                            "memory_mb": 16,
+                            "exclusive_workspace": false,
+                            "timeout_ms": 10000
+                        }
+                    }]
+                }
+            }),
+        )]),
+        ModelOutput::ToolCalls(vec![call(
+            "write-first",
+            "write_file",
+            serde_json::json!({"path":"README.md","content":"第一版"}),
+        )]),
+        ModelOutput::Text("第一版已经完成。".to_string()),
+        ModelOutput::ToolCalls(vec![call(
+            "write-repair",
+            "write_file",
+            serde_json::json!({"path":"README.md","content":"验收通过"}),
+        )]),
+        ModelOutput::Text("修复后的版本已通过宿主验收。".to_string()),
+    ]));
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider { outputs }),
+        ToolRegistry::new(),
+        Policy::new(workspace.path()),
+        AgentConfig::default(),
+    );
+    let mut session = Session::new(workspace.path(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "修改 README 并包含验收通过",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("宿主失败反馈后应允许模型在同一回合修复");
+
+    assert_eq!(
+        outcome.completion_status,
+        owo_agent_protocol::CompletionStatusV1::Accepted
+    );
+    assert_eq!(
+        outcome.final_text.as_deref(),
+        Some("修复后的版本已通过宿主验收。")
+    );
+    let final_events = outcome
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TurnEvent::Final { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(final_events, vec!["修复后的版本已通过宿主验收。"]);
+    assert!(session.messages.iter().any(|message| {
+        message.role == "system"
+            && message.content.as_deref().is_some_and(|content| {
+                content.contains("宿主已按本回合冻结的 VerificationPlan")
+                    && content.contains("Failed")
+            })
+    }));
+    assert!(session
+        .validation_receipts
+        .iter()
+        .any(|receipt| receipt.verdict == crate::plan::ValidationVerdictV1::Failed));
+    assert_eq!(
+        session
+            .validation_receipts
+            .iter()
+            .map(|receipt| receipt.epoch)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "每次宿主重验必须推进验证 epoch"
+    );
+    assert_eq!(session.execution_receipts[0].status, "stale");
+    assert_eq!(session.execution_receipts[1].status, "accepted");
+}
+
 #[test]
 fn default_turn_and_tool_call_limits_allow_the_model_to_finish_naturally() {
     let config = AgentConfig::default();
