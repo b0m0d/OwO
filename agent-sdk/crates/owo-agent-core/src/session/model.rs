@@ -67,7 +67,11 @@ pub struct Session {
     pub single_verification_plan: Option<crate::plan::VerificationPlanV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub single_verification_plan_input_sha256: Option<String>,
-    /// Current prompt digest is set by Agent and used to bind plan registration to this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_verification_plan_turn_id: Option<String>,
+    /// Current request identity is ephemeral and binds host actions to this user turn.
+    #[serde(skip)]
+    pub(crate) active_turn_id: Option<String>,
     #[serde(skip)]
     pub(crate) active_turn_input_sha256: Option<String>,
     /// Ephemeral model-request observations for building an error trace before a TurnOutcome exists.
@@ -132,6 +136,8 @@ impl Session {
             validation_receipts: Vec::new(),
             single_verification_plan: None,
             single_verification_plan_input_sha256: None,
+            single_verification_plan_turn_id: None,
+            active_turn_id: None,
             active_turn_input_sha256: None,
             transient_model_calls: Vec::new(),
             created_at: now.clone(),
@@ -522,6 +528,8 @@ impl Session {
             validation_receipts: Vec::new(),
             single_verification_plan: self.single_verification_plan.clone(),
             single_verification_plan_input_sha256: self.single_verification_plan_input_sha256.clone(),
+            single_verification_plan_turn_id: self.single_verification_plan_turn_id.clone(),
+            active_turn_id: None,
             active_turn_input_sha256: None,
             transient_model_calls: Vec::new(),
             created_at: now.clone(),

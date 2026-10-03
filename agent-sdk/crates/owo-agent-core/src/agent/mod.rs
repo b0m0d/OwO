@@ -553,6 +553,7 @@ impl Agent {
         let mut usage = TokenUsage::default();
         let mut model_calls = Vec::new();
         session.transient_model_calls.clear();
+        session.active_turn_id = Some(turn_id.clone());
         session.active_turn_input_sha256 = Some(crate::CasStore::hash_of(prompt.as_bytes()));
         let mut usage_known = true;
         let mut model_requests = 0usize;
@@ -1872,19 +1873,35 @@ fn assess_single_turn_completion(
             latest_receipt_by_path.insert(normalized, (index, execution.receipt_id.clone()));
         }
     }
-    if pending_hashes.is_empty() {
-        return decide(true, false, false, 0, 0, 0, stale_candidate);
-    }
-    if missing_write_hash || root.is_none() {
-        return decide(true, false, true, 1, 0, 0, true);
-    }
-    let root = root.expect("checked above");
-
     let input_sha256 = crate::CasStore::hash_of(prompt.as_bytes());
     let plan = session
         .single_verification_plan
         .clone()
-        .filter(|_| session.single_verification_plan_input_sha256.as_deref() == Some(input_sha256.as_str()));
+        .filter(|_| {
+            session.single_verification_plan_input_sha256.as_deref() == Some(input_sha256.as_str())
+                && session.single_verification_plan_turn_id.as_deref() == Some(turn_id)
+        });
+    let has_current_turn_candidate = session.execution_receipts.iter().any(|execution| {
+        execution.turn_id == turn_id
+            && execution.status == "executed"
+            && !execution.changed_files.is_empty()
+    });
+    if !has_current_turn_candidate && plan.is_none() {
+        // Unaccepted files from prior turns do not turn ordinary conversation into a
+        // code candidate. A user can explicitly start a new verification turn by
+        // registering a fresh request-bound plan.
+        return decide(true, false, false, 0, 0, 0, stale_candidate);
+    }
+    if missing_write_hash {
+        return decide(true, false, true, 1, 0, 0, true);
+    }
+    if pending_hashes.is_empty() {
+        return decide(true, false, false, 0, 0, 0, stale_candidate);
+    }
+    if root.is_none() {
+        return decide(true, false, true, 1, 0, 0, true);
+    }
+    let root = root.expect("checked above");
     let Some(plan) = plan else {
         // A generic successful command is not enough to claim that a task's declared
         // requirements were covered. The model must register a host-resolvable plan.
@@ -2277,6 +2294,7 @@ mod single_verification_plan_tests {
         ));
         session.single_verification_plan_input_sha256 =
             Some(crate::CasStore::hash_of(prompt.as_bytes()));
+        session.single_verification_plan_turn_id = Some("turn-source".to_string());
 
         let status = assess_single_turn_completion(
             &mut session,
@@ -2304,6 +2322,14 @@ mod single_verification_plan_tests {
         let mut session = Session::new(workspace.path(), "mock", None);
         add_write(&mut session, "turn-unplanned", "src/lib.rs", &hash);
         let command = "cargo test -p owo-agent-core";
+        session.single_verification_plan = Some(plan(
+            "workspace-command-success-v1",
+            "src/lib.rs",
+            serde_json::json!({"command":command}),
+        ));
+        session.single_verification_plan_input_sha256 =
+            Some(crate::CasStore::hash_of("实现 ready 检查".as_bytes()));
+        session.single_verification_plan_turn_id = Some("older-turn".to_string());
         let events = vec![TurnEvent::ToolResult {
             id: "test-command".to_string(),
             tool: "run_command".to_string(),
@@ -2338,6 +2364,32 @@ mod single_verification_plan_tests {
     }
 
     #[test]
+    fn prior_unaccepted_code_does_not_reclassify_a_later_normal_reply() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut session = Session::new(workspace.path(), "mock", None);
+        add_write(
+            &mut session,
+            "previous-turn",
+            "src/lib.rs",
+            "previous-source-hash",
+        );
+
+        let status = assess_single_turn_completion(
+            &mut session,
+            "解释一下所有权",
+            "current-chat-turn",
+            &[],
+            false,
+            Some("Rust 所有权用于管理值的生命周期。"),
+        );
+        assert_eq!(
+            status,
+            owo_agent_protocol::CompletionStatusV1::ResponseComplete
+        );
+        assert!(session.validation_receipts.is_empty());
+    }
+
+    #[test]
     fn planned_static_check_binds_receipt_to_exact_changed_file_hash() {
         let workspace = tempfile::tempdir().unwrap();
         let doc = workspace.path().join("README.md");
@@ -2355,6 +2407,7 @@ hello
         ));
         session.single_verification_plan_input_sha256 =
             Some(crate::CasStore::hash_of(prompt.as_bytes()));
+        session.single_verification_plan_turn_id = Some("turn-doc".to_string());
 
         let status = assess_single_turn_completion(
             &mut session,

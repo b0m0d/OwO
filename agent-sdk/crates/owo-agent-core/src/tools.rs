@@ -1687,6 +1687,12 @@ fn validate_single_verification_plan(
         return Err("VerificationPlan 超过宿主的 plan_id/requirement 数量上限".to_string());
     }
     for requirement in &plan.requirements {
+        if requirement.covers_requirement_ids.is_empty() {
+            return Err(format!(
+                "requirement {} 必须声明覆盖的用户验收点",
+                requirement.requirement_id
+            ));
+        }
         if requirement.validator_version.as_deref() != Some("1")
             || !crate::verification::is_registered_workspace_validator(&requirement.validator_id)
         {
@@ -1734,7 +1740,7 @@ impl Tool for SingleVerificationPlanTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "verification_plan".into(),
-            description: "登记本次任务的验收要求。只可选择宿主注册的 WorkspacePaths validator；计划本身不是通过证据，完成时由宿主按绑定源码执行并生成回执。".into(),
+            description: "登记本次任务的宿主验收要求。每项都要填写 covers_requirement_ids 对应用户验收点；代码任务的源码路径必须被 workspace-command-success-v1 覆盖，arguments.command 必须与本回合实际 run_command 一致。计划不是通过证据；宿主在回合结束时按绑定源码执行检查并生成回执。resources 四个字段均须显式填写。".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1748,7 +1754,7 @@ impl Tool for SingleVerificationPlanTool {
                                     "type": "object",
                                     "properties": {
                                         "requirement_id": {"type": "string"},
-                                        "covers_requirement_ids": {"type": "array", "items": {"type": "string"}},
+                                        "covers_requirement_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                                         "validator_id": {"type": "string", "enum": ["workspace-file-exists-v1", "workspace-file-non-empty-v1", "workspace-file-contains-v1", "workspace-json-field-equals-v1", "workspace-command-success-v1"]},
                                         "validator_version": {"type": "string", "enum": ["1"]},
                                         "scope": {
@@ -1768,10 +1774,11 @@ impl Tool for SingleVerificationPlanTool {
                                                 "memory_mb": {"type": "integer", "minimum": 8, "maximum": 128, "default": 16},
                                                 "exclusive_workspace": {"type": "boolean", "enum": [false]},
                                                 "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000, "default": 30000}
-                                            }
+                                            },
+                                            "required": ["cpu_slots", "memory_mb", "exclusive_workspace", "timeout_ms"]
                                         }
                                     },
-                                    "required": ["requirement_id", "validator_id", "validator_version", "scope", "arguments", "required", "resources"]
+                                    "required": ["requirement_id", "covers_requirement_ids", "validator_id", "validator_version", "scope", "arguments", "required", "resources"]
                                 }
                             }
                         },
@@ -1794,8 +1801,30 @@ impl Tool for SingleVerificationPlanTool {
             .active_turn_input_sha256
             .clone()
             .ok_or("当前 Agent 回合没有可绑定的用户输入摘要")?;
+        let turn_id = ctx
+            .session
+            .active_turn_id
+            .clone()
+            .ok_or("当前 Agent 回合没有可绑定的 turn_id")?;
+        let has_current_turn_writes = ctx
+            .session
+            .execution_receipts
+            .iter()
+            .any(|receipt| receipt.turn_id == turn_id && receipt.status != "reverted");
+        if has_current_turn_writes
+            && (ctx.session.single_verification_plan_turn_id.as_deref() != Some(turn_id.as_str())
+                || ctx.session.single_verification_plan.as_ref() != Some(&plan))
+        {
+            return Err("VerificationPlan 必须在首次工作区写入前登记，且本回合登记后不可替换".to_string());
+        }
+        if ctx.session.single_verification_plan_turn_id.as_deref() == Some(turn_id.as_str())
+            && ctx.session.single_verification_plan.as_ref().is_some_and(|registered| registered != &plan)
+        {
+            return Err("本回合 VerificationPlan 已冻结，不能在看到验证结果后降低验收要求".to_string());
+        }
         ctx.session.single_verification_plan = Some(plan.clone());
         ctx.session.single_verification_plan_input_sha256 = Some(input_sha256);
+        ctx.session.single_verification_plan_turn_id = Some(turn_id);
         Ok(json!({"plan": plan, "status": "registered_pending_host_validation"}))
     }
 }
@@ -3587,6 +3616,10 @@ mod tests {
             json!({"command":"cargo test -p owo-agent-core"}),
         );
         assert!(validate_single_verification_plan(&command_plan).is_ok());
+
+        let mut unmapped = command_plan.clone();
+        unmapped.requirements[0].covers_requirement_ids.clear();
+        assert!(validate_single_verification_plan(&unmapped).is_err());
 
         let unsupported = sample_single_plan("custom-shell-validator", json!({}));
         assert!(validate_single_verification_plan(&unsupported).is_err());
