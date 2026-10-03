@@ -126,6 +126,23 @@ pub const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 5,
+        name: "session behavior validation receipts 持久化",
+        run: |conn| {
+            let columns = table_columns(conn, "sessions")?;
+            if !columns
+                .iter()
+                .any(|existing| existing == "validation_receipts_json")
+            {
+                conn.execute_batch(
+                    "ALTER TABLE sessions ADD COLUMN validation_receipts_json TEXT NOT NULL DEFAULT '[]'",
+                )
+                .map_err(sqlite_error)?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// 迁移运行状态（供健康/状态面板展示；只读降级时 last_error 给出原因）。
@@ -187,7 +204,8 @@ fn base_schema() -> &'static str {
          title TEXT,
          archived INTEGER NOT NULL DEFAULT 0,
          pinned INTEGER NOT NULL DEFAULT 0,
-         model_override TEXT
+         model_override TEXT,
+         validation_receipts_json TEXT NOT NULL DEFAULT '[]'
      );
      CREATE TABLE IF NOT EXISTS audit (
          id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -347,8 +365,9 @@ impl SqliteSessionStore {
             "INSERT INTO sessions (
                  id, workspace, model, system_prompt, messages_json, snapshots_json,
                  execution_receipts_json, created_at, updated_at, parent_id, fork_point,
-                 redo_json, message_redo_json, title, archived, pinned, model_override
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                 redo_json, message_redo_json, title, archived, pinned, model_override,
+                 validation_receipts_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(id) DO UPDATE SET
                  workspace=excluded.workspace,
                  model=excluded.model,
@@ -364,7 +383,8 @@ impl SqliteSessionStore {
                  title=excluded.title,
                  archived=excluded.archived,
                  pinned=excluded.pinned,
-                 model_override=excluded.model_override",
+                 model_override=excluded.model_override,
+                 validation_receipts_json=excluded.validation_receipts_json",
             params![
                 session.id,
                 session.workspace.to_string_lossy(),
@@ -383,6 +403,7 @@ impl SqliteSessionStore {
                 i64::from(session.archived),
                 i64::from(session.pinned),
                 session.model_override,
+                serde_json::to_string(&session.validation_receipts).map_err(json_error)?,
             ],
         )
         .map_err(sqlite_error)?;
@@ -394,7 +415,8 @@ impl SqliteSessionStore {
             .query_row(
                 "SELECT id, workspace, model, system_prompt, messages_json, snapshots_json,
                         execution_receipts_json, created_at, updated_at, parent_id, fork_point,
-                        redo_json, message_redo_json, title, archived, pinned, model_override
+                        redo_json, message_redo_json, title, archived, pinned, model_override,
+                        validation_receipts_json
                  FROM sessions WHERE id = ?1",
                 [id],
                 |row| {
@@ -416,6 +438,7 @@ impl SqliteSessionStore {
                         row.get::<_, bool>(14)?,
                         row.get::<_, bool>(15)?,
                         row.get::<_, Option<String>>(16)?,
+                        row.get::<_, String>(17)?,
                     ))
                 },
             )
@@ -434,6 +457,7 @@ impl SqliteSessionStore {
             snapshots: serde_json::from_str::<HashMap<String, SnapshotEntry>>(&row.5)
                 .map_err(json_error)?,
             execution_receipts: serde_json::from_str(&row.6).map_err(json_error)?,
+            validation_receipts: serde_json::from_str(&row.17).map_err(json_error)?,
             created_at: row.7,
             updated_at: row.8,
             parent_id: row.9,

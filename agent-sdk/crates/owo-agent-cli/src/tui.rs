@@ -937,10 +937,18 @@ impl TuiApp {
                 steps,
                 duration_ms,
                 total_tokens,
+                completion_status,
                 ..
             } => {
+                let status = match completion_status {
+                    owo_agent_protocol::CompletionStatusV1::ResponseComplete => "",
+                    owo_agent_protocol::CompletionStatusV1::Candidate => " · 代码变更待验收",
+                    owo_agent_protocol::CompletionStatusV1::Accepted => " · 宿主验收通过",
+                    owo_agent_protocol::CompletionStatusV1::Unverified => " · 结果未验证",
+                    owo_agent_protocol::CompletionStatusV1::Blocked => " · 存在阻断问题",
+                };
                 self.push_line(
-                    format!("  ⏱ {steps} 步 / {duration_ms} ms / {total_tokens} tokens"),
+                    format!("  ⏱ {steps} 步 / {duration_ms} ms / {total_tokens} tokens{status}"),
                     cyan(),
                 );
             }

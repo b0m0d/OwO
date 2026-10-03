@@ -156,6 +156,7 @@ mod tests {
         session.push(ChatMessage::user("你好".to_string()));
         let outcome = TurnOutcome {
             final_text: Some("收到".to_string()),
+            completion_status: owo_agent_protocol::CompletionStatusV1::ResponseComplete,
             reached_model_turn_limit: false,
             steps: 1,
             events: vec![
@@ -200,6 +201,7 @@ mod tests {
         session.push(ChatMessage::user("你好".to_string()));
         let outcome = TurnOutcome {
             final_text: Some("收到".to_string()),
+            completion_status: owo_agent_protocol::CompletionStatusV1::ResponseComplete,
             reached_model_turn_limit: false,
             steps: 1,
             events: vec![],

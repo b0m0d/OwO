@@ -605,6 +605,7 @@ impl TeamCoordinator {
                     }
                 }
                 acceptance_receipts.push(json!({
+                    "completion_status": owo_agent_protocol::CompletionStatusV1::Accepted,
                     "step_id": &step.id,
                     "attempt_id": attempt_id,
                     "artifact_id": &artifact.artifact_id,

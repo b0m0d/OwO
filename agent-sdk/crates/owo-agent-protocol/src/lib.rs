@@ -799,6 +799,24 @@ pub struct DaemonDescriptor {
 /// 变更策略：破坏性事件结构变更 → 递增版本并登记 RFC 注释（弃用期 ≥2 个 minor）。
 pub const SSE_PROTOCOL_VERSION: u32 = 1;
 
+/// Shared completion meaning across ordinary Agent turns and Team delivery.
+/// A finished response is not the same claim as an accepted code change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionStatusV1 {
+    /// The conversational turn produced a final response without tracked file changes.
+    ResponseComplete,
+    /// The host observed file changes, but no task-scoped validation has accepted them.
+    Candidate,
+    /// All required host validations and version-bound delivery checks passed.
+    Accepted,
+    /// The turn ended, but required behavior or source evidence is missing or stale.
+    #[default]
+    Unverified,
+    /// A required validation or blocking issue prevents acceptance.
+    Blocked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseEvent {
@@ -901,6 +919,9 @@ pub enum SseEvent {
         total_tokens: u64,
         #[serde(default)]
         cost_usd: f64,
+        /// Completion state shared with Team DeliveryGate; older clients may ignore it.
+        #[serde(default)]
+        completion_status: CompletionStatusV1,
     },
 }
 

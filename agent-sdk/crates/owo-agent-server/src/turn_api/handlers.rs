@@ -343,6 +343,7 @@ pub(crate) async fn turn(
                         completion_tokens: outcome.usage.completion_tokens,
                         total_tokens: outcome.usage.total_tokens,
                         cost_usd,
+                        completion_status: outcome.completion_status,
                     },
                 );
             }

@@ -39,6 +39,16 @@ impl OutputMode {
     }
 }
 
+fn completion_status_label(status: owo_agent_protocol::CompletionStatusV1) -> String {
+    match status {
+        owo_agent_protocol::CompletionStatusV1::ResponseComplete => String::new(),
+        owo_agent_protocol::CompletionStatusV1::Candidate => " · 代码变更待验收".to_string(),
+        owo_agent_protocol::CompletionStatusV1::Accepted => " · 宿主验收通过".to_string(),
+        owo_agent_protocol::CompletionStatusV1::Unverified => " · 结果未验证".to_string(),
+        owo_agent_protocol::CompletionStatusV1::Blocked => " · 存在阻断问题".to_string(),
+    }
+}
+
 // ---------- 协议渲染纯函数（协议稳定性由测试锁定） ----------
 
 /// jsonl：把任意可序列化事件包裹为稳定协议行（turn/repl 共用同一 schema）。
@@ -358,12 +368,14 @@ impl StreamPrinter {
                 steps,
                 duration_ms,
                 total_tokens,
+                completion_status,
                 ..
             } => {
                 self.clear_status();
                 println!(
-                    "  {} {steps} 步 / {duration_ms} ms / {total_tokens} tokens",
-                    "⏱".cyan()
+                    "  {} {steps} 步 / {duration_ms} ms / {total_tokens} tokens{}",
+                    "⏱".cyan(),
+                    completion_status_label(*completion_status)
                 );
             }
             SseEvent::UserQuestion {

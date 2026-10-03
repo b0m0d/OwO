@@ -43,6 +43,9 @@ pub struct ExecutionReceipt {
     pub created_at: String,
     #[serde(default)]
     pub status: String,
+    /// Host validation receipt that accepted this exact file snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_receipt_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +59,9 @@ pub struct Session {
     /// ToolHost 成功写入产生的收据；旧会话没有此字段时按空列表加载。
     #[serde(default)]
     pub execution_receipts: Vec<ExecutionReceipt>,
+    /// Host-produced behavior validation evidence for ordinary Agent work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
     pub created_at: String,
     pub updated_at: String,
     /// 父会话（由 fork 产生时）。
@@ -112,6 +118,7 @@ impl Session {
             messages: Vec::new(),
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
+            validation_receipts: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
             parent_id: None,
@@ -274,6 +281,7 @@ impl Session {
             diff_sha256,
             created_at: Utc::now().to_rfc3339(),
             status: "executed".to_string(),
+            validation_receipt_id: None,
         };
         self.execution_receipts.push(receipt.clone());
         self.updated_at = Utc::now().to_rfc3339();
@@ -496,6 +504,7 @@ impl Session {
             messages,
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
+            validation_receipts: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
             parent_id: Some(self.id.clone()),

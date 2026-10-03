@@ -1091,6 +1091,11 @@ function fillTurnSummaryMeta(turn) {
     : Math.max(1, Math.round((Date.now() - turn.startedAt) / 1000));
   const parts = [`耗时 ${wall}s`, `工具 ${turn.tools} 次`];
   if (turn.stopped) parts.push("未完成");
+  const completionStatus = server.completion_status;
+  if (completionStatus === "candidate") parts.push("代码变更待验收");
+  else if (completionStatus === "unverified") parts.push("结果未验证");
+  else if (completionStatus === "blocked") parts.push("存在阻断问题");
+  else if (completionStatus === "accepted") parts.push("宿主验收通过");
   if (turn.modelCalls) parts.push(`模型调用 ${turn.modelCalls} 轮`);
   if (server.steps) parts.push(`共 ${server.steps} 步`);
   if (server.total_tokens) {
