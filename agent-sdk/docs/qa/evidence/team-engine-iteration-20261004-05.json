@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-03T18:32:28Z",
+  "repository": "T:/创新创业/OwO-master/agent-sdk",
+  "git": {
+    "head": "190d0e9",
+    "branch": "agent-frame",
+    "worktree": "clean except pre-existing untracked desktop/tauri preserved",
+    "commits": [
+      {
+        "id": "190d0e9",
+        "summary": "bind paired evaluations to exact run identity"
+      },
+      {
+        "id": "a339c70",
+        "summary": "reject malformed paired evaluation matrices"
+      },
+      {
+        "id": "a827e73",
+        "summary": "gate team benefit on paired run alignment"
+      }
+    ]
+  },
+  "iteration": {
+    "area": "Matched Single/Team evaluation identity and safe resume",
+    "changes": [
+      "Paired reports require the production Single and Team execution modes, matching nonempty model and batch labels, exact case/repetition sets, and no malformed or pending matrix cells.",
+      "Added a run-contract SHA-256 over selected task definitions, permission/checker identity, effective repetitions, timeouts, model-call budgets, and suite defaults.",
+      "Run directories now reject resumed journals with changed or missing model, executor, batch, run-contract, or evaluator executable identity.",
+      "Reports carry the evaluator executable SHA-256; paired reports with missing or different binaries cannot enable Team benefit.",
+      "Corrected the architecture document: Single shares completion DTOs and receipt contracts with Team, but still has a separate persistence and lifecycle implementation."
+    ],
+    "validation": {
+      "git_diff_check": "passed",
+      "source_review": "completed",
+      "cargo_or_tests": "not run; reserved for one final verification pass after implementation stabilizes",
+      "exit_code": null,
+      "cargo_processes": 0,
+      "cloud_model_calls": 0
+    },
+    "resources": {
+      "free_physical_memory_gb_approx": 13.51,
+      "free_T_drive_gb_approx": null,
+      "disk_probe": "Win32_LogicalDisk did not return T: in this environment",
+      "cargo_processes": 0
+    },
+    "remaining": [
+      "Evaluator binary identity does not prove the source Git revision or provider endpoint; freeze/source and endpoint identity must be bound before making a formal advantage claim.",
+      "Single and Team still have separate lifecycle/persistence implementations around shared completion DTOs; continue converging the host acceptance path without weakening permissions or review.",
+      "Review WorkerRuntime assembly and generic task-pool/template costs from current source.",
+      "Run the single final resource-policy-compliant validation only after source changes stabilize; perform matched live runs only with valid model access and record real outcomes."
+    ]
+  }
+}
