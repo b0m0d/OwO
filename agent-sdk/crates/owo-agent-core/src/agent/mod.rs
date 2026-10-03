@@ -553,6 +553,7 @@ impl Agent {
         let mut usage = TokenUsage::default();
         let mut model_calls = Vec::new();
         session.transient_model_calls.clear();
+        session.active_turn_input_sha256 = Some(crate::CasStore::hash_of(prompt.as_bytes()));
         let mut usage_known = true;
         let mut model_requests = 0usize;
         // §9.2：turn 入口建立统一预算（None = 不限时，仅记账不强制）；
@@ -1879,155 +1880,496 @@ fn assess_single_turn_completion(
     }
     let root = root.expect("checked above");
 
-    let last_command = events
-        .iter()
-        .enumerate()
-        .filter_map(|(index, event)| match event {
-            TurnEvent::ToolResult {
-                tool,
-                command_receipt,
-                ..
-            } if tool == "run_command" => Some((index, command_receipt.as_ref())),
-            _ => None,
-        })
-        .last();
-    let Some((command_event_index, Some(command_receipt))) = last_command else {
-        return match last_command {
-            Some((_, None)) => decide(true, false, true, 1, 0, 0, false),
-            _ => decide(true, false, true, 0, 0, 0, false),
-        };
-    };
-    if command_receipt.validator_id.as_deref() != Some("workspace-command-success-v1")
-        || command_receipt.validator_version.as_deref() != Some("1")
-    {
+    let input_sha256 = crate::CasStore::hash_of(prompt.as_bytes());
+    let plan = session
+        .single_verification_plan
+        .clone()
+        .filter(|_| session.single_verification_plan_input_sha256.as_deref() == Some(input_sha256.as_str()));
+    let Some(plan) = plan else {
+        // A generic successful command is not enough to claim that a task's declared
+        // requirements were covered. The model must register a host-resolvable plan.
         return decide(true, false, true, 0, 0, 0, false);
+    };
+    execute_single_verification_plan(
+        session,
+        &plan,
+        &input_sha256,
+        turn_id,
+        events,
+        &pending_hashes,
+        &root,
+    )
+}
+
+fn single_path_is_source_code(path: &str) -> bool {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py" | "go"
+            | "java" | "cs" | "cpp" | "c" | "h" | "hpp" | "vue" | "svelte"
+            | "php" | "rb" | "swift" | "kt" | "scala" | "sql"
+    )
+}
+
+fn execute_single_verification_plan(
+    session: &mut Session,
+    plan: &crate::plan::VerificationPlanV1,
+    input_sha256: &str,
+    turn_id: &str,
+    events: &[TurnEvent],
+    pending_hashes: &std::collections::BTreeMap<String, Option<String>>,
+    root: &std::path::Path,
+) -> owo_agent_protocol::CompletionStatusV1 {
+    use crate::plan::{
+        ValidationReceiptV1, ValidationVerdictV1, VerificationScopeV1,
+    };
+    use crate::verification::{execute_workspace_requirement, workspace_validator_arguments_supported};
+
+    let base_evidence = |required, passed, failed, stale| {
+        crate::completion::decide_completion(crate::completion::CompletionEvidence {
+            response_finished: true,
+            has_candidate_changes: true,
+            required_validation_count: required,
+            passed_required_validation_count: passed,
+            failed_required_validation_count: failed,
+            stale_evidence: stale,
+            ..crate::completion::CompletionEvidence::default()
+        })
+    };
+    if validate_single_verification_plan(plan).is_err() {
+        return base_evidence(1, 0, 0, false);
     }
 
-    let mut subject_hashes = std::collections::HashMap::new();
-    let mut snapshot_matches = command_receipt.workspace_hashes_complete;
-    for (relative, expected_hash) in &pending_hashes {
-        let Some(command_hash) = command_receipt.workspace_hashes.get(relative) else {
-            snapshot_matches = false;
-            continue;
-        };
-        let Some(current_hash) = workspace_file_hash(&root, relative) else {
-            snapshot_matches = false;
-            continue;
-        };
-        if command_hash != expected_hash || command_hash != &current_hash {
-            snapshot_matches = false;
+    let normalized_paths = |requirement: &crate::plan::VerificationRequirementV1| {
+        match &requirement.scope {
+            VerificationScopeV1::WorkspacePaths { relative_paths } => relative_paths
+                .iter()
+                .map(|path| path.replace('\\', "/"))
+                .collect::<std::collections::BTreeSet<_>>(),
+            _ => std::collections::BTreeSet::new(),
         }
-        let subject_hash = command_hash
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(crate::verification::workspace_path_absence_sha256);
-        subject_hashes.insert(format!("workspace-path:{relative}"), subject_hash);
-    }
-    let later_mutation = events
+    };
+    let required_requirements = plan
+        .requirements
         .iter()
-        .skip(command_event_index + 1)
-        .any(|event| match event {
-            TurnEvent::ToolResult { tool, ok, .. } if *ok => {
-                crate::tool_effects::effect_class_for(tool)
-                    != crate::tool_effects::EffectClass::Read
+        .filter(|requirement| requirement.required)
+        .collect::<Vec<_>>();
+    let mut all_covered_paths = std::collections::BTreeSet::new();
+    let mut behavior_covered_paths = std::collections::BTreeSet::new();
+    for requirement in &required_requirements {
+        let paths = normalized_paths(requirement);
+        all_covered_paths.extend(paths.iter().cloned());
+        if requirement.validator_id == "workspace-command-success-v1" {
+            behavior_covered_paths.extend(paths);
+        }
+    }
+    let missing_paths = pending_hashes
+        .keys()
+        .filter(|path| !all_covered_paths.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing_behavior_paths = pending_hashes
+        .keys()
+        .filter(|path| single_path_is_source_code(path) && !behavior_covered_paths.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let coverage_ok = missing_paths.is_empty() && missing_behavior_paths.is_empty();
+
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let changeset_bytes = serde_json::to_vec(pending_hashes).unwrap_or_default();
+    let changeset_sha256 = crate::CasStore::hash_of(&changeset_bytes);
+    let environment_id = crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
+    let mut required_count = required_requirements.len();
+    let mut passed_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut stale_evidence = false;
+    let mut first_passed_receipt_id = None;
+    let mut plan_receipts = Vec::with_capacity(plan.requirements.len() + 1);
+
+    for requirement in &plan.requirements {
+        let requirement_started = chrono::Utc::now().to_rfc3339();
+        let mut subjects = std::collections::HashMap::new();
+        let mut evidence_refs = Vec::new();
+        let (mut verdict, mut detail) = if requirement.validator_id == "workspace-command-success-v1" {
+            let expected_command = requirement.arguments.get("command").and_then(serde_json::Value::as_str);
+            let expected_command_sha = expected_command.map(|command| crate::CasStore::hash_of(command.trim().as_bytes()));
+            let command_observation = events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| match event {
+                    TurnEvent::ToolResult { tool, command_receipt: Some(receipt), .. }
+                        if tool == "run_command"
+                            && Some(receipt.command_sha256.as_str()) == expected_command_sha.as_deref()
+                            && receipt.validator_id.as_deref() == Some("workspace-command-success-v1")
+                            && receipt.validator_version.as_deref() == Some("1") =>
+                    {
+                        Some((index, receipt))
+                    }
+                    _ => None,
+                })
+                .last();
+            match command_observation {
+                None => (
+                    ValidationVerdictV1::Unverified,
+                    Some("本回合没有运行计划登记的宿主行为命令".to_string()),
+                ),
+                Some((_event_index, receipt)) if receipt.exit_code != 0 => (
+                    ValidationVerdictV1::Failed,
+                    Some(format!("宿主登记的行为命令失败，exit_code={}", receipt.exit_code)),
+                ),
+                Some((_, receipt))
+                    if receipt.duration_ms.is_none_or(|duration| duration > requirement.resources.timeout_ms) =>
+                {
+                    (
+                        ValidationVerdictV1::Unverified,
+                        Some("行为命令缺少宿主耗时证据或超过 VerificationPlan 预算".to_string()),
+                    )
+                }
+                Some((event_index, receipt)) => {
+                    let paths = normalized_paths(requirement);
+                    let mut snapshot_matches = receipt.workspace_hashes_complete;
+                    for relative in &paths {
+                        let Some(command_hash) = receipt.workspace_hashes.get(relative) else {
+                            snapshot_matches = false;
+                            continue;
+                        };
+                        let Some(current_hash) = workspace_file_hash(root, relative) else {
+                            snapshot_matches = false;
+                            continue;
+                        };
+                        let expected_hash = pending_hashes.get(relative);
+                        if expected_hash.is_some_and(|expected| expected != command_hash)
+                            || command_hash != &current_hash
+                        {
+                            snapshot_matches = false;
+                        }
+                        subjects.insert(
+                            format!("workspace-path:{relative}"),
+                            command_hash.as_ref().cloned().unwrap_or_else(
+                                crate::verification::workspace_path_absence_sha256,
+                            ),
+                        );
+                    }
+                    let later_mutation = events
+                        .iter()
+                        .skip(event_index + 1)
+                        .any(|event| match event {
+                            TurnEvent::ToolResult { tool, ok, .. } if *ok => {
+                                crate::tool_effects::effect_class_for(tool)
+                                    != crate::tool_effects::EffectClass::Read
+                            }
+                            _ => false,
+                        });
+                    evidence_refs.push(format!("command-result:sha256:{}", receipt.result_sha256));
+                    if !receipt.workspace_hashes_complete {
+                        (
+                            ValidationVerdictV1::Unverified,
+                            Some("命令执行时宿主文件快照不完整".to_string()),
+                        )
+                    } else if !snapshot_matches || later_mutation {
+                        (
+                            ValidationVerdictV1::Stale,
+                            Some("行为命令回执与计划路径的最终源码快照不一致".to_string()),
+                        )
+                    } else {
+                        (
+                            ValidationVerdictV1::Passed,
+                            Some("宿主登记的行为命令成功，覆盖路径与执行及最终源码哈希一致".to_string()),
+                        )
+                    }
+                }
             }
-            _ => false,
+        } else if workspace_validator_arguments_supported(&requirement.validator_id, &requirement.arguments) {
+            let (workspace_verdict, workspace_detail, hashes) = execute_workspace_requirement(requirement, root);
+            let mut matches_pending = true;
+            for (relative, actual_hash) in hashes {
+                let normalized = relative.replace('\\', "/");
+                subjects.insert(format!("workspace-path:{normalized}"), actual_hash.clone());
+                if pending_hashes.get(&normalized).is_some_and(|expected| expected.as_deref() != Some(actual_hash.as_str())) {
+                    matches_pending = false;
+                }
+                if workspace_file_hash(root, &normalized).and_then(|value| value) != Some(actual_hash) {
+                    matches_pending = false;
+                }
+            }
+            if workspace_verdict == ValidationVerdictV1::Passed && !matches_pending {
+                (
+                    ValidationVerdictV1::Stale,
+                    Some("宿主静态验证路径与本次变更或最终文件哈希不一致".to_string()),
+                )
+            } else {
+                (workspace_verdict, workspace_detail)
+            }
+        } else {
+            (
+                ValidationVerdictV1::Unsupported,
+                Some("VerificationPlan validator 参数未被宿主注册".to_string()),
+            )
+        };
+        if !coverage_ok && requirement.required && verdict == ValidationVerdictV1::Passed {
+            verdict = ValidationVerdictV1::Unverified;
+            detail = Some(format!(
+                "声明的验收项通过，但计划未覆盖所有候选变更；遗漏路径={}，未行为验证源码路径={}",
+                missing_paths.join(","),
+                missing_behavior_paths.join(",")
+            ));
+        }
+        let receipt_id = format!("single-validation-{}", uuid::Uuid::new_v4());
+        if requirement.required {
+            match verdict {
+                ValidationVerdictV1::Passed | ValidationVerdictV1::ManualAccepted => {
+                    passed_count += 1;
+                    first_passed_receipt_id.get_or_insert_with(|| receipt_id.clone());
+                }
+                ValidationVerdictV1::Failed => failed_count += 1,
+                ValidationVerdictV1::Stale => stale_evidence = true,
+                _ => {}
+            }
+        }
+        plan_receipts.push(ValidationReceiptV1 {
+            receipt_id,
+            task_id: session.id.clone(),
+            attempt_id: turn_id.to_string(),
+            epoch: session.messages.len() as u64,
+            requirement_id: requirement.requirement_id.clone(),
+            validator_id: requirement.validator_id.clone(),
+            validator_version: requirement.validator_version.clone().unwrap_or_else(|| "unknown".to_string()),
+            arguments_sha256: crate::CasStore::hash_of(requirement.arguments.to_string().as_bytes()),
+            input_sha256: input_sha256.to_string(),
+            environment_id: environment_id.clone(),
+            changeset_sha256: Some(changeset_sha256.clone()),
+            detail,
+            subject_sha256: subjects,
+            verdict,
+            evidence_refs,
+            started_at: requirement_started,
+            completed_at: chrono::Utc::now().to_rfc3339(),
         });
-    if later_mutation {
-        snapshot_matches = false;
+    }
+    if !coverage_ok {
+        required_count += 1;
+        let mut subjects = std::collections::HashMap::new();
+        for (path, hash) in pending_hashes {
+            subjects.insert(
+                format!("workspace-path:{path}"),
+                hash.clone().unwrap_or_else(crate::verification::workspace_path_absence_sha256),
+            );
+        }
+        plan_receipts.push(ValidationReceiptV1 {
+            receipt_id: format!("single-coverage-{}", uuid::Uuid::new_v4()),
+            task_id: session.id.clone(),
+            attempt_id: turn_id.to_string(),
+            epoch: session.messages.len() as u64,
+            requirement_id: "host-change-scope-coverage".to_string(),
+            validator_id: "host-change-scope-coverage-v1".to_string(),
+            validator_version: "1".to_string(),
+            arguments_sha256: crate::CasStore::hash_of(plan.plan_id.as_bytes()),
+            input_sha256: input_sha256.to_string(),
+            environment_id,
+            changeset_sha256: Some(changeset_sha256),
+            detail: Some(format!(
+                "候选变更不在必需验证范围内；遗漏路径={}，未行为验证源码路径={}",
+                missing_paths.join(","),
+                missing_behavior_paths.join(",")
+            )),
+            subject_sha256: subjects,
+            verdict: ValidationVerdictV1::Unverified,
+            evidence_refs: Vec::new(),
+            started_at: started_at.clone(),
+            completed_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+    session.validation_receipts.extend(plan_receipts);
+
+    let status = base_evidence(required_count, passed_count, failed_count, stale_evidence);
+    if status == owo_agent_protocol::CompletionStatusV1::Accepted {
+        let mut latest_receipt_by_path = std::collections::BTreeMap::new();
+        for (index, execution) in session.execution_receipts.iter().enumerate() {
+            for path in &execution.changed_files {
+                latest_receipt_by_path.insert(path.replace('\\', "/"), index);
+            }
+        }
+        let accepted_receipt_id = first_passed_receipt_id.unwrap_or_default();
+        for (index, execution) in session.execution_receipts.iter_mut().enumerate() {
+            let paths = execution.changed_files.iter().map(|path| path.replace('\\', "/")).collect::<Vec<_>>();
+            if execution.status == "executed"
+                && !paths.is_empty()
+                && paths.iter().all(|path| pending_hashes.contains_key(path)
+                    && latest_receipt_by_path.get(path) == Some(&index))
+            {
+                execution.status = "accepted".to_string();
+                execution.validation_receipt_id = Some(accepted_receipt_id.clone());
+            }
+        }
+    }
+    status
+}
+
+
+#[cfg(test)]
+mod single_verification_plan_tests {
+    use super::{assess_single_turn_completion, CommandExecutionReceipt, TurnEvent};
+    use crate::plan::{
+        VerificationPlanV1, VerificationRequirementV1, VerificationResourcesV1,
+        VerificationScopeV1,
+    };
+    use crate::session::{ExecutionReceipt, Session};
+    use std::collections::HashMap;
+
+    fn plan(validator_id: &str, path: &str, arguments: serde_json::Value) -> VerificationPlanV1 {
+        VerificationPlanV1 {
+            plan_id: "single-task-plan".to_string(),
+            requirements: vec![VerificationRequirementV1 {
+                requirement_id: "req-user-visible".to_string(),
+                covers_requirement_ids: vec!["user-request:req-user-visible".to_string()],
+                validator_id: validator_id.to_string(),
+                validator_version: Some("1".to_string()),
+                scope: VerificationScopeV1::WorkspacePaths {
+                    relative_paths: vec![path.to_string()],
+                },
+                arguments,
+                required: true,
+                resources: VerificationResourcesV1 {
+                    cpu_slots: 1,
+                    memory_mb: 16,
+                    exclusive_workspace: false,
+                    timeout_ms: 10_000,
+                },
+            }],
+        }
     }
 
-    let verdict = if command_receipt.exit_code != 0 {
-        ValidationVerdictV1::Failed
-    } else if command_receipt.duration_ms.is_none()
-        || command_receipt.duration_ms.is_some_and(|duration| duration > 60_000)
-    {
-        ValidationVerdictV1::Unverified
-    } else if snapshot_matches {
-        ValidationVerdictV1::Passed
-    } else {
-        ValidationVerdictV1::Stale
-    };
-    let detail = match verdict {
-        ValidationVerdictV1::Passed => {
-            "宿主登记的行为命令成功，测试时与回合结束源码哈希一致".to_string()
-        }
-        ValidationVerdictV1::Failed => {
-            format!("宿主行为命令失败，exit_code={}", command_receipt.exit_code)
-        }
-        ValidationVerdictV1::Unverified => {
-            "行为命令缺少有效宿主耗时证据或超过默认命令预算".to_string()
-        }
-        _ => "行为验证回执与当前 Single 源码快照不一致".to_string(),
-    };
-    let now = chrono::Utc::now().to_rfc3339();
-    let change_bytes = serde_json::to_vec(&pending_hashes).unwrap_or_else(|_| Vec::new());
-    let validation = ValidationReceiptV1 {
-        receipt_id: format!("single-validation-{}", uuid::Uuid::new_v4()),
-        task_id: session.id.clone(),
-        attempt_id: turn_id.to_string(),
-        epoch: session.messages.len() as u64,
-        requirement_id: "single-behavior-validation".to_string(),
-        validator_id: "workspace-command-success-v1".to_string(),
-        validator_version: "1".to_string(),
-        arguments_sha256: command_receipt.command_sha256.clone(),
-        input_sha256: crate::CasStore::hash_of(prompt.as_bytes()),
-        environment_id: crate::CasStore::hash_of(
-            session.workspace.to_string_lossy().as_bytes(),
-        ),
-        changeset_sha256: Some(crate::CasStore::hash_of(&change_bytes)),
-        detail: Some(detail),
-        subject_sha256: subject_hashes,
-        verdict,
-        evidence_refs: vec![format!(
-            "command-result:sha256:{}",
-            command_receipt.result_sha256
-        )],
-        started_at: now.clone(),
-        completed_at: now,
-    };
-    let receipt_id = validation.receipt_id.clone();
-    session.validation_receipts.push(validation);
+    fn add_write(session: &mut Session, turn_id: &str, relative: &str, hash: &str) {
+        session.execution_receipts.push(ExecutionReceipt {
+            receipt_id: format!("exec-{turn_id}"),
+            tool: "write_file".to_string(),
+            turn_id: turn_id.to_string(),
+            changed_files: vec![relative.to_string()],
+            snapshot_keys: HashMap::new(),
+            before_hashes: HashMap::from([(relative.to_string(), None)]),
+            after_hashes: HashMap::from([(relative.to_string(), Some(hash.to_string()))]),
+            diff_sha256: "diff-hash".to_string(),
+            created_at: "2026-10-04T00:00:00Z".to_string(),
+            status: "executed".to_string(),
+            validation_receipt_id: None,
+        });
+    }
 
-    let completion_status = match verdict {
-        ValidationVerdictV1::Passed => {
-            for (index, execution) in session.execution_receipts.iter_mut().enumerate() {
-                let paths = execution
-                    .changed_files
-                    .iter()
-                    .map(|path| path.replace('\\', "/"))
-                    .collect::<Vec<_>>();
-                if execution.status == "stale"
-                    && paths.iter().any(|path| pending_hashes.contains_key(path))
-                {
-                    execution.status = "superseded".to_string();
-                    continue;
-                }
-                if execution.status != "executed" {
-                    continue;
-                }
-                if paths.is_empty() || !paths.iter().any(|path| pending_hashes.contains_key(path)) {
-                    continue;
-                }
-                let is_latest_for_every_path = paths.iter().all(|path| {
-                    latest_receipt_by_path
-                        .get(path)
-                        .is_some_and(|(latest_index, _)| *latest_index == index)
-                });
-                if is_latest_for_every_path {
-                    execution.status = "accepted".to_string();
-                    execution.validation_receipt_id = Some(receipt_id.clone());
-                } else {
-                    execution.status = "superseded".to_string();
-                }
-            }
-            decide(true, false, true, 1, 1, 0, false)
-        }
-        ValidationVerdictV1::Failed => decide(true, false, true, 1, 0, 1, false),
-        ValidationVerdictV1::Stale => decide(true, false, true, 1, 0, 0, true),
-        _ => decide(true, false, true, 1, 0, 0, false),
-    };
-    completion_status
+    #[test]
+    fn source_changes_need_a_registered_behavior_check_covering_the_changed_source() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("src").join("lib.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "pub fn ready() -> bool { true }
+").unwrap();
+        let hash = crate::CasStore::hash_of(&std::fs::read(&source).unwrap());
+        let mut session = Session::new(workspace.path(), "mock", None);
+        add_write(&mut session, "turn-source", "src/lib.rs", &hash);
+        let prompt = "实现 ready 检查";
+        session.single_verification_plan = Some(plan(
+            "workspace-file-exists-v1",
+            "src/lib.rs",
+            serde_json::json!({}),
+        ));
+        session.single_verification_plan_input_sha256 =
+            Some(crate::CasStore::hash_of(prompt.as_bytes()));
+
+        let status = assess_single_turn_completion(
+            &mut session,
+            prompt,
+            "turn-source",
+            &[],
+            false,
+            Some("已实现并验证。"),
+        );
+        assert_eq!(status, owo_agent_protocol::CompletionStatusV1::Unverified);
+        assert!(session.validation_receipts.iter().any(|receipt| {
+            receipt.requirement_id == "host-change-scope-coverage"
+                && receipt.verdict == crate::plan::ValidationVerdictV1::Unverified
+        }));
+    }
+
+    #[test]
+    fn generic_command_success_without_a_request_bound_plan_is_only_candidate() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("src").join("lib.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "pub fn ready() -> bool { true }
+").unwrap();
+        let hash = crate::CasStore::hash_of(&std::fs::read(&source).unwrap());
+        let mut session = Session::new(workspace.path(), "mock", None);
+        add_write(&mut session, "turn-unplanned", "src/lib.rs", &hash);
+        let command = "cargo test -p owo-agent-core";
+        let events = vec![TurnEvent::ToolResult {
+            id: "test-command".to_string(),
+            tool: "run_command".to_string(),
+            ok: true,
+            error: None,
+            preview: None,
+            command_receipt: Some(CommandExecutionReceipt {
+                command_sha256: crate::CasStore::hash_of(command.as_bytes()),
+                exit_code: 0,
+                result_sha256: "result-hash".to_string(),
+                duration_ms: Some(100),
+                workspace_hashes_complete: true,
+                validator_id: Some("workspace-command-success-v1".to_string()),
+                validator_version: Some("1".to_string()),
+                workspace_hashes: std::collections::BTreeMap::from([(
+                    "src/lib.rs".to_string(),
+                    Some(hash),
+                )]),
+            }),
+        }];
+
+        let status = assess_single_turn_completion(
+            &mut session,
+            "实现 ready 检查",
+            "turn-unplanned",
+            &events,
+            false,
+            Some("已实现并运行测试。"),
+        );
+        assert_eq!(status, owo_agent_protocol::CompletionStatusV1::Candidate);
+        assert!(session.validation_receipts.is_empty());
+    }
+
+    #[test]
+    fn planned_static_check_binds_receipt_to_exact_changed_file_hash() {
+        let workspace = tempfile::tempdir().unwrap();
+        let doc = workspace.path().join("README.md");
+        std::fs::write(&doc, "用户要求：包含 hello
+hello
+").unwrap();
+        let hash = crate::CasStore::hash_of(&std::fs::read(&doc).unwrap());
+        let mut session = Session::new(workspace.path(), "mock", None);
+        add_write(&mut session, "turn-doc", "README.md", &hash);
+        let prompt = "创建说明并包含 hello";
+        session.single_verification_plan = Some(plan(
+            "workspace-file-contains-v1",
+            "README.md",
+            serde_json::json!({"text":"hello"}),
+        ));
+        session.single_verification_plan_input_sha256 =
+            Some(crate::CasStore::hash_of(prompt.as_bytes()));
+
+        let status = assess_single_turn_completion(
+            &mut session,
+            prompt,
+            "turn-doc",
+            &[],
+            false,
+            Some("已完成说明。"),
+        );
+        assert_eq!(status, owo_agent_protocol::CompletionStatusV1::Accepted);
+        assert_eq!(session.validation_receipts.len(), 1);
+        assert_eq!(session.validation_receipts[0].verdict, crate::plan::ValidationVerdictV1::Passed);
+        assert_eq!(session.validation_receipts[0].subject_sha256["workspace-path:README.md"], hash);
+        assert_eq!(session.execution_receipts[0].status, "accepted");
+    }
 }
 
 fn tool_preview(outcome: &Result<serde_json::Value, String>) -> Option<String> {

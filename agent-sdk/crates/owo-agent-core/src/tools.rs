@@ -504,6 +504,7 @@ impl ToolRegistry {
         registry.register(ShellOutputTool);
         registry.register(KillShellTool);
         registry.register(TodoTool);
+        registry.register(SingleVerificationPlanTool);
         registry.register(WebFetchTool);
         registry.register(WebSearchTool);
         registry.register(ReadImageTool);
@@ -1672,6 +1673,130 @@ impl Tool for ApplyPatchTool {
             }));
         }
         Ok(json!({ "ok": true, "files": applied }))
+    }
+}
+
+/// Host-bound acceptance requirements for an ordinary Single task.
+struct SingleVerificationPlanTool;
+
+fn validate_single_verification_plan(
+    plan: &crate::plan::VerificationPlanV1,
+) -> Result<(), String> {
+    plan.validate()?;
+    if plan.plan_id.len() > 128 || plan.requirements.len() > 32 {
+        return Err("VerificationPlan 超过宿主的 plan_id/requirement 数量上限".to_string());
+    }
+    for requirement in &plan.requirements {
+        if requirement.validator_version.as_deref() != Some("1")
+            || !crate::verification::is_registered_workspace_validator(&requirement.validator_id)
+        {
+            return Err(format!(
+                "requirement {} 使用了未注册的宿主 validator/version",
+                requirement.requirement_id
+            ));
+        }
+        let crate::plan::VerificationScopeV1::WorkspacePaths { relative_paths } =
+            &requirement.scope
+        else {
+            return Err(format!(
+                "requirement {} 必须绑定 WorkspacePaths",
+                requirement.requirement_id
+            ));
+        };
+        if relative_paths.len() > 16
+            || !crate::verification::workspace_validator_arguments_supported(
+                &requirement.validator_id,
+                &requirement.arguments,
+            )
+        {
+            return Err(format!(
+                "requirement {} 的路径数量或 validator 参数不符合宿主注册契约",
+                requirement.requirement_id
+            ));
+        }
+        let resources = &requirement.resources;
+        if resources.cpu_slots != 1
+            || !(8..=128).contains(&resources.memory_mb)
+            || resources.exclusive_workspace
+            || !(1..=30_000).contains(&resources.timeout_ms)
+        {
+            return Err(format!(
+                "requirement {} 的资源声明超出宿主验证器预算",
+                requirement.requirement_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[async_trait]
+impl Tool for SingleVerificationPlanTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "verification_plan".into(),
+            description: "登记本次任务的验收要求。只可选择宿主注册的 WorkspacePaths validator；计划本身不是通过证据，完成时由宿主按绑定源码执行并生成回执。".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "plan": {
+                        "type": "object",
+                        "properties": {
+                            "plan_id": {"type": "string"},
+                            "requirements": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "requirement_id": {"type": "string"},
+                                        "covers_requirement_ids": {"type": "array", "items": {"type": "string"}},
+                                        "validator_id": {"type": "string", "enum": ["workspace-file-exists-v1", "workspace-file-non-empty-v1", "workspace-file-contains-v1", "workspace-json-field-equals-v1", "workspace-command-success-v1"]},
+                                        "validator_version": {"type": "string", "enum": ["1"]},
+                                        "scope": {
+                                            "type": "object",
+                                            "properties": {
+                                                "kind": {"type": "string", "enum": ["workspace_paths"]},
+                                                "relative_paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 16}
+                                            },
+                                            "required": ["kind", "relative_paths"]
+                                        },
+                                        "arguments": {"type": "object"},
+                                        "required": {"type": "boolean"},
+                                        "resources": {
+                                            "type": "object",
+                                            "properties": {
+                                                "cpu_slots": {"type": "integer", "enum": [1]},
+                                                "memory_mb": {"type": "integer", "minimum": 8, "maximum": 128, "default": 16},
+                                                "exclusive_workspace": {"type": "boolean", "enum": [false]},
+                                                "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000, "default": 30000}
+                                            }
+                                        }
+                                    },
+                                    "required": ["requirement_id", "validator_id", "validator_version", "scope", "arguments", "required", "resources"]
+                                }
+                            }
+                        },
+                        "required": ["plan_id", "requirements"]
+                    }
+                },
+                "required": ["plan"]
+            }),
+            effect: None,
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let plan: crate::plan::VerificationPlanV1 = serde_json::from_value(
+            args.get("plan").cloned().ok_or("缺少 plan 对象")?
+        ).map_err(|error| format!("VerificationPlan 结构非法：{error}"))?;
+        validate_single_verification_plan(&plan)?;
+        let input_sha256 = ctx
+            .session
+            .active_turn_input_sha256
+            .clone()
+            .ok_or("当前 Agent 回合没有可绑定的用户输入摘要")?;
+        ctx.session.single_verification_plan = Some(plan.clone());
+        ctx.session.single_verification_plan_input_sha256 = Some(input_sha256);
+        Ok(json!({"plan": plan, "status": "registered_pending_host_validation"}))
     }
 }
 
@@ -3431,6 +3556,47 @@ impl Tool for UseSkillTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_single_plan(validator_id: &str, arguments: Value) -> crate::plan::VerificationPlanV1 {
+        crate::plan::VerificationPlanV1 {
+            plan_id: "single-plan".to_string(),
+            requirements: vec![crate::plan::VerificationRequirementV1 {
+                requirement_id: "req-user-visible".to_string(),
+                covers_requirement_ids: vec!["user-request:req-user-visible".to_string()],
+                validator_id: validator_id.to_string(),
+                validator_version: Some("1".to_string()),
+                scope: crate::plan::VerificationScopeV1::WorkspacePaths {
+                    relative_paths: vec!["src/lib.rs".to_string()],
+                },
+                arguments,
+                required: true,
+                resources: crate::plan::VerificationResourcesV1 {
+                    cpu_slots: 1,
+                    memory_mb: 16,
+                    exclusive_workspace: false,
+                    timeout_ms: 10_000,
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn single_verification_plan_accepts_only_registered_scoped_checks() {
+        let command_plan = sample_single_plan(
+            "workspace-command-success-v1",
+            json!({"command":"cargo test -p owo-agent-core"}),
+        );
+        assert!(validate_single_verification_plan(&command_plan).is_ok());
+
+        let unsupported = sample_single_plan("custom-shell-validator", json!({}));
+        assert!(validate_single_verification_plan(&unsupported).is_err());
+
+        let bypass = sample_single_plan(
+            "workspace-command-success-v1",
+            json!({"command":"cargo test -p owo-agent-core --no-run"}),
+        );
+        assert!(validate_single_verification_plan(&bypass).is_err());
+    }
 
     /// 回归：UTF-8 输出不得被二次误解，OEM 代码页（GBK）输出不得变成替换字符。
     #[test]

@@ -62,6 +62,14 @@ pub struct Session {
     /// Host-produced behavior validation evidence for ordinary Agent work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+    /// Model-proposed host-registered acceptance checks for the active task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_verification_plan: Option<crate::plan::VerificationPlanV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_verification_plan_input_sha256: Option<String>,
+    /// Current prompt digest is set by Agent and used to bind plan registration to this request.
+    #[serde(skip)]
+    pub(crate) active_turn_input_sha256: Option<String>,
     /// Ephemeral model-request observations for building an error trace before a TurnOutcome exists.
     #[serde(skip)]
     pub(crate) transient_model_calls: Vec<crate::agent::ModelCallRecord>,
@@ -122,6 +130,9 @@ impl Session {
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
             validation_receipts: Vec::new(),
+            single_verification_plan: None,
+            single_verification_plan_input_sha256: None,
+            active_turn_input_sha256: None,
             transient_model_calls: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
@@ -509,6 +520,9 @@ impl Session {
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
             validation_receipts: Vec::new(),
+            single_verification_plan: self.single_verification_plan.clone(),
+            single_verification_plan_input_sha256: self.single_verification_plan_input_sha256.clone(),
+            active_turn_input_sha256: None,
             transient_model_calls: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
