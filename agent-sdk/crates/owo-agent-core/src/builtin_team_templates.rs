@@ -1086,8 +1086,9 @@ mod tests {
 
     #[test]
     fn fullstack_prompts_do_not_impose_blog_specific_contracts() {
-        for role in ["lead", "w1", "w2", "project_integrator"] {
-            let sections = prompt_sections_for(FULLSTACK_WEB_V1, role).unwrap();
+        let template = descriptor(FULLSTACK_WEB_V1).unwrap().template;
+        for role_name in ["lead", "w1", "w2", "project_integrator"] {
+            let sections = prompt_sections_for(FULLSTACK_WEB_V1, role_name).unwrap();
             let prompt = sections
                 .must_do
                 .iter()
@@ -1096,9 +1097,27 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(!prompt.contains("totalPages"), "{role} 应按任务定义契约");
-            assert!(!prompt.contains("title/excerpt/body"), "{role} 不应预设搜索字段");
+            let handoff = template
+                .roles
+                .iter()
+                .find(|role| role.role == role_name)
+                .and_then(|role| role.handoff_contract.as_deref())
+                .unwrap_or_default();
+            for text in [prompt.as_str(), handoff] {
+                assert!(!text.contains("totalPages"), "{role_name} 应按任务定义契约");
+                assert!(!text.contains("title/excerpt/body"), "{role_name} 不应预设搜索字段");
+            }
         }
+        let integrator = template
+            .roles
+            .iter()
+            .find(|role| role.role == "project_integrator")
+            .unwrap();
+        assert!(integrator.write_paths.iter().all(|path| {
+            !["posts.mjs", "blog.mjs", "api.mjs", "api.test.mjs"]
+                .iter()
+                .any(|business_file| path.ends_with(business_file))
+        }));
     }
 
     #[test]
