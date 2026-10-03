@@ -1336,21 +1336,11 @@ impl TeamCoordinator {
                         .await?;
                     return Ok(PhaseOutcome::Failed);
                 };
-                let suggested_owner = finding
-                    .get("suggested_owner")
-                    .and_then(Value::as_str)
-                    .filter(|owner| !owner.trim().is_empty());
-                let owner_binding = match suggested_owner {
-                    Some(owner) => reviewed.iter().find(|artifact| {
-                        artifact.get("producer").and_then(Value::as_str) == Some(owner)
-                    }),
-                    None if reviewed.len() == 1 => reviewed.first(),
-                    None => None,
-                };
+                let owner_binding = select_reviewed_owner_binding(reviewed, finding);
                 let Some(owner_binding) = owner_binding else {
                     self.set_run_active(team_id, false);
                     let reason = format!(
-                        "review {} 未能关联原始产物 owner",
+                        "review {} 未能唯一关联被审任务；请为多任务 owner 提供 target_task_id 或 target_artifact_id",
                         review_artifact.artifact_id
                     );
                     self.fail_run_internal(team_id, &mut team, &mut state, &reason)
@@ -1371,14 +1361,31 @@ impl TeamCoordinator {
                         .await?;
                     return Ok(PhaseOutcome::Failed);
                 }
-                let Some(owner_step) = state.plan.steps.iter().find(|step| {
-                    step.worker == owner
-                        && state.records.get(&step.id).map(|record| record.status)
-                            == Some(StepStatus::Succeeded)
-                }) else {
+                let bound_task_id = owner_binding.get("task_id").and_then(Value::as_str);
+                let bound_attempt_id = owner_binding.get("attempt_id").and_then(Value::as_str);
+                let owner_steps = state
+                    .plan
+                    .steps
+                    .iter()
+                    .filter(|step| {
+                        step.worker == owner
+                            && state.records.get(&step.id).is_some_and(|record| {
+                                record.status == StepStatus::Succeeded
+                                    && bound_attempt_id.is_none_or(|attempt_id| {
+                                        record.attempt_id.as_deref() == Some(attempt_id)
+                                    })
+                            })
+                            && bound_task_id.is_none_or(|task_id| {
+                                step.id == task_id
+                                    || step.input.get("assigned_task_id").and_then(Value::as_str)
+                                        == Some(task_id)
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let Some(owner_step) = (owner_steps.len() == 1).then(|| owner_steps[0]) else {
                     self.set_run_active(team_id, false);
                     let reason = format!(
-                        "review {} 的 owner {} 不对应已接受的生产步骤",
+                        "review {} 的 owner {} 未能唯一对应已接受的生产步骤",
                         review_artifact.artifact_id, owner
                     );
                     self.fail_run_internal(team_id, &mut team, &mut state, &reason)
@@ -1730,6 +1737,36 @@ impl TeamCoordinator {
 
         Ok(())
     }
+}
+
+/// Resolve a finding only to a reviewed host-bound Artifact. Old findings remain
+/// compatible when the suggested producer owns exactly one reviewed task.
+fn select_reviewed_owner_binding<'a>(reviewed: &'a [Value], finding: &Value) -> Option<&'a Value> {
+    let owner = finding
+        .get("suggested_owner")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let task_id = finding
+        .get("target_task_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let artifact_id = finding
+        .get("target_artifact_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let matches = reviewed
+        .iter()
+        .filter(|artifact| {
+            owner.is_none_or(|owner| {
+                artifact.get("producer").and_then(Value::as_str) == Some(owner)
+            }) && task_id.is_none_or(|task_id| {
+                artifact.get("task_id").and_then(Value::as_str) == Some(task_id)
+            }) && artifact_id.is_none_or(|artifact_id| {
+                artifact.get("artifact_id").and_then(Value::as_str) == Some(artifact_id)
+            })
+        })
+        .collect::<Vec<_>>();
+    (matches.len() == 1).then(|| matches[0])
 }
 
 /// `w<数字>`（并行 writer 角色名；lead/leader 不在其列）。
@@ -2499,6 +2536,60 @@ fn parse_parallel_subtasks(output: &str) -> Option<(Vec<Value>, bool)> {
                 .map(|items| (items, versioned))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod review_owner_binding_tests {
+    use super::select_reviewed_owner_binding;
+    use serde_json::{json, Value};
+
+    fn reviewed() -> Vec<Value> {
+        vec![
+            json!({"producer":"m-w1", "task_id":"step-a", "artifact_id":"artifact-a"}),
+            json!({"producer":"m-w1", "task_id":"step-b", "artifact_id":"artifact-b"}),
+        ]
+    }
+
+    #[test]
+    fn legacy_owner_binding_remains_compatible_when_unique() {
+        let finding = json!({"suggested_owner":"m-w1"});
+        let only_artifact = vec![reviewed()[0].clone()];
+        assert_eq!(
+            select_reviewed_owner_binding(&only_artifact, &finding)
+                .and_then(|artifact| artifact.get("task_id"))
+                .and_then(Value::as_str),
+            Some("step-a")
+        );
+    }
+
+    #[test]
+    fn ambiguous_legacy_owner_does_not_pick_the_first_task() {
+        let finding = json!({"suggested_owner":"m-w1"});
+        assert!(select_reviewed_owner_binding(&reviewed(), &finding).is_none());
+    }
+
+    #[test]
+    fn task_or_artifact_identity_resolves_the_exact_reviewed_task() {
+        let finding = json!({"suggested_owner":"m-w1", "target_task_id":"step-b"});
+        assert_eq!(
+            select_reviewed_owner_binding(&reviewed(), &finding)
+                .and_then(|artifact| artifact.get("artifact_id"))
+                .and_then(Value::as_str),
+            Some("artifact-b")
+        );
+        let finding = json!({"target_artifact_id":"artifact-a"});
+        assert_eq!(
+            select_reviewed_owner_binding(&reviewed(), &finding)
+                .and_then(|artifact| artifact.get("task_id"))
+                .and_then(Value::as_str),
+            Some("step-a")
+        );
+        let inconsistent = json!({
+            "target_task_id":"step-b",
+            "target_artifact_id":"artifact-a"
+        });
+        assert!(select_reviewed_owner_binding(&reviewed(), &inconsistent).is_none());
     }
 }
 

@@ -648,7 +648,7 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
                 "只读：不修改文件、不执行写入操作、不覆盖实现者交付。".to_string(),
                 "不得把代码存在或模型声明当作功能/测试通过证据。".to_string(),
             ],
-            output_format: "WorkerOutputV1 契约：status=done，省略 artifact；必须提交 review_result={verdict,findings:[{severity,detail,requirement_id,evidence_refs,suggested_owner}]}，只报告有证据的问题；宿主绑定被审查产物哈希。".to_string(),
+            output_format: "WorkerOutputV1 契约：status=done，省略 artifact；必须提交 review_result={verdict,findings:[{severity,detail,requirement_id,evidence_refs,suggested_owner,target_task_id,target_artifact_id}]}，只报告有证据的问题；同一 owner 多任务时从上游上下文的宿主 Artifact 身份原样复制 target_task_id 或 target_artifact_id，禁止自造；宿主绑定被审查产物哈希。".to_string(),
             acceptance: vec![
                 "覆盖前后端实现、功能范围、测试源码和可访问状态；shared 契约与命令退出结果由集成者负责。".to_string(),
                 "结论逐项区分通过、失败和未验证。".to_string(),
@@ -657,14 +657,14 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
         (CODE_CHANGE_V1, "reviewer") => RolePromptSections {
             must_do: vec![
                 "核对工作区真实变更与目标/上游影响面是否一致。".to_string(),
-                "提交结构化 ReviewResult：approved/changes_requested/rejected 与 blocker/major/minor/note findings，逐条指出证据和建议 owner。".to_string(),
+                "提交结构化 ReviewResult：approved/changes_requested/rejected 与 blocker/major/minor/note findings，逐条指出证据和建议 owner；同一 owner 涉及多个任务时精确标注 task/artifact 身份。".to_string(),
             ],
             must_not_do: vec![
                 "只读：不改写交付物、不产出代码。".to_string(),
                 "不直接重新实现（发现问题写进评审结论，不动手改）。".to_string(),
                 "遵守共享 WorkerOutputV1：省略 artifact，评审结论放 summary；变更/终稿归 producer 链。".to_string(),
             ],
-            output_format: "WorkerOutputV1 契约：status=done，省略 artifact；必须提交 review_result={verdict,findings:[{severity,detail,requirement_id,evidence_refs,suggested_owner}]}，只报告有证据的问题；宿主绑定被审查产物哈希。".to_string(),
+            output_format: "WorkerOutputV1 契约：status=done，省略 artifact；必须提交 review_result={verdict,findings:[{severity,detail,requirement_id,evidence_refs,suggested_owner,target_task_id,target_artifact_id}]}，只报告有证据的问题；同一 owner 多任务时从上游上下文的宿主 Artifact 身份原样复制 target_task_id 或 target_artifact_id，禁止自造；宿主绑定被审查产物哈希。".to_string(),
             acceptance: vec![
                 "结论覆盖「与目标一致」与「无越界修改」两个维度。".to_string(),
                 "每条意见可定位到文件/函数级。".to_string(),
@@ -753,7 +753,7 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
                 "只读：不改写原文、不产出新稿。".to_string(),
                 "遵守共享 WorkerOutputV1：省略 artifact，修订意见放 summary；终稿归 finalizer。".to_string(),
             ],
-            output_format: "WorkerOutputV1 契约：status=done，省略 artifact；必须提交 review_result={verdict,findings:[{severity,detail,requirement_id,evidence_refs,suggested_owner}]}，宿主绑定被审查产物哈希。".to_string(),
+            output_format: "WorkerOutputV1 契约：status=done，省略 artifact；必须提交 review_result={verdict,findings:[{severity,detail,requirement_id,evidence_refs,suggested_owner,target_task_id,target_artifact_id}]}，宿主绑定被审查产物哈希。".to_string(),
             acceptance: vec![
                 "意见覆盖结构与事实两类。".to_string(),
                 "每条意见可执行（不是泛泛评价）。".to_string(),

@@ -272,6 +272,8 @@ impl TeamCoordinator {
                     }
                     Ok(json!({
                         "artifact_id": artifact.get("artifact_id").cloned().unwrap_or(Value::Null),
+                        "task_id": artifact.get("task_id").cloned().unwrap_or(Value::Null),
+                        "attempt_id": artifact.get("attempt_id").cloned().unwrap_or(Value::Null),
                         "version": artifact.get("version").cloned().unwrap_or(Value::Null),
                         "sha256": artifact.get("sha256").cloned().unwrap_or(Value::Null),
                         "producer": producer,

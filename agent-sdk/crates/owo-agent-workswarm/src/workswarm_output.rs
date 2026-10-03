@@ -90,6 +90,12 @@ pub struct WorkerReviewFindingV1 {
     /// 仅为派发建议；宿主必须校验其为原生产者且不扩大写范围。
     #[serde(default)]
     pub suggested_owner: Option<String>,
+    /// 精确指向宿主绑定的被审任务；同一 Worker 承担多个任务时必须提供。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_task_id: Option<String>,
+    /// 可选的被审产物身份；若 task 与 artifact 都提供，二者必须指向同一快照。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_artifact_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,12 +264,12 @@ pub fn contract_system_prompt(is_critic: bool) -> String {
   \"artifact\": {\"kind\": \"产物分类\", \"format\": \"text|markdown|json|csv\", \"content\": \"产物正文本体\"},\n\
   \"evidence\": [{\"source\": \"来源\", \"note\": \"说明\"}],\n\
   \"open_issues\": [\"未解决问题\"],\n  \"handoff\": \"给下游的交接说明（可省略）\"\n}\n\
-review_result（reviewer必填）：对象含 verdict（approved/changes_requested/rejected）与 findings 列表；finding 含 severity（blocker/major/minor/note）、detail、requirement_id、evidence_refs、suggested_owner；其他角色省略。\nartifact.format 只能取 text|markdown|json|csv 之一（大小写敏感，用小写）。\n",
+review_result（reviewer必填）：对象含 verdict（approved/changes_requested/rejected）与 findings 列表；finding 含 severity（blocker/major/minor/note）、detail、requirement_id、evidence_refs、suggested_owner、target_task_id、target_artifact_id；同一 owner 有多个被审任务时必须从上游上下文的宿主 Artifact 身份复制 target_task_id 或 target_artifact_id 精确定位；其他角色省略。\nartifact.format 只能取 text|markdown|json|csv 之一（大小写敏感，用小写）。\n",
     );
     if is_critic {
         prompt.push_str(
             "你是评审角色（review capability）：**禁止**提交 artifact；status=done 时必须提交 review_result，\
-包含 verdict 和 findings（severity/detail/requirement_id/evidence_refs/suggested_owner）。\
+包含 verdict 和 findings（severity/detail/requirement_id/evidence_refs/suggested_owner/target_task_id/target_artifact_id）；owner 有多个被审任务时必须精确定位。\
 只报告有证据的问题；approved 不得包含 blocker。summary 可写简要结论。被审查产物由宿主绑定，\
 不要自行编造哈希或身份。交付物归 producer 链，评审无权覆盖。\n",
         );
@@ -307,14 +313,14 @@ pub fn strip_code_fences(text: &str) -> String {
 /// 修复提示只回显了违例原因，模型第二次仍输出白名单外格式（如 "md"/"Markdown"）。
 pub fn contract_repair_prompt(is_critic: bool, violation: &str, broken: &str) -> String {
     let role_rule = if is_critic {
-        "你是 review capability：禁止 artifact；status=done 必须提交 review_result={verdict,findings}，只报告有证据的问题；宿主绑定评审快照"
+        "你是 review capability：禁止 artifact；status=done 必须提交 review_result={verdict,findings}，只报告有证据的问题；同一 owner 多任务时从上游上下文的宿主 Artifact 身份原样复制 target_task_id 或 target_artifact_id 精确定位；宿主绑定评审快照"
     } else {
         "你是交付角色：status=done 必须携带 artifact（content=交付物正文本体；artifact.format 只能取 text|markdown|json|csv 之一，代码分析与补丁/变更报告一律用 \"markdown\"，kind 用 \"analysis\"/\"code\"）"
     };
     format!(
         "你的上一次回复不符合 WorkerOutputV1 输出契约（必须是合法 JSON：status/summary/artifact{{kind,format,content}}/evidence/open_issues/handoff/review_result）。\
 artifact.format 的合法枚举只有 text|markdown|json|csv——不要输出 \"md\"、\"Markdown\"、\"plaintext\" 等白名单外写法；\
-评审/审查角色（critic/reviewer）禁止输出最终 Artifact。具体违例：{violation}。{role_rule}。请修正后**只输出**契约合规的 JSON 本体。\n原输出：\n{broken}\n\n请重新输出契约合规的 JSON："
+评审/审查角色（critic/reviewer）禁止输出最终 Artifact；同一 owner 多任务时 finding 必须从上游上下文宿主 Artifact 身份复制 target_task_id 或 target_artifact_id。具体违例：{violation}。{role_rule}。请修正后**只输出**契约合规的 JSON 本体。\n原输出：\n{broken}\n\n请重新输出契约合规的 JSON："
     )
 }
 
@@ -438,6 +444,20 @@ mod tests {
     }
 
     #[test]
+    fn review_finding_accepts_exact_task_and_artifact_identity() {
+        let output = parse_worker_output(
+            r#"{"status":"done","summary":"发现缺陷","review_result":{"verdict":"changes_requested","findings":[{"severity":"major","detail":"边界条件错误","suggested_owner":"m-w1","target_task_id":"step-a","target_artifact_id":"artifact-a"}]}}"#,
+        );
+        let WorkerOutputParse::Parsed(output) = output else {
+            panic!("包含宿主引用字段的 review 输出应能解析");
+        };
+        let review_result = output.review_result.unwrap();
+        let finding = &review_result.findings[0];
+        assert_eq!(finding.target_task_id.as_deref(), Some("step-a"));
+        assert_eq!(finding.target_artifact_id.as_deref(), Some("artifact-a"));
+    }
+
+    #[test]
     fn reviewer_cannot_approve_with_blocker_finding() {
         let output = WorkerOutputV1 {
             status: WorkerOutputStatus::Done,
@@ -454,6 +474,8 @@ mod tests {
                     requirement_id: None,
                     evidence_refs: Vec::new(),
                     suggested_owner: None,
+                    target_task_id: None,
+                    target_artifact_id: None,
                 }],
             }),
         };
