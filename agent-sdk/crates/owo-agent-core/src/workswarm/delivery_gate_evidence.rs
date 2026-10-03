@@ -106,6 +106,7 @@ pub(super) fn uncovered_source_paths(
 /// visible when a reviewer context is assembled. ChangeSet decision status is omitted:
 /// accepting a reviewed change must not invalidate the source snapshot.
 pub(super) fn review_source_snapshot(
+    team_id: &str,
     step_id: &str,
     attempt_id: &str,
     change_sets: &[owo_agent_protocol::ChangeSet],
@@ -114,7 +115,9 @@ pub(super) fn review_source_snapshot(
     let mut matching = change_sets
         .iter()
         .filter(|change_set| {
-            change_set.step_id == step_id && change_set.attempt_id.as_deref() == Some(attempt_id)
+            change_set.team_id == team_id
+                && change_set.step_id == step_id
+                && change_set.attempt_id.as_deref() == Some(attempt_id)
         })
         .collect::<Vec<_>>();
     matching.sort_by(|left, right| left.change_set_id.cmp(&right.change_set_id));

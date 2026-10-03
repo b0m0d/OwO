@@ -866,6 +866,7 @@ impl TeamCoordinator {
                     "artifact_id": a.artifact_id,
                     "kind": a.kind,
                     "reviewed_source": super::delivery_gate_evidence::review_source_snapshot(
+                        team_id,
                         &dep_step.id,
                         a.attempt_id.as_deref().unwrap_or_default(),
                         &review_change_sets,

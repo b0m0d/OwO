@@ -410,6 +410,7 @@ impl TeamCoordinator {
                                 .unwrap_or_default();
                             let reviewed_source =
                                 super::delivery_gate_evidence::review_source_snapshot(
+                                    team_id,
                                     &dep_step.id,
                                     current_attempt,
                                     &change_sets,
@@ -1258,13 +1259,26 @@ mod validation_receipt_identity_tests {
             content_available: false,
         }];
 
+        let mut foreign_team_change = accepted.clone();
+        foreign_team_change.team_id = "team-2".to_string();
+        foreign_team_change.change_set_id = "cs-foreign-team".to_string();
+        foreign_team_change.changed_files = vec!["src/foreign.rs".to_string()];
+        let mixed_team_changes = [accepted.clone(), foreign_team_change];
         let accepted_snapshot =
             super::super::delivery_gate_evidence::review_source_snapshot(
+                "team-1",
                 "task-1",
                 "attempt-1",
-                std::slice::from_ref(&accepted),
+                &mixed_team_changes,
                 Some(&workspace),
             );
+        assert_eq!(
+            accepted_snapshot
+                .get("change_set_ids")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
         assert_eq!(
             accepted_snapshot
                 .get("changeset_source_consistent")
@@ -1282,6 +1296,7 @@ mod validation_receipt_identity_tests {
         pending.status = ChangeSetStatus::PendingReview;
         pending.decision = None;
         let pending_snapshot = super::super::delivery_gate_evidence::review_source_snapshot(
+            "team-1",
             "task-1",
             "attempt-1",
             &[pending],
@@ -1295,6 +1310,7 @@ mod validation_receipt_identity_tests {
 
         std::fs::write(&source_path, b"edited after review").expect("changed source");
         let stale_snapshot = super::super::delivery_gate_evidence::review_source_snapshot(
+            "team-1",
             "task-1",
             "attempt-1",
             std::slice::from_ref(&accepted),
