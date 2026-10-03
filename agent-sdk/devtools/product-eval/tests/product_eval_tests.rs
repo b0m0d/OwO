@@ -1048,14 +1048,16 @@ fn checker_quality_metrics_and_mode_statistics() {
 
 #[test]
 fn paired_report_json_matches_route3_paired_stats_contract() {
-    let a = dummy_run(
+    let mut a = dummy_run(
         MatrixKey::new(String::from("code-one"), AgentMode::Single, 0),
         RunStatus::Passed,
     );
-    let b = dummy_run(
+    a.model = Some("glm-5.3-flash".into());
+    let mut b = dummy_run(
         MatrixKey::new(String::from("code-one"), AgentMode::Multi, 0),
         RunStatus::Passed,
     );
+    b.model = Some("glm-5.3-flash".into());
     let single = ProductEvalReport {
         schema_version: 1,
         suite_name: "s".into(),
@@ -1091,6 +1093,32 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         strategy_version: "ten-3-default".into(),
     };
     let paired = build_paired_report_json(&single, &multi, &opts, Some("t3"));
+    assert_eq!(
+        paired
+            .get("run_alignment")
+            .and_then(|value| value.get("configuration_aligned")),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert_eq!(
+        paired
+            .get("run_alignment")
+            .and_then(|value| value.get("paired_cells")),
+        Some(&serde_json::json!(1))
+    );
+    let mut unmatched_multi = multi.clone();
+    unmatched_multi.runs[0].key.repetition = 1;
+    let unmatched = build_paired_report_json(&single, &unmatched_multi, &opts, Some("t4"));
+    assert_eq!(
+        unmatched
+            .get("run_alignment")
+            .and_then(|value| value.get("configuration_aligned")),
+        Some(&serde_json::Value::Bool(false))
+    );
+    assert!(unmatched
+        .get("run_alignment")
+        .and_then(|value| value.get("reasons"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|reasons| !reasons.is_empty()));
     let pairs = paired.get("pairs").unwrap().as_array().unwrap();
     let overall = pairs
         .iter()

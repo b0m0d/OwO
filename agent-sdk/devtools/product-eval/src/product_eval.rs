@@ -3273,6 +3273,99 @@ fn paired_snapshot_json(mode: AgentMode, runs: &[&ProductEvalRun]) -> serde_json
     })
 }
 
+/// Check the two report sides before presenting aggregate numbers as a matched pair.
+/// This validates report/suite/model/batch and (case_id, repetition) alignment; the
+/// evaluator binary revision still needs an external freeze binding.
+fn paired_run_alignment(
+    single: &ProductEvalReport,
+    multi: &ProductEvalReport,
+    opts: &PairedReportOptions,
+) -> serde_json::Value {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut reasons = Vec::new();
+    if single.suite_hash.trim().is_empty() || single.suite_hash != multi.suite_hash {
+        reasons.push("single/multi suite_hash 缺失或不一致".to_string());
+    }
+    if single.model.as_deref().is_none_or(str::is_empty)
+        || single.model != multi.model
+        || single.model != opts.model
+    {
+        reasons.push("single/multi/绑定项 model 缺失或不一致".to_string());
+    }
+    if single.batch_label.as_deref().is_none_or(str::is_empty)
+        || single.batch_label != multi.batch_label
+    {
+        reasons.push("single/multi batch_label 缺失或不一致".to_string());
+    }
+
+    let single_rows = single
+        .runs
+        .iter()
+        .filter(|run| run.key.agent_mode == AgentMode::Single)
+        .collect::<Vec<_>>();
+    let multi_rows = multi
+        .runs
+        .iter()
+        .filter(|run| run.key.agent_mode == AgentMode::Multi)
+        .collect::<Vec<_>>();
+    if single_rows.len() != single.runs.len() || multi_rows.len() != multi.runs.len() {
+        reasons.push("报告包含不属于该侧的 agent_mode 记录".to_string());
+    }
+    let single_keys = single_rows
+        .iter()
+        .map(|run| ((run.key.case_id.clone(), run.key.repetition), *run))
+        .collect::<Vec<_>>();
+    let multi_keys = multi_rows
+        .iter()
+        .map(|run| ((run.key.case_id.clone(), run.key.repetition), *run))
+        .collect::<Vec<_>>();
+    let single_set = single_keys.iter().map(|(key, _)| key.clone()).collect::<BTreeSet<_>>();
+    let multi_set = multi_keys.iter().map(|(key, _)| key.clone()).collect::<BTreeSet<_>>();
+    let duplicates_exist = single_set.len() != single_keys.len() || multi_set.len() != multi_keys.len();
+    if duplicates_exist {
+        reasons.push("存在重复的 (case_id, repetition) 矩阵单元".to_string());
+    }
+    if single_set.is_empty() || single_set != multi_set {
+        reasons.push("single/multi 任务与重复编号集合不一致或为空".to_string());
+    }
+
+    let single_by_key = single_keys.into_iter().collect::<BTreeMap<_, _>>();
+    let multi_by_key = multi_keys.into_iter().collect::<BTreeMap<_, _>>();
+    let mut paired_keys = 0usize;
+    let mut run_models_match = true;
+    for key in single_set.intersection(&multi_set) {
+        paired_keys += 1;
+        let left = single_by_key.get(key).and_then(|run| run.model.as_deref());
+        let right = multi_by_key.get(key).and_then(|run| run.model.as_deref());
+        if left.is_none() || left != right || left != opts.model.as_deref() {
+            run_models_match = false;
+        }
+    }
+    if !run_models_match {
+        reasons.push("配对运行的有效模型缺失或不一致".to_string());
+    }
+    let pending_side_cells = single
+        .pending
+        .iter()
+        .any(|key| key.agent_mode == AgentMode::Single)
+        || multi
+            .pending
+            .iter()
+            .any(|key| key.agent_mode == AgentMode::Multi);
+    if pending_side_cells {
+        reasons.push("配对矩阵仍有未执行单元".to_string());
+    }
+    serde_json::json!({
+        "configuration_aligned": reasons.is_empty(),
+        "reasons": reasons,
+        "paired_cells": paired_keys,
+        "single_cells": single_rows.len(),
+        "multi_cells": multi_rows.len(),
+        "evaluator_revision_binding": "not present in ProductEvalReport; verify from freeze/git metadata",
+    })
+}
+
 /// 生成三路可直接读取的配对对照报告 JSON（一个包里含全部任务组）。
 ///
 /// 分组：`overall` / 分类 `code|research|document` / 每 `case_id`；
@@ -3293,6 +3386,7 @@ pub fn build_paired_report_json(
         "task_set": opts.task_set.clone(),
         "strategy_version": opts.strategy_version,
     });
+    let run_alignment = paired_run_alignment(single, multi, opts);
     let mut pairs: Vec<serde_json::Value> = Vec::new();
 
     let mut categories: BTreeSet<String> = BTreeSet::new();
@@ -3339,6 +3433,7 @@ pub fn build_paired_report_json(
         "schema_version": PAIRED_REPORT_SCHEMA_VERSION,
         "generated_at": generated_at,
         "bindings": bindings,
+        "run_alignment": run_alignment,
         "single_report": {
             "suite_name": single.suite_name,
             "suite_hash": single.suite_hash,

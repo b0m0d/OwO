@@ -628,8 +628,20 @@ pub struct PairedReport {
     /// 报告级绑定（每组 pair 亦各自携带绑定；判定以 pair 自身绑定为准）。
     #[serde(default)]
     pub bindings: BenefitBindings,
+    /// Added by product-eval to prevent unaligned reports from enabling Team.
+    /// Missing alignment is treated as legacy/unverified and fails closed.
+    #[serde(default)]
+    pub run_alignment: Option<PairedRunAlignment>,
     #[serde(default)]
     pub pairs: Vec<PairedStats>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PairedRunAlignment {
+    #[serde(default)]
+    pub configuration_aligned: bool,
+    #[serde(default)]
+    pub reasons: Vec<String>,
 }
 
 impl PairedReport {
@@ -696,15 +708,28 @@ pub fn evaluate_report(
     current: Option<&BenefitBindings>,
     now_rfc3339: &str,
 ) -> Vec<GroupBenefitReport> {
+    let run_alignment_ok = report
+        .run_alignment
+        .as_ref()
+        .is_some_and(|alignment| alignment.configuration_aligned);
     report
         .pairs
         .iter()
         .map(|pair| {
             let policy_group = report.policy_group_for(policy, &pair.task_group);
             let verdict = evaluate(pair, &policy.thresholds);
-            let gate = match &policy_group {
-                Some(group) => gate_auto(policy, group, Some(&verdict), current, now_rfc3339),
-                None => PolicyGate {
+            let gate = match (&policy_group, run_alignment_ok) {
+                (Some(_), false) => PolicyGate {
+                    allow_team: false,
+                    reasons: vec![
+                        "配对报告缺少有效 run_alignment；该数据不能作为 Team 收益放行依据".to_string(),
+                    ],
+                    mandatory_review: false,
+                },
+                (Some(group), true) => {
+                    gate_auto(policy, group, Some(&verdict), current, now_rfc3339)
+                }
+                (None, _) => PolicyGate {
                     allow_team: false,
                     reasons: vec![format!(
                         "任务组「{}」不在 team-policy 预选组内（overall/未知组不参与收益判定）：默认 single",
@@ -1102,6 +1127,7 @@ mod tests {
   "bindings": {bindings},
   "single_report": {{"suite_name":"v1","suite_hash":"abc"}},
   "multi_report": {{"suite_name":"v1","suite_hash":"abc"}},
+  "run_alignment": {{"configuration_aligned":true,"reasons":[],"paired_cells":1}},
   "pairs": [
     {{
       "task_group": "overall",
@@ -1159,6 +1185,39 @@ mod tests {
     fn paired_report_schema_mismatch_rejected() {
         let bad = sample_report_json().replace("\"schema_version\": 1", "\"schema_version\": 2");
         assert!(PairedReport::from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn missing_or_failed_run_alignment_cannot_enable_team() {
+        let policy = TeamPolicy::embedded_defaults();
+        let current = BenefitBindings {
+            model: Some("glm-5.3-flash".to_string()),
+            template: None,
+            task_set: Some("v1".to_string()),
+            strategy_version: "ten-3-default".to_string(),
+        };
+        for aligned in [false, true] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&sample_report_json()).unwrap();
+            if !aligned {
+                value["run_alignment"]["configuration_aligned"] =
+                    serde_json::Value::Bool(false);
+            } else {
+                value.as_object_mut().unwrap().remove("run_alignment");
+            }
+            let report = PairedReport::from_json(&value.to_string()).unwrap();
+            let items = evaluate_report(
+                &report,
+                &policy,
+                Some(&current),
+                "2026-08-31T00:00:00+00:00",
+            );
+            assert!(items.iter().all(|item| !item.gate.allow_team));
+            assert!(items
+                .iter()
+                .filter(|item| item.policy_group.is_some())
+                .all(|item| item.gate.reasons.iter().any(|reason| reason.contains("run_alignment"))));
+        }
     }
 
     #[test]

@@ -339,6 +339,21 @@ fn run_paired(
         serde_json::to_string_pretty(&paired).map_err(|e| format!("序列化配对报告失败：{e}"))?;
     std::fs::write(&out, text + "\n").map_err(|e| format!("写入 {} 失败：{e}", out.display()))?;
     println!("配对对照报告：{}", out.display());
+    let alignment = paired.get("run_alignment");
+    let aligned = alignment
+        .and_then(|value| value.get("configuration_aligned"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if aligned {
+        println!("任务矩阵、套件配置、模型与批次对齐；评测器代码版本仍需从 freeze/git 元数据单独核对。");
+    } else {
+        let reasons = alignment
+            .and_then(|value| value.get("reasons"))
+            .and_then(serde_json::Value::as_array)
+            .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join("；"))
+            .unwrap_or_else(|| "缺少对齐信息".to_string());
+        println!("配对对照不可用于收益放行：{reasons}");
+    }
     println!(
         "包含 {} 个任务组（overall/分类/每 case）；请三路按 PairedStats 契约读取。",
         paired
