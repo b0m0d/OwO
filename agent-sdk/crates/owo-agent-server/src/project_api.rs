@@ -100,6 +100,22 @@ pub(super) async fn project_rules_template(
 - 写清楚构建命令、测试命令与代码约定。
 - 说明哪些目录/文件禁止修改。
 ";
+    // AGENTS.md 是**项目级**规则文件，只能写进真正的项目目录。
+    //
+    // 桌面壳在 `workspace.json` 未配置时会给核心一个兜底工作区（用户主目录），
+    // 以前这里不做判断，于是"生成模板"会静默往 `C:\Users\<user>\AGENTS.md` 落文件，
+    // 并在 409 里回显完整家目录路径。以 `.git` 作为项目判据：AGENTS.md 的语义就是
+    // 随项目走，非仓库目录下生成它既无意义又容易污染用户目录。
+    if !state.workspace.join(".git").exists() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "当前工作区不是项目目录（{} 下没有 .git）。AGENTS.md 是项目级规则文件，\
+                 请先切换到一个具体的项目工作区再生成。",
+                state.workspace.display()
+            ),
+        ));
+    }
     let path = state.workspace.join("AGENTS.md");
     if path.exists() {
         return Err((

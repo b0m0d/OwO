@@ -18,7 +18,7 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
                 "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateSessionRequest" } } } },
                 "responses": { "200": { "description": "session created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionInfo" } } } } }
             } },
-            "/session/{id}": { "get": { "operationId": "getSession", "parameters": [path_param("id")], "responses": { "200": { "description": "session detail with messages" } } } },
+            "/session/{id}": { "get": { "operationId": "getSession", "parameters": [path_param("id")], "responses": { "200": { "description": "session detail with messages" } } }, "delete": { "operationId": "deleteSession", "parameters": [path_param("id")], "responses": { "200": { "description": "session deleted (store + memory cache)" }, "404": { "description": "session not found" } } } },
             "/session/{id}/turn": { "post": {
                 "operationId": "agentTurn",
                 "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],

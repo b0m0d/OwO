@@ -57,12 +57,44 @@ pub(super) fn load_session(state: &AppState, id: &str) -> Result<Session, (Statu
             return Ok(session.clone());
         }
     }
-    state.store.load(id).map_err(|error| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("会话不存在：{id}（{error}）"),
-        )
+    state.store.load(id).map_err(|_error| {
+        // 不拼接底层错误原文：`store.load` 的失败原因本身就是"会话不存在"，
+        // 拼上去会得到「会话不存在：X（session error: 会话不存在：X）」这种自我复读，
+        // 用户看不出多出来的那层究竟提供了什么新信息（实测报错就是这样）。
+        (StatusCode::NOT_FOUND, format!("会话不存在：{id}"))
     })
+}
+
+/// `DELETE /session/{id}`——删除会话（存储 + 内存缓存 + 事件流广播失效）。
+///
+/// 先 `load_session` 确认存在：直接删不存在的会话会得到"删了 0 行却回报成功"，
+/// 而 `SessionStore::remove` 的契约是"不存在 → Err"，两者必须一致。
+pub(super) async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = load_session(&state, &id)?;
+    state
+        .store
+        .remove(&id)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    // 内存缓存里可能仍持有它（运行期会话不落盘也在列表中），必须同步清掉，
+    // 否则"删完还在列"。
+    if let Ok(mut sessions) = state.sessions.lock() {
+        sessions.remove(&id);
+    }
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            &id,
+            "session_delete",
+            None,
+            Some(true),
+            format!("删除会话（工作区 {}）", session.workspace.display()),
+        );
+    }
+    owo_agent_server::event_stream::hub()
+        .publish_invalidate(owo_agent_server::event_stream::InvalidateDomain::Sessions);
+    Ok(Json(json!({ "ok": true, "id": id })))
 }
 
 pub(super) async fn list_sessions(

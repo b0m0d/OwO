@@ -194,6 +194,14 @@ impl ChangeSetStore {
     /// 跨团队全量（扫描 `*-change-sets.json`；规模 = 有变更的团队数，小）。
     pub fn list_all(&self) -> Result<Vec<ChangeSet>, ChangeSetStoreError> {
         let mut all = Vec::new();
+        // run_dir 不存在 = 还没有任何团队跑过，是正常空状态，不是存储故障。
+        //
+        // 以前这里无条件 read_dir 并把它当 Storage 错误上抛，导致
+        // `GET /change-sets/{id}` 在任何 id 下都返回 **500**（应为 404），
+        // 排查时极易误判成"改动集存储坏了"。
+        if !self.run_dir.is_dir() {
+            return Ok(all);
+        }
         let entries = std::fs::read_dir(&self.run_dir)
             .map_err(|error| ChangeSetStoreError::Storage(format!("扫描 run_dir 失败：{error}")))?;
         for entry in entries.flatten() {

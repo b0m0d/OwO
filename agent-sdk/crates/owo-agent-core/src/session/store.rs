@@ -52,6 +52,13 @@ pub trait SessionStore: Send + Sync {
     fn list(&self) -> Vec<String> {
         Vec::new()
     }
+    /// 删除一个会话及其存储产物。
+    ///
+    /// 默认返回"不支持"而不是静默成功：调用方（`DELETE /session/{id}`）必须能区分
+    /// "删掉了"和"这个后端根本没实现删除"，否则界面会显示删除成功而会话仍在。
+    fn remove(&self, _id: &str) -> Result<(), AgentError> {
+        Err(AgentError::Session("当前会话存储后端不支持删除会话".into()))
+    }
     /// 持久化审计记录（默认 no-op；SQLite 存储落库）。
     fn append_audit(&self, entries: &[crate::audit::AuditEntry]) -> Result<(), AgentError> {
         let _ = entries;
@@ -131,6 +138,23 @@ impl JsonSessionStore {
 }
 
 impl SessionStore for JsonSessionStore {
+    /// 删除会话文件（明文与加密两种形态都尝试）。
+    fn remove(&self, id: &str) -> Result<(), AgentError> {
+        let mut removed = false;
+        for path in [self.plain_path(id), self.encrypted_path(id)] {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .map_err(|error| AgentError::Session(format!("删除会话文件失败：{error}")))?;
+                removed = true;
+            }
+        }
+        if removed {
+            Ok(())
+        } else {
+            Err(AgentError::Session(format!("会话不存在：{id}")))
+        }
+    }
+
     fn create(
         &self,
         workspace: &Path,

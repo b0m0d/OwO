@@ -194,10 +194,14 @@ pub(super) async fn learn_package_detail(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let pipeline = state.pipeline.lock().map_err(poison)?;
-    let package = pipeline
-        .store
-        .load(&name)
-        .map_err(|error| (StatusCode::NOT_FOUND, error))?;
+    let package = pipeline.store.load(&name).map_err(|error| {
+        // 存储层抛的是 io 文案（"系统找不到指定的路径。 (os error 3)"），
+        // 直接透出既没有"什么不存在"也没有"该怎么办"。统一成人话。
+        (
+            StatusCode::NOT_FOUND,
+            format!("技能包不存在或不可读：{name}（{error}）"),
+        )
+    })?;
     Ok(Json(json!({
         "name": package.manifest.name,
         "target_apps": package.manifest.target_apps,
@@ -383,10 +387,12 @@ pub(super) async fn learn_export(
 ) -> Result<Response, (StatusCode, String)> {
     let package = {
         let pipeline = state.pipeline.lock().map_err(poison)?;
-        pipeline
-            .store
-            .load(&name)
-            .map_err(|error| (StatusCode::NOT_FOUND, error))?
+        pipeline.store.load(&name).map_err(|error| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("技能包不存在或不可读：{name}（{error}）"),
+            )
+        })?
     };
     let bytes = owo_agent_core::export_flow_skill_package(&package)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;

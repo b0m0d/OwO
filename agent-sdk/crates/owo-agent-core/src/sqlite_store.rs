@@ -451,6 +451,33 @@ impl SqliteSessionStore {
 }
 
 impl SessionStore for SqliteSessionStore {
+    /// 删除会话及其回合事件/游标。
+    fn remove(&self, id: &str) -> Result<(), AgentError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AgentError::Session("SQLite 锁中毒".into()))?;
+        // 先确认存在：不能"删了 0 行也回报成功"，否则界面显示删除成功而会话还在。
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .map_err(|error| AgentError::Session(format!("查询会话失败：{error}")))?;
+        if count == 0 {
+            return Err(AgentError::Session(format!("会话不存在：{id}")));
+        }
+        // 事件与游标按 session_id 关联，一并清理；否则会留下永远读不到的孤儿记录。
+        for statement in [
+            "DELETE FROM turn_events WHERE session_id = ?1",
+            "DELETE FROM turn_event_cursors WHERE session_id = ?1",
+            "DELETE FROM sessions WHERE id = ?1",
+        ] {
+            conn.execute(statement, [id])
+                .map_err(|error| AgentError::Session(format!("删除会话失败：{error}")))?;
+        }
+        Ok(())
+    }
+
     fn clear(&self) -> Result<(), AgentError> {
         self.clear_all().map(|_| ())
     }
