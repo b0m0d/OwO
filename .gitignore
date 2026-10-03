@@ -4,6 +4,8 @@
 target/
 /agent-sdk/dist/
 /.owo-agent/
+# 代理运行期数据目录（shell 会话/临时态；每次运行可再生，永不入库）
+/.owo/
 /.vs/
 /.vscode/
 CMakeUserPresets.json
@@ -44,6 +46,8 @@ __pycache__/
 /agent-sdk/full_core_tests.log
 # 并行验证草稿目录
 scratch-*/
+# CI web 步骤的流式日志（可再生运行产物；web-tests.stream.log 单文件可近 2 MB）
+/agent-sdk/.ci-webstep-logs/
 # 临时路径清单（门禁辅助产物）
 tmp_path_keys.txt
 # 本机个人启动变体（凭据依旧只走环境变量，永不入库）
