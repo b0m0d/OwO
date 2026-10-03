@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -610,6 +610,13 @@ pub struct ProductEvalReport {
     /// 附加标签（CLI --tag 可重复；进报告供溯源）。
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Fingerprint of effective task, permission, checker and budget configuration.
+    /// Older reports lack this and cannot be used as paired benefit evidence.
+    #[serde(default)]
+    pub run_contract_sha256: Option<String>,
+    /// SHA-256 of the executable that produced the report.
+    #[serde(default)]
+    pub evaluator_binary_sha256: Option<String>,
     pub generated_at: String,
     pub runs: Vec<ProductEvalRun>,
     /// 计划中但尚未完成的矩阵单元格（中断续跑的目标集）。
@@ -624,11 +631,19 @@ struct RunDirMeta {
     schema_version: u32,
     suite_name: String,
     suite_hash: String,
+    #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    execution: Option<String>,
     #[serde(default)]
     batch_label: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
+    /// Missing fingerprints make old run directories non-resumable without --fresh.
+    #[serde(default)]
+    run_contract_sha256: Option<String>,
+    #[serde(default)]
+    evaluator_binary_sha256: Option<String>,
     created_at: String,
 }
 
@@ -647,6 +662,21 @@ fn err<T>(msg: impl Into<String>) -> Result<T, ProductEvalError> {
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn current_executable_sha256() -> Option<String> {
+    let executable = std::env::current_exe().ok()?;
+    let mut file = std::fs::File::open(executable).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).ok()?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 fn truncate_for_log(text: &str, max_chars: usize) -> String {
@@ -2109,10 +2139,39 @@ impl MatrixRunner {
         keys
     }
 
+    fn run_contract_sha256(&self, cases: &[ProductEvalCase], opts: &RunOptions) -> String {
+        let effective_tasks = cases
+            .iter()
+            .map(|case| {
+                serde_json::json!({
+                    "case_id": case.id,
+                    "category": case.category.as_str(),
+                    "repetitions": case.effective_repetitions(
+                        &self.bundle.suite.defaults,
+                        opts.reps_override,
+                    ),
+                    "timeout_secs": case.effective_timeout_secs(&self.bundle.suite.defaults),
+                    "max_model_calls": case.effective_max_model_calls(&self.bundle.suite.defaults),
+                    "permissions_sha256": permissions_hash(case),
+                })
+            })
+            .collect::<Vec<_>>();
+        let contract = serde_json::json!({
+            "suite_hash": suite_hash(&self.bundle),
+            "suite_defaults": self.bundle.suite.defaults,
+            "effective_tasks": effective_tasks,
+        });
+        let bytes = serde_json::to_vec(&contract).unwrap_or_default();
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
     fn init_or_verify_out_dir(
         &self,
         model: Option<&str>,
+        execution: &str,
         opts: &RunOptions,
+        run_contract_sha256: &str,
+        evaluator_binary_sha256: &str,
     ) -> Result<(), ProductEvalError> {
         let hash = suite_hash(&self.bundle);
         let fresh = opts.fresh;
@@ -2138,16 +2197,35 @@ impl MatrixRunner {
                     self.out_dir.display()
                 ));
             }
-            // 批次一致性：同一批次的续跑必须沿用同一 batch_label（防跨批次混算）。
-            if let Some(label) = &opts.batch_label {
-                match &meta.batch_label {
-                    Some(existing) if existing != label => {
-                        return err(format!(
-                            "out 目录已有批次「{existing}」，与本次「{label}」不一致：换 --out 或加 --fresh（修复后重测必须建立新批次，不得覆盖旧失败记录）"
-                        ));
-                    }
-                    _ => {}
-                }
+            if meta.model.as_deref() != model {
+                return err(format!(
+                    "out 目录模型与本次运行不一致：换 --out 或加 --fresh。目录：{}",
+                    self.out_dir.display()
+                ));
+            }
+            if meta.execution.as_deref() != Some(execution) {
+                return err(format!(
+                    "out 目录执行器与本次运行不一致或元数据缺失：换 --out 或加 --fresh。目录：{}",
+                    self.out_dir.display()
+                ));
+            }
+            if meta.batch_label != opts.batch_label {
+                return err(format!(
+                    "out 目录批次标签与本次运行不一致或元数据缺失：换 --out 或加 --fresh。目录：{}",
+                    self.out_dir.display()
+                ));
+            }
+            if meta.run_contract_sha256.as_deref() != Some(run_contract_sha256) {
+                return err(format!(
+                    "out 目录的生效任务/权限/预算指纹缺失或不一致：换 --out 或加 --fresh。目录：{}",
+                    self.out_dir.display()
+                ));
+            }
+            if meta.evaluator_binary_sha256.as_deref() != Some(evaluator_binary_sha256) {
+                return err(format!(
+                    "out 目录评测器二进制身份缺失或不一致：换 --out 或加 --fresh。目录：{}",
+                    self.out_dir.display()
+                ));
             }
         } else {
             if self.journal_path().exists() {
@@ -2161,8 +2239,11 @@ impl MatrixRunner {
                 suite_name: self.bundle.suite.name.clone(),
                 suite_hash: hash,
                 model: model.map(str::to_string),
+                execution: Some(execution.to_string()),
                 batch_label: opts.batch_label.clone(),
                 tags: opts.tags.clone(),
+                run_contract_sha256: Some(run_contract_sha256.to_string()),
+                evaluator_binary_sha256: Some(evaluator_binary_sha256.to_string()),
                 created_at: now_rfc3339(),
             };
             let text = serde_json::to_string_pretty(&meta)
@@ -2234,7 +2315,17 @@ impl MatrixRunner {
         if cases.is_empty() {
             return err("过滤条件下没有可执行的任务");
         }
-        self.init_or_verify_out_dir(model.as_deref(), opts)?;
+        let run_contract_sha256 = self.run_contract_sha256(&cases, opts);
+        let evaluator_binary_sha256 = current_executable_sha256().ok_or_else(|| {
+            ProductEvalError("无法读取当前评测器二进制，拒绝生成无来源绑定的运行报告".to_string())
+        })?;
+        self.init_or_verify_out_dir(
+            model.as_deref(),
+            execution,
+            opts,
+            &run_contract_sha256,
+            &evaluator_binary_sha256,
+        )?;
         let mut runs = self.load_runs()?;
         let completed: std::collections::BTreeSet<MatrixKey> =
             runs.iter().map(|run| run.key.clone()).collect();
@@ -2465,7 +2556,14 @@ impl MatrixRunner {
             };
             self.append_run(&run)?;
             runs.push(run);
-            let report = self.build_report(&runs, &cases, opts, execution, &model)?;
+            let report = self.build_report(
+                &runs,
+                &cases,
+                opts,
+                execution,
+                &model,
+                &evaluator_binary_sha256,
+            )?;
             write_report(&self.out_dir, &report)?;
             tracing::info!(
                 cell = %runs.last().map(|r| r.key.slug()).unwrap_or_default(),
@@ -2475,7 +2573,14 @@ impl MatrixRunner {
             );
         }
 
-        self.build_report(&runs, &cases, opts, execution, &model)
+        self.build_report(
+            &runs,
+            &cases,
+            opts,
+            execution,
+            &model,
+            &evaluator_binary_sha256,
+        )
     }
 
     fn build_report(
@@ -2485,6 +2590,7 @@ impl MatrixRunner {
         opts: &RunOptions,
         execution: &str,
         model: &Option<String>,
+        evaluator_binary_sha256: &str,
     ) -> Result<ProductEvalReport, ProductEvalError> {
         let completed: std::collections::BTreeSet<MatrixKey> =
             runs.iter().map(|run| run.key.clone()).collect();
@@ -2502,6 +2608,8 @@ impl MatrixRunner {
             model: model.clone(),
             batch_label: opts.batch_label.clone(),
             tags: opts.tags.clone(),
+            run_contract_sha256: Some(self.run_contract_sha256(cases, opts)),
+            evaluator_binary_sha256: Some(evaluator_binary_sha256.to_string()),
             generated_at: now_rfc3339(),
             runs: runs.to_vec(),
             pending,
@@ -3287,6 +3395,22 @@ fn paired_run_alignment(
     if single.suite_hash.trim().is_empty() || single.suite_hash != multi.suite_hash {
         reasons.push("single/multi suite_hash 缺失或不一致".to_string());
     }
+    if single.run_contract_sha256.as_deref().is_none_or(str::is_empty)
+        || single.run_contract_sha256 != multi.run_contract_sha256
+    {
+        reasons.push("single/multi 生效任务、权限、检查器或预算指纹缺失/不一致".to_string());
+    }
+    if single.execution != "live-agent" || multi.execution != "live-workswarm" {
+        reasons.push(format!(
+            "执行器不匹配：要求 Single=live-agent、Team=live-workswarm，实际为 Single={}、Team={}",
+            single.execution, multi.execution
+        ));
+    }
+    if single.evaluator_binary_sha256.as_deref().is_none_or(str::is_empty)
+        || single.evaluator_binary_sha256 != multi.evaluator_binary_sha256
+    {
+        reasons.push("Single/Team 评测器二进制身份缺失或不一致".to_string());
+    }
     if single.model.as_deref().is_none_or(str::is_empty)
         || single.model != multi.model
         || single.model != opts.model
@@ -3446,6 +3570,8 @@ pub fn build_paired_report_json(
             "suite_name": single.suite_name,
             "suite_hash": single.suite_hash,
             "execution": single.execution,
+            "run_contract_sha256": single.run_contract_sha256,
+            "evaluator_binary_sha256": single.evaluator_binary_sha256,
             "batch_label": single.batch_label,
             "generated_at": single.generated_at,
             "metrics": single.metrics,
@@ -3454,6 +3580,8 @@ pub fn build_paired_report_json(
             "suite_name": multi.suite_name,
             "suite_hash": multi.suite_hash,
             "execution": multi.execution,
+            "run_contract_sha256": multi.run_contract_sha256,
+            "evaluator_binary_sha256": multi.evaluator_binary_sha256,
             "batch_label": multi.batch_label,
             "generated_at": multi.generated_at,
             "metrics": multi.metrics,

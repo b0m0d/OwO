@@ -490,6 +490,104 @@ async fn dry_run_reference_passes_and_resume_skips_completed() {
 }
 
 #[tokio::test]
+async fn resume_rejects_model_execution_and_batch_label_drift() {
+    let b = bundle(vec![make_case("run-identity", EvalCategory::Code)]);
+    let out = temp_out("run-identity-contract");
+    let opts = RunOptions {
+        batch_label: Some("batch-a".into()),
+        ..opts1(vec![AgentMode::Single])
+    };
+    let runner = MatrixRunner::new(b, &out);
+    let _ = runner
+        .run(
+            Arc::new(ReferenceDryExecutor),
+            "live-agent",
+            Some("model-a".into()),
+            &opts,
+            no_cancel(),
+        )
+        .await
+        .unwrap();
+
+    let variants = [
+        (
+            "live-agent",
+            Some("model-b"),
+            opts.clone(),
+            "模型",
+        ),
+        (
+            "dry-reference",
+            Some("model-a"),
+            opts.clone(),
+            "执行器",
+        ),
+        (
+            "live-agent",
+            Some("model-a"),
+            RunOptions {
+                batch_label: None,
+                ..opts.clone()
+            },
+            "批次标签",
+        ),
+    ];
+    for (execution, model, changed_opts, reason) in variants {
+        let error = runner
+            .run(
+                Arc::new(ReferenceDryExecutor),
+                execution,
+                model.map(str::to_string),
+                &changed_opts,
+                no_cancel(),
+            )
+            .await
+            .expect_err("运行身份变化必须拒绝续跑");
+        assert!(error.0.contains(reason), "{}", error.0);
+    }
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[tokio::test]
+async fn resume_rejects_changed_effective_budget_even_when_suite_hash_is_unchanged() {
+    let b = bundle(vec![make_case("budget-drift", EvalCategory::Code)]);
+    let out = temp_out("budget-contract");
+    let opts = opts1(vec![AgentMode::Single]);
+    let first_runner = MatrixRunner::new(b.clone(), &out);
+    let first = run_matrix(
+        &first_runner,
+        Arc::new(ReferenceDryExecutor),
+        "dry-reference",
+        &opts,
+        no_cancel(),
+    )
+    .await;
+    assert_eq!(first.runs.len(), 1);
+
+    let mut changed_bundle = b;
+    changed_bundle.suite.defaults.max_model_calls =
+        changed_bundle.suite.defaults.max_model_calls.saturating_add(1);
+    assert_eq!(
+        suite_hash(&first_runner.bundle),
+        suite_hash(&changed_bundle),
+        "本回归需要覆盖 suite_hash 未包含套件默认预算的场景"
+    );
+    let changed_runner = MatrixRunner::new(changed_bundle, &out);
+    let error = changed_runner
+        .run(
+            Arc::new(ReferenceDryExecutor),
+            "dry-reference",
+            None,
+            &opts,
+            no_cancel(),
+        )
+        .await
+        .expect_err("预算变化必须阻止续跑混合");
+    assert!(error.0.contains("指纹"), "{}", error.0);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[tokio::test]
 async fn dry_run_single_multi_parity() {
     let b = bundle(vec![make_case("parity-a", EvalCategory::Research)]);
     let out = temp_out("parity");
@@ -593,36 +691,31 @@ async fn cancel_leaves_pending_and_keeps_journal() {
 // 7) journal 损坏的容错语义：尾行撕裂容忍、中部损坏拒绝
 // ---------------------------------------------------------------------------
 
-fn write_meta(out: &Path, hash: &str) {
-    std::fs::create_dir_all(out).unwrap();
-    std::fs::write(
-        out.join("meta.json"),
-        format!(
-            r#"{{"schema_version":1,"suite_name":"t","suite_hash":"{hash}","model":null,"created_at":"2026-01-01T00:00:00Z"}}"#
-        ),
-    )
-    .unwrap();
-}
-
 #[tokio::test]
 async fn torn_journal_tail_is_tolerated_mid_corruption_is_fatal() {
     let b = bundle(vec![
         make_case("jrnl-a", EvalCategory::Code),
         make_case("jrnl-b", EvalCategory::Code),
     ]);
-    let hash = suite_hash(&b);
     let opts = opts1(vec![AgentMode::Single]);
 
-    // 尾行撕裂：容忍，对应单元格视为未完成并续跑。
+    // 尾行撕裂：先由真实 runner 写入有效元数据，再注入中断 journal。
     let out = temp_out("torn-tail");
-    write_meta(&out, &hash);
+    let runner = MatrixRunner::new(b.clone(), &out);
+    let _ = run_matrix(
+        &runner,
+        Arc::new(ReferenceDryExecutor),
+        "dry-reference",
+        &opts,
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
     let a_line = serde_json::to_string(&dummy_run(
         MatrixKey::new("jrnl-a", AgentMode::Single, 0),
         RunStatus::Passed,
     ))
     .unwrap();
     std::fs::write(out.join("state.jsonl"), format!("{a_line}\n{{torn")).unwrap();
-    let runner = MatrixRunner::new(b.clone(), &out);
     let report = run_matrix(
         &runner,
         Arc::new(ReferenceDryExecutor),
@@ -636,7 +729,15 @@ async fn torn_journal_tail_is_tolerated_mid_corruption_is_fatal() {
 
     // 中部损坏：拒绝静默丢弃，明确失败。
     let out2 = temp_out("mid-corrupt");
-    write_meta(&out2, &hash);
+    let runner2 = MatrixRunner::new(b.clone(), &out2);
+    let _ = run_matrix(
+        &runner2,
+        Arc::new(ReferenceDryExecutor),
+        "dry-reference",
+        &opts,
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
     let b_line = serde_json::to_string(&dummy_run(
         MatrixKey::new("jrnl-b", AgentMode::Single, 0),
         RunStatus::Passed,
@@ -647,7 +748,6 @@ async fn torn_journal_tail_is_tolerated_mid_corruption_is_fatal() {
         format!("{a_line}\n{{broken-middle}}\n{b_line}\n"),
     )
     .unwrap();
-    let runner2 = MatrixRunner::new(b, &out2);
     let result = runner2
         .run(
             Arc::new(ReferenceDryExecutor),
@@ -843,6 +943,8 @@ fn compare_reports_flags_regressions_and_mismatched_execution() {
         model: None,
         batch_label: None,
         tags: vec![],
+        run_contract_sha256: None,
+        evaluator_binary_sha256: None,
         generated_at: "t1".into(),
         runs: vec![],
         pending: vec![],
@@ -1066,6 +1168,8 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         model: Some("glm-5.3-flash".into()),
         batch_label: Some("b1".into()),
         tags: vec!["tag1".into()],
+        run_contract_sha256: Some("contract-v1".into()),
+        evaluator_binary_sha256: Some("binary-v1".into()),
         generated_at: "t1".into(),
         runs: vec![a.clone()],
         pending: vec![],
@@ -1080,6 +1184,8 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         model: Some("glm-5.3-flash".into()),
         batch_label: Some("b1".into()),
         tags: vec!["tag1".into()],
+        run_contract_sha256: Some("contract-v1".into()),
+        evaluator_binary_sha256: Some("binary-v1".into()),
         generated_at: "t2".into(),
         runs: vec![b.clone()],
         pending: vec![],
@@ -1119,6 +1225,39 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         .and_then(|value| value.get("reasons"))
         .and_then(serde_json::Value::as_array)
         .is_some_and(|reasons| !reasons.is_empty()));
+
+    let mut different_contract_multi = multi.clone();
+    different_contract_multi.run_contract_sha256 = Some("different-budget".into());
+    let different_contract =
+        build_paired_report_json(&single, &different_contract_multi, &opts, Some("t-contract"));
+    assert_eq!(
+        different_contract["run_alignment"]["configuration_aligned"],
+        serde_json::Value::Bool(false)
+    );
+    let mut different_binary_multi = multi.clone();
+    different_binary_multi.evaluator_binary_sha256 = Some("binary-v2".into());
+    let different_binary =
+        build_paired_report_json(&single, &different_binary_multi, &opts, Some("t-binary"));
+    assert_eq!(
+        different_binary["run_alignment"]["configuration_aligned"],
+        serde_json::Value::Bool(false)
+    );
+    let mut legacy_multi = multi.clone();
+    legacy_multi.evaluator_binary_sha256 = None;
+    let legacy_pair =
+        build_paired_report_json(&single, &legacy_multi, &opts, Some("t-legacy-binary"));
+    assert_eq!(
+        legacy_pair["run_alignment"]["configuration_aligned"],
+        serde_json::Value::Bool(false)
+    );
+
+    let mut dry_single = single.clone();
+    dry_single.execution = "dry-reference".into();
+    let dry_pair = build_paired_report_json(&dry_single, &multi, &opts, Some("t-dry"));
+    assert_eq!(
+        dry_pair["run_alignment"]["configuration_aligned"],
+        serde_json::Value::Bool(false)
+    );
 
     let mut cross_side_pending = single.clone();
     cross_side_pending

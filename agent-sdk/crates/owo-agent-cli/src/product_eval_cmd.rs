@@ -345,7 +345,7 @@ fn run_paired(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     if aligned {
-        println!("任务矩阵、套件配置、模型与批次对齐；评测器代码版本仍需从 freeze/git 元数据单独核对。");
+        println!("真实执行器、任务/权限/检查器/预算指纹、评测器二进制、模型与批次对齐；Git 源码版本和模型端点仍需从 freeze 元数据核对。");
     } else {
         let reasons = alignment
             .and_then(|value| value.get("reasons"))
