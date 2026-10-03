@@ -28,6 +28,8 @@
         baseUrl: "https://open.bigmodel.cn/api/paas/v4",
         model: "glm-5.3-flash",
         keyEnv: "OPENAI_API_KEY",
+        // 该服务商可挑选的模型（含推理模型；推理模型回传 reasoning_content → 深度思考块）
+        models: ["glm-5.3-flash", "glm-4-plus", "glm-z1-flashx", "glm-z1-flash"],
       },
       {
         id: "openai",
@@ -35,6 +37,7 @@
         baseUrl: "https://api.openai.com/v1",
         model: "gpt-4o-mini",
         keyEnv: "OPENAI_API_KEY",
+        models: ["gpt-4o-mini", "gpt-4o", "o3-mini"],
       },
       {
         id: "deepseek",
@@ -42,6 +45,15 @@
         baseUrl: "https://api.deepseek.com/v1",
         model: "deepseek-chat",
         keyEnv: "OPENAI_API_KEY",
+        // 实测（2026-10-03 直连验证）：deepseek-flash / deepseek-v4-flash 也回
+        // reasoning_content（各 ~220 字），同 deepseek-reasoner 一样是推理模型；
+        // deepseek-chat 不回。别按名字猜——flash 系同样是深度思考模型。
+        models: [
+          "deepseek-flash",
+          "deepseek-v4-flash",
+          "deepseek-chat",
+          "deepseek-reasoner",
+        ],
       },
       {
         id: "dashscope",
@@ -49,6 +61,7 @@
         baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         model: "qwen-plus",
         keyEnv: "OPENAI_API_KEY",
+        models: ["qwen-plus", "qwen-max", "qwen-flash"],
       },
       {
         id: "ollama",
@@ -56,6 +69,7 @@
         baseUrl: ollamaBaseUrl(),
         model: "local",
         keyEnv: "",
+        models: [],
       },
       {
         id: "custom",

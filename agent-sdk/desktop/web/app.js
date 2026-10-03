@@ -20,6 +20,9 @@ const state = {
   // 跨会话审批队列：request_id → { tool, reason, sessionId }。
   // 多对话并行时每个会话都可能挂起等待审批，单值卡会互相覆盖/不可见。
   pendingApprovals: new Map(),
+  // 「完全访问 / 自动允许」下被自动放行的工具名（FIFO）。用于给对应的工具步骤
+  // 打一个「自动放行」小徽标，而不是逐条往对话流里塞系统消息。
+  autoAllowed: [],
   // 仍在运行的回合：sessionId → { controller, startedAt }。切走会话不打断任务，
   // 切回时恢复该会话的本地实时视图。
   activeTurns: new Map(),
@@ -35,6 +38,8 @@ const state = {
   toolRun: null,
   // 当前回合统计（工具次数/模型调用轮次/耗时），供回合汇报卡使用
   turn: null,
+  // 本回合是否已记录过"该模型会推理"（每回合一次，避免高频读 localStorage）
+  reasoningNoted: false,
   // 运行状态条（转圈 + 阶段文案 + 计时）：让用户明确感知 agent 正在工作
   runStartedAt: 0,
   runTicker: null,
@@ -517,15 +522,18 @@ function newMessageBlock(node) {
 const THINKING_RENDER_LIMIT = 30000;
 const THINKING_FLUSH_MS = 120;
 
-// 思考过程块：流式追加；结束后保持展开可见（点摘要可手动折叠）。
+// 思考过程块：**默认折叠**——它是过程不是结论，展开着会把回答挤到屏幕外
+// （实测单回合推理可超 10 万字）。摘要行给出发起/字数线索，点开才看内容。
 function ensureThinking() {
   if (state.thinking) return state.thinking;
   const el = document.createElement("details");
   el.className = "thinking-block";
-  el.open = true;
   const summary = document.createElement("summary");
   summary.innerHTML =
-    '<span class="thinking-label">思考过程</span><span class="thinking-hint">思考中…</span>';
+    '<span class="thinking-label">思考过程</span>' +
+    '<span class="thinking-hint">思考中…</span>' +
+    '<span class="thinking-peek hidden"></span>' +
+    '<span class="thinking-chev" aria-hidden="true">⌄</span>';
   const body = document.createElement("div");
   body.className = "thinking-body";
   el.append(summary, body);
@@ -537,8 +545,17 @@ function ensureThinking() {
 
 function pushReasoning(delta) {
   if (!delta) return;
-  // 新思考开始：上一段工具分组到此为止，后续工具归入新组。
-  state.toolRun = null;
+  // 运行时学习：这个模型真的会推理事后才知道（deepseek-flash 名字上看不出来）。
+  // 只在每个回合记一次，避免每个增量都读 localStorage。
+  if (!state.reasoningNoted) {
+    state.reasoningNoted = true;
+    rememberReasoningModel(
+      state.selectedModel || (state.settings && state.settings.model) || ""
+    );
+  }
+  // 推理与工具调用会交替出现（think → act → think → act）。**不**在这里另起一段
+  // 工具时间线：那会让一个几十步的回合变成几十枚一行胶囊。工具步骤持续归入同一段，
+  // 段落位置由 pushToolUse 保持在最末（见那里的说明）。
   const block = ensureThinking();
   block.chars += delta.length;
   if (block.chars > THINKING_RENDER_LIMIT) return;
@@ -549,8 +566,21 @@ function pushReasoning(delta) {
     if (!block.pending) return;
     block.body.appendChild(document.createTextNode(block.pending));
     block.pending = "";
+    updateThinkingPeek(block);
     followScroll();
   }, THINKING_FLUSH_MS);
+}
+
+/// 折叠状态下给一截"正在想什么"的实时预览：深度思考的价值在于能看到模型在想什么，
+/// 全折叠等于看不见；一行截断的尾巴既不打断阅读又能感知进度。
+function updateThinkingPeek(block) {
+  if (!block || !block.summary) return;
+  const peek = block.summary.querySelector(".thinking-peek");
+  if (!peek) return;
+  const text = (block.body && block.body.textContent) || "";
+  const tail = text.replace(/\s+/g, " ").trim().slice(-56);
+  peek.textContent = tail ? `「${tail}」` : "";
+  peek.classList.toggle("hidden", !tail);
 }
 
 // 思考结束：不再自动折叠，只把提示更新为字数（点摘要可手动折叠；
@@ -573,6 +603,12 @@ function finishThinking() {
       block.chars > THINKING_RENDER_LIMIT
         ? `（${block.chars} 字，仅展示前 ${THINKING_RENDER_LIMIT} 字）`
         : `（${block.chars} 字）`;
+  }
+  // 思考结束：撤掉实时预览（点开折叠块看全文即可）。
+  const peek = block.summary.querySelector(".thinking-peek");
+  if (peek) {
+    peek.textContent = "";
+    peek.classList.add("hidden");
   }
   state.thinking = null;
 }
@@ -789,11 +825,12 @@ function createToolStep(payload = {}) {
   body.appendChild(result);
   row.append(summary, body);
   // 结算：成功写结果预览（服务端 preview），失败写原因并自动展开（失败必须一眼可见）。
+  // 成功的步骤不再逐条写「完成」——绿点本身就是完成，一个回合几十条"完成"只是噪音。
   const settle = (outcome = {}) => {
     const ok = outcome.ok !== false;
     row.classList.remove("is-running");
     row.classList.add(ok ? "is-ok" : "is-fail");
-    stateEl.textContent = ok ? "完成" : "失败";
+    stateEl.textContent = ok ? "" : "失败";
     const text = ok ? clipToolPreview(outcome.preview) : String(outcome.error || "未知原因");
     if (text) {
       resultPre.textContent = text;
@@ -805,23 +842,92 @@ function createToolStep(payload = {}) {
     if (!argsText && !text) body.remove();
     return ok;
   };
-  return { row, body, result, resultPre, state: stateEl, settle };
+  return { row, body, result, resultPre, state: stateEl, chev, settle };
+}
+
+/// 时间线外壳：整段折叠成一行摘要（默认收起）。
+/// 一个回合跑几十步时，逐条平铺会让过程比结论长十倍；过程按需展开即可。
+function createToolRunShell() {
+  const el = document.createElement("details");
+  el.className = "tool-steps";
+  const head = document.createElement("summary");
+  head.className = "tool-steps-head";
+  const icon = document.createElement("span");
+  icon.className = "tool-steps-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = "⚙";
+  const text = document.createElement("span");
+  text.className = "tool-steps-text";
+  const chev = document.createElement("span");
+  chev.className = "tool-steps-chev";
+  chev.setAttribute("aria-hidden", "true");
+  chev.textContent = "⌄";
+  head.append(icon, text, chev);
+  const list = document.createElement("div");
+  list.className = "tool-step-list";
+  el.append(head, list);
+  return { el, head, headText: text, list, groups: [] };
+}
+
+/// 把一步挂进时间线：**连续同类合并成一组**（「读取文件 ×12」），落单的直接平铺。
+/// 只出现一次就套一层折叠是纯噪音，所以升级成组推迟到第二次同类调用时。
+function attachToolStep(run, step, label) {
+  const last = run.groups[run.groups.length - 1];
+  if (!last || last.label !== label) {
+    run.list.appendChild(step.row);
+    const group = { label, count: 1, first: step, wrap: null, pending: 0, failed: 0 };
+    run.groups.push(group);
+    return group;
+  }
+  last.count += 1;
+  if (!last.wrap) {
+    const wrap = document.createElement("details");
+    wrap.className = "tool-group";
+    const sum = document.createElement("summary");
+    sum.className = "tool-group-head";
+    const name = document.createElement("span");
+    name.className = "tool-group-name";
+    name.textContent = label;
+    const count = document.createElement("span");
+    count.className = "tool-group-count";
+    const stateText = document.createElement("span");
+    stateText.className = "tool-group-state";
+    const chev = document.createElement("span");
+    chev.className = "tool-step-chev";
+    chev.setAttribute("aria-hidden", "true");
+    chev.textContent = "⌄";
+    sum.append(name, count, stateText, chev);
+    const body = document.createElement("div");
+    body.className = "tool-group-body";
+    wrap.append(sum, body);
+    run.list.insertBefore(wrap, last.first.row);
+    run.list.removeChild(last.first.row);
+    body.appendChild(last.first.row);
+    last.wrap = wrap;
+    last.body = body;
+    last.countEl = count;
+    last.stateEl = stateText;
+  }
+  last.body.appendChild(step.row);
+  return last;
+}
+
+function refreshToolGroup(group) {
+  if (!group || !group.wrap) return;
+  group.countEl.textContent = `×${group.count}`;
+  const parts = [];
+  if (group.pending > 0) parts.push(`${group.pending} 个进行中`);
+  if (group.failed > 0) parts.push(`${group.failed} 个失败`);
+  group.stateEl.textContent = parts.join(" · ");
+  group.wrap.classList.toggle("has-failure", group.failed > 0);
 }
 
 function ensureToolRun() {
   if (state.toolRun) return state.toolRun;
-  const el = document.createElement("div");
-  el.className = "tool-steps";
-  const head = document.createElement("div");
-  head.className = "tool-steps-head";
-  const list = document.createElement("div");
-  list.className = "tool-step-list";
-  el.append(head, list);
-  newMessageBlock(el);
+  const shell = createToolRunShell();
+  newMessageBlock(shell.el);
   state.toolRun = {
-    el,
-    head,
-    list,
+    ...shell,
     total: 0,
     running: 0,
     failed: 0,
@@ -833,10 +939,17 @@ function ensureToolRun() {
 
 function updateToolRun(run) {
   if (!run) return;
-  const parts = [`已执行 ${run.total} 个工具`];
+  // 只跑了一步就直接报工具名（"已执行 1 个工具" 重复出现等于没说）。
+  const single =
+    run.total === 1 && run.groups.length === 1 && run.groups[0].count === 1
+      ? run.groups[0].label
+      : "";
+  const parts = [single || `已执行 ${run.total} 个工具`];
   if (run.running > 0) parts.push(`${run.running} 个进行中`);
   if (run.failed > 0) parts.push(`${run.failed} 个失败`);
-  run.head.textContent = `⚙ ${parts.join(" · ")}`;
+  const text = parts.join(" · ");
+  if (run.headText) run.headText.textContent = text;
+  else run.head.textContent = `⚙ ${text}`;
   run.head.classList.toggle("has-failure", run.failed > 0);
 }
 
@@ -846,7 +959,18 @@ function pushToolUse(payload) {
   run.total += 1;
   run.running += 1;
   const step = createToolStep(payload);
-  run.list.appendChild(step.row);
+  // 自动放行标记：把「已自动允许…」从逐条系统消息降级成 chip 上的一个小徽标。
+  if (takeAutoAllowed(payload.tool)) {
+    const badge = document.createElement("span");
+    badge.className = "tool-step-auto";
+    badge.textContent = "自动放行";
+    badge.title = "当前访问级别下该工具无需逐次确认";
+    step.row.querySelector("summary").insertBefore(badge, step.chev);
+  }
+  const group = attachToolStep(run, step, toolLabel(payload.tool));
+  step.group = group;
+  group.pending += 1;
+  refreshToolGroup(group);
   if (payload.id) run.steps.set(String(payload.id), step);
   if (state.turn) {
     state.turn.tools += 1;
@@ -858,6 +982,10 @@ function pushToolUse(payload) {
     }
   }
   updateToolRun(run);
+  // 工具段落始终压在时间线末尾：推理块会不断插到它后面，不搬一次的话，
+  // 新步骤会被写进"更早的位置"，读起来像顺序错乱。
+  const box = run.el.parentNode;
+  if (box && box.lastElementChild !== run.el) box.appendChild(run.el);
   followScroll();
 }
 
@@ -868,50 +996,69 @@ function pushToolResult(payload) {
   if (step) {
     ok = step.settle(payload);
     run.running = Math.max(0, run.running - 1);
+    const group = step.group;
+    if (group) {
+      group.pending = Math.max(0, group.pending - 1);
+      if (!ok) group.failed += 1;
+      refreshToolGroup(group);
+      // 失败必须一眼可见：把所在分组一并展开（否则它会藏在两层折叠里）。
+      if (!ok && group.wrap) group.wrap.open = true;
+    }
   } else {
     // 没有配对 tool_use 的终态（权限被拒 / 插件热卸载 / 断线重连）：补一枚 chip，
     // 否则这一步在前端会永远停在「进行中」。
     run.total += 1;
     const fallback = createToolStep({ id: payload.id, tool: payload.tool });
-    run.list.appendChild(fallback.row);
+    const group = attachToolStep(run, fallback, toolLabel(payload.tool));
+    fallback.group = group;
     ok = fallback.settle(payload);
+    if (!ok) group.failed += 1;
+    refreshToolGroup(group);
   }
-  if (!ok) run.failed += 1;
+  if (!ok) {
+    run.failed += 1;
+    run.el.open = true;
+  }
   updateToolRun(run);
   if (ok) return;
   if (state.turn) state.turn.failed += 1;
 }
 
 /// 历史回放：把 role=tool 的结果按 tool_call_id 配回 assistant 的 tool_calls，重建成同样的 chip。
-function appendHistoryToolSteps(calls, resultsById) {
-  const el = document.createElement("div");
-  el.className = "tool-steps";
-  const head = document.createElement("div");
-  head.className = "tool-steps-head";
-  const list = document.createElement("div");
-  list.className = "tool-step-list";
-  el.append(head, list);
+/// `existing` 用于**把连续的工具回合并进同一段折叠**——真实会话里就是
+/// `assistant(tool_calls) → tool → assistant(tool_calls) → …` 长链（实测 24 步连成一条），
+/// 每步单起一个折叠块会让时间线变成一摞只有一行字的胶囊。
+function appendHistoryToolSteps(calls, resultsById, existing = null) {
+  const run = existing || { ...createToolRunShell(), total: 0, running: 0, failed: 0, steps: new Map() };
   let failed = 0;
   for (const call of calls) {
     const step = createToolStep({ id: call.id, tool: call.name, args: call.arguments });
     const outcome = resultsById.get(String(call.id || ""));
+    let ok = true;
     if (outcome) {
-      const ok = step.settle(outcome);
+      ok = step.settle(outcome);
       if (!ok) failed += 1;
     } else {
       step.row.classList.remove("is-running");
       step.state.textContent = "无结果";
     }
-    list.appendChild(step.row);
+    const group = attachToolStep(run, step, toolLabel(call.name));
+    step.group = group;
+    if (!ok) group.failed += 1;
+    refreshToolGroup(group);
   }
-  head.textContent = `已执行 ${calls.length} 个工具${failed ? ` · ${failed} 个失败` : ""}`;
-  head.classList.toggle("has-failure", failed > 0);
-  newMessageBlock(el);
+  run.total += calls.length;
+  run.failed += failed;
+  updateToolRun(run);
+  if (failed > 0) run.el.open = true;
+  if (!existing) newMessageBlock(run.el);
+  return run;
 }
 
 function resetRunBlocks() {
   state.thinking = null;
   state.toolRun = null;
+  state.reasoningNoted = false;
 }
 
 // ---------- 回合汇报卡：每次调用结束后的工作总结（文件改动 + 耗时 + 消耗） ----------
@@ -1161,6 +1308,96 @@ function safeMarkdownHref(raw) {
   return /^(?:\.|\/|#)/.test(href) ? href : "";
 }
 
+// ---------- 轻量 LaTeX 可读化（推理模型的输出习惯） ----------
+//
+// 接入深度思考（deepseek-reasoner / glm-z1 系）后暴露的新问题：这类模型写数学
+// 结论时习惯用 LaTeX（`\frac{1}{6}`、`\times`、`\approx`），轻量 Markdown 渲染器
+// 不认 LaTeX，原样吐给用户——一屏 `$\frac{24}{7}$` 看起来就像乱码。
+//
+// 这里不做完整 KaTeX（体积大、与 md 代码块冲突多），只做**可读化**：
+// 分隔符内的公式转成 `a/(b)` 形式并用等宽样式标出，分隔符外的裸符号做等价替换。
+// 代码块不经过这里（flushCode 直接转义），所以不会误伤代码。
+
+// 占位符用 NUL (NUL 不会出现在正常文本里，行内规则也不会跨它匹配)
+const TEX_MARK = "\u0000";
+
+const TEX_SYMBOLS = [
+  ["\\times", "×"],
+  ["\\cdot", "·"],
+  ["\\div", "÷"],
+  ["\\approx", "≈"],
+  ["\\neq", "≠"],
+  ["\\leq", "≤"],
+  ["\\geq", "≥"],
+  ["\\le", "≤"],
+  ["\\ge", "≥"],
+  ["\\pm", "±"],
+  ["\\mp", "∓"],
+  ["\\rightarrow", "→"],
+  ["\\Rightarrow", "⇒"],
+  ["\\to", "→"],
+  ["\\ldots", "…"],
+  ["\\cdots", "…"],
+  ["\\infty", "∞"],
+  ["\\pi", "π"],
+  ["\\alpha", "α"],
+  ["\\beta", "β"],
+  ["\\gamma", "γ"],
+  ["\\theta", "θ"],
+  ["\\lambda", "λ"],
+  ["\\mu", "μ"],
+  ["\\sigma", "σ"],
+  ["\\Delta", "Δ"],
+  ["\\%", "%"],
+];
+
+/// LaTeX 片段 → 可读文本（分数/根号做结构化简写，其余符号等价替换）。
+function texToReadable(tex) {
+  let out = String(tex || "");
+  out = out.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
+  out = out.replace(/\\[dt]?frac\s*(\d)\s*(\d)/g, "($1)/($2)");
+  out = out.replace(/\\sqrt\s*\{([^{}]*)\}/g, "√($1)");
+  out = out.replace(/\\sqrt\s*(\d)/g, "√$1");
+  for (const [command, symbol] of TEX_SYMBOLS) {
+    out = out.split(command).join(symbol);
+  }
+  out = out.replace(/\\(?:left|right|displaystyle|text|mathrm|mathbf|operatorname|mbox)\b/g, "");
+  out = out.replace(/\\\\/g, " ");
+  out = out.replace(/[{}]/g, "");
+  return out.replace(/\s+/g, " ").trim();
+}
+
+/// 公式表按"每次渲染"累积：占位符在整篇 html 拼好后统一还原，
+/// 这样行内渲染（标题/列表/表格/段落）无需各自关心公式。
+let TEX_STORE = [];
+
+/// 把 `\(…\)` / `$$…$$` / `$…$` 的公式抠成占位符（只对非代码行调用）。
+function extractTex(text) {
+  const hold = (match, body) => {
+    TEX_STORE.push(texToReadable(body));
+    return `${TEX_MARK}${TEX_STORE.length - 1}${TEX_MARK}`;
+  };
+  let out = String(text || "");
+  out = out.replace(/\\\[([\s\S]+?)\\\]/g, hold);
+  out = out.replace(/\$\$([\s\S]+?)\$\$/g, hold);
+  out = out.replace(/\$([^$\n]{1,400}?)\$/g, hold);
+  out = out.replace(/\\\(([\s\S]+?)\\\)/g, hold);
+  return out;
+}
+
+/// 占位符还原：公式渲染成等宽的 `<code class="md-tex">`。
+function restoreTex(html, store) {
+  if (!store.length) return html;
+  return html.replace(
+    new RegExp(`${TEX_MARK}(\\d+)${TEX_MARK}`, "g"),
+    (match, index) => {
+      const body = store[Number(index)];
+      if (!body) return match;
+      return `<code class="md-tex">${escapeHtml(body)}</code>`;
+    }
+  );
+}
+
 function inlineMarkdown(text) {
   let out = escapeHtml(text);
   out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -1172,12 +1409,24 @@ function inlineMarkdown(text) {
       ? `<a href="${escapeAttribute(href)}" target="_blank" rel="noopener">${label}</a>`
       : label;
   });
+  // 分隔符外的裸 LaTeX（模型常常不加 $…$）：符号表 + 花括号边界明确的 frac/sqrt。
+  // 取舍说明：行内代码里的 \frac 也会被化简（概率极低——没人会在代码片段里写
+  // 公式），换取正文中裸公式可读，这个交换是划算的。
+  out = out.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
+  out = out.replace(/\\[dt]?frac\s*(\d)\s*(\d)/g, "($1)/($2)");
+  out = out.replace(/\\sqrt\s*\{([^{}]*)\}/g, "√($1)");
+  for (const [command, symbol] of TEX_SYMBOLS) {
+    out = out.split(command).join(symbol);
+  }
   return out;
 }
 
 // 把 markdown 文本渲染为 HTML。代码块保留原样（pre/code），行内元素转义。
+// 公式可读化只对**非代码行**做占位（代码块里的 $…$ 是代码不是公式），
+// 整篇 html 拼好后再统一还原占位符。
 function renderMarkdown(text) {
   if (!text) return "";
+  TEX_STORE = [];
   const lines = text.split("\n");
   const html = [];
   let inCode = false;
@@ -1213,8 +1462,8 @@ function renderMarkdown(text) {
     tableAlign = null;
   };
 
-  for (const line of lines) {
-    const fence = line.match(/^```(\w*)\s*$/);
+  for (const rawLine of lines) {
+    const fence = rawLine.match(/^```(\w*)\s*$/);
     if (fence) {
       if (inCode) flushCode();
       else {
@@ -1226,9 +1475,10 @@ function renderMarkdown(text) {
       continue;
     }
     if (inCode) {
-      codeLines.push(line);
+      codeLines.push(rawLine);
       continue;
     }
+    const line = extractTex(rawLine);
     if (/^\s*$/.test(line)) {
       flushList();
       flushTable();
@@ -1295,7 +1545,7 @@ function renderMarkdown(text) {
   flushCode();
   flushList();
   flushTable();
-  return html.join("\n");
+  return restoreTex(html.join("\n"), TEX_STORE);
 }
 
 // ---------- 头部状态 ----------
@@ -1625,6 +1875,9 @@ async function refreshSettings() {
       modelSelect.appendChild(option);
       modelSelect.value = model;
     }
+    // 记住"当前要用的模型"：新会话把它作为 model_override 传给核心
+    // （桌面壳下 OPENAI_MODEL 环境变量会盖住 settings.model，只靠设置页保存不生效）。
+    state.selectedModel = modelSelect.value;
     $("modelChipText").textContent = settings.model || "默认模型";
     renderEffortChip();
     $("connectionSummary").textContent = cloudEnabled ? "云端模型已启用" : "云端模型已关闭";
@@ -1637,6 +1890,8 @@ async function refreshSettings() {
     }
     syncLocalPrefs();
     renderCustomModels();
+    syncProviderModels();
+    updateModelChipMeta();
     renderProviderForm();
     updateModelGate();
   } catch (error) {
@@ -2011,13 +2266,55 @@ function showTurnFailure(message) {
     run.running = 0;
     updateToolRun(run);
   }
-  addMessage("error", `回合未完成：${message}`);
+  const reason = String(message || "").replace(/^gateway error:\s*/i, "");
+  // 工具预算耗尽不是"报错"，是"任务太大这一轮装不下"：给原因 + 一键继续，
+  // 而不是只丢一句「回合未完成」让用户以为整轮白跑。
+  if (reason.includes("循环保护") || reason.includes("工具调用达到上限")) {
+    showTurnLimitCard(reason);
+  } else {
+    addMessage("error", `回合未完成：${reason}`);
+  }
   const turn = state.turn;
   // 只有真的跑过（有模型调用/工具）才补汇报卡；请求级失败（如鉴权）不打扰。
   if (turn && (turn.tools > 0 || turn.modelCalls > 0)) {
     turn.stopped = true;
     renderTurnSummary(state.sessionId, turn);
   }
+}
+
+/// 单回合工具预算耗尽卡：说清原因，并给一个「继续执行」的出口。
+function showTurnLimitCard(reason) {
+  const card = document.createElement("div");
+  card.className = "msg turn-limit";
+  const title = document.createElement("strong");
+  title.className = "turn-limit-title";
+  title.textContent = "本回合的步数用完了";
+  const text = document.createElement("span");
+  text.className = "turn-limit-text";
+  text.textContent = reason;
+  const actions = document.createElement("div");
+  actions.className = "turn-limit-actions";
+  const cont = document.createElement("button");
+  cont.type = "button";
+  cont.className = "primary";
+  cont.textContent = "继续执行";
+  cont.addEventListener("click", () => continueTurn());
+  const hint = document.createElement("span");
+  hint.className = "turn-limit-hint";
+  hint.textContent = "已完成的步骤会保留，继续时不会重做";
+  actions.append(cont, hint);
+  card.append(title, text, actions);
+  newMessageBlock(card);
+}
+
+/// 继续执行：把「接着做」作为一条普通指令发出去（步数上限是服务端的策略，
+/// 前端只负责把用户意图表达清楚并复用同一条发送链路）。
+function continueTurn() {
+  const box = $("prompt");
+  if (!box) return;
+  box.value = "继续完成上面未完成的部分，不要重复已经完成的步骤。";
+  updateComposerHint();
+  sendPrompt();
 }
 
 // ---------- composer 通用下拉浮层（模型 / 访问级别共用） ----------
@@ -2116,7 +2413,9 @@ async function selectModel(id) {
   select.value = id;
   state.settings = state.settings || {};
   state.settings.model = id;
+  state.selectedModel = id;
   $("modelChipText").textContent = id;
+  updateModelChipMeta();
   const result = await saveSettings();
   if (result.ok) showToast(`已切换模型：${id}`, "ok");
 }
@@ -2386,6 +2685,87 @@ function saveCustomModels(models) {
   localStorage.setItem("owo.custom-models", JSON.stringify(models));
   state.settings = state.settings || {};
   state.settings.custom_models = models;
+}
+
+/// 推理模型判定：名字启发式只是**先验**，真正的判定靠运行时——回合里真的收到过
+/// reasoning 增量的模型记进 localStorage（`rememberReasoningModel`）。
+/// 这是被 deepseek-flash 教的：名字完全看不出是推理模型（直连实测每回合回 ~220 字
+/// 推理），只有跑过才知道。启发式里把 DeepSeek flash/v4 系写死是刻意的：
+/// localStorage 按 origin 隔离，而核心每次重启都换端口，学到的集合活不过重启
+/// （与桌宠皮肤当初同一类问题）；先把已知推理系名字写死兜底，彻底解法是
+/// 本机偏好走壳侧文件（后续与 owo.prefs 一起迁）。
+const REASONING_MODEL_RE =
+  /reason|z1|thinking|o[13](-mini)?$|deepseek-(flash|v\d)/i;
+
+function loadReasoningModels() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem("owo.reasoning-models") || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function rememberReasoningModel(id) {
+  const model = String(id || "").trim();
+  if (!model || loadReasoningModels().has(model)) return;
+  const set = loadReasoningModels();
+  set.add(model);
+  try {
+    localStorage.setItem("owo.reasoning-models", JSON.stringify([...set]));
+  } catch {
+    /* 隐私模式下不可持久化，不影响本会话 */
+  }
+  updateModelChipMeta();
+}
+
+function isReasoningModel(id) {
+  return REASONING_MODEL_RE.test(String(id || "")) || loadReasoningModels().has(String(id || ""));
+}
+
+/// 模型 chip 元信息：推理模型给"深度思考"徽标 + 提示，普通模型只显示名字。
+function updateModelChipMeta() {
+  const chip = $("modelChip");
+  if (!chip) return;
+  const model = state.selectedModel || "";
+  const reasoner = isReasoningModel(model);
+  chip.classList.toggle("is-reasoner", reasoner);
+  chip.title = reasoner
+    ? `${model} · 深度思考模型：回合会流式展示推理过程（点「思考过程」展开看全文）`
+    : `选择模型（当前 ${model || "默认"}）`;
+  let badge = chip.querySelector(".reasoner-badge");
+  if (reasoner && !badge) {
+    badge = document.createElement("span");
+    badge.className = "reasoner-badge";
+    badge.textContent = "深度思考";
+    chip.appendChild(badge);
+  } else if (!reasoner && badge) {
+    badge.remove();
+  }
+}
+
+/// 按当前服务商同步模型候选：provider-presets.js 里每个预设带 `models` 清单
+/// （文件驱动，见 R13）。只**补充**缺失的 option，不动静态预设与自定义模型。
+/// 判定顺序：runtime.provider（核心识别出的服务商 id）→ settings.provider.base_url。
+function syncProviderModels() {
+  const registry = window.OwoProviderPresets;
+  const select = $("settingsModel");
+  if (!registry || !select || typeof registry.presets !== "function") return;
+  const settings = state.settings || {};
+  const runtime = settings.runtime || {};
+  const baseUrl = String((settings.provider && settings.provider.base_url) || "").toLowerCase();
+  const strip = (url) => String(url || "").toLowerCase().replace(/^https?:\/\//, "");
+  const preset =
+    registry.presets().find((p) => p.id && p.id === runtime.provider) ||
+    registry.presets().find((p) => p.baseUrl && baseUrl && baseUrl.includes(strip(p.baseUrl)));
+  if (!preset || !Array.isArray(preset.models)) return;
+  for (const id of preset.models) {
+    if (!id || select.querySelector(`option[value="${CSS.escape(id)}"]`)) continue;
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = id + (isReasoningModel(id) ? "（深度思考）" : "");
+    option.dataset.provider = "1";
+    select.appendChild(option);
+  }
 }
 function renderCustomModels() {
   const list = $("customModelList");
@@ -3611,11 +3991,21 @@ async function selectSession(id) {
     }
     // 仍检测「最后一条是用户消息但没回复」的失败回合，显式告诉用户。
     let lastRole = null;
+    // 连续的工具回合共用同一段折叠（见 appendHistoryToolSteps 注释）。
+    let historyToolRun = null;
     for (const message of history) {
       if (message.role === "system") {
         // 压缩摘要等系统记录：按系统提示显示，避免被当作助手回复。
-        addMessage("system", message.content);
+        // 历史摘要动辄上千字，直接铺成正文会把真正的对话挤出屏幕——收成可展开的
+        // 时间线事件（与回合内实时压缩用同一枚 chip）。
+        const content = String(message.content || "");
+        if (content.includes("历史摘要（已压缩）")) {
+          addEventChip("compact", "上下文已压缩", content);
+        } else {
+          addMessage("system", content);
+        }
         lastRole = "system";
+        historyToolRun = null;
         continue;
       }
       if (message.role === "tool") {
@@ -3625,7 +4015,7 @@ async function selectSession(id) {
       if (message.role === "assistant") {
         const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
         if (calls.length) {
-          appendHistoryToolSteps(calls, toolResults);
+          historyToolRun = appendHistoryToolSteps(calls, toolResults, historyToolRun);
           lastRole = "tool";
           rendered += 1;
         }
@@ -3635,6 +4025,7 @@ async function selectSession(id) {
       }
       addMessage(message.role === "user" ? "user" : "assistant", message.content);
       lastRole = message.role === "user" ? "user" : "assistant";
+      historyToolRun = null;
       rendered += 1;
     }
     if (lastRole === "user") {
@@ -3693,9 +4084,15 @@ async function newSession() {
     throw error;
   }
   localStorage.setItem("owo.workspace", workspace);
+  // 把用户选中的模型作为会话级 model_override 传给核心：桌面壳下
+  // OPENAI_MODEL 环境变量优先级高于 settings.model，不在创建时带上模型，
+  // 用户在界面上切的模型（如 deepseek-reasoner 深度思考）根本不会生效。
   const session = await api("/session", {
     method: "POST",
-    body: JSON.stringify({ workspace }),
+    body: JSON.stringify({
+      workspace,
+      ...(state.selectedModel ? { model: state.selectedModel } : {}),
+    }),
   });
   await selectSession(session.id);
   addMessage("system", `已创建会话 ${session.id}`);
@@ -4048,15 +4445,29 @@ function showApproval(payload) {
   if (mode !== "ask") {
     const safe = SAFE_TOOL_PATTERN.test(payload.tool || "");
     if (mode === "full" || safe) {
-      addMessage(
-        "system",
-        `已自动允许（${mode === "full" ? "完全访问" : "自动允许"}）：${payload.tool}`
-      );
+      // 不逐条写系统消息：完全访问模式下一次任务能自动放行几十次，
+      // 会把对话流淹成权限日志（实测 64 次工具调用刷出 30+ 条）。改为在对应
+      // 的工具步骤上打一枚「自动放行」徽标（pushToolUse 消费这条记录）。
+      queueAutoAllowed(payload.tool);
       respondApproval(requestId, true);
       return;
     }
   }
   renderApprovals();
+}
+
+// 自动放行记录（FIFO）：审批与工具调用按同一顺序到达，同名工具一一对应。
+function queueAutoAllowed(tool) {
+  state.autoAllowed.push(String(tool || ""));
+  if (state.autoAllowed.length > 64) state.autoAllowed.shift();
+}
+
+function takeAutoAllowed(tool) {
+  const name = String(tool || "");
+  const index = state.autoAllowed.indexOf(name);
+  if (index < 0) return false;
+  state.autoAllowed.splice(index, 1);
+  return true;
 }
 
 // 渲染审批队列：当前会话与其它会话的待审批卡并存，各自独立允许/拒绝。
@@ -4069,6 +4480,21 @@ function renderApprovals() {
   const items = [...state.pendingApprovals.entries()];
   bar.classList.toggle("hidden", items.length === 0);
   let anyUrgent = false;
+  if (items.length) {
+    // 标题行：先说清"这是要你点头"，再列具体动作——审批卡本身要能自解释。
+    const head = document.createElement("div");
+    head.className = "approval-head";
+    const title = document.createElement("span");
+    title.textContent = "需要你的确认";
+    const badge = document.createElement("span");
+    badge.className = "approval-head-badge";
+    badge.textContent = `${items.length} 项待处理`;
+    const tip = document.createElement("span");
+    tip.className = "approval-head-tip";
+    tip.textContent = "超时未响应将按拒绝处理";
+    head.append(title, badge, tip);
+    list.appendChild(head);
+  }
   for (const [requestId, entry] of items) {
     const row = document.createElement("div");
     row.className = "approval-item";
@@ -4079,9 +4505,17 @@ function renderApprovals() {
     const prefix = cross
       ? `[会话 ${String(entry.sessionId).slice(0, 6)}…] `
       : "";
-    text.textContent = `${prefix}需要审批：${entry.tool || "未知工具"}${
-      entry.reason ? `（${entry.reason}）` : ""
-    }`;
+    if (prefix) text.appendChild(document.createTextNode(prefix));
+    const name = document.createElement("span");
+    name.className = "tool-name";
+    name.textContent = entry.tool ? toolLabel(entry.tool) : "未知工具";
+    text.appendChild(name);
+    if (entry.reason) {
+      const reason = document.createElement("span");
+      reason.className = "tool-reason";
+      reason.textContent = `　${entry.reason}`;
+      text.appendChild(reason);
+    }
     const timer = document.createElement("span");
     timer.className = "approval-timer";
     const remain = approvalRemainingMs(entry);
@@ -4232,10 +4666,10 @@ async function respondApproval(requestId, allow) {
       method: "POST",
       body: JSON.stringify({ allow }),
     });
-    if (allow) {
-      addMessage("system", "已允许该操作");
-    } else {
+    if (!allow) {
       // 拒绝是回合内的关键事件：写成时间线 chip，附工具与原因，便于事后复盘。
+      // 允许则不写任何消息——审批卡消失 + 对应工具步骤转绿就是最直接的反馈，
+      // 再补一条「已允许该操作」只会把对话流刷成权限日志。
       addEventChip(
         "deny",
         tool ? `已拒绝「${toolLabel(tool)}」` : "已拒绝该操作",
