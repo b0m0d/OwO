@@ -5,6 +5,8 @@
 use owo_agent_protocol::CompletionStatusV1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub const SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID: &str = "single-human-acceptance-v1";
+
 pub struct CompletionEvidence {
     pub response_finished: bool,
     pub reached_turn_limit: bool,

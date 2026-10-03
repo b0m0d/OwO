@@ -138,12 +138,24 @@ fn single_completion_record(
     let task_id = context.task_id.as_deref()?;
     let attempt_id = context.attempt_id.as_deref()?;
     let mut evidence_ids = std::collections::BTreeSet::new();
+    let current_attempt_validation_ids = session
+        .validation_receipts
+        .iter()
+        .filter(|receipt| receipt.attempt_id == attempt_id)
+        .map(|receipt| receipt.receipt_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
     let mut changed_paths = std::collections::BTreeMap::new();
     for receipt in session
         .execution_receipts
         .iter()
         .filter(|receipt| {
-            receipt.turn_id == attempt_id && receipt.status != "reverted" && receipt.status != "stale"
+            let accepted_by_current_attempt = receipt.status == "accepted"
+                && receipt.validation_receipt_id.as_deref().is_some_and(|id| {
+                    current_attempt_validation_ids.contains(id)
+                });
+            (receipt.turn_id == attempt_id || accepted_by_current_attempt)
+                && receipt.status != "reverted"
+                && receipt.status != "stale"
         })
     {
         evidence_ids.insert(receipt.receipt_id.clone());
@@ -161,9 +173,22 @@ fn single_completion_record(
     for receipt in session
         .validation_receipts
         .iter()
+        .rev()
         .filter(|receipt| receipt.attempt_id == attempt_id)
     {
         evidence_ids.insert(receipt.receipt_id.clone());
+        for (subject, hash) in &receipt.subject_sha256 {
+            let Some(path) = subject.strip_prefix("workspace-path:") else {
+                continue;
+            };
+            changed_paths.entry(path.replace('\\', "/")).or_insert_with(|| {
+                if hash == &crate::verification::workspace_path_absence_sha256() {
+                    None
+                } else {
+                    Some(hash.clone())
+                }
+            });
+        }
     }
     let candidate_version_sha256 = if changed_paths.is_empty() {
         None
@@ -268,6 +293,72 @@ mod tests {
         let restored: TraceRecord = serde_json::from_value(serde_json::to_value(trace).unwrap()).unwrap();
         assert_eq!(restored.model_calls.len(), 2);
         assert!(!restored.model_calls[1].succeeded);
+    }
+
+    #[test]
+    fn completion_record_includes_prior_writes_accepted_by_this_attempt() {
+        let mut session = Session::new(".", "mock", None);
+        session.active_task_context = Some(
+            crate::task_context::ResolvedTaskContext::for_single_turn(
+                "turn-current",
+                "请验收已有候选",
+            ),
+        );
+        let hash = crate::CasStore::hash_of(b"fn main() {}\n");
+        session.execution_receipts.push(crate::session::ExecutionReceipt {
+            receipt_id: "exec-prior".to_string(),
+            tool: "write_file".to_string(),
+            turn_id: "turn-prior".to_string(),
+            changed_files: vec!["src/main.rs".to_string()],
+            snapshot_keys: Default::default(),
+            before_hashes: std::collections::HashMap::from([("src/main.rs".to_string(), None)]),
+            after_hashes: std::collections::HashMap::from([(
+                "src/main.rs".to_string(),
+                Some(hash.clone()),
+            )]),
+            diff_sha256: "diff".to_string(),
+            created_at: "2026-10-04T00:00:00Z".to_string(),
+            status: "accepted".to_string(),
+            validation_receipt_id: Some("manual-current".to_string()),
+        });
+        session.validation_receipts.push(crate::plan::ValidationReceiptV1 {
+            receipt_id: "manual-current".to_string(),
+            task_id: "session-1".to_string(),
+            attempt_id: "turn-current".to_string(),
+            epoch: 1,
+            requirement_id: "manual-acceptance".to_string(),
+            validator_id: crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID.to_string(),
+            validator_version: "1".to_string(),
+            arguments_sha256: crate::CasStore::hash_of(b"{}"),
+            input_sha256: crate::CasStore::hash_of("请验收已有候选".as_bytes()),
+            environment_id: "workspace".to_string(),
+            changeset_sha256: Some("changeset".to_string()),
+            detail: Some("accepted".to_string()),
+            subject_sha256: std::collections::HashMap::from([(
+                "workspace-path:src/main.rs".to_string(),
+                hash.clone(),
+            )]),
+            verdict: crate::plan::ValidationVerdictV1::ManualAccepted,
+            evidence_refs: vec!["manual-question:q1".to_string()],
+            started_at: "2026-10-04T00:00:00Z".to_string(),
+            completed_at: "2026-10-04T00:00:01Z".to_string(),
+        });
+
+        let record = single_completion_record(
+            &session,
+            owo_agent_protocol::CompletionStatusV1::Accepted,
+        )
+        .unwrap();
+        let expected = crate::completion::hash_candidate_version(
+            &std::collections::BTreeMap::from([(
+                "src/main.rs".to_string(),
+                Some(hash),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(record.candidate_version_sha256.as_deref(), Some(expected.as_str()));
+        assert!(record.evidence_receipt_ids.contains(&"exec-prior".to_string()));
+        assert!(record.evidence_receipt_ids.contains(&"manual-current".to_string()));
     }
 
     #[test]

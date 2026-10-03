@@ -32,7 +32,10 @@ pub(super) fn accepted_candidate_paths(session: &Session, turn_id: &str) -> BTre
         .iter()
         .filter(|receipt| {
             receipt.attempt_id == turn_id
-                && receipt.verdict == ValidationVerdictV1::Passed
+                && matches!(
+                    receipt.verdict,
+                    ValidationVerdictV1::Passed | ValidationVerdictV1::ManualAccepted
+                )
                 && receipt.validator_id != "workspace-independent-review-v1"
         })
         .map(|receipt| receipt.receipt_id.as_str())

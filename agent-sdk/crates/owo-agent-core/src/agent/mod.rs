@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 mod config;
 mod single_review;
+mod single_manual_acceptance;
 
 #[cfg(test)]
 mod tests;
@@ -425,7 +426,7 @@ impl Agent {
         prompt: &str,
         read_only: bool,
     ) -> Result<String, AgentError> {
-        let abort = AtomicBool::new(false);
+        let abort = std::sync::atomic::AtomicBool::new(false);
         // 直呼子代理没有可回传到客户端的审批通道（goal/plan 后台 worker、
         // POST /subagent）：改用工作区范围审批器——读恒放行；写/执行仅在
         // **工作区内**放行，越界一律拒绝；只读模式拒绝全部写/执行。
@@ -825,7 +826,7 @@ impl Agent {
                     );
                     break;
                 }
-                ModelOutput::Text(text) => {
+                ModelOutput::Text(mut text) => {
                     let mut completion_status = assess_single_turn_completion(
                         session,
                         prompt,
@@ -834,6 +835,32 @@ impl Agent {
                         false,
                         Some(&text),
                     );
+                    if completion_status == owo_agent_protocol::CompletionStatusV1::Unverified {
+                        let current_plan = session.single_verification_plan.clone().filter(|_| {
+                            single_verification_plan_matches_turn(session, prompt, &turn_id)
+                        });
+                        if let Some(plan) = current_plan.filter(|plan| {
+                            plan.requirements.iter().any(|requirement| {
+                                requirement.required
+                                    && requirement.validator_id
+                                        == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
+                            })
+                        }) {
+                            completion_status = single_manual_acceptance::request_single_manual_acceptance(
+                                session,
+                                &plan,
+                                &turn_id,
+                                questioner,
+                                abort,
+                            )
+                            .await;
+                            if abort.load(Ordering::Relaxed) {
+                                messages.push(ChatMessage::assistant_text(text.clone()));
+                                commit_turn_messages(session, &messages);
+                                return Err(AgentError::Aborted);
+                            }
+                        }
+                    }
                     if completion_status == owo_agent_protocol::CompletionStatusV1::Accepted {
                         let candidate_paths = single_review::accepted_candidate_paths(session, &turn_id);
                         if single_review::is_required(prompt, &candidate_paths) {
@@ -916,6 +943,13 @@ impl Agent {
                                 commit_turn_messages(session, &messages);
                                 return Err(AgentError::Aborted);
                             }
+                        }
+                    }
+                    if completion_status == owo_agent_protocol::CompletionStatusV1::Accepted {
+                        if let Some(notice) =
+                            single_manual_acceptance::completion_notice(session, &turn_id)
+                        {
+                            text.push_str(&notice);
                         }
                     }
                     let can_retry_after_validation =
@@ -2197,6 +2231,19 @@ fn execute_single_verification_plan(
         .collect::<Vec<_>>();
     let mut all_covered_paths = std::collections::BTreeSet::new();
     let mut behavior_covered_paths = std::collections::BTreeSet::new();
+    let manual_acceptance_covers_candidate = required_requirements.iter().any(|requirement| {
+        requirement.validator_id == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
+            && matches!(&requirement.scope, VerificationScopeV1::Manual)
+    });
+    if manual_acceptance_covers_candidate {
+        all_covered_paths.extend(pending_hashes.keys().cloned());
+        behavior_covered_paths.extend(
+            pending_hashes
+                .keys()
+                .filter(|path| single_path_is_source_code(path))
+                .cloned(),
+        );
+    }
     for requirement in &required_requirements {
         let paths = normalized_paths(requirement);
         all_covered_paths.extend(paths.iter().cloned());
@@ -2232,7 +2279,21 @@ fn execute_single_verification_plan(
         let requirement_started = chrono::Utc::now().to_rfc3339();
         let mut subjects = std::collections::HashMap::new();
         let mut evidence_refs = Vec::new();
-        let (mut verdict, mut detail) = if requirement.validator_id == "workspace-command-success-v1" {
+        let (mut verdict, mut detail) = if requirement.validator_id
+            == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
+            && matches!(&requirement.scope, VerificationScopeV1::Manual)
+        {
+            for (path, hash) in pending_hashes {
+                subjects.insert(
+                    format!("workspace-path:{path}"),
+                    hash.clone().unwrap_or_else(crate::verification::workspace_path_absence_sha256),
+                );
+            }
+            (
+                ValidationVerdictV1::Unverified,
+                Some("等待用户对宿主展示的精确候选快照作出验收".to_string()),
+            )
+        } else if requirement.validator_id == "workspace-command-success-v1" {
             let expected_command = requirement.arguments.get("command").and_then(serde_json::Value::as_str);
             let expected_command_sha = expected_command.map(|command| crate::CasStore::hash_of(command.trim().as_bytes()));
             let command_observation = events
@@ -2458,7 +2519,13 @@ fn execute_single_verification_plan(
 
 #[cfg(test)]
 mod single_verification_plan_tests {
-    use super::{assess_single_turn_completion, CommandExecutionReceipt, TurnEvent};
+    use super::{
+        assess_single_turn_completion, CommandExecutionReceipt, TurnEvent,
+    };
+    use super::single_manual_acceptance::{
+        manual_acceptance_answer_verdict, request_single_manual_acceptance,
+        SINGLE_MANUAL_ACCEPT_OPTION, SINGLE_MANUAL_REJECT_OPTION,
+    };
     use crate::plan::{
         VerificationPlanV1, VerificationRequirementV1, VerificationResourcesV1,
         VerificationScopeV1,
@@ -2616,6 +2683,151 @@ mod single_verification_plan_tests {
             owo_agent_protocol::CompletionStatusV1::ResponseComplete
         );
         assert!(session.validation_receipts.is_empty());
+    }
+
+    #[test]
+    fn manual_acceptance_requires_the_current_question_and_exact_option() {
+        let question_id = "question-current";
+        let accepted = crate::question::QuestionAnswer {
+            question_id: question_id.to_string(),
+            answer: SINGLE_MANUAL_ACCEPT_OPTION.to_string(),
+        };
+        let declined = crate::question::QuestionAnswer {
+            question_id: question_id.to_string(),
+            answer: SINGLE_MANUAL_REJECT_OPTION.to_string(),
+        };
+        let stale_question = crate::question::QuestionAnswer {
+            question_id: "question-old".to_string(),
+            answer: SINGLE_MANUAL_ACCEPT_OPTION.to_string(),
+        };
+        assert_eq!(
+            manual_acceptance_answer_verdict(Some(&accepted), question_id),
+            crate::plan::ValidationVerdictV1::ManualAccepted
+        );
+        assert_eq!(
+            manual_acceptance_answer_verdict(Some(&declined), question_id),
+            crate::plan::ValidationVerdictV1::Failed
+        );
+        assert_eq!(
+            manual_acceptance_answer_verdict(Some(&stale_question), question_id),
+            crate::plan::ValidationVerdictV1::Unverified
+        );
+        let free_form = crate::question::QuestionAnswer {
+            question_id: question_id.to_string(),
+            answer: "yes".to_string(),
+        };
+        assert_eq!(
+            manual_acceptance_answer_verdict(Some(&free_form), question_id),
+            crate::plan::ValidationVerdictV1::Unverified
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_acceptance_receipt_binds_the_candidate_snapshot() {
+        struct FixedQuestioner {
+            answer: String,
+            mutate_path: Option<std::path::PathBuf>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::question::Questioner for FixedQuestioner {
+            async fn ask(
+                &self,
+                question: &crate::question::UserQuestion,
+            ) -> Option<crate::question::QuestionAnswer> {
+                if let Some(path) = &self.mutate_path {
+                    std::fs::write(path, "changed while waiting").unwrap();
+                }
+                Some(crate::question::QuestionAnswer {
+                    question_id: question.question_id.clone(),
+                    answer: self.answer.clone(),
+                })
+            }
+        }
+
+        async fn run_case(mutate: bool) -> (
+            owo_agent_protocol::CompletionStatusV1,
+            crate::plan::ValidationVerdictV1,
+            String,
+            String,
+            Vec<String>,
+            bool,
+            bool,
+        ) {
+            let workspace = tempfile::tempdir().unwrap();
+            let source = workspace.path().join("src").join("main.rs");
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(&source, "fn main() {}\n").unwrap();
+            let hash = crate::CasStore::hash_of(&std::fs::read(&source).unwrap());
+            let mut session = Session::new(workspace.path(), "mock", None);
+            add_write(&mut session, "turn-prior", "src/main.rs", &hash);
+            let plan = VerificationPlanV1 {
+                plan_id: "manual-plan".to_string(),
+                requirements: vec![VerificationRequirementV1 {
+                    requirement_id: "manual-user-requirement".to_string(),
+                    covers_requirement_ids: vec!["user-request:实现可用功能".to_string()],
+                    validator_id: crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID.to_string(),
+                    validator_version: Some("1".to_string()),
+                    scope: VerificationScopeV1::Manual,
+                    arguments: serde_json::json!({}),
+                    required: true,
+                    resources: VerificationResourcesV1::default(),
+                }],
+            };
+            let questioner = FixedQuestioner {
+                answer: SINGLE_MANUAL_ACCEPT_OPTION.to_string(),
+                mutate_path: mutate.then(|| source.clone()),
+            };
+            let abort = std::sync::atomic::AtomicBool::new(false);
+            let status = request_single_manual_acceptance(
+                &mut session,
+                &plan,
+                "turn-manual",
+                Some(&questioner),
+                &abort,
+            ).await;
+            let review_candidate_present = super::single_review::accepted_candidate_paths(
+                &session,
+                "turn-manual",
+            )
+            .contains_key("src/main.rs");
+            let notice_is_explicit = super::single_manual_acceptance::completion_notice(
+                &session,
+                "turn-manual",
+            )
+            .is_some_and(|notice| notice.contains("不等同于自动行为测试通过"));
+            (
+                status,
+                session.validation_receipts.last().unwrap().verdict,
+                session.validation_receipts.last().unwrap().subject_sha256["workspace-path:src/main.rs"].clone(),
+                session.execution_receipts[0].status.clone(),
+                session.validation_receipts.last().unwrap().evidence_refs.clone(),
+                review_candidate_present,
+                notice_is_explicit,
+            )
+        }
+
+        let (
+            accepted_status,
+            accepted_verdict,
+            accepted_hash,
+            execution_status,
+            evidence_refs,
+            review_candidate_present,
+            notice_is_explicit,
+        ) = run_case(false).await;
+        assert_eq!(accepted_status, owo_agent_protocol::CompletionStatusV1::Accepted);
+        assert_eq!(accepted_verdict, crate::plan::ValidationVerdictV1::ManualAccepted);
+        assert_eq!(accepted_hash, crate::CasStore::hash_of(b"fn main() {}\n"));
+        assert_eq!(execution_status, "accepted");
+        assert!(review_candidate_present);
+        assert!(notice_is_explicit);
+        assert!(evidence_refs.iter().any(|reference| reference.starts_with("manual-question:")));
+        assert!(evidence_refs.iter().any(|reference| reference.starts_with("user-answer-sha256:")));
+
+        let (stale_status, stale_verdict, _, _, _, _, _) = run_case(true).await;
+        assert_eq!(stale_status, owo_agent_protocol::CompletionStatusV1::Unverified);
+        assert_eq!(stale_verdict, crate::plan::ValidationVerdictV1::Stale);
     }
 
     #[test]

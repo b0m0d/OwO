@@ -1687,6 +1687,8 @@ fn validate_single_verification_plan(
         return Err("VerificationPlan 超过宿主的 plan_id/requirement 数量上限".to_string());
     }
     for requirement in &plan.requirements {
+        let manual_acceptance = requirement.validator_id == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
+            && matches!(&requirement.scope, crate::plan::VerificationScopeV1::Manual);
         if requirement.covers_requirement_ids.is_empty()
             || requirement.covers_requirement_ids.iter().any(|id| {
                 id.strip_prefix("user-request:")
@@ -1698,9 +1700,22 @@ fn validate_single_verification_plan(
                 requirement.requirement_id
             ));
         }
-        if requirement.validator_version.as_deref() != Some("1")
-            || !crate::verification::is_registered_workspace_validator(&requirement.validator_id)
-        {
+        if requirement.validator_version.as_deref() != Some("1") {
+            return Err(format!(
+                "requirement {} 必须固定宿主 validator version 1",
+                requirement.requirement_id
+            ));
+        }
+        if manual_acceptance {
+            if requirement.arguments != json!({}) {
+                return Err(format!(
+                    "requirement {} 的人工验收 arguments 必须为空对象",
+                    requirement.requirement_id
+                ));
+            }
+            continue;
+        }
+        if !crate::verification::is_registered_workspace_validator(&requirement.validator_id) {
             return Err(format!(
                 "requirement {} 使用了未注册的宿主 validator/version",
                 requirement.requirement_id
@@ -1710,7 +1725,7 @@ fn validate_single_verification_plan(
             &requirement.scope
         else {
             return Err(format!(
-                "requirement {} 必须绑定 WorkspacePaths",
+                "requirement {} 必须绑定 WorkspacePaths 或明确声明人工验收",
                 requirement.requirement_id
             ));
         };
@@ -1767,7 +1782,7 @@ impl Tool for SingleVerificationPlanTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "verification_plan".into(),
-            description: "开始任何工作区写入前，先登记本次任务的宿主验收要求。计划首次写入后不可替换。每个必需 covers_requirement_ids 都必须写成 user-request:<用户原文中的精确验收片段>，宿主会核对它确实出现在本回合输入中；不要编造或只填泛化 ID。代码任务的源码路径必须被 workspace-command-success-v1 覆盖，arguments.command 必须与本回合实际 run_command 一致。计划不是通过证据；宿主在回合结束时按绑定源码执行检查并生成回执。resources 四个字段均须显式填写。".into(),
+            description: "开始任何工作区写入前，先登记本次任务的宿主验收要求。计划首次写入后不可替换。每个必需 covers_requirement_ids 都必须写成 user-request:<用户原文中的精确验收片段>，宿主会核对它确实出现在本回合输入中。源码路径优先声明 workspace-command-success-v1；确实没有可运行自动验收时，才可声明 single-human-acceptance-v1 + manual scope，宿主会展示当前候选快照并等待用户明确验收。计划本身不是通过证据。resources 四个字段按 schema 显式填写；人工验收不消耗该资源配额。".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1786,15 +1801,24 @@ impl Tool for SingleVerificationPlanTool {
                                             "items": {"type": "string", "description": "user-request:<用户原文中的精确验收片段>"},
                                             "minItems": 1
                                         },
-                                        "validator_id": {"type": "string", "enum": ["workspace-file-exists-v1", "workspace-file-non-empty-v1", "workspace-file-contains-v1", "workspace-json-field-equals-v1", "workspace-command-success-v1"]},
+                                        "validator_id": {"type": "string", "enum": ["workspace-file-exists-v1", "workspace-file-non-empty-v1", "workspace-file-contains-v1", "workspace-json-field-equals-v1", "workspace-command-success-v1", "single-human-acceptance-v1"]},
                                         "validator_version": {"type": "string", "enum": ["1"]},
                                         "scope": {
-                                            "type": "object",
-                                            "properties": {
-                                                "kind": {"type": "string", "enum": ["workspace_paths"]},
-                                                "relative_paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 16}
-                                            },
-                                            "required": ["kind", "relative_paths"]
+                                            "oneOf": [
+                                                {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "kind": {"type": "string", "enum": ["workspace_paths"]},
+                                                        "relative_paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 16}
+                                                    },
+                                                    "required": ["kind", "relative_paths"]
+                                                },
+                                                {
+                                                    "type": "object",
+                                                    "properties": {"kind": {"type": "string", "enum": ["manual"]}},
+                                                    "required": ["kind"]
+                                                }
+                                            ]
                                         },
                                         "arguments": {"type": "object"},
                                         "required": {"type": "boolean"},
@@ -3679,6 +3703,17 @@ mod tests {
             json!({"command":"cargo test -p owo-agent-core --no-run"}),
         );
         assert!(validate_single_verification_plan(&bypass).is_err());
+
+        let mut manual = sample_single_plan(
+            "workspace-command-success-v1",
+            json!({}),
+        );
+        manual.requirements[0].validator_id =
+            crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID.to_string();
+        manual.requirements[0].scope = crate::plan::VerificationScopeV1::Manual;
+        assert!(validate_single_verification_plan(&manual).is_ok());
+        manual.requirements[0].arguments = json!({"question":"accept?"});
+        assert!(validate_single_verification_plan(&manual).is_err());
     }
 
     /// 回归：UTF-8 输出不得被二次误解，OEM 代码页（GBK）输出不得变成替换字符。
