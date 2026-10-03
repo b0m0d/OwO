@@ -1806,7 +1806,9 @@ fn assess_single_turn_completion(
     let mut stale_candidate = false;
     let mut missing_write_hash = false;
     for (index, execution) in session.execution_receipts.iter().enumerate() {
-        if execution.status == "stale" {
+        // Completion status describes this user turn. A stale receipt from older
+        // work must not turn an unrelated answer into an unverified result.
+        if execution.status == "stale" && execution.turn_id == turn_id {
             stale_candidate = true;
         }
         if execution.status != "executed" {

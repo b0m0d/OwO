@@ -64,6 +64,38 @@ fn default_turn_and_tool_call_limits_allow_the_model_to_finish_naturally() {
     );
 }
 
+#[test]
+fn stale_receipts_from_prior_turns_do_not_change_plain_answer_completion() {
+    let mut session = Session::new(
+        std::env::current_dir().expect("workspace path"),
+        "test-model",
+        None,
+    );
+    session.execution_receipts.push(crate::session::ExecutionReceipt {
+        receipt_id: "exec-old".to_string(),
+        tool: "write_file".to_string(),
+        turn_id: "prior-turn".to_string(),
+        changed_files: vec!["src/old.rs".to_string()],
+        snapshot_keys: Default::default(),
+        before_hashes: Default::default(),
+        after_hashes: Default::default(),
+        diff_sha256: "old-diff".to_string(),
+        created_at: "2026-10-01T00:00:00Z".to_string(),
+        status: "stale".to_string(),
+        validation_receipt_id: Some("old-validation".to_string()),
+    });
+
+    let status = super::assess_single_turn_completion(
+        &mut session,
+        "解释一下这个模块",
+        "current-turn",
+        &[],
+        false,
+        Some("这个模块负责会话状态管理。"),
+    );
+
+    assert_eq!(status, owo_agent_protocol::CompletionStatusV1::ResponseComplete);
+}
 
 #[test]
 fn estimate_tokens_counts_chars_and_overhead() {
