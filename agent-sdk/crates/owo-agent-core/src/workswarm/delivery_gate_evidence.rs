@@ -1,5 +1,12 @@
 use super::*;
 
+pub(super) fn is_code_artifact_kind(kind: &str) -> bool {
+    matches!(
+        kind.trim().to_ascii_lowercase().as_str(),
+        "code" | "source" | "patch" | "implementation" | "frontend" | "backend" | "integrated"
+    )
+}
+
 pub(super) fn validate_review_artifact_kind(is_reviewer: bool, kind: &str) -> Result<(), String> {
     match (is_reviewer, kind == "review") {
         (true, true) | (false, false) => Ok(()),
@@ -126,6 +133,112 @@ pub(super) fn collect_attempt_changeset_evidence(
 /// Ensure workspace validation evidence for changed files describes the exact
 /// accepted ChangeSet result snapshot. This prevents a validator run before a
 /// later edit from being reused as proof for different delivered bytes.
+pub(super) fn evaluate_workspace_command_receipt(
+    requirement: &crate::plan::VerificationRequirementV1,
+    event_details: &[String],
+    step_id: &str,
+    attempt_id: &str,
+    change_sets: &[owo_agent_protocol::ChangeSet],
+) -> (
+    crate::plan::ValidationVerdictV1,
+    Option<String>,
+    std::collections::BTreeMap<String, String>,
+    Option<String>,
+) {
+    use crate::plan::{ValidationVerdictV1, VerificationScopeV1};
+
+    let unsupported = |detail: String| {
+        (ValidationVerdictV1::Unsupported, Some(detail), std::collections::BTreeMap::new(), None)
+    };
+    let VerificationScopeV1::WorkspacePaths { relative_paths } = &requirement.scope else {
+        return unsupported("行为检查要求绑定 WorkspacePaths 文件集合".to_string());
+    };
+    let Some(command) = requirement.arguments.get("command").and_then(Value::as_str) else {
+        return unsupported("行为检查缺少 command 参数".to_string());
+    };
+    if !crate::verification::is_registered_behavior_command(command) {
+        return unsupported("行为检查命令不在宿主登记的测试命令集合内".to_string());
+    }
+    let command_sha256 = CasStore::hash_of(command.trim().as_bytes());
+    let matching = event_details.iter().filter_map(|detail| {
+        let event: Value = serde_json::from_str(detail).ok()?;
+        if event.get("step_id").and_then(Value::as_str) != Some(step_id)
+            || event.get("attempt_id").and_then(Value::as_str) != Some(attempt_id)
+        {
+            return None;
+        }
+        let receipt = event.get("receipt")?;
+        if receipt.get("command_sha256").and_then(Value::as_str)
+            != Some(command_sha256.as_str())
+        {
+            return None;
+        }
+        Some(receipt.clone())
+    });
+    let Some(receipt_value) = matching.last() else {
+        return (
+            ValidationVerdictV1::Unverified,
+            Some("当前 task/attempt 没有匹配的宿主命令执行回执".to_string()),
+            std::collections::BTreeMap::new(),
+            None,
+        );
+    };
+    let receipt: crate::CommandExecutionReceipt = match serde_json::from_value(receipt_value) {
+        Ok(receipt) => receipt,
+        Err(error) => return unsupported(format!("宿主命令回执结构无效：{error}")),
+    };
+    let mut subject_hashes = std::collections::BTreeMap::new();
+    for raw_path in relative_paths {
+        let path = raw_path.replace('\\', "/");
+        let Some(hash) = receipt.workspace_hashes.get(&path) else {
+            return (
+                ValidationVerdictV1::Unverified,
+                Some(format!("命令执行时没有宿主快照证据：{path}")),
+                subject_hashes,
+                Some(format!("command-result:sha256:{}", receipt.result_sha256)),
+            );
+        };
+        let Some(hash) = hash else {
+            return (
+                ValidationVerdictV1::Failed,
+                Some(format!("命令执行时工作区文件不存在或不可读：{path}")),
+                subject_hashes,
+                Some(format!("command-result:sha256:{}", receipt.result_sha256)),
+            );
+        };
+        subject_hashes.insert(format!("workspace-path:{raw_path}"), hash.clone());
+    }
+    if let Err(reason) = validate_workspace_receipt_snapshot(
+        step_id,
+        attempt_id,
+        relative_paths,
+        &subject_hashes,
+        change_sets,
+    ) {
+        return (
+            ValidationVerdictV1::Failed,
+            Some(reason),
+            subject_hashes,
+            Some(format!("command-result:sha256:{}", receipt.result_sha256)),
+        );
+    }
+    let evidence_ref = Some(format!("command-result:sha256:{}", receipt.result_sha256));
+    if receipt.exit_code != 0 {
+        return (
+            ValidationVerdictV1::Failed,
+            Some(format!("宿主命令退出码为 {}", receipt.exit_code)),
+            subject_hashes,
+            evidence_ref,
+        );
+    }
+    (
+        ValidationVerdictV1::Passed,
+        Some(format!("宿主登记命令成功，exit_code=0 command_sha256={command_sha256}")),
+        subject_hashes,
+        evidence_ref,
+    )
+}
+
 pub(super) fn validate_workspace_receipt_snapshot(
     step_id: &str,
     attempt_id: &str,

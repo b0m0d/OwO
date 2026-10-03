@@ -288,6 +288,20 @@ impl TeamCoordinator {
         self.audit(team_id, event, detail);
     }
 
+    pub(crate) fn runtime_event_details(&self, team_id: &str, event: &str) -> Vec<String> {
+        let Some(log) = &self.audit else {
+            return Vec::new();
+        };
+        let Ok(log) = log.lock() else {
+            return Vec::new();
+        };
+        log.entries
+            .iter()
+            .filter(|entry| entry.session_id == team_id && entry.event == event)
+            .map(|entry| entry.detail.clone())
+            .collect()
+    }
+
     pub(crate) fn audit(&self, team_id: &str, event: &str, detail: String) {
         if let Some(log) = &self.audit {
             if let Ok(mut log) = log.lock() {

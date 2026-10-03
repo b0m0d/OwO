@@ -2025,6 +2025,7 @@ fn validate_parallel_subtasks(
             "search_files",
             "write_file",
             "apply_patch",
+            "run_command",
         ];
         if required_capabilities.len() > 8 {
             return Err(format!(
@@ -2137,6 +2138,19 @@ fn validate_parallel_subtasks(
                 ))
             }
         };
+        let has_command_validator = verification_plan.as_ref().is_some_and(|plan| {
+            plan.requirements
+                .iter()
+                .any(|requirement| requirement.validator_id == "workspace-command-success-v1")
+        });
+        let requires_command_capability = required_capabilities
+            .iter()
+            .any(|capability| capability == "run_command");
+        if has_command_validator != requires_command_capability {
+            return Err(format!(
+                "task {task_id} must request run_command exactly when its VerificationPlan includes workspace-command-success-v1"
+            ));
+        }
         let risk = item
             .get("risk")
             .and_then(Value::as_str)

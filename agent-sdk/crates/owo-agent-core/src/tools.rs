@@ -347,44 +347,76 @@ impl ToolHostService {
                 None => Err(format!("未知工具：{}", capability.tool)),
             }
         };
-        let execution_receipt = if outcome.is_ok() {
-            if let Some(path) = write_path.as_deref() {
-                match ctx
-                    .session
-                    .record_file_execution(&capability.tool, &capability.turn_id, path)
-                {
-                    Ok(receipt) => receipt,
-                    Err(error) => {
-                        outcome = Err(format!("写入收据失败：{error}"));
-                        None
+        let mut write_paths = Vec::new();
+        if let Some(path) = write_path.as_deref() {
+            write_paths.push(path.to_path_buf());
+        } else if capability.tool == "apply_patch" {
+            if let Some(files) = outcome
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("files"))
+                .and_then(Value::as_array)
+            {
+                for path in files.iter().filter_map(|file| file.get("path").and_then(Value::as_str)) {
+                    if let Ok(path) = resolve_session_path(ctx, path) {
+                        write_paths.push(path);
                     }
                 }
-            } else {
-                None
             }
-        } else {
-            None
-        };
-        if let (Ok(Value::Object(result)), Some(receipt)) = (&mut outcome, &execution_receipt) {
-            result.insert(
-                "execution_receipt_id".to_string(),
-                Value::String(receipt.receipt_id.clone()),
-            );
-            result.insert(
-                "changed_files".to_string(),
-                Value::Array(
-                    receipt
-                        .changed_files
-                        .iter()
-                        .cloned()
-                        .map(Value::String)
-                        .collect(),
-                ),
-            );
-            result.insert(
-                "diff_sha256".to_string(),
-                Value::String(receipt.diff_sha256.clone()),
-            );
+        }
+        let mut execution_receipts = Vec::new();
+        if outcome.is_ok() {
+            for path in write_paths {
+                match ctx
+                    .session
+                    .record_file_execution(&capability.tool, &capability.turn_id, &path)
+                {
+                    Ok(Some(receipt)) => execution_receipts.push(receipt),
+                    Ok(None) => {}
+                    Err(error) => {
+                        outcome = Err(format!("写入收据失败：{error}"));
+                        execution_receipts.clear();
+                        break;
+                    }
+                }
+            }
+        }
+        if let (Ok(Value::Object(result)), receipts) = (&mut outcome, &execution_receipts) {
+            if !receipts.is_empty() {
+                result.insert(
+                    "execution_receipt_ids".to_string(),
+                    Value::Array(
+                        receipts
+                            .iter()
+                            .map(|receipt| Value::String(receipt.receipt_id.clone()))
+                            .collect(),
+                    ),
+                );
+                if receipts.len() == 1 {
+                    result.insert(
+                        "execution_receipt_id".to_string(),
+                        Value::String(receipts[0].receipt_id.clone()),
+                    );
+                }
+                let changed_files = receipts
+                    .iter()
+                    .flat_map(|receipt| receipt.changed_files.iter().cloned())
+                    .collect::<Vec<_>>();
+                result.insert(
+                    "changed_files".to_string(),
+                    Value::Array(changed_files.into_iter().map(Value::String).collect()),
+                );
+                result.insert(
+                    "diff_sha256".to_string(),
+                    Value::String(crate::CasStore::hash_of(
+                        serde_json::to_vec(
+                            &receipts.iter().map(|receipt| &receipt.diff_sha256).collect::<Vec<_>>(),
+                        )
+                        .unwrap_or_default()
+                        .as_slice(),
+                    )),
+                );
+            }
         }
         let result_sha256 = outcome
             .as_ref()
@@ -401,16 +433,22 @@ impl ToolHostService {
             scope_sha256: crate::CasStore::hash_of(capability.scope.as_bytes()),
             args_sha256: capability.args_sha256,
             result_sha256,
-            execution_receipt_id: execution_receipt
-                .as_ref()
+            execution_receipt_id: execution_receipts
+                .first()
                 .map(|receipt| receipt.receipt_id.clone()),
-            changed_files: execution_receipt
-                .as_ref()
-                .map(|receipt| receipt.changed_files.clone())
-                .unwrap_or_default(),
-            diff_sha256: execution_receipt
-                .as_ref()
-                .map(|receipt| receipt.diff_sha256.clone()),
+            changed_files: execution_receipts
+                .iter()
+                .flat_map(|receipt| receipt.changed_files.iter().cloned())
+                .collect(),
+            diff_sha256: (!execution_receipts.is_empty()).then(|| {
+                crate::CasStore::hash_of(
+                    serde_json::to_vec(
+                        &execution_receipts.iter().map(|receipt| &receipt.diff_sha256).collect::<Vec<_>>(),
+                    )
+                    .unwrap_or_default()
+                    .as_slice(),
+                )
+            }),
             duration_ms: started.elapsed().as_millis() as u64,
             expires_at_unix: capability.expires_at_unix,
             nonce: capability.nonce,

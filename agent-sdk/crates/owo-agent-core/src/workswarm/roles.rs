@@ -141,10 +141,10 @@ pub fn parallel_roles(writers: usize) -> Vec<RoleSpec> {
          对象包含 version=1 和 tasks 数组；每项包含 task_id、worker（可省略）、task、depends_on、\
          read_refs、write_paths、contract_refs、required_capabilities、estimated_effort、verification、risk、priority、acceptance。\
          依赖引用 task_id；重叠写范围必须有依赖顺序；目标和验收不能为空。\
-         代码任务的 verification 使用宿主注册的 WorkspacePaths 计划（scope.kind=workspace_paths，validator_id 为 workspace-file-contains-v1，arguments 提供 text）；\
+         代码实现任务必须包含 required=true 的 workspace-command-success-v1 行为检查，scope.kind=workspace_paths 且 relative_paths 覆盖被改代码；arguments.command 使用宿主登记的测试入口，并在 required_capabilities 声明 run_command。\
          scope 路径必须位于该任务 write_paths 内；required=true，resources 用 cpu_slots=1、memory_mb=8..128、exclusive_workspace=false、timeout_ms=1..30000。\
          仅对报告文本断言使用 non_empty、contains:<文本> 或 equals:<文本>。\
-         禁止在验证计划中指定 shell/命令。risk 使用 low/normal/high/critical。\
+         验证命令必须是单条测试命令，执行仍经现有工具审批与沙箱；文件存在/非空/文本包含只能证明静态条件，不能替代行为测试。risk 使用 low/normal/high/critical。\
          不要无意义拆分，只声明任务确需写入的路径。"
     ));
     lead.verify = Some("non_empty".to_string());
@@ -155,7 +155,7 @@ pub fn parallel_roles(writers: usize) -> Vec<RoleSpec> {
         writer.depends_on = vec!["lead".to_string()];
         writer.handoff_contract = Some(format!(
             "你是并行执行者 {name}（第 {} 路）：只执行当前步骤输入中的 assigned_task，\
-             按 assigned_acceptance 验收；写权限仅限 assigned_write_paths。不要承担队友任务；\
+             按 assigned_acceptance 与 assigned_verification 验收；写权限仅限 assigned_write_paths。若声明宿主命令检查，必须执行完全相同的命令，检查后不得再修改受测文件；不要承担队友任务；\
              完成当前任务后交付结果与证据。",
             index + 1
         ));

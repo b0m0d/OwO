@@ -57,6 +57,15 @@ fn nested_turn_cap(configured: usize) -> usize {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandExecutionReceipt {
+    pub command_sha256: String,
+    pub exit_code: i32,
+    pub result_sha256: String,
+    #[serde(default)]
+    pub workspace_hashes: std::collections::BTreeMap<String, Option<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TurnEvent {
     ModelCall,
@@ -93,6 +102,8 @@ pub enum TurnEvent {
         /// 序列化向后兼容（缺省为 None）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_receipt: Option<CommandExecutionReceipt>,
     },
     Final {
         text: String,
@@ -1003,6 +1014,7 @@ impl Agent {
                                 let sink = Arc::clone(&group_events);
                                 let call_id = call.id.clone();
                                 let tool_name = call.name.clone();
+                                let turn_id_for_receipt = turn_id.clone();
                                 let arguments = call.arguments.clone();
                                 let tool_host = self.tool_host.clone();
                                 // 实时状态：ToolStart 立即外发（不再等整组结束），
@@ -1042,12 +1054,15 @@ impl Agent {
                                         Err(error) => Err(error),
                                     };
                                     if let Ok(mut buffer) = sink.lock() {
+                                        let command_receipt =
+                                            command_execution_receipt(&tool_name, &outcome, ctx.session, &turn_id_for_receipt);
                                         buffer.push(TurnEvent::ToolResult {
                                             id: call_id,
                                             tool: tool_name,
                                             ok: outcome.is_ok(),
                                             error: outcome.as_ref().err().cloned(),
                                             preview: tool_preview(&outcome),
+                                            command_receipt,
                                         });
                                     }
                                     outcome
@@ -1140,6 +1155,7 @@ impl Agent {
                                         error: Some(guard.clone()),
                                         // 未执行（宿主拦截）没有结果正文可预览。
                                         preview: None,
+                                        command_receipt: None,
                                     },
                                 );
                                 Err(guard)
@@ -1238,6 +1254,8 @@ impl Agent {
                                     target: call.name.clone(),
                                     first_token_ms: None,
                                 });
+                                let command_receipt =
+                                    command_execution_receipt(&call.name, &outcome, ctx.session, &turn_id);
                                 emit(
                                     &mut events,
                                     &event_cell,
@@ -1247,6 +1265,7 @@ impl Agent {
                                         ok: outcome.is_ok(),
                                         error: outcome.as_ref().err().cloned(),
                                         preview: tool_preview(&outcome),
+                                        command_receipt,
                                     },
                                 );
                                 if ctx.session.todos != plan_before {
@@ -1587,6 +1606,42 @@ const TOOL_PREVIEW_CHARS: usize = 1600;
 
 /// 工具结果预览（随 `ToolResult` 事件下发给前端 chip 展开区）。
 /// 纯展示用途：写回模型上下文的净化仍由 `sanitize_tool_result` 负责。
+fn command_execution_receipt(
+    tool: &str,
+    outcome: &Result<serde_json::Value, String>,
+    session: &Session,
+    turn_id: &str,
+) -> Option<CommandExecutionReceipt> {
+    if tool != "run_command" {
+        return None;
+    }
+    let value = outcome.as_ref().ok()?;
+    let command = value.get("command")?.as_str()?.trim();
+    let exit_code = i32::try_from(value.get("exit_code")?.as_i64()?).ok()?;
+    let mut workspace_hashes = std::collections::BTreeMap::new();
+    let root = session.workspace.canonicalize().ok()?;
+    for receipt in session.execution_receipts.iter().filter(|receipt| {
+        receipt.turn_id == turn_id && receipt.status == "executed"
+    }) {
+        for relative in &receipt.changed_files {
+            let normalized = relative.replace('\\', "/");
+            let digest = match root.join(relative).canonicalize() {
+                Ok(canonical) if canonical.starts_with(&root) => {
+                    std::fs::read(canonical).ok().map(|bytes| crate::CasStore::hash_of(&bytes))
+                }
+                _ => None,
+            };
+            workspace_hashes.insert(normalized, digest);
+        }
+    }
+    Some(CommandExecutionReceipt {
+        command_sha256: crate::CasStore::hash_of(command.as_bytes()),
+        exit_code,
+        result_sha256: crate::CasStore::hash_of(value.to_string().as_bytes()),
+        workspace_hashes,
+    })
+}
+
 fn tool_preview(outcome: &Result<serde_json::Value, String>) -> Option<String> {
     let text = match outcome {
         Ok(value) => value.to_string(),

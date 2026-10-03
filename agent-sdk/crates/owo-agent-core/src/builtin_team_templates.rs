@@ -189,7 +189,7 @@ fn fullstack_web_v1() -> BuiltinTemplateDescriptor {
         concat!(
             "前端任务槽位：只实现 apps/web 内用户明确要求的前端功能，沿用现有页面、布局、样式与 API。\n",
             "使用 items/page/limit/total/totalPages 响应契约，将页面连接真实后端；保留现有移动端 @media 断点。\n",
-            "只写 apps/web 与必要测试源码；不要调用 run_command，不要重建脚手架或生成无关报告。"
+            "只写 apps/web 与必要测试源码；只有当前任务明确声明宿主验证命令时才运行该命令，不重建脚手架或生成无关报告。"
         ),
         "non_empty",
     );

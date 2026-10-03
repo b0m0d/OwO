@@ -191,6 +191,31 @@ pub fn workspace_validator_arguments_supported(validator_id: &str, arguments: &V
                     .and_then(Value::as_str)
                     .is_some_and(|expected| expected.len() <= 1_024)
         }),
+        "workspace-command-success-v1" => exact_string_argument(arguments, "command")
+            .is_some_and(is_registered_behavior_command),
+        _ => false,
+    }
+}
+
+pub fn is_registered_behavior_command(command: &str) -> bool {
+    let command = command.trim();
+    if command.is_empty()
+        || command.len() > 512
+        || !command.is_ascii()
+        || command.chars().any(|ch| {
+            matches!(ch as u32, 38 | 124 | 60 | 62 | 94 | 37 | 40 | 41 | 59 | 96 | 34 | 39 | 33 | 10 | 13)
+        })
+    {
+        return false;
+    }
+    let tokens: Vec<_> = command.split_whitespace().collect();
+    match tokens.as_slice() {
+        ["cargo", "test", ..] | ["cargo", "check", ..] => true,
+        ["npm", "test"] | ["npm", "run", "test", ..] => true,
+        ["pnpm", "test", ..] | ["yarn", "test", ..] | ["bun", "test", ..] => true,
+        ["pytest", ..] | ["python", "-m", "pytest", ..] => true,
+        ["dotnet", "test", ..] | ["go", "test", ..] | ["mvn", "test", ..] => true,
+        ["gradle", "test", ..] | ["ctest", ..] => true,
         _ => false,
     }
 }
@@ -202,6 +227,7 @@ pub fn is_registered_workspace_validator(validator_id: &str) -> bool {
             | "workspace-file-non-empty-v1"
             | "workspace-file-contains-v1"
             | "workspace-json-field-equals-v1"
+            | "workspace-command-success-v1"
     )
 }
 
@@ -306,6 +332,11 @@ pub fn execute_workspace_requirement(
                 );
             }
             Some(format!("{field}\0{expected}"))
+        }
+        "workspace-command-success-v1" => {
+            return unsupported(
+                "workspace-command-success-v1 必须由 DeliveryGate 消费宿主命令回执".to_string(),
+            )
         }
         unknown => {
             return unsupported(format!(
@@ -600,4 +631,16 @@ mod tests {
             ValidationVerdictV1::Unsupported
         );
     }
+
+    #[test]
+    fn behavior_commands_are_registered_test_runners_without_shell_chaining() {
+        assert!(is_registered_behavior_command("cargo test -p owo-agent-core"));
+        assert!(is_registered_behavior_command("npm test"));
+        assert!(is_registered_behavior_command("python -m pytest tests/test_api.py"));
+        assert!(!is_registered_behavior_command("echo passed"));
+        assert!(!is_registered_behavior_command("cargo test --no-run"));
+        assert!(!is_registered_behavior_command("npm test && echo passed"));
+        assert!(!is_registered_behavior_command("cargo check"));
+    }
+
 }

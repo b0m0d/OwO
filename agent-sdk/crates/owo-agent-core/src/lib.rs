@@ -253,7 +253,9 @@ pub use owo_agent_kernel::{
 // ---------------------------------------------------------------------------
 
 pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
-pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
+pub use agent::{
+    estimate_tokens, Agent, AgentConfig, CommandExecutionReceipt, TurnEvent, TurnOutcome,
+};
 pub use audit::{AuditEntry, AuditLog};
 pub use audit_chain::{
     canonical, export_to_file, hex_encode, hmac_sha256, load_export, verify_export, verify_file,

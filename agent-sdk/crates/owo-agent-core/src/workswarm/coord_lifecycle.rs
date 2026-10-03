@@ -139,6 +139,8 @@ impl TeamCoordinator {
         let change_sets = crate::change_set_store::ChangeSetStore::new(&self.run_dir)
             .list_for_team(team_id)
             .map_err(|error| WorkSwarmError::Run(format!("ChangeSet 读取失败：{error}")))?;
+        let runtime_command_receipts =
+            self.runtime_event_details(team_id, "team.command.executed");
         let mut acceptance_receipts = Vec::new();
         for step in state.plan.steps.clone() {
             let record = state.records.get(&step.id).cloned().ok_or_else(|| {
@@ -238,6 +240,18 @@ impl TeamCoordinator {
             let input_sha256 = CasStore::hash_of(&input_bytes);
             for artifact_id in &handoff.output_artifact_refs {
                 let artifact = self.store.get_artifact(artifact_id).await?;
+                if step.input.get("assigned_task_id").is_some()
+                    && super::delivery_gate_evidence::is_code_artifact_kind(&artifact.kind)
+                    && !verification_plan
+                        .requirements
+                        .iter()
+                        .any(|requirement| requirement.validator_id == "workspace-command-success-v1")
+                {
+                    return Err(WorkSwarmError::Conflict(format!(
+                        "动态代码任务 {} 缺少宿主行为验证命令，静态文件检查不能通过交付门",
+                        step.id
+                    )));
+                }
                 if artifact.team_id != team_id || artifact.producer != step.worker {
                     return Err(WorkSwarmError::Conflict(format!(
                         "任务 {} 的产物 {} 与当前团队/成员不匹配",
@@ -467,12 +481,24 @@ impl TeamCoordinator {
                 for requirement in &verification_plan.requirements {
                     let started_at = now_ts();
                     let verification_workspace = self.verification_workspace(team_id);
-                    let (mut verdict, mut detail, subject_hashes) =
-                        crate::verification::execute_registered_requirement(
-                            requirement,
-                            content,
-                            verification_workspace.as_deref(),
-                        );
+                    let (mut verdict, mut detail, subject_hashes, command_evidence_ref) =
+                        if requirement.validator_id == "workspace-command-success-v1" {
+                            super::delivery_gate_evidence::evaluate_workspace_command_receipt(
+                                requirement,
+                                &runtime_command_receipts,
+                                &step.id,
+                                attempt_id,
+                                &change_sets,
+                            )
+                        } else {
+                            let (verdict, detail, subject_hashes) =
+                                crate::verification::execute_registered_requirement(
+                                    requirement,
+                                    content,
+                                    verification_workspace.as_deref(),
+                                );
+                            (verdict, detail, subject_hashes, None)
+                        };
                     if let crate::plan::VerificationScopeV1::WorkspacePaths { relative_paths } =
                         &requirement.scope
                     {
@@ -491,6 +517,13 @@ impl TeamCoordinator {
                     }
                     let arguments_sha256 =
                         CasStore::hash_of(requirement.arguments.to_string().as_bytes());
+                    let mut additional_evidence_refs = subject_hashes
+                        .iter()
+                        .map(|(subject, hash)| format!("{subject}@sha256:{hash}"))
+                        .collect::<Vec<_>>();
+                    if let Some(evidence_ref) = command_evidence_ref {
+                        additional_evidence_refs.push(evidence_ref);
+                    }
                     let receipt = make_validation_receipt(ValidationReceiptInput {
                         team_id,
                         step_id: &step.id,
@@ -511,10 +544,7 @@ impl TeamCoordinator {
                         started_at: &started_at,
                         verdict,
                         detail: detail.clone(),
-                        additional_evidence_refs: subject_hashes
-                            .iter()
-                            .map(|(subject, hash)| format!("{subject}@sha256:{hash}"))
-                            .collect(),
+                        additional_evidence_refs,
                         subject_hashes,
                     });
                     store_validation_receipt(state, &step.id, &receipt);
@@ -1016,6 +1046,80 @@ mod validation_receipt_identity_tests {
             .contains("快照不一致"));
 
         assert!(validate("task-other", "attempt-1", &scope, &evidence, &[accepted]).is_ok());
+    }
+
+    #[test]
+    fn behavior_receipts_require_approved_matching_attempt_and_final_source_hashes() {
+        use owo_agent_protocol::{ChangeSetFileHash, ChangeSetStatus};
+        use crate::plan::{VerificationRequirementV1, VerificationResourcesV1, VerificationScopeV1};
+
+        let mut accepted = changeset("cs-source", ChangeSetStatus::Accepted, "2026-10-03");
+        accepted.changed_files = vec!["src/lib.rs".to_string()];
+        accepted.result_hashes = vec![ChangeSetFileHash {
+            path: "src/lib.rs".to_string(),
+            sha256: Some("source-final".to_string()),
+            content_available: false,
+        }];
+        let requirement = VerificationRequirementV1 {
+            requirement_id: "task-1:behavior".to_string(),
+            covers_requirement_ids: Vec::new(),
+            validator_id: "workspace-command-success-v1".to_string(),
+            validator_version: Some("1".to_string()),
+            scope: VerificationScopeV1::WorkspacePaths {
+                relative_paths: vec!["src/lib.rs".to_string()],
+            },
+            arguments: serde_json::json!({"command":"cargo test -p owo-agent-core"}),
+            required: true,
+            resources: VerificationResourcesV1 {
+                cpu_slots: 1,
+                memory_mb: 8,
+                exclusive_workspace: false,
+                timeout_ms: 30_000,
+            },
+        };
+        let command_hash = crate::CasStore::hash_of(b"cargo test -p owo-agent-core");
+        let event = serde_json::json!({
+            "step_id":"task-1",
+            "attempt_id":"attempt-1",
+            "receipt": {
+                "command_sha256":command_hash,
+                "exit_code":0,
+                "result_sha256":"command-output-hash",
+                "workspace_hashes":{"src/lib.rs":"source-final"}
+            }
+        })
+        .to_string();
+        let evaluate = super::super::delivery_gate_evidence::evaluate_workspace_command_receipt;
+        let (verdict, _, subjects, output_ref) = evaluate(
+            &requirement,
+            std::slice::from_ref(&event),
+            "task-1",
+            "attempt-1",
+            &[accepted.clone()],
+        );
+        assert_eq!(verdict, ValidationVerdictV1::Passed);
+        assert_eq!(subjects.get("workspace-path:src/lib.rs"), Some(&"source-final".to_string()));
+        assert_eq!(output_ref.as_deref(), Some("command-result:sha256:command-output-hash"));
+
+        let (verdict, _, _, _) = evaluate(
+            &requirement,
+            std::slice::from_ref(&event),
+            "task-1",
+            "attempt-old",
+            &[accepted.clone()],
+        );
+        assert_eq!(verdict, ValidationVerdictV1::Unverified);
+
+        let stale = event.replace("source-final", "source-before");
+        let (verdict, detail, _, _) = evaluate(
+            &requirement,
+            &[stale],
+            "task-1",
+            "attempt-1",
+            &[accepted],
+        );
+        assert_eq!(verdict, ValidationVerdictV1::Failed);
+        assert!(detail.unwrap().contains("快照不一致"));
     }
 
     #[test]

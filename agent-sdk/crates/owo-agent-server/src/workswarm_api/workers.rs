@@ -171,8 +171,16 @@ impl Worker for AgentSubagentWorker {
                     apply_task_capability_scope(&mut task_profile, input, task_has_no_write_scope);
                 }
                 if task_write_allowed.is_some() {
-                    task_profile.can_run_command = false;
-                    task_profile.visible_tools.retain(|tool| tool != "run_command");
+                    let command_was_assigned = input
+                        .get("required_capabilities")
+                        .and_then(Value::as_array)
+                        .is_some_and(|capabilities| {
+                            capabilities.iter().any(|item| item.as_str() == Some("run_command"))
+                        });
+                    task_profile.can_run_command &= command_was_assigned;
+                    if !command_was_assigned {
+                        task_profile.visible_tools.retain(|tool| tool != "run_command");
+                    }
                     task_profile.write_allowed_paths = effective_write_allowed
                         .iter().map(|path| path.to_string_lossy().to_string()).collect();
                     if task_has_no_write_scope {
@@ -225,7 +233,30 @@ impl Worker for AgentSubagentWorker {
                 let team_id = self.team_id.clone();
                 let role = self.role.clone();
                 let event_step_id = raw_step_id.clone();
+                let event_task_id = assigned_task_id.clone().unwrap_or_else(|| raw_step_id.clone());
+                let event_attempt_id = workswarm
+                    .and_then(|meta| meta.get("attempt_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let event_sink: TurnEventSink = Arc::new(move |event| {
+                    if let TurnEvent::ToolResult {
+                        command_receipt: Some(receipt),
+                        ..
+                    } = event
+                    {
+                        let detail = serde_json::json!({
+                            "step_id": &event_step_id,
+                            "task_id": &event_task_id,
+                            "attempt_id": &event_attempt_id,
+                            "receipt": receipt,
+                        })
+                        .to_string();
+                        coordinator.record_runtime_event(
+                            &team_id,
+                            "team.command.executed",
+                            detail,
+                        );
+                    }
                     if let Some(detail) = safe_team_model_event(event, &role, &event_step_id) {
                         coordinator.record_runtime_event(&team_id, "team.model.started", detail);
                         return;
@@ -707,7 +738,8 @@ fn apply_task_capability_scope(
     profile
         .visible_tools
         .retain(|tool| required.contains(tool.as_str()));
-    profile.can_run_command = false;
+    profile.can_run_command =
+        profile.can_run_command && can_write_files && required.contains("run_command");
     if !can_write_files {
         profile.read_only = true;
         profile
@@ -1007,6 +1039,7 @@ mod team_context_scope_tests {
             ok: false,
             error: Some("private contents".into()),
             preview: Some("payload".into()),
+            command_receipt: None,
         };
         let (_, detail) = safe_team_tool_event(&finish, "worker", "step-1", Some(12)).unwrap();
         assert!(detail.contains("outcome=failed"));

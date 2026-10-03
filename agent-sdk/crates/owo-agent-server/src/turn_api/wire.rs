@@ -53,6 +53,7 @@ pub(crate) fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {
             ok,
             error,
             preview,
+            ..
         } => Some(SseEvent::ToolResult {
             id: id.clone(),
             tool: tool.clone(),
