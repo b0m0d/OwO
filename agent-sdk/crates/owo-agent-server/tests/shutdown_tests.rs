@@ -117,6 +117,42 @@ fn process_liveness_distinguishes_current_and_impossible_pid() {
     );
 }
 
+/// pid 复用防护：pid 活着 ≠ 上一代服务活着。
+///
+/// Windows 会把死掉核心的 pid 分给无关进程；若陈旧 pid 判定只看存活，桌面壳
+/// 的新核心会等满 40s 后按双开冲突拒绝启动，且每次重启都复现（锁死不自愈）。
+#[cfg(windows)]
+#[test]
+fn pid_reuse_guard_requires_owo_agent_image() {
+    let me = std::process::id();
+    assert!(
+        owo_agent_server::shutdown::process_alive(me),
+        "前置条件：当前测试进程是活的"
+    );
+    assert!(
+        !owo_agent_server::shutdown::process_is_previous_server(me),
+        "测试进程映像名不是 owo-agent，不能被当成上一代服务（否则 pid 复用会锁死启动）"
+    );
+    assert!(
+        !owo_agent_server::shutdown::process_is_previous_server(u32::MAX),
+        "不可能的 pid 必须判死"
+    );
+    // 陈旧 pid 指向"活着的无关进程"时，recover_force_kill 必须放行而不是报双开冲突。
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("server.pid"), me.to_string()).unwrap();
+    let recovery = owo_agent_server::shutdown::recover_force_kill(temp.path())
+        .expect("被复用的 pid 不应触发双开冲突");
+    assert_eq!(
+        recovery,
+        Some(ForceKillRecovery {
+            stale_pid: Some(me),
+            cleaned: true,
+        }),
+        "被复用的 pid 应按陈旧锁清理"
+    );
+    assert!(!temp.path().join("server.pid").exists());
+}
+
 // ---------- 路由面：/server/status + /server/shutdown ----------
 
 struct IdleProvider;
