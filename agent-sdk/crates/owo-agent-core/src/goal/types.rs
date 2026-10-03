@@ -163,6 +163,43 @@ pub struct StepRecord {
     pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
 }
 
+/// Host-owned status for a structured review finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryIssueStatusV1 {
+    Open,
+    RepairDispatched,
+    Resolved,
+}
+
+/// Durable review issue bound to the exact reviewed task attempt and its repair closure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryIssueV1 {
+    pub issue_id: String,
+    pub source_review_artifact_id: String,
+    pub source_review_sha256: String,
+    pub finding_sha256: String,
+    pub severity: String,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirement_id: Option<String>,
+    pub target_task_id: String,
+    pub target_attempt_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_artifact_id: Option<String>,
+    pub owner_step_id: String,
+    pub status: DeliveryIssueStatusV1,
+    pub repair_attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_review_artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_review_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_attempt_id: Option<String>,
+    pub opened_at: String,
+    pub updated_at: String,
+}
+
 /// 单步完成状态更新，供上层调度器在任务之间隙持久化。
 #[derive(Debug, Clone)]
 pub struct StepProgressUpdate {
@@ -185,6 +222,9 @@ pub struct GoalRunState {
     /// Host-produced goal-level receipts; legacy snapshots load with no receipts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+    /// Durable review findings and their owner-repair/re-review closure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_issues: Vec<DeliveryIssueV1>,
     /// 全局已执行动作数（预算）。
     pub steps_taken: u32,
     /// 全局重试次数。
@@ -226,6 +266,7 @@ impl GoalRunState {
             plan,
             records,
             validation_receipts: Vec::new(),
+            delivery_issues: Vec::new(),
             steps_taken: 0,
             total_retries: 0,
             replan_count: 0,

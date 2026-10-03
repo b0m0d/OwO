@@ -622,6 +622,21 @@ impl TeamCoordinator {
             .and_then(Value::as_u64)
             .unwrap_or(0)
             .saturating_add(1);
+        if actor == "reviewer" {
+            if let Some(source_id) = source_id {
+                let now = now_ts();
+                for issue in &mut state.delivery_issues {
+                    if issue.source_review_artifact_id == source_id
+                        && issue.owner_step_id == step.id
+                        && issue.status == crate::goal::DeliveryIssueStatusV1::Open
+                    {
+                        issue.status = crate::goal::DeliveryIssueStatusV1::RepairDispatched;
+                        issue.repair_attempt = rework_attempt.min(u64::from(u32::MAX)) as u32;
+                        issue.updated_at = now.clone();
+                    }
+                }
+            }
+        }
         let target_status = state
             .records
             .get(&step.id)

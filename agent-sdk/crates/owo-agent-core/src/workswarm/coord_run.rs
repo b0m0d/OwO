@@ -606,6 +606,7 @@ impl TeamCoordinator {
             meta: RunMeta,
             /// 八期一路：本阶段运行期跳过的角色（role, reason, saved_calls）。
             runtime_skips: Vec<(String, String, usize)>,
+            review_issues_pending: bool,
             base_steps_taken: u32,
             base_total_retries: u32,
         }
@@ -936,6 +937,7 @@ impl TeamCoordinator {
                 },
                 records: sub_records,
                 validation_receipts: Vec::new(),
+                delivery_issues: Vec::new(),
                 steps_taken: 0,
                 total_retries: 0,
                 replan_count: 0,
@@ -963,6 +965,10 @@ impl TeamCoordinator {
                 claimed,
                 meta,
                 runtime_skips,
+                review_issues_pending: state
+                    .delivery_issues
+                    .iter()
+                    .any(|issue| issue.status != crate::goal::DeliveryIssueStatusV1::Resolved),
                 base_steps_taken: state.steps_taken,
                 base_total_retries: state.total_retries,
             }
@@ -1017,17 +1023,22 @@ impl TeamCoordinator {
                 .filter(|spec| spec.is_reviewer())
                 .map(|spec| spec.role.clone())
                 .collect::<std::collections::HashSet<_>>();
+            let review_issues_pending = claim.review_issues_pending;
             runner.attach_step_skipper(move |step| {
                 let role = worker_role(&step.worker).unwrap_or_default();
                 if parallel_leader_uses_host_manifest && role == "leader" {
                     return Some(PARALLEL_LEADER_HOST_MANIFEST_SKIP_REASON.to_string());
                 }
                 if is_code_change_template {
+                    let is_reviewer = reviewer_roles.contains(&role);
+                    if is_reviewer && review_issues_pending {
+                        return None;
+                    }
                     let has_changes =
                         super::coord_artifacts::workspace_change_status(&changes_path)
                             != Some(false);
                     return crate::team_strategy::review_runtime_skip_reason(
-                        reviewer_roles.contains(&role),
+                        is_reviewer,
                         has_changes,
                     );
                 }
@@ -1256,7 +1267,7 @@ impl TeamCoordinator {
                     .ok_or_else(|| WorkSwarmError::Run("缺少 project_space_id".to_string()))?,
             )
             .await?;
-        let mut repair_request: Option<(String, String, String, u64)> = None;
+        let mut repair_request: Option<(String, String, String, u64, String)> = None;
         'review_scan: for review_step in &state.plan.steps {
             if state
                 .records
@@ -1299,9 +1310,19 @@ impl TeamCoordinator {
                 let Ok(document) = serde_json::from_str::<Value>(&content) else {
                     continue;
                 };
-                if document.pointer("/result/verdict").and_then(Value::as_str)
-                    != Some("changes_requested")
-                {
+                let review_verdict = document.pointer("/result/verdict").and_then(Value::as_str);
+                if review_verdict == Some("approved") {
+                    if let Some(reviewed) = document.get("reviewed_artifacts").and_then(Value::as_array) {
+                        resolve_review_issues(
+                            &mut state,
+                            &review_artifact.artifact_id,
+                            &review_artifact.sha256,
+                            reviewed,
+                        );
+                    }
+                    continue;
+                }
+                if review_verdict != Some("changes_requested") {
                     continue;
                 }
                 let Some(finding) = document
@@ -1415,16 +1436,95 @@ impl TeamCoordinator {
                         evidence.join(", ")
                     }
                 );
+                let severity = finding
+                    .get("severity")
+                    .and_then(Value::as_str)
+                    .unwrap_or("major")
+                    .to_string();
+                let requirement_id = finding
+                    .get("requirement_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let bound_task_id = bound_task_id.unwrap_or(owner_step.id.as_str()).to_string();
+                let bound_attempt_id = bound_attempt_id
+                    .or_else(|| {
+                        state
+                            .records
+                            .get(&owner_step.id)
+                            .and_then(|record| record.attempt_id.as_deref())
+                    })
+                    .unwrap_or_default()
+                    .to_string();
+                if bound_attempt_id.is_empty() {
+                    self.set_run_active(team_id, false);
+                    let reason = format!(
+                        "review {} 的被审任务缺少当前 attempt 身份，不能登记可追溯 Issue",
+                        review_artifact.artifact_id
+                    );
+                    self.fail_run_internal(team_id, &mut team, &mut state, &reason)
+                        .await?;
+                    return Ok(PhaseOutcome::Failed);
+                }
+                let finding_bytes = serde_json::to_vec(finding)
+                    .map_err(|error| WorkSwarmError::Run(format!("finding 序列化失败：{error}")))?;
+                let finding_sha256 = crate::CasStore::hash_of(&finding_bytes);
+                let issue_identity = serde_json::json!({
+                    "team_id": team_id,
+                    "task_id": &bound_task_id,
+                    "requirement_id": &requirement_id,
+                    "severity": &severity,
+                    "finding_sha256": &finding_sha256,
+                });
+                let issue_identity_bytes = serde_json::to_vec(&issue_identity)
+                    .map_err(|error| WorkSwarmError::Run(format!("Issue 身份序列化失败：{error}")))?;
+                let issue_id = format!(
+                    "issue-{}",
+                    crate::CasStore::hash_of(&issue_identity_bytes)
+                );
+                let now = now_ts();
+                let issue = crate::goal::DeliveryIssueV1 {
+                    issue_id: issue_id.clone(),
+                    source_review_artifact_id: review_artifact.artifact_id.clone(),
+                    source_review_sha256: review_artifact.sha256.clone(),
+                    finding_sha256,
+                    severity,
+                    detail: detail.to_string(),
+                    requirement_id,
+                    target_task_id: bound_task_id,
+                    target_attempt_id: bound_attempt_id,
+                    target_artifact_id: owner_binding
+                        .get("artifact_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    owner_step_id: owner_step.id.clone(),
+                    status: crate::goal::DeliveryIssueStatusV1::Open,
+                    repair_attempt: attempt.saturating_add(1) as u32,
+                    resolution_review_artifact_id: None,
+                    resolution_review_sha256: None,
+                    resolution_attempt_id: None,
+                    opened_at: now.clone(),
+                    updated_at: now,
+                };
+                if let Some(existing) = state
+                    .delivery_issues
+                    .iter_mut()
+                    .find(|existing| existing.issue_id == issue_id)
+                {
+                    *existing = issue;
+                } else {
+                    state.delivery_issues.push(issue);
+                }
                 repair_request = Some((
                     owner_step.id.clone(),
                     instruction,
                     review_artifact.artifact_id.clone(),
                     attempt,
+                    issue_id,
                 ));
                 break 'review_scan;
             }
         }
-        if let Some((owner_step_id, instruction, review_id, attempt)) = repair_request {
+        if let Some((owner_step_id, instruction, review_id, attempt, issue_id)) = repair_request {
             if attempt >= 2 {
                 self.set_run_active(team_id, false);
                 let reason = format!("评审问题在两次局部返修后仍未关闭：{}", review_id);
@@ -1432,6 +1532,7 @@ impl TeamCoordinator {
                     .await?;
                 return Ok(PhaseOutcome::Failed);
             }
+            self.persist_state(&state)?;
             drop(_guard);
             self.rework_from_review(team_id, &owner_step_id, &instruction, &review_id)
                 .await?;
@@ -1439,12 +1540,16 @@ impl TeamCoordinator {
                 team_id,
                 "team.review.repair_dispatched",
                 format!(
-                    "review={review_id} owner_step={owner_step_id} attempt={}",
+                    "review={review_id} issue={issue_id} owner_step={owner_step_id} attempt={}",
                     attempt + 1
                 ),
             );
             return Ok(PhaseOutcome::MoreReady);
         }
+
+        // Persist issue resolutions produced by the review scan before returning Done or
+        // scheduling unrelated ready work; DeliveryGate reads this durable ledger.
+        self.persist_state(&state)?;
 
         // 批次后重评就绪（基于落盘前的最新内存状态）。
         let ready = Self::ready_steps(&state);
@@ -1741,6 +1846,46 @@ impl TeamCoordinator {
 
 /// Resolve a finding only to a reviewed host-bound Artifact. Old findings remain
 /// compatible when the suggested producer owns exactly one reviewed task.
+fn resolve_review_issues(
+    state: &mut GoalRunState,
+    review_artifact_id: &str,
+    review_sha256: &str,
+    reviewed_artifacts: &[Value],
+) -> usize {
+    let now = now_ts();
+    let mut resolved = 0usize;
+    for binding in reviewed_artifacts {
+        let Some(task_id) = binding.get("task_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(attempt_id) = binding.get("attempt_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let current_attempt_matches = state
+            .records
+            .get(task_id)
+            .and_then(|record| record.attempt_id.as_deref())
+            == Some(attempt_id);
+        if !current_attempt_matches {
+            continue;
+        }
+        for issue in &mut state.delivery_issues {
+            if issue.status == crate::goal::DeliveryIssueStatusV1::RepairDispatched
+                && issue.target_task_id == task_id
+                && issue.target_attempt_id != attempt_id
+            {
+                issue.status = crate::goal::DeliveryIssueStatusV1::Resolved;
+                issue.resolution_review_artifact_id = Some(review_artifact_id.to_string());
+                issue.resolution_review_sha256 = Some(review_sha256.to_string());
+                issue.resolution_attempt_id = Some(attempt_id.to_string());
+                issue.updated_at = now.clone();
+                resolved += 1;
+            }
+        }
+    }
+    resolved
+}
+
 fn select_reviewed_owner_binding<'a>(reviewed: &'a [Value], finding: &Value) -> Option<&'a Value> {
     let owner = finding
         .get("suggested_owner")
@@ -2590,6 +2735,80 @@ mod review_owner_binding_tests {
             "target_artifact_id":"artifact-a"
         });
         assert!(select_reviewed_owner_binding(&reviewed(), &inconsistent).is_none());
+    }
+}
+
+#[cfg(test)]
+mod delivery_issue_resolution_tests {
+    use super::resolve_review_issues;
+    use crate::goal::{
+        DeliveryIssueStatusV1, DeliveryIssueV1, Goal, GoalRunState, StepRecord,
+    };
+    use crate::plan::{Plan, StepStatus};
+    use serde_json::json;
+
+    fn state_with_issue() -> GoalRunState {
+        let mut state = GoalRunState::new(
+            Goal::new("issue-goal", "review issue closure"),
+            Plan::new("issue-plan", "issue-goal"),
+        );
+        state.records.insert(
+            "step-a".to_string(),
+            StepRecord {
+                step_id: "step-a".to_string(),
+                status: StepStatus::Succeeded,
+                attempts: 2,
+                attempt_id: Some("attempt-new".to_string()),
+                output: Some("fixed".to_string()),
+                error: None,
+                skip_reason: None,
+                phase_epoch: Some(2),
+                validation_receipts: Vec::new(),
+            },
+        );
+        state.delivery_issues.push(DeliveryIssueV1 {
+            issue_id: "issue-1".to_string(),
+            source_review_artifact_id: "review-old".to_string(),
+            source_review_sha256: "review-hash".to_string(),
+            finding_sha256: "finding-hash".to_string(),
+            severity: "major".to_string(),
+            detail: "fix boundary".to_string(),
+            requirement_id: Some("req-1".to_string()),
+            target_task_id: "step-a".to_string(),
+            target_attempt_id: "attempt-old".to_string(),
+            target_artifact_id: Some("artifact-old".to_string()),
+            owner_step_id: "step-a".to_string(),
+            status: DeliveryIssueStatusV1::RepairDispatched,
+            repair_attempt: 1,
+            resolution_review_artifact_id: None,
+            resolution_review_sha256: None,
+            resolution_attempt_id: None,
+            opened_at: "t1".to_string(),
+            updated_at: "t1".to_string(),
+        });
+        state
+    }
+
+    #[test]
+    fn approved_review_closes_only_repaired_current_task_attempts() {
+        let mut state = state_with_issue();
+        let reviewed = vec![json!({"task_id":"step-a","attempt_id":"attempt-new"})];
+
+        assert_eq!(resolve_review_issues(&mut state, "review-new", "review-sha-new", &reviewed), 1);
+        let issue = &state.delivery_issues[0];
+        assert_eq!(issue.status, DeliveryIssueStatusV1::Resolved);
+        assert_eq!(issue.resolution_review_artifact_id.as_deref(), Some("review-new"));
+        assert_eq!(issue.resolution_review_sha256.as_deref(), Some("review-sha-new"));
+        assert_eq!(issue.resolution_attempt_id.as_deref(), Some("attempt-new"));
+    }
+
+    #[test]
+    fn approved_review_cannot_close_an_issue_with_a_stale_attempt() {
+        let mut state = state_with_issue();
+        let stale_review = vec![json!({"task_id":"step-a","attempt_id":"attempt-old"})];
+
+        assert_eq!(resolve_review_issues(&mut state, "review-stale", "review-sha-stale", &stale_review), 0);
+        assert_eq!(state.delivery_issues[0].status, DeliveryIssueStatusV1::RepairDispatched);
     }
 }
 

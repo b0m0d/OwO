@@ -130,6 +130,16 @@ impl TeamCoordinator {
                 "存在未完成或已取消的步骤，不能收尾".to_string(),
             ));
         }
+        if let Some(issue) = state
+            .delivery_issues
+            .iter()
+            .find(|issue| issue.status != crate::goal::DeliveryIssueStatusV1::Resolved)
+        {
+            return Err(WorkSwarmError::Conflict(format!(
+                "存在未关闭的评审 Issue {}（task={} attempt={}），不能收尾",
+                issue.issue_id, issue.target_task_id, issue.target_attempt_id
+            )));
+        }
 
         let handoffs = self
             .store
@@ -153,6 +163,7 @@ impl TeamCoordinator {
             .count();
         let mut has_code_changes = false;
         let mut validated_review_count = 0usize;
+        let mut validated_review_closures = HashSet::new();
         let mut acceptance_receipts = Vec::new();
         for step in state.plan.steps.clone() {
             let record = state.records.get(&step.id).cloned().ok_or_else(|| {
@@ -393,6 +404,8 @@ impl TeamCoordinator {
                                 artifact.artifact_id
                             ))
                         })?;
+                    let review_is_approved =
+                        review_result.get("verdict").and_then(Value::as_str) == Some("approved");
                     let bound = review
                         .get("reviewed_artifacts")
                         .and_then(Value::as_array)
@@ -435,6 +448,8 @@ impl TeamCoordinator {
                                 current.producer,
                                 current.kind,
                                 reviewed_source,
+                                dep_step.id.clone(),
+                                current_attempt.to_string(),
                             ));
                         }
                     }
@@ -444,7 +459,16 @@ impl TeamCoordinator {
                             artifact.artifact_id
                         )));
                     }
-                    for (artifact_id, hash, producer, kind, reviewed_source) in expected {
+                    for (
+                        artifact_id,
+                        hash,
+                        producer,
+                        kind,
+                        reviewed_source,
+                        reviewed_task_id,
+                        reviewed_attempt_id,
+                    ) in expected
+                    {
                         let Some(binding) = bound.iter().find(|item| {
                             item.get("artifact_id").and_then(Value::as_str)
                                 == Some(artifact_id.as_str())
@@ -461,6 +485,10 @@ impl TeamCoordinator {
                         if binding.get("sha256").and_then(Value::as_str) != Some(hash.as_str())
                             || binding.get("producer").and_then(Value::as_str)
                                 != Some(producer.as_str())
+                            || binding.get("task_id").and_then(Value::as_str)
+                                != Some(reviewed_task_id.as_str())
+                            || binding.get("attempt_id").and_then(Value::as_str)
+                                != Some(reviewed_attempt_id.as_str())
                             || binding.get("reviewed_source") != Some(&reviewed_source)
                             || producer == artifact.producer
                         {
@@ -468,6 +496,14 @@ impl TeamCoordinator {
                                 "ReviewResult {} 的 Artifact、源码快照或独立评审身份已过期",
                                 artifact.artifact_id
                             )));
+                        }
+                        if review_is_approved {
+                            validated_review_closures.insert((
+                                artifact.artifact_id.clone(),
+                                actual_hash.clone(),
+                                reviewed_task_id,
+                                reviewed_attempt_id,
+                            ));
                         }
                         if super::delivery_gate_evidence::is_code_artifact_kind(&kind)
                             || reviewed_source
@@ -722,6 +758,39 @@ impl TeamCoordinator {
             }
         }
 
+        for issue in &state.delivery_issues {
+            let Some(review_id) = issue.resolution_review_artifact_id.as_deref() else {
+                return Err(WorkSwarmError::Conflict(format!(
+                    "已关闭评审 Issue {} 缺少关闭评审身份",
+                    issue.issue_id
+                )));
+            };
+            let Some(review_sha256) = issue.resolution_review_sha256.as_deref() else {
+                return Err(WorkSwarmError::Conflict(format!(
+                    "已关闭评审 Issue {} 缺少关闭评审版本哈希",
+                    issue.issue_id
+                )));
+            };
+            let Some(attempt_id) = issue.resolution_attempt_id.as_deref() else {
+                return Err(WorkSwarmError::Conflict(format!(
+                    "已关闭评审 Issue {} 缺少关闭 attempt 身份",
+                    issue.issue_id
+                )));
+            };
+            if issue.target_attempt_id == attempt_id
+                || !validated_review_closures.contains(&(
+                    review_id.to_string(),
+                    review_sha256.to_string(),
+                    issue.target_task_id.clone(),
+                    attempt_id.to_string(),
+                ))
+            {
+                return Err(WorkSwarmError::Conflict(format!(
+                    "评审 Issue {} 的关闭证据没有绑定到修复后的最终 task/attempt 版本",
+                    issue.issue_id
+                )));
+            }
+        }
         let required_validation_count = acceptance_receipts.len();
         let independent_review_required = has_code_changes && reviewer_step_count > 0;
         let completion_status = crate::completion::decide_completion(
@@ -884,6 +953,7 @@ impl TeamCoordinator {
             "objective": state.goal.objective,
             "artifacts": final_artifacts,
             "acceptance_receipts": acceptance_receipts,
+            "delivery_issues": &state.delivery_issues,
             "created_at": now_ts(),
         });
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;

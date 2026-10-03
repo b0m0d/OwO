@@ -27,12 +27,14 @@ fn run_state_serde_roundtrip() {
         .as_object_mut()
         .unwrap()
         .remove("validation_receipts");
+    legacy.as_object_mut().unwrap().remove("delivery_issues");
     legacy["goal"]
         .as_object_mut()
         .unwrap()
         .remove("verification_plan");
     let restored_legacy: GoalRunState = serde_json::from_value(legacy).unwrap();
     assert!(restored_legacy.validation_receipts.is_empty());
+    assert!(restored_legacy.delivery_issues.is_empty());
     assert!(restored_legacy.goal.verification_plan.is_none());
 }
 
