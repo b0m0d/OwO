@@ -418,7 +418,7 @@ impl Worker for EvalAgentWorker {
             max_tool_calls_per_turn: if unbounded_calls {
                 usize::MAX
             } else {
-                defaults.max_tool_calls_per_turn
+                64
             },
             max_repeated_tool_calls: if unbounded_calls {
                 usize::MAX

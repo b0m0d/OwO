@@ -846,9 +846,9 @@ impl CaseExecutor for SingleAgentExecutor {
         let config = AgentConfig {
             max_turns: (max_model_calls as usize).max(1),
             max_tool_calls_per_turn: if unbounded_calls {
-                usize::MAX
+                0
             } else {
-                defaults.max_tool_calls_per_turn
+                64
             },
             max_repeated_tool_calls: if unbounded_calls {
                 usize::MAX
@@ -943,7 +943,11 @@ impl CaseExecutor for SingleAgentExecutor {
             ctx.record_failed_step(format!("tool_error:{tool_error}"));
         }
         // 预算耗尽判定：调用数达到上限且未产出总结（run_turn 会以"达到最大回合数"失败）。
-        let budget_exhausted = budgeted_provider.exceeded()
+        let turn_limit_reached = result
+            .as_ref()
+            .is_ok_and(|turn| turn.reached_model_turn_limit);
+        let budget_exhausted = turn_limit_reached
+            || budgeted_provider.exceeded()
             || (snapshot_state.model_calls >= max_model_calls
                 && snapshot_state.final_text.is_none()
                 && !ctx.cancelled());

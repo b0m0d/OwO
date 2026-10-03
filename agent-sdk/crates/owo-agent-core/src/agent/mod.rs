@@ -25,6 +25,7 @@ mod config;
 mod tests;
 
 pub use config::AgentConfig;
+pub(crate) use config::DEFAULT_BOUNDED_TOOL_CALL_CAP;
 use config::*;
 
 /// 达到最大回合数后的收尾指令：不再调用工具，强制产出可见结论
@@ -45,6 +46,16 @@ const EMPTY_REPLY_RETRY_PROMPT: &str = "（系统提示）你上一条回复没�
 const FALLBACK_ACTION_PREVIEW_CHARS: usize = 90;
 /// 兜底摘要中最多列出的工具动作条数（去重后）。
 const FALLBACK_ACTION_LIMIT: usize = 20;
+
+/// Default safety cap for nested workers. Main user turns are uncapped by default,
+/// while delegated subagents always have a finite independent request budget.
+fn nested_turn_cap(configured: usize) -> usize {
+    if configured == 0 {
+        crate::subagent::MAX_SUBAGENT_TURNS
+    } else {
+        configured.min(crate::subagent::MAX_SUBAGENT_TURNS)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TurnEvent {
@@ -91,6 +102,9 @@ pub enum TurnEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnOutcome {
     pub final_text: Option<String>,
+    /// True when an explicitly configured turn cap forced the wrap-up request.
+    #[serde(default)]
+    pub reached_model_turn_limit: bool,
     pub steps: usize,
     pub events: Vec<TurnEvent>,
     pub prompt: String,
@@ -392,7 +406,7 @@ impl Agent {
             approver: &approver,
             abort: &abort,
             depth: self.config.subagent_depth,
-            max_turns: self.config.max_turns,
+            max_turns: nested_turn_cap(self.config.max_turns),
             model: model.to_string(),
             events: None,
         };
@@ -586,7 +600,14 @@ impl Agent {
             })
         };
 
-        for _index in 0..self.config.max_turns {
+        let mut model_turns = 0usize;
+        let mut reached_model_turn_limit = false;
+        loop {
+            if self.config.max_turns > 0 && model_turns >= self.config.max_turns {
+                reached_model_turn_limit = true;
+                break;
+            }
+            model_turns = model_turns.saturating_add(1);
             if abort.load(Ordering::Relaxed) {
                 commit_turn_messages(session, &messages);
                 return Err(AgentError::Aborted);
@@ -747,7 +768,10 @@ impl Agent {
                 }
                 ModelOutput::ToolCalls(calls) => {
                     // 循环保护（对标 Codex/OpenCode）：先查总量上限，再逐调用查重复。
-                    if tool_calls_seen + calls.len() > self.config.max_tool_calls_per_turn {
+                    if self.config.max_tool_calls_per_turn > 0
+                        && tool_calls_seen.saturating_add(calls.len())
+                            > self.config.max_tool_calls_per_turn
+                    {
                         let limit = self.config.max_tool_calls_per_turn;
                         commit_turn_messages(session, &messages);
                         return Err(AgentError::Gateway(format!(
@@ -755,7 +779,7 @@ impl Agent {
                             calls.len()
                         )));
                     }
-                    tool_calls_seen += calls.len();
+                    tool_calls_seen = tool_calls_seen.saturating_add(calls.len());
                     messages.push(ChatMessage::assistant_tool_calls(calls.clone()));
                     // §9.1 阶段一——权限判定保持原始 tool-call 顺序：Ask 的独立审批
                     // 与用户审批仍按原序逐个交互，先得到每个调用的 Allow/Deny。
@@ -964,7 +988,7 @@ impl Agent {
                                     approver,
                                     abort,
                                     depth: self.config.subagent_depth,
-                                    max_turns: self.config.max_turns,
+                                    max_turns: nested_turn_cap(self.config.max_turns),
                                     model: session.model_override.clone().unwrap_or_default(),
                                     events: Some(Arc::clone(&nested_sink)),
                                 };
@@ -974,7 +998,7 @@ impl Agent {
                                     workspace: workspace.clone(),
                                     model: session_view.model_override.clone().unwrap_or_default(),
                                     depth: self.config.subagent_depth,
-                                    max_turns: self.config.max_turns,
+                                    max_turns: nested_turn_cap(self.config.max_turns),
                                 };
                                 let sink = Arc::clone(&group_events);
                                 let call_id = call.id.clone();
@@ -1142,7 +1166,7 @@ impl Agent {
                                     approver,
                                     abort,
                                     depth: self.config.subagent_depth,
-                                    max_turns: self.config.max_turns,
+                                    max_turns: nested_turn_cap(self.config.max_turns),
                                     model: session.model_override.clone().unwrap_or_default(),
                                     events: Some(Arc::clone(&nested_sink)),
                                 };
@@ -1151,7 +1175,7 @@ impl Agent {
                                     workspace: workspace.clone(),
                                     model: session.model_override.clone().unwrap_or_default(),
                                     depth: self.config.subagent_depth,
-                                    max_turns: self.config.max_turns,
+                                    max_turns: nested_turn_cap(self.config.max_turns),
                                 };
                                 // P2-5：计划快照——工具执行后清单变化即发 PlanUpdate
                                 //（前端渲染步骤进度；todo 工具为整表替换语义）。
@@ -1288,6 +1312,7 @@ impl Agent {
         }
 
         if final_text.is_none() {
+            reached_model_turn_limit = true;
             // 步数耗尽不能只甩一句「达到最大回合数」：再补一次不带工具的收尾总结，
             // 保证回合一定有可见结论（审查/分析类任务据此产出报告），
             // 而不是让用户看到「思考完就停住」。
@@ -1384,6 +1409,7 @@ impl Agent {
         usage_known &= model_requests > 0;
         Ok(TurnOutcome {
             final_text,
+            reached_model_turn_limit,
             steps,
             events,
             prompt: prompt.to_string(),

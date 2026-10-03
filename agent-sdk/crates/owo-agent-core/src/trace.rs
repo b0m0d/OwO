@@ -30,6 +30,8 @@ pub struct TraceRecord {
     pub duration_ms: u64,
     pub steps: usize,
     pub final_text: Option<String>,
+    #[serde(default)]
+    pub reached_model_turn_limit: bool,
     pub events: Vec<TurnEvent>,
     #[serde(default)]
     pub usage: TokenUsage,
@@ -61,6 +63,7 @@ impl TraceRecord {
             duration_ms: outcome.duration_ms,
             steps: outcome.steps,
             final_text: outcome.final_text.clone(),
+            reached_model_turn_limit: outcome.reached_model_turn_limit,
             events: outcome.events.clone(),
             usage: outcome.usage,
             phase_timings: outcome.phase_timings.clone(),
@@ -91,6 +94,7 @@ impl TraceRecord {
             duration_ms,
             steps: 0,
             final_text: None,
+            reached_model_turn_limit: false,
             events: Vec::new(),
             usage: TokenUsage::default(),
             phase_timings: Vec::new(),
@@ -152,6 +156,7 @@ mod tests {
         session.push(ChatMessage::user("你好".to_string()));
         let outcome = TurnOutcome {
             final_text: Some("收到".to_string()),
+            reached_model_turn_limit: false,
             steps: 1,
             events: vec![
                 TurnEvent::ModelCall,
@@ -195,6 +200,7 @@ mod tests {
         session.push(ChatMessage::user("你好".to_string()));
         let outcome = TurnOutcome {
             final_text: Some("收到".to_string()),
+            reached_model_turn_limit: false,
             steps: 1,
             events: vec![],
             prompt: "你好".to_string(),

@@ -1,5 +1,6 @@
 use crate::tools::ToolApprovalGrant;
 pub(super) const MAX_TOOL_RESULT_CHARS: usize = 50_000;
+pub(crate) const DEFAULT_BOUNDED_TOOL_CALL_CAP: usize = 64;
 
 /// §9.1 阶段一产物：按原始 tool-call 顺序完成的权限判定（Ask 已归并为 Allow/Deny）。
 pub(super) struct PreparedCall {
@@ -9,15 +10,15 @@ pub(super) struct PreparedCall {
     pub(super) reason: String,
     /// 循环保护拦截原因（Some = 本调用被宿主拦截，不执行、不审批）。
     ///
-    /// 对标 Codex/OpenCode 的 loop guard：弱模型遇到工具报错时会反复发起**完全相同**
-    /// 的调用（例如写文件失败后原样重发），若不加约束，`max_turns` × 并发组会把
-    /// 一次任务放大成几百次工具执行。这里对「同一 name + 规范化参数」的重复调用
-    /// 计数，超限即拦截并回灌可读原因，让模型改策略而不是空转。
+    /// Loop protection for a model that repeats the exact same failed tool call.
+    /// The host reports the repeated call back so the model can change strategy.
     pub(super) guard_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
+    /// Maximum model/tool rounds in one user turn; 0 means continue until the model
+    /// returns a final answer or the caller cancels. Worker runtimes set explicit caps.
     pub max_turns: usize,
     pub context_limit: usize,
     pub subagent_depth: usize,
@@ -26,10 +27,10 @@ pub struct AgentConfig {
     pub compaction_enabled: bool,
     /// §9.1：单个并发组内只读工具的最大并发数（默认 4；下限 1）。
     pub tool_concurrency: usize,
-    /// 循环保护：单回合内允许请求的工具调用总数上限（默认 64）。
+    /// Optional hard cap on tool calls for one user turn; 0 means uncapped.
     ///
-    /// 与 `max_turns` 的区别：`max_turns` 约束**模型调用轮数**，本项约束**工具执行总量**。
-    /// 二者相乘才是真实上界；只设 `max_turns` 时，60 轮 × 每轮多并发会放大成数百次执行。
+    /// Normal conversations may keep using tools until the model finishes.
+    /// Worker/evaluation budgets remain explicit in their runtime profiles.
     pub max_tool_calls_per_turn: usize,
     /// 循环保护：同一 `name + 规范化参数` 的调用在同一回合内允许重复的次数（默认 3）。
     /// 超过即拦截该调用并回灌"改变策略"提示，不再执行。
@@ -71,6 +72,9 @@ impl AgentConfig {
         }
         if let Some(value) = env_usize("OWO_MODEL_TIMEOUT_SECS") {
             self.request_timeout_secs = Some(value);
+        }
+        if let Some(value) = env_usize("OWO_AGENT_MAX_MODEL_TURNS") {
+            self.max_turns = value;
         }
         if let Some(value) = env_usize("OWO_AGENT_MAX_TOOL_CALLS") {
             self.max_tool_calls_per_turn = value;
@@ -114,14 +118,14 @@ fn env_bool(name: &str) -> Option<bool> {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_turns: 60,
+            max_turns: 0,
             context_limit: 200,
             subagent_depth: 0,
             token_budget: 60_000,
             keep_recent: 20,
             compaction_enabled: true,
             tool_concurrency: 4,
-            max_tool_calls_per_turn: 64,
+            max_tool_calls_per_turn: 0,
             max_repeated_tool_calls: 3,
             turn_deadline: None,
             max_output_tokens: None,

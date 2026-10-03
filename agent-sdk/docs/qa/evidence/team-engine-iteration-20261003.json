@@ -753,5 +753,34 @@
       "Retain or require independent review only where the task risk/requirements demand it; reviewer results must be bound to the exact accepted change and blocking findings.",
       "Promote host behavior checks and hash-bound receipts from ProductEval into the production Team Validator/DeliveryGate path; keep checker execution inside ToolHost authorization and preserve failure/recovery semantics."
     ]
+  },
+  "continuation_after_checkpoint": {
+    "recorded_at": "2026-10-03T22:55:19.622052+08:00",
+    "checkpoint_commit": "23b3447",
+    "changes": [
+      "Removed the default 60-model-round and 64-tool-call hard stops from normal Agent turns; the loop now ends on model final text, cancellation, or error.",
+      "Added positive-value OWO_AGENT_MAX_MODEL_TURNS as an explicit opt-in limit and retained explicit tool-call limit configuration.",
+      "Kept nested subagents capped at 12 model rounds; Team workers use their explicit profile round cap (maximum 16) and default 64 tool calls. Deliberately unbounded evaluation stays an explicit separate mode.",
+      "Added reached_model_turn_limit metadata and made Team WorkerRuntime, ContractSubagentRunner, and Single ProductEval treat a forced wrap-up as budget exhaustion rather than accepted completion.",
+      "Updated shared system guidance so ordinary conversation stays direct while executable requests continue through action, result inspection, correction, and appropriate validation.",
+      "Added regression coverage for more than 60 normal model/tool rounds, nested-worker caps, explicit limit metadata, and shared prompt guidance."
+    ],
+    "validation": {
+      "tests": "deferred until implementation is complete, as requested",
+      "exit_code": null,
+      "no_cargo_process_running": true,
+      "previous_full_server_session": "session handle unavailable; no result recorded in this continuation"
+    },
+    "resources": {
+      "free_physical_memory_gb_approx": 8.1,
+      "free_T_drive_gb_approx": 34.9
+    },
+    "remaining": [
+      "Unify Single and Team task acceptance around host-generated behavior-validation receipts bound to the final ChangeSet version.",
+      "Ensure source-code tasks cannot pass DeliveryGate using only non-empty or file-exists checks.",
+      "Finish shared Task/Issue repair and validation closure where gaps remain.",
+      "After all implementation changes, run one final verification pass and record its real exit codes.",
+      "Run a valid same-source, same-model, same-task, same-budget live Single/Team pair before making any performance claim."
+    ]
   }
 }

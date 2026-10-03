@@ -140,6 +140,7 @@ if ($ciExit -ne 0) { throw ('测试退出码：{0}' -f $ciExit) }
 - `OPENAI_BASE_URL` / `OPENAI_MODEL` 可覆盖默认值；本地兼容端点按代码允许空密钥。模型未配置时维持诊断和设置入口，返回明确 `provider/not_configured`。
 - `OWO_CLOUD_ENABLED=false` 是模型调用出境开关，不能据此宣称所有 MCP/浏览器/下载网络都被关闭。
 - 其他常用变量：`OWO_AGENT_DATA`（数据根）、`OWO_HTTP_PROXY` / `HTTPS_PROXY`（代理）、`OWO_MODEL_FAST` / `OWO_MODEL_VISION`（模型档位）、`OWO_MCP_SCHEMA_BUDGET_BYTES`（schema 阈值）。
+- 普通 Agent 会话默认不设模型轮数和工具调用总数上限；OWO_AGENT_MAX_MODEL_TURNS、OWO_AGENT_MAX_TOOL_CALLS 可设正数作为显式上限。子代理、Team Worker 与评测仍按各自任务预算单独限额。
 - 成本估算用 `OWO_EVAL_PRICE_IN_PER_MTOK` / `OWO_EVAL_PRICE_OUT_PER_MTOK`；未设置单价、缺失 usage 或只获得模拟结果时，不能填报真实成本。
 - 本次仅审查文档，无需云端调用。需要真实模型评测时控制轮数/预算，并保留脱敏用量与错误证据。
 

@@ -320,7 +320,15 @@ impl ContractSubagentRunner<'_> {
             ToolRegistry::new()
         };
         let config = AgentConfig {
-            max_turns: adaptive_subagent_turns(prompt, read_only).min(self.max_turns),
+            max_turns: if self.max_turns == 0 {
+                adaptive_subagent_turns(prompt, read_only)
+                    .min(crate::subagent::MAX_SUBAGENT_TURNS)
+            } else {
+                adaptive_subagent_turns(prompt, read_only)
+                    .min(self.max_turns)
+                    .min(crate::subagent::MAX_SUBAGENT_TURNS)
+            },
+            max_tool_calls_per_turn: crate::agent::DEFAULT_BOUNDED_TOOL_CALL_CAP,
             subagent_depth: self.depth + 1,
             ..Default::default()
         };
@@ -384,6 +392,9 @@ impl ContractSubagentRunner<'_> {
             )
             .await
             .map_err(|error| format!("子代理执行失败：{error}"))?;
+        if outcome.reached_model_turn_limit {
+            return Err("worker_turn_budget_exhausted:模型在任务预算内未自行给出最终答复".to_string());
+        }
         // 连兜底文本（无最终文本）也走契约执行——自由文本路径不豁免
         // （至多修复一次，否则 output_contract_invalid）。
         let text = outcome

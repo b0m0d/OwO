@@ -445,10 +445,21 @@ impl ProfileSubagentRunner<'_> {
         }
         let mut config = self.agent_config.clone().unwrap_or_else(|| AgentConfig {
             max_turns: self.profile.max_turns.min(PROFILE_MAX_TURNS_CAP),
+            max_tool_calls_per_turn: crate::agent::DEFAULT_BOUNDED_TOOL_CALL_CAP,
             subagent_depth: self.depth + 1,
             ..Default::default()
         });
+        let profile_turn_cap = self.profile.max_turns.min(PROFILE_MAX_TURNS_CAP);
+        config.max_turns = if config.max_turns == 0 {
+            profile_turn_cap
+        } else {
+            config.max_turns.min(profile_turn_cap)
+        };
+        if config.max_tool_calls_per_turn == 0 {
+            config.max_tool_calls_per_turn = crate::agent::DEFAULT_BOUNDED_TOOL_CALL_CAP;
+        }
         config.subagent_depth = self.depth + 1;
+        let configured_turn_cap = config.max_turns;
         let agent = Agent::new(Arc::clone(&self.provider), registry, policy, config);
         let budget_note = self.budget_note_override.clone().unwrap_or_else(|| {
             format!(
@@ -520,6 +531,20 @@ impl ProfileSubagentRunner<'_> {
                 .map_err(|error| format!("Worker 会话执行后保存失败：{error}"))?;
         }
         let outcome = outcome.map_err(|error| format!("子代理执行失败：{error}"))?;
+        if outcome.reached_model_turn_limit {
+            return Err(ProfileSubagentRunError {
+                message: format!(
+                    "worker_turn_budget_exhausted:模型在 {} 轮预算内未自行给出最终答复",
+                    configured_turn_cap
+                ),
+                duration_ms: started.elapsed().as_millis() as u64,
+                steps: outcome.steps,
+                model_calls: outcome.events.iter().filter(|event| matches!(event, TurnEvent::ModelCall)).count() as u32,
+                usage: outcome.usage,
+                usage_known: outcome.usage_known,
+                output_repairs: 0,
+            });
+        }
         let model_calls_from_turn = outcome
             .events
             .iter()

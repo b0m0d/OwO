@@ -19,6 +19,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 pub const MAX_SUBAGENT_DEPTH: usize = 2;
+pub const MAX_SUBAGENT_TURNS: usize = 12;
 
 /// 只读子代理系统提示（单任务 explore 与 fan-out 共用）。
 pub(crate) const READ_ONLY_SUBAGENT_PROMPT: &str =
@@ -89,7 +90,12 @@ pub async fn fan_out_subagents(
                 let policy = Policy::read_only(workspace.clone());
                 let registry = ToolRegistry::read_only();
                 let config = AgentConfig {
-                    max_turns: max_turns.min(12),
+                    max_turns: if max_turns == 0 {
+                        MAX_SUBAGENT_TURNS
+                    } else {
+                        max_turns.min(MAX_SUBAGENT_TURNS)
+                    },
+                    max_tool_calls_per_turn: crate::agent::DEFAULT_BOUNDED_TOOL_CALL_CAP,
                     subagent_depth: depth + 1,
                     ..Default::default()
                 };

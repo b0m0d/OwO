@@ -49,6 +49,7 @@ fn trace_record(
         duration_ms,
         steps,
         final_text: None,
+        reached_model_turn_limit: false,
         events,
         usage: TokenUsage {
             prompt_tokens: 10,

@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn an_uncapped_parent_still_gives_nested_workers_a_finite_round_budget() {
+    assert_eq!(super::nested_turn_cap(0), crate::subagent::MAX_SUBAGENT_TURNS);
+    assert_eq!(super::nested_turn_cap(5), 5);
+    assert_eq!(super::nested_turn_cap(usize::MAX), crate::subagent::MAX_SUBAGENT_TURNS);
+}
+
+#[tokio::test]
+async fn default_user_turn_can_run_more_than_sixty_five_model_tool_rounds() {
+    let state = ProbeState::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(ProbeTool {
+        label: "probe_a",
+        delay_ms: 0,
+        class: EffectClass::Read,
+        host_verified: true,
+        state: Arc::clone(&state),
+    });
+    let mut outputs = VecDeque::new();
+    for index in 0..65 {
+        outputs.push_back(ModelOutput::ToolCalls(vec![crate::gateway::ToolCall {
+            id: format!("call-{index}"),
+            name: "probe_a".to_string(),
+            arguments: serde_json::json!({ "path": format!("item-{index}.txt") }),
+        }]));
+    }
+    outputs.push_back(ModelOutput::Text("全部完成".to_string()));
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider {
+            outputs: Mutex::new(outputs),
+        }),
+        registry,
+        Policy::new("."),
+        AgentConfig::default(),
+    );
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "连续执行较长任务",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("默认用户回合不应在第 60 轮或第 64 个工具调用处提前停止");
+
+    assert_eq!(outcome.final_text.as_deref(), Some("全部完成"));
+    assert!(!outcome.reached_model_turn_limit);
+    assert_eq!(state.completed.lock().unwrap().len(), 65);
+}
+
+#[test]
+fn default_turn_and_tool_call_limits_allow_the_model_to_finish_naturally() {
+    let config = AgentConfig::default();
+
+    assert_eq!(config.max_turns, 0, "zero means no hidden model-round cap");
+    assert_eq!(
+        config.max_tool_calls_per_turn, 0,
+        "zero means no hidden tool-call cap"
+    );
+}
+
+
+#[test]
 fn estimate_tokens_counts_chars_and_overhead() {
     let messages = vec![
         ChatMessage::system("规则".to_string()),
@@ -1222,6 +1287,7 @@ async fn max_turns_exhaustion_runs_wrap_up_and_returns_final_text() {
         .await
         .expect("收尾总结应让回合成功");
     assert_eq!(outcome.final_text.as_deref(), Some("收尾总结报告"));
+    assert!(outcome.reached_model_turn_limit);
     assert!(
         outcome
             .events
