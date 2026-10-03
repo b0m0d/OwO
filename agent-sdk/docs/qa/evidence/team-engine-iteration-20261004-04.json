@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-03T17:59:25Z",
+  "repository": "T:/创新创业/OwO-master/agent-sdk",
+  "git": {
+    "head": "27bd1ca",
+    "branch": "agent-frame",
+    "worktree": "clean except pre-existing untracked desktop/tauri preserved",
+    "commits": [
+      {
+        "id": "27bd1ca",
+        "summary": "bind review findings to exact task attempts"
+      },
+      {
+        "id": "77c0e76",
+        "summary": "cover generic fullstack Team contracts"
+      },
+      {
+        "id": "1a01768",
+        "summary": "remove blog-specific contracts from fullstack Team prompts"
+      },
+      {
+        "id": "7afcacf",
+        "summary": "keep Single completion status turn scoped"
+      }
+    ]
+  },
+  "iteration": {
+    "area": "Turn-scoped Single completion, generic Team contracts, and exact review-to-task repair",
+    "changes": [
+      "Single completion status ignores old stale receipts when judging an unrelated current plain-answer turn.",
+      "The fullstack Web template no longer imposes blog-specific response fields, search fields, pagination constants, or a fixed test command; integrator paths remain bounded.",
+      "Review findings can bind target_task_id and target_artifact_id; host review snapshots retain task_id and attempt_id.",
+      "Review repair resolves only a unique exact artifact/task/attempt owner; ambiguous legacy findings fail closed. Added parser and routing regression test source."
+    ],
+    "validation": {
+      "git_diff_check": "passed",
+      "source_review": "completed",
+      "cargo_or_tests": "not run; deferred for the single final verification pass",
+      "exit_code": null,
+      "cargo_processes": 0,
+      "cloud_model_calls": 0
+    },
+    "resources": {
+      "free_physical_memory_gb_approx": 10.26,
+      "free_T_drive_gb_approx": 34.9
+    },
+    "remaining": [
+      "Audit duplicated ContractSubagentRunner and ProfileSubagentRunner execution assembly while preserving their tool permissions, bounded budgets, persistence, and request telemetry.",
+      "Continue source-level review of WorkerRuntime repair/recovery and exact review freshness.",
+      "After implementation stabilizes, perform the single resource-policy-compliant final Rust validation; measure Team versus Single only on matched live tasks and do not claim an unmeasured advantage."
+    ]
+  }
+}
