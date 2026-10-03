@@ -283,3 +283,28 @@ impl TeamCoordinator {
         }
     }
 }
+
+#[cfg(test)]
+mod downstream_recheck_tests {
+    use super::TeamCoordinator;
+    use crate::goal::{Goal, GoalRunState};
+    use crate::plan::{Plan, StepSpec};
+
+    #[test]
+    fn rework_invalidates_successful_transitive_dependents() {
+        let mut plan = Plan::new("plan-1", "goal-1");
+        let root = StepSpec::new("root", "writer");
+        let mut integrated = StepSpec::new("integrated", "integrator");
+        integrated.depends_on = vec!["root".to_string()];
+        let mut reviewed = StepSpec::new("reviewed", "reviewer");
+        reviewed.depends_on = vec!["integrated".to_string()];
+        let independent = StepSpec::new("independent", "writer");
+        plan.steps = vec![root, integrated, reviewed, independent];
+        let state = GoalRunState::new(Goal::new("goal-1", "rework closure"), plan);
+
+        assert_eq!(
+            TeamCoordinator::downstream_recheck_closure(&state, "root"),
+            vec!["integrated".to_string(), "reviewed".to_string()]
+        );
+    }
+}
