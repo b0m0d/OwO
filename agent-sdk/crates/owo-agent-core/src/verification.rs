@@ -3,6 +3,11 @@ use crate::plan::{
     VerificationResourcesV1, VerificationScopeV1, VerificationSpec,
 };
 use serde_json::Value;
+
+/// Domain-separated digest used in receipt subject_sha256 when a changed workspace path is absent.
+pub(crate) fn workspace_path_absence_sha256() -> String {
+    crate::CasStore::hash_of(b"owo-agent:workspace-path-absence:v1")
+}
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path};

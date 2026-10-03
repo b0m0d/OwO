@@ -1716,6 +1716,15 @@ fn command_execution_receipt(
 }
 
 
+fn single_workspace_path_matches(root: &std::path::Path, relative: &str, expected: &str) -> bool {
+    let absent_digest = crate::verification::workspace_path_absence_sha256();
+    match workspace_file_hash(root, relative) {
+        Some(Some(current)) => expected != absent_digest && current == expected,
+        Some(None) => expected == absent_digest,
+        None => false,
+    }
+}
+
 /// Read a workspace path without following it outside the session root.
 /// Some(None) is a known-absent file; None means the host could not prove its state.
 fn workspace_file_hash(root: &std::path::Path, relative: &str) -> Option<Option<String>> {
@@ -1772,10 +1781,7 @@ fn assess_single_turn_completion(
                 let Some(relative) = subject.strip_prefix("workspace-path:") else {
                     return true;
                 };
-                workspace_file_hash(root, relative)
-                    .flatten()
-                    .as_deref()
-                    != Some(expected.as_str())
+                !single_workspace_path_matches(root, relative, expected)
             });
             if stale {
                 receipt.verdict = ValidationVerdictV1::Stale;
@@ -1859,18 +1865,22 @@ fn assess_single_turn_completion(
     let mut subject_hashes = std::collections::HashMap::new();
     let mut snapshot_matches = command_receipt.workspace_hashes_complete;
     for (relative, expected_hash) in &pending_hashes {
-        let Some(Some(command_hash)) = command_receipt.workspace_hashes.get(relative) else {
+        let Some(command_hash) = command_receipt.workspace_hashes.get(relative) else {
             snapshot_matches = false;
             continue;
         };
-        let Some(Some(current_hash)) = workspace_file_hash(&root, relative) else {
+        let Some(current_hash) = workspace_file_hash(&root, relative) else {
             snapshot_matches = false;
             continue;
         };
-        if Some(command_hash) != expected_hash.as_ref() || command_hash != &current_hash {
+        if command_hash != expected_hash || command_hash != &current_hash {
             snapshot_matches = false;
         }
-        subject_hashes.insert(format!("workspace-path:{relative}"), command_hash.clone());
+        let subject_hash = command_hash
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(crate::verification::workspace_path_absence_sha256);
+        subject_hashes.insert(format!("workspace-path:{relative}"), subject_hash);
     }
     let later_mutation = events
         .iter()

@@ -385,6 +385,7 @@ pub(super) fn collect_attempt_changeset_evidence(
 /// accepted ChangeSet result snapshot. This prevents a validator run before a
 /// later edit from being reused as proof for different delivered bytes.
 pub(super) fn evaluate_workspace_command_receipt(
+    team_id: &str,
     requirement: &crate::plan::VerificationRequirementV1,
     event_details: &[String],
     step_id: &str,
@@ -438,6 +439,16 @@ pub(super) fn evaluate_workspace_command_receipt(
         Ok(receipt) => receipt,
         Err(error) => return unsupported(format!("宿主命令回执结构无效：{error}")),
     };
+    if receipt.validator_id.as_deref() != Some("workspace-command-success-v1")
+        || receipt.validator_version.as_deref() != Some("1")
+    {
+        return (
+            ValidationVerdictV1::Unverified,
+            Some("宿主命令回执没有匹配已登记行为验证器身份".to_string()),
+            std::collections::BTreeMap::new(),
+            Some(format!("command-result:sha256:{}", receipt.result_sha256)),
+        );
+    }
     let Some(duration_ms) = receipt.duration_ms else {
         return (
             ValidationVerdictV1::Unverified,
@@ -468,17 +479,36 @@ pub(super) fn evaluate_workspace_command_receipt(
                 Some(format!("command-result:sha256:{}", receipt.result_sha256)),
             );
         };
-        let Some(hash) = hash else {
-            return (
-                ValidationVerdictV1::Failed,
-                Some(format!("命令执行时工作区文件不存在或不可读：{path}")),
-                subject_hashes,
-                Some(format!("command-result:sha256:{}", receipt.result_sha256)),
-            );
+        let subject_hash = match hash {
+            Some(hash) => hash.clone(),
+            None => {
+                let is_recorded_deletion = receipt.workspace_hashes_complete
+                    && change_sets.iter().any(|change_set| {
+                        change_set.team_id == team_id
+                            && change_set.step_id == step_id
+                            && change_set.attempt_id.as_deref() == Some(attempt_id)
+                            && change_set.changed_files.iter().any(|changed| {
+                                changed.replace('\\', "/") == path
+                            })
+                            && change_set.result_hashes.iter().any(|file| {
+                                file.path.replace('\\', "/") == path && file.sha256.is_none()
+                            })
+                    });
+                if !is_recorded_deletion {
+                    return (
+                        ValidationVerdictV1::Failed,
+                        Some(format!("命令执行时工作区文件不存在或不可读：{path}")),
+                        subject_hashes,
+                        Some(format!("command-result:sha256:{}", receipt.result_sha256)),
+                    );
+                }
+                crate::verification::workspace_path_absence_sha256()
+            }
         };
-        subject_hashes.insert(format!("workspace-path:{raw_path}"), hash.clone());
+        subject_hashes.insert(format!("workspace-path:{raw_path}"), subject_hash);
     }
     if let Err(reason) = validate_workspace_receipt_snapshot(
+        team_id,
         step_id,
         attempt_id,
         relative_paths,
@@ -510,6 +540,7 @@ pub(super) fn evaluate_workspace_command_receipt(
 }
 
 pub(super) fn validate_workspace_receipt_snapshot(
+    team_id: &str,
     step_id: &str,
     attempt_id: &str,
     relative_paths: &[String],
@@ -519,7 +550,9 @@ pub(super) fn validate_workspace_receipt_snapshot(
     let matching: Vec<_> = change_sets
         .iter()
         .filter(|change_set| {
-            change_set.step_id == step_id && change_set.attempt_id.as_deref() == Some(attempt_id)
+            change_set.team_id == team_id
+                && change_set.step_id == step_id
+                && change_set.attempt_id.as_deref() == Some(attempt_id)
         })
         .collect();
     if matching.is_empty() {
@@ -552,7 +585,14 @@ pub(super) fn validate_workspace_receipt_snapshot(
         let actual_hash = subject_hashes.get(&evidence_key).ok_or_else(|| {
             format!("workspace 验证未为 ChangeSet 文件 {path} 产生最终源码哈希")
         })?;
-        if expected_hash.as_deref() != Some(actual_hash.as_str()) {
+        let matches_result = match expected_hash {
+            Some(expected_hash) => actual_hash == expected_hash,
+            None if changed.contains(&path) => {
+                actual_hash == &crate::verification::workspace_path_absence_sha256()
+            }
+            None => false,
+        };
+        if !matches_result {
             return Err(format!(
                 "workspace 验证哈希与接受的 ChangeSet 快照不一致：{path}"
             ));

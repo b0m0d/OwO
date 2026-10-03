@@ -570,6 +570,7 @@ impl TeamCoordinator {
                     let (mut verdict, mut detail, subject_hashes, command_evidence_ref) =
                         if requirement.validator_id == "workspace-command-success-v1" {
                             super::delivery_gate_evidence::evaluate_workspace_command_receipt(
+                                team_id,
                                 requirement,
                                 &runtime_command_receipts,
                                 &step.id,
@@ -590,6 +591,7 @@ impl TeamCoordinator {
                     {
                         if let Err(reason) =
                             super::delivery_gate_evidence::validate_workspace_receipt_snapshot(
+                                team_id,
                                 &step.id,
                                 attempt_id,
                                 relative_paths,
@@ -1371,24 +1373,48 @@ mod validation_receipt_identity_tests {
                 "exit_code":0,
                 "result_sha256":"command-output-hash",
                 "duration_ms":12,
+                "workspace_hashes_complete":true,
+                "validator_id":"workspace-command-success-v1",
+                "validator_version":"1",
                 "workspace_hashes":{"src/lib.rs":"source-final"}
             }
         })
         .to_string();
         let evaluate = super::super::delivery_gate_evidence::evaluate_workspace_command_receipt;
+        let mut foreign_team_change = accepted.clone();
+        foreign_team_change.team_id = "team-2".to_string();
+        foreign_team_change.change_set_id = "cs-foreign-team".to_string();
+        foreign_team_change.result_hashes[0].sha256 = Some("other-team-hash".to_string());
+        let mixed_team_changes = [accepted.clone(), foreign_team_change];
         let (verdict, _, subjects, output_ref) = evaluate(
+            "team-1",
             &requirement,
             std::slice::from_ref(&event),
             "task-1",
             "attempt-1",
-            &[accepted.clone()],
+            &mixed_team_changes,
         );
         assert_eq!(verdict, ValidationVerdictV1::Passed);
         assert_eq!(subjects.get("workspace-path:src/lib.rs"), Some(&"source-final".to_string()));
         assert_eq!(output_ref.as_deref(), Some("command-result:sha256:command-output-hash"));
 
+        let bad_validator = event.replace(
+            "\"validator_id\":\"workspace-command-success-v1\"",
+            "\"validator_id\":\"unregistered-validator\"",
+        );
+        let (verdict, _, _, _) = evaluate(
+            "team-1",
+            &requirement,
+            &[bad_validator],
+            "task-1",
+            "attempt-1",
+            std::slice::from_ref(&accepted),
+        );
+        assert_eq!(verdict, ValidationVerdictV1::Unverified);
+
         let over_budget = event.replace("\"duration_ms\":12", "\"duration_ms\":30001");
         let (verdict, detail, _, _) = evaluate(
+            "team-1",
             &requirement,
             &[over_budget],
             "task-1",
@@ -1399,6 +1425,7 @@ mod validation_receipt_identity_tests {
         assert!(detail.unwrap().contains("超过验证计划预算"));
 
         let (verdict, _, _, _) = evaluate(
+            "team-1",
             &requirement,
             std::slice::from_ref(&event),
             "task-1",
@@ -1409,6 +1436,7 @@ mod validation_receipt_identity_tests {
 
         let stale = event.replace("source-final", "source-before");
         let (verdict, detail, _, _) = evaluate(
+            "team-1",
             &requirement,
             &[stale],
             "task-1",
@@ -1417,6 +1445,42 @@ mod validation_receipt_identity_tests {
         );
         assert_eq!(verdict, ValidationVerdictV1::Failed);
         assert!(detail.unwrap().contains("快照不一致"));
+
+        let mut deleted = changeset("cs-deleted", ChangeSetStatus::Accepted, "2026-10-04");
+        deleted.changed_files = vec!["src/lib.rs".to_string()];
+        deleted.result_hashes = vec![ChangeSetFileHash {
+            path: "src/lib.rs".to_string(),
+            sha256: None,
+            content_available: false,
+        }];
+        let deleted_event = serde_json::json!({
+            "step_id":"task-1",
+            "attempt_id":"attempt-1",
+            "receipt": {
+                "command_sha256":command_hash,
+                "exit_code":0,
+                "result_sha256":"deletion-command-output-hash",
+                "duration_ms":12,
+                "workspace_hashes_complete":true,
+                "validator_id":"workspace-command-success-v1",
+                "validator_version":"1",
+                "workspace_hashes":{"src/lib.rs":null}
+            }
+        })
+        .to_string();
+        let (verdict, _, subjects, _) = evaluate(
+            "team-1",
+            &requirement,
+            &[deleted_event],
+            "task-1",
+            "attempt-1",
+            &[deleted],
+        );
+        assert_eq!(verdict, ValidationVerdictV1::Passed);
+        assert_eq!(
+            subjects.get("workspace-path:src/lib.rs"),
+            Some(&crate::verification::workspace_path_absence_sha256())
+        );
     }
 
     #[test]

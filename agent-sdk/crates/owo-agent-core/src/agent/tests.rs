@@ -1422,3 +1422,19 @@ async fn run_turn_with_images_feeds_vision_message_to_provider() {
     assert_eq!(user.images.len(), 1);
     assert_eq!(user.images[0].url, "data:image/png;base64,AAAA");
 }
+
+#[test]
+fn single_workspace_receipt_can_bind_a_deleted_file_and_detect_recreation() {
+    let root = std::env::temp_dir().join(format!("owo-single-absence-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("src")).expect("create test workspace");
+    let relative = "src/deleted.rs";
+    let absent = crate::verification::workspace_path_absence_sha256();
+    assert!(super::single_workspace_path_matches(&root, relative, &absent));
+
+    let path = root.join(relative);
+    std::fs::write(&path, b"recreated source").expect("recreate changed file");
+    assert!(!super::single_workspace_path_matches(&root, relative, &absent));
+    let actual = crate::CasStore::hash_of(b"recreated source");
+    assert!(super::single_workspace_path_matches(&root, relative, &actual));
+    std::fs::remove_dir_all(root).expect("remove test workspace");
+}
