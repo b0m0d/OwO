@@ -3312,6 +3312,11 @@ fn paired_run_alignment(
     if single_rows.len() != single.runs.len() || multi_rows.len() != multi.runs.len() {
         reasons.push("报告包含不属于该侧的 agent_mode 记录".to_string());
     }
+    if single_rows.iter().any(|run| run.key.case_id.trim().is_empty())
+        || multi_rows.iter().any(|run| run.key.case_id.trim().is_empty())
+    {
+        reasons.push("配对矩阵包含空白 case_id".to_string());
+    }
     let single_keys = single_rows
         .iter()
         .map(|run| ((run.key.case_id.clone(), run.key.repetition), *run))
@@ -3345,15 +3350,18 @@ fn paired_run_alignment(
     if !run_models_match {
         reasons.push("配对运行的有效模型缺失或不一致".to_string());
     }
-    let pending_side_cells = single
+    let pending_side_mismatch = single
         .pending
         .iter()
-        .any(|key| key.agent_mode == AgentMode::Single)
+        .any(|key| key.agent_mode != AgentMode::Single)
         || multi
             .pending
             .iter()
-            .any(|key| key.agent_mode == AgentMode::Multi);
-    if pending_side_cells {
+            .any(|key| key.agent_mode != AgentMode::Multi);
+    if pending_side_mismatch {
+        reasons.push("pending 列表包含不属于该报告侧的 agent_mode".to_string());
+    }
+    if !single.pending.is_empty() || !multi.pending.is_empty() {
         reasons.push("配对矩阵仍有未执行单元".to_string());
     }
     serde_json::json!({

@@ -1119,6 +1119,36 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         .and_then(|value| value.get("reasons"))
         .and_then(serde_json::Value::as_array)
         .is_some_and(|reasons| !reasons.is_empty()));
+
+    let mut cross_side_pending = single.clone();
+    cross_side_pending
+        .pending
+        .push(MatrixKey::new("not-single", AgentMode::Multi, 0));
+    let pending_report =
+        build_paired_report_json(&cross_side_pending, &multi, &opts, Some("t5"));
+    let pending_alignment = pending_report.get("run_alignment").unwrap();
+    assert_eq!(
+        pending_alignment.get("configuration_aligned"),
+        Some(&serde_json::Value::Bool(false))
+    );
+    assert!(pending_alignment
+        .get("reasons")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|reasons| reasons.iter().any(|reason| {
+            reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("不属于该报告侧"))
+        })));
+
+    let mut blank_case_single = single.clone();
+    blank_case_single.runs[0].key.case_id = "  ".into();
+    let blank_case_report =
+        build_paired_report_json(&blank_case_single, &multi, &opts, Some("t6"));
+    assert_eq!(
+        blank_case_report["run_alignment"]["configuration_aligned"],
+        serde_json::Value::Bool(false)
+    );
+
     let pairs = paired.get("pairs").unwrap().as_array().unwrap();
     let overall = pairs
         .iter()
