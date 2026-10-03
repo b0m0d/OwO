@@ -175,10 +175,16 @@ pub(super) async fn automations_create(
             "缺少动作：提供 action 或 reminder".into(),
         ));
     };
-    if let AutomationAction::Reminder { text } = &action {
-        if text.trim().is_empty() {
+    // 两类动作各自的必填校验：空提醒/空提示词都应当在创建时就挡住，
+    // 而不是等到触发时才发现无事可做。
+    match &action {
+        AutomationAction::Reminder { text } if text.trim().is_empty() => {
             return Err((StatusCode::BAD_REQUEST, "提醒内容不能为空".into()));
         }
+        AutomationAction::RunPrompt { prompt } if prompt.trim().is_empty() => {
+            return Err((StatusCode::BAD_REQUEST, "定时任务的提示词不能为空".into()));
+        }
+        _ => {}
     }
     let task = AutomationTask::new(&request.name, request.schedule, action);
     let mut automations = state.automations.lock().map_err(poison)?;

@@ -24,7 +24,11 @@ impl AgentWorker {
         Self { agent, workspace }
     }
 
-    /// 模型解析：input.model → OWO_AGENT_MODEL → 缺省。
+    /// 模型解析：input.model → OWO_AGENT_MODEL → OPENAI_MODEL → 缺省。
+    ///
+    /// 第三档（OPENAI_MODEL）是必需的：无人值守任务跑在用户实际配置的端点上，
+    /// 而 `gpt-4.1-mini` 是厂商专名——在 BigModel / DeepSeek / 本地端点上一律不存在，
+    /// 缺了这一档会让所有「定时跑任务」以"模型不存在"失败。
     pub fn resolve_model(input: &Value) -> String {
         input
             .get("model")
@@ -35,6 +39,7 @@ impl AgentWorker {
                     .ok()
                     .filter(|v| !v.is_empty())
             })
+            .or_else(|| std::env::var("OPENAI_MODEL").ok().filter(|v| !v.is_empty()))
             .unwrap_or_else(|| "gpt-4.1-mini".to_string())
     }
 

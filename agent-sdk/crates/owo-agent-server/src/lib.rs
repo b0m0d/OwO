@@ -104,7 +104,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use owo_agent_core::automation::{AutomationRun, AutomationStore};
+use owo_agent_core::automation::{AutomationAction, AutomationRun, AutomationStore};
 use owo_agent_core::learn::{
     ActionType, LearnPipeline, LearnState, ProactiveEngine, RecordedAction, SemanticAnchor,
 };
@@ -411,10 +411,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/auth/token", get(auth_token::auth_token_bootstrap))
         .with_state(state.clone());
     // 保护面：全部业务 API（bearer token 鉴权 + 双令牌桶限流）。
+    //
+    // 注意 `/session/{id}` 的 GET+DELETE：两个方法链在一起会超出 rustfmt 行宽而被折成
+    // 多行，而契约测试 route_contract_tests.rs 是**按行**扫描路由声明的——
+    // 折行会让该路径从注册清单里消失、断言失败。所以先构造 MethodRouter 变量，
+    // 让路径与 route 调用保持单行。（这段注释本身也不能出现形如 route 加引号的字面量，
+    // 否则会被那个按行扫描的提取器当成一条真实路由，实测让契约测试报出假漏登记。）
+    let session_detail = get(session_api::get_session).delete(session_api::delete_session);
     let protected = Router::new()
         .route("/audit", get(audit_api::audit_list))
         .route("/session", post(session_api::create_session))
-        .route("/session/{id}", get(session_api::get_session))
+        .route("/session/{id}", session_detail)
         .route("/session/{id}/turn", post(turn_api::turn))
         .route("/session/{id}/turn/events", get(turn_api::turn_events))
         .route(
@@ -1130,11 +1137,14 @@ pub async fn start_usage_persistence_loop(state: Arc<AppState>) {
     }
 }
 
-/// 自动化常驻循环：每秒检查到期任务，触发提醒并写审计。
+/// 自动化常驻循环：每秒检查到期任务——提醒走提醒列表，「跑任务」交给 Agent 执行。
 pub async fn start_automation_loop(state: Arc<AppState>) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     loop {
         interval.tick().await;
+        // 到期的「跑任务」不能在这里 await：本循环每秒都要跑，而一次子代理执行可能
+        // 几十秒。先收集，释放锁之后再丢给后台（同时避免后台任务在这里等锁）。
+        let mut pending_prompts: Vec<(String, String, String, String)> = Vec::new();
         let fired = {
             let mut automations = state
                 .automations
@@ -1143,23 +1153,28 @@ pub async fn start_automation_loop(state: Arc<AppState>) {
             let now = chrono::Utc::now();
             let mut fired = Vec::new();
             for id in automations.due_tasks(now) {
-                let task_name = automations
-                    .get(&id)
-                    .map(|task| task.name.clone())
-                    .unwrap_or_default();
+                let (task_name, action) = match automations.get(&id) {
+                    Some(task) => (task.name.clone(), task.action.clone()),
+                    None => continue,
+                };
                 let at = now.to_rfc3339();
                 match automations.fire(&id, now) {
-                    Ok(text) => {
-                        // A8-1：执行记录落盘（/automations/runs 可查）。
-                        let _ = automations.record_run(AutomationRun {
-                            task_id: id.clone(),
-                            task_name,
-                            at,
-                            status: "ok".to_string(),
-                            output: Some(text.clone()),
-                        });
-                        fired.push(text);
-                    }
+                    Ok(payload) => match action {
+                        AutomationAction::RunPrompt { prompt } => {
+                            pending_prompts.push((id.clone(), task_name, at, prompt));
+                        }
+                        AutomationAction::Reminder { .. } => {
+                            // A8-1：执行记录落盘（/automations/runs 可查）。
+                            let _ = automations.record_run(AutomationRun {
+                                task_id: id.clone(),
+                                task_name,
+                                at,
+                                status: "ok".to_string(),
+                                output: Some(payload.clone()),
+                            });
+                            fired.push(payload);
+                        }
+                    },
                     Err(error) => {
                         let _ = automations.record_run(AutomationRun {
                             task_id: id.clone(),
@@ -1173,6 +1188,15 @@ pub async fn start_automation_loop(state: Arc<AppState>) {
             }
             fired
         };
+        for (task_id, task_name, at, prompt) in pending_prompts {
+            tokio::spawn(run_automation_prompt(
+                state.clone(),
+                task_id,
+                task_name,
+                at,
+                prompt,
+            ));
+        }
         if !fired.is_empty() {
             if let Ok(mut audit) = state.agent.audit_log().lock() {
                 audit.record("automation", "fire", None, Some(true), fired.join(" | "));
@@ -1181,6 +1205,52 @@ pub async fn start_automation_loop(state: Arc<AppState>) {
             logging::audit_event("automation_fire", None, &fired.join(" | "));
         }
     }
+}
+
+/// 执行一条「定时跑任务」：只读子代理跑提示词，结果写入执行记录。
+///
+/// 两个刻意的约束：
+/// * **只读**：定时任务无人值守，没有可以把审批卡送达的客户端。放行写/执行的话，
+///   工具调用只会阻塞在一个永远不会有人点的审批上，直到 300s 超时被拒——
+///   任务"跑了"却什么也没做，且每次白等五分钟。
+/// * **复用 `AgentWorker`**：与 goal/plan 的后台 worker 走同一条执行路径
+///   （凭据检查、模型解析、审批器都在那里），避免出现第二套无人值守语义。
+async fn run_automation_prompt(
+    state: Arc<AppState>,
+    task_id: String,
+    task_name: String,
+    at: String,
+    prompt: String,
+) {
+    // `agent_worker` 声明在 `goal_api` 之下（goal_api/mod.rs: `pub mod agent_worker;`），
+    // 根作用域里没有这个名字，必须写全路径。
+    let worker =
+        goal_api::agent_worker::AgentWorker::new(Arc::clone(&state.agent), state.workspace.clone());
+    // `AgentWorker::run` 由 `Worker` trait 提供，作用域内必须引入（局部 use 最小污染）。
+    use owo_agent_core::goal::Worker as _;
+    let outcome = worker
+        .run(&serde_json::json!({ "prompt": prompt, "read_only": true }))
+        .await;
+    let (status, output) = match outcome {
+        Ok(text) => ("ok".to_string(), text),
+        Err(error) => ("failed".to_string(), format!("执行失败：{error}")),
+    };
+    // 截断到 4000 字符：runs 是给人看的执行台账，不该被一次长回答撑爆。
+    let output: String = output.chars().take(4000).collect();
+    if let Ok(mut automations) = state.automations.lock() {
+        let _ = automations.record_run(AutomationRun {
+            task_id,
+            task_name: task_name.clone(),
+            at,
+            status: status.clone(),
+            output: Some(output),
+        });
+    }
+    logging::audit_event(
+        "automation_run",
+        None,
+        &format!("定时跑任务「{task_name}」{status}"),
+    );
 }
 
 /// 静默观察器：每 2s 采样桌面状态（前台应用/标题哈希/剪贴板序列，受 L0 授权门控），

@@ -19,7 +19,15 @@ pub enum Schedule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AutomationAction {
+    /// 到点写入提醒列表（桌面端轮询展示）。
     Reminder { text: String },
+    /// 到点让 Agent 执行一段提示词。
+    ///
+    /// 执行走**只读子代理**（`Agent::run_subagent(read_only = true)`）：定时任务是
+    /// 无人值守场景，没有可以把审批卡送达的客户端——若放行写/执行，工具调用只会
+    /// 阻塞在一个永远不会有人点的审批上，直到 300s 超时被拒。只读侧让"定时任务"
+    /// 落在安全边界内（查询、汇总、巡检、日报这类），需要改动文件的操作请手动发起。
+    RunPrompt { prompt: String },
 }
 
 /// 一次自动化执行记录（A8-1 取优合并自远端 engine；任务中心可查）。
@@ -217,19 +225,24 @@ impl AutomationStore {
             .collect()
     }
 
-    /// 触发任务：标记 last_run_at，提醒动作追加到提醒列表；返回动作文本。
+    /// 触发任务：标记 last_run_at；提醒类追加到提醒列表；返回本次的动作载荷
+    /// （提醒文本 / 待执行的提示词）。
     pub fn fire(&mut self, id: &str, now: DateTime<Utc>) -> Result<String, String> {
         let task = self
             .tasks
             .get_mut(id)
             .ok_or_else(|| format!("任务不存在：{id}"))?;
         task.last_run_at = Some(now.to_rfc3339());
-        let text = match &task.action {
-            AutomationAction::Reminder { text } => text.clone(),
+        let (text, is_reminder) = match &task.action {
+            AutomationAction::Reminder { text } => (text.clone(), true),
+            // 跑任务的载荷就是提示词本身；它不进提醒列表（那是提醒专用通道）。
+            AutomationAction::RunPrompt { prompt } => (prompt.clone(), false),
         };
-        self.reminders.push(text.clone());
-        if self.reminders.len() > 200 {
-            self.reminders.drain(..self.reminders.len() - 200);
+        if is_reminder {
+            self.reminders.push(text.clone());
+            if self.reminders.len() > 200 {
+                self.reminders.drain(..self.reminders.len() - 200);
+            }
         }
         self.save()?;
         Ok(text)
