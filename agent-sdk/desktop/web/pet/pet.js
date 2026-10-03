@@ -15,8 +15,13 @@
  *     Node 权限，也不许自己开窗。
  *
  * 与旧 LingXi 桌宠的差异：删掉 QQ 轮询（与框架无关且构成第四个状态源）、删掉
- * 双击彩蛋与 ✦ 粒子（统一为"点一下就把能做的事列出来"，无按键记忆负担）、把
- * Tauri invoke 换成 OwoApi，并补上审批倒计时（超时＝拒绝是最大的隐性坑）。
+ * 双击彩蛋与 ✦ 粒子、把 Tauri invoke 换成 OwoApi，并补上审批倒计时（超时＝拒绝
+ * 是最大的隐性坑）。
+ *
+ * 按键口径（2026-10-01 定）：**左键点击只互动**——摸摸头（happy 摇动 + ❤×4 + 皮肤
+ * 台词），**右键才是功能面**——允许 / 拒绝审批 · 停止回合 · 打开工作台 · 换形象 ·
+ * 隐藏。左键不再弹菜单："点着玩"是手最顺的动作，不该在按下去之前先担心会弹出一屏
+ * 操作项；要办事的意图由右键明确表达。拖动仍是纯移动（不弹菜单）。
  */
 "use strict";
 
@@ -440,8 +445,9 @@ async function refreshActivity() {
   render(deriveStateFromActivity());
 }
 
-// ---- 点击菜单：把当前能做的事一次性列出来 ----
-// 没有"单击做什么、双击做什么"的隐藏约定——能做什么全写在菜单里，按状态出现。
+// ---- 右键菜单：把当前能做的事一次性列出来 ----
+// 唯一入口是**右键**（左键留给逗它玩，见文件头「按键口径」）：能做什么全写在菜单
+// 里、按状态出现，不需要记"单击做什么、双击做什么"。
 
 function closeMenu() {
   menu.hidden = true;
@@ -547,6 +553,7 @@ function openMenu(x, y) {
   placeMenu(x, y);
 }
 
+// 右键＝功能面：开着就关（toggle），关着就按当前状态重列一遍。
 pet.addEventListener("contextmenu", (event) => {
   event.preventDefault();
   if (!menu.hidden) {
@@ -569,10 +576,18 @@ window.addEventListener("keydown", (event) => {
 // ② screenX/Y 是 CSS 像素，moveBy 按物理像素走，Windows 缩放 125%/150% 时不乘
 // devicePixelRatio 会出现"桌宠追不上鼠标、像被粘住"。
 
+// 拖动＝纯移动：这里不再记账"划动距离"。旧实现累计 >420px 就顺手摸摸头
+// （`dragDistance` / `pettedThisDrag` / `petCooldown`），后果是把桌宠从屏幕这头
+// 挪到那头会一路飘 ❤，拖动途中还夹着 happy 摇动——移窗这种纯搬迁动作被塞了
+// 互动语义。按 2026-10-01 口径删除：要互动就点一下（见 endDrag 的左键分支）。
+//
+// 5px 死区必须**闩住**（`down.moved`）而不是每帧与按下点比距离：手指拖出去再
+// 拖回来时，"离按下点"的距离会重新变 0，窗口就被判定为不需要跟随（桌宠被甩在
+// 鼠标后面，下次移动又突然追回去／累积偏移），同时松手时还会被误判成"单击"
+// 顺手摸摸头。闩住之后：死区只影响开头那 5px，之后每一段位移都照实交给壳，
+// 而"是点击还是拖动"也改用同一把尺子（动过就是拖动）。
 let down = null;
 let lastPointer = null;
-let dragDistance = 0;
-let pettedThisDrag = false;
 
 pet.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return;
@@ -582,10 +597,8 @@ pet.addEventListener("pointerdown", (event) => {
   } catch {
     /* capture 失败不影响拖动本身 */
   }
-  down = { x: event.screenX, y: event.screenY };
+  down = { x: event.screenX, y: event.screenY, moved: false };
   lastPointer = { x: event.screenX, y: event.screenY };
-  dragDistance = 0;
-  pettedThisDrag = false;
   pet.classList.add("dragging");
   pet.classList.remove("dropped");
 });
@@ -595,24 +608,21 @@ pet.addEventListener("pointermove", (event) => {
   const dx = event.screenX - lastPointer.x;
   const dy = event.screenY - lastPointer.y;
   lastPointer = { x: event.screenX, y: event.screenY };
-  dragDistance += Math.hypot(dx, dy);
   const total = Math.hypot(event.screenX - down.x, event.screenY - down.y);
-  // 5px 死区：单击的微小抖动不应推动窗口。
-  if (total > 5 && (dx || dy) && shellBridge && typeof shellBridge.moveBy === "function") {
+  // 5px 死区：单击的微小抖动不应推动窗口；越过一次就永久生效（回拖也不失效）。
+  if (total > 5) down.moved = true;
+  if (down.moved && (dx || dy) && shellBridge && typeof shellBridge.moveBy === "function") {
     const dpr = globalThis.devicePixelRatio || 1;
     shellBridge.moveBy(Math.round(dx * dpr), Math.round(dy * dpr));
-  }
-  if (!pettedThisDrag && dragDistance > 420 && Date.now() > petCooldown) {
-    pettedThisDrag = true;
-    petCooldown = Date.now() + 3200;
-    petted();
   }
 });
 
 function endDrag(event, movedOverride) {
   if (!down) return;
+  // 判"点击 vs 拖动"与指针移动用的是同一个闩：只要拖动过程中越过过死区就算拖动。
   const moved =
     movedOverride === true ||
+    down.moved === true ||
     Math.hypot(event.screenX - down.x, event.screenY - down.y) > 5;
   try {
     pet.releasePointerCapture(event.pointerId);
@@ -627,11 +637,9 @@ function endDrag(event, movedOverride) {
     setTimeout(() => pet.classList.remove("dropped"), 620);
     return;
   }
-  if (!menu.hidden) {
-    closeMenu();
-    return;
-  }
-  openMenu(event.clientX, event.clientY);
+  // 左键点击＝只互动：收起右键菜单（若还开着）＋摸摸头（happy 摇动 + ❤×4 + 皮肤台词）。
+  if (!menu.hidden) closeMenu();
+  petted();
 }
 
 pet.addEventListener("pointerup", (event) => endDrag(event));
@@ -664,7 +672,6 @@ const PET_LINES = {
 };
 const PET_FALLBACK_LINES = ["嘿嘿，好痒～", "再摸摸我嘛", "(*´▽`*)"];
 
-let petCooldown = 0;
 let sayTimer = 0;
 let sayActive = false;
 

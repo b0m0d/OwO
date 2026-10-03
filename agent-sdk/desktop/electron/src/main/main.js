@@ -836,8 +836,62 @@ function createWindow() {
 //  3. `movable: false` —— 由 PointerEvents 算出位移后走 IPC `pet:move` 调
 //     setPosition，避免 Electron 自己的拖拽与自定义手势打架。
 
+// 桌宠偏好（当前皮肤、窗口位置）落在壳侧文件，**不能放 localStorage**：
+// 桌宠页来自 `http://127.0.0.1:<端口>`，而核心每次启动都用 `--port 0` 重新分配端口
+// —— origin 一变，localStorage 就是另一个存储区，用户换的皮肤每次重启都会被忘掉。
+function petPrefPath() {
+  return path.join(dataRoot(), "pet.json");
+}
+
+function readPetPref() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(petPrefPath(), "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) {
+    return {}; // 首次运行或文件损坏：从空偏好开始
+  }
+}
+
+function writePetPref(patch) {
+  const next = { ...readPetPref(), ...(patch && typeof patch === "object" ? patch : {}) };
+  try {
+    const file = petPrefPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(next, null, 2), "utf8");
+    return { ok: true, pref: next };
+  } catch (error) {
+    return { ok: false, error: String(error && error.message ? error.message : error) };
+  }
+}
+
+// 拖动期间 `pet:move` 每秒会来几十次，每次都写盘既无必要也伤磁盘——防抖到停手后落一次。
+let petBoundsTimer = null;
+function schedulePetBoundsSave() {
+  if (petBoundsTimer) clearTimeout(petBoundsTimer);
+  petBoundsTimer = setTimeout(() => {
+    petBoundsTimer = null;
+    if (!petWindow || petWindow.isDestroyed()) return;
+    const [x, y] = petWindow.getPosition();
+    writePetPref({ x, y });
+  }, 600);
+}
+
+/// 把一组坐标收进主显示器工作区（换分辨率/拔外接屏后旧坐标可能落在屏幕外）。
+function clampToWorkArea(x, y) {
+  const area = screen.getPrimaryDisplay().workArea;
+  return {
+    x: Math.min(Math.max(x, area.x), area.x + area.width - PET_SIZE.width),
+    y: Math.min(Math.max(y, area.y), area.y + area.height - PET_SIZE.height),
+  };
+}
+
 function petDefaultBounds() {
   const area = screen.getPrimaryDisplay().workArea;
+  const saved = readPetPref();
+  // 记住用户拖到的位置：桌宠的位置是个人偏好，重启弹回右下角等于每次都要重摆。
+  if (Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+    return clampToWorkArea(saved.x, saved.y);
+  }
   return {
     x: Math.max(area.x, area.x + area.width - PET_SIZE.width - 24),
     y: Math.max(area.y, area.y + area.height - PET_SIZE.height - 24),
@@ -1099,10 +1153,10 @@ ipcMain.handle("pet:move", (_event, dx, dy) => {
   if (!petWindow || petWindow.isDestroyed()) return { ok: false };
   const [x, y] = petWindow.getPosition();
   // Clamp 在显示器工作区内：无限拖动会把桌宠拖到屏幕外找不回来。
-  const area = screen.getPrimaryDisplay().workArea;
-  const nextX = Math.min(Math.max(x + Number(dx || 0), area.x), area.x + area.width - PET_SIZE.width);
-  const nextY = Math.min(Math.max(y + Number(dy || 0), area.y), area.y + area.height - PET_SIZE.height);
-  petWindow.setPosition(nextX, nextY);
+  const next = clampToWorkArea(x + Number(dx || 0), y + Number(dy || 0));
+  petWindow.setPosition(next.x, next.y);
+  // 记住新位置（防抖），这样重启后用户不用再把桌宠摆一遍。
+  schedulePetBoundsSave();
   return { ok: true };
 });
 
@@ -1133,44 +1187,22 @@ ipcMain.handle("pet:query", () => {
 
 ipcMain.handle("pet:reset", () => {
   if (!petWindow || petWindow.isDestroyed()) return { ok: false };
-  const bounds = petDefaultBounds();
+  const area = screen.getPrimaryDisplay().workArea;
+  const bounds = {
+    x: Math.max(area.x, area.x + area.width - PET_SIZE.width - 24),
+    y: Math.max(area.y, area.y + area.height - PET_SIZE.height - 24),
+  };
   petWindow.setBounds({ ...PET_SIZE, ...bounds });
   petWindow.show();
+  // "回到右下角"同时要清掉记住的位置，否则下次启动又回到旧坐标。
+  writePetPref({ x: bounds.x, y: bounds.y });
   return { ok: true, bounds };
 });
 
-// 桌宠偏好（当前皮肤等）落在壳侧文件，**不能放 localStorage**：
-// 桌宠页来自 `http://127.0.0.1:<端口>`，而核心每次启动都用 `--port 0` 重新分配端口
-// —— origin 一变，localStorage 就是另一个存储区，用户换的皮肤每次重启都会被忘掉。
-function petPrefPath() {
-  return path.join(dataRoot(), "pet.json");
-}
+// 偏好读写统一走 readPetPref / writePetPref（定义见 petDefaultBounds 上方）。
+ipcMain.handle("pet:pref:get", () => readPetPref());
 
-ipcMain.handle("pet:pref:get", () => {
-  try {
-    return JSON.parse(fs.readFileSync(petPrefPath(), "utf8"));
-  } catch (_) {
-    return {};
-  }
-});
-
-ipcMain.handle("pet:pref:set", (_event, patch) => {
-  const file = petPrefPath();
-  let current = {};
-  try {
-    current = JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch (_) {
-    /* 首次写入或文件损坏：从空对象重建 */
-  }
-  const next = { ...current, ...(patch && typeof patch === "object" ? patch : {}) };
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(next, null, 2), "utf8");
-    return { ok: true, pref: next };
-  } catch (error) {
-    return { ok: false, error: String(error && error.message ? error.message : error) };
-  }
-});
+ipcMain.handle("pet:pref:set", (_event, patch) => writePetPref(patch));
 
 // ---------- Tauri 兼容命令桥（ADR-003） ----------
 //
