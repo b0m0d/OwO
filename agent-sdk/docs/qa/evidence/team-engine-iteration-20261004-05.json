@@ -40,8 +40,8 @@
     },
     "resources": {
       "free_physical_memory_gb_approx": 13.51,
-      "free_T_drive_gb_approx": null,
-      "disk_probe": "Win32_LogicalDisk did not return T: in this environment",
+      "free_T_drive_gb_approx": 34.91,
+      "disk_probe": "Get-Item T: confirmed 34.91 GB available",
       "cargo_processes": 0
     },
     "remaining": [
