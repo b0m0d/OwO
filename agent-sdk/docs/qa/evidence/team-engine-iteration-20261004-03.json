@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-03T17:46:36Z",
+  "repository": "T:/创新创业/OwO-master/agent-sdk",
+  "git": {
+    "head": "1a01768",
+    "branch": "agent-frame",
+    "worktree": "clean except pre-existing untracked desktop/tauri preserved",
+    "commits": [
+      {
+        "id": "7afcacf",
+        "summary": "keep Single completion status scoped to current user turn"
+      },
+      {
+        "id": "1a01768",
+        "summary": "remove blog-specific contracts from fullstack Team prompts"
+      }
+    ]
+  },
+  "iteration": {
+    "area": "Single completion truth and reusable Team task contracts",
+    "changes": [
+      "Historical stale execution receipts no longer downgrade an unrelated current plain-answer turn from response_complete to unverified; a regression test source covers this behavior.",
+      "Fullstack Web lead, frontend, backend, integrator, and reviewer prompt sections now derive interface behavior from the request and repository instead of imposing blog fields, search fields, pagination constants, or a fixed npm test command.",
+      "The integrator write scope remains limited to the existing shared, stylesheet, root configuration, documentation, and environment example allowlist; worker write boundaries were not widened.",
+      "Updated the architecture document with the behavior boundary and explicitly marked both regression additions as awaiting final validation."
+    ],
+    "validation": {
+      "git_diff_check": "passed",
+      "source_review": "completed; no Cargo build, test, clippy, formatting check, or cloud model call run",
+      "cargo_or_tests": "not run; deferred for the single final verification pass",
+      "exit_code": null,
+      "cargo_processes": 0
+    },
+    "resources": {
+      "free_physical_memory_gb_approx": 12.82,
+      "free_T_drive_gb_approx": 34.91
+    },
+    "remaining": [
+      "Review the generic WorkerRuntime boundary and avoid merging runners until tool permissions, worker budgets, persistence, and telemetry can remain explicit.",
+      "Continue checking task/attempt repair and final review freshness under the current accepted-source gates.",
+      "Complete code changes before the one policy-compliant Rust verification pass; do not claim Team quality or speed superiority without matched live evidence."
+    ]
+  }
+}
