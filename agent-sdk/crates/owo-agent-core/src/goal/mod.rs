@@ -1026,13 +1026,9 @@ impl GoalRunner {
                     })
                 })
                 .collect::<Vec<_>>();
-            let bundle = serde_json::json!({
-                "accepted_outputs": accepted_outputs,
-                "validation_receipts": receipts,
-            });
-            Some(crate::cas_store::CasStore::hash_of(
-                &serde_json::to_vec(&bundle).unwrap_or_default(),
-            ))
+            Some(crate::completion::hash_candidate_version(&accepted_outputs).map_err(
+                |error| format!("目标候选版本摘要生成失败：{error}"),
+            )?)
         } else {
             None
         };

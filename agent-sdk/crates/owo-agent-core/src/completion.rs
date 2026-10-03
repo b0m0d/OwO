@@ -18,6 +18,15 @@ pub struct CompletionEvidence {
     pub independent_review_passed: bool,
 }
 
+/// Hash a canonical host snapshot that identifies the candidate version.
+/// Callers provide ordered collections or ordered maps; validation evidence stays
+/// in receipt IDs instead of being mixed into this identity digest.
+pub fn hash_candidate_version<T: serde::Serialize>(
+    snapshot: &T,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_vec(snapshot).map(|bytes| crate::CasStore::hash_of(&bytes))
+}
+
 /// Build the durable record after callers have gathered and validated host evidence.
 /// Receipt IDs are normalized and sorted so retries do not create order-dependent records.
 pub fn build_completion_record(
@@ -97,6 +106,24 @@ pub fn apply_required_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_version_hash_binds_the_candidate_snapshot() {
+        let first = std::collections::BTreeMap::from([
+            ("src/a.rs", "sha-a"),
+            ("src/b.rs", "sha-b"),
+        ]);
+        let second = std::collections::BTreeMap::from([
+            ("src/b.rs", "sha-b"),
+            ("src/a.rs", "sha-a"),
+        ]);
+        let changed = std::collections::BTreeMap::from([
+            ("src/a.rs", "sha-changed"),
+            ("src/b.rs", "sha-b"),
+        ]);
+        assert_eq!(hash_candidate_version(&first).unwrap(), hash_candidate_version(&second).unwrap());
+        assert_ne!(hash_candidate_version(&first).unwrap(), hash_candidate_version(&changed).unwrap());
+    }
 
     #[test]
     fn durable_completion_record_sorts_and_deduplicates_host_receipts() {

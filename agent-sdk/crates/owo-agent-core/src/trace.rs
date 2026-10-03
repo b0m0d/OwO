@@ -168,8 +168,7 @@ fn single_completion_record(
     let candidate_version_sha256 = if changed_paths.is_empty() {
         None
     } else {
-        let bytes = serde_json::to_vec(&changed_paths).unwrap_or_default();
-        Some(crate::CasStore::hash_of(&bytes))
+        Some(crate::completion::hash_candidate_version(&changed_paths).ok()?)
     };
     Some(crate::completion::build_completion_record(
         task_id,

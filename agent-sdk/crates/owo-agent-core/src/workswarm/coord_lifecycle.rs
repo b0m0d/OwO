@@ -937,13 +937,34 @@ impl TeamCoordinator {
             .filter_map(|receipt| receipt.get("receipt_id").and_then(Value::as_str))
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let acceptance_bytes = serde_json::to_vec(&acceptance_receipts)?;
+        let mut candidate_versions = Vec::<(String, String, String)>::new();
+        for item in &acceptance_receipts {
+            let artifact_id = item
+                .get("artifact_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| WorkSwarmError::Conflict("Accepted 收据缺少 artifact_id".to_string()))?;
+            let attempt_id = item
+                .get("attempt_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| WorkSwarmError::Conflict("Accepted 收据缺少 attempt_id".to_string()))?;
+            let content_sha256 = item
+                .get("content_sha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| WorkSwarmError::Conflict("Accepted 收据缺少候选内容 SHA-256".to_string()))?;
+            candidate_versions.push((
+                artifact_id.to_string(),
+                attempt_id.to_string(),
+                content_sha256.to_string(),
+            ));
+        }
+        candidate_versions.sort();
+        let candidate_version_sha256 = crate::completion::hash_candidate_version(&candidate_versions)?;
         let completion_record = crate::completion::build_completion_record(
             team_id,
             &state.run_id,
             owo_agent_protocol::CompletionStatusV1::Accepted,
             evidence_receipt_ids,
-            Some(crate::CasStore::hash_of(&acceptance_bytes)),
+            Some(candidate_version_sha256),
         );
         // ValidationReceipt 与失败/成功的 task state 一起落盘；若后续发布清单失败，
         // 也不能丢失刚刚执行过的宿主验收证据。
