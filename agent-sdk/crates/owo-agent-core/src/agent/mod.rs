@@ -554,9 +554,8 @@ impl Agent {
         let mut usage = TokenUsage::default();
         let mut model_calls = Vec::new();
         session.transient_model_calls.clear();
-        session.active_turn_id = Some(turn_id.clone());
-        session.active_turn_input_sha256 = Some(crate::CasStore::hash_of(prompt.as_bytes()));
-        session.active_turn_input_text = Some(prompt.to_string());
+        session.active_task_context =
+            Some(crate::task_context::ResolvedTaskContext::for_single_turn(&turn_id, prompt));
         let mut usage_known = true;
         let mut model_requests = 0usize;
         // §9.2：turn 入口建立统一预算（None = 不限时，仅记账不强制）；

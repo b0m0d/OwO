@@ -113,7 +113,7 @@ impl Worker for RoleWorker {
     }
 
     async fn run(&self, input: &Value) -> Result<String, String> {
-        let task_context = crate::task_context::ResolvedTaskContext::from_worker_input(input)?;
+        let task_context = crate::task_context::ResolvedTaskContext::from_assignment_input(input)?;
         let step_id = task_context.step_id.clone().unwrap_or_default();
         // 领取代次：cancel/retry/replace 接管现场后，旧阶段回传凭此被拒收。
         let phase_epoch = task_context.phase_epoch;

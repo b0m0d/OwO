@@ -69,13 +69,9 @@ pub struct Session {
     pub single_verification_plan_input_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub single_verification_plan_turn_id: Option<String>,
-    /// Current request identity is ephemeral and binds host actions to this user turn.
+    /// Ephemeral host-resolved task identity shared by Single execution and acceptance tools.
     #[serde(skip)]
-    pub(crate) active_turn_id: Option<String>,
-    #[serde(skip)]
-    pub(crate) active_turn_input_sha256: Option<String>,
-    #[serde(skip)]
-    pub(crate) active_turn_input_text: Option<String>,
+    pub(crate) active_task_context: Option<crate::task_context::ResolvedTaskContext>,
     /// Ephemeral model-request observations for building an error trace before a TurnOutcome exists.
     #[serde(skip)]
     pub(crate) transient_model_calls: Vec<crate::agent::ModelCallRecord>,
@@ -139,9 +135,7 @@ impl Session {
             single_verification_plan: None,
             single_verification_plan_input_sha256: None,
             single_verification_plan_turn_id: None,
-            active_turn_id: None,
-            active_turn_input_sha256: None,
-            active_turn_input_text: None,
+            active_task_context: None,
             transient_model_calls: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
@@ -532,9 +526,7 @@ impl Session {
             single_verification_plan: self.single_verification_plan.clone(),
             single_verification_plan_input_sha256: self.single_verification_plan_input_sha256.clone(),
             single_verification_plan_turn_id: self.single_verification_plan_turn_id.clone(),
-            active_turn_id: None,
-            active_turn_input_sha256: None,
-            active_turn_input_text: None,
+            active_task_context: None,
             transient_model_calls: Vec::new(),
             created_at: now.clone(),
             updated_at: now,

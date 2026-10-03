@@ -1827,21 +1827,20 @@ impl Tool for SingleVerificationPlanTool {
             args.get("plan").cloned().ok_or("缺少 plan 对象")?
         ).map_err(|error| format!("VerificationPlan 结构非法：{error}"))?;
         validate_single_verification_plan(&plan)?;
-        let input_sha256 = ctx
+        let task_context = ctx
             .session
-            .active_turn_input_sha256
-            .clone()
-            .ok_or("当前 Agent 回合没有可绑定的用户输入摘要")?;
-        let turn_id = ctx
-            .session
-            .active_turn_id
-            .clone()
-            .ok_or("当前 Agent 回合没有可绑定的 turn_id")?;
-        let request = ctx
-            .session
-            .active_turn_input_text
+            .active_task_context
+            .as_ref()
+            .ok_or("当前 Agent 回合没有宿主解析的任务上下文")?;
+        let request = task_context
+            .objective
             .as_deref()
             .ok_or("当前 Agent 回合没有可核对的原始用户输入")?;
+        let input_sha256 = crate::CasStore::hash_of(request.as_bytes());
+        let turn_id = task_context
+            .attempt_id
+            .clone()
+            .ok_or("当前 Agent 回合没有绑定的 attempt_id")?;
         validate_single_request_coverage(&plan, request)?;
         let has_current_turn_writes = ctx
             .session
