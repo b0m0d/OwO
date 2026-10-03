@@ -1469,19 +1469,17 @@ impl TeamCoordinator {
                 let finding_bytes = serde_json::to_vec(finding)
                     .map_err(|error| WorkSwarmError::Run(format!("finding 序列化失败：{error}")))?;
                 let finding_sha256 = crate::CasStore::hash_of(&finding_bytes);
-                let issue_identity = serde_json::json!({
-                    "team_id": team_id,
-                    "task_id": &bound_task_id,
-                    "requirement_id": &requirement_id,
-                    "severity": &severity,
-                    "finding_sha256": &finding_sha256,
-                });
-                let issue_identity_bytes = serde_json::to_vec(&issue_identity)
-                    .map_err(|error| WorkSwarmError::Run(format!("Issue 身份序列化失败：{error}")))?;
-                let issue_id = format!(
-                    "issue-{}",
-                    crate::CasStore::hash_of(&issue_identity_bytes)
-                );
+                let issue_id = delivery_issue_id(
+                    team_id,
+                    &review_artifact.artifact_id,
+                    &review_artifact.sha256,
+                    &bound_task_id,
+                    &bound_attempt_id,
+                    requirement_id.as_deref(),
+                    &severity,
+                    &finding_sha256,
+                )
+                .map_err(|error| WorkSwarmError::Run(format!("Issue 身份序列化失败：{error}")))?;
                 let now = now_ts();
                 let issue = crate::goal::DeliveryIssueV1 {
                     issue_id: issue_id.clone(),
@@ -1843,6 +1841,32 @@ impl TeamCoordinator {
 
         Ok(())
     }
+}
+
+/// Stable for replay of one review result, distinct when the source review or
+/// target attempt changes so a previously resolved issue cannot suppress recurrence.
+fn delivery_issue_id(
+    team_id: &str,
+    source_review_artifact_id: &str,
+    source_review_sha256: &str,
+    task_id: &str,
+    attempt_id: &str,
+    requirement_id: Option<&str>,
+    severity: &str,
+    finding_sha256: &str,
+) -> Result<String, serde_json::Error> {
+    let identity = serde_json::json!({
+        "team_id": team_id,
+        "source_review_artifact_id": source_review_artifact_id,
+        "source_review_sha256": source_review_sha256,
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "requirement_id": requirement_id,
+        "severity": severity,
+        "finding_sha256": finding_sha256,
+    });
+    let identity_bytes = serde_json::to_vec(&identity)?;
+    Ok(format!("issue-{}", crate::CasStore::hash_of(&identity_bytes)))
 }
 
 /// Resolve a finding only to a reviewed host-bound Artifact. Old findings remain
@@ -2753,12 +2777,41 @@ mod review_owner_binding_tests {
 
 #[cfg(test)]
 mod delivery_issue_resolution_tests {
-    use super::resolve_review_issues;
+    use super::{delivery_issue_id, resolve_review_issues};
     use crate::goal::{
         DeliveryIssueStatusV1, DeliveryIssueV1, Goal, GoalRunState, StepRecord,
     };
     use crate::plan::{Plan, StepStatus};
     use serde_json::json;
+
+    #[test]
+    fn issue_identity_is_idempotent_per_review_but_changes_with_attempt_or_review() {
+        let issue_id = delivery_issue_id(
+            "team-1", "review-1", "review-sha-1", "task-1", "attempt-1",
+            Some("requirement-1"), "major", "finding-sha-1",
+        ).unwrap();
+        assert_eq!(
+            issue_id,
+            delivery_issue_id(
+                "team-1", "review-1", "review-sha-1", "task-1", "attempt-1",
+                Some("requirement-1"), "major", "finding-sha-1",
+            ).unwrap()
+        );
+        assert_ne!(
+            issue_id,
+            delivery_issue_id(
+                "team-1", "review-1", "review-sha-1", "task-1", "attempt-2",
+                Some("requirement-1"), "major", "finding-sha-1",
+            ).unwrap()
+        );
+        assert_ne!(
+            issue_id,
+            delivery_issue_id(
+                "team-1", "review-2", "review-sha-2", "task-1", "attempt-1",
+                Some("requirement-1"), "major", "finding-sha-1",
+            ).unwrap()
+        );
+    }
 
     fn state_with_issue() -> GoalRunState {
         let mut state = GoalRunState::new(

@@ -1,0 +1,28 @@
+{
+  "iteration": "2026-10-04-26",
+  "scope": "Bind structured review issue identity to source review and exact task attempt",
+  "changes": [
+    "Issue IDs now include source review artifact identity and hash plus target task and attempt identity.",
+    "Replaying an identical source review remains idempotent; recurrence on a repaired attempt creates a fresh issue rather than overwriting a resolved issue.",
+    "Added regression-test source for stable replay identity and new IDs after review or attempt changes."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Cargo, formatting, clippy, and tests remain deferred until implementation convergence as requested.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 16.12,
+    "memory_used_percent": 49.0,
+    "free_workspace_volume_gb": 34.28,
+    "workspace_volume_status": "Measured on T:; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Shared completion evidence collection and lifecycle transitions still use separate Single and Team adapters.",
+    "Continue reviewing post-repair evidence freshness and stale artifact invalidation across dependent tasks.",
+    "Final Cargo validation, formatting, clippy, and focused tests.",
+    "Matched live Single/Team evaluation; no Team advantage is claimed."
+  ]
+}
