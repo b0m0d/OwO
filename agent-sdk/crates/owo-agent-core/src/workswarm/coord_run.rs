@@ -2006,9 +2006,11 @@ fn bind_dynamic_follow_up_dependencies(
     }
 }
 
-/// Independent dynamic tasks need no model-based leader pass: the host publishes
-/// their individually accepted artifacts in the final manifest. Dependencies,
-/// shared write surfaces, or shared contract references require explicit integration.
+/// Dynamic tasks with explicit, disjoint write scopes need no extra model-based
+/// integration pass solely because one consumes another task's artifact: the DAG
+/// carries that dependency and DeliveryGate validates the final workspace. Shared
+/// write surfaces or contract references still require explicit integration; an
+/// unscoped dependency stays conservative because the host cannot prove isolation.
 pub(super) fn parallel_tasks_require_integration(steps: &[StepSpec]) -> bool {
     let tasks = steps
         .iter()
@@ -2023,13 +2025,6 @@ pub(super) fn parallel_tasks_require_integration(steps: &[StepSpec]) -> bool {
         return true;
     }
     for (index, task) in tasks.iter().enumerate() {
-        if task
-            .depends_on
-            .iter()
-            .any(|dependency| tasks.iter().any(|candidate| candidate.id == *dependency))
-        {
-            return true;
-        }
         let paths = task
             .input
             .get("assigned_write_paths")
@@ -2039,6 +2034,23 @@ pub(super) fn parallel_tasks_require_integration(steps: &[StepSpec]) -> bool {
             .filter_map(Value::as_str)
             .filter(|path| !path.trim().is_empty())
             .collect::<Vec<_>>();
+        for dependency in &task.depends_on {
+            let Some(upstream) = tasks.iter().find(|candidate| candidate.id == *dependency) else {
+                continue;
+            };
+            let upstream_paths = upstream
+                .input
+                .get("assigned_write_paths")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|path| !path.trim().is_empty())
+                .collect::<Vec<_>>();
+            if paths.is_empty() || upstream_paths.is_empty() {
+                return true;
+            }
+        }
         let contracts = task
             .input
             .get("assigned_contract_refs")
@@ -2837,7 +2849,7 @@ mod parallel_assignment_validation_tests {
     }
 
     #[test]
-    fn host_manifest_skips_leader_only_for_independent_task_graphs() {
+    fn host_manifest_skips_leader_when_dynamic_tasks_need_no_model_integration() {
         let independent = vec![
             assigned_step(
                 "step-a",
@@ -2858,6 +2870,27 @@ mod parallel_assignment_validation_tests {
             step
         }];
         assert!(parallel_tasks_require_integration(&dependent));
+
+        let scoped_dependency = vec![
+            assigned_step(
+                "step-a",
+                "task-a",
+                serde_json::json!({"assigned_write_paths":["src/a.rs"]}),
+            ),
+            {
+                let mut step = assigned_step(
+                    "step-b",
+                    "task-b",
+                    serde_json::json!({"assigned_write_paths":["src/b.rs"]}),
+                );
+                step.depends_on.push("step-a".to_string());
+                step
+            },
+        ];
+        assert!(
+            !parallel_tasks_require_integration(&scoped_dependency),
+            "依赖产物不应单独触发串行集成步骤；最终源码仍由宿主门禁验收"
+        );
 
         let overlapping_writes = vec![
             assigned_step(
