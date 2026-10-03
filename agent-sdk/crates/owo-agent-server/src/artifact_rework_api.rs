@@ -125,20 +125,6 @@ pub(crate) async fn submit_rework(
             ) })),
         ));
     }
-    use owo_agent_protocol::ReviewState;
-    if matches!(
-        artifact.review_state,
-        ReviewState::Rejected | ReviewState::Superseded
-    ) {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(json!({ "error": format!(
-                "产物当前状态 {:?} 不可返工（被驳回产物请重新执行任务；被取代产物请评审最新版本）",
-                artifact.review_state
-            ) })),
-        ));
-    }
-
     let project_id = store
         .get_artifact_project(&artifact_id)
         .await
@@ -152,12 +138,56 @@ pub(crate) async fn submit_rework(
         .idempotency_key
         .clone()
         .unwrap_or_else(|| format!("rework:{review_id}"));
-    if let Some(task) = existing.iter().find(|t| t.review_id == review_id) {
-        return Ok((
-            StatusCode::OK,
-            Json(json!({ "replayed": true, "rework": task })),
+    let existing_task = existing
+        .iter()
+        .find(|task| task.review_id == review_id)
+        .cloned();
+    let replayed = existing_task.is_some();
+    if let Some(task) = &existing_task {
+        if task.artifact_id != artifact_id
+            || task.team_id != team_id
+            || task.idempotency_key != derived_key
+            || task.instruction != instruction
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "同一评审的返工请求必须保持产物、幂等键和指令一致" })),
+            ));
+        }
+        if task.status == ArtifactReworkStatus::Failed {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "返工任务已失败；请基于当前产物提交新的评审后再返工" })),
+            ));
+        }
+    } else if existing.iter().any(|task| {
+        task.team_id == team_id
+            && task.artifact_id == artifact_id
+            && matches!(
+                task.status,
+                ArtifactReworkStatus::Dispatching | ArtifactReworkStatus::Requested
+            )
+    }) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "该产物已有进行中的返工任务" })),
         ));
     }
+    // 已完成任务的重放仍须幂等成功，即使原产物已被新版本取代。
+    // 只有创建新任务时才按当前 Artifact 状态拒绝返工。
+    use owo_agent_protocol::ReviewState;
+    if existing_task.is_none()
+        && matches!(artifact.review_state, ReviewState::Rejected | ReviewState::Superseded)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!(
+                "产物当前状态 {:?} 不可返工（被驳回产物请重新执行任务；被取代产物请评审最新版本）",
+                artifact.review_state
+            ) })),
+        ));
+    }
+
     if existing
         .iter()
         .any(|t| t.idempotency_key == derived_key && t.review_id != review_id)
@@ -194,41 +224,74 @@ pub(crate) async fn submit_rework(
                 ) })),
             )
         })?;
+    if existing_task.as_ref().is_some_and(|task| task.step_id != step_id) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "返工记录的生产步骤与当前计划不一致"
+            })),
+        ));
+    }
 
-    // 核心侧重置 + 指令注入（校验失败零写副作用）。
-    let note = format!("评审返工 {review_id}");
-    coordinator
-        .rework_step(&team_id, &step_id, &instruction, &note)
-        .await
-        .map_err(swarm_error)?;
-
-    let task = ArtifactReworkTask {
-        rework_id: format!("rework-{}", uuid::Uuid::new_v4().simple()),
-        artifact_id: artifact.artifact_id.clone(),
-        artifact_version: artifact.version,
-        review_id: review_id.clone(),
-        team_id: team_id.clone(),
-        project_id: project_id.clone(),
-        step_id,
-        instruction,
-        idempotency_key: derived_key,
-        status: ArtifactReworkStatus::Requested,
-        reworked_artifact_id: None,
-        error: String::new(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+    // 先持久化 dispatching 意图，再执行协调器副作用。若进程在两边之间崩溃，
+    // 同一评审的重放会用 source_id 对 coordinator 操作做幂等恢复。
+    let mut task = if let Some(task) = existing_task {
+        task
+    } else {
+        let task = ArtifactReworkTask {
+            rework_id: format!("rework-{}", uuid::Uuid::new_v4().simple()),
+            artifact_id: artifact.artifact_id.clone(),
+            artifact_version: artifact.version,
+            review_id: review_id.clone(),
+            team_id: team_id.clone(),
+            project_id: project_id.clone(),
+            step_id: step_id.clone(),
+            instruction: instruction.clone(),
+            idempotency_key: derived_key,
+            status: ArtifactReworkStatus::Dispatching,
+            reworked_artifact_id: None,
+            error: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        save_artifact_rework_task(store.as_ref(), &task)
+            .await
+            .map_err(store_error)?;
+        task
     };
-    save_artifact_rework_task(store.as_ref(), &task)
-        .await
-        .map_err(store_error)?;
+
+    if task.status == ArtifactReworkStatus::Dispatching {
+        if let Err(error) = coordinator
+            .rework_step_for_review(&team_id, &step_id, &instruction, &review_id)
+            .await
+        {
+            task.error = error.to_string();
+            if let Err(save_error) = save_artifact_rework_task(store.as_ref(), &task).await {
+                tracing::error!(
+                    rework_id = %task.rework_id,
+                    error = %save_error,
+                    "返工派发错误诊断无法落盘"
+                );
+            }
+            return Err(swarm_error(error));
+        }
+        task.status = ArtifactReworkStatus::Requested;
+        task.error.clear();
+        save_artifact_rework_task(store.as_ref(), &task)
+            .await
+            .map_err(store_error)?;
+    }
 
     // 重启运行循环（幂等：运行中/已有循环则跳过；循环内部按迭代重建注册表）。
-    if !coordinator.is_run_active(&team_id) && !coordinator.is_loop_alive(&team_id) {
+    if task.status != ArtifactReworkStatus::Completed
+        && !coordinator.is_run_active(&team_id)
+        && !coordinator.is_loop_alive(&team_id)
+    {
         tokio::spawn(run_team_loop(Arc::clone(&state), coordinator, team_id));
     }
 
     Ok((
-        StatusCode::CREATED,
-        Json(json!({ "replayed": false, "rework": task })),
+        if replayed { StatusCode::OK } else { StatusCode::CREATED },
+        Json(json!({ "replayed": replayed, "rework": task })),
     ))
 }
 

@@ -826,10 +826,17 @@ impl GoalRunner {
                 .collect::<Vec<_>>()
                 .join("\n");
             let input_sha256 = crate::cas_store::CasStore::hash_of(summary.as_bytes());
-            let subject_sha256 = std::collections::HashMap::from([(
-                "goal-aggregate-output".to_string(),
-                input_sha256.clone(),
-            )]);
+            let verification_root = self.workspace_verification_root.clone();
+            let environment_id = verification_root
+                .as_deref()
+                .and_then(|root| root.canonicalize().ok())
+                .map(|root| {
+                    format!(
+                        "goal-workspace-v1:{}",
+                        crate::cas_store::CasStore::hash_of(root.to_string_lossy().as_bytes())
+                    )
+                })
+                .unwrap_or_else(|| "goal-aggregate-output-v1".to_string());
             let evidence_refs = accepted_steps
                 .iter()
                 .map(|(record, _)| {
@@ -841,8 +848,22 @@ impl GoalRunner {
                 })
                 .collect::<Vec<_>>();
             for requirement in &plan.requirements {
-                let (verdict, detail) =
-                    crate::verification::execute_requirement(requirement, &summary);
+                let (verdict, detail, workspace_subjects) =
+                    crate::verification::execute_registered_requirement(
+                        requirement,
+                        &summary,
+                        verification_root.as_deref(),
+                    );
+                let mut receipt_subjects = std::collections::HashMap::from([(
+                    "goal-aggregate-output".to_string(),
+                    input_sha256.clone(),
+                )]);
+                receipt_subjects.extend(workspace_subjects.clone());
+                let workspace_subjects_sha256 =
+                    serde_json::to_vec(&workspace_subjects).unwrap_or_default();
+                let changeset_sha256 = (!workspace_subjects.is_empty()).then(|| {
+                    crate::cas_store::CasStore::hash_of(&workspace_subjects_sha256)
+                });
                 let timestamp = chrono::Utc::now().to_rfc3339();
                 let arguments = serde_json::to_string(&requirement.arguments)
                     .unwrap_or_else(|_| "null".to_string());
@@ -855,7 +876,7 @@ impl GoalRunner {
                 let verdict_label =
                     serde_json::to_string(&verdict).unwrap_or_else(|_| "unknown".to_string());
                 let identity = format!(
-                    "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                    "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                     self.state.goal.id,
                     attempt_id,
                     self.state.replan_count,
@@ -864,6 +885,7 @@ impl GoalRunner {
                     validator_version,
                     arguments_sha256,
                     input_sha256,
+                    crate::cas_store::CasStore::hash_of(&workspace_subjects_sha256),
                     verdict_label
                 );
                 let receipt = crate::plan::ValidationReceiptV1 {
@@ -876,10 +898,10 @@ impl GoalRunner {
                     validator_version,
                     arguments_sha256,
                     input_sha256: input_sha256.clone(),
-                    environment_id: "goal-aggregate-output-v1".to_string(),
-                    changeset_sha256: None,
+                    environment_id: environment_id.clone(),
+                    changeset_sha256,
                     detail: detail.clone(),
-                    subject_sha256: subject_sha256.clone(),
+                    subject_sha256: receipt_subjects,
                     verdict,
                     evidence_refs: evidence_refs.clone(),
                     started_at: timestamp.clone(),

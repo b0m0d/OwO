@@ -296,11 +296,13 @@ pub struct ArtifactReviewRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactReworkStatus {
+    /// Request is durably recorded; coordinator dispatch may need replay after a crash.
+    Dispatching,
     /// 已受理：步骤已重置并注入返工指令，等待重跑产出新版本。
     Requested,
     /// 新版本已登记（由版本链/评审闭环体现；任务记录保留供追溯）。
     Completed,
-    /// 重跑失败（记录失败原因；可再次发起返工）。
+    /// 重跑失败（记录失败原因；需基于最新产物创建新评审后再次返工）。
     Failed,
 }
 

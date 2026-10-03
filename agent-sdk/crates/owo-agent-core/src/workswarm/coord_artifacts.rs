@@ -629,6 +629,25 @@ impl TeamCoordinator {
         let mut new_space = space;
         new_space.artifacts.push(artifact.artifact_id.clone());
         new_space.version += 1;
+        if is_rework {
+            if let Some(previous_artifact_id) = artifact.supersedes_artifact_id.as_deref() {
+                for rework in &mut new_space.rework_tasks {
+                    if rework.team_id == team_id
+                        && rework.step_id == step_id
+                        && rework.artifact_id == previous_artifact_id
+                        && matches!(
+                            rework.status,
+                            owo_agent_protocol::ArtifactReworkStatus::Dispatching
+                                | owo_agent_protocol::ArtifactReworkStatus::Requested
+                        )
+                    {
+                        rework.status = owo_agent_protocol::ArtifactReworkStatus::Completed;
+                        rework.reworked_artifact_id = Some(artifact.artifact_id.clone());
+                        rework.error.clear();
+                    }
+                }
+            }
+        }
         new_space.updated_at = now_ts();
         new_space.activity_stream.push(format!(
             "{} step.completed {step_id} → {}",

@@ -324,6 +324,58 @@ async fn workspace_step_validation_passes_before_success_receipt() {
 }
 
 #[tokio::test]
+async fn goal_workspace_validation_binds_receipt_to_real_file_hash() {
+    let root = std::env::temp_dir().join(format!(
+        "owo-goal-workspace-goal-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn ready() {}\n").unwrap();
+
+    let mut goal = Goal::new("g-workspace-goal", "host goal workspace validation");
+    goal.verification_plan = Some(crate::plan::VerificationPlanV1 {
+        plan_id: "goal-workspace-plan".to_string(),
+        requirements: vec![crate::plan::VerificationRequirementV1 {
+            requirement_id: "goal-source-ready".to_string(),
+            covers_requirement_ids: Vec::new(),
+            validator_id: "workspace-file-contains-v1".to_string(),
+            validator_version: Some("1".to_string()),
+            scope: crate::plan::VerificationScopeV1::WorkspacePaths {
+                relative_paths: vec!["src/lib.rs".to_string()],
+            },
+            arguments: serde_json::json!({"text": "ready"}),
+            required: true,
+            resources: crate::plan::VerificationResourcesV1 {
+                cpu_slots: 1,
+                memory_mb: 8,
+                exclusive_workspace: false,
+                timeout_ms: 5_000,
+            },
+        }],
+    });
+    let mut plan = Plan::new("p-workspace-goal", "g-workspace-goal");
+    plan.add_step(crate::plan::StepSpec::new("step", "fixed-output"));
+    let workers = WorkerRegistry::new();
+    workers.register(std::sync::Arc::new(FixedOutputWorker("candidate")));
+    let mut runner = GoalRunner::new(goal, plan, RunnerConfig::default());
+    runner.attach_workspace_verification_root(root.clone());
+
+    assert_eq!(runner.run(&workers).await.unwrap(), GoalStatus::Succeeded);
+    let receipt = &runner.state.validation_receipts[0];
+    assert_eq!(receipt.verdict, crate::plan::ValidationVerdictV1::Passed);
+    assert_eq!(
+        receipt.subject_sha256.get("workspace-path:src/lib.rs"),
+        Some(&crate::cas_store::CasStore::hash_of(b"pub fn ready() {}\n"))
+    );
+    assert!(receipt.changeset_sha256.is_some());
+    assert!(receipt.environment_id.starts_with("goal-workspace-v1:"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn failed_workspace_validation_keeps_dependent_step_locked() {
     struct CountingWorker {
         name: &'static str,

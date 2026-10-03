@@ -754,11 +754,30 @@ async fn rework_full_loop_produces_v2_and_switches_head_on_approval() {
         deliverables["approved"].as_array().unwrap().is_empty(),
         "v2 未批准前不得有 approved head：{deliverables}"
     );
-    assert_eq!(
-        deliverables["rework_tasks"].as_array().unwrap().len(),
-        1,
-        "应记录一次返工任务：{deliverables}"
-    );
+    let rework_tasks = deliverables["rework_tasks"].as_array().unwrap();
+    assert_eq!(rework_tasks.len(), 1, "应记录一次返工任务：{deliverables}");
+    assert_eq!(rework_tasks[0]["rework_id"], json!(rework_id));
+    assert_eq!(rework_tasks[0]["status"], json!("completed"));
+    assert_eq!(rework_tasks[0]["reworked_artifact_id"], json!(v2_id));
+
+    // 完成后再次重放仍返回原任务；原 v1 已被取代不应破坏幂等语义。
+    let (status, completed_replay) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/artifacts/{v1_id}/rework"),
+        Some(&rework_body(
+            &team_id,
+            &review_id,
+            "修正 scope 字段并保持 schema 不变",
+            Some("rw-v1-1"),
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{completed_replay}");
+    assert_eq!(completed_replay["replayed"], json!(true));
+    assert_eq!(completed_replay["rework"]["status"], json!("completed"));
+    assert_eq!(completed_replay["rework"]["reworked_artifact_id"], json!(v2_id));
 
     // approve v2：head 切换到 v2；v1 进入 Superseded（历史保留）。
     let (status, approve_resp) = call(

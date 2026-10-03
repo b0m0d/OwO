@@ -504,7 +504,7 @@ impl TeamCoordinator {
         instruction: &str,
         note: &str,
     ) -> WorkSwarmResult<TeamRun> {
-        self.rework_step_with_actor(team_id, step_id, instruction, note, "user")
+        self.rework_step_with_actor(team_id, step_id, instruction, note, "user", None)
             .await
     }
 
@@ -516,7 +516,7 @@ impl TeamCoordinator {
         instruction: &str,
         note: &str,
     ) -> WorkSwarmResult<TeamRun> {
-        self.rework_step_with_actor(team_id, step_id, instruction, note, "host_validator")
+        self.rework_step_with_actor(team_id, step_id, instruction, note, "host_validator", None)
             .await
     }
 
@@ -527,8 +527,30 @@ impl TeamCoordinator {
         instruction: &str,
         note: &str,
     ) -> WorkSwarmResult<TeamRun> {
-        self.rework_step_with_actor(team_id, step_id, instruction, note, "reviewer")
+        self.rework_step_with_actor(team_id, step_id, instruction, note, "reviewer", Some(note))
             .await
+    }
+
+    /// Idempotent review rework entry point used by durable artifact rework tasks.
+    pub async fn rework_step_for_review(
+        &self,
+        team_id: &str,
+        step_id: &str,
+        instruction: &str,
+        review_id: &str,
+    ) -> WorkSwarmResult<TeamRun> {
+        if review_id.trim().is_empty() {
+            return Err(WorkSwarmError::Validation("review_id 不能为空".to_string()));
+        }
+        self.rework_step_with_actor(
+            team_id,
+            step_id,
+            instruction,
+            &format!("评审返工 {review_id}"),
+            "reviewer",
+            Some(review_id),
+        )
+        .await
     }
 
     async fn rework_step_with_actor(
@@ -538,6 +560,7 @@ impl TeamCoordinator {
         instruction: &str,
         note: &str,
         actor: &str,
+        source_id: Option<&str>,
     ) -> WorkSwarmResult<TeamRun> {
         if instruction.trim().is_empty() {
             return Err(WorkSwarmError::Validation(
@@ -551,18 +574,7 @@ impl TeamCoordinator {
         };
         let lock = self.team_lock(team_id);
         let _guard = lock.lock().await;
-        if self.is_run_active(team_id) {
-            return Err(WorkSwarmError::Conflict(
-                "运行正在执行中，不能发起返工（待阶段结束后重试）".to_string(),
-            ));
-        }
         let (mut team, _space, mut state) = self.load_bundle(team_id).await?;
-        if team.status == TeamRunStatus::Running && self.is_run_active(team_id) {
-            return Err(WorkSwarmError::Conflict(format!(
-                "当前状态 {:?} 不可返工（运行中）",
-                team.status
-            )));
-        }
         let step = state
             .plan
             .steps
@@ -570,6 +582,39 @@ impl TeamCoordinator {
             .find(|s| s.id == step_id)
             .ok_or_else(|| WorkSwarmError::NotFound(format!("任务 {step_id} 不存在")))?
             .clone();
+        if let Some(source_id) = source_id {
+            if let Some(existing) = step.input.get("rework") {
+                if existing.get("source_id").and_then(Value::as_str) == Some(source_id) {
+                    if existing.get("instruction").and_then(Value::as_str)
+                        != Some(instruction.trim())
+                    {
+                        return Err(WorkSwarmError::Conflict(
+                            "相同评审 ID 不能更换返工指令".to_string(),
+                        ));
+                    }
+                    let step_status = state
+                        .records
+                        .get(&step.id)
+                        .map(|record| record.status)
+                        .ok_or_else(|| {
+                            WorkSwarmError::Run(format!("任务 {} 缺少执行记录", step.id))
+                        })?;
+                    if step_status != StepStatus::Succeeded
+                        && team.status == TeamRunStatus::Succeeded
+                    {
+                        team.status = TeamRunStatus::Created;
+                        team.updated_at = now_ts();
+                        self.store.save_team_run(&team).await?;
+                    }
+                    return Ok(team);
+                }
+            }
+        }
+        if self.is_run_active(team_id) {
+            return Err(WorkSwarmError::Conflict(
+                "运行正在执行中，不能发起返工（待阶段结束后重试）".to_string(),
+            ));
+        }
         let rework_attempt = step
             .input
             .get("rework")
@@ -630,6 +675,7 @@ impl TeamCoordinator {
                     "note": note,
                     "attempt": rework_attempt,
                     "requested_at": now_ts(),
+                    "source_id": source_id,
                 }),
             );
         }
@@ -655,7 +701,9 @@ impl TeamCoordinator {
 
         // 变更留痕：DecisionRecord。
         let decision = DecisionRecord {
-            decision_id: format!("{team_id}:rework:{}", now_ms()),
+            decision_id: source_id
+                .map(|id| format!("{team_id}:rework:{id}"))
+                .unwrap_or_else(|| format!("{team_id}:rework:{}", now_ms())),
             proposer: actor.to_string(),
             choice: format!(
                 "rework：{note}（目标 {} 及未完成下游共 {} 个节点）",

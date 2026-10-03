@@ -10,6 +10,39 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 
+async fn fail_pending_rework_tasks(coordinator: &TeamCoordinator, team_id: &str, reason: &str) {
+    let Ok(team) = coordinator.get_team_run(team_id).await else {
+        return;
+    };
+    let Some(project_id) = team.project_space_id.as_deref() else {
+        return;
+    };
+    let Ok(mut space) = coordinator.store().get_project_space(project_id).await else {
+        return;
+    };
+    let mut changed = false;
+    for task in &mut space.rework_tasks {
+        if task.team_id == team_id
+            && matches!(
+                task.status,
+                owo_agent_protocol::ArtifactReworkStatus::Dispatching
+                    | owo_agent_protocol::ArtifactReworkStatus::Requested
+            )
+        {
+            task.status = owo_agent_protocol::ArtifactReworkStatus::Failed;
+            task.error = reason.to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        space.version += 1;
+        space.updated_at = chrono::Utc::now().to_rfc3339();
+        if let Err(error) = coordinator.store().save_project_space(&space).await {
+            tracing::error!(team_id = %team_id, %error, "返工终态回写失败");
+        }
+    }
+}
+
 /// 声明写范围与团队绑定无交集时的不可达写白名单哨兵（工具/审批层据此拒绝一切写入）。
 const NO_WRITE_SCOPE_MARKER: &str = ".owo-no-write-scope";
 
@@ -330,6 +363,12 @@ pub(super) async fn stop_if_budget_exhausted(
             {
                 tracing::error!(team_id = %team_id, %e, "预算停止：团队取消收尾失败");
             }
+            fail_pending_rework_tasks(
+                coordinator,
+                team_id,
+                "团队预算耗尽，返工未产出新版本",
+            )
+            .await;
             true
         }
         Ok(None) => false,
@@ -379,6 +418,7 @@ pub(crate) async fn run_team_loop(
         let Some(registry) = build_run_registry(&coordinator, &state, &team_id, &cancel_flag).await
         else {
             tracing::error!(team_id = %team_id, "workswarm 运行循环：worker 注册表构建失败，运行终止");
+            fail_pending_rework_tasks(&coordinator, &team_id, "团队运行器初始化失败，返工未产出新版本").await;
             return;
         };
         match coordinator.run_phase(&team_id, &registry).await {
@@ -403,7 +443,15 @@ pub(crate) async fn run_team_loop(
                 }
                 owo_agent_core::PhaseOutcome::Failed
                 | owo_agent_core::PhaseOutcome::Aborted
-                | owo_agent_core::PhaseOutcome::Finished => return,
+                | owo_agent_core::PhaseOutcome::Finished => {
+                    fail_pending_rework_tasks(
+                        &coordinator,
+                        &team_id,
+                        "团队执行在返工产出新版本前终止",
+                    )
+                    .await;
+                    return;
+                }
                 owo_agent_core::PhaseOutcome::AwaitingHuman { waits } => {
                     tracing::info!(team_id = %team_id, ?waits, "团队等待人节点，进入门闩等待");
                     // 门闩：人结果录入（落盘）→ 下一次 run_phase 自动唤醒；
@@ -418,6 +466,12 @@ pub(crate) async fn run_team_loop(
                             {
                                 tracing::error!(team_id = %team_id, %e, "取消收尾失败");
                             }
+                            fail_pending_rework_tasks(
+                                &coordinator,
+                                &team_id,
+                                "团队已取消，返工未产出新版本",
+                            )
+                            .await;
                             return;
                         }
                         // 五期（第三路）：门闩内调度点同样过指标预算门（人结果落盘
@@ -435,7 +489,15 @@ pub(crate) async fn run_team_loop(
                                 return;
                             }
                             Ok(owo_agent_core::PhaseOutcome::MoreReady) => break, // 外层循环重建注册表继续
-                            Ok(_) => return,                                      // 终态
+                            Ok(_) => {
+                                fail_pending_rework_tasks(
+                        &coordinator,
+                        &team_id,
+                        "团队执行在返工产出新版本前终止",
+                    )
+                    .await;
+                                return;
+                            } // 终态
                             Err(e) => {
                                 tracing::warn!(team_id = %team_id, %e, "门闩等待中 run_phase 失败，退避");
                                 tokio::time::sleep(Duration::from_secs(1)).await;
