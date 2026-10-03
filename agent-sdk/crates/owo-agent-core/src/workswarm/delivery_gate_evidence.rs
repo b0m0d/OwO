@@ -22,6 +22,8 @@ pub(super) fn is_source_code_path(raw: &str) -> bool {
         "ts", "tsx", "vue", "svelte", "html", "css", "scss", "sass", "less", "sql",
         "sh", "bash", "ps1", "psm1", "bat", "cmd", "lua", "rb", "php", "swift", "dart",
         "ex", "exs", "hs", "lhs", "clj", "cljs", "cljc", "proto", "graphql", "gql",
+        "m", "mm", "pl", "r", "jl", "tf", "tfvars", "nix", "astro", "mdx",
+        "csproj", "fsproj", "vbproj", "sln", "cmake", "gradle", "cabal",
     ];
     if source_extensions.contains(&extension.as_str()) {
         return true;
@@ -36,6 +38,7 @@ pub(super) fn is_source_code_path(raw: &str) -> bool {
         "cargo.toml" | "go.mod" | "go.sum" | "package.json" | "pnpm-lock.yaml"
             | "yarn.lock" | "package-lock.json" | "tsconfig.json" | "pyproject.toml"
             | "requirements.txt" | "pom.xml" | "build.gradle" | "build.gradle.kts"
+            | "makefile" | "justfile" | "cmakelists.txt" | "dockerfile"
     ) {
         return true;
     }

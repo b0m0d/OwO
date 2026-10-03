@@ -1043,6 +1043,10 @@ mod validation_receipt_identity_tests {
         assert!(is_source_code_path("src/lib.rs"));
         assert!(is_source_code_path("apps/web/src/App.tsx"));
         assert!(is_source_code_path("package.json"));
+        assert!(is_source_code_path("Sources/AppDelegate.m"));
+        assert!(is_source_code_path("infra/main.tf"));
+        assert!(is_source_code_path("CMakeLists.txt"));
+        assert!(is_source_code_path("app/Example.csproj"));
         assert!(!is_source_code_path("docs/design.md"));
         assert!(!is_source_code_path("src"));
 
