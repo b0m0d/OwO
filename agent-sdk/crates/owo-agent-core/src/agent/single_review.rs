@@ -22,6 +22,8 @@ pub(super) struct ReviewExecution {
     pub request: Option<ModelCallRecord>,
     pub usage: Option<TokenUsage>,
     pub usage_known: bool,
+    /// Wall-clock time spent on the reviewer model request, excluding snapshot preparation.
+    pub request_duration_ms: u64,
 }
 
 pub(super) fn accepted_candidate_paths(session: &Session, turn_id: &str) -> BTreeMap<String, String> {
@@ -85,6 +87,35 @@ pub(super) fn is_required(prompt: &str, paths: &BTreeMap<String, String>) -> boo
     })
 }
 
+async fn run_cancellable_review_request<F, T>(
+    abort: &std::sync::atomic::AtomicBool,
+    timeout: Option<std::time::Duration>,
+    request: F,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    match timeout {
+        Some(timeout) => {
+            tokio::select! {
+                biased;
+                _ = super::wait_for_abort(abort) => Err("独立评审因回合取消而停止".to_string()),
+                result = tokio::time::timeout(timeout, request) => match result {
+                    Ok(observed) => observed,
+                    Err(_) => Err("独立评审超过当前回合剩余模型预算".to_string()),
+                }
+            }
+        }
+        None => {
+            tokio::select! {
+                biased;
+                _ = super::wait_for_abort(abort) => Err("独立评审因回合取消而停止".to_string()),
+                observed = request => observed,
+            }
+        }
+    }
+}
+
 /// Conservative complexity signal for explicit multi-part user requests.
 /// Code fences are excluded so pasted examples do not trigger review by themselves.
 fn request_has_multiple_acceptance_clauses(prompt: &str) -> bool {
@@ -124,9 +155,10 @@ pub(super) async fn review_candidate(
     input_sha256: &str,
     expected_paths: &BTreeMap<String, String>,
     allow_model_request: bool,
+    abort: &std::sync::atomic::AtomicBool,
+    timeout: Option<std::time::Duration>,
 ) -> ReviewExecution {
     let started_at = chrono::Utc::now().to_rfc3339();
-    let started = Instant::now();
     let changeset = expected_paths
         .iter()
         .map(|(path, hash)| (path.clone(), Some(hash.clone())))
@@ -165,12 +197,13 @@ pub(super) async fn review_candidate(
             request: None,
             usage: None,
             usage_known: true,
+            request_duration_ms: 0,
         };
     };
 
     if !allow_model_request {
         receipt.detail = Some(
-            "当前回合显式模型轮数预算已用尽，无法执行必需的独立评审".to_string(),
+            "当前回合模型预算或轮数已用尽，无法执行必需的独立评审".to_string(),
         );
         receipt.completed_at = chrono::Utc::now().to_rfc3339();
         return ReviewExecution {
@@ -178,6 +211,7 @@ pub(super) async fn review_candidate(
             request: None,
             usage: None,
             usage_known: true,
+            request_duration_ms: 0,
         };
     }
 
@@ -216,13 +250,29 @@ pub(super) async fn review_candidate(
         user.push_str(&format!("\n--- FILE {path} sha256={hash} ---\n{content}\n--- END FILE ---\n"));
     }
     let messages = [ChatMessage::system(system.to_string()), ChatMessage::user(user)];
-    let observed = provider
-        .complete_with_model_observed(model, &messages, &[])
-        .await;
+    if abort.load(std::sync::atomic::Ordering::Relaxed) {
+        receipt.detail = Some("独立评审因回合取消而未发起".to_string());
+        receipt.completed_at = chrono::Utc::now().to_rfc3339();
+        return ReviewExecution {
+            receipt,
+            request: None,
+            usage: None,
+            usage_known: true,
+            request_duration_ms: 0,
+        };
+    }
+    let request_started = Instant::now();
+    let observed = run_cancellable_review_request(
+        abort,
+        timeout,
+        provider.complete_with_model_observed(model, &messages, &[]),
+    )
+    .await;
+    let request_duration_ms = request_started.elapsed().as_millis() as u64;
     let (request, usage, usage_known, verdict, detail, evidence_refs) = match observed {
         Ok(observed) => {
             let mut metadata = observed.metadata.clone();
-            metadata.latency_ms.get_or_insert(started.elapsed().as_millis() as u64);
+            metadata.latency_ms.get_or_insert(request_started.elapsed().as_millis() as u64);
             let request = ModelCallRecord {
                 metadata,
                 succeeded: true,
@@ -236,7 +286,7 @@ pub(super) async fn review_candidate(
             let request = ModelCallRecord {
                 metadata: ModelCallMetadata {
                     model: model.map(str::to_string),
-                    latency_ms: Some(started.elapsed().as_millis() as u64),
+                    latency_ms: Some(request_started.elapsed().as_millis() as u64),
                     ..ModelCallMetadata::default()
                 },
                 succeeded: false,
@@ -273,6 +323,7 @@ pub(super) async fn review_candidate(
         request,
         usage,
         usage_known,
+        request_duration_ms,
     }
 }
 
@@ -426,6 +477,45 @@ mod tests {
     use super::{is_required, parse_review_output};
     use crate::plan::ValidationVerdictV1;
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn reviewer_request_obeys_cancellation_and_active_deadline() {
+        use super::run_cancellable_review_request;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let abort = std::sync::Arc::new(AtomicBool::new(false));
+        let cancel_flag = std::sync::Arc::clone(&abort);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            cancel_flag.store(true, Ordering::Relaxed);
+        });
+        let cancelled = run_cancellable_review_request(
+            &abort,
+            None,
+            std::future::pending::<Result<(), String>>(),
+        )
+        .await;
+        assert!(cancelled.unwrap_err().contains("取消"));
+
+        let timeout_flag = AtomicBool::new(false);
+        let timed_out = run_cancellable_review_request(
+            &timeout_flag,
+            Some(Duration::from_millis(5)),
+            std::future::pending::<Result<(), String>>(),
+        )
+        .await;
+        assert!(timed_out.unwrap_err().contains("预算"));
+
+        let ready_flag = AtomicBool::new(false);
+        let ready = run_cancellable_review_request(
+            &ready_flag,
+            None,
+            std::future::ready(Ok::<_, String>("approved")),
+        )
+        .await;
+        assert_eq!(ready.unwrap(), "approved");
+    }
 
     #[test]
     fn independent_review_covers_high_risk_and_explicit_multi_part_source_changes() {

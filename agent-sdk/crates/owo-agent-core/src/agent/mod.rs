@@ -837,6 +837,17 @@ impl Agent {
                     if completion_status == owo_agent_protocol::CompletionStatusV1::Accepted {
                         let candidate_paths = single_review::accepted_candidate_paths(session, &turn_id);
                         if single_review::is_required(prompt, &candidate_paths) {
+                            let model_turn_available =
+                                self.config.max_turns == 0 || model_turns < self.config.max_turns;
+                            let review_timeout = if self.config.turn_deadline.is_some() {
+                                budget.remaining(Phase::Model).ok()
+                            } else {
+                                None
+                            };
+                            let allow_review_request =
+                                model_turn_available
+                                    && (self.config.turn_deadline.is_none()
+                                        || review_timeout.is_some());
                             let review = single_review::review_candidate(
                                 &self.provider,
                                 session.model_override.as_deref(),
@@ -845,11 +856,22 @@ impl Agent {
                                 &turn_id,
                                 &crate::CasStore::hash_of(prompt.as_bytes()),
                                 &candidate_paths,
-                                self.config.max_turns == 0 || model_turns < self.config.max_turns,
+                                allow_review_request,
+                                abort,
+                                review_timeout,
                             )
                             .await;
                             if let Some(request) = review.request {
                                 emit(&mut events, &event_cell, TurnEvent::ModelCall);
+                                let review_elapsed =
+                                    std::time::Duration::from_millis(review.request_duration_ms);
+                                budget.record(Phase::Model, review_elapsed);
+                                phase_timings.push(PhaseTiming {
+                                    phase: Phase::Model.as_str().to_string(),
+                                    elapsed_ms: review.request_duration_ms,
+                                    target: "single_independent_review".to_string(),
+                                    first_token_ms: None,
+                                });
                                 model_turns = model_turns.saturating_add(1);
                                 model_requests = model_requests.saturating_add(1);
                                 session.transient_model_calls.push(request.clone());
@@ -889,11 +911,21 @@ impl Agent {
                                 completion_status,
                                 review_verdict,
                             );
+                            if abort.load(Ordering::Relaxed) {
+                                messages.push(ChatMessage::assistant_text(text.clone()));
+                                commit_turn_messages(session, &messages);
+                                return Err(AgentError::Aborted);
+                            }
                         }
                     }
+                    let can_retry_after_validation =
+                        (self.config.max_turns == 0 || model_turns < self.config.max_turns)
+                            && (self.config.turn_deadline.is_none()
+                                || budget.remaining(Phase::Model).is_ok());
                     let plan_is_current =
                         single_verification_plan_matches_turn(session, prompt, &turn_id);
                     let retry_feedback = if plan_is_current
+                        && can_retry_after_validation
                         && matches!(
                             completion_status,
                             owo_agent_protocol::CompletionStatusV1::Unverified
