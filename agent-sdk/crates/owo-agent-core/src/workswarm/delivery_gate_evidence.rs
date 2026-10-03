@@ -123,6 +123,61 @@ pub(super) fn collect_attempt_changeset_evidence(
     Ok((digest, refs))
 }
 
+/// Ensure workspace validation evidence for changed files describes the exact
+/// accepted ChangeSet result snapshot. This prevents a validator run before a
+/// later edit from being reused as proof for different delivered bytes.
+pub(super) fn validate_workspace_receipt_snapshot(
+    step_id: &str,
+    attempt_id: &str,
+    relative_paths: &[String],
+    subject_hashes: &std::collections::BTreeMap<String, String>,
+    change_sets: &[owo_agent_protocol::ChangeSet],
+) -> Result<(), String> {
+    let matching: Vec<_> = change_sets
+        .iter()
+        .filter(|change_set| {
+            change_set.step_id == step_id && change_set.attempt_id.as_deref() == Some(attempt_id)
+        })
+        .collect();
+    if matching.is_empty() {
+        return Ok(());
+    }
+
+    let mut expected = std::collections::BTreeMap::new();
+    let mut changed = std::collections::BTreeSet::new();
+    for change_set in matching {
+        changed.extend(change_set.changed_files.iter().map(|path| path.replace('\\', "/")));
+        for file in &change_set.result_hashes {
+            let path = file.path.replace('\\', "/");
+            if expected
+                .insert(path.clone(), file.sha256.clone())
+                .is_some_and(|previous| previous != file.sha256)
+            {
+                return Err(format!("ChangeSet 对同一文件 {path} 包含冲突结果哈希"));
+            }
+        }
+    }
+    for raw_path in relative_paths {
+        let path = raw_path.replace('\\', "/");
+        if changed.contains(&path) && !expected.contains_key(&path) {
+            return Err(format!("ChangeSet 缺少已变更文件 {path} 的结果哈希"));
+        }
+        let Some(expected_hash) = expected.get(&path) else {
+            continue;
+        };
+        let evidence_key = format!("workspace-path:{raw_path}");
+        let actual_hash = subject_hashes.get(&evidence_key).ok_or_else(|| {
+            format!("workspace 验证未为 ChangeSet 文件 {path} 产生最终源码哈希")
+        })?;
+        if expected_hash.as_deref() != Some(actual_hash.as_str()) {
+            return Err(format!(
+                "workspace 验证哈希与接受的 ChangeSet 快照不一致：{path}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn store_validation_receipt(
     state: &mut GoalRunState,
     step_id: &str,

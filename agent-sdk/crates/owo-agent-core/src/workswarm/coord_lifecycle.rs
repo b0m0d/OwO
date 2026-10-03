@@ -467,12 +467,28 @@ impl TeamCoordinator {
                 for requirement in &verification_plan.requirements {
                     let started_at = now_ts();
                     let verification_workspace = self.verification_workspace(team_id);
-                    let (verdict, detail, subject_hashes) =
+                    let (mut verdict, mut detail, subject_hashes) =
                         crate::verification::execute_registered_requirement(
                             requirement,
                             content,
                             verification_workspace.as_deref(),
                         );
+                    if let crate::plan::VerificationScopeV1::WorkspacePaths { relative_paths } =
+                        &requirement.scope
+                    {
+                        if let Err(reason) =
+                            super::delivery_gate_evidence::validate_workspace_receipt_snapshot(
+                                &step.id,
+                                attempt_id,
+                                relative_paths,
+                                &subject_hashes,
+                                &change_sets,
+                            )
+                        {
+                            verdict = crate::plan::ValidationVerdictV1::Failed;
+                            detail = Some(reason);
+                        }
+                    }
                     let arguments_sha256 =
                         CasStore::hash_of(requirement.arguments.to_string().as_bytes());
                     let receipt = make_validation_receipt(ValidationReceiptInput {
@@ -970,6 +986,36 @@ mod validation_receipt_identity_tests {
         .unwrap();
         assert_eq!(forward, reversed);
         assert_eq!(forward.1, vec!["changeset://cs-new", "changeset://cs-old"]);
+    }
+
+    #[test]
+    fn workspace_receipts_must_match_the_accepted_changeset_result_hash() {
+        use owo_agent_protocol::{ChangeSetFileHash, ChangeSetStatus};
+
+        let mut accepted = changeset("cs-source", ChangeSetStatus::Accepted, "2026-10-03");
+        accepted.changed_files = vec!["src\\lib.rs".to_string()];
+        accepted.result_hashes = vec![ChangeSetFileHash {
+            path: "src/lib.rs".to_string(),
+            sha256: Some("final-source-hash".to_string()),
+            content_available: false,
+        }];
+        let scope = vec!["src\\lib.rs".to_string()];
+        let evidence = std::collections::BTreeMap::from([(
+            "workspace-path:src\\lib.rs".to_string(),
+            "final-source-hash".to_string(),
+        )]);
+        let validate = super::super::delivery_gate_evidence::validate_workspace_receipt_snapshot;
+        assert!(validate("task-1", "attempt-1", &scope, &evidence, &[accepted.clone()]).is_ok());
+
+        let stale_evidence = std::collections::BTreeMap::from([(
+            "workspace-path:src\\lib.rs".to_string(),
+            "stale-source-hash".to_string(),
+        )]);
+        assert!(validate("task-1", "attempt-1", &scope, &stale_evidence, &[accepted.clone()])
+            .unwrap_err()
+            .contains("快照不一致"));
+
+        assert!(validate("task-other", "attempt-1", &scope, &evidence, &[accepted]).is_ok());
     }
 
     #[test]

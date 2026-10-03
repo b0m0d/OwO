@@ -782,5 +782,31 @@
       "After all implementation changes, run one final verification pass and record its real exit codes.",
       "Run a valid same-source, same-model, same-task, same-budget live Single/Team pair before making any performance claim."
     ]
+  },
+  "continuation_after_snapshot_binding": {
+    "recorded_at": "2026-10-03T23:06:35+08:00",
+    "changes": [
+      "DeliveryGate now compares WorkspacePaths receipt hashes with accepted ChangeSet result hashes for the matching task attempt.",
+      "Changed files missing result hashes, conflicting ChangeSet hashes, or stale validation hashes fail required verification.",
+      "Added a regression test for matching and stale snapshot hashes; it has not been run."
+    ],
+    "validation": {
+      "static_diff_check": "git diff --check passed",
+      "cargo_or_tests": "deferred until implementation is complete",
+      "exit_code": null
+    },
+    "resources": {
+      "free_physical_memory_gb_approx": 8.92,
+      "free_T_drive_gb_approx": 34.9,
+      "cargo_processes": 0
+    },
+    "remaining": [
+      "Persist host command exit receipts and bind approved behavioral checks to the final ChangeSet.",
+      "Prevent code-writing tasks from passing with only static weak validators.",
+      "Unify Single and Team task acceptance around Accepted/Unverified receipts.",
+      "Close Task/Issue repair and validation loops.",
+      "Run exactly one final validation pass after implementation is complete.",
+      "Run a same-source/model/task/budget live Single/Team pair before making performance claims."
+    ]
   }
 }
