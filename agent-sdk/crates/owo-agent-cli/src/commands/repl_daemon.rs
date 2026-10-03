@@ -797,22 +797,23 @@ impl DaemonRepl {
         &mut self,
         parts: std::str::SplitWhitespace<'_>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        const USAGE: &str = "用法：/team [--single|--team|--auto] <目标>（创建并跟踪）| list | use <团队ID> | status | watch | steer <说明> | retry <步骤ID> | cancel | diff";
-        // 前置策略开关：`--single` 单 Agent / `--team` 强制流水线 / `--auto`（缺省）
-        // 交给策略层判定——用于单/队 A/B 实测对比。
-        let mut args: Vec<&str> = parts.collect();
-        let mut strategy = "auto".to_string();
-        while let Some(flag) = args.first() {
-            match *flag {
-                "--single" => strategy = "single".to_string(),
-                "--team" => strategy = "team".to_string(),
-                "--auto" => strategy = "auto".to_string(),
-                _ => break,
-            }
-            args.remove(0);
-        }
-        let mut parts = args.into_iter();
-        match parts.next() {
+        const USAGE: &str = "用法：/team [--single|--team|--auto] [--parallel <2..=8> | --role <名>[:依赖1|依赖2]] [--model <模型>] [--model <角色>=<模型>] [--write <角色>=<路径>[;<路径>]] <目标>（缺省自动并行开发；--auto 使用策略选择）| list | use <团队ID> | status | watch | context [publish <key> <内容>] | steer <说明> | retry <步骤ID> | cancel | diff";
+        // 前置参数解析（纯函数 `parse_team_args`，便于单测）。声明了自定义角色时
+        // 策略缺省强制 team（避免 auto 判定裁剪显式编排）。
+        let raw: Vec<String> = parts.map(str::to_string).collect();
+        let parsed =
+            parse_team_args(&raw).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let TeamArgs {
+            strategy: parsed_strategy,
+            roles: parsed_roles,
+            rest,
+            model: parsed_model,
+            parallel,
+        } = parsed;
+        let (strategy, automatic_parallel) =
+            resolve_team_create_intent(parsed_strategy, &parsed_roles, parallel);
+        let mut parts = rest.into_iter();
+        match parts.next().as_deref() {
             None => println!("{}", USAGE.dimmed()),
             Some("list") => self.team_list().await?,
             Some("use") => {
@@ -829,6 +830,22 @@ impl DaemonRepl {
             Some("watch") => {
                 let id = self.team_required()?;
                 self.team_watch(&id).await?;
+            }
+            Some("context") => {
+                let id = self.team_required()?;
+                match parts.next() {
+                    Some(command) if command == "publish" => {
+                        let key = parts
+                            .next()
+                            .ok_or("用法：/team context publish <key> <内容>")?;
+                        let value = parts.collect::<Vec<_>>().join(" ");
+                        self.team_context_publish(&id, &key, &value).await?;
+                    }
+                    None => self.team_context(&id).await?,
+                    Some(other) => {
+                        return Err(format!("未知 context 子命令：{other}（支持 publish）").into())
+                    }
+                }
             }
             Some("steer") => {
                 let id = self.team_required()?;
@@ -861,11 +878,19 @@ impl DaemonRepl {
             }
             Some(first) => {
                 // 目标可能含空格：把剩余片段拼回。
-                let objective = std::iter::once(first)
+                let objective = std::iter::once(first.to_string())
                     .chain(parts)
                     .collect::<Vec<_>>()
                     .join(" ");
-                self.team_create_and_watch(&objective, &strategy).await?;
+                self.team_create_and_watch(
+                    &objective,
+                    &strategy,
+                    &parsed_roles,
+                    parsed_model.as_deref(),
+                    parallel,
+                    automatic_parallel,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -927,6 +952,80 @@ impl DaemonRepl {
         Ok(())
     }
 
+    async fn team_context(&self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let context = self
+            .client
+            .get_json::<serde_json::Value>(&format!("/teams/{id}/context"))
+            .await?;
+        let revision = context
+            .get("revision")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let facts = context
+            .get("facts")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        println!("{} revision={revision}", "团队共享上下文：".bold());
+        if facts.is_empty() {
+            println!("（暂无共享事实；用 /team context publish <key> <内容> 发布候选事实）");
+            return Ok(());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for fact in facts {
+            let key = fact.get("key").and_then(|v| v.as_str()).unwrap_or("?");
+            if !seen.insert(key.to_string()) {
+                continue;
+            }
+            let fact_revision = fact.get("revision").and_then(|v| v.as_u64()).unwrap_or(0);
+            let producer = fact.get("producer").and_then(|v| v.as_str()).unwrap_or("?");
+            let status = fact.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            let value = fact.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            let preview = value.chars().take(240).collect::<String>();
+            println!("  r{fact_revision} [{status}] {key} · {producer}\n    {preview}");
+        }
+        Ok(())
+    }
+
+    async fn team_context_publish(
+        &self,
+        id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if key.trim().is_empty() || value.trim().is_empty() {
+            return Err("用法：/team context publish <key> <内容>".into());
+        }
+        let current = self
+            .client
+            .get_json::<serde_json::Value>(&format!("/teams/{id}/context"))
+            .await?;
+        let expected_revision = current
+            .get("revision")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let body = serde_json::json!({
+            "expected_revision": expected_revision,
+            "key": key,
+            "value": value,
+            "producer": "user",
+            "source_refs": []
+        });
+        let result: serde_json::Value = self
+            .client
+            .post_json(&format!("/teams/{id}/context"), &body)
+            .await?;
+        let revision = result
+            .pointer("/fact/revision")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(|| expected_revision.saturating_add(1));
+        println!(
+            "{} {key}（revision {revision}，候选事实）",
+            "已共享：".green()
+        );
+        Ok(())
+    }
+
     async fn team_status(&self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let detail = self
             .client
@@ -937,12 +1036,25 @@ impl DaemonRepl {
     }
 
     /// 创建团队（后台跑）+ 实时跟踪到终态（Ctrl+C 只停止跟踪，团队继续跑）。
+    ///
+    /// - `roles` 非空 = 自定义/并行角色编排；
+    /// - `model`：显式 `--model` 才随请求下发；缺省由服务端读
+    ///   `<workspace>/settings.json` 的 `team.model`（→ `model` → 环境变量/内置缺省）；
+    /// - `parallel` = 显式并行开发：请求带 `parallel=true` +
+    ///   `max_agent_members=N+2` + `budget.max_parallel=N`；缺省由服务端按
+    ///   `team.parallel` 决定；lead 拆解出的 `subtasks`（子任务 + 写范围）由服务端
+    ///   运行期动态应用到 w1..wN。
     async fn team_create_and_watch(
         &mut self,
         objective: &str,
         strategy: &str,
+        roles: &[serde_json::Value],
+        model: Option<&str>,
+        parallel: Option<usize>,
+        automatic_parallel: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let body = serde_json::json!({
+        let model = model.map(str::to_string);
+        let mut body = serde_json::json!({
             "objective": objective,
             "mode": "team",
             "strategy": strategy,
@@ -951,6 +1063,53 @@ impl DaemonRepl {
                 "read_only": false,
             },
         });
+        if let Some(model) = &model {
+            body["model"] = serde_json::json!(model);
+        }
+        if let Some(session_id) = self.session.as_deref() {
+            body["parent_session_id"] = serde_json::json!(session_id);
+        }
+        apply_team_execution_intent(&mut body, parallel, automatic_parallel);
+        if automatic_parallel {
+            println!(
+                "{} 默认自动并行开发；并发容量按工作区 team 配置（缺省 4）",
+                "编排：".green()
+            );
+        }
+        if !roles.is_empty() {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert(
+                    "roles".to_string(),
+                    serde_json::Value::Array(roles.to_vec()),
+                );
+            }
+            if let Some(writers) = parallel {
+                println!(
+                    "{} 并行 {writers} 路：lead 拆解 → w1..w{writers} 并行 → leader 汇总；\
+                     写范围由 lead 拆解动态分配（也可 --write w1=路径 预声明）",
+                    "编排：".green()
+                );
+            } else {
+                // 只读提示：自定义角色既未声明写范围、角色名也不属写角色族时，服务端
+                // 按权限默认 deny 只读执行（不会产出文件）——提前告知避免"成功零产出"。
+                for role in roles {
+                    let name = role.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+                    let has_write = role
+                        .get("write_paths")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|paths| !paths.is_empty());
+                    if !has_write
+                        && !owo_agent_core::worker_profile::WorkerProfile::for_role(name, 0)
+                            .is_writer()
+                    {
+                        println!(
+                            "{} 角色 {name} 未声明 --write 且不在写角色族，将按只读执行（不产出文件）",
+                            "提示：".yellow()
+                        );
+                    }
+                }
+            }
+        }
         let created: serde_json::Value = self.client.post_json("/teams", &body).await?;
         let team_id = created
             .get("team_id")
@@ -965,21 +1124,36 @@ impl DaemonRepl {
             .get("template_id")
             .and_then(|v| v.as_str())
             .unwrap_or("（动态组队）");
+        // 成员展示：role 名 +（角色级模型覆盖时的）标注；统一模型在标题行展示。
         let members = created
             .get("members")
             .and_then(|v| v.as_array())
             .map(|list| {
                 list.iter()
-                    .filter_map(|member| member.get("user_id").and_then(|v| v.as_str()))
+                    .filter_map(|member| {
+                        let role = member.get("role").and_then(|v| v.as_str())?;
+                        let model = roles
+                            .iter()
+                            .find(|r| r.get("role").and_then(|v| v.as_str()) == Some(role))
+                            .and_then(|r| r.get("model"))
+                            .and_then(|v| v.as_str());
+                        Some(match model {
+                            Some(model) => format!("{role}({model})"),
+                            None => role.to_string(),
+                        })
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             })
             .unwrap_or_default();
         self.team_id = Some(team_id.clone());
         println!(
-            "{} 团队已创建：{}（{mode} · 模板 {template}）",
+            "{} 团队已创建：{}（{mode} · 模板 {template} · 模型 {}）",
             "✓".green(),
-            team_id
+            team_id,
+            model
+                .as_deref()
+                .unwrap_or("settings.json team.model / 服务端缺省")
         );
         if !members.is_empty() {
             println!("  成员：{members}");
@@ -990,85 +1164,143 @@ impl DaemonRepl {
 
     /// 轮询任务图并打印状态转移，直到团队进入终态。
     async fn team_watch(&self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        use std::collections::HashMap;
-        let mut last: HashMap<String, String> = HashMap::new();
-        let mut printed_header = false;
-        // 跟踪上限：到点自动放手（团队继续后台跑），避免 REPL 无限挂住。
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        use std::collections::{HashMap, HashSet};
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(600);
+        let mut last = HashMap::<String, String>::new();
+        let mut seen_audit = HashSet::<u64>::new();
+        let mut last_event_id: Option<String> = None;
+        let mut detail = self
+            .client
+            .get_json::<serde_json::Value>(&format!("/teams/{id}"))
+            .await?;
+        print_team_detail(&detail);
+        seed_team_step_states(&detail, &mut last);
+        let mut status = team_status(&detail);
+        if team_status_is_terminal(&status) {
+            print_team_watch_terminal(&status, &detail);
+            return Ok(());
+        }
+
+        let mut retry_delay = Duration::from_millis(250);
         loop {
-            let detail = self
-                .client
-                .get_json::<serde_json::Value>(&format!("/teams/{id}"))
-                .await?;
-            if !printed_header {
-                print_team_detail(&detail);
-                printed_header = true;
-            }
-            let status = detail
-                .get("team")
-                .and_then(|team| team.get("status"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("running")
-                .to_string();
-            if let Some(tasks) = detail.get("tasks").and_then(|v| v.as_array()) {
-                for task in tasks {
-                    let task_id = task
-                        .get("task_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?")
-                        .to_string();
-                    let role = task.get("role").and_then(|v| v.as_str()).unwrap_or("?");
-                    let state = task
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Pending")
-                        .to_string();
-                    if last.get(&task_id) != Some(&state) {
-                        let line = match state.as_str() {
-                            "Running" => format!("  {} {role} 开始执行", "▶".blue()),
-                            "Succeeded" => format!("  {} {role} 完成", "✔".green()),
-                            "Failed" => format!(
-                                "  {} {role} 失败：{}",
-                                "✘".red(),
-                                task.get("error").and_then(|v| v.as_str()).unwrap_or("未知")
-                            ),
-                            "Skipped" => format!("  {} {role} 跳过", "○".dimmed()),
-                            _ => format!("  {} {role} {state}", "○".dimmed()),
-                        };
-                        println!("{line}");
-                        last.insert(task_id, state);
-                    }
-                }
-            }
-            if matches!(status.as_str(), "succeeded" | "failed" | "cancelled") {
-                let mark = if status == "succeeded" {
-                    "✓".green().to_string()
-                } else {
-                    "✘".red().to_string()
-                };
-                println!(
-                    "{mark} 团队终态：{status}（/team diff 看真实变更集，/team status 看详情）"
-                );
-                return Ok(());
-            }
-            // 轮询 + Ctrl+C 只停止跟踪（团队仍在 Daemon 侧运行）。
-            if std::time::Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 println!(
                     "{}",
                     "（跟踪已到 10 分钟上限；团队继续在后台运行，/team watch 继续跟踪）".yellow()
                 );
                 return Ok(());
             }
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                _ = tokio::signal::ctrl_c() => {
-                    println!(
-                        "{}",
-                        "（已停止跟踪；团队继续在后台运行，/team status 查看）".yellow()
+
+            let stream_path = format!("/teams/{id}/events");
+            match self
+                .client
+                .open_event_stream_after(&stream_path, last_event_id.as_deref())
+                .await
+            {
+                Ok(mut stream) => loop {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {
+                            println!("{}", "（已停止跟踪；团队继续在后台运行，/team status 查看）".yellow());
+                            return Ok(());
+                        }
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                            println!("{}", "（跟踪已到 10 分钟上限；团队继续在后台运行，/team watch 继续跟踪）".yellow());
+                            return Ok(());
+                        }
+                        event = stream.next_event() => match event {
+                            Some(Ok(event)) => {
+                                if let Some(cursor) = stream.last_event_id() {
+                                    last_event_id = Some(cursor.to_string());
+                                }
+                                match event.get("type").and_then(|v| v.as_str()) {
+                                    Some("progress") => {
+                                        if let Some(steps) = event.pointer("/progress/current_steps").and_then(|v| v.as_array()) {
+                                            print_team_step_updates(steps, &mut last);
+                                        }
+                                    }
+                                    Some("audit") => {
+                                        if let Some(signature) = team_audit_signature(&event) {
+                                            if seen_audit.insert(signature) {
+                                                if seen_audit.len() > 2048 {
+                                                    seen_audit.clear();
+                                                    seen_audit.insert(signature);
+                                                }
+                                                if let Some(summary) = team_audit_summary(&event) {
+                                                    println!("  · {summary}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Some("state") => {
+                                        status = event.get("status").and_then(|v| v.as_str()).unwrap_or("running").to_string();
+                                        if team_status_is_terminal(&status) {
+                                            detail = self.client.get_json(&format!("/teams/{id}")).await?;
+                                            print_team_watch_terminal(&status, &detail);
+                                            return Ok(());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Some(Err(error)) => {
+                                if let Some(cursor) = stream.last_event_id() {
+                                    last_event_id = Some(cursor.to_string());
+                                }
+                                eprintln!("{} {error}", "团队事件流中断，正在刷新状态并重连：".yellow());
+                                break;
+                            }
+                            None => {
+                                if let Some(cursor) = stream.last_event_id() {
+                                    last_event_id = Some(cursor.to_string());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                },
+                Err(error) => {
+                    eprintln!(
+                        "{} {error}",
+                        "团队事件流暂不可用，正在刷新状态并重连：".yellow()
                     );
-                    return Ok(());
                 }
             }
+
+            // SSE 断开时先用快照补齐状态，再重连；不会让断流丢失进度。
+            detail = self
+                .client
+                .get_json::<serde_json::Value>(&format!("/teams/{id}"))
+                .await?;
+            status = team_status(&detail);
+            if let Some(steps) = detail
+                .get("progress")
+                .and_then(|progress| progress.get("current_steps"))
+                .and_then(|steps| steps.as_array())
+            {
+                print_team_step_updates(steps, &mut last);
+            }
+            if let Some(tasks) = detail.get("tasks").and_then(|tasks| tasks.as_array()) {
+                print_team_step_updates(tasks, &mut last);
+            }
+            if team_status_is_terminal(&status) {
+                print_team_watch_terminal(&status, &detail);
+                return Ok(());
+            }
+
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    println!("{}", "（已停止跟踪；团队继续在后台运行，/team status 查看）".yellow());
+                    return Ok(());
+                }
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    println!("{}", "（跟踪已到 10 分钟上限；团队继续在后台运行，/team watch 继续跟踪）".yellow());
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(retry_delay) => {}
+            }
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
         }
     }
 
@@ -1180,6 +1412,216 @@ impl DaemonRepl {
     }
 }
 
+fn team_status(detail: &serde_json::Value) -> String {
+    detail
+        .get("team")
+        .and_then(|team| team.get("status"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("running")
+        .to_string()
+}
+
+fn team_status_is_terminal(status: &str) -> bool {
+    ["succeeded", "failed", "cancelled", "canceled"]
+        .iter()
+        .any(|terminal| status.eq_ignore_ascii_case(terminal))
+}
+
+fn seed_team_step_states(
+    detail: &serde_json::Value,
+    last: &mut std::collections::HashMap<String, String>,
+) {
+    if let Some(tasks) = detail.get("tasks").and_then(|value| value.as_array()) {
+        for task in tasks {
+            if let (Some(id), Some(status)) = (
+                task.get("task_id").and_then(|value| value.as_str()),
+                task.get("status").and_then(|value| value.as_str()),
+            ) {
+                last.insert(id.to_string(), status.to_string());
+            }
+        }
+    }
+}
+
+fn print_team_step_updates(
+    steps: &[serde_json::Value],
+    last: &mut std::collections::HashMap<String, String>,
+) {
+    for step in steps {
+        let Some(id) = step
+            .get("step_id")
+            .or_else(|| step.get("task_id"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        let role = step
+            .get("worker")
+            .and_then(|value| value.as_str())
+            .unwrap_or("?");
+        let state = step
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Pending");
+        if last.get(id).is_some_and(|previous| previous == state) {
+            continue;
+        }
+        let line = match state.to_ascii_lowercase().as_str() {
+            "claimed" => format!("  {} {role} 已领取，等待执行", "◷".yellow()),
+            "running" => format!("  {} {role} 开始执行", "▶".blue()),
+            "succeeded" => format!("  {} {role} 完成", "✔".green()),
+            "failed" | "aborted" => format!(
+                "  {} {role} 失败：{}",
+                "✘".red(),
+                step.get("error")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("查看 /team status")
+            ),
+            "skipped" => format!("  {} {role} 跳过", "○".dimmed()),
+            _ => format!("  {} {role} {state}", "○".dimmed()),
+        };
+        println!("{line}");
+        last.insert(id.to_string(), state.to_string());
+    }
+}
+
+fn team_audit_signature(event: &serde_json::Value) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+
+    let event_name = event.get("event")?.as_str()?;
+    let detail = event
+        .get("detail")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let timestamp = event
+        .get("ts")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    timestamp.hash(&mut hasher);
+    event_name.hash(&mut hasher);
+    detail.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn team_audit_field(detail: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    detail
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(&prefix))
+        .map(|value| {
+            value
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(80)
+                .collect::<String>()
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn team_audit_summary(event: &serde_json::Value) -> Option<String> {
+    let name = event.get("event")?.as_str()?;
+    let detail = event
+        .get("detail")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let field = |key| team_audit_field(detail, key).unwrap_or_else(|| "?".to_string());
+    match name {
+        "team.worker.started" => Some(format!(
+            "{} 开始执行（{}）",
+            field("role"),
+            field("step_id")
+        )),
+        "team.tool.started" => Some(format!(
+            "{} 正在使用 {} · {}",
+            field("role"),
+            field("tool"),
+            field("step_id")
+        )),
+        "team.tool.finished" => Some(format!(
+            "{} 使用 {}：{} · {} ms · {}",
+            field("role"),
+            field("tool"),
+            field("outcome"),
+            field("duration_ms"),
+            field("step_id")
+        )),
+        "team.model.started" => Some(format!(
+            "{} 发起模型请求 · {}",
+            field("role"),
+            field("step_id")
+        )),
+        "team.model.request_completed" => Some(format!(
+            "模型请求：{} · {} · {} ms · {} tokens",
+            field("role"),
+            field("model"),
+            field("latency_ms"),
+            field("usage_tokens")
+        )),
+        "team.lease.wait_completed" => Some(format!(
+            "{} 等待写入租约 {} ms",
+            field("role"),
+            field("wait_ms")
+        )),
+        "team.worker.finished" => Some(format!(
+            "{} 执行结束：{} · {} ms",
+            field("role"),
+            field("outcome"),
+            field("wall_ms")
+        )),
+        "team.context.fact_published" => Some(format!(
+            "共享事实更新：{} · revision {}",
+            field("key"),
+            field("revision")
+        )),
+        "team.artifact.validation_started" => Some(format!(
+            "产物校验开始（{}，{}）",
+            field("member"),
+            field("format")
+        )),
+        "team.artifact.validation_passed" => Some(format!(
+            "产物校验通过（{}，{} · {} ms）",
+            field("member"),
+            field("format"),
+            field("duration_ms")
+        )),
+        "team.artifact.validation_rejected" => Some(format!(
+            "产物校验未通过（{} · {} ms）",
+            team_audit_field(detail, "step").unwrap_or_else(|| "查看 /team status".to_string()),
+            field("duration_ms")
+        )),
+        _ => None,
+    }
+}
+
+fn print_team_watch_terminal(status: &str, detail: &serde_json::Value) {
+    if let Some(tasks) = detail.get("tasks").and_then(|value| value.as_array()) {
+        for task in tasks.iter().filter(|task| {
+            task.get("status")
+                .and_then(|value| value.as_str())
+                .is_some_and(|state| {
+                    matches!(state.to_ascii_lowercase().as_str(), "failed" | "aborted")
+                })
+        }) {
+            let role = task
+                .get("role")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            let error = task
+                .get("error")
+                .and_then(|value| value.as_str())
+                .unwrap_or("未知");
+            println!("  {} {role} 失败：{error}", "✘".red());
+        }
+    }
+    let mark = if status.eq_ignore_ascii_case("succeeded") {
+        "✓".green().to_string()
+    } else {
+        "✘".red().to_string()
+    };
+    println!("{mark} 团队终态：{status}（/team diff 看真实变更集，/team status 看详情）");
+}
+
 /// 团队详情渲染（状态 / 成员 / 任务图 / 审计尾迹）——`/team status` 与跟踪共用。
 fn print_team_detail(detail: &serde_json::Value) {
     let team = detail.get("team").cloned().unwrap_or_default();
@@ -1267,13 +1709,241 @@ fn print_help() {
     println!(
         "  /permissions [status] 查看档位与授权；set <档位> 切换；revoke <授权ID> 撤销单条授权"
     );
+    println!("  /team [--parallel N] [--model <模型>] [--write <角色>=<路径>] <目标>");
     println!(
-        "  /team <目标>       创建多 agent 团队并实时跟踪（list/status/steer/retry/cancel/diff）"
+        "                    并行 N 路：lead 拆解 → w1..wN 并行 → leader 汇总；模型/并行/角色缺省读 <workspace>/settings.json 的 team 段（list/status/steer/retry/cancel/diff）"
     );
+    println!("                    context 查看团队共享事实；context publish <key> <内容> 发布带 revision 的候选事实");
     println!("  /audit /skills /settings /traces  读取服务端状态");
     println!("  /clear             清屏");
     println!("  /exit | /quit      退出");
     println!("  其它命令请用 --local 使用旧 REPL（迁移中）");
+}
+
+/// `/team` 前置参数解析结果（纯逻辑，便于单测）。
+#[derive(Debug, Default, PartialEq)]
+struct TeamArgs {
+    /// 显式策略（`--single|--team|--auto`；None = 按是否声明角色/并行取缺省）。
+    strategy: Option<String>,
+    /// 自定义角色（RoleSpec JSON：role/assignee/depends_on[/model/write_paths]）。
+    roles: Vec<serde_json::Value>,
+    /// 非前置参数（子命令或目标片段）；空 = 仅打印用法。
+    rest: Vec<String>,
+    /// 团队统一模型（`--model <模型>`，全队 agent 共用；None = 用默认常量）。
+    model: Option<String>,
+    /// 并行路数（`--parallel N`：lead 拆解 → w1..wN 并行 → leader 汇总）。
+    parallel: Option<usize>,
+}
+
+/// 解析 `/team` 前置参数：
+/// - `--single|--team|--auto`：策略开关；
+/// - `--parallel <N>`（2..=8）：**并行开发**——生成 `lead`（只读拆解）→ `w1..wN`
+///   （依赖 lead，彼此无依赖 = 同 wave 真并行）→ `leader`（汇总）；运行期 lead
+///   产出的 `subtasks`（子任务 + 写范围）动态应用到对应 writer；
+/// - `--role <名[:依赖1|依赖2]>`（可重复）：自定义角色；与 `--parallel` 互斥；
+/// - `--model <模型>`：团队统一模型（全队共用）；`--model <角色>=<模型>[,…]`：
+///   角色级覆盖（高级用法）；不传则读 `<workspace>/settings.json` 的 `team.model`；
+/// - `--write <角色>=<路径>[;<路径>]`：角色写范围（互不重叠 → 并发落盘）。
+///
+/// 错误：缺参、角色重复/为空、`--parallel` 与 `--role` 同用、并行路数越界、
+/// `--model`/`--write` 指向未声明角色、映射格式非法。
+fn apply_team_execution_intent(
+    body: &mut serde_json::Value,
+    parallel: Option<usize>,
+    automatic_parallel: bool,
+) {
+    if let Some(writers) = parallel {
+        body["parallel"] = serde_json::json!(true);
+        body["max_agent_members"] = serde_json::json!(writers + 2);
+        body["budget"] = serde_json::json!({ "max_parallel": writers });
+    } else if automatic_parallel {
+        // Capacity remains unset so the server can honor workspace settings.
+        body["parallel"] = serde_json::json!(true);
+    }
+}
+
+fn resolve_team_create_intent(
+    strategy: Option<String>,
+    roles: &[serde_json::Value],
+    parallel: Option<usize>,
+) -> (String, bool) {
+    let automatic_parallel = strategy.is_none() && roles.is_empty() && parallel.is_none();
+    let strategy = strategy.unwrap_or_else(|| {
+        if automatic_parallel || !roles.is_empty() || parallel.is_some() {
+            "team".to_string()
+        } else {
+            "auto".to_string()
+        }
+    });
+    (strategy, automatic_parallel)
+}
+
+fn parse_team_args(args: &[String]) -> Result<TeamArgs, String> {
+    let mut parsed = TeamArgs::default();
+    let mut role_specs: Vec<String> = Vec::new();
+    let mut model_specs: Vec<String> = Vec::new();
+    let mut write_specs: Vec<String> = Vec::new();
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--single" => {
+                parsed.strategy = Some("single".to_string());
+                index += 1;
+            }
+            "--team" => {
+                parsed.strategy = Some("team".to_string());
+                index += 1;
+            }
+            "--auto" => {
+                parsed.strategy = Some("auto".to_string());
+                index += 1;
+            }
+            "--parallel" => {
+                let value = args
+                    .get(index + 1)
+                    .map(String::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| "--parallel 需要参数（2..=8）".to_string())?;
+                let writers: usize = value
+                    .parse()
+                    .map_err(|_| format!("--parallel 需要 2..=8 的数字：{value}"))?;
+                if !(2..=8).contains(&writers) {
+                    return Err(format!("--parallel 需要在 2..=8 之间：{writers}"));
+                }
+                parsed.parallel = Some(writers);
+                index += 2;
+            }
+            flag @ ("--role" | "--model" | "--write") => {
+                let value = args
+                    .get(index + 1)
+                    .map(String::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| format!("{flag} 需要参数"))?
+                    .to_string();
+                index += 2;
+                match flag {
+                    "--role" => role_specs.push(value),
+                    "--model" => model_specs.push(value),
+                    _ => write_specs.push(value),
+                }
+            }
+            _ => break,
+        }
+    }
+    parsed.rest = args[index..].to_vec();
+
+    if parsed.parallel.is_some() && !role_specs.is_empty() {
+        return Err(
+            "--parallel 与 --role 互斥（并行模式已内置 lead/w1..wN/leader 角色）".to_string(),
+        );
+    }
+
+    if let Some(writers) = parsed.parallel {
+        // 十一期：并行开发角色组由核心提供（契约与运行期分配口径同源）。
+        parsed.roles = owo_agent_core::workswarm::parallel_roles(writers)
+            .into_iter()
+            .map(|role| serde_json::to_value(role).unwrap_or_default())
+            .collect();
+    } else {
+        // `名[:依赖1|依赖2]` → RoleSpec JSON（assignee=agent，缺省模型/写范围由服务端解析）。
+        for spec in &role_specs {
+            let (name, deps) = match spec.split_once(':') {
+                Some((name, deps)) => (
+                    name.trim(),
+                    deps.split(['|', ','])
+                        .map(str::trim)
+                        .filter(|d| !d.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                ),
+                None => (spec.trim(), Vec::new()),
+            };
+            if name.is_empty() {
+                return Err("--role 角色名不能为空".to_string());
+            }
+            if parsed
+                .roles
+                .iter()
+                .any(|r| r.get("role").and_then(|v| v.as_str()) == Some(name))
+            {
+                return Err(format!("--role 角色重复：{name}"));
+            }
+            parsed.roles.push(serde_json::json!({
+                "role": name,
+                "assignee": "agent",
+                "depends_on": deps,
+            }));
+        }
+    }
+    let role_names: Vec<String> = parsed
+        .roles
+        .iter()
+        .filter_map(|r| r.get("role").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    let find_role = |roles: &mut [serde_json::Value], role: &str| -> Result<(), String> {
+        roles
+            .iter_mut()
+            .find(|r| r.get("role").and_then(|v| v.as_str()) == Some(role))
+            .map(|_| ())
+            .ok_or_else(|| {
+                format!(
+                    "角色 {role} 不在 --role 列表（现有：{}）",
+                    role_names.join(", ")
+                )
+            })
+    };
+    for spec in &model_specs {
+        let spec = spec.trim();
+        // 无 `=`：团队统一模型（`--model glm-5.3-flashx` 全队共用，最后一条生效）。
+        if !spec.contains('=') {
+            if spec.contains(',') {
+                return Err(format!("--model 统一模型不能含逗号：{spec}"));
+            }
+            parsed.model = Some(spec.to_string());
+            continue;
+        }
+        for pair in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (role, model) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("--model 需要 <角色>=<模型>：{pair}"))?;
+            let (role, model) = (role.trim(), model.trim());
+            if role.is_empty() || model.is_empty() {
+                return Err(format!("--model 需要 <角色>=<模型>：{pair}"));
+            }
+            find_role(&mut parsed.roles, role)?;
+            let target = parsed
+                .roles
+                .iter_mut()
+                .find(|r| r.get("role").and_then(|v| v.as_str()) == Some(role))
+                .expect("find_role 已校验存在");
+            target["model"] = serde_json::json!(model);
+        }
+    }
+    for spec in &write_specs {
+        let (role, paths) = spec
+            .split_once('=')
+            .ok_or_else(|| format!("--write 需要 <角色>=<路径[;路径]>：{spec}"))?;
+        let role = role.trim();
+        let paths: Vec<String> = paths
+            .split(';')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        if role.is_empty() || paths.is_empty() {
+            return Err(format!("--write 需要 <角色>=<路径[;路径]>：{spec}"));
+        }
+        find_role(&mut parsed.roles, role)?;
+        let target = parsed
+            .roles
+            .iter_mut()
+            .find(|r| r.get("role").and_then(|v| v.as_str()) == Some(role))
+            .expect("find_role 已校验存在");
+        target["write_paths"] = serde_json::json!(paths);
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -1287,5 +1957,182 @@ mod tests {
             grant_revoke_payload("grant-123"),
             serde_json::json!({ "grant_id": "grant-123" })
         );
+    }
+
+    fn team_args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_team_args_builds_parallel_roles_with_models_and_scopes() {
+        let parsed = parse_team_args(&team_args(&[
+            "--role",
+            "w1",
+            "--role",
+            "w2:reviewer",
+            "--model",
+            "w1=glm-5.3-flash,w2=glm-4.6",
+            "--write",
+            "w1=src/a;src/common",
+            "--write",
+            "w2=src/b",
+            "实现",
+            "A 与 B",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.strategy, None, "缺省策略按是否声明角色推导");
+        assert_eq!(parsed.rest, vec!["实现".to_string(), "A 与 B".to_string()]);
+        assert_eq!(parsed.roles.len(), 2);
+        assert_eq!(parsed.roles[0]["role"], "w1");
+        assert_eq!(parsed.roles[0]["assignee"], "agent");
+        assert_eq!(parsed.roles[0]["model"], "glm-5.3-flash");
+        assert_eq!(
+            parsed.roles[0]["write_paths"],
+            serde_json::json!(["src/a", "src/common"])
+        );
+        assert_eq!(parsed.roles[1]["role"], "w2");
+        assert_eq!(
+            parsed.roles[1]["depends_on"],
+            serde_json::json!(["reviewer"])
+        );
+        assert_eq!(parsed.roles[1]["model"], "glm-4.6");
+        assert_eq!(parsed.roles[1]["write_paths"], serde_json::json!(["src/b"]));
+    }
+
+    #[test]
+    fn automatic_parallel_request_leaves_capacity_to_workspace_settings() {
+        let mut body = serde_json::json!({"objective":"goal"});
+        apply_team_execution_intent(&mut body, None, true);
+        assert_eq!(body["parallel"], true);
+        assert!(body.get("budget").is_none());
+        assert!(body.get("max_agent_members").is_none());
+
+        let mut explicit = serde_json::json!({"objective":"goal"});
+        apply_team_execution_intent(&mut explicit, Some(3), false);
+        assert_eq!(explicit["parallel"], true);
+        assert_eq!(explicit["max_agent_members"], 5);
+        assert_eq!(explicit["budget"]["max_parallel"], 3);
+    }
+
+    #[test]
+    fn default_team_goal_selects_parallel_development_without_overriding_explicit_modes() {
+        let (strategy, parallel) = resolve_team_create_intent(None, &[], None);
+        assert_eq!(strategy, "team");
+        assert!(parallel);
+
+        let (strategy, parallel) = resolve_team_create_intent(Some("auto".to_string()), &[], None);
+        assert_eq!(strategy, "auto");
+        assert!(!parallel);
+
+        let roles = vec![serde_json::json!({"role":"reviewer"})];
+        let (strategy, parallel) = resolve_team_create_intent(None, &roles, None);
+        assert_eq!(strategy, "team");
+        assert!(!parallel);
+
+        let (strategy, parallel) =
+            resolve_team_create_intent(Some("single".to_string()), &[], None);
+        assert_eq!(strategy, "single");
+        assert!(!parallel);
+    }
+
+    #[test]
+    fn parse_team_args_keeps_defaults_and_rejects_bad_mappings() {
+        // 无前置参数：rest 原样，无角色；模型不写死（缺省读 settings.json team 段）。
+        let parsed = parse_team_args(&team_args(&["--team", "目标"])).unwrap();
+        assert_eq!(parsed.strategy.as_deref(), Some("team"));
+        assert!(parsed.roles.is_empty());
+        assert!(parsed.model.is_none(), "未显式 --model 时不得内置模型常量");
+        assert!(parsed.parallel.is_none());
+        assert_eq!(parsed.rest, vec!["目标".to_string()]);
+        // 未声明角色 → 模型/写范围映射报错；缺参数报错。
+        assert!(parse_team_args(&team_args(&["--model", "w1=x"])).is_err());
+        assert!(parse_team_args(&team_args(&["--role", "w1", "--write", "w2=src"])).is_err());
+        assert!(parse_team_args(&team_args(&["--write"])).is_err());
+    }
+
+    #[test]
+    fn parse_team_args_parallel_generates_lead_writers_and_leader() {
+        let parsed = parse_team_args(&team_args(&[
+            "--parallel",
+            "3",
+            "--model",
+            "glm-5.3-flashx",
+            "--write",
+            "w2=src/b",
+            "开发",
+            "功能",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.parallel, Some(3));
+        assert_eq!(parsed.model.as_deref(), Some("glm-5.3-flashx"));
+        let roles: Vec<&str> = parsed
+            .roles
+            .iter()
+            .map(|r| r["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, vec!["lead", "w1", "w2", "w3", "leader"]);
+        assert_eq!(parsed.roles[1]["depends_on"], serde_json::json!(["lead"]));
+        assert_eq!(
+            parsed.roles[4]["depends_on"],
+            serde_json::json!(["w1", "w2", "w3"])
+        );
+        assert_eq!(parsed.roles[2]["write_paths"], serde_json::json!(["src/b"]));
+        assert_eq!(parsed.rest, vec!["开发".to_string(), "功能".to_string()]);
+    }
+
+    #[test]
+    fn team_audit_summary_exposes_runtime_measurements_without_control_characters() {
+        let event = serde_json::json!({
+            "ts": "2026-10-02T05:00:00Z",
+            "event": "team.model.request_completed",
+            "detail": "role=w1 model=glm-5 latency_ms=123 usage_tokens=42 request_id=secret"
+        });
+        let summary = team_audit_summary(&event).expect("known runtime event");
+        assert!(summary.contains("w1"));
+        assert!(summary.contains("glm-5"));
+        assert!(summary.contains("123 ms"));
+        assert!(summary.contains("42 tokens"));
+        assert!(!summary.contains("secret"));
+
+        let model_started = serde_json::json!({
+            "event": "team.model.started",
+            "detail": "role=w1 step_id=step-1"
+        });
+        let model_summary = team_audit_summary(&model_started).expect("model start is visible");
+        assert!(model_summary.contains("w1"));
+        assert!(model_summary.contains("step-1"));
+
+        let tool_event = serde_json::json!({
+            "event": "team.tool.finished",
+            "detail": "role=implementer step_id=step-2 tool=apply_patch outcome=succeeded duration_ms=13",
+        });
+        let tool_summary = team_audit_summary(&tool_event).expect("tool event is visible");
+        assert!(tool_summary.contains("apply_patch"));
+        assert!(tool_summary.contains("succeeded"));
+        assert!(tool_summary.contains("13 ms"));
+
+        let validation_event = serde_json::json!({
+            "event": "team.artifact.validation_passed",
+            "detail": "member=m-w1 step=step-2 format=markdown duration_ms=4",
+        });
+        let validation_summary =
+            team_audit_summary(&validation_event).expect("validation timing is visible");
+        assert!(validation_summary.contains("4 ms"));
+
+        let unsafe_field = serde_json::json!({
+            "event": "team.worker.started",
+            "detail": "role=w1\u{001b}[31m step_id=step-1"
+        });
+        let summary = team_audit_summary(&unsafe_field).expect("worker start");
+        assert!(!summary.contains('\u{1b}'));
+        assert!(team_audit_summary(&serde_json::json!({"event":"unknown.event"})).is_none());
+    }
+
+    #[test]
+    fn parse_team_args_parallel_rejects_bad_or_conflicting_flags() {
+        assert!(parse_team_args(&team_args(&["--parallel", "1"])).is_err());
+        assert!(parse_team_args(&team_args(&["--parallel", "9"])).is_err());
+        assert!(parse_team_args(&team_args(&["--parallel", "2", "--role", "w1"])).is_err());
+        assert!(parse_team_args(&team_args(&["--parallel"])).is_err());
     }
 }

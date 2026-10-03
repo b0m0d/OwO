@@ -211,9 +211,35 @@ impl CircuitBreaker {
     }
 }
 
-/// 错误是否可重试：网络/5xx/429/空闲看门狗 → 可；预算/出境/解析/4xx → 不可。
+/// 已知不可恢复的 Provider 错误，不应通过重试或 fallback 放大请求。
+/// BigModel HTTP 429 code 1113 表示余额不足或无可用资源包；其他 429 仍遵循 RetryPolicy。
+pub fn is_non_retryable_provider_failure(error: &str) -> bool {
+    let Some((_, payload)) = error.split_once("模型返回 429") else {
+        return false;
+    };
+    let Some(json_start) = payload.find('{') else {
+        return false;
+    };
+    let mut parser = serde_json::Deserializer::from_str(&payload[json_start..]);
+    let Ok(value) = <serde_json::Value as serde::Deserialize>::deserialize(&mut parser) else {
+        return false;
+    };
+    value
+        .get("code")
+        .and_then(|code| {
+            code.as_str()
+                .map(str::to_string)
+                .or_else(|| code.as_i64().map(|value| value.to_string()))
+        })
+        .is_some_and(|code| code == "1113")
+}
+
+/// 错误是否可重试：网络/5xx/临时429/空闲看门狗 → 可；资源耗尽/预算/出境/解析/4xx → 不可。
 pub(super) fn is_retriable(error: &str, policy: &RetryPolicy) -> bool {
-    if error.contains("预算已超限") || error.contains("数据出境") {
+    if error.contains("预算已超限")
+        || error.contains("数据出境")
+        || is_non_retryable_provider_failure(error)
+    {
         return false;
     }
     if error.contains("模型返回 429") {
@@ -435,6 +461,45 @@ impl ModelProvider for ResilientProvider {
         Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
 
+    async fn complete_with_model_observed(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ObservedModelOutput, String> {
+        if !self.breaker.allow_request() {
+            return Err(format!(
+                "模型网关熔断器打开（连续失败 {} 次），请稍后重试",
+                self.breaker.consecutive_failures()
+            ));
+        }
+        let mut errors = Vec::new();
+        for provider in self.providers() {
+            let mut attempt = 0;
+            loop {
+                match provider
+                    .complete_with_model_observed(model, messages, tools)
+                    .await
+                {
+                    Ok(observed) => {
+                        self.breaker.record_success();
+                        return Ok(observed);
+                    }
+                    Err(error) => {
+                        if !is_retriable(&error, &self.retry) || attempt >= self.retry.max_retries {
+                            errors.push(error);
+                            break;
+                        }
+                        tokio::time::sleep(self.retry.delay_for(attempt)).await;
+                        attempt += 1;
+                    }
+                }
+            }
+        }
+        self.breaker.record_failure();
+        Err(format!("模型网关全部失败：{}", errors.join("；")))
+    }
+
     async fn complete_stream(
         &self,
         messages: &[ChatMessage],
@@ -513,18 +578,18 @@ impl ModelProvider for ResilientProvider {
         Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
 
-    /// 思考通道流式（无模型覆盖）：见 [`ResilientProvider::stream_with_reasoning`]。
+    /// 思考通道流式（无模型覆盖）：保留请求观测与重试语义。
     async fn complete_stream_with_reasoning(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolSpec],
         on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
     ) -> Result<ModelOutput, String> {
-        self.stream_with_reasoning(None, messages, tools, on_chunk)
+        self.complete_stream_with_reasoning_and_model(None, messages, tools, on_chunk)
             .await
     }
 
-    /// 思考通道流式（带模型覆盖）：回合主循环走的就是这条路径。
+    /// 思考通道流式（带模型覆盖）：回合主循环使用的观测入口。
     async fn complete_stream_with_reasoning_and_model(
         &self,
         model: Option<&str>,
@@ -532,8 +597,67 @@ impl ModelProvider for ResilientProvider {
         tools: &[ToolSpec],
         on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
     ) -> Result<ModelOutput, String> {
-        self.stream_with_reasoning(model, messages, tools, on_chunk)
+        self.complete_stream_with_reasoning_and_model_observed(model, messages, tools, on_chunk)
             .await
+            .map(|observed| observed.output)
+    }
+
+    async fn complete_stream_with_reasoning_and_model_observed(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ObservedModelOutput, String> {
+        if !self.breaker.allow_request() {
+            return Err(format!(
+                "模型网关熔断器打开（连续失败 {} 次），请稍后重试",
+                self.breaker.consecutive_failures()
+            ));
+        }
+        let mut errors = Vec::new();
+        for provider in self.providers() {
+            let mut attempt = 0;
+            loop {
+                let mut emitted = false;
+                let result = {
+                    let mut forward = |chunk: StreamChunk| {
+                        emitted = true;
+                        on_chunk(chunk);
+                    };
+                    provider
+                        .complete_stream_with_reasoning_and_model_observed(
+                            model,
+                            messages,
+                            tools,
+                            &mut forward,
+                        )
+                        .await
+                };
+                match result {
+                    Ok(observed) => {
+                        self.breaker.record_success();
+                        return Ok(observed);
+                    }
+                    Err(error) => {
+                        if emitted {
+                            self.breaker.record_failure();
+                            return Err(format!(
+                                "{error}（流式中断：已输出部分内容，不再重试以免重复）"
+                            ));
+                        }
+                        if !is_retriable(&error, &self.retry) || attempt >= self.retry.max_retries {
+                            errors.push(error);
+                            break;
+                        }
+                        tokio::time::sleep(self.retry.delay_for(attempt)).await;
+                        attempt += 1;
+                    }
+                }
+            }
+        }
+        self.breaker.record_failure();
+        Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
 
     fn usage_snapshot(&self) -> TokenUsage {
@@ -742,6 +866,17 @@ impl ModelProvider for DeferredProvider {
             .await
     }
 
+    async fn complete_with_model_observed(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ObservedModelOutput, String> {
+        self.resolve()?
+            .complete_with_model_observed(model, messages, tools)
+            .await
+    }
+
     async fn complete_stream(
         &self,
         messages: &[ChatMessage],
@@ -785,6 +920,18 @@ impl ModelProvider for DeferredProvider {
     ) -> Result<ModelOutput, String> {
         self.resolve()?
             .complete_stream_with_reasoning_and_model(model, messages, tools, on_chunk)
+            .await
+    }
+
+    async fn complete_stream_with_reasoning_and_model_observed(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ObservedModelOutput, String> {
+        self.resolve()?
+            .complete_stream_with_reasoning_and_model_observed(model, messages, tools, on_chunk)
             .await
     }
 

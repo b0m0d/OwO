@@ -44,9 +44,26 @@ impl TeamCoordinator {
         if result.trim().is_empty() {
             return Err(WorkSwarmError::Validation("人节点结果不能为空".to_string()));
         }
-        // 产物注册（复用步骤产物通道；producer = 人成员）。
+        // 人工提交也分配宿主 epoch/attempt，并通过同一代次校验的产物通道。
+        let epoch = self.phase_epoch(team_id);
+        if let Some(record) = state.records.get_mut(step_id) {
+            record.phase_epoch = Some(epoch);
+            record.attempt_id = Some(uuid::Uuid::new_v4().to_string());
+            record.attempts = record.attempts.saturating_add(1);
+        }
+        self.persist_state(&state)?;
         let artifact = self
-            .register_step_output(team_id, &step.worker, &spec.role, step_id, result)
+            .register_step_output_checked_bound(
+                team_id,
+                &step.worker,
+                &spec.role,
+                step_id,
+                result,
+                OutputAttemptBinding {
+                    phase_epoch: Some(epoch),
+                    attempt_id: state.records[step_id].attempt_id.as_deref(),
+                },
+            )
             .await?;
         // 步骤置 Succeeded（运行任务据此自动唤醒下游）。
         if let Some(r) = state.records.get_mut(step_id) {
@@ -85,7 +102,7 @@ impl TeamCoordinator {
     ) -> WorkSwarmResult<HandoffRecord> {
         let lock = self.team_lock(team_id);
         let _guard = lock.lock().await;
-        let (team, _space, state) = self.load_bundle(team_id).await?;
+        let (team, space, state) = self.load_bundle(team_id).await?;
         let meta = RunMeta::load(&self.run_dir, team_id)?;
         let correlation = meta.correlation_id.clone();
         let step = state
@@ -107,10 +124,10 @@ impl TeamCoordinator {
                 record.status
             )));
         }
-        let role = worker_role(&step.worker).unwrap_or_default();
         let source_artifact = self
-            .latest_artifact_for_role_by_producer(team_id, from_member, &role)
-            .await?;
+            .latest_artifact_for_step(&space, &state, task_id)
+            .await
+            .map(|artifact| artifact.artifact_id);
         let handoff = HandoffRecord {
             handoff_id: format!("{team_id}:{task_id}:manual:{}", now_ms()),
             from_member: from_member.to_string(),
@@ -159,32 +176,6 @@ impl TeamCoordinator {
             format!("{from_member} 手动交接任务 {task_id}（correlation={correlation}）"),
         );
         Ok(handoff)
-    }
-
-    pub(crate) async fn latest_artifact_for_role_by_producer(
-        &self,
-        team_id: &str,
-        member_id: &str,
-        role: &str,
-    ) -> WorkSwarmResult<Option<String>> {
-        let team = self.store.get_team_run(team_id).await?;
-        let pid = team
-            .project_space_id
-            .ok_or_else(|| WorkSwarmError::Run("缺少 project_space_id".to_string()))?;
-        let space = self.store.get_project_space(&pid).await?;
-        let kind = role_kind(role);
-        let mut best: Option<Artifact> = None;
-        for id in &space.artifacts {
-            if let Ok(a) = self.store.get_artifact(id).await {
-                if a.kind == kind
-                    && a.producer == member_id
-                    && best.as_ref().is_none_or(|b| a.version > b.version)
-                {
-                    best = Some(a);
-                }
-            }
-        }
-        Ok(best.map(|a| a.artifact_id))
     }
 
     // -- steer（continue / steer / replace / cancel / retry；只改未完成节点） --

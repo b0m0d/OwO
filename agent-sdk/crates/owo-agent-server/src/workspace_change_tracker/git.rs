@@ -231,6 +231,29 @@ pub(crate) fn simplify_path(path: &Path) -> PathBuf {
     }
 }
 
+/// 相对路径是否落在写白名单内（canonical 前缀判定，两侧同经 [`simplify_path`]
+/// 去 verbatim；白名单空 = 未约束 → 放行）。
+///
+/// 与 [`check_whitelist`] 同一判定口径；十一期（二路）范围归属过滤复用。
+pub fn path_in_allowed(relative: &str, root: &Path, allowed: &[PathBuf]) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    let base = simplify_path(&root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
+    let candidate = base.join(relative);
+    let candidate = candidate.canonicalize().unwrap_or_else(|_| {
+        candidate
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .map(|parent| parent.join(candidate.file_name().unwrap_or_default()))
+            .unwrap_or_else(|| candidate.clone())
+    });
+    let candidate = simplify_path(&candidate);
+    allowed
+        .iter()
+        .any(|prefix| candidate.starts_with(simplify_path(prefix)))
+}
+
 /// 写白名单校验：`changed`（相对路径）必须全部落在 `allowed`（绝对前缀）内。
 ///
 /// - `changed` 为空（无窗口新增变更 / 非 git 检测不到）→ 放行；
@@ -242,22 +265,9 @@ pub fn check_whitelist(changed: &[String], root: &Path, allowed: &[PathBuf]) -> 
     if changed.is_empty() || allowed.is_empty() {
         return Ok(());
     }
-    let base = simplify_path(&root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
-    let allowed: Vec<PathBuf> = allowed.iter().map(|prefix| simplify_path(prefix)).collect();
     let offenders: Vec<String> = changed
         .iter()
-        .filter(|relative| {
-            let candidate = base.join(relative);
-            let candidate = candidate.canonicalize().unwrap_or_else(|_| {
-                candidate
-                    .parent()
-                    .and_then(|parent| parent.canonicalize().ok())
-                    .map(|parent| parent.join(candidate.file_name().unwrap_or_default()))
-                    .unwrap_or_else(|| candidate.clone())
-            });
-            let candidate = simplify_path(&candidate);
-            !allowed.iter().any(|prefix| candidate.starts_with(prefix))
-        })
+        .filter(|relative| !path_in_allowed(relative, root, allowed))
         .cloned()
         .collect();
     if offenders.is_empty() {

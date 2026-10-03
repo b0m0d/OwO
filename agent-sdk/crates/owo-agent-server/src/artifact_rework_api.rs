@@ -34,7 +34,7 @@ fn swarm_error(e: owo_agent_core::workswarm::WorkSwarmError) -> (StatusCode, Jso
     use owo_agent_core::workswarm::WorkSwarmError;
     let status = match &e {
         WorkSwarmError::NotFound(_) => StatusCode::NOT_FOUND,
-        WorkSwarmError::Conflict(_) => StatusCode::CONFLICT,
+        WorkSwarmError::Conflict(_) | WorkSwarmError::DeliveryPending(_) => StatusCode::CONFLICT,
         WorkSwarmError::Validation(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };

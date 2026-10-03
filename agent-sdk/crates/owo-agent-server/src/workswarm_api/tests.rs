@@ -1,5 +1,5 @@
-use super::state::*;
 use super::workers::*;
+use super::write_lease::{manager_for_workspace, WriteLease, WriteLeaseManager, WriteScope};
 use super::*;
 use async_trait::async_trait;
 use owo_agent_core::goal::Worker;
@@ -78,7 +78,10 @@ impl Worker for WriteWorker {
 }
 
 fn step_input(step_id: &str) -> Value {
-    json!({ "prompt": "p", "_workswarm": { "step_id": step_id } })
+    json!({ "prompt": "p", "_workswarm": {
+        "step_id": step_id,
+        "attempt_id": format!("t1:{}:attempt-1:epoch-7", step_id)
+    } })
 }
 
 /// 核心完工要求：执行前已经修改过的文件，Agent 再次修改后必须出现在
@@ -95,6 +98,7 @@ async fn pre_dirty_file_modified_again_enters_changed_files() {
             "fn a() { /* agent fix */ }\n",
         )),
         lease: None,
+        lease_waits: None,
         tracking: Some(tracking),
     };
     let output = worker.run(&step_input("s-impl")).await;
@@ -116,6 +120,10 @@ async fn pre_dirty_file_modified_again_enters_changed_files() {
     let sets = store.list_for_team("t1").unwrap();
     assert_eq!(sets.len(), 1, "恰好一个 ChangeSet");
     let set = &sets[0];
+    assert_eq!(
+        set.attempt_id.as_deref(),
+        Some("t1:s-impl:attempt-1:epoch-7")
+    );
     assert!(set.changed_files.contains(&"src/a.rs".to_string()));
     let base_hash = set
         .base_hashes
@@ -139,6 +147,106 @@ async fn pre_dirty_file_modified_again_enters_changed_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 实际文件改动已发生但变更记录无法落盘时，Worker 必须拒绝成功。
+#[tokio::test]
+async fn changed_workspace_with_record_persistence_failure_fails_closed() {
+    let dir = unique_dir("record-fail-closed");
+    let (root, _, _) = git_repo_with_pre_dirty_file("record-fail-closed");
+    let run_dir = dir.join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    // 用同名目录阻止 JSON 记录文件写入，同时不影响 ChangeSet sidecar。
+    std::fs::create_dir(run_dir.join("t1-workspace-changes.json")).unwrap();
+    let worker = TrackedRoleWorker {
+        inner: Arc::new(WriteWorker(
+            root.join("src/a.rs"),
+            "fn a() { /* tracked */ }\n",
+        )),
+        lease: None,
+        lease_waits: None,
+        tracking: Some(tracking_for(&root, &dir)),
+    };
+
+    let result = worker.run(&step_input("s-record-fail")).await;
+    assert!(result.is_err(), "不可审计的文件变更不能返回成功");
+    assert!(
+        result.unwrap_err().contains("变更记录未落盘"),
+        "应指出失败的留证环节"
+    );
+    let sets = owo_agent_core::change_set_store::ChangeSetStore::new(&run_dir)
+        .list_for_team("t1")
+        .unwrap();
+    assert_eq!(
+        sets.len(),
+        1,
+        "即使另一条记录失败，也要保留可恢复 ChangeSet"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// ChangeSet sidecar 无法写入时，已有 workspace change record 也不能掩盖审批闭环缺失。
+#[tokio::test]
+async fn changed_workspace_with_changeset_persistence_failure_fails_closed() {
+    let dir = unique_dir("changeset-fail-closed");
+    let (root, _, _) = git_repo_with_pre_dirty_file("changeset-fail-closed");
+    let run_dir = dir.join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    // 阻止 ChangeSetStore 把团队 sidecar 当文件读取/替换；变更记录本身仍可落盘。
+    std::fs::create_dir(run_dir.join("t1-change-sets.json")).unwrap();
+    let worker = TrackedRoleWorker {
+        inner: Arc::new(WriteWorker(
+            root.join("src/a.rs"),
+            "fn a() { /* changeset failure */ }\n",
+        )),
+        lease: None,
+        lease_waits: None,
+        tracking: Some(tracking_for(&root, &dir)),
+    };
+
+    let result = worker.run(&step_input("s-changeset-fail")).await;
+    assert!(
+        result.is_err(),
+        "没有审批/恢复 ChangeSet 的文件改动不能返回成功"
+    );
+    assert!(
+        result.unwrap_err().contains("ChangeSet 未落盘"),
+        "应指出 ChangeSet 留证失败"
+    );
+    let records = workspace_change_tracker::load_records(&run_dir, "t1")
+        .await
+        .unwrap();
+    assert!(records
+        .iter()
+        .any(|record| !record.changed_files.is_empty()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 即使本次没有文件差异，无法持久化执行记录也不能静默报告成功。
+#[tokio::test]
+async fn no_change_with_record_persistence_failure_fails_closed() {
+    let dir = unique_dir("nochange-record-fail-closed");
+    let (root, _, _) = git_repo_with_pre_dirty_file("nochange-record-fail-closed");
+    let run_dir = dir.join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::create_dir(run_dir.join("t1-workspace-changes.json")).unwrap();
+    let worker = TrackedRoleWorker {
+        inner: Arc::new(WriteWorker(
+            root.join("src/a.rs"),
+            "fn a() {} // user dirty\n",
+        )),
+        lease: None,
+        lease_waits: None,
+        tracking: Some(tracking_for(&root, &dir)),
+    };
+
+    let result = worker.run(&step_input("s-nochange-record-fail")).await;
+    assert!(result.is_err(), "缺失执行审计的步骤不能静默返回成功");
+    assert!(result.unwrap_err().contains("变更记录未落盘"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// 空变更：不创建 ChangeSet（列表为空），记录 changed_files 为空、diff_ref None。
 #[tokio::test]
 async fn no_change_creates_no_change_set() {
@@ -148,6 +256,7 @@ async fn no_change_creates_no_change_set() {
     let worker = TrackedRoleWorker {
         inner: Arc::new(EchoWorker) as Arc<dyn Worker>,
         lease: None,
+        lease_waits: None,
         tracking: Some(tracking_for(&root, &dir)),
     };
     let output = worker.run(&step_input("s-echo")).await;
@@ -256,6 +365,7 @@ async fn write_then_fail_still_generates_change_set() {
     let worker = TrackedRoleWorker {
         inner: Arc::new(FileOpsWorker) as Arc<dyn Worker>,
         lease: None,
+        lease_waits: None,
         tracking: Some(tracking_for(&root, &dir)),
     };
     let input = fileops_input(
@@ -311,6 +421,7 @@ async fn cancelled_during_write_still_closes_out() {
     let worker = TrackedRoleWorker {
         inner: Arc::new(FileOpsWorker) as Arc<dyn Worker>,
         lease: None,
+        lease_waits: None,
         tracking: Some(tracking_for(&root, &dir)),
     };
     let input = fileops_input(
@@ -366,6 +477,7 @@ async fn non_git_dir_content_hash_detects_new_modify_delete() {
     let worker = TrackedRoleWorker {
         inner: Arc::new(FileOpsWorker) as Arc<dyn Worker>,
         lease: None,
+        lease_waits: None,
         tracking: Some(tracking),
     };
     let input = fileops_input(
@@ -410,11 +522,12 @@ async fn non_git_dir_content_hash_detects_new_modify_delete() {
 async fn two_write_workers_sharing_lease_keep_change_sets_isolated() {
     let dir = unique_dir("wlease");
     let (root, _head, _pre) = git_repo_with_pre_dirty_file("wlease");
-    let lease = Arc::new(tokio::sync::Mutex::new(()));
+    let manager = WriteLeaseManager::new();
     let mk = |role: &str, dir: &Path| -> TrackedRoleWorker {
         TrackedRoleWorker {
             inner: Arc::new(FileOpsWorker) as Arc<dyn Worker>,
-            lease: Some(Arc::clone(&lease)),
+            lease: Some(WriteLease::new(Arc::clone(&manager), WriteScope::global())),
+            lease_waits: None,
             tracking: Some(workspace_change_tracker::Tracker {
                 root: root.clone(),
                 run_dir: dir.join("run"),
@@ -476,4 +589,161 @@ async fn two_write_workers_sharing_lease_keep_change_sets_isolated() {
         .unwrap();
     assert_eq!(records.len(), 2, "两笔收尾记录：{records:#?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// -----------------------------------------------------------------------
+// 十一期 · 二路：范围写租约——声明互不重叠写范围的写者真并发，归属过滤
+// 不把并发写者的变更算到本步骤头上。
+// -----------------------------------------------------------------------
+
+/// 并发证明 worker：双方都到 barrier 才继续写自己的文件；串行执行会等到超时失败。
+struct BarrierWriter {
+    barrier: Arc<tokio::sync::Barrier>,
+    target: PathBuf,
+    content: &'static str,
+}
+
+#[async_trait]
+impl Worker for BarrierWriter {
+    fn name(&self) -> &str {
+        "agent"
+    }
+    async fn run(&self, _input: &Value) -> Result<String, String> {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), self.barrier.wait())
+            .await
+            .is_err()
+        {
+            return Err("串行执行：并发 barrier 超时（范围租约未放行并发写）".to_string());
+        }
+        if let Some(parent) = self.target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&self.target, self.content).map_err(|e| e.to_string())?;
+        Ok("ok".to_string())
+    }
+}
+
+/// 声明互不重叠写范围的两个写 Worker 真并发——barrier 证明同时进入执行；
+/// 各自 ChangeSet 只含自己范围内的文件；并发写者范围内的新增文件不误判越界。
+#[tokio::test]
+async fn disjoint_scoped_writers_run_concurrently_and_keep_change_sets_isolated() {
+    let dir = unique_dir("parallel");
+    let (root, _head, _pre) = git_repo_with_pre_dirty_file("parallel");
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let manager = WriteLeaseManager::new();
+    let mk = |role: &str, allowed: Vec<PathBuf>, target: PathBuf, content: &'static str| {
+        let mut tracking = tracking_for(&root, &dir);
+        tracking.role = role.to_string();
+        tracking.allowed = allowed.clone();
+        TrackedRoleWorker {
+            inner: Arc::new(BarrierWriter {
+                barrier: Arc::clone(&barrier),
+                target,
+                content,
+            }) as Arc<dyn Worker>,
+            lease: Some(WriteLease::new(
+                Arc::clone(&manager),
+                WriteScope::from_paths(&allowed),
+            )),
+            lease_waits: None,
+            tracking: Some(tracking),
+        }
+    };
+    let w1 = mk(
+        "w1",
+        vec![root.join("src/a")],
+        root.join("src/a/one.txt"),
+        "one\n",
+    );
+    let w2 = mk(
+        "w2",
+        vec![root.join("src/b")],
+        root.join("src/b/two.txt"),
+        "two\n",
+    );
+    let input1 = step_input("s-one");
+    let input2 = step_input("s-two");
+    let (r1, r2) = tokio::join!(w1.run(&input1), w2.run(&input2));
+    assert!(r1.is_ok(), "{r1:?}");
+    assert!(r2.is_ok(), "{r2:?}");
+
+    let records = workspace_change_tracker::load_records(&dir.join("run"), "t1")
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 2, "{records:#?}");
+    assert!(
+        records.iter().all(|record| record.violation.is_none()),
+        "并发范围内路径不得误判越界：{records:#?}"
+    );
+    let store = owo_agent_core::change_set_store::ChangeSetStore::new(&dir.join("run"));
+    let sets = store.list_for_team("t1").unwrap();
+    assert_eq!(sets.len(), 2, "{sets:#?}");
+    let one = sets.iter().find(|s| s.step_id == "s-one").expect("s-one");
+    let two = sets.iter().find(|s| s.step_id == "s-two").expect("s-two");
+    assert_eq!(
+        one.changed_files,
+        vec!["src/a/one.txt".to_string()],
+        "w1 只登记自己范围内的变更：{:?}",
+        one.changed_files
+    );
+    assert_eq!(
+        two.changed_files,
+        vec!["src/b/two.txt".to_string()],
+        "w2 只登记自己范围内的变更：{:?}",
+        two.changed_files
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 声明范围但与团队绑定无交集时：写白名单哨兵生效（直接写文件被拒为越界）。
+#[tokio::test]
+async fn scope_without_binding_intersection_denies_writes() {
+    let dir = unique_dir("scope-deny");
+    let (root, _head, _pre) = git_repo_with_pre_dirty_file("scope-deny");
+    let mut tracking = tracking_for(&root, &dir);
+    tracking.allowed = vec![root.join(".owo-no-write-scope")];
+    let worker = TrackedRoleWorker {
+        inner: Arc::new(FileOpsWorker) as Arc<dyn Worker>,
+        // 未持租约（纯归属过滤/白名单路径）也能验证哨兵拒绝。
+        lease: None,
+        lease_waits: None,
+        tracking: Some(tracking),
+    };
+    let output = worker
+        .run(&fileops_input(
+            &root,
+            json!([{ "action": "write", "path": "src/x.txt", "content": "x\n" }]),
+            "s-deny",
+        ))
+        .await;
+    assert!(output.is_err(), "{output:?}");
+    assert!(
+        output.unwrap_err().contains("scope_violation"),
+        "越界必须报 scope_violation"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn delivery_gate_lease_excludes_team_writers_until_validation_commits() {
+    let root = unique_dir("delivery-gate-lease");
+    let held = acquire_workspace_delivery_lease(&root).await;
+    let writer = WriteLease::new(
+        manager_for_workspace(&root),
+        WriteScope::from_paths(&[root.join("src/main.rs")]),
+    );
+    let mut waiting = tokio::spawn(async move { writer.acquire().await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut waiting)
+            .await
+            .is_err(),
+        "DeliveryGate lease must serialize against all Team writer scopes"
+    );
+    drop(held);
+    let acquired = tokio::time::timeout(std::time::Duration::from_secs(1), &mut waiting)
+        .await
+        .expect("writer should proceed after DeliveryGate releases the lease")
+        .expect("writer task should not panic");
+    drop(acquired);
+    let _ = std::fs::remove_dir_all(root);
 }

@@ -26,6 +26,10 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<Session, AgentError>;
     fn load(&self, id: &str) -> Result<Session, AgentError>;
     fn save(&self, session: &Session) -> Result<(), AgentError>;
+    /// Check session presence without loading/sorting the entire session index.
+    fn exists(&self, id: &str) -> Result<bool, AgentError> {
+        Ok(self.list().iter().any(|candidate| candidate == id))
+    }
     /// Persist one turn event and allocate the next sequence number for its session.
     /// Non-durable stores must opt in explicitly rather than pretending to support replay.
     fn append_turn_event(
@@ -177,6 +181,10 @@ impl SessionStore for JsonSessionStore {
         let content = std::fs::read_to_string(self.plain_path(id))
             .map_err(|e| AgentError::Session(format!("会话 {id} 读取失败：{e}")))?;
         Ok(serde_json::from_str(&content)?)
+    }
+
+    fn exists(&self, id: &str) -> Result<bool, AgentError> {
+        Ok(self.plain_path(id).exists() || self.encrypted_path(id).exists())
     }
 
     fn save(&self, session: &Session) -> Result<(), AgentError> {

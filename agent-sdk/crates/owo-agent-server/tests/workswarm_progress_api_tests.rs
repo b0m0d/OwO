@@ -211,6 +211,55 @@ async fn detail_latency_under_200ms_during_90s_worker_and_cancel_stops_fast() {
     );
 }
 
+#[tokio::test]
+async fn progress_separates_claimed_steps_from_worker_execution() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let create = json!({
+        "objective": "区分已领取任务与实际执行任务",
+        "budget": { "max_parallel": 1 },
+        "roles": [
+            { "role": "w1", "assignee": "agent", "worker": "sleep",
+              "extra_input": { "ms": 3000 }, "verify": "non_empty" },
+            { "role": "w2", "assignee": "agent", "worker": "sleep",
+              "extra_input": { "ms": 3000 }, "verify": "non_empty" }
+        ]
+    });
+    let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
+    assert_eq!(status, 202, "{created}");
+    let team_id = created["team_id"].as_str().unwrap().to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut observed = false;
+    while Instant::now() < deadline {
+        let (status, body) = call(&state, &app, "GET", &format!("/teams/{team_id}"), None).await;
+        assert_eq!(status, 200, "{body}");
+        let steps = body["progress"]["current_steps"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let running = steps.iter().any(|step| step["status"] == "Running");
+        let claimed = steps.iter().any(|step| step["status"] == "Claimed");
+        if running && claimed {
+            assert_eq!(body["progress"]["counts"]["running"], 1);
+            assert_eq!(body["progress"]["counts"]["claimed"], 1);
+            observed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (cancel_status, cancel_body) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/teams/{team_id}/steer"),
+        Some(&json!({ "command": "cancel" }).to_string()),
+    )
+    .await;
+    assert_eq!(cancel_status, 200, "{cancel_body}");
+    assert!(observed, "进度快照没有区分实际执行与等待调度的步骤");
+}
+
 // ---------------------------------------------------------------------------
 // 3. SSE progress 事件：seq 单调；运行中含 current_steps
 // ---------------------------------------------------------------------------
@@ -243,16 +292,8 @@ async fn sse_stream_emits_monotonic_progress_events() {
     .await;
 
     // 开流（流在终态关闭；本测试稍后取消使其闭合）。
-    let resp = app
-        .clone()
-        .oneshot(request(
-            &state,
-            "GET",
-            &format!("/teams/{team_id}/events"),
-            None,
-        ))
-        .await
-        .unwrap();
+    let stream_request = request(&state, "GET", &format!("/teams/{team_id}/events"), None);
+    let resp = app.clone().oneshot(stream_request).await.unwrap();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
     // 流读取期间发起 cancel（另路），让流自然闭合。
@@ -290,6 +331,35 @@ async fn sse_stream_emits_monotonic_progress_events() {
     canceller.await.expect("取消任务不应 panic");
 
     assert!(text.contains("\"type\":\"open\""), "应有 open 帧：{text}");
+    let audit_ids: Vec<String> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("id: "))
+        .map(str::to_string)
+        .collect();
+    assert!(audit_ids.len() >= 2, "应有多条带游标的审计帧：{text}");
+    assert!(audit_ids.iter().all(|id| id.contains('#')));
+
+    // 重连带首个游标：服务端只重放严格晚于该帧的审计事件。
+    let cursor = &audit_ids[0];
+    let mut resumed_request = request(&state, "GET", &format!("/teams/{team_id}/events"), None);
+    resumed_request.headers_mut().insert(
+        "last-event-id",
+        axum::http::HeaderValue::from_str(cursor).unwrap(),
+    );
+    let resumed_response = app.clone().oneshot(resumed_request).await.unwrap();
+    let resumed_body = axum::body::to_bytes(resumed_response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    let resumed_text = String::from_utf8(resumed_body.to_vec()).unwrap();
+    let replayed_ids: Vec<&str> = resumed_text
+        .lines()
+        .filter_map(|line| line.strip_prefix("id: "))
+        .collect();
+    assert!(
+        !replayed_ids.is_empty(),
+        "游标后仍应有审计帧：{resumed_text}"
+    );
+    assert!(!replayed_ids.contains(&cursor.as_str()), "不能重放游标本身");
     // progress 帧：含 seq / current_steps / counts。
     let progress_frames: Vec<&str> = text
         .split("\n\n")

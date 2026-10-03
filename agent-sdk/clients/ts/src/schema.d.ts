@@ -4,6 +4,38 @@
  */
 
 export interface paths {
+    "/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["activityList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/approvals/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["pendingApprovalsList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/artifacts/{id}/content": {
         parameters: {
             query?: never;
@@ -158,6 +190,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["automationsClearReminders"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/automations/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["automationsRuns"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -756,6 +804,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/desktop/pet": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["petStateGet"];
+        put?: never;
+        post: operations["petStateSet"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/desktop/pet/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["petStateReport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/desktop/scroll": {
         parameters: {
             query?: never;
@@ -1135,6 +1215,38 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["fleetTaskResult"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fs/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fsOpenPath"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fs/pick-directory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fsPickDirectory"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3113,6 +3225,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/session/{id}/answer/{question_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["respondQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/session/{id}/archive": {
         parameters: {
             query?: never;
@@ -3155,6 +3283,22 @@ export interface paths {
         get: operations["sessionChildren"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/session/{id}/compact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["compactSession"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3347,6 +3491,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["agentTurn"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/session/{id}/turn/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["turnEventsAfter"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4377,6 +4537,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams/{id}/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workswarmReadTeamContext"];
+        put?: never;
+        post: operations["workswarmPublishTeamContext"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4599,6 +4775,23 @@ export interface components {
             updated_at?: string;
             workspace?: string;
         };
+        TurnEventRecord: {
+            created_at: string;
+            /** @description Versioned SseEvent payload */
+            payload: Record<string, never>;
+            /** Format: int64 */
+            seq: number;
+            session_id: string;
+            turn_id: string;
+        };
+        TurnEventReplayPage: {
+            active: boolean;
+            events: components["schemas"]["TurnEventRecord"][];
+            /** Format: int64 */
+            next_after_seq: number;
+            /** @enum {string} */
+            state: "active" | "completed" | "failed" | "interrupted";
+        };
         TurnRequest: {
             attachments?: string[];
             prompt: string;
@@ -4612,6 +4805,42 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    activityList: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description active turns snapshot (session/phase/tool) + pending approval count */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    pendingApprovalsList: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description cross-session pending approval requests */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     artifactContent: {
         parameters: {
             query?: never;
@@ -4710,6 +4939,8 @@ export interface operations {
                 content: {
                     "application/json": {
                         artifact_id: string;
+                        task_id?: string | null;
+                        attempt_id?: string | null;
                         evidence_refs: string[];
                         /** @enum {string} */
                         format: "json" | "csv" | "research" | "markdown";
@@ -5016,6 +5247,24 @@ export interface operations {
             };
         };
     };
+    automationsRuns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description recent automation run records (task_id/limit query) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     automationsDelete: {
         parameters: {
             query?: never;
@@ -5093,6 +5342,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         change_set_id: string;
+                        attempt_id?: string | null;
                         changed_files?: string[];
                         created_at?: string;
                         diff_ref?: string | null;
@@ -6129,6 +6379,72 @@ export interface operations {
             };
         };
     };
+    petStateGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description desktop pet visibility (desired/actual/overlay_online) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    petStateSet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    visible: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description desired pet visibility updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    petStateReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    visible: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description overlay heartbeat accepted; returns desired visibility */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     desktopScroll: {
         parameters: {
             query?: never;
@@ -6721,6 +7037,50 @@ export interface operations {
         };
         responses: {
             /** @description task result recorded (terminal) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fsOpenPath: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description opened the workspace path with the requested opener (opener = program actually used) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fsPickDirectory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description selected absolute directory path (null when cancelled) */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10095,6 +10455,27 @@ export interface operations {
             };
         };
     };
+    respondQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                question_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description ok */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     sessionArchive: {
         parameters: {
             query?: never;
@@ -10167,6 +10548,26 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description children */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    compactSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description compaction result: compacted/summary/tokens_before/tokens_after */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10380,10 +10781,24 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 可选执行收据 ID；省略时使用最近一张未撤销收据 */
+                    receipt_id?: string;
+                };
+            };
+        };
         responses: {
             /** @description ok */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 撤销冲突：目标文件内容不再匹配 Agent 最近一次写入，整批零覆盖；错误码 storage/revert_conflict/not_retryable */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10428,6 +10843,41 @@ export interface operations {
         responses: {
             /** @description SSE event stream */
             200: {
+                headers: {
+                    /** @description Stable turn identifier used with the durable replay endpoint */
+                    "x-owo-turn-id"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    turnEventsAfter: {
+        parameters: {
+            query: {
+                turn_id: string;
+                after_seq?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Persisted turn events after the session-scoped sequence cursor */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TurnEventReplayPage"];
+                };
+            };
+            /** @description session not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11021,6 +11471,8 @@ export interface operations {
                         /** @description 相对 root 的允许写入路径 */
                         write_allowed_paths?: string[];
                     };
+                    /** @description optional REPL session; server snapshots bounded same-workspace user constraints */
+                    parent_session_id?: string;
                 };
             };
         };
@@ -11276,6 +11728,7 @@ export interface operations {
                                 [key: string]: unknown;
                             };
                             change_set_id?: string;
+                            attempt_id?: string | null;
                             changed_files?: string[];
                             created_at?: string;
                             /** @description 幂等决定记录（accept/reject/revert 只增不改） */
@@ -12112,6 +12565,87 @@ export interface operations {
         responses: {
             /** @description active rule model + candidates + per-signature samples + calibration report */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmReadTeamContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description versioned team facts with bounded CAS content */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description unknown team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workswarmPublishTeamContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** Format: int64 */
+                    expected_revision: number;
+                    key: string;
+                    value: string;
+                    producer: string;
+                    task_id?: string | null;
+                    source_refs?: string[];
+                    file_hash?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description candidate fact published */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description invalid fact */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description unknown team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description stale expected_revision */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

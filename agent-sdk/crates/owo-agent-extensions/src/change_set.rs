@@ -381,6 +381,7 @@ pub fn build_change_set(
         ),
         team_id: team_id.to_string(),
         step_id: step_id.to_string(),
+        attempt_id: None,
         role: role.to_string(),
         base_hashes,
         result_hashes,

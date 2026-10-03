@@ -202,6 +202,22 @@ pub enum StreamChunk {
     Reasoning(String),
 }
 
+/// Metadata returned for one provider request; contains no prompt or response content.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCallMetadata {
+    pub request_id: Option<String>,
+    pub model: Option<String>,
+    pub usage: Option<TokenUsage>,
+    /// Wall time spent in the provider call, recorded by instrumentation wrappers.
+    pub latency_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedModelOutput {
+    pub output: ModelOutput,
+    pub metadata: ModelCallMetadata,
+}
+
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     async fn complete(
@@ -236,6 +252,21 @@ pub trait ModelProvider: Send + Sync {
     ) -> Result<ModelOutput, String> {
         let _ = model;
         self.complete(messages, tools).await
+    }
+
+    /// One non-streaming request with attributable metadata. Providers without native
+    /// request accounting keep compatibility and report unknown metadata.
+    async fn complete_with_model_observed(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ObservedModelOutput, String> {
+        let output = self.complete_with_model(model, messages, tools).await?;
+        Ok(ObservedModelOutput {
+            output,
+            metadata: ModelCallMetadata::default(),
+        })
     }
 
     /// 流式版按请求覆盖（语义同 [`complete_with_model`](Self::complete_with_model)）。
@@ -274,6 +305,24 @@ pub trait ModelProvider: Send + Sync {
     ) -> Result<ModelOutput, String> {
         let _ = model;
         self.complete_stream(messages, tools, on_delta).await
+    }
+
+    /// 带单次请求元数据的流式模型调用。兼容 Provider 默认委托原接口并返回未知元数据；
+    /// 原生支持的 Provider 应返回本次响应的 request id、请求模型和 usage。
+    async fn complete_stream_with_reasoning_and_model_observed(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ObservedModelOutput, String> {
+        let output = self
+            .complete_stream_with_reasoning_and_model(model, messages, tools, on_chunk)
+            .await?;
+        Ok(ObservedModelOutput {
+            output,
+            metadata: ModelCallMetadata::default(),
+        })
     }
 
     /// 累计 token 用量快照（供回合增量统计；未实现的 Provider 返回零）。

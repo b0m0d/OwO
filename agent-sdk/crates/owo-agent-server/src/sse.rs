@@ -22,7 +22,10 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
+
+/// SSE HTTP 转发队列上限；防止慢客户端让转发任务无限积压。
+const SSE_FORWARD_QUEUE_CAPACITY: usize = 64;
 
 /// SSE 集线器：task_id → 广播通道 + 事件历史（重放）。
 pub struct CloudSseHub {
@@ -176,15 +179,16 @@ pub fn sse_frame_text(frame: &str) -> String {
 /// SSE 事件流端点：`GET /cloud/tasks/{id}/events`。
 async fn cloud_task_events(
     Path(task_id): Path<String>,
-) -> Sse<UnboundedReceiverStream<Result<Event, Infallible>>> {
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (receiver, history) = hub().subscribe(&task_id);
-    let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_FORWARD_QUEUE_CAPACITY);
 
     tokio::spawn(async move {
         // 1) 重放历史（订阅前已完成的事件）。
         for frame in history {
             if tx
                 .send(Ok(Event::default().event("progress").data(frame)))
+                .await
                 .is_err()
             {
                 return;
@@ -193,10 +197,15 @@ async fn cloud_task_events(
         // 2) 实时流。
         let mut receiver = receiver;
         loop {
-            match receiver.recv().await {
+            let received = tokio::select! {
+                _ = tx.closed() => break,
+                received = receiver.recv() => received,
+            };
+            match received {
                 Ok(frame) => {
                     if tx
                         .send(Ok(Event::default().event("progress").data(frame)))
+                        .await
                         .is_err()
                     {
                         break;
@@ -213,7 +222,7 @@ async fn cloud_task_events(
         }
     });
 
-    Sse::new(UnboundedReceiverStream::new(rx))
+    Sse::new(ReceiverStream::new(rx))
 }
 
 /// Lane D Part 2 路由：/cloud/tasks/{id}/events（供主控并入 build_router）。

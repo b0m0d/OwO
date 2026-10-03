@@ -10,7 +10,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use owo_agent_core::project_space_store::{ProjectSpaceStoreBackend, SqliteProjectSpaceStore};
 use owo_agent_core::workswarm::{
-    CreateTeamRequest, HandoffFields, RoleSpec, SteerCommand, TeamCoordinator, WorkSwarmError,
+    CreateTeamRequest, HandoffFields, RoleSpec, SharedContextFactDraft, SteerCommand,
+    TeamCoordinator, WorkSwarmError,
 };
 use owo_agent_protocol::{TeamMode, TeamRunStatus};
 use owo_agent_server::AppState;
@@ -19,7 +20,7 @@ use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 
 // ---------------------------------------------------------------------------
 
@@ -37,9 +38,36 @@ struct CreateTeamHttpRequest {
     /// 五期：组队策略 auto|single|team（缺省 auto；未知值 → 400）。
     #[serde(default)]
     strategy: Option<String>,
+    /// 十一期：团队统一模型（所有 agent 步骤缺省使用；roles[].model 显式覆盖）。
+    #[serde(default)]
+    model: Option<String>,
+    /// 十一期：并行开发模式（lead 拆解 → w1..wN 并行 → leader 汇总；
+    /// 运行期把 lead 产物的 subtasks 动态应用到 writer）。
+    #[serde(default)]
+    parallel: bool,
+    /// 十一期：Agent 成员上限覆盖（并行模式 lead+writers+leader > 默认 5）。
+    #[serde(default)]
+    max_agent_members: Option<usize>,
     /// 六期（第二路）：可选项目工作区绑定（root 必须已存在；缺省只读）。
     #[serde(default)]
     workspace: Option<project_workspace::WorkspaceSpec>,
+    /// 当前 REPL 父会话；服务端验证工作区后自行生成 CoreSpec。
+    #[serde(default)]
+    parent_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishTeamContextHttpRequest {
+    expected_revision: u64,
+    key: String,
+    value: String,
+    producer: String,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    source_refs: Vec<String>,
+    #[serde(default)]
+    file_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +162,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/teams/{id}/tasks", get(get_team_tasks))
         .route("/teams/{id}/events", get(team_events))
         .route("/teams/{id}/metrics", get(team_metrics))
+        .route(
+            "/teams/{id}/context",
+            get(get_team_context).post(publish_team_context),
+        )
         .route("/teams/{id}/diagnostic", get(team_diagnostic))
         .route("/teams/{id}/steer", post(steer_team))
         // 八期（第二路）：ChangeSet 审批、接受与安全撤销。
@@ -232,7 +264,72 @@ async fn create_team(
         ),
         None => None,
     };
-    let req = CreateTeamRequest {
+    let parent_context_snapshot = if let Some(parent_id) = req.parent_session_id.as_deref() {
+        let parent = crate::session_api::load_session(&state, parent_id)
+            .map_err(|(status, message)| (status, Json(json!({ "error": message }))))?;
+        let parent_workspace = parent.workspace.canonicalize().map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("父会话工作区不可访问：{error}") })),
+            )
+        })?;
+        let active_workspace = state.workspace.canonicalize().map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Daemon 工作区不可访问：{error}") })),
+            )
+        })?;
+        if parent_workspace != active_workspace {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "父会话必须属于当前工作区" })),
+            ));
+        }
+        let system_constraints = parent
+            .system_prompt
+            .as_deref()
+            .unwrap_or_default()
+            .chars()
+            .take(8000)
+            .collect::<String>();
+        let mut remaining = 24000usize;
+        let mut recent_user_requirements = Vec::new();
+        for message in parent
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == "user")
+            .take(12)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            let content = message.content.as_deref().unwrap_or_default();
+            let bounded = content.chars().take(remaining).collect::<String>();
+            remaining = remaining.saturating_sub(bounded.chars().count());
+            if !bounded.is_empty() {
+                recent_user_requirements.push(bounded);
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+        Some(
+            serde_json::json!({
+                "kind": "source_session_context_v1",
+                "source_session_id": parent.id,
+                "source_updated_at": parent.updated_at,
+                "core_spec": {
+                    "system_constraints": system_constraints,
+                    "recent_user_requirements": recent_user_requirements
+                }
+            })
+            .to_string(),
+        )
+    } else {
+        None
+    };
+    let mut req = CreateTeamRequest {
         goal_id: req.goal_id,
         objective: req.objective,
         mode,
@@ -241,7 +338,15 @@ async fn create_team(
         budget: req.budget,
         human_policy: req.human_policy,
         strategy,
+        model: req.model,
+        parallel: req.parallel,
+        max_agent_members: req.max_agent_members,
+        parent_context_snapshot,
     };
+    // 十一期：工作区 `settings.json` 的 `team` 段统一配置（模型/并行/自定义角色）；
+    // 请求显式字段优先，配置只在缺省时补位（CLI/UI 传参即覆盖）。
+    let settings = owo_agent_core::Settings::load(&state.workspace);
+    let settings_applied = apply_team_settings(&mut req, &settings);
     let team = coordinator
         .create_team_run(&req)
         .await
@@ -273,8 +378,87 @@ async fn create_team(
             "status": format!("{:?}", team.status),
             "strategy_decision": team.strategy_decision,
             "workspace_bound": bound_workspace,
+            "team_settings_applied": settings_applied,
         })),
     ))
+}
+
+/// 十一期：把 `<workspace>/settings.json` 的 `team` 段应用到建队请求（请求显式优先）。
+///
+/// 优先级与补位规则：
+/// - `model`：请求 > `team.model` > `Settings.model`（空串视为未配置）；
+/// - `roles`：请求未给角色且未指定模板 → 用 `team.roles` 自定义编排；
+/// - `parallel`：请求未开 → `team.parallel`（2..=8）或角色里含 `lead` 时启用；
+///   并行且无角色 → 生成内置 `parallel_roles(N)`（N = `team.parallel`，缺省 4）；
+/// - `budget.max_parallel`：请求未显式给 → `team.max_parallel` / `team.parallel`；
+/// - `max_agent_members`：请求未给 → 角色数（覆盖默认上限 5）。
+///
+/// 返回是否应用了配置（响应回执/排障用）。
+fn apply_team_settings(req: &mut CreateTeamRequest, settings: &owo_agent_core::Settings) -> bool {
+    let team = &settings.team;
+    let mut applied = false;
+
+    if req.model.is_none() {
+        // 候选逐级回退：空串/空白视为未配置（不能因为 `Some(" ")` 短路掉下游回退）。
+        let fallback = team
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                settings
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(str::to_string)
+            });
+        if let Some(model) = fallback {
+            req.model = Some(model);
+            applied = true;
+        }
+    }
+
+    if req.roles.is_empty() && req.template_id.is_none() && !team.roles.is_empty() {
+        req.roles = team.roles.clone();
+        applied = true;
+    }
+
+    let config_parallel = team.parallel.filter(|writers| (2..=8).contains(writers));
+    if !req.parallel
+        && (config_parallel.is_some() || req.roles.iter().any(|role| role.role == "lead"))
+    {
+        req.parallel = true;
+        applied = true;
+    }
+    if req.parallel && req.roles.is_empty() {
+        req.roles = owo_agent_core::workswarm::parallel_roles(config_parallel.unwrap_or(4));
+        applied = true;
+    }
+
+    let has_budget_parallel = req
+        .budget
+        .get("max_parallel")
+        .and_then(Value::as_u64)
+        .is_some();
+    if !has_budget_parallel {
+        if let Some(limit) = team
+            .max_parallel
+            .or(team.parallel)
+            .filter(|limit| (1..=8).contains(limit))
+        {
+            let mut budget = req.budget.as_object().cloned().unwrap_or_default();
+            budget.insert("max_parallel".to_string(), json!(limit));
+            req.budget = Value::Object(budget);
+            applied = true;
+        }
+    }
+
+    if req.max_agent_members.is_none() && !req.roles.is_empty() {
+        req.max_agent_members = Some(req.roles.len());
+    }
+    applied
 }
 
 /// GET /teams：团队运行列表。
@@ -335,12 +519,81 @@ async fn get_team(
     let run_state = coordinator
         .load_run_state(&id)
         .map_err(|e| error_response(&e))?;
+    let progress = coordinator.progress_snapshot(&id).await.ok();
     Ok(Json(json!({
         "team": team,
         "interrupted": coordinator.is_interrupted(&id),
         "tasks": task_view(&run_state),
+        "progress": progress,
         "audit_tail": audit_tail(&coordinator, &id),
     })))
+}
+
+/// GET /teams/{id}/context：返回版本号、事实来源与有界 CAS 正文。
+async fn get_team_context(
+    State(state): State<Arc<AppState>>,
+    AxumPath(team_id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let coordinator = state
+        .workswarm
+        .coordinator()
+        .map_err(|e| error_response(&e))?;
+    let snapshot = coordinator
+        .read_team_context(&team_id)
+        .await
+        .map_err(|e| error_response(&e))?;
+    let mut remaining = 128 * 1024usize;
+    let mut facts = Vec::new();
+    for fact in snapshot.facts.iter().rev().take(64) {
+        if remaining == 0 {
+            break;
+        }
+        let value = fact
+            .value_ref
+            .strip_prefix("cas://sha256:")
+            .and_then(|hash| coordinator.cas().get_text(hash))
+            .unwrap_or_default();
+        let bounded = value.chars().take(remaining).collect::<String>();
+        remaining = remaining.saturating_sub(bounded.chars().count());
+        facts.push(json!({
+            "key": fact.key, "value": bounded, "value_ref": fact.value_ref,
+            "revision": fact.revision, "producer": fact.producer,
+            "task_id": fact.task_id, "source_refs": fact.source_refs,
+            "file_hash": fact.file_hash, "confidence": fact.confidence,
+            "status": fact.status, "created_at": fact.created_at
+        }));
+    }
+    Ok(Json(
+        json!({ "team_id": team_id, "revision": snapshot.revision, "facts": facts }),
+    ))
+}
+
+/// POST /teams/{id}/context：expected_revision 保护的 CAS 发布。
+async fn publish_team_context(
+    State(state): State<Arc<AppState>>,
+    AxumPath(team_id): AxumPath<String>,
+    Json(request): Json<PublishTeamContextHttpRequest>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let coordinator = state
+        .workswarm
+        .coordinator()
+        .map_err(|e| error_response(&e))?;
+    let fact = coordinator
+        .publish_team_context_fact(
+            &team_id,
+            request.expected_revision,
+            SharedContextFactDraft {
+                key: request.key,
+                value: request.value,
+                producer: request.producer,
+                task_id: request.task_id,
+                source_refs: request.source_refs,
+                file_hash: request.file_hash,
+            },
+        )
+        .await
+        .map_err(|e| error_response(&e))?;
+    Ok((StatusCode::CREATED, Json(json!({ "fact": fact }))))
 }
 
 /// GET /teams/{id}/tasks：任务图（步骤 × 状态）。
@@ -379,6 +632,7 @@ async fn team_events(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<TeamEventsQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     let coordinator = state
         .workswarm
@@ -406,27 +660,31 @@ async fn team_events(
         }))
         .into_response());
     }
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
+    // Bound per-subscriber buffering so a slow/disconnected watcher cannot accumulate
+    // an unbounded event backlog. New subscribers replay 50 audit entries by default;
+    // Last-Event-ID resumes strictly after the supplied team-local audit cursor.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+    let after_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let stream_coordinator = Arc::clone(&coordinator);
     let team_id = team.team_id.clone();
     tokio::spawn(async move {
-        team_event_stream(stream_coordinator, team_id, tx).await;
+        team_event_stream(stream_coordinator, team_id, tx, after_event_id).await;
     });
-    Ok(Sse::new(UnboundedReceiverStream::new(rx)).into_response())
+    Ok(Sse::new(ReceiverStream::new(rx)).into_response())
 }
 
-/// SSE 流任务：先重放审计尾迹（最近 50 条，旧→新），再 500ms 轮询新增审计 + 状态变化；
-/// 团队进入终态（并补发终帧）后结束。客户端断开（发送失败）即退出。
+/// SSE 流任务：按 Last-Event-ID 续传审计（新订阅默认最近 50 条），再 500ms 轮询新增审计 + 状态变化；
+/// 审计帧携带团队内单调游标。团队进入终态后结束；客户端断开即退出。
 async fn team_event_stream(
     coordinator: Arc<TeamCoordinator>,
     team_id: String,
-    tx: tokio::sync::mpsc::UnboundedSender<Result<Event, Infallible>>,
+    tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    after_event_id: Option<String>,
 ) {
-    let emit = |frame: Value| -> bool {
-        tx.send(Ok(Event::default().data(frame.to_string())))
-            .is_ok()
-    };
-    if !emit(json!({ "type": "open", "team_id": team_id })) {
+    if !send_team_event(&tx, json!({ "type": "open", "team_id": team_id }), None).await {
         return;
     }
 
@@ -435,7 +693,13 @@ async fn team_event_stream(
     let mut last_progress_seq: Option<u64> = None;
     if let Ok(progress) = coordinator.progress_snapshot(&team_id).await {
         last_progress_seq = Some(progress.seq);
-        if !emit(json!({ "type": "progress", "progress": progress })) {
+        if !send_team_event(
+            &tx,
+            json!({ "type": "progress", "progress": progress }),
+            None,
+        )
+        .await
+        {
             return;
         }
     }
@@ -459,13 +723,27 @@ async fn team_event_stream(
     // 历史重放（最近 50 条）。
     let replay = team_entries();
     let mut seen = replay.len();
-    for entry in replay.iter().rev().take(50).rev() {
-        if !emit(json!({
-            "type": "audit",
-            "ts": entry.ts,
-            "event": entry.event,
-            "detail": entry.detail,
-        })) {
+    let replay_from = after_event_id
+        .as_deref()
+        .and_then(|cursor| {
+            replay.iter().enumerate().find_map(|(index, entry)| {
+                (team_audit_event_id(entry, index) == cursor).then_some(index + 1)
+            })
+        })
+        .unwrap_or_else(|| replay.len().saturating_sub(50));
+    for (index, entry) in replay.iter().enumerate().skip(replay_from) {
+        if !send_team_event(
+            &tx,
+            json!({
+                "type": "audit",
+                "ts": entry.ts,
+                "event": entry.event,
+                "detail": entry.detail,
+            }),
+            Some(team_audit_event_id(entry, index)),
+        )
+        .await
+        {
             return;
         }
     }
@@ -477,13 +755,19 @@ async fn team_event_stream(
         };
         // 新增审计条目（重放点之后）。
         let entries = team_entries();
-        for entry in entries.iter().skip(seen) {
-            if !emit(json!({
-                "type": "audit",
-                "ts": entry.ts,
-                "event": entry.event,
-                "detail": entry.detail,
-            })) {
+        for (index, entry) in entries.iter().enumerate().skip(seen) {
+            if !send_team_event(
+                &tx,
+                json!({
+                    "type": "audit",
+                    "ts": entry.ts,
+                    "event": entry.event,
+                    "detail": entry.detail,
+                }),
+                Some(team_audit_event_id(entry, index)),
+            )
+            .await
+            {
                 return;
             }
         }
@@ -491,12 +775,18 @@ async fn team_event_stream(
         // 状态帧（变化即发；首次必发）。
         if last_status != Some(team.status) {
             last_status = Some(team.status);
-            if !emit(json!({
-                "type": "state",
-                "status": format!("{:?}", team.status),
-                "active": coordinator.is_run_active(&team_id),
-                "interrupted": coordinator.is_interrupted(&team_id),
-            })) {
+            if !send_team_event(
+                &tx,
+                json!({
+                    "type": "state",
+                    "status": format!("{:?}", team.status),
+                    "active": coordinator.is_run_active(&team_id),
+                    "interrupted": coordinator.is_interrupted(&team_id),
+                }),
+                None,
+            )
+            .await
+            {
                 return;
             }
         }
@@ -504,7 +794,13 @@ async fn team_event_stream(
         if let Ok(progress) = coordinator.progress_snapshot(&team_id).await {
             if last_progress_seq != Some(progress.seq) {
                 last_progress_seq = Some(progress.seq);
-                if !emit(json!({ "type": "progress", "progress": progress })) {
+                if !send_team_event(
+                    &tx,
+                    json!({ "type": "progress", "progress": progress }),
+                    None,
+                )
+                .await
+                {
                     return;
                 }
             }
@@ -512,8 +808,27 @@ async fn team_event_stream(
         if team.status.is_terminal() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::select! {
+            _ = tx.closed() => return,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {},
+        }
     }
+}
+
+fn team_audit_event_id(entry: &owo_agent_core::audit::AuditEntry, index: usize) -> String {
+    format!("{}#{}", entry.ts, index.saturating_add(1))
+}
+
+async fn send_team_event(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    frame: Value,
+    event_id: Option<String>,
+) -> bool {
+    let mut event = Event::default().data(frame.to_string());
+    if let Some(id) = event_id {
+        event = event.id(id);
+    }
+    tx.send(Ok(event)).await.is_ok()
 }
 
 /// GET /teams/{id}/metrics：TeamRun 指标汇总（五期 · 第三路）。
@@ -896,3 +1211,155 @@ async fn reject_proposal(
 // ---------------------------------------------------------------------------
 // 九期（一路）：TrackedRoleWorker 合并检测 / 空 ChangeSet 守卫（真实 git 仓库）
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 十一期：`settings.json` 的 `team` 段 → 建队请求缺省（请求显式优先）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod team_settings_tests {
+    use super::*;
+    use owo_agent_core::{Settings, TeamSettings};
+
+    fn base_req() -> CreateTeamRequest {
+        CreateTeamRequest::new("并行目标", TeamMode::Team)
+    }
+
+    /// 配置补位：统一模型 + 并行路数 + 并行度 + 自动生成并行角色 + 成员上限。
+    #[test]
+    fn config_fills_defaults_and_generates_parallel_roles() {
+        let settings = Settings {
+            team: TeamSettings {
+                model: Some("glm-5.3-flashx".to_string()),
+                parallel: Some(3),
+                max_parallel: Some(2),
+                roles: Vec::new(),
+            },
+            ..Default::default()
+        };
+        let mut req = base_req();
+        assert!(apply_team_settings(&mut req, &settings));
+        assert_eq!(req.model.as_deref(), Some("glm-5.3-flashx"));
+        assert!(req.parallel, "team.parallel 应启用并行模式");
+        assert_eq!(req.roles.len(), 5, "lead + w1..w3 + leader");
+        assert_eq!(req.roles[0].role, "lead");
+        assert_eq!(req.roles[4].role, "leader");
+        assert_eq!(req.budget["max_parallel"], 2, "并行度可独立配置");
+        assert_eq!(req.max_agent_members, Some(5));
+    }
+
+    /// CLI 显式并行意图未携带容量时，按配置或服务端安全缺省生成 worker 槽位。
+    #[test]
+    fn explicit_parallel_intent_without_config_uses_default_worker_capacity() {
+        let mut req = base_req();
+        req.parallel = true;
+        assert!(apply_team_settings(&mut req, &Settings::default()));
+        assert_eq!(req.roles.len(), 6, "lead + 默认 4 个 worker + leader");
+        assert_eq!(
+            req.roles.first().map(|role| role.role.as_str()),
+            Some("lead")
+        );
+        assert_eq!(
+            req.roles.last().map(|role| role.role.as_str()),
+            Some("leader")
+        );
+        assert_eq!(req.roles[1].role, "w1");
+        assert_eq!(req.roles[4].role, "w4");
+        assert_eq!(req.max_agent_members, Some(6));
+        assert_eq!(req.budget, Value::Null, "未显式容量时保留预算默认值");
+    }
+
+    /// 请求显式字段优先：配置不得覆盖 model/roles/parallel/budget/成员上限。
+    #[test]
+    fn request_explicit_fields_win_over_config() {
+        let mut roles = vec![RoleSpec::agent("solo")];
+        roles[0].write_paths = vec!["src/x".to_string()];
+        let mut req = base_req();
+        req.model = Some("custom-model".to_string());
+        req.parallel = true;
+        req.roles = roles;
+        req.budget = json!({ "max_parallel": 1 });
+        req.max_agent_members = Some(9);
+        let settings = Settings {
+            model: Some("fallback-model".to_string()),
+            team: TeamSettings {
+                model: Some("cfg-model".to_string()),
+                parallel: Some(4),
+                max_parallel: Some(8),
+                roles: vec![RoleSpec::agent("w1")],
+            },
+            ..Default::default()
+        };
+        assert!(!apply_team_settings(&mut req, &settings), "无缺省可补");
+        assert_eq!(req.model.as_deref(), Some("custom-model"));
+        assert_eq!(req.roles.len(), 1);
+        assert_eq!(req.roles[0].role, "solo");
+        assert_eq!(req.budget["max_parallel"], 1);
+        assert_eq!(req.max_agent_members, Some(9));
+    }
+
+    /// 配置自定义角色编排：请求未给角色时使用；角色含 lead 时自动开并行分配。
+    #[test]
+    fn config_custom_roles_used_and_lead_enables_parallel() {
+        let mut lead = RoleSpec::agent("lead");
+        lead.depends_on.clear();
+        let settings = Settings {
+            team: TeamSettings {
+                roles: vec![lead, {
+                    let mut w1 = RoleSpec::agent("w1");
+                    w1.depends_on = vec!["lead".to_string()];
+                    w1.write_paths = vec!["src/a".to_string()];
+                    w1
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut req = base_req();
+        assert!(apply_team_settings(&mut req, &settings));
+        assert_eq!(req.roles.len(), 2);
+        assert!(req.parallel, "自定义编排含 lead → 启用动态分配");
+        assert_eq!(req.max_agent_members, Some(2));
+    }
+
+    /// 指定模板的请求不被配置角色覆盖；模型回退 `Settings.model`；空串视为未配置。
+    #[test]
+    fn template_request_keeps_roles_and_model_falls_back() {
+        let settings = Settings {
+            model: Some("glm-5.3-flash".to_string()),
+            team: TeamSettings {
+                model: Some("   ".to_string()),
+                roles: vec![RoleSpec::agent("w1")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut req = base_req();
+        req.template_id = Some("code-change-v1".to_string());
+        assert!(apply_team_settings(&mut req, &settings));
+        assert!(req.roles.is_empty(), "模板请求保留模板角色");
+        assert_eq!(
+            req.model.as_deref(),
+            Some("glm-5.3-flash"),
+            "team.model 空串回退 Settings.model"
+        );
+    }
+
+    /// 非法并行度（越界）不启用并行；max_parallel 越界不写预算。
+    #[test]
+    fn out_of_range_parallel_is_ignored() {
+        let settings = Settings {
+            team: TeamSettings {
+                parallel: Some(99),
+                max_parallel: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut req = base_req();
+        assert!(!apply_team_settings(&mut req, &settings));
+        assert!(!req.parallel);
+        assert!(req.roles.is_empty());
+        assert_eq!(req.budget, Value::Null);
+    }
+}

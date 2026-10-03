@@ -1,6 +1,4 @@
 use super::queue::*;
-use super::wire::*;
-use super::*;
 use owo_agent_protocol::SseEvent;
 use std::sync::{Arc, Weak};
 

@@ -38,6 +38,11 @@
 //! （子模块 [`workspace_change_tracker`]；白名单越界 → `scope_violation` 步骤失败）；
 //! 团队取消令牌经桥接任务置位共享 abort 标志，运行中 Worker 协作即时中断。
 //!
+//! 十一期（二路）并行开发接线：角色可声明 `model`（每角色独立模型）与 `write_paths`
+//! （角色写范围）——写范围互不重叠的写角色经 [`write_lease`] 范围租约**并发落盘**，
+//! 未声明范围的写角色保持原单写者语义（全局互斥）；范围归属过滤避免并发窗口把
+//! 其他写者的变更误判为本步骤越界（见 [`workers::TrackedRoleWorker`]）。
+//!
 //! S0 边界：产物经 CAS ref 传递（大对象不进响应体）；agent 角色经
 //! `Agent::run_subagent` 模型驱动；内置 echo/sleep/fail worker 供测试与演示。
 
@@ -69,6 +74,23 @@ mod handlers;
 mod runtime;
 mod state;
 mod workers;
+/// 十一期（二路）：范围写租约——声明写范围的写角色可并发落盘（范围不重叠时）。
+mod write_lease;
+
+/// Hold the same workspace-wide lease used by Team writers while DeliveryGate
+/// hashes workspace subjects and commits its accepted manifest. This prevents
+/// another in-process TeamRun from changing checked files between validation
+/// and delivery publication.
+pub(crate) async fn acquire_workspace_delivery_lease(
+    workspace_root: &std::path::Path,
+) -> write_lease::WriteLeaseGuard {
+    write_lease::WriteLease::new(
+        write_lease::manager_for_workspace(workspace_root),
+        write_lease::WriteScope::global(),
+    )
+    .acquire()
+    .await
+}
 
 #[cfg(test)]
 mod tests;

@@ -77,11 +77,11 @@ const LEADER_FINAL: &str =
 // 手写 const JSON（r###：正文含 `"##` 序列，需三重 # 终止）；content 内 \n 为
 // JSON 转义 = 真实换行，与 LEADER_FINAL 字面一致。
 // 十期 · 三路：Document 分类 multi 评测走 document-delivery-v1 模板
-//（drafter → content_reviewer → finalizer）；评审结论经 artifact 携带（登记 kind
-// 取角色链 kind=角色名），最终交付按 producer 收口角色挑选，评审角色永不入选。
+//（drafter → content_reviewer → finalizer）；评审结论按共享 WorkerOutputV1 契约放 summary，
+// Coordinator 再将其记录为 review Artifact，最终交付选择排除评审角色。
 
 const DRAFTER_CONTRACT: &str = r###"{"status":"done","summary":"初稿完成","artifact":{"kind":"draft","format":"markdown","content":"## 草稿\n关键结论 A 的初稿，结构完整，待评审。"},"evidence":[],"open_issues":[]}"###;
-const CONTENT_REVIEWER_CONTRACT: &str = r###"{"status":"done","summary":"评审通过","artifact":{"kind":"review","format":"markdown","content":"{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\"]}"},"evidence":[],"open_issues":[]}"###;
+const CONTENT_REVIEWER_CONTRACT: &str = r###"{"status":"done","summary":"评审通过","review_result":{"verdict":"approved","findings":[]},"evidence":[],"open_issues":[]}"###;
 const FINALIZER_CONTRACT: &str = r###"{"status":"done","summary":"最终交付","artifact":{"kind":"final","format":"markdown","content":"# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。"},"evidence":[],"open_issues":[]}"###;
 
 fn ws_case(id: &str) -> ProductEvalCase {

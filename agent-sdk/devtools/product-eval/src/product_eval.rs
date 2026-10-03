@@ -24,8 +24,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// 当前产品评测任务 schema 版本。
@@ -150,6 +150,19 @@ fn default_timeout_secs() -> u64 {
 }
 fn default_max_model_calls() -> u32 {
     6
+}
+
+/// Opt-in for wall-clock benchmark runs: the outer timeout, not an arbitrary call
+/// count, ends the run. Normal product-eval suites retain their explicit budgets.
+pub(crate) fn unbounded_benchmark_calls() -> bool {
+    std::env::var("OWO_PRODUCT_EVAL_UNBOUNDED_CALLS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// 输入 fixture：执行前写入沙盒工作区的文件。
@@ -403,9 +416,15 @@ impl ProductEvalCase {
     }
 
     pub fn effective_max_model_calls(&self, defaults: &SuiteDefaults) -> u32 {
-        self.max_model_calls
+        let calls = self
+            .max_model_calls
             .unwrap_or(defaults.max_model_calls)
-            .clamp(1, 20)
+            .max(1);
+        if unbounded_benchmark_calls() {
+            calls
+        } else {
+            calls.min(64)
+        }
     }
 }
 
@@ -498,6 +517,17 @@ pub struct ProductEvalRun {
     pub category: EvalCategory,
     pub status: RunStatus,
     pub wall_ms: u64,
+    /// Wall time inside CaseExecutor::execute. For Team, this includes inline host checks
+    /// and DeliveryGate; for Single, the outer checker pass is measured separately.
+    #[serde(default)]
+    pub executor_wall_ms: u64,
+    /// Time spent in host-side product checkers, including retries and fallback checks.
+    /// This can overlap executor_wall_ms for Team and must not be added to total wall time.
+    #[serde(default)]
+    pub validation_wall_ms: u64,
+    /// Time spent committing the Team DeliveryGate (zero for Single); nested in executor wall.
+    #[serde(default)]
+    pub delivery_gate_wall_ms: u64,
     pub model_calls: u32,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
@@ -538,6 +568,12 @@ pub struct ProductEvalMetrics {
     /// 成功率分母为全部已尝试运行（失败/错误/超时一律计入，禁止剔除重算）。
     pub success_rate: f64,
     pub mean_wall_ms: f64,
+    #[serde(default)]
+    pub mean_executor_wall_ms: f64,
+    #[serde(default)]
+    pub mean_validation_wall_ms: f64,
+    #[serde(default)]
+    pub mean_delivery_gate_wall_ms: f64,
     pub total_model_calls: u64,
     pub total_tokens: Option<u64>,
     pub estimated_cost_usd: Option<f64>,
@@ -1243,8 +1279,10 @@ pub fn validate_case(
         }
     }
     if let Some(calls) = case.max_model_calls {
-        if calls == 0 || calls > 20 {
-            issues.push(format!("max_model_calls={calls} 超出 [1,20]"));
+        if calls == 0 || (calls > 64 && !unbounded_benchmark_calls()) {
+            issues.push(format!(
+                "max_model_calls={calls} 超出允许范围（普通评测 1..=64；计时基准可用完整 u32 范围）"
+            ));
         }
     }
 
@@ -1324,6 +1362,133 @@ pub fn format_validation(validation: &SuiteValidation) -> String {
 // 执行器契约
 // ---------------------------------------------------------------------------
 
+/// 运行中可读取的原子遥测，供墙钟截止时保留已发生的工作量。
+#[derive(Debug, Default)]
+pub(crate) struct ExecProgress {
+    model_calls: AtomicU32,
+    prompt_tokens: AtomicU64,
+    completion_tokens: AtomicU64,
+    total_tokens: AtomicU64,
+    usage_known: AtomicBool,
+    usage_unknown: AtomicBool,
+    team_workspace: Mutex<Option<PathBuf>>,
+    prevalidated_checkers: Mutex<Option<(u32, u32)>>,
+    validation_wall_ms: AtomicU64,
+    delivery_gate_wall_ms: AtomicU64,
+}
+
+impl ExecProgress {
+    pub(crate) fn record_model_call(&self) {
+        self.model_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_usage(&self, usage: TokenUsage) {
+        self.prompt_tokens
+            .fetch_add(usage.prompt_tokens, Ordering::Relaxed);
+        self.completion_tokens
+            .fetch_add(usage.completion_tokens, Ordering::Relaxed);
+        self.total_tokens
+            .fetch_add(usage.total_tokens, Ordering::Relaxed);
+        self.usage_known.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_usage_unknown(&self) {
+        self.usage_unknown.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_team_workspace(&self, path: PathBuf) {
+        if let Ok(mut workspace) = self.team_workspace.lock() {
+            *workspace = Some(path);
+        }
+    }
+
+    pub(crate) fn record_validation_wall_ms(&self, elapsed_ms: u64) {
+        self.validation_wall_ms
+            .fetch_add(elapsed_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_delivery_gate_wall_ms(&self, elapsed_ms: u64) {
+        self.delivery_gate_wall_ms
+            .fetch_add(elapsed_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn mark_checkers_prevalidated(&self, passed: u32, total: u32) {
+        if passed == total {
+            if let Ok(mut result) = self.prevalidated_checkers.lock() {
+                *result = Some((passed, total));
+            }
+        }
+    }
+
+    pub(crate) fn prevalidated_checkers(&self) -> Option<(u32, u32)> {
+        self.prevalidated_checkers
+            .lock()
+            .ok()
+            .and_then(|result| *result)
+    }
+
+    fn snapshot(&self) -> RawExecOutcome {
+        let usage_known =
+            self.usage_known.load(Ordering::Relaxed) && !self.usage_unknown.load(Ordering::Relaxed);
+        RawExecOutcome {
+            model_calls: self.model_calls.load(Ordering::Relaxed),
+            usage: TokenUsage {
+                prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
+                completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
+                total_tokens: self.total_tokens.load(Ordering::Relaxed),
+            },
+            usage_known,
+            validation_wall_ms: self.validation_wall_ms.load(Ordering::Relaxed),
+            delivery_gate_wall_ms: self.delivery_gate_wall_ms.load(Ordering::Relaxed),
+            ..RawExecOutcome::default()
+        }
+    }
+
+    fn copy_expected_artifacts(
+        &self,
+        case: &ProductEvalCase,
+        destination: &Path,
+    ) -> Result<Vec<String>, String> {
+        let source = self
+            .team_workspace
+            .lock()
+            .map_err(|_| "团队工作区快照锁中毒".to_string())?
+            .clone();
+        let Some(source) = source else {
+            return Ok(Vec::new());
+        };
+        let mut copied = Vec::new();
+        for raw in &case.expected_artifacts {
+            let rel = sanitize_rel_path(raw)?;
+            if !in_scope(&case.allow_write, &rel) {
+                continue;
+            }
+            let from = source.join(&rel);
+            if !from.is_file() {
+                continue;
+            }
+            let to = destination.join(&rel);
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("创建截止快照目录失败：{error}"))?;
+            }
+            let source_bytes = std::fs::read(&from)
+                .map_err(|error| format!("读取截止快照 {} 失败：{error}", rel))?;
+            if to.is_file() {
+                let target_bytes = std::fs::read(&to)
+                    .map_err(|error| format!("读取基线文件 {} 失败：{error}", rel))?;
+                if Sha256::digest(&source_bytes)[..] == Sha256::digest(&target_bytes)[..] {
+                    continue;
+                }
+            }
+            std::fs::write(&to, source_bytes)
+                .map_err(|error| format!("复制截止快照 {} 失败：{error}", rel))?;
+            copied.push(rel.replace('\\', "/"));
+        }
+        Ok(copied)
+    }
+}
+
 /// 执行器可见的单次运行上下文。写入统一走 [`ExecContext::write_file`]，
 /// 强制 allow_write 范围（权限默认 deny），并自动登记 Artifact 引用与失败步骤。
 pub struct ExecContext<'ctx> {
@@ -1334,6 +1499,7 @@ pub struct ExecContext<'ctx> {
     pub max_model_calls: u32,
     /// 外部取消令牌（Ctrl-C 等）；执行器应在合适时机检查并尽快返回 aborted。
     pub cancel: Arc<AtomicBool>,
+    progress: Arc<ExecProgress>,
     artifact_refs: Vec<String>,
     failed_steps: Vec<String>,
 }
@@ -1354,9 +1520,14 @@ impl<'ctx> ExecContext<'ctx> {
             timeout_secs,
             max_model_calls,
             cancel,
+            progress: Arc::new(ExecProgress::default()),
             artifact_refs: Vec::new(),
             failed_steps: Vec::new(),
         }
+    }
+
+    pub(crate) fn progress(&self) -> Arc<ExecProgress> {
+        Arc::clone(&self.progress)
     }
 
     pub fn record_failed_step(&mut self, step: impl Into<String>) {
@@ -1418,6 +1589,10 @@ pub struct RawExecOutcome {
     pub usage: TokenUsage,
     /// Provider 是否回报了可用用量（否则 token 字段落盘为 null）。
     pub usage_known: bool,
+    /// Host-side validation wall time accumulated by the executor.
+    pub validation_wall_ms: u64,
+    /// Team DeliveryGate commit wall time; zero for executors without a Team gate.
+    pub delivery_gate_wall_ms: u64,
     /// 内部重试次数（如多 Agent 复审返工）。
     pub retries: u32,
     /// 真实工具调用轨迹（单 Agent 执行器填写；其余执行器为空）。
@@ -1804,6 +1979,8 @@ impl CaseExecutor for GenerativeExecutor {
                 model_calls: state.model_calls,
                 usage: state.session_usage,
                 usage_known: state.session_usage.total_tokens > 0,
+                validation_wall_ms: 0,
+                delivery_gate_wall_ms: 0,
                 retries,
                 tool_log: Vec::new(),
             },
@@ -1813,6 +1990,8 @@ impl CaseExecutor for GenerativeExecutor {
                 model_calls: state.model_calls,
                 usage: state.session_usage,
                 usage_known: state.session_usage.total_tokens > 0,
+                validation_wall_ms: 0,
+                delivery_gate_wall_ms: 0,
                 retries,
                 tool_log: Vec::new(),
             },
@@ -1822,6 +2001,8 @@ impl CaseExecutor for GenerativeExecutor {
                 model_calls: state.model_calls,
                 usage: state.session_usage,
                 usage_known: state.session_usage.total_tokens > 0,
+                validation_wall_ms: 0,
+                delivery_gate_wall_ms: 0,
                 retries,
                 tool_log: Vec::new(),
             },
@@ -2109,6 +2290,8 @@ impl MatrixRunner {
 
             let started_at = now_rfc3339();
             let cell_started = Instant::now();
+            let mut execution_wall_ms = None;
+            let mut executor_wall_ms = 0_u64;
             let (status, failed_steps, artifact_refs, outcome, checker_passed, checker_total) =
                 if let Some(setup_error) = setup_error {
                     (
@@ -2128,9 +2311,11 @@ impl MatrixRunner {
                         max_model_calls,
                         Arc::clone(&cancel),
                     );
+                    let execution_started = Instant::now();
                     let future = executor.execute(&mut ctx);
                     match tokio::time::timeout(Duration::from_secs(timeout_secs), future).await {
-                        Ok(outcome) => {
+                        Ok(mut outcome) => {
+                            executor_wall_ms = execution_started.elapsed().as_millis() as u64;
                             let (artifacts, mut steps) = ctx.take_records();
                             if outcome.aborted {
                                 steps.push("cancelled:收到取消信号".to_string());
@@ -2142,9 +2327,22 @@ impl MatrixRunner {
                                     steps.push(format!("executor:{error}"));
                                     (RunStatus::Error, Vec::new(), 0, 0)
                                 } else {
-                                    // 检查器判定：静态检查器 + 行为 command_check 在真实沙盒执行。
-                                    let (passed, total, failed) =
-                                        evaluate_all_on_dir(&case.checkers, &sandbox).await;
+                                    // Team 全栈路径在 finalize_success 前已对同一工作区执行
+                                    // 宿主检查器，复用通过结果，避免重复运行 command_check。
+                                    let checks = ctx.progress().prevalidated_checkers();
+                                    let (passed, total, failed) = match checks {
+                                        Some((passed, total)) => (passed, total, Vec::new()),
+                                        None => {
+                                            let validation_started = Instant::now();
+                                            let result =
+                                                evaluate_all_on_dir(&case.checkers, &sandbox).await;
+                                            outcome.validation_wall_ms =
+                                                outcome.validation_wall_ms.saturating_add(
+                                                    validation_started.elapsed().as_millis() as u64,
+                                                );
+                                            result
+                                        }
+                                    };
                                     if failed.is_empty() {
                                         (RunStatus::Passed, Vec::new(), passed, total)
                                     } else {
@@ -2162,20 +2360,59 @@ impl MatrixRunner {
                             )
                         }
                         Err(_) => {
-                            let (artifacts, mut steps) = ctx.take_records();
+                            executor_wall_ms = execution_started.elapsed().as_millis() as u64;
+                            execution_wall_ms = Some(cell_started.elapsed().as_millis() as u64);
+                            let (mut artifacts, mut steps) = ctx.take_records();
                             steps.push(format!("timeout:超过 {timeout_secs}s 上限"));
-                            (
-                                RunStatus::Timeout,
-                                steps,
-                                artifacts,
-                                RawExecOutcome::default(),
-                                0,
-                                0,
-                            )
+                            if unbounded_benchmark_calls() {
+                                // Freeze the Team workspace into the eval sandbox at the exact cutoff.
+                                // Preserve live telemetry even though the executor future is cancelled.
+                                match ctx.progress.copy_expected_artifacts(case, &sandbox) {
+                                    Ok(partial_artifacts) => {
+                                        for artifact in partial_artifacts {
+                                            if !artifacts.contains(&artifact) {
+                                                artifacts.push(artifact);
+                                            }
+                                        }
+                                    }
+                                    Err(error) => steps.push(format!("partial_snapshot:{error}")),
+                                }
+                                let mut partial_outcome = ctx.progress.snapshot();
+                                let validation_started = Instant::now();
+                                let (passed, total, failed) =
+                                    evaluate_all_on_dir(&case.checkers, &sandbox).await;
+                                partial_outcome.validation_wall_ms =
+                                    partial_outcome.validation_wall_ms.saturating_add(
+                                        validation_started.elapsed().as_millis() as u64,
+                                    );
+                                steps.extend(
+                                    failed
+                                        .into_iter()
+                                        .map(|failure| format!("partial_completion:{failure}")),
+                                );
+                                (
+                                    RunStatus::Timeout,
+                                    steps,
+                                    artifacts,
+                                    partial_outcome,
+                                    passed,
+                                    total,
+                                )
+                            } else {
+                                (
+                                    RunStatus::Timeout,
+                                    steps,
+                                    artifacts,
+                                    RawExecOutcome::default(),
+                                    0,
+                                    0,
+                                )
+                            }
                         }
                     }
                 };
-            let wall_ms = cell_started.elapsed().as_millis() as u64;
+            let wall_ms =
+                execution_wall_ms.unwrap_or_else(|| cell_started.elapsed().as_millis() as u64);
 
             // 失败沙盒留档（供事后排查，路径随记录落盘）；成功沙盒即时清理。
             let sandbox_rel = if matches!(status, RunStatus::Passed) {
@@ -2203,6 +2440,9 @@ impl MatrixRunner {
                 category: case.category,
                 status,
                 wall_ms,
+                executor_wall_ms,
+                validation_wall_ms: outcome.validation_wall_ms,
+                delivery_gate_wall_ms: outcome.delivery_gate_wall_ms,
                 model_calls: outcome.model_calls,
                 prompt_tokens: outcome.usage_known.then_some(outcome.usage.prompt_tokens),
                 completion_tokens: outcome
@@ -2335,6 +2575,9 @@ pub fn aggregate_metrics(runs: &[ProductEvalRun]) -> ProductEvalMetrics {
         .filter(|r| r.status == RunStatus::Cancelled)
         .count();
     let wall_sum: u64 = runs.iter().map(|r| r.wall_ms).sum();
+    let executor_wall_sum: u64 = runs.iter().map(|r| r.executor_wall_ms).sum();
+    let validation_wall_sum: u64 = runs.iter().map(|r| r.validation_wall_ms).sum();
+    let delivery_gate_wall_sum: u64 = runs.iter().map(|r| r.delivery_gate_wall_ms).sum();
     let model_calls: u64 = runs.iter().map(|r| r.model_calls as u64).sum();
     let tokens_known = runs.iter().any(|r| r.total_tokens.is_some());
     let total_tokens = if tokens_known {
@@ -2364,6 +2607,21 @@ pub fn aggregate_metrics(runs: &[ProductEvalRun]) -> ProductEvalMetrics {
             0.0
         } else {
             wall_sum as f64 / total as f64
+        },
+        mean_executor_wall_ms: if total == 0 {
+            0.0
+        } else {
+            executor_wall_sum as f64 / total as f64
+        },
+        mean_validation_wall_ms: if total == 0 {
+            0.0
+        } else {
+            validation_wall_sum as f64 / total as f64
+        },
+        mean_delivery_gate_wall_ms: if total == 0 {
+            0.0
+        } else {
+            delivery_gate_wall_sum as f64 / total as f64
         },
         total_model_calls: model_calls,
         total_tokens,
@@ -2682,6 +2940,12 @@ pub struct ModeStats {
     pub p50_wall_ms: Option<f64>,
     pub p95_wall_ms: Option<f64>,
     pub mean_wall_ms: f64,
+    #[serde(default)]
+    pub mean_executor_wall_ms: f64,
+    #[serde(default)]
+    pub mean_validation_wall_ms: f64,
+    #[serde(default)]
+    pub mean_delivery_gate_wall_ms: f64,
     pub mean_model_calls: f64,
     pub total_tokens: Option<u64>,
     pub total_cost_usd: Option<f64>,
@@ -2715,6 +2979,33 @@ pub fn mode_statistics(runs: &[ProductEvalRun], mode: AgentMode) -> ModeStats {
     } else {
         group.iter().map(|run| run.model_calls as f64).sum::<f64>() / total as f64
     };
+    let mean_executor_wall = if total == 0 {
+        0.0
+    } else {
+        group
+            .iter()
+            .map(|run| run.executor_wall_ms as f64)
+            .sum::<f64>()
+            / total as f64
+    };
+    let mean_validation_wall = if total == 0 {
+        0.0
+    } else {
+        group
+            .iter()
+            .map(|run| run.validation_wall_ms as f64)
+            .sum::<f64>()
+            / total as f64
+    };
+    let mean_delivery_gate_wall = if total == 0 {
+        0.0
+    } else {
+        group
+            .iter()
+            .map(|run| run.delivery_gate_wall_ms as f64)
+            .sum::<f64>()
+            / total as f64
+    };
     let tokens_known = group.iter().any(|run| run.total_tokens.is_some());
     let tokens = if tokens_known {
         Some(group.iter().filter_map(|run| run.total_tokens).sum())
@@ -2743,6 +3034,9 @@ pub fn mode_statistics(runs: &[ProductEvalRun], mode: AgentMode) -> ModeStats {
         p50_wall_ms: percentile(&walls, 50.0),
         p95_wall_ms: percentile(&walls, 95.0),
         mean_wall_ms: mean_wall,
+        mean_executor_wall_ms: mean_executor_wall,
+        mean_validation_wall_ms: mean_validation_wall,
+        mean_delivery_gate_wall_ms: mean_delivery_gate_wall,
         mean_model_calls: mean_calls,
         total_tokens: tokens,
         total_cost_usd: cost,
@@ -2782,9 +3076,9 @@ fn rel_change(baseline: f64, candidate: f64) -> Option<f64> {
     }
 }
 
-/// 对照判定（multi 相对 single）。启用条件：
-/// ① 成功率差 ≥ +5 个百分点；② 成功率相对提升 ≥ +10%（质量代理：检查器为二元
-/// 判定，暂无独立质量指标，以成功率相对改善代替，已在 detail 标注）；③ 平均耗时 −30%。
+/// 对照判定（multi 相对 single）。质量是硬门槛：multi 成功率不得低于 single；
+/// 质量不退化后，启用条件任一满足即可：成功率差 ≥ +5 个百分点、成功率相对提升 ≥ +10%
+///（质量代理：检查器为二元判定，暂无独立质量指标），或平均耗时 −30%。
 pub fn compare_mode_statistics(single: &ModeStats, multi: &ModeStats) -> ModeComparison {
     let diff = multi.success_rate - single.success_rate;
     let wall_rel = rel_change(single.mean_wall_ms, multi.mean_wall_ms);
@@ -2825,7 +3119,10 @@ pub fn compare_mode_statistics(single: &ModeStats, multi: &ModeStats) -> ModeCom
         multi_calls_rel_change: calls_rel,
         multi_tokens_rel_change: tokens_rel,
         multi_cost_rel_change: cost_rel,
-        enabled: rules.iter().any(|rule| rule.satisfied),
+        enabled: single.sample_sufficient
+            && multi.sample_sufficient
+            && diff >= 0.0
+            && rules.iter().any(|rule| rule.satisfied),
         rules,
         sample_sufficient: single.sample_sufficient && multi.sample_sufficient,
     }
@@ -2853,7 +3150,7 @@ pub fn format_mode_statistics(runs: &[ProductEvalRun]) -> String {
             continue;
         }
         out.push_str(&format!(
-            "  {:<7} 成功率 {:.1}% CI95 [{:.1}%, {:.1}%]（{}/{}） p50={:.0}ms p95={:.0}ms mean_calls={:.1} tokens={:?} cost={:?}{}\n",
+            "  {:<7} 成功率 {:.1}% CI95 [{:.1}%, {:.1}%]（{}/{}） p50={:.0}ms p95={:.0}ms executor={:.0}ms validate={:.0}ms gate={:.0}ms mean_calls={:.1} tokens={:?} cost={:?}{}\n",
             stats.mode,
             stats.success_rate * 100.0,
             stats.ci95_low * 100.0,
@@ -2862,11 +3159,17 @@ pub fn format_mode_statistics(runs: &[ProductEvalRun]) -> String {
             stats.runs_total,
             stats.p50_wall_ms.unwrap_or(0.0),
             stats.p95_wall_ms.unwrap_or(0.0),
+            stats.mean_executor_wall_ms,
+            stats.mean_validation_wall_ms,
+            stats.mean_delivery_gate_wall_ms,
             stats.mean_model_calls,
             stats.total_tokens,
             stats.total_cost_usd,
             if stats.sample_sufficient { "" } else { "（样本不足 n<30，区间仅供参考）" },
         ));
+    }
+    if single.runs_total > 0 || multi.runs_total > 0 {
+        out.push_str("  说明：Team 的 validate/gate 计入 executor；Single 的外层检查在 executor 之后计时，这些阶段值不可相加替代总 wall_ms。\n");
     }
     if single.runs_total > 0 && multi.runs_total > 0 {
         let comparison = compare_mode_statistics(&single, &multi);
@@ -2877,16 +3180,28 @@ pub fn format_mode_statistics(runs: &[ProductEvalRun]) -> String {
 
 /// 启用条件判定的人类可读段落。
 pub fn format_mode_comparison(comparison: &ModeComparison) -> String {
-    let mut out = String::from("  —— 多 Agent 启用条件（任一满足即建议启用）——\n");
+    let mut out = String::from("  —— 多 Agent 启用条件（样本充分与质量不退化为硬门槛）——\n");
     for rule in &comparison.rules {
         let mark = if rule.satisfied { "✅" } else { "⬜" };
         out.push_str(&format!("  {} {}：{}\n", mark, rule.name, rule.detail));
     }
-    out.push_str(if comparison.enabled {
-        "  结论：建议启用多 Agent（满足至少一条启用条件）\n"
+    if comparison.multi_success_rate_diff < 0.0 {
+        out.push_str(&format!(
+            "  质量守卫：未通过，multi 成功率低于 single {:.1}pp；速度收益不抵消质量退化\n",
+            comparison.multi_success_rate_diff.abs() * 100.0
+        ));
     } else {
-        "  结论：暂不建议启用多 Agent（未满足任何启用条件）\n"
-    });
+        out.push_str("  质量守卫：通过，multi 成功率不低于 single\n");
+    }
+    if comparison.enabled {
+        out.push_str("  结论：建议启用多 Agent（样本充分、质量守卫通过且至少一条优势条件满足）\n");
+    } else if !comparison.sample_sufficient {
+        out.push_str("  结论：暂不建议启用多 Agent（single 与 multi 均需至少 30 个样本）\n");
+    } else if comparison.multi_success_rate_diff < 0.0 {
+        out.push_str("  结论：暂不建议启用多 Agent（质量守卫未通过）\n");
+    } else {
+        out.push_str("  结论：暂不建议启用多 Agent（未达到任何优势条件）\n");
+    }
     if !comparison.sample_sufficient {
         out.push_str("  ⚠️ 样本不足（n<30）：以上对照结论仅具方向性参考\n");
     }
@@ -3261,6 +3576,18 @@ pub fn parse_freeze(text: &str) -> Result<serde_json::Value, ProductEvalError> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn execution_progress_accumulates_validation_and_delivery_gate_time() {
+        let progress = ExecProgress::default();
+        progress.record_validation_wall_ms(12);
+        progress.record_validation_wall_ms(8);
+        progress.record_delivery_gate_wall_ms(5);
+
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.validation_wall_ms, 20);
+        assert_eq!(snapshot.delivery_gate_wall_ms, 5);
+    }
 
     /// 契约变更任务的映射片段检查器必须容忍格式化差异（反引号/空格/箭头变体）。
     /// 回归依据：2026-08-31 正式批次 code-contract-change 3 个失败均为"语义正确、

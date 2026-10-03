@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::capability::{CapabilityWorkerRegistry, WorkerRequirement};
 use crate::execution_target::WorkerBinding;
-use crate::plan::{Plan, StepStatus, VerificationSpec};
+use crate::plan::{Plan, StepStatus, VerificationPlanV1, VerificationSpec};
 use crate::worker_pool::WorkerPool;
 /// 目标状态机：Pending→Planning→Running→Verifying→Succeeded/Failed/Aborted。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +43,15 @@ pub struct GoalBudget {
     pub max_replans: u32,
     /// 最大执行时长（秒，0 = 不限）。
     pub max_duration_secs: u64,
+    /// 并行度上限（十一期 · 团队并行开发：同一 wave 内并发执行的步骤数；
+    /// 缺省 4；旧持久化状态缺字段时按缺省反序列化）。
+    #[serde(default = "default_max_parallel")]
+    pub max_parallel: u32,
+}
+
+/// `GoalBudget.max_parallel` 缺省值（与 [`RunnerConfig::default`] 一致）。
+pub fn default_max_parallel() -> u32 {
+    4
 }
 
 impl Default for GoalBudget {
@@ -53,6 +62,7 @@ impl Default for GoalBudget {
             max_total_retries: 10,
             max_replans: 2,
             max_duration_secs: 0,
+            max_parallel: default_max_parallel(),
         }
     }
 }
@@ -68,6 +78,9 @@ pub struct Goal {
     /// 目标级验收条件（全部通过才 Succeeded）。
     #[serde(default)]
     pub acceptance: Vec<VerificationSpec>,
+    /// Typed host verification contract; legacy `acceptance` compiles through the same registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_plan: Option<VerificationPlanV1>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +96,7 @@ impl Goal {
             status: GoalStatus::Pending,
             budget: GoalBudget::default(),
             acceptance: Vec::new(),
+            verification_plan: None,
             created_at: now.clone(),
             updated_at: now,
             error: None,
@@ -131,10 +145,33 @@ pub struct StepRecord {
     pub step_id: String,
     pub status: StepStatus,
     pub attempts: u32,
+    /// Host-generated unique identity for the active attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Host-authenticated runtime skip disposition; ordinary success must not impersonate a skip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+    /// Host epoch that claimed the attempt; stale worker results cannot reuse it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_epoch: Option<u64>,
+    /// Host receipts from the current and prior attempts; prior receipts are kept as Stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+}
+
+/// 单步完成状态更新，供上层调度器在任务之间隙持久化。
+#[derive(Debug, Clone)]
+pub struct StepProgressUpdate {
+    pub step_id: String,
+    pub worker: String,
+    pub record: StepRecord,
+    pub steps_taken: u32,
+    pub total_retries: u32,
+    pub skip_reason: Option<String>,
 }
 
 /// 一次运行的完整状态（可整体持久化：<dir>/<run_id>.json）。
@@ -145,6 +182,9 @@ pub struct GoalRunState {
     pub plan: Plan,
     /// step_id → 执行记录。
     pub records: BTreeMap<String, StepRecord>,
+    /// Host-produced goal-level receipts; legacy snapshots load with no receipts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
     /// 全局已执行动作数（预算）。
     pub steps_taken: u32,
     /// 全局重试次数。
@@ -170,8 +210,12 @@ impl GoalRunState {
                         step_id: s.id.clone(),
                         status: StepStatus::Pending,
                         attempts: 0,
+                        attempt_id: None,
                         output: None,
                         error: None,
+                        skip_reason: None,
+                        phase_epoch: None,
+                        validation_receipts: Vec::new(),
                     },
                 )
             })
@@ -181,6 +225,7 @@ impl GoalRunState {
             goal,
             plan,
             records,
+            validation_receipts: Vec::new(),
             steps_taken: 0,
             total_retries: 0,
             replan_count: 0,

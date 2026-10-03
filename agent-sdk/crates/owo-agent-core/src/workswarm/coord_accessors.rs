@@ -21,6 +21,7 @@ impl TeamCoordinator {
             phase_epochs: Arc::new(Mutex::new(HashMap::new())),
             phase_claims: Arc::new(Mutex::new(HashMap::new())),
             progress_seqs: Arc::new(Mutex::new(HashMap::new())),
+            verification_workspaces: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -46,6 +47,35 @@ impl TeamCoordinator {
 
     pub fn run_dir(&self) -> &Path {
         &self.run_dir
+    }
+
+    pub fn bind_verification_workspace(
+        &self,
+        team_id: &str,
+        root: impl AsRef<Path>,
+    ) -> WorkSwarmResult<()> {
+        let root = root
+            .as_ref()
+            .canonicalize()
+            .map_err(|error| WorkSwarmError::Io(format!("验证工作区不可用：{error}")))?;
+        if !root.is_dir() {
+            return Err(WorkSwarmError::Validation(
+                "验证工作区必须是目录".to_string(),
+            ));
+        }
+        self.verification_workspaces
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(team_id.to_string(), root);
+        Ok(())
+    }
+
+    pub(crate) fn verification_workspace(&self, team_id: &str) -> Option<PathBuf> {
+        self.verification_workspaces
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(team_id)
+            .cloned()
     }
 
     // -- 内部基础 --
@@ -133,6 +163,34 @@ impl TeamCoordinator {
             .insert(team_id.to_string(), claim);
     }
 
+    /// Worker 包装层真正进入执行时，把实时阶段状态从 Claimed 推进到 Running。
+    pub fn mark_phase_step_running(&self, team_id: &str, step_id: &str) -> bool {
+        let epoch = self.phase_epoch(team_id);
+        let changed = {
+            let mut claims = self.phase_claims.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(claim) = claims.get_mut(team_id) else {
+                return false;
+            };
+            if claim.epoch != epoch {
+                return false;
+            }
+            let Some(step) = claim.steps.iter_mut().find(|step| step.step_id == step_id) else {
+                return false;
+            };
+            if step.status == "Running" {
+                false
+            } else {
+                step.status = "Running".to_string();
+                step.started_at = now_ts();
+                true
+            }
+        };
+        if changed {
+            self.advance_progress(team_id);
+        }
+        changed
+    }
+
     /// 清除阶段领取（仅当代次仍匹配；防误清新阶段的领取）。
     pub(crate) fn clear_phase_claim(&self, team_id: &str, epoch: u64) {
         let mut map = self.phase_claims.lock().unwrap_or_else(|e| e.into_inner());
@@ -176,25 +234,43 @@ impl TeamCoordinator {
             })?;
         let state = self.load_goal_state(team_id)?;
         let mut counts = ProgressCounts::default();
+        let mut persisted_running = 0u32;
         for record in state.records.values() {
             match record.status {
                 StepStatus::Pending | StepStatus::Ready => counts.pending += 1,
-                StepStatus::Running => counts.running += 1,
+                StepStatus::Running => persisted_running += 1,
                 StepStatus::Succeeded => counts.succeeded += 1,
                 StepStatus::Failed => counts.failed += 1,
                 StepStatus::Aborted => counts.aborted += 1,
             }
         }
+        let epoch = self.phase_epoch(team_id);
         let claim = self
             .phase_claims
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(team_id)
+            .filter(|claim| claim.epoch == epoch)
             .cloned();
-        let current_steps = match claim {
-            Some(claim) if claim.epoch == self.phase_epoch(team_id) => claim.steps,
-            _ => Vec::new(),
-        };
+        let current_steps = claim
+            .as_ref()
+            .map(|claim| claim.steps.clone())
+            .unwrap_or_default();
+        if let Some(claim) = claim {
+            counts.claimed = claim
+                .steps
+                .iter()
+                .filter(|step| step.status == "Claimed")
+                .count() as u32;
+            counts.running = claim
+                .steps
+                .iter()
+                .filter(|step| step.status == "Running")
+                .count() as u32;
+        } else {
+            // After a restart, persisted Running steps are recoverable claims, not live execution.
+            counts.claimed = persisted_running;
+        }
         Ok(TeamProgress {
             seq: self.progress_seq(team_id),
             team_id: team_id.to_string(),
@@ -204,6 +280,12 @@ impl TeamCoordinator {
             counts,
             updated_at: now_ts(),
         })
+    }
+
+    /// Record a bounded, content-free execution diagnostic in the team audit stream.
+    /// Callers must pass identifiers and measurements only, never prompts or tool arguments.
+    pub fn record_runtime_event(&self, team_id: &str, event: &str, detail: String) {
+        self.audit(team_id, event, detail);
     }
 
     pub(crate) fn audit(&self, team_id: &str, event: &str, detail: String) {

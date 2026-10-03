@@ -361,6 +361,7 @@ mod tests {
             change_set_id: id.to_string(),
             team_id: team_id.to_string(),
             step_id: "s-implementer".to_string(),
+            attempt_id: None,
             role: "implementer".to_string(),
             base_hashes: vec![ChangeSetFileHash {
                 path: "src/a.rs".to_string(),

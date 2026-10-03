@@ -9,9 +9,188 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
+struct ObservedGatewayTestProvider;
+
+#[async_trait]
+impl ModelProvider for ObservedGatewayTestProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        Ok(ModelOutput::Text("ok".into()))
+    }
+
+    async fn complete_with_model_observed(
+        &self,
+        model: Option<&str>,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ObservedModelOutput, String> {
+        Ok(ObservedModelOutput {
+            output: ModelOutput::Text("ok".into()),
+            metadata: ModelCallMetadata {
+                request_id: Some("req-observed".into()),
+                model: model.map(str::to_string),
+                usage: Some(TokenUsage {
+                    prompt_tokens: 7,
+                    completion_tokens: 3,
+                    total_tokens: 10,
+                }),
+                ..Default::default()
+            },
+        })
+    }
+
+    async fn complete_stream_with_reasoning_and_model_observed(
+        &self,
+        _model: Option<&str>,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+        _on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ObservedModelOutput, String> {
+        Ok(ObservedModelOutput {
+            output: ModelOutput::Text("ok".into()),
+            metadata: ModelCallMetadata {
+                request_id: Some("req-observed".into()),
+                model: Some("model-observed".into()),
+                usage: Some(TokenUsage {
+                    prompt_tokens: 7,
+                    completion_tokens: 3,
+                    total_tokens: 10,
+                }),
+                ..Default::default()
+            },
+        })
+    }
+}
+
+#[tokio::test]
+async fn openai_provider_reports_non_stream_usage_request_and_model() {
+    let _env_guard = ENV_LOCK.lock().await;
+    let previous_proxy = std::env::var("OWO_HTTP_PROXY").ok();
+    std::env::set_var("OWO_HTTP_PROXY", "http://127.0.0.1:1");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request)
+            .await
+            .unwrap();
+        let payload = json!({
+            "id": "response-id",
+            "model": "served-model",
+            "choices": [{"message": {"role": "assistant", "content": "fixed"}}],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nx-request-id: req-http-123\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
+            .await
+            .unwrap();
+    });
+    let provider_result = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: format!("http://{address}/v1"),
+        api_key: "test-only".to_string(),
+        model: "configured-model".to_string(),
+        cloud_enabled: false,
+    });
+    match previous_proxy {
+        Some(value) => std::env::set_var("OWO_HTTP_PROXY", value),
+        None => std::env::remove_var("OWO_HTTP_PROXY"),
+    }
+    let provider = provider_result.unwrap();
+    let observed = provider
+        .complete_with_model_observed(
+            Some("requested-model"),
+            &[ChatMessage::user("repair output".into())],
+            &[],
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(
+        observed.metadata.request_id.as_deref(),
+        Some("req-http-123")
+    );
+    assert_eq!(observed.metadata.model.as_deref(), Some("served-model"));
+    assert_eq!(observed.metadata.usage.unwrap().total_tokens, 13);
+    assert_eq!(provider.usage_snapshot().total_tokens, 13);
+}
+
+#[tokio::test]
+async fn resilient_provider_preserves_non_stream_request_metadata() {
+    let provider = ResilientProvider::new(
+        Arc::new(ObservedGatewayTestProvider),
+        Vec::new(),
+        CircuitBreaker::default(),
+        RetryPolicy {
+            max_retries: 0,
+            ..RetryPolicy::default()
+        },
+    );
+    let observed = provider
+        .complete_with_model_observed(
+            Some("model-observed"),
+            &[ChatMessage::user("repair".into())],
+            &[],
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(
+        observed.metadata.request_id.as_deref(),
+        Some("req-observed")
+    );
+    assert_eq!(observed.metadata.model.as_deref(), Some("model-observed"));
+    assert_eq!(observed.metadata.usage.unwrap().total_tokens, 10);
+}
+
+#[tokio::test]
+async fn resilient_provider_preserves_per_request_metadata() {
+    let provider = ResilientProvider::new(
+        Arc::new(ObservedGatewayTestProvider),
+        Vec::new(),
+        CircuitBreaker::default(),
+        RetryPolicy {
+            max_retries: 0,
+            ..RetryPolicy::default()
+        },
+    );
+    let observed = provider
+        .complete_stream_with_reasoning_and_model_observed(
+            Some("model-observed"),
+            &[ChatMessage::user("hello".into())],
+            &[],
+            &mut |_| {},
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(
+        observed.metadata.request_id.as_deref(),
+        Some("req-observed")
+    );
+    assert_eq!(observed.metadata.model.as_deref(), Some("model-observed"));
+    assert_eq!(observed.metadata.usage.unwrap().total_tokens, 10);
+}
+
 /// 环境变量依赖的网关测试串行执行，避免并行设置互相干扰。
 static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+#[test]
+fn parses_stream_finish_reason() {
+    let delta = parse_sse_payload(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#)
+        .expect("终止帧应被解析");
+    assert_eq!(delta.finish_reason.as_deref(), Some("length"));
+}
 
 #[test]
 fn parses_content_delta() {
@@ -122,14 +301,25 @@ fn budget_violation_blocks_when_caps_exceeded() {
 
 #[test]
 fn parse_sse_payload_extracts_trailing_usage_block() {
-    let payload = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+    let payload = r#"{"id":"req-123","model":"model-real","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
     let delta = parse_sse_payload(payload).expect("usage 块应返回 Some");
     assert_eq!(delta.content, None);
+    assert_eq!(delta.request_id.as_deref(), Some("req-123"));
+    assert_eq!(delta.model.as_deref(), Some("model-real"));
     let usage = delta.usage.expect("usage 应被解析");
     assert_eq!(usage.total_tokens, 15);
 
-    // 无 usage 的空 delta 仍按心跳忽略。
-    assert!(parse_sse_payload(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#).is_none());
+    // OpenAI-compatible usage-only 帧可带空 choices；usage 仍须进入账本。
+    let usage_only = parse_sse_payload(
+        r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}"#,
+    )
+    .expect("空 choices 的 usage 尾帧不能丢失");
+    assert_eq!(usage_only.usage.expect("usage").total_tokens, 10);
+
+    // 终止帧没有正文时仍须保留 finish_reason，供网关判断是否被截断。
+    let terminal = parse_sse_payload(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+        .expect("终止帧应被保留");
+    assert_eq!(terminal.finish_reason.as_deref(), Some("stop"));
 }
 
 /// R3-B（§3.4）：占位 Provider 的调用面必须携带稳定码 provider/not_configured
@@ -467,7 +657,10 @@ fn provider_creates_direct_client_when_proxy_configured() {
         cloud_enabled: true,
     };
     let provider = OpenAiCompatibleProvider::new(config).expect("客户端创建成功");
-    assert!(provider.direct_client.is_some());
+    assert!(
+        provider.direct_client.is_none(),
+        "loopback 模型端点应绕过 HTTP 代理"
+    );
     std::env::remove_var("OWO_HTTP_PROXY");
     let config = OpenAiCompatibleConfig {
         base_url: "http://127.0.0.1:9/v1".to_string(),
@@ -549,6 +742,76 @@ fn fast_retry(max_retries: usize) -> RetryPolicy {
     }
 }
 
+struct AlwaysFailProvider {
+    error: String,
+    calls: StdMutex<usize>,
+}
+
+#[async_trait]
+impl ModelProvider for AlwaysFailProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        *self
+            .calls
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) += 1;
+        Err(self.error.clone())
+    }
+}
+
+#[tokio::test]
+async fn permanent_resource_exhaustion_is_not_retried_but_transient_429_policy_remains() {
+    let policy = fast_retry(3);
+    assert!(!is_retriable(
+        r#"模型返回 429: {"code":"1113","msg":"余额不足"}"#,
+        &policy
+    ));
+    assert!(!is_retriable(
+        r#"模型返回 429: {"code":1113,"msg":"no available resource package"}"#,
+        &policy
+    ));
+    assert!(is_retriable(
+        r#"模型返回 429: {"code":"1302","msg":"rate limited"}"#,
+        &policy
+    ));
+    assert!(is_retriable("模型返回 429：invalid body", &policy));
+
+    let provider = Arc::new(AlwaysFailProvider {
+        error: r#"模型返回 429: {"code":1113}"#.to_string(),
+        calls: StdMutex::new(0),
+    });
+    let fallback = Arc::new(AlwaysFailProvider {
+        error: "fallback must not run for permanent resource exhaustion".to_string(),
+        calls: StdMutex::new(0),
+    });
+    let gateway = ResilientProvider::new(
+        Arc::clone(&provider) as Arc<dyn ModelProvider>,
+        vec![Arc::clone(&fallback) as Arc<dyn ModelProvider>],
+        CircuitBreaker::default(),
+        policy,
+    );
+    assert!(gateway.complete(&[], &[]).await.is_err());
+    assert_eq!(
+        *provider
+            .calls
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()),
+        1,
+        "permanent provider resource exhaustion must issue one request, not retries"
+    );
+    assert_eq!(
+        *fallback
+            .calls
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()),
+        0,
+        "permanent provider resource exhaustion must not cascade to fallback providers"
+    );
+}
+
 /// F-02 回归：Provider 吐了增量后失败——增量必须已经**立即**到达调用方，
 /// 且因"已输出"而不再重试（否则重试会重复内容）。旧实现（整条缓存成功后回放）
 /// 会得到 0 个增量，本测试必红。
@@ -608,6 +871,36 @@ async fn resilient_still_retries_before_any_delta() {
         *mock.calls.lock().unwrap_or_else(|p| p.into_inner()),
         2,
         "未产生增量前应重试一次"
+    );
+}
+
+/// Agent 使用带 reasoning/model override 的流接口，网络失败在首个 chunk 前也要按策略重试。
+#[tokio::test]
+async fn resilient_reasoning_stream_retries_before_any_chunk() {
+    let mock = Arc::new(StreamingMock {
+        deltas: vec!["A".to_string()],
+        fail_first: 1,
+        fail_after_emit: false,
+        calls: StdMutex::new(0),
+    });
+    let resilient = ResilientProvider::new(
+        Arc::clone(&mock) as Arc<dyn ModelProvider>,
+        Vec::new(),
+        CircuitBreaker::default(),
+        fast_retry(2),
+    );
+    let mut chunks = Vec::new();
+    resilient
+        .complete_stream_with_reasoning_and_model(Some("test-model"), &[], &[], &mut |chunk| {
+            chunks.push(chunk)
+        })
+        .await
+        .expect("首个 chunk 前的连接失败应重试成功");
+    assert_eq!(chunks, vec![StreamChunk::Content("A".to_string())]);
+    assert_eq!(
+        *mock.calls.lock().unwrap_or_else(|p| p.into_inner()),
+        2,
+        "reasoning stream 应使用同一重试策略"
     );
 }
 
@@ -817,6 +1110,51 @@ async fn deferred_provider_reports_not_configured_without_credentials() {
     }
 }
 
+/// 真实 GLM 流式诊断：验证显式推理档位/输出预算下能收到完整 SSE 终止帧。
+#[tokio::test]
+#[ignore = "真实 GLM API 请求；显式 --ignored 运行"]
+async fn live_glm_stream_finishes_with_bounded_reasoning() {
+    let _guard = ENV_LOCK.lock().await;
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .expect("live 门控需要 OPENAI_API_KEY 环境变量");
+    let saved_effort = std::env::var("OWO_REASONING_EFFORT").ok();
+    let saved_max_tokens = std::env::var("OWO_MODEL_MAX_OUTPUT_TOKENS").ok();
+    std::env::set_var("OWO_REASONING_EFFORT", "low");
+    std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", "32000");
+    let config = OpenAiCompatibleConfig {
+        base_url: std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| DEFAULT_MODEL_BASE_URL.to_string()),
+        api_key,
+        model: DEFAULT_MODEL_ID.to_string(),
+        cloud_enabled: true,
+    };
+    let provider = OpenAiCompatibleProvider::new(config).unwrap();
+    let mut chunks = Vec::new();
+    let result = provider
+        .complete_stream_with_reasoning_and_model(
+            Some("glm-5.3-flashx"),
+            &[ChatMessage::user("只回复：stream-ok".to_string())],
+            &[],
+            &mut |chunk| chunks.push(chunk),
+        )
+        .await;
+    if let Some(value) = saved_effort {
+        std::env::set_var("OWO_REASONING_EFFORT", value);
+    } else {
+        std::env::remove_var("OWO_REASONING_EFFORT");
+    }
+    if let Some(value) = saved_max_tokens {
+        std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", value);
+    } else {
+        std::env::remove_var("OWO_MODEL_MAX_OUTPUT_TOKENS");
+    }
+    let output = result.expect("GLM SSE 应正常终止");
+    assert!(matches!(output, ModelOutput::Text(ref text) if !text.trim().is_empty()));
+    assert!(!chunks.is_empty(), "完整 SSE 应产生正文或推理增量");
+}
+
 /// DeferredProvider：配置就绪时报 ready，且未发网络请求即完成 provider 构造。
 #[tokio::test]
 async fn deferred_provider_ready_when_configured_and_reuses_instances() {
@@ -847,6 +1185,40 @@ async fn deferred_provider_ready_when_configured_and_reuses_instances() {
 
 /// 推理档位（取优合并自远端 engine）：只认 minimal/low/medium/high，默认与非法值
 /// 都不下发 `reasoning_effort`（避免不支持该字段的端点 400）。
+#[tokio::test]
+async fn request_body_applies_bounded_output_token_env() {
+    let _guard = ENV_LOCK.lock().await;
+    let saved = std::env::var("OWO_MODEL_MAX_OUTPUT_TOKENS").ok();
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: "http://127.0.0.1:11434/v1".to_string(),
+        api_key: String::new(),
+        model: "local".to_string(),
+        cloud_enabled: false,
+    })
+    .unwrap();
+
+    std::env::remove_var("OWO_MODEL_MAX_OUTPUT_TOKENS");
+    assert!(provider
+        .request_body(None, &[], &[], false)
+        .get("max_tokens")
+        .is_none());
+    std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", "32000");
+    assert_eq!(
+        provider.request_body(None, &[], &[], true)["max_tokens"],
+        32000
+    );
+    std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", "32001");
+    assert!(provider
+        .request_body(None, &[], &[], false)
+        .get("max_tokens")
+        .is_none());
+
+    match saved {
+        Some(value) => std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", value),
+        None => std::env::remove_var("OWO_MODEL_MAX_OUTPUT_TOKENS"),
+    }
+}
+
 #[tokio::test]
 async fn request_body_sends_reasoning_effort_only_for_known_levels() {
     let _guard = ENV_LOCK.lock().await;

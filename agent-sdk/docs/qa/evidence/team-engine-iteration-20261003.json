@@ -1,0 +1,757 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-03T13:57:12Z",
+  "repository": "T:/创新创业/OwO-master/agent-sdk",
+  "git": {
+    "head": "975955499e04802d17f8ef4259e6a6e8e99a4ea2",
+    "worktree": "dirty; existing staged and untracked changes preserved",
+    "staged_or_committed": true,
+    "staged": true,
+    "committed": false
+  },
+  "iteration": {
+    "area": "Team DeliveryGate, TaskGraph scheduling, fullstack template migration, and ProductEval host validation",
+    "changes": [
+      "Collect and deterministically bind the complete ChangeSet set for a task attempt into receipt evidence and a hash.",
+      "Keep TeamRun in AwaitingHuman and GoalRun in Verifying while required ChangeSets remain pending or conflicted.",
+      "Resume delivery after terminal ChangeSet decisions and idempotent accept replay, covering acceptance persisted before a process exit.",
+      "Reject or revert decisions close an impossible delivery as failed; restore conflicts remain recoverable in AwaitingHuman.",
+      "Publish successful TeamRun and ProjectSpace/manifest state atomically.",
+      "Extract receipt and ChangeSet delivery evidence helpers into workswarm/delivery_gate_evidence.rs.",
+      "Reject high/critical TaskGraph tasks unless a distinct independent review-capable role is available.",
+      "Bind independent reviewer steps to all high/critical task steps and make the final leader wait for those review steps.",
+      "Apply the dynamic TaskGraph before the next phase claims ready steps, including recovery after a succeeded lead.",
+      "On a fresh parallel run, execute the lead alone first; persist the dynamic task graph before dispatching workers.",
+      "Skip the fixed leader model step for independent dynamic task graphs and publish the host-validated artifacts via the DeliveryGate manifest; retain leader execution when task dependencies, overlapping write scopes, or shared contract references require integration.",
+      "Host DeliveryGate re-deserializes structured ReviewResult and rejects malformed findings, hidden blocker findings, or non-approved verdicts instead of relying only on the worker-side parser.",
+      "DeliveryGate now enforces reviewer capability ↔ review artifact kind, preventing a reviewer from bypassing structured ReviewResult checks by submitting a markdown/code artifact; non-review roles cannot label output as review evidence.",
+      "Delivery manifest now separates user-facing artifacts from review evidence: review artifacts remain indexed and represented in acceptance receipts but are excluded from manifest.artifacts and template evidence.",
+      "ProductEval fullstack Team now runs fixed file and command checkers before DeliveryGate finalization; failed checks rework the scoped producer or integrator within the existing retry budget.",
+      "After an integrator repair, the independent reviewer is explicitly reworked before validation and delivery, preventing reuse of a review from before the repair.",
+      "Host check results are reused by the outer ProductEval runner, avoiding a second command_check execution after accepted delivery.",
+      "Expected files are snapshotted before and after host validation; missing, unsafe, or changed files prevent acceptance.",
+      "TeamCoordinator now persists a host validation rejection as TeamRun Failed before delivery commit; an already committed Succeeded delivery cannot be revoked.",
+      "Automatic checker rework is audited as host_validator rather than attributed to the user.",
+      "Dynamic task assignment now binds project_integrator to every generated task step, including second and later tasks on a reused worker slot; leader remains bound to every task plus high-risk reviewers.",
+      "RunMeta now enables dynamic assignment when the resolved role list contains lead, covering selected templates whose lead role is only known after template expansion.",
+      "Migrate fullstack_web_v1 to lead plus bounded w1/w2 writer slots, a shared-surface project_integrator, and a read-only reviewer.",
+      "Preserve dynamic TaskGraph task acceptance/verification and the template handoff constraints in task-scoped worker prompts.",
+      "Bind every dynamic task, including additional tasks on reused worker slots, to integrator and reviewer prerequisites; require reviewers for high/critical tasks before leader finalization.",
+      "Keep legacy frontend_engineer/backend_engineer fullstack prompt aliases role-neutral while new templates use w1/w2.",
+      "Dynamic dependency rebinding now retains pre-existing template prerequisites for reviewer, project_integrator, and leader steps while adding every dynamic task edge.",
+      "ProductEval fullstack host-check repairs now target a dynamic task step using the failed path, assigned write scope, and latest matching ChangeSet; ambiguous owner evidence fails closed.",
+      "Dynamic host-check repair routing now rejects traversal paths and refuses role-level fallback when a dynamic owner has no task whose assigned write scope contains the failed file.",
+      "Add a bounded host-registered WorkspacePaths validator lane for file existence, non-empty content, required text, and top-level JSON field checks; reject traversal, reparse escapes, unsupported IDs/scopes, excessive resources, and oversized files.",
+      "Bind the project workspace root into TeamCoordinator before production WorkSwarm scheduling and bind ProductEval sandboxes for evaluation runs; absent or invalid host bindings fail closed.",
+      "Allow dynamic TaskGraph verification plans only through structured VerificationPlanV1 with host-derived IDs, registered WorkspacePaths validators, task write-scope containment, and bounded resources; do not execute model-selected commands.",
+      "Include verified workspace file hashes in DeliveryGate receipt subject hashes, evidence references, and receipt identity.",
+      "Execute host-bound WorkspacePaths validators inside GoalRunner before marking a step successful; persist per-step receipts with file hashes and keep dependency steps pending until required validation passes.",
+      "Reconnected ProductEval fullstack host validation before DeliveryGate finalization; host checker failures route to the latest successful dynamic task for the primary writer in the declared file scope, with command checks assigned to project_integrator.",
+      "Skip ProductEval Team local retry only for provider HTTP 429 code 1113 (insufficient balance/resource package); keep retries for transient rate limits.",
+      "Centralize provider non-retryable classification in the core gateway: HTTP 429 code 1113 stops gateway retries and fallback amplification; ProductEval consumes the same classifier while transient 429 remains retryable.",
+      "ProductEval now records executor, host-validation, and DeliveryGate wall time per run and reports stage means in aggregate and mode statistics; WorkSwarm records host-check and DeliveryGate elapsed time.",
+      "CLI statistics now render mean executor, host-validation, and DeliveryGate wall times; the summary explains that Team validation and gate timings overlap executor wall time, so total wall_ms remains the comparison metric.",
+      "Server DeliveryGate finalization now holds the workspace-global lease shared with Team writers across runtime completion, resumed ChangeSet acceptance, and ChangeSet restore; this closes the in-process check-to-publish write race.",
+      "Add DeliveryGate regression proving an earlier Passed receipt cannot authorize a changed final workspace file: the gate revalidates, writes a Failed receipt bound to the tampered file hash, and refuses TeamRun success."
+    ]
+  },
+  "validation": {
+    "cargo_fmt_all_check_after_scheduler_change": "passed after formatting the added regression test",
+    "targeted_scheduler_integration_test": "1/1 passed; fresh TeamRun first phase called only lead and persisted the dynamic task assignment",
+    "full_workswarm_tests_after_scheduler_change": "42/42 passed after the conditional leader integration path, high-risk review, and dynamic phase barrier changes",
+    "git_diff_check_after_scheduler_change": "passed; only existing CRLF-to-LF advisory warnings",
+    "cargo_clippy_core_all_targets": "passed; pre-existing manual character comparison warning remains in owo-agent-tool-safety/src/sandbox.rs; no core warning after replacing the new cloned-ref warning with slice::from_ref",
+    "cargo_fmt_all_check_final": "passed",
+    "git_diff_check_final": "passed; only existing CRLF-to-LF advisory warnings",
+    "integration_decision_helper_unit_coverage": "added independent/dependency/overlapping-write/shared-contract/empty-graph cases; not run because current memory usage is above the repository cargo gate.",
+    "parallel_writer_profile_regression": "test added; not run because the core library build was terminated by the CI resource guard.",
+    "core_library_rerun_after_profile_fix": {
+      "status": "resource_limited",
+      "detail": "A first launch caught and fixed a derive-placement compile error. The next launch compiled core, then the CI resource guard terminated the build at 5.89 GB available / 81.4% used; exit code 137. Test execution did not begin."
+    },
+    "team_success_vs_external_behavior_check": "historical r12 evidence contradicts completion semantics: TeamRun reported Succeeded, while ProductEval failed npm test and the @media requirement.",
+    "review_gate_regression": {
+      "test": "approved_review_cannot_hide_blockers_or_malformed_findings",
+      "coverage": [
+        "approved empty findings accepted",
+        "approved with blocker rejected",
+        "unknown severity rejected",
+        "changes_requested rejected"
+      ],
+      "status": "not_run_resource_limited",
+      "detail": "Preflight refused Cargo before launch: 4.59 GB available and 85.5% memory used; DeltaForceClient-Win64-Shipping was still running at about 6.80 GB. User declined forced termination and planned to close it manually."
+    },
+    "cargo_fmt_all": "passed via Invoke-CiCargo; git diff --check passed with existing CRLF-to-LF advisory warnings.",
+    "post_sync_merge_markers": "none; all conflict markers removed and files formatted.",
+    "post_sync_cargo_fmt_all_check": "passed via Invoke-CiCargo after restoring work; git diff and git diff --cached --check passed.",
+    "review_artifact_kind_regression": {
+      "test": "reviewer_cannot_pass_with_a_non_review_artifact",
+      "coverage": [
+        "reviewer + review accepted by type gate",
+        "producer + code accepted",
+        "reviewer + markdown rejected",
+        "producer + review rejected"
+      ],
+      "status": "not_run_resource_limited",
+      "detail": "No Cargo command was started because current resources remain below policy: latest sample 4.50 GB free / 85.8% used, DeltaForceClient-Win64-Shipping about 7.68 GB."
+    },
+    "resource_gate_latest_poll": {
+      "at": "2026-10-03T09:17:54Z",
+      "free_gb": 6.31,
+      "used_percent": 80.04,
+      "delta_force_pid_182484": "not_running",
+      "cargo_or_rustc_started": false
+    },
+    "review_artifact_manifest_regression": {
+      "unit_test": "review_artifacts_are_evidence_but_not_user_delivery_items",
+      "integration_test": "review_finding_dispatches_bounded_repair_to_original_owner",
+      "coverage": [
+        "review artifacts are absent from final manifest.artifacts",
+        "review artifacts remain in acceptance_receipts with artifact_kind=review",
+        "accepted artifact IDs still match ProjectSpace index"
+      ],
+      "status": "not_run_resource_limited",
+      "detail": "Latest sample: 5.22 GB free / 83.5% used; DeltaForceClient-Win64-Shipping PID 182484 running at about 7.21 GB."
+    },
+    "review_artifact_manifest_integration": {
+      "test": "review_finding_dispatches_bounded_repair_to_original_owner",
+      "added_assertions": [
+        "final manifest artifacts omit review kind",
+        "acceptance_receipts retain artifact_kind=review evidence"
+      ],
+      "status": "not_run_resource_limited",
+      "detail": "Latest sample: 5.00 GB free / 84.2% used; DeltaForceClient-Win64-Shipping PID 182484 running at about 7.25 GB."
+    },
+    "latest_continuation_test_attempt": {
+      "command_scope": "owo-agent-product-eval library test host_checker_repairs_route_to_primary_writer_or_integrator",
+      "status": "resource_limited",
+      "exit_code": 137,
+      "detail": "The correctly named package began compiling windows; after 32 seconds the CI resource guard sampled 4.97 GB free / 84.3% used, terminated the process tree, and returned 137. Test execution did not begin. No other process was terminated. At the latest poll, available memory is 5.63 GB (below the 6 GB gate); no Cargo process was restarted."
+    },
+    "product_eval_fullstack_host_gate": {
+      "status": "passed_source_and_deterministic_regressions",
+      "tests": [
+        "product_eval::workswarm_executor::tests::host_checker_routes_frontend_files_to_primary_writer_before_integrator",
+        "product_eval::workswarm_executor::tests::host_checker_rework_selects_latest_dynamic_task_for_the_failed_file"
+      ],
+      "result": "Both routing regressions passed; fullstack host checks run before finalize_success, successful results are reused by MatrixRunner, and terminal host rejection is persisted as TeamRun Failed.",
+      "runtime_limit": "No live fullstack model execution was performed in this validation pass; prior R19/R20 attempts failed at the provider with HTTP 429 code 1113 before meaningful work."
+    },
+    "host_validation_failure_terminal_state": {
+      "status": "source_change_added; not compiled or tested",
+      "behavior": "ProductEval marks an uncommitted TeamRun Failed after bounded host validation/rework is exhausted; DeliveryGate success cannot be revoked after commit.",
+      "format_check": "passed with Invoke-CiCargo cargo fmt --all -- --check for the core workspace"
+    },
+    "dynamic_scheduler_dependency_binding": {
+      "regression": "integration_waits_for_every_task_even_when_one_worker_has_multiple_tasks",
+      "status": "source_change_and_regression_added; not compiled or tested",
+      "coverage": [
+        "project_integrator waits for every dynamic task step",
+        "leader waits for every dynamic task step and all scheduled high-risk reviewer steps"
+      ],
+      "static_check": "rustfmt --check --edition 2021 on coord_run.rs passed; git diff --check passed",
+      "resource_gate": "not run; latest sample 5.35 GB free / 83.1% used, below repository build threshold"
+    },
+    "template_resolved_parallel_activation": {
+      "regression": "resolved_template_lead_enables_dynamic_assignment_without_request_flag",
+      "status": "source_change_and_regression_added; not compiled or tested",
+      "behavior": "RunMeta.parallel derives from explicit request or resolved role list containing lead.",
+      "format_check": "rustfmt --check --edition 2021 on coord_run.rs passed; git diff --check passed"
+    },
+    "core_template_migration_test_attempts": {
+      "status": "resource_limited",
+      "test_scope": "owo-agent-core --lib parallel_assignment_validation_tests",
+      "attempts": 3,
+      "details": [
+        "First compilation was terminated by ci-shared after sampling 6.15 GB available / 80.6% used; exit 137.",
+        "Second compilation was terminated by ci-shared after sampling 6.07 GB available / 80.8% used; exit 137.",
+        "Third guarded attempt compiled core and dependencies for 152 seconds, then ci-shared sampled 5.31 GB available / 83.2% used and terminated the process tree; exit 137. Test execution did not begin."
+      ],
+      "test_execution": "did not begin; neither attempt executed test cases",
+      "latest_sample": {
+        "at": "2026-10-03T09:50:58Z",
+        "available_gib": 7.02,
+        "used_percent": 77.8,
+        "delta_force_pid_182484": "running, about 6.82 GiB RSS",
+        "cargo_or_rustc_running": false
+      }
+    },
+    "fullstack_taskgraph_template_migration": {
+      "status": "source_change_added; not compiled or tested",
+      "scope": [
+        "fullstack_web_v1 lead/w1/w2 migration",
+        "task prompt preserves dynamic acceptance and verification",
+        "integrator/reviewer dependencies cover every assigned task",
+        "legacy role aliases use role-neutral prompt wording"
+      ],
+      "static_checks": "pending in this continuation",
+      "format_check": "rustfmt --check --edition 2021 passed for affected Rust files; git diff --check and evidence JSON parse passed."
+    },
+    "dynamic_scheduler_original_dependencies": {
+      "regression": "integration_waits_for_every_task_even_when_one_worker_has_multiple_tasks",
+      "status": "source_change_and_regression_added; not compiled or tested",
+      "coverage": [
+        "project_integrator retains its contract-preparation prerequisite and waits for all assigned tasks",
+        "reviewer retains its review-brief prerequisite and waits for all assigned tasks",
+        "leader retains its coordinator prerequisite, all assigned tasks, and required reviewers",
+        "drops only prerequisites whose legacy writer step was removed because that writer slot received no task"
+      ],
+      "static_check": "rustfmt --check --edition 2021 and git diff --check passed; evidence JSON parsed successfully; Cargo regression not executed because the guarded build was resource-limited."
+    },
+    "fullstack_dynamic_task_rework_routing": {
+      "regression": "host_checker_rework_routes_to_latest_dynamic_task_for_the_failed_file",
+      "status": "resource_limited",
+      "coverage": [
+        "one dynamic worker slot with multiple tasks routes to the task whose latest ChangeSet modified the failed file",
+        "ambiguous task ownership without ChangeSet evidence fails closed",
+        "host-validation repair state and ChangeSet storage read failures terminate the evaluation as failed instead of falling back to role-level routing",
+        "reverted/conflicted ChangeSets cannot be treated as current file ownership; same-time ownership by different task steps is ambiguous",
+        "same-time ChangeSets from different task steps fail closed rather than selecting arbitrarily"
+      ],
+      "static_check": "rustfmt --check --edition 2021 and git diff --check passed before the Cargo attempt; the evidence JSON parsed successfully.",
+      "test_command_scope": "devtools/product-eval: cargo test --lib host_checker_rework_routes_to_latest_dynamic_task_for_the_failed_file --locked -j 2 -- --test-threads=2",
+      "test_exit_code": 137,
+      "test_detail": "Compilation reached owo-agent-core; after 92 seconds ci-shared sampled 6.23 GB available / 80.3% used and terminated the process tree. The ProductEval test did not begin. Delta Force was not terminated.",
+      "latest_resource_sample": {
+        "at": "2026-10-03T10:05:52Z",
+        "available_gib": 7.36,
+        "used_percent": 76.7,
+        "delta_force_pid_182484": "running, about 6.54 GiB RSS",
+        "cargo_or_rustc_running": false
+      }
+    },
+    "dynamic_task_owner_route_scope_regressions": {
+      "test": "host_checker_rework_routes_to_latest_dynamic_task_for_the_failed_file",
+      "status": "resource_limited",
+      "static_checks": [
+        "rustfmt --check --edition 2021 passed",
+        "git diff --check passed"
+      ],
+      "reason": "The user is manually closing Delta Force; it remained running at the latest pre-test sample and the guarded build again crossed the repository memory thresholds.",
+      "attempt": {
+        "command": "devtools/product-eval cargo test --lib host_checker_rework_routes_to_latest_dynamic_task_for_the_failed_file --locked -j 2 -- --test-threads=2",
+        "result": "core compilation reached; target test did not begin",
+        "available_memory_gib": 5.83,
+        "used_percent": 81.6,
+        "exit_code": 137,
+        "guard": "ci-shared terminated the process tree at 30s heartbeat after crossing both resource thresholds"
+      }
+    },
+    "workspace_validator_unit_regression": {
+      "status": "passed",
+      "scope": [
+        "path-scope containment",
+        "file SHA-256 evidence",
+        "required text check",
+        "top-level JSON field check",
+        "traversal rejection",
+        "unknown validator rejection"
+      ]
+    },
+    "taskgraph_workspace_verification_plan_regression": {
+      "status": "passed",
+      "scope": [
+        "registered structured WorkspacePaths plan accepted",
+        "traversal/out-of-scope path rejected",
+        "unknown validator rejected"
+      ]
+    },
+    "delivery_gate_workspace_validator_integration": {
+      "status": "passed",
+      "scope": [
+        "bound workspace checked by DeliveryGate",
+        "receipt subject SHA and evidence ref persisted"
+      ]
+    },
+    "workswarm_integration_suite_after_dependency_expectation_update": {
+      "status": "passed",
+      "result": "43/43 passed",
+      "note": "Updated assertion to retain template prerequisites and include every dynamic task dependency."
+    },
+    "product_eval_dynamic_task_rework_route": {
+      "status": "passed",
+      "result": "1/1 passed after the GoalRunner workspace-validation change",
+      "test": "product_eval::workswarm_executor::tests::host_checker_rework_routes_to_latest_dynamic_task_for_the_failed_file",
+      "command": "cargo test --manifest-path devtools/product-eval/Cargo.toml host_checker_rework_routes_to_latest_dynamic_task_for_the_failed_file --locked -j 2 -- --test-threads=2 via Invoke-CiCargo"
+    },
+    "server_workspace_binding_compile": {
+      "status": "passed",
+      "command_scope": "cargo check -p owo-agent-server --locked -j 2"
+    },
+    "core_and_server_clippy": {
+      "status": "passed",
+      "command_scope": "cargo clippy -p owo-agent-core -p owo-agent-server --all-targets --locked -j 2",
+      "notes": [
+        "No new clippy warnings.",
+        "Existing warnings remain in owo-agent-tool-safety/src/sandbox.rs and gateway/resilience.rs."
+      ]
+    },
+    "workspace_validator_rustfmt_and_diff_check": {
+      "status": "passed",
+      "notes": [
+        "rustfmt --check --edition 2021 passed for changed Rust files.",
+        "git diff --check passed; existing CRLF-to-LF advisory remains."
+      ]
+    },
+    "latest_resource_sample_after_user_released_memory": {
+      "at": "2026-10-03T12:52:21Z",
+      "available_gib": 16.09,
+      "used_percent": 49.1,
+      "cargo_or_rustc_running": false,
+      "T_drive_free_gib": 54.02
+    },
+    "workspace_task_validation_before_unlock": {
+      "status": "passed",
+      "coverage": [
+        "registered workspace file validator passes and receipt includes step-output plus workspace-path hashes",
+        "required workspace validation failure keeps the dependent step Pending and never calls its worker"
+      ],
+      "tests": [
+        "goal::tests::workspace_step_validation_passes_before_success_receipt",
+        "goal::tests::failed_workspace_validation_keeps_dependent_step_locked"
+      ],
+      "result": "both targeted tests passed"
+    },
+    "full_core_test_after_workspace_lane": {
+      "status": "passed",
+      "command": "cargo test -p owo-agent-core --locked -j 1 -- --test-threads=1 via Invoke-CiCargo strict",
+      "result": "exit 0; full core unit, integration, and doc-test suites passed; 2 live provider tests ignored"
+    },
+    "core_clippy_after_workspace_lane": {
+      "status": "passed",
+      "command": "cargo clippy -p owo-agent-core --all-targets --locked -j 2 via Invoke-CiCargo",
+      "result": "exit 0; existing manual_pattern_char_comparison and stream_with_reasoning dead-code warnings remain"
+    },
+    "cargo_fmt_all_after_workspace_lane": "passed via Invoke-CiCargo",
+    "git_diff_check_after_workspace_lane": "passed; only existing CRLF-to-LF advisory warnings",
+    "server_check_after_workspace_lane": {
+      "status": "passed",
+      "command": "cargo check -p owo-agent-server --locked -j 2 via Invoke-CiCargo",
+      "result": "exit 0"
+    },
+    "full_core_test_after_memory_release": {
+      "status": "passed",
+      "command": "cargo test -p owo-agent-core --locked -j 1 -- --test-threads=1 via Invoke-CiCargo -PolicyMode strict",
+      "result": "exit 0 in 390 seconds; 310 unit tests, all integration tests, and 3 doc tests passed; 2 live provider tests ignored."
+    },
+    "product_eval_full_workspace_after_host_gate_restore": {
+      "status": "passed",
+      "command": "cargo test --locked -j 2 -- --test-threads=2 via Invoke-CiCargo in devtools/product-eval",
+      "result": "exit 0; library tests 25 passed; integration binaries passed (eval 3, single-agent 13, statistics 14, product-eval 27, WorkSwarm 4); 2 live provider comparisons ignored."
+    },
+    "product_eval_clippy_after_host_gate_restore": {
+      "status": "passed",
+      "command": "cargo clippy --all-targets --locked -j 2 via Invoke-CiCargo in devtools/product-eval",
+      "result": "exit 0; ProductEval produced no clippy warnings; the dependency core retains its existing stream_with_reasoning dead-code warning."
+    },
+    "product_eval_fmt_after_host_gate_restore": "passed via Invoke-CiCargo cargo fmt --all -- --check",
+    "product_eval_full_workspace_after_nonretryable_429_guard": {
+      "status": "passed",
+      "command": "cargo test --locked -j 2 -- --test-threads=2 via Invoke-CiCargo in devtools/product-eval",
+      "result": "exit 0; full ProductEval library, integration, and doc-test suites passed, including provider_resource_exhaustion_skips_team_retry_but_transient_rate_limits_remain_retryable."
+    },
+    "provider_429_retry_policy_regression": {
+      "status": "passed",
+      "coverage": [
+        "HTTP 429 code 1113 as string skips the outer Team retry",
+        "HTTP 429 code 1113 as integer skips the outer Team retry",
+        "transient HTTP 429 code 1302 remains retryable",
+        "malformed or unrelated provider error bodies remain retryable"
+      ]
+    },
+    "product_eval_clippy_after_nonretryable_429_guard": {
+      "status": "passed",
+      "command": "cargo clippy --all-targets --locked -j 2 via Invoke-CiCargo in devtools/product-eval",
+      "result": "exit 0; no new ProductEval warnings; existing dependency core dead-code warning remains."
+    },
+    "product_eval_fmt_after_nonretryable_429_guard": "passed via Invoke-CiCargo cargo fmt --all -- --check",
+    "git_diff_check_after_nonretryable_429_guard": "passed for staged and unstaged diffs; only existing CRLF-to-LF advisory warnings",
+    "latest_resource_sample_after_full_validation": {
+      "at": "2026-10-03T12:58:52Z",
+      "available_gib": 16.09,
+      "used_percent": 49.1,
+      "cargo_or_rustc_running": false,
+      "T_drive_free_gib": 54.02
+    },
+    "gateway_permanent_provider_failure_retry_regression": {
+      "status": "passed",
+      "unit_test": "gateway::tests::permanent_resource_exhaustion_is_not_retried_but_transient_429_policy_remains",
+      "result": "1 passed; code 1113 string/integer is non-retryable; transient code 1302 and malformed 429 remain retryable; primary provider call count is exactly 1 and fallback provider call count is 0."
+    },
+    "gateway_contract_suite_after_retry_classifier_change": {
+      "status": "passed",
+      "command": "cargo test -p owo-agent-core --test gateway_tests --locked -j 2 -- --test-threads=2 via Invoke-CiCargo",
+      "result": "4/4 passed, including transient retry, fallback, streaming retry, and breaker recovery."
+    },
+    "product_eval_shared_retry_classifier_regression": {
+      "status": "passed",
+      "test": "provider_resource_exhaustion_skips_team_retry_but_transient_rate_limits_remain_retryable",
+      "result": "1 passed; ProductEval imports the core gateway classifier instead of maintaining a duplicate parser."
+    },
+    "gateway_retry_classifier_core_and_product_eval_clippy": {
+      "status": "passed",
+      "commands": [
+        "cargo clippy -p owo-agent-core --all-targets --locked -j 2 via Invoke-CiCargo",
+        "cargo clippy --manifest-path devtools/product-eval/Cargo.toml --all-targets --locked -j 2 via Invoke-CiCargo"
+      ],
+      "result": "Both passed; only previously existing dependency warnings remain."
+    },
+    "gateway_retry_classifier_fmt": "passed via Invoke-CiCargo cargo fmt --all -- --check",
+    "gateway_retry_classifier_diff_check": "passed for staged and unstaged diffs; existing CRLF advisory warnings only",
+    "provider_comparison_after_retry_classifier_change": "not run; live provider code 1113 resource exhaustion remains unresolved, so no current-source speed or quality comparison is valid.",
+    "gateway_permanent_failure_no_fallback_assertion": {
+      "status": "passed",
+      "test": "gateway::tests::permanent_resource_exhaustion_is_not_retried_but_transient_429_policy_remains",
+      "result": "primary receives exactly one request; fallback receives zero requests."
+    },
+    "product_eval_stage_timing_unit": {
+      "status": "passed",
+      "test": "execution_progress_accumulates_validation_and_delivery_gate_time",
+      "result": "1/1 passed"
+    },
+    "product_eval_stage_timing_statistics": {
+      "status": "passed",
+      "suite": "product_eval_statistics_tests",
+      "result": "15/15 passed; includes stage_wall_times_are_reported_for_single_and_multi_comparisons"
+    },
+    "product_eval_main_flow_tests_after_stage_timing": {
+      "status": "passed",
+      "suite": "product_eval_tests",
+      "result": "27/27 passed"
+    },
+    "product_eval_full_suite_after_stage_timing": {
+      "status": "passed",
+      "command_scope": "final devtools/product-eval full suite via Invoke-CiCargo, -j 2, --test-threads=2",
+      "result": {
+        "library": "27 passed",
+        "eval_tests": "3 passed",
+        "single_agent": "13 passed",
+        "statistics": "15 passed",
+        "product_eval": "27 passed",
+        "workswarm": "4 passed",
+        "live_model_suites": "ignored/not run",
+        "doc_tests": "0 tests"
+      },
+      "exit_code": 0
+    },
+    "product_eval_fmt_after_stage_timing": "passed via Invoke-CiCargo cargo fmt --all; final cargo fmt --all -- --check is included in the previous final format check.",
+    "product_eval_clippy_all_targets_after_stage_timing": {
+      "status": "passed",
+      "scope": "devtools/product-eval --all-targets",
+      "flags": "-D warnings",
+      "exit_code": 0
+    },
+    "live_team_vs_single_after_stage_timing": {
+      "status": "not_run",
+      "reason": "Earlier R19/R20 comparisons failed before meaningful work with provider HTTP 429 code 1113; live model comparison remains ignored. Stage telemetry is instrumentation only and establishes no Team speed or quality advantage."
+    },
+    "product_eval_stage_timing_human_report": {
+      "status": "passed",
+      "test": "statistics_render_and_json_contract_shapes",
+      "result": "15/15 statistics tests passed; human summary prints executor/validate/gate columns and the non-additive timing boundary."
+    },
+    "workspace_delivery_lease_regression": {
+      "status": "passed",
+      "test": "delivery_gate_lease_excludes_team_writers_until_validation_commits",
+      "result": "1/1 passed; the shared DeliveryGate lease blocks a scoped Team writer until release."
+    },
+    "change_set_api_after_delivery_lease": {
+      "status": "passed",
+      "test_scope": "owo-agent-server --test change_set_api_tests",
+      "result": "9/9 passed, including accepted ChangeSet resuming DeliveryGate and reject/revert handling.",
+      "exit_code": 0
+    },
+    "server_fmt_after_delivery_lease": "passed via Invoke-CiCargo cargo fmt --all -- --check",
+    "server_clippy_after_delivery_lease": {
+      "status": "passed_with_existing_dependency_lints_allowed",
+      "scope": "owo-agent-server --all-targets",
+      "allowed_existing_lints": [
+        "clippy::manual_pattern_char_comparison in owo-agent-tool-safety/src/sandbox.rs",
+        "dead_code for ResilientProvider::stream_with_reasoning in owo-agent-core/src/gateway/resilience.rs"
+      ],
+      "result": "No additional warnings under -D warnings after the two named existing dependency lints were allowed.",
+      "exit_code": 0
+    },
+    "workspace_delivery_lease_limits": "The lease is process-local and coordinates server Team writers using the shared WriteLeaseManager. External editors/processes that bypass this manager are outside the lock; no cross-process workspace snapshot or file-system lock is claimed.",
+    "delivery_gate_rejects_stale_workspace_receipt": {
+      "status": "passed",
+      "test": "finalize_success_rechecks_workspace_after_a_previously_passed_receipt",
+      "result": "1/1 passed; old receipt remained Passed for its original hash, fresh final-version receipt recorded Failed with the new hash, and TeamRun did not succeed."
+    },
+    "workswarm_integration_after_final_version_regression": {
+      "status": "passed",
+      "scope": "owo-agent-core --test workswarm_tests",
+      "result": "44/44 passed, including workspace hash-bound acceptance and stale receipt rejection.",
+      "exit_code": 0
+    },
+    "core_clippy_after_final_version_regression": {
+      "status": "passed_with_existing_dependency_lints_allowed",
+      "scope": "owo-agent-core --all-targets",
+      "allowed_existing_lints": [
+        "clippy::manual_pattern_char_comparison in owo-agent-tool-safety/src/sandbox.rs",
+        "dead_code for ResilientProvider::stream_with_reasoning in owo-agent-core/src/gateway/resilience.rs"
+      ],
+      "exit_code": 0
+    },
+    "fmt_after_final_version_regression": "passed via Invoke-CiCargo cargo fmt --all and cargo fmt --all -- --check"
+  },
+  "benchmark": {
+    "batch": "r19 and r20 live paired attempts",
+    "suite_hash": "812ccbc77667f6588bd75a79f8218eaf1735e12e9c19caceff13cff6c446bf7d",
+    "model": "glm-5.3-flashx",
+    "r19": {
+      "output_root": "C:/Users/23843/AppData/Local/Temp/owo-blog-benchmark/run-r19-team-refactor-20261003",
+      "single": {
+        "status": "Error",
+        "wall_time_ms": 4459,
+        "calls": 1
+      },
+      "team": {
+        "status": "Error",
+        "wall_time_ms": 9081,
+        "calls": 4,
+        "retries": 1
+      },
+      "validity": "invalid; provider returned HTTP 429, code 1113, insufficient balance or no available resource package"
+    },
+    "r20": {
+      "output_root": "C:/Users/23843/AppData/Local/Temp/owo-blog-benchmark/run-r20-refactor-20261003",
+      "single": {
+        "status": "Error",
+        "wall_time_ms": 4603,
+        "calls": 1
+      },
+      "team": {
+        "status": "Error",
+        "wall_time_ms": 8928,
+        "calls": 4,
+        "retries": 1
+      },
+      "validity": "invalid; provider returned HTTP 429, code 1113, insufficient balance or no available resource package"
+    },
+    "conclusion": "Still no valid current-source Team-vs-Single performance or quality sample. The earlier R19/R20 attempts were rejected by provider HTTP 429 code 1113; all live comparison tests remain ignored pending usable provider resources. No Team advantage is established."
+  },
+  "limitations": [
+    "Historical rounds 9-12 are directional only because suite hashes vary between rounds; they do not establish a fixed-version statistical comparison.",
+    "The latest matched live rounds r19 and r20 both failed before task work due to provider HTTP 429 code 1113; a valid quality/speed comparison needs provider resources.",
+    "The repository contains unrelated dirty and untracked changes that were preserved."
+  ],
+  "historical_context": {
+    "evidence_file": "docs/qa/evidence/team-speed-quality-audit-20261002.json",
+    "rounds": "9-12",
+    "interpretation": "Directional only; suite hashes differ between rounds, so do not pool as a fixed-version statistical comparison.",
+    "observed_ranges": {
+      "single_wall_time_seconds": "29-55",
+      "team_wall_time_seconds": "96-214",
+      "single_passed_per_round": "1/4",
+      "team_passed_per_round": "1/4"
+    },
+    "observed_quality": "Checker success was slightly lower for Team in these rounds.",
+    "conclusion": "Historical evidence does not establish Team superiority."
+  },
+  "architecture_gaps_observed": [
+    {
+      "gap": "High/critical TaskGraph tasks did not enforce a separate review step.",
+      "status": "resolved in current worktree; independent review-capable role is now required and scheduled after the high-risk task steps.",
+      "source_files": [
+        "crates/owo-agent-core/src/workswarm/coord_run.rs",
+        "crates/owo-agent-core/tests/workswarm_tests.rs"
+      ],
+      "verification": "high_risk_tasks_require_a_separate_reviewer_role passed; parallel_lead_assignment_applies_writer_scopes_and_tasks passed and asserted reviewer dependencies."
+    },
+    {
+      "gap": "A fresh parallel phase could expand the fixed role DAG before the lead-produced TaskGraph was applied.",
+      "status": "resolved in current worktree; first phase is lead-only, then the persisted dynamic plan controls later dispatch.",
+      "source_files": [
+        "crates/owo-agent-core/src/workswarm/coord_run.rs",
+        "crates/owo-agent-core/tests/workswarm_tests.rs"
+      ],
+      "verification": "parallel_team_runs_only_lead_before_dynamic_task_assignment passed; the recorder observed only lead in the first phase and the persisted plan contained task only."
+    },
+    {
+      "gap": "Parallel TaskGraph always paid a fixed leader model call after workers, even when independent accepted results only needed host publication.",
+      "status": "conditionally resolved in current worktree: host skips leader only when no dynamic task dependencies, overlapping write scopes, or shared contract references exist; DeliveryGate still checks worker artifacts and host creates the final manifest. Integration cases retain leader.",
+      "source_files": [
+        "crates/owo-agent-core/src/workswarm/coord_run.rs",
+        "crates/owo-agent-core/src/workswarm/coord_lifecycle.rs",
+        "crates/owo-agent-core/tests/workswarm_tests.rs"
+      ],
+      "verification": "parallel_independent_tasks_skip_leader_and_publish_host_manifest passed and confirmed both writer artifacts appear in CAS manifest with matching acceptance receipts; parallel_lead_assignment_applies_writer_scopes_and_tasks passed and confirmed leader remains active for dependent high-risk tasks."
+    },
+    {
+      "gap": "Single product-eval uses a separate Agent assembly path from Team's shared ProfileSubagentRunner.",
+      "status": "observed by static source inspection; no migration made because output, tool, budget, and telemetry semantics need contract comparison first.",
+      "source_files": [
+        "devtools/product-eval/src/product_eval/single_agent.rs",
+        "devtools/product-eval/src/product_eval/workswarm_executor.rs",
+        "crates/owo-agent-core/src/worker_profile.rs"
+      ],
+      "verification": "source inspection only; SingleAgentExecutor constructs Agent and calls run_turn, while Team eval EvalAgentWorker calls ProfileSubagentRunner::run_report."
+    },
+    {
+      "gap": "Parallel TaskGraph writer slots were initialized with read-only profiles before any task-scoped grant.",
+      "status": "source fix applied: shared WorkerProfile::for_team_role now initializes reserved parallel writer slots with a writable tool ceiling; the TaskGraph capability scope still narrows each invocation and reviewers remain read-only.",
+      "source_files": [
+        "crates/owo-agent-core/src/worker_profile.rs",
+        "crates/owo-agent-core/src/workswarm/coord_run.rs",
+        "crates/owo-agent-server/src/workswarm_api/runtime.rs"
+      ],
+      "verification": "regression unit test added; cargo core test was rejected before launch by resource gate at 6.17 GB available and 80.5% used. Formatting and diff checks passed."
+    },
+    {
+      "gap": "Host DeliveryGate trusted the review verdict field without re-parsing findings, so a malformed approved result could hide a blocker from host acceptance.",
+      "status": "source fix added; regression test added but not executed because the resource preflight refused Cargo.",
+      "source_files": [
+        "crates/owo-agent-core/src/workswarm/coord_lifecycle.rs",
+        "crates/owo-agent-core/src/workswarm/delivery_gate_evidence.rs"
+      ],
+      "verification": "cargo fmt --all and git diff --check passed; targeted core unit test is pending resource availability."
+    },
+    {
+      "gap": "DeliveryGate only validated reviewer artifacts when kind already equaled review; a reviewer could submit another artifact kind and skip ReviewResult validation.",
+      "status": "source fix and regression test added; execution pending resource availability.",
+      "source_files": [
+        "crates/owo-agent-core/src/workswarm/coord_lifecycle.rs",
+        "crates/owo-agent-core/src/workswarm/delivery_gate_evidence.rs"
+      ],
+      "verification": "cargo fmt --all passed; git diff checks passed; reviewer_artifact_kind unit test is pending because latest resource poll remains below the mandated 6 GB free and 80% use limits."
+    },
+    {
+      "gap": "Final DeliveryGate manifest included reviewer artifacts in the same user-facing artifacts array, contrary to the WorkerOutput contract that review artifacts are evidence and never final product selection.",
+      "status": "source fix and helper regression added; not executed due to resource gate.",
+      "source_files": [
+        "crates/owo-agent-core/src/workswarm/coord_lifecycle.rs",
+        "crates/owo-agent-core/src/workswarm/delivery_gate_evidence.rs"
+      ],
+      "verification": "Source filtering and ProjectSpace receipt/index parity are implemented. Unit and bounded-repair integration regressions cover exclusion from manifest.artifacts while retaining review receipts. cargo fmt and diff checks passed; both test scopes remain pending resource availability."
+    },
+    {
+      "gap": "The fixed fullstack ProductEval path does not exercise dynamic TaskGraph assignment.",
+      "status": "The current worktree now routes fullstack cases through fullstack-web-v1, whose lead role activates parallel assignment after template expansion. ProductEval binds the host workspace, and WorkspacePaths validators now run before dependent steps unlock. Live fullstack execution remains unverified because the matched provider runs returned HTTP 429.",
+      "source_files": [
+        "devtools/product-eval/src/product_eval/workswarm_executor.rs",
+        "crates/owo-agent-core/src/builtin_team_templates.rs",
+        "crates/owo-agent-core/src/workswarm/coord_run.rs"
+      ],
+      "verification": "Static source confirms template_for_case selects FULLSTACK_WEB_V1 for cases with both apps/web and apps/api artifacts; should_enable_parallel_assignment enables the resolved lead role; run_team_loop and ProductEval bind workspace roots. Core task-assignment and new GoalRunner validation regressions pass. The R19/R20 live pair failed before task work due to provider quota, so no end-to-end ProductEval fullstack run is claimed."
+    },
+    {
+      "gap": "ProductEval fullstack checkers previously ran after Team DeliveryGate, allowing TeamRun Succeeded with failing behavior checks.",
+      "status": "addressed in the ProductEval fullstack execution path with pre-final host checks, bounded owner rework, review refresh after integrator repair, stable expected-file snapshot comparison, and durable TeamRun failure on rejection. Production Team routes outside ProductEval still need the shared Validator/DeliveryGate integration.",
+      "source_files": [
+        "devtools/product-eval/src/product_eval/workswarm_executor.rs",
+        "devtools/product-eval/src/product_eval.rs",
+        "crates/owo-agent-core/src/workswarm/coord_lifecycle.rs"
+      ],
+      "verification": "Both core and ProductEval cargo fmt --all -- --check passed. The targeted ProductEval regression did not execute because ci-shared resource guard terminated dependency compilation at 4.97 GB / 84.3%. No live Team-versus-Single benchmark has been run."
+    },
+    {
+      "gap": "A previously passing WorkspacePaths receipt could become stale if workspace files changed before final DeliveryGate publication.",
+      "status": "resolved for server-mediated Team writes in the current worktree: DeliveryGate re-executes the registered validator against final bytes, stores the new subject hash and verdict, and production server finalization holds the shared workspace-global write lease through validation and manifest commit.",
+      "source_files": [
+        "crates/owo-agent-core/src/workswarm/coord_lifecycle.rs",
+        "crates/owo-agent-server/src/workswarm_api/runtime.rs",
+        "crates/owo-agent-server/src/change_set_api.rs",
+        "crates/owo-agent-server/src/workswarm_api/mod.rs",
+        "crates/owo-agent-core/tests/workswarm_tests.rs",
+        "crates/owo-agent-server/src/workswarm_api/tests.rs"
+      ],
+      "verification": "finalize_success_rechecks_workspace_after_a_previously_passed_receipt passed; workswarm_tests 44/44 passed; delivery_gate_lease_excludes_team_writers_until_validation_commits passed; change_set_api_tests 9/9 passed.",
+      "limit": "The shared lease coordinates writers within this server process; external processes/editors that bypass it are not locked."
+    }
+  ],
+  "scheduler_iteration": {
+    "change": "Host TaskGraph assignment preserves source-order task-to-step identities, then inserts runnable plan steps by priority descending, estimated effort descending, and stable task_id tie break. Dependencies still govern readiness; the rank cannot bypass prerequisite completion.",
+    "regression_test": {
+      "name": "parallel_lead_assignment_applies_writer_scopes_and_tasks",
+      "assertion": "C (priority 100) is first in candidate order; B and A tie at priority 80 so B (estimated effort 5) precedes A (3); A retains step s-w1 and C retains dependency on s-w1.",
+      "result": "passed"
+    },
+    "measured_effect": "Deterministic integration tests verify one fixed leader model call is removed for independent task graphs, the accepted writer artifacts and receipts are still present in the host manifest, and leader execution remains for a dependent high-risk graph. This is a call-count/path result only; live wall-clock and quality superiority versus Single remain unmeasured."
+  },
+  "iteration_notes": [
+    "A regression assertion initially exposed that sorting before step identity binding reassigned the first worker task to a different task. The implementation was corrected to bind step IDs in source order and sort only the plan entries; the final targeted test passed.",
+    "A fresh-run regression now records actual Worker roles invoked during the first phase; only lead executes, while the dynamic task assignment is persisted for subsequent dispatch. The targeted test passed, then the full WorkSwarm integration suite passed 41/41.",
+    "The first independent-task test run showed GoalRunner can activate leader within the same phase after writers complete; the skip therefore moved into its host step-skipper. A follow-up exposed that the lead planning artifact is also accepted and listed in the manifest; the test now verifies writer producers and receipt/artifact parity rather than assuming only two manifest entries. Final WorkSwarm suite passed 42/42.",
+    "A permanent provider-resource failure was being retried inside ResilientProvider even after ProductEval skipped the outer Team retry. The core gateway now classifies code 1113 as non-retryable; the regression proves one outbound attempt while transient 429 still retries. No live speed claim follows from this request-count test.",
+    "The independent dynamic-task detector does not itself prove behavior acceptance. Production dynamic VerificationPlan currently permits only bounded WorkspacePaths checks, while the fullstack integrator owns command/test repair. Therefore the fixed integrator cannot be skipped safely until a host-authorized command ValidationLane can produce version-bound receipts; current performance work retains that quality boundary."
+  ],
+  "build_cleanup": {
+    "action": "cargo clean",
+    "precondition": "confirmed no cargo, rustc, or linker build processes running",
+    "result": "passed",
+    "reclaimed": "14.3 GiB (16,723 files)",
+    "note": "The cleanup reclaimed 14.3 GiB at the recorded time. Targeted tests and the full WorkSwarm suite were subsequently rebuilt/run in the continued iteration; no cleanup was performed while builds were active."
+  },
+  "updated_at": "2026-10-03T13:57:12Z",
+  "git_sync": {
+    "branch": "agent-frame",
+    "tracking": "origin/agent-frame",
+    "before": "9a8e3d5a6231220519d8ca62f7cc68d9629bf398",
+    "after": "9759554",
+    "remote_commits_fast_forwarded": 9,
+    "ahead": 0,
+    "behind": 0,
+    "dirty_worktree_preserved": true,
+    "recovery": "Existing staged, unstaged, and untracked work was saved in stash@{0}, fast-forwarded, then restored. Two overlapping hunks in gateway/resilience.rs and settings.rs were manually reconciled; the stash remains as a recovery snapshot."
+  },
+  "performance_diagnosis": {
+    "source": "docs/qa/evidence/team-speed-quality-audit-20261002.json and preserved r12 run artifacts under C:/Users/23843/AppData/Local/Temp/owo-blog-benchmark/run-r12-speed-20261002-195528",
+    "matched_pair": {
+      "case_id": "editorial-blog-fullstack",
+      "model": "glm-5.3-flashx",
+      "single_suite_hash": "1e6e095f6bc2ffd96544712764934effce9960071d24620e0f6765b0a299f87c",
+      "team_suite_hash": "1e6e095f6bc2ffd96544712764934effce9960071d24620e0f6765b0a299f87c",
+      "single": {
+        "status": "passed",
+        "wall_ms": 36817,
+        "model_calls": 9
+      },
+      "team": {
+        "status": "failed",
+        "wall_ms": 105387,
+        "model_calls": 39
+      },
+      "interpretation": "One matched pair only; directional evidence, not a statistical conclusion. This pair contradicts Team superiority."
+    },
+    "team_worker_observation": {
+      "coordinator_mode": "Historical r12 used a fullstack template with RunMeta.parallel=false; current worktree has since added the lead-driven dynamic TaskGraph path. The r12 observation remains historical and does not describe the current source.",
+      "core_wall_ms": 103999,
+      "workers": {
+        "backend_engineer": {
+          "wall_ms": 35909,
+          "model_calls": 8,
+          "output_repairs": 1
+        },
+        "frontend_engineer": {
+          "wall_ms": 32862,
+          "model_calls": 10,
+          "output_repairs": 1
+        },
+        "project_integrator": {
+          "wall_ms": 57099,
+          "model_calls": 11,
+          "output_repairs": 1
+        },
+        "reviewer": {
+          "wall_ms": 26611,
+          "model_calls": 10,
+          "output_repairs": 1
+        }
+      },
+      "quality_failures": [
+        "npm test command_check exited with status 1",
+        "apps/web/styles.css lacked required @media",
+        "Internal TeamRun observation was Succeeded even though ProductEval's host-side behavior checks failed."
+      ],
+      "interpretation": "Project integrator is on the critical path after both producers and costs 57.1 seconds. Four role-level output repairs added model calls. Existing conditional leader-skip optimization applies only when RunMeta.parallel is true and did not affect this run."
+    },
+    "next_architecture_work": [
+      "Exercise dynamic task scheduling in the fullstack product path without weakening write-scope or acceptance validation.",
+      "Bind behavior-check receipts into Team DeliveryGate so TeamRun cannot report success before required product checks pass.",
+      "Remove avoidable model-based final integration work only after a host-owned behavior validator can run and receipt-bind the shared contract and test results.",
+      "Retain or require independent review only where the task risk/requirements demand it; reviewer results must be bound to the exact accepted change and blocking findings.",
+      "Promote host behavior checks and hash-bound receipts from ProductEval into the production Team Validator/DeliveryGate path; keep checker execution inside ToolHost authorization and preserve failure/recovery semantics."
+    ]
+  }
+}

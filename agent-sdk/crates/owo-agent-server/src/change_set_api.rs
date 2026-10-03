@@ -23,7 +23,7 @@ use owo_agent_core::change_set_store::{ChangeSetAction, ChangeSetStore, ChangeSe
 use owo_agent_core::workswarm::TeamCoordinator;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::error_response;
@@ -159,6 +159,40 @@ pub(crate) async fn revert_change_set(
     decide(state, change_set_id, ChangeSetAction::Revert, request).await
 }
 
+/// ChangeSet 人工接受后，若团队先前停在交付门等待人工处理，则重跑唯一 DeliveryGate。
+async fn finalize_waiting_delivery(
+    coordinator: &TeamCoordinator,
+    team_id: &str,
+    workspace_root: &Path,
+) {
+    let Ok(team) = coordinator.get_team_run(team_id).await else {
+        return;
+    };
+    if team.status != owo_agent_protocol::TeamRunStatus::AwaitingHuman {
+        return;
+    }
+    let Ok(run_state) = coordinator.load_run_state(team_id) else {
+        return;
+    };
+    if !run_state
+        .goal
+        .error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("delivery_pending:changeset:"))
+    {
+        return;
+    }
+    let _delivery_lease = super::acquire_workspace_delivery_lease(workspace_root).await;
+    if let Err(error) = coordinator.finalize_success(team_id).await {
+        if !matches!(
+            error,
+            owo_agent_core::workswarm::WorkSwarmError::DeliveryPending(_)
+        ) {
+            tracing::error!(team_id, %error, "ChangeSet 已决定，但交付门重试失败");
+        }
+    }
+}
+
 /// 决定编排（accept/reject/revert 共用）：
 /// 1) 幂等重放先判（不做任何文件操作、零副作用）；
 /// 2) reject/revert 先恢复文件（冲突 → conflicted + 409，不覆盖用户内容）；
@@ -187,6 +221,8 @@ async fn decide(
     // 1) 幂等重放：同动作 → 零副作用返回现状（reject/revert 也不做文件操作）。
     if let Some(decision) = &existing.decision {
         if decision.action == action.as_str() {
+            let root = workspace_root(&state, &coordinator, &existing.team_id);
+            finalize_waiting_delivery(&coordinator, &existing.team_id, &root).await;
             return Ok(Json(json!({
                 "replayed": true,
                 "change_set": existing,
@@ -219,7 +255,9 @@ async fn decide(
     // 2) reject/revert：先恢复文件（冲突 → conflicted + 409，不覆盖用户内容）。
     if !matches!(action, ChangeSetAction::Accept) {
         let root = workspace_root(&state, &coordinator, &existing.team_id);
+        let _workspace_lease = super::acquire_workspace_delivery_lease(&root).await;
         let report = restore_change_set(&root, &existing, coordinator.cas()).await;
+        drop(_workspace_lease);
         if !report.conflicts.is_empty() {
             let updated = store
                 .mark_conflicted(&change_set_id, &report.conflicts)
@@ -277,6 +315,8 @@ async fn decide(
             }
         ),
     );
+    let root = workspace_root(&state, &coordinator, &outcome.change_set.team_id);
+    finalize_waiting_delivery(&coordinator, &outcome.change_set.team_id, &root).await;
     Ok(Json(json!({
         "replayed": outcome.replayed,
         "change_set": outcome.change_set,

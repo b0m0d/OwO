@@ -10,7 +10,9 @@ use std::sync::Arc;
 pub(crate) fn error_response(e: &WorkSwarmError) -> (StatusCode, Json<Value>) {
     let (code, msg) = match e {
         WorkSwarmError::Validation(m) => (StatusCode::BAD_REQUEST, m.clone()),
-        WorkSwarmError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+        WorkSwarmError::Conflict(m) | WorkSwarmError::DeliveryPending(m) => {
+            (StatusCode::CONFLICT, m.clone())
+        }
         WorkSwarmError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
         // R2：状态文件损坏 → 明确 500 失败；原文件已保留、未被覆盖（消息中注明），
         // 不返回可重试语义——需人工修复后才能继续。

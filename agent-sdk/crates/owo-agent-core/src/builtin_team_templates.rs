@@ -59,6 +59,8 @@ pub struct BuiltinTemplateDescriptor {
 
 /// 代码变更：代码分析 → 单写者实现 → 只读审查。
 pub const CODE_CHANGE_V1: &str = "code-change-v1";
+/// Full-stack web development: frontend and backend writers run after shared integration.
+pub const FULLSTACK_WEB_V1: &str = "fullstack-web-v1";
 /// 研究简报：并行研究 → 证据核验 → 汇总交付。
 pub const RESEARCH_BRIEF_V1: &str = "research-brief-v1";
 /// 文档交付：文档起草 → 内容审查 → 最终版本。
@@ -67,8 +69,9 @@ pub const DOCUMENT_DELIVERY_V1: &str = "document-delivery-v1";
 pub const STRUCTURED_EXTRACT_V1: &str = "structured-extract-v1";
 
 /// 目录固定顺序（UI 展示序）。
-pub const CATALOG_IDS: [&str; 4] = [
+pub const CATALOG_IDS: [&str; 5] = [
     CODE_CHANGE_V1,
+    FULLSTACK_WEB_V1,
     RESEARCH_BRIEF_V1,
     DOCUMENT_DELIVERY_V1,
     STRUCTURED_EXTRACT_V1,
@@ -82,6 +85,15 @@ fn role(role: &str, depends_on: &[&str], handoff_contract: &str, verify: &str) -
         depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
         handoff_contract: Some(handoff_contract.to_string()),
         verify: Some(verify.to_string()),
+        // 十一期：内置模板不写死模型/写范围（模型由服务端解析链决定；
+        // 写范围未声明 = 沿用工作区级单写者语义）。
+        model: None,
+        write_paths: Vec::new(),
+        capabilities: if crate::workswarm::is_review_role_name(role) {
+            vec!["review".to_string()]
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -153,6 +165,115 @@ fn code_change_v1() -> BuiltinTemplateDescriptor {
         ],
         tool_scope: "code_analyzer/reviewer 只读（读文件+搜索）；implementer 需写权限（经审批）"
             .to_string(),
+        template,
+    }
+}
+
+/// 多模块全栈 Web：前后端按独立目录并行实现，集成者独占共享契约和根配置。
+fn fullstack_web_v1() -> BuiltinTemplateDescriptor {
+    let lead = role(
+        "lead",
+        &[],
+        concat!(
+            "只读协调者：先读取任务简报与必要入口，只输出版本化 TaskGraphV1 JSON，不实现代码、不修改文件。\n",
+            "本模板包含前端槽位 w1（只允许 apps/web）和后端槽位 w2（只允许 apps/api）。\n",
+            "按目标拆成两个边界清晰、可并行验收的任务；明确任务、验收、验证、读取引用与写入路径。\n",
+            "两边共享响应契约：items、page、limit、total、totalPages；不要拆出第三个集成任务，集成由宿主检查与 project_integrator 处理。\n",
+            "保留目标要求的页面状态、搜索/分页语义和移动端样式要求。任务依赖只在真实需要先后关系时填写。"
+        ),
+        "non_empty",
+    );
+    let mut frontend = role(
+        "w1",
+        &["lead"],
+        concat!(
+            "前端任务槽位：只实现 apps/web 内用户明确要求的前端功能，沿用现有页面、布局、样式与 API。\n",
+            "使用 items/page/limit/total/totalPages 响应契约，将页面连接真实后端；保留现有移动端 @media 断点。\n",
+            "只写 apps/web 与必要测试源码；不要调用 run_command，不要重建脚手架或生成无关报告。"
+        ),
+        "non_empty",
+    );
+    frontend.write_paths = vec!["apps/web".to_string()];
+    let mut backend = role(
+        "w2",
+        &["lead"],
+        concat!(
+            "后端任务槽位：只实现 apps/api 内目标明确要求的行为，沿用现有路由、数据层与验证方式。\n",
+            "列表响应必须符合 items/page/limit/total/totalPages；page/limit 为 0 或负数时回退默认值，limit 大于 12 时钳制到 12。\n",
+            "搜索语义覆盖标题、摘要或正文；只写 apps/api 与必要测试源码，不新增未经要求的存储、认证或服务。"
+        ),
+        "non_empty",
+    );
+    backend.write_paths = vec!["apps/api".to_string()];
+    let mut integrator = role(
+        "project_integrator",
+        &["w1", "w2"],
+        concat!(
+            "集成与故障修复 owner：等 w1/w2 的 TaskGraph 任务都完成后再运行检查。\n",
+            "先核对 packages/shared 与 items/page/limit/total/totalPages 契约，再只运行 npm test。\n",
+            "若失败，只按真实错误在既有集成白名单文件做最小修复，最多复跑 2 轮；不得扩大功能或弱化测试、样式和安全语义。"
+        ),
+        "non_empty",
+    );
+    integrator.write_paths = vec![
+        "packages/shared".to_string(),
+        "apps/api/posts.mjs".to_string(),
+        "apps/api/posts.test.mjs".to_string(),
+        "apps/web/api.mjs".to_string(),
+        "apps/web/blog.mjs".to_string(),
+        "apps/web/styles.css".to_string(),
+        "apps/web/api.test.mjs".to_string(),
+        "package.json".to_string(),
+        "package-lock.json".to_string(),
+        "README.md".to_string(),
+        ".env.example".to_string(),
+        "docs".to_string(),
+    ];
+    let template = TeamTemplate {
+        template_id: FULLSTACK_WEB_V1.to_string(),
+        name: "全栈 Web（任务拆分 → 并行实现 → 宿主验收）".to_string(),
+        mode: TeamMode::Team,
+        roles: vec![
+            lead,
+            frontend,
+            backend,
+            integrator,
+            role(
+                "reviewer",
+                &["w1", "w2"],
+                concat!(
+                    "在 TaskGraph 写入任务完成后，对 apps/web、apps/api 及其测试做只读独立评审。\n",
+                    "只报告带文件/证据引用的 findings；不修改文件、不声称运行未执行的命令。"
+                ),
+                "non_empty",
+            ),
+        ],
+        applicability: "全栈 网站 web frontend backend 前端 后端 博客 应用 monorepo".to_string(),
+        source_team_id: None,
+        created_at: AUTHORED_AT.to_string(),
+    };
+    BuiltinTemplateDescriptor {
+        budget_calls_per_role: vec![
+            RoleBudget { role: "lead".to_string(), budget_calls: 6 },
+            RoleBudget { role: "w1".to_string(), budget_calls: 14 },
+            RoleBudget { role: "w2".to_string(), budget_calls: 14 },
+            RoleBudget { role: "project_integrator".to_string(), budget_calls: 15 },
+            RoleBudget { role: "reviewer".to_string(), budget_calls: 11 },
+        ],
+        budget: json!({
+            "max_steps": 8,
+            "max_retries_per_step": 1,
+            "max_total_retries": 2,
+            "max_replans": 1,
+            "max_wall_secs": 3600
+        }),
+        artifact_kinds: vec!["frontend".to_string(), "backend".to_string(), "integrated".to_string()],
+        completion_criteria: vec![
+            "lead 输出经宿主校验的 TaskGraphV1；前后端任务由不同 Worker 在隔离写面完成".to_string(),
+            "TaskGraph 任务全部结束后运行宿主行为检查；失败只返工对应 owner 或集成者".to_string(),
+            "独立 reviewer 对稳定的前后端任务产物评审；集成修复后必须刷新受影响评审".to_string(),
+        ],
+        tool_scope: "lead 只读规划；w1 仅 apps/web；w2 仅 apps/api；project_integrator 主责 shared/根集成文件与 npm test 修复白名单；reviewer 只读".to_string(),
         template,
     }
 }
@@ -374,10 +495,11 @@ fn structured_extract_v1() -> BuiltinTemplateDescriptor {
 // 目录访问
 // ---------------------------------------------------------------------------
 
-/// 全量目录（固定展示序：code → research → document → structured）。
+/// 全量目录（固定展示序：code → fullstack → research → document → structured）。
 pub fn catalog() -> Vec<BuiltinTemplateDescriptor> {
     vec![
         code_change_v1(),
+        fullstack_web_v1(),
         research_brief_v1(),
         document_delivery_v1(),
         structured_extract_v1(),
@@ -388,6 +510,7 @@ pub fn catalog() -> Vec<BuiltinTemplateDescriptor> {
 pub fn descriptor(template_id: &str) -> Option<BuiltinTemplateDescriptor> {
     match template_id {
         CODE_CHANGE_V1 => Some(code_change_v1()),
+        FULLSTACK_WEB_V1 => Some(fullstack_web_v1()),
         RESEARCH_BRIEF_V1 => Some(research_brief_v1()),
         DOCUMENT_DELIVERY_V1 => Some(document_delivery_v1()),
         STRUCTURED_EXTRACT_V1 => Some(structured_extract_v1()),
@@ -421,6 +544,22 @@ pub struct RolePromptSections {
 /// 结构化段给模型。
 pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSections> {
     let sections = match (template_id, role) {
+        (FULLSTACK_WEB_V1, "lead") => RolePromptSections {
+            must_do: vec![
+                "只读检查任务简报与必要入口，拆分为边界清晰、可并行验收的前后端任务。".to_string(),
+                "输出带稳定任务 ID、验收要求、验证计划、读取引用和写入范围的版本化 TaskGraphV1 JSON。".to_string(),
+                "仅当存在真实先后依赖、共享写范围或接口集成需求时才建立依赖；由宿主验证计划和写入范围。".to_string(),
+            ],
+            must_not_do: vec![
+                "只读协调：不修改文件、不实现代码、不运行命令；前端只分配 apps/web，后端只分配 apps/api。".to_string(),
+                "不得在 TaskGraph 中声明任意 shell 命令作为验证器；验证只能引用宿主注册的检查。".to_string(),
+            ],
+            output_format: "只输出版本化 TaskGraphV1 JSON，不输出代码或 Artifact；任务验收使用宿主可执行的文件/结构化验证计划。".to_string(),
+            acceptance: vec![
+                "任务图通过宿主结构、依赖、写入范围和验证计划校验。".to_string(),
+                "前后端任务分配给不同 worker，路径不重叠，验收目标能对应用户要求。".to_string(),
+            ],
+        },
         (CODE_CHANGE_V1, "code_analyzer") => RolePromptSections {
             must_do: vec![
                 "只读定位目标代码与调用点，梳理影响面（受影响的函数/调用方/测试）。".to_string(),
@@ -454,17 +593,83 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
                 "无越界文件改动。".to_string(),
             ],
         },
+        (FULLSTACK_WEB_V1, "frontend_engineer" | "w1") => RolePromptSections {
+            must_do: vec![
+                "仅实现目标明确要求的前端功能，复用 apps/web 既有页面、技术栈和设计。".to_string(),
+                "候选提交与 open_issues 只覆盖当前前端任务范围；其他角色负责的 API/shared/集成事项不得写成自己的未解决问题，真实接口冲突要给出证据并交由 owner 处理。".to_string(),
+                "使用目标中约定的 API 与 shared 类型；将页面接通真实后端接口。".to_string(),
+                "只对本次变更写实现和测试源码；不要调用 run_command 或 apply_patch，不要生成无关页面、报告或重建脚手架。集成者在双方文件稳定后统一运行一次根 npm test。".to_string(),
+            ],
+            must_not_do: vec![
+                "只写 apps/web；不得修改 apps/api、packages/shared、根配置或文档；保留现有 CSS 移动端 @media 断点。".to_string(),
+                "不得用静态假数据冒充已接通的后端能力。".to_string(),
+            ],
+            output_format: "契约 JSON：artifact.kind=frontend、format=markdown，content 写实现摘要和验证证据；前端源文件必须真实落盘。".to_string(),
+            acceptance: vec![
+                "前端功能符合本次目标和既有 API 契约，未声称完成未要求页面。".to_string(),
+                "前端构建/类型检查通过；未验证项明确说明。".to_string(),
+            ],
+        },
+        (FULLSTACK_WEB_V1, "backend_engineer" | "w2") => RolePromptSections {
+            must_do: vec![
+                "仅实现目标明确要求的 API 行为，复用 apps/api 现有路由、数据层和验证方式。".to_string(),
+                "候选提交与 open_issues 只覆盖当前后端任务范围；其他角色负责的前端/shared/集成事项不得写成自己的未解决问题，真实接口冲突要给出证据并交由 owner 处理。".to_string(),
+                "按约定接口提供前端所需行为；只有目标要求时才新增持久化或权限机制。".to_string(),
+                "用 write_file 在白名单内直接落盘；不要调用 run_command 或 apply_patch。只编写后端测试源码，不自行运行命令；集成者统一执行一次根 npm test。不要创建报告文件。".to_string(),
+            ],
+            must_not_do: vec![
+                "只写 apps/api；不得修改 apps/web、packages/shared、根配置或文档；HTTP 搜索断言覆盖 title/excerpt/body 的匹配语义。".to_string(),
+                "不得声称运行过未实际执行的测试。".to_string(),
+            ],
+            output_format: "契约 JSON：artifact.kind=backend、format=markdown，content 写接口、数据和验证摘要；后端源文件必须真实落盘。".to_string(),
+            acceptance: vec![
+                "本次要求的 API 路径、筛选语义和错误行为由测试覆盖。".to_string(),
+                "API 测试覆盖成功路径与关键失败路径；未验证项明确说明。".to_string(),
+            ],
+        },
+        (FULLSTACK_WEB_V1, "project_integrator") => RolePromptSections {
+            must_do: vec![
+                "等待 w1 与 w2 的所有动态任务完成后再开始集成。".to_string(),
+                "以 packages/shared 为主；npm test 证实 producer 缺陷时，只在明确白名单源文件内做最小修复，不扩大功能范围。".to_string(),
+                "核对本次前后端接口，特别确认 shared 响应 schema 含 items/page/limit/total/totalPages；只运行任务要求的根 npm test，按完整错误做最小局部修复并复跑最多 2 轮。".to_string(),
+            ],
+            must_not_do: vec![
+                "不得重写 apps/web 或 apps/api；只允许对测试确证的缺陷做最小修复，保留原范围、样式和安全语义。".to_string(),
+                "不得报告未实际执行的命令为通过。".to_string(),
+            ],
+            output_format: "契约 JSON：artifact.kind=integrated、format=markdown，content 列出接口契约、集成改动与真实验证结果。".to_string(),
+            acceptance: vec![
+                "共享 API/schema 契约包含 items/page/limit/total/totalPages，分页边界与前后端一致，npm test 实际通过。".to_string(),
+                "根脚本和安装说明可复现；每项验证带真实退出结果。".to_string(),
+            ],
+        },
+        (FULLSTACK_WEB_V1, "reviewer") => RolePromptSections {
+            must_do: vec![
+                "在 w1/w2 动态任务完成后只读检查 apps/web、apps/api 及各自测试文件。".to_string(),
+                "不要读取集成者正在修改的 packages/shared 或根配置；npm test 未由你执行时标为未验证。".to_string(),
+                "按功能验收逐项列出通过、失败、未验证和可定位证据。".to_string(),
+            ],
+            must_not_do: vec![
+                "只读：不修改文件、不执行写入操作、不覆盖实现者交付。".to_string(),
+                "不得把代码存在或模型声明当作功能/测试通过证据。".to_string(),
+            ],
+            output_format: "WorkerOutputV1 契约：status=done，省略 artifact；必须提交 review_result={verdict,findings:[{severity,detail,requirement_id,evidence_refs,suggested_owner}]}，只报告有证据的问题；宿主绑定被审查产物哈希。".to_string(),
+            acceptance: vec![
+                "覆盖前后端实现、功能范围、测试源码和可访问状态；shared 契约与命令退出结果由集成者负责。".to_string(),
+                "结论逐项区分通过、失败和未验证。".to_string(),
+            ],
+        },
         (CODE_CHANGE_V1, "reviewer") => RolePromptSections {
             must_do: vec![
                 "核对工作区真实变更与目标/上游影响面是否一致。".to_string(),
-                "输出评审结论：approved/score/comments，逐条指出问题位置。".to_string(),
+                "提交结构化 ReviewResult：approved/changes_requested/rejected 与 blocker/major/minor/note findings，逐条指出证据和建议 owner。".to_string(),
             ],
             must_not_do: vec![
                 "只读：不改写交付物、不产出代码。".to_string(),
                 "不直接重新实现（发现问题写进评审结论，不动手改）。".to_string(),
-                "不得提交交付物正文（变更/终稿归 producer 链）：你的 artifact.kind=\"review\"、artifact.format=\"markdown\"，artifact.content 只放评审结论。".to_string(),
+                "遵守共享 WorkerOutputV1：省略 artifact，评审结论放 summary；变更/终稿归 producer 链。".to_string(),
             ],
-            output_format: "契约 JSON：status=done + artifact{kind=\"review\", format=\"markdown\", content=评审结论 JSON（{\"approved\":bool,\"score\":0-100,\"comments\":[..]}）}；kind=review 的产物不会参与最终交付选择。".to_string(),
+            output_format: "WorkerOutputV1 契约：status=done，省略 artifact；必须提交 review_result={verdict,findings:[{severity,detail,requirement_id,evidence_refs,suggested_owner}]}，只报告有证据的问题；宿主绑定被审查产物哈希。".to_string(),
             acceptance: vec![
                 "结论覆盖「与目标一致」与「无越界修改」两个维度。".to_string(),
                 "每条意见可定位到文件/函数级。".to_string(),
@@ -551,9 +756,9 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
             ],
             must_not_do: vec![
                 "只读：不改写原文、不产出新稿。".to_string(),
-                "不得提交文档正文（终稿归 finalizer）：你的 artifact.kind=\"review\"、artifact.format=\"markdown\"，artifact.content 只放修订意见。".to_string(),
+                "遵守共享 WorkerOutputV1：省略 artifact，修订意见放 summary；终稿归 finalizer。".to_string(),
             ],
-            output_format: "契约 JSON：status=done + artifact{kind=\"review\", format=\"markdown\", content=修订意见列表（逐条：位置 + 问题 + 建议）}；kind=review 的产物不会参与最终交付选择。".to_string(),
+            output_format: "WorkerOutputV1 契约：status=done，省略 artifact；必须提交 review_result={verdict,findings:[{severity,detail,requirement_id,evidence_refs,suggested_owner}]}，宿主绑定被审查产物哈希。".to_string(),
             acceptance: vec![
                 "意见覆盖结构与事实两类。".to_string(),
                 "每条意见可执行（不是泛泛评价）。".to_string(),
@@ -636,9 +841,9 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn catalog_has_four_stable_templates() {
+    fn catalog_has_five_stable_templates() {
         let entries = catalog();
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 5);
         let ids: Vec<&str> = entries
             .iter()
             .map(|d| d.template.template_id.as_str())
@@ -800,7 +1005,7 @@ mod tests {
             registry.save_template(&d.template).unwrap();
         }
         let listed = registry.list_templates();
-        assert_eq!(listed.len(), 4, "安装后注册表应有 4 个模板：{listed:?}");
+        assert_eq!(listed.len(), 5, "安装后注册表应有 5 个模板：{listed:?}");
         for original in catalog() {
             let stored = registry
                 .get_template(&original.template.template_id)
@@ -834,7 +1039,7 @@ mod tests {
 
     #[test]
     fn every_catalog_role_has_prompt_sections() {
-        // 四个内置模板的每个角色都必须有角色专属 Prompt 段（八期一路完工判据）。
+        // 每个内置模板的每个角色都必须有角色专属 Prompt 段（八期一路完工判据）。
         for d in catalog() {
             for r in &d.template.roles {
                 let s = prompt_sections_for(&d.template.template_id, &r.role)
@@ -870,6 +1075,39 @@ mod tests {
     }
 
     #[test]
+    fn fullstack_producer_issues_are_scoped_to_owned_work() {
+        for role in ["w1", "w2", "frontend_engineer", "backend_engineer"] {
+            let sections = prompt_sections_for(FULLSTACK_WEB_V1, role).unwrap();
+            assert!(sections
+                .must_do
+                .iter()
+                .any(|line| line.contains("open_issues")));
+            assert!(sections
+                .must_do
+                .iter()
+                .any(|line| line.contains("其他角色负责")));
+        }
+    }
+
+    #[test]
+    fn reviewer_templates_follow_shared_output_contract() {
+        for (template, role) in [
+            (FULLSTACK_WEB_V1, "reviewer"),
+            (CODE_CHANGE_V1, "reviewer"),
+            (DOCUMENT_DELIVERY_V1, "content_reviewer"),
+        ] {
+            let reviewer = prompt_sections_for(template, role).unwrap();
+            assert!(reviewer.output_format.contains("省略 artifact"));
+            assert!(reviewer.output_format.contains("review_result"));
+            assert!(reviewer
+                .must_do
+                .iter()
+                .chain(reviewer.must_not_do.iter())
+                .all(|line| !line.contains("artifact.kind") && !line.contains("artifact.content")));
+        }
+    }
+
+    #[test]
     fn code_template_sections_keep_single_writer_semantics() {
         let implementer = prompt_sections_for(CODE_CHANGE_V1, "implementer").unwrap();
         assert!(implementer
@@ -884,6 +1122,13 @@ mod tests {
                 .any(|l| l.contains("不改写交付物") || l.contains("只读")),
             "评审角色段必须保持只读语义：{reviewer:?}"
         );
+        assert!(reviewer.output_format.contains("省略 artifact"));
+        assert!(reviewer.output_format.contains("review_result"));
+        assert!(reviewer
+            .must_do
+            .iter()
+            .chain(reviewer.must_not_do.iter())
+            .all(|l| !l.contains("artifact.kind") && !l.contains("artifact.content")));
         assert!(reviewer
             .must_do
             .iter()

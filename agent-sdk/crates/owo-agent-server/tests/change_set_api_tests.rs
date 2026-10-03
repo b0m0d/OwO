@@ -155,6 +155,7 @@ fn sample_change_set(id: &str, team_id: &str) -> ChangeSet {
         change_set_id: id.to_string(),
         team_id: team_id.to_string(),
         step_id: "s1".to_string(),
+        attempt_id: None,
         role: "implementer".to_string(),
         base_hashes: vec![],
         result_hashes: vec![],
@@ -168,6 +169,261 @@ fn sample_change_set(id: &str, team_id: &str) -> ChangeSet {
 }
 
 const TEAM: &str = "team-cstest";
+
+struct EchoTeamWorker;
+
+#[async_trait::async_trait]
+impl owo_agent_core::goal::Worker for EchoTeamWorker {
+    fn name(&self) -> &str {
+        "echo-team"
+    }
+
+    async fn run(&self, input: &Value) -> Result<String, String> {
+        let is_reviewer = input
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|capabilities| capabilities.iter().any(|item| item == "review"))
+            || input
+                .get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|role| matches!(role, "critic" | "reviewer" | "content_reviewer"));
+        if is_reviewer {
+            return Ok(r#"{"status":"done","summary":"测试评审通过","review_result":{"verdict":"approved","findings":[]},"evidence":[],"open_issues":[]}"#.to_string());
+        }
+        Ok(input
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string())
+    }
+}
+
+#[tokio::test]
+async fn accepting_pending_changeset_over_http_resumes_delivery_finalization() {
+    use owo_agent_core::change_set_store::ChangeSetAction;
+    use owo_agent_core::goal::WorkerRegistry;
+    use owo_agent_core::workswarm::{default_relay_roles, RoleWorker};
+    use owo_agent_core::{CreateTeamRequest, PhaseOutcome};
+    use owo_agent_protocol::{TeamMode, TeamRunStatus};
+
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let coordinator = state.workswarm.coordinator().unwrap();
+    let mut roles = default_relay_roles();
+    for role in &mut roles {
+        role.worker = Some("echo".to_string());
+    }
+    let team = coordinator
+        .create_team_run(&CreateTeamRequest {
+            goal_id: None,
+            objective: "通过人工 ChangeSet 门后完成团队交付".to_string(),
+            mode: TeamMode::Team,
+            template_id: None,
+            roles: roles.clone(),
+            budget: Value::Null,
+            human_policy: None,
+            strategy: None,
+            model: None,
+            parallel: false,
+            max_agent_members: None,
+            parent_context_snapshot: None,
+        })
+        .await
+        .unwrap();
+
+    let registry = WorkerRegistry::new();
+    let worker: Arc<dyn owo_agent_core::goal::Worker> = Arc::new(EchoTeamWorker);
+    for role in &roles {
+        registry.register(Arc::new(RoleWorker::new(
+            Arc::clone(&coordinator),
+            team.team_id.clone(),
+            format!("m-{}", role.role),
+            role.role.clone(),
+            Arc::clone(&worker),
+        )));
+    }
+
+    let mut completed = false;
+    for _ in 0..50 {
+        match coordinator
+            .run_phase(&team.team_id, &registry)
+            .await
+            .unwrap()
+        {
+            PhaseOutcome::MoreReady => {}
+            PhaseOutcome::Done => {
+                completed = true;
+                break;
+            }
+            other => panic!("团队步骤未完成：{other:?}"),
+        }
+    }
+    assert!(completed, "团队步骤未在限制轮数内完成");
+
+    let run_state = coordinator.load_run_state(&team.team_id).unwrap();
+    let (step, attempt_id) = run_state
+        .plan
+        .steps
+        .iter()
+        .find_map(|step| {
+            run_state
+                .records
+                .get(&step.id)
+                .and_then(|record| record.attempt_id.as_deref())
+                .map(|attempt_id| (step, attempt_id))
+        })
+        .expect("已完成步骤应绑定 attempt_id");
+    let role = step.worker.strip_prefix("m-").expect("worker member id");
+    let change_set = owo_agent_protocol::ChangeSet {
+        change_set_id: format!("{}:{}:http-accept-pending", team.team_id, step.id),
+        team_id: team.team_id.clone(),
+        step_id: step.id.clone(),
+        attempt_id: Some(attempt_id.to_string()),
+        role: role.to_string(),
+        base_hashes: Vec::new(),
+        result_hashes: Vec::new(),
+        changed_files: vec!["src/main.rs".to_string()],
+        diff_ref: Some("test.patch".to_string()),
+        status: ChangeSetStatus::PendingReview,
+        created_at: "2026-10-03T00:00:00Z".to_string(),
+        decision: None,
+        conflicts: Vec::new(),
+    };
+    let change_store = ChangeSetStore::new(coordinator.run_dir());
+    change_store.save_upsert(&change_set).unwrap();
+    let mut second_pending = change_set.clone();
+    second_pending.change_set_id = format!("{}:{}:http-accept-pending-2", team.team_id, step.id);
+    second_pending.created_at = "2026-10-03T00:00:01Z".to_string();
+    change_store.save_upsert(&second_pending).unwrap();
+
+    let error = coordinator
+        .finalize_success(&team.team_id)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("仍待人工接受"), "{error}");
+    assert_eq!(
+        coordinator
+            .get_team_run(&team.team_id)
+            .await
+            .unwrap()
+            .status,
+        TeamRunStatus::AwaitingHuman
+    );
+
+    // 模拟进程在持久化 accept 后、调用 DeliveryGate 前退出；幂等重放必须续跑收尾。
+    ChangeSetStore::new(coordinator.run_dir())
+        .apply_decision(
+            &change_set.change_set_id,
+            ChangeSetAction::Accept,
+            "accept-and-resume",
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        coordinator
+            .get_team_run(&team.team_id)
+            .await
+            .unwrap()
+            .status,
+        TeamRunStatus::AwaitingHuman
+    );
+
+    let (status, body) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/change-sets/{}/accept", change_set.change_set_id),
+        Some(r#"{ "idempotency_key": "accept-and-resume" }"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["replayed"], json!(true));
+    assert_eq!(body["change_set"]["status"], json!("accepted"));
+    assert_eq!(
+        coordinator
+            .get_team_run(&team.team_id)
+            .await
+            .unwrap()
+            .status,
+        TeamRunStatus::AwaitingHuman,
+        "同一 attempt 仍有待审 ChangeSet 时必须继续等待"
+    );
+
+    let (status, body) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/change-sets/{}/accept", second_pending.change_set_id),
+        Some(r#"{ "idempotency_key": "accept-last-and-resume" }"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["replayed"], json!(false));
+    assert_eq!(body["change_set"]["status"], json!("accepted"));
+    assert_eq!(
+        coordinator
+            .get_team_run(&team.team_id)
+            .await
+            .unwrap()
+            .status,
+        TeamRunStatus::Succeeded,
+        "接受最后一条待审记录后应重跑交付门并完成 TeamRun"
+    );
+}
+
+#[tokio::test]
+async fn rejecting_delivery_changeset_closes_waiting_team_as_failed() {
+    use owo_agent_core::goal::GoalStatus;
+    use owo_agent_core::CreateTeamRequest;
+    use owo_agent_protocol::{TeamMode, TeamRunStatus};
+
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let coordinator = state.workswarm.coordinator().unwrap();
+    let team = coordinator
+        .create_team_run(&CreateTeamRequest::new(
+            "终态决定应解除交付等待",
+            TeamMode::Team,
+        ))
+        .await
+        .unwrap();
+
+    let mut waiting_team = coordinator.get_team_run(&team.team_id).await.unwrap();
+    waiting_team.status = TeamRunStatus::AwaitingHuman;
+    coordinator
+        .store()
+        .save_team_run(&waiting_team)
+        .await
+        .unwrap();
+    let mut run_state = coordinator.load_run_state(&team.team_id).unwrap();
+    run_state.goal.status = GoalStatus::Verifying;
+    run_state.goal.error = Some("delivery_pending:changeset:simulated".to_string());
+    run_state.persist(coordinator.run_dir()).unwrap();
+
+    let change_set_id = format!("{}:s1:reject-pending", team.team_id);
+    ChangeSetStore::new(coordinator.run_dir())
+        .save_upsert(&sample_change_set(&change_set_id, &team.team_id))
+        .unwrap();
+    let (status, body) = call(
+        &state,
+        &app,
+        "POST",
+        &format!("/change-sets/{change_set_id}/reject"),
+        Some(r#"{ "idempotency_key": "reject-and-close" }"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["change_set"]["status"], json!("rejected"));
+    assert_eq!(
+        coordinator
+            .get_team_run(&team.team_id)
+            .await
+            .unwrap()
+            .status,
+        TeamRunStatus::Failed,
+        "拒绝终态不能让 TeamRun 永久停在 AwaitingHuman"
+    );
+}
 
 #[tokio::test]
 async fn change_set_lifecycle_accept_replay_and_gate_relief() {

@@ -7,8 +7,8 @@
 //! - Producer 类角色（producer/builder/researcher/writer/leader）必须提交
 //!   `artifact { kind, format, content }`——交付物正文只取 `artifact.content`，
 //!   不再拿整段自由文本当产物；
-//! - Critic **不得**提交 artifact（只提交评审结论，放 `summary`），其产物登记为
-//!   `review` 类且永不参与最终交付选择；
+//! - review capability **不得**提交 artifact；必须提交结构化 `review_result`，宿主绑定评审范围，
+//!   其产物登记为 `review` 类且永不参与最终交付选择；
 //! - 解析失败由调用方执行**恰好一次**定向修复（见执行器 `repair_output_once`），
 //!   仍失败以 `output_contract_invalid` 定位上报，禁止无限重试。
 //!
@@ -63,12 +63,50 @@ pub struct WorkerEvidenceV1 {
     pub note: Option<String>,
 }
 
+/// 独立评审结论。被审查的产物身份与哈希由宿主从当前上下文绑定，不能由模型声明。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerReviewResultV1 {
+    pub verdict: WorkerReviewVerdict,
+    #[serde(default)]
+    pub findings: Vec<WorkerReviewFindingV1>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerReviewVerdict {
+    Approved,
+    ChangesRequested,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerReviewFindingV1 {
+    pub severity: WorkerReviewSeverity,
+    pub detail: String,
+    #[serde(default)]
+    pub requirement_id: Option<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    /// 仅为派发建议；宿主必须校验其为原生产者且不扩大写范围。
+    #[serde(default)]
+    pub suggested_owner: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerReviewSeverity {
+    Blocker,
+    Major,
+    Minor,
+    Note,
+}
+
 /// Worker 结构化输出（V1 契约本体）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerOutputV1 {
     /// 终态声明。
     pub status: WorkerOutputStatus,
-    /// 一句话结论（critic 的评审结论 JSON 也放这里）。
+    /// 一句话结论（reviewer 的简要说明；结构化结论使用 review_result）。
     pub summary: String,
     /// 交付物（Producer 类角色必填；critic 禁止提交）。
     #[serde(default)]
@@ -82,6 +120,9 @@ pub struct WorkerOutputV1 {
     /// 给下游角色的交接说明（可选）。
     #[serde(default)]
     pub handoff: Option<String>,
+    /// review capability 的结构化结论；被审查快照由宿主绑定。
+    #[serde(default)]
+    pub review_result: Option<WorkerReviewResultV1>,
 }
 
 impl WorkerOutputV1 {
@@ -101,6 +142,12 @@ impl WorkerOutputV1 {
         }
         if self.summary.trim().is_empty() {
             return Err("summary 不能为空".to_string());
+        }
+        if !self.open_issues.is_empty() {
+            return Err(format!(
+                "status=done 仍有未解决问题，不能提交为候选完成：{}",
+                self.open_issues.join("；")
+            ));
         }
         match &self.artifact {
             Some(artifact) => {
@@ -132,6 +179,24 @@ impl WorkerOutputV1 {
         if self.summary.trim().is_empty() {
             return Err("critic summary（评审结论）不能为空".to_string());
         }
+        if self.status == WorkerOutputStatus::Done {
+            let review = self.review_result.as_ref().ok_or_else(|| {
+                "status=done 的 reviewer 必须提交结构化 review_result".to_string()
+            })?;
+            for finding in &review.findings {
+                if finding.detail.trim().is_empty() {
+                    return Err("review finding.detail 不能为空".to_string());
+                }
+            }
+            if review.verdict == WorkerReviewVerdict::Approved
+                && review
+                    .findings
+                    .iter()
+                    .any(|finding| finding.severity == WorkerReviewSeverity::Blocker)
+            {
+                return Err("存在 blocker finding 时 verdict 不得为 approved".to_string());
+            }
+        }
         Ok(())
     }
 }
@@ -155,7 +220,10 @@ pub enum WorkerOutputParse {
 /// artifact 由调用方按角色调用 [`WorkerOutputV1::validate`] /
 /// [`WorkerOutputV1::validate_critic`]（否则 critic 的合法输出会被误判）。
 pub fn parse_worker_output(text: &str) -> WorkerOutputParse {
-    let trimmed = text.trim();
+    // 模型常把合法 JSON 包在 ```json 围栏中。围栏不改变契约语义，解析前先做
+    // 确定性归一化，避免触发一次昂贵的模型修复调用。
+    let normalized = strip_code_fences(text);
+    let trimmed = normalized.trim();
     // 快速排除：非 `{` 开头不可能是契约 JSON（自由文本直接 Legacy）。
     if !trimmed.starts_with('{') {
         return WorkerOutputParse::Legacy;
@@ -190,13 +258,14 @@ pub fn contract_system_prompt(is_critic: bool) -> String {
   \"artifact\": {\"kind\": \"产物分类\", \"format\": \"text|markdown|json|csv\", \"content\": \"产物正文本体\"},\n\
   \"evidence\": [{\"source\": \"来源\", \"note\": \"说明\"}],\n\
   \"open_issues\": [\"未解决问题\"],\n  \"handoff\": \"给下游的交接说明（可省略）\"\n}\n\
-artifact.format 只能取 text|markdown|json|csv 之一（大小写敏感，用小写）。\n",
+review_result（reviewer必填）：对象含 verdict（approved/changes_requested/rejected）与 findings 列表；finding 含 severity（blocker/major/minor/note）、detail、requirement_id、evidence_refs、suggested_owner；其他角色省略。\nartifact.format 只能取 text|markdown|json|csv 之一（大小写敏感，用小写）。\n",
     );
     if is_critic {
         prompt.push_str(
-            "你是评审角色（critic/reviewer）：**禁止**提交最终 Artifact——artifact 字段必须省略；\
-把评审结论 JSON {\"approved\":bool,\"score\":0-100,\"comments\":[..]} 放进 summary。\
-交付物归 producer 链，评审无权覆盖。\n",
+            "你是评审角色（review capability）：**禁止**提交 artifact；status=done 时必须提交 review_result，\
+包含 verdict 和 findings（severity/detail/requirement_id/evidence_refs/suggested_owner）。\
+只报告有证据的问题；approved 不得包含 blocker。summary 可写简要结论。被审查产物由宿主绑定，\
+不要自行编造哈希或身份。交付物归 producer 链，评审无权覆盖。\n",
         );
     } else {
         prompt.push_str(
@@ -238,12 +307,12 @@ pub fn strip_code_fences(text: &str) -> String {
 /// 修复提示只回显了违例原因，模型第二次仍输出白名单外格式（如 "md"/"Markdown"）。
 pub fn contract_repair_prompt(is_critic: bool, violation: &str, broken: &str) -> String {
     let role_rule = if is_critic {
-        "你是评审角色（critic/reviewer）：禁止提交最终 Artifact——artifact 字段必须省略，把评审结论 JSON 放进 summary"
+        "你是 review capability：禁止 artifact；status=done 必须提交 review_result={verdict,findings}，只报告有证据的问题；宿主绑定评审快照"
     } else {
         "你是交付角色：status=done 必须携带 artifact（content=交付物正文本体；artifact.format 只能取 text|markdown|json|csv 之一，代码分析与补丁/变更报告一律用 \"markdown\"，kind 用 \"analysis\"/\"code\"）"
     };
     format!(
-        "你的上一次回复不符合 WorkerOutputV1 输出契约（必须是合法 JSON：status/summary/artifact{{kind,format,content}}/evidence/open_issues/handoff）。\
+        "你的上一次回复不符合 WorkerOutputV1 输出契约（必须是合法 JSON：status/summary/artifact{{kind,format,content}}/evidence/open_issues/handoff/review_result）。\
 artifact.format 的合法枚举只有 text|markdown|json|csv——不要输出 \"md\"、\"Markdown\"、\"plaintext\" 等白名单外写法；\
 评审/审查角色（critic/reviewer）禁止输出最终 Artifact。具体违例：{violation}。{role_rule}。请修正后**只输出**契约合规的 JSON 本体。\n原输出：\n{broken}\n\n请重新输出契约合规的 JSON："
     )
@@ -269,6 +338,15 @@ mod tests {
                 assert!(output.validate().is_ok());
             }
             other => panic!("应为 Parsed：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_valid_producer_output_inside_markdown_fence_without_repair() {
+        let fenced = format!("```json\n{}\n```", producer_json("# 交付 正文"));
+        match parse_worker_output(&fenced) {
+            WorkerOutputParse::Parsed(output) => assert!(output.validate().is_ok()),
+            other => panic!("围栏内的合法契约应直接解析，不触发模型修复：{other:?}"),
         }
     }
 
@@ -343,6 +421,62 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_done_requires_structured_review_result() {
+        let output = WorkerOutputV1 {
+            status: WorkerOutputStatus::Done,
+            summary: "看起来通过".to_string(),
+            artifact: None,
+            evidence: Vec::new(),
+            open_issues: Vec::new(),
+            handoff: None,
+            review_result: None,
+        };
+        assert!(output
+            .validate_critic()
+            .unwrap_err()
+            .contains("review_result"));
+    }
+
+    #[test]
+    fn reviewer_cannot_approve_with_blocker_finding() {
+        let output = WorkerOutputV1 {
+            status: WorkerOutputStatus::Done,
+            summary: "发现阻断问题".to_string(),
+            artifact: None,
+            evidence: Vec::new(),
+            open_issues: Vec::new(),
+            handoff: None,
+            review_result: Some(WorkerReviewResultV1 {
+                verdict: WorkerReviewVerdict::Approved,
+                findings: vec![WorkerReviewFindingV1 {
+                    severity: WorkerReviewSeverity::Blocker,
+                    detail: "行为验收缺失".to_string(),
+                    requirement_id: None,
+                    evidence_refs: Vec::new(),
+                    suggested_owner: None,
+                }],
+            }),
+        };
+        assert!(output.validate_critic().unwrap_err().contains("blocker"));
+    }
+
+    #[test]
+    fn critic_failure_is_preserved_as_failure() {
+        let parsed = parse_worker_output(
+            r#"{"status":"blocked","summary":"缺少被测版本的可读快照","open_issues":["目标产物不可访问"]}"#,
+        );
+        match parsed {
+            WorkerOutputParse::Parsed(output) => {
+                output
+                    .validate_critic()
+                    .expect("失败状态可作为候选失败结果提交");
+                assert_eq!(output.status, WorkerOutputStatus::Blocked);
+            }
+            other => panic!("应为 Parsed：{other:?}"),
+        }
+    }
+
+    #[test]
     fn failed_status_needs_reason() {
         // 角色规则在 validate()：failed/blocked 必须在 summary 或 open_issues 给出原因。
         let parsed = parse_worker_output(r#"{"status":"failed","summary":"","open_issues":[]}"#);
@@ -383,8 +517,8 @@ mod tests {
             "producer 允许提交 artifact"
         );
         let critic = contract_system_prompt(true);
-        assert!(critic.contains("禁止**提交最终 Artifact"));
-        assert!(critic.contains("critic/reviewer"));
+        assert!(critic.contains("禁止**提交 artifact"));
+        assert!(critic.contains("review capability"));
     }
 
     #[test]
@@ -394,7 +528,24 @@ mod tests {
         assert!(producer.contains("markdown"));
         assert!(producer.contains("\"md\""), "点名白名单外常见写法");
         let critic = contract_repair_prompt(true, "携带 artifact", "{\"status\":\"done\"}");
-        assert!(critic.contains("禁止提交最终 Artifact"));
-        assert!(critic.contains("critic/reviewer"));
+        assert!(critic.contains("禁止 artifact"));
+        assert!(critic.contains("review capability"));
+    }
+    #[test]
+    fn done_output_with_open_issues_is_not_accepted() {
+        let output = WorkerOutputV1 {
+            status: WorkerOutputStatus::Done,
+            summary: "实现完成".to_string(),
+            artifact: Some(WorkerArtifactV1 {
+                kind: "code".to_string(),
+                format: "text".to_string(),
+                content: "候选交付".to_string(),
+            }),
+            evidence: Vec::new(),
+            open_issues: vec!["验收失败".to_string()],
+            handoff: None,
+            review_result: None,
+        };
+        assert!(output.validate().unwrap_err().contains("未解决问题"));
     }
 }

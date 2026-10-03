@@ -7,7 +7,10 @@
 use async_trait::async_trait;
 use owo_agent_core::audit::AuditLog;
 use owo_agent_core::element_registry::ElementRegistry;
-use owo_agent_core::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage, ToolCall};
+use owo_agent_core::gateway::{
+    ChatMessage, ModelCallMetadata, ModelOutput, ModelProvider, ObservedModelOutput, StreamChunk,
+    TokenUsage, ToolCall,
+};
 use owo_agent_core::permissions::{Approver, Decision, Policy};
 use owo_agent_core::session::Session;
 use owo_agent_core::skill::SkillRegistry;
@@ -26,6 +29,19 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+
+struct FailingProvider;
+
+#[async_trait]
+impl ModelProvider for FailingProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        Err("gateway error: stream decoder detail".to_string())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 构造工具
@@ -117,6 +133,30 @@ impl ModelProvider for ScriptedProvider {
         }
         let mut queue = self.outputs.lock().unwrap();
         queue.pop_front().ok_or_else(|| "脚本输出耗尽".to_string())
+    }
+
+    async fn complete_stream_with_reasoning_and_model_observed(
+        &self,
+        _model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ObservedModelOutput, String> {
+        let output = self.complete(messages, tools).await?;
+        if let ModelOutput::Text(text) = &output {
+            on_chunk(StreamChunk::Content(text.clone()));
+        }
+        Ok(ObservedModelOutput {
+            output,
+            metadata: ModelCallMetadata {
+                usage: Some(TokenUsage {
+                    prompt_tokens: self.tokens_per_call / 2,
+                    completion_tokens: self.tokens_per_call / 2,
+                    total_tokens: self.tokens_per_call,
+                }),
+                ..ModelCallMetadata::default()
+            },
+        })
     }
 
     fn usage_snapshot(&self) -> TokenUsage {
@@ -561,6 +601,29 @@ async fn live_agent_denies_out_of_scope_write_and_flags_missing_artifact() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+#[tokio::test]
+async fn provider_failure_is_not_masked_by_missing_artifacts() {
+    let case = agent_case("sa-preserve-provider-error", EvalCategory::Code);
+    let executor: Arc<SingleAgentExecutor> = Arc::new(SingleAgentExecutor::new(
+        Arc::new(FailingProvider),
+        "stub-model",
+    ));
+    let (report, out) = run_matrix(executor, vec![case], no_cancel()).await;
+    let run = &report.runs[0];
+    assert_eq!(run.status, RunStatus::Error, "{run:?}");
+    let error = run.error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("gateway error: stream decoder detail"),
+        "{run:?}"
+    );
+    assert!(error.contains("预期产物缺失"), "{run:?}");
+    assert!(run
+        .failed_steps
+        .iter()
+        .any(|step| step.starts_with("missing_artifact:")));
+    let _ = std::fs::remove_dir_all(out);
+}
+
 // ---------------------------------------------------------------------------
 // 5) 取消：矩阵级预置取消 = 零单元格；运行中取消 = 不再调用模型/执行工具
 // ---------------------------------------------------------------------------
@@ -677,6 +740,11 @@ async fn budget_exceeded_is_error_not_cancel_and_does_not_poison_matrix() {
         provider.calls() <= 1,
         "预算后不得继续调用模型（实际 {} 次）",
         provider.calls()
+    );
+    assert_eq!(
+        run.model_calls,
+        provider.calls(),
+        "报表只统计预算闸门放行的真实 Provider 调用，不计入被拒绝的尝试"
     );
     assert!(
         run.failed_steps

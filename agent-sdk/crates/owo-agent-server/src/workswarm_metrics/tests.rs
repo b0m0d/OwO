@@ -1,6 +1,9 @@
 use super::*;
 use async_trait::async_trait;
-use owo_agent_core::gateway::{ChatMessage, ModelOutput, ModelProvider};
+use owo_agent_core::gateway::{
+    ChatMessage, ModelCallMetadata, ModelOutput, ModelProvider, ObservedModelOutput, StreamChunk,
+    TokenUsage,
+};
 use owo_agent_core::tools::ToolSpec;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,12 +53,16 @@ fn span(role: &str, step: &str, cost: f64, attempt: u32, started_ms: u64) -> Wor
         started_at_ms: started_ms,
         ended_at_ms: started_ms + 1000,
         wall_ms: 1000,
+        provider_wait_ms: 0,
+        lease_wait_ms: 0,
         outcome: "succeeded".to_string(),
         error: None,
         model_calls: 0,
         prompt_tokens: None,
         completion_tokens: None,
         total_tokens: None,
+        usage_attribution: "not_applicable".to_string(),
+        requests: Vec::new(),
         cost_usd: cost,
         attempt,
         artifact: Some(SpanArtifact {
@@ -194,4 +201,228 @@ fn sanitize_value_redacts_nested_sensitive_keys_and_truncates() {
     let note = out["note"].as_str().unwrap();
     assert!(note.len() < 500, "长文本应截断：{}", note.len());
     assert!(note.contains("[截断"), "{note}");
+}
+
+#[test]
+fn cost_budget_fails_closed_when_concurrent_usage_is_unknown() {
+    let mut record = span("builder", "step-1", 0.0, 1, 1000);
+    record.model_calls = 1;
+    record.usage_attribution = "unknown_concurrent_overlap".to_string();
+    let reason = budget_exhaustion_reason(&json!({"max_cost_usd": 10.0}), &[record], 2_000)
+        .expect("未知并发用量时不能继续使用成本预算门");
+    assert!(reason.contains("费用预算无法核验"), "{reason}");
+}
+
+#[test]
+fn concurrent_spans_are_marked_for_unknown_usage_attribution() {
+    let tracker = UsageAttributionTracker::default();
+    let first = tracker.begin();
+    assert!(!first.load(Ordering::Relaxed));
+    let second = tracker.begin();
+    assert!(first.load(Ordering::Relaxed));
+    assert!(second.load(Ordering::Relaxed));
+    tracker.finish(&second);
+    let third = tracker.begin();
+    assert!(third.load(Ordering::Relaxed));
+    tracker.finish(&third);
+    tracker.finish(&first);
+}
+
+#[test]
+fn request_scoped_usage_is_accepted_by_cost_budget_gate() {
+    let mut record = span("builder", "step-1", 0.25, 1, 1000);
+    record.model_calls = 1;
+    record.prompt_tokens = Some(100);
+    record.completion_tokens = Some(50);
+    record.total_tokens = Some(150);
+    record.usage_attribution = "request_id_scoped".to_string();
+    record
+        .requests
+        .push(owo_agent_core::gateway::ModelCallMetadata {
+            request_id: Some("req-safe-id".to_string()),
+            model: Some("model-test".to_string()),
+            usage: Some(owo_agent_core::gateway::TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+            }),
+            latency_ms: Some(25),
+        });
+    assert_eq!(
+        budget_exhaustion_reason(&json!({"max_cost_usd": 10.0}), &[record], 2_000),
+        None,
+        "逐请求 usage 可用于校验成本预算"
+    );
+}
+
+#[tokio::test]
+async fn measured_provider_preserves_request_metadata_once() {
+    struct ObservedStub;
+    #[async_trait]
+    impl ModelProvider for ObservedStub {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            Ok(ModelOutput::Text("ok".to_string()))
+        }
+
+        async fn complete_stream_with_reasoning_and_model_observed(
+            &self,
+            model: Option<&str>,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+            _on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+        ) -> Result<ObservedModelOutput, String> {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            Ok(ObservedModelOutput {
+                output: ModelOutput::Text("ok".to_string()),
+                metadata: ModelCallMetadata {
+                    request_id: Some("req-42".to_string()),
+                    model: model.map(str::to_string),
+                    usage: Some(TokenUsage {
+                        prompt_tokens: 12,
+                        completion_tokens: 8,
+                        total_tokens: 20,
+                    }),
+                    latency_ms: None,
+                },
+            })
+        }
+    }
+
+    let calls = Arc::new(AtomicU64::new(0));
+    let collector = Arc::new(RequestUsageCollector::default());
+    let measured = MeasuredProvider::new_with_request_usage(
+        Arc::new(ObservedStub),
+        Arc::clone(&calls),
+        Arc::clone(&collector),
+        "step-a".to_string(),
+    );
+    let mut chunks = Vec::new();
+    let observed = measured
+        .complete_stream_with_reasoning_and_model_observed(
+            Some("model-actual"),
+            &[],
+            &[],
+            &mut |chunk| chunks.push(chunk),
+        )
+        .await
+        .unwrap();
+    let records = collector.take("step-a");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(observed.output, ModelOutput::Text("ok".to_string()));
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].request_id.as_deref(), Some("req-42"));
+    assert_eq!(records[0].model.as_deref(), Some("model-actual"));
+    assert_eq!(records[0].usage.unwrap().total_tokens, 20);
+    assert!(records[0].latency_ms.unwrap_or(0) >= 5);
+}
+
+#[tokio::test]
+async fn concurrent_measured_providers_keep_request_usage_scoped_to_each_step() {
+    struct ScopedProvider {
+        request_id: &'static str,
+        usage: TokenUsage,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ScopedProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            Ok(ModelOutput::Text("ok".to_string()))
+        }
+
+        async fn complete_stream_with_reasoning_and_model_observed(
+            &self,
+            model: Option<&str>,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+            _on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+        ) -> Result<ObservedModelOutput, String> {
+            tokio::task::yield_now().await;
+            Ok(ObservedModelOutput {
+                output: ModelOutput::Text("ok".to_string()),
+                metadata: ModelCallMetadata {
+                    request_id: Some(self.request_id.to_string()),
+                    model: model.map(str::to_string),
+                    usage: Some(self.usage),
+                    latency_ms: None,
+                },
+            })
+        }
+    }
+
+    let collector = Arc::new(RequestUsageCollector::default());
+    let calls_a = Arc::new(AtomicU64::new(0));
+    let calls_b = Arc::new(AtomicU64::new(0));
+    let provider_a = MeasuredProvider::new_with_request_usage(
+        Arc::new(ScopedProvider {
+            request_id: "req-a",
+            usage: TokenUsage {
+                prompt_tokens: 11,
+                completion_tokens: 3,
+                total_tokens: 14,
+            },
+        }),
+        Arc::clone(&calls_a),
+        Arc::clone(&collector),
+        request_scope_key("step-a", Some(4)),
+    );
+    let provider_b = MeasuredProvider::new_with_request_usage(
+        Arc::new(ScopedProvider {
+            request_id: "req-b",
+            usage: TokenUsage {
+                prompt_tokens: 29,
+                completion_tokens: 7,
+                total_tokens: 36,
+            },
+        }),
+        Arc::clone(&calls_b),
+        Arc::clone(&collector),
+        request_scope_key("step-b", Some(4)),
+    );
+    let mut on_chunk_a = |_chunk: StreamChunk| {};
+    let mut on_chunk_b = |_chunk: StreamChunk| {};
+    let (result_a, result_b) = tokio::join!(
+        provider_a.complete_stream_with_reasoning_and_model_observed(
+            Some("model-a"),
+            &[],
+            &[],
+            &mut on_chunk_a,
+        ),
+        provider_b.complete_stream_with_reasoning_and_model_observed(
+            Some("model-b"),
+            &[],
+            &[],
+            &mut on_chunk_b,
+        ),
+    );
+    result_a.unwrap();
+    result_b.unwrap();
+
+    let records_a = collector.take(&request_scope_key("step-a", Some(4)));
+    let records_b = collector.take(&request_scope_key("step-b", Some(4)));
+    assert_eq!(calls_a.load(Ordering::Relaxed), 1);
+    assert_eq!(calls_b.load(Ordering::Relaxed), 1);
+    assert_eq!(records_a.len(), 1);
+    assert_eq!(records_b.len(), 1);
+    assert_eq!(records_a[0].request_id.as_deref(), Some("req-a"));
+    assert_eq!(records_b[0].request_id.as_deref(), Some("req-b"));
+    assert_eq!(records_a[0].usage.unwrap().total_tokens, 14);
+    assert_eq!(records_b[0].usage.unwrap().total_tokens, 36);
+}
+
+#[test]
+fn lease_wait_measurements_are_isolated_by_step() {
+    let waits = LeaseWaitTracker::default();
+    waits.record(&request_scope_key("step-a", Some(3)), 23);
+    waits.record(&request_scope_key("step-a", Some(4)), 41);
+    assert_eq!(waits.take(&request_scope_key("step-a", Some(3))), 23);
+    assert_eq!(waits.take(&request_scope_key("step-a", Some(4))), 41);
+    assert_eq!(waits.take(&request_scope_key("step-a", Some(3))), 0);
 }

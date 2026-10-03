@@ -24,13 +24,20 @@
 //! 采集 TeamRun 总耗时、各 Worker 模型调用/耗时、retry/Handoff/Artifact 版本、
 //! 失败 Worker 与失败步骤、token/费用汇总。取消令牌贯通 TeamRun 与所有 Worker。
 
-use crate::product_eval::{AgentMode, CaseExecutor, EvalCategory, ExecContext, RawExecOutcome};
+use super::single_agent::BudgetedProvider;
+use crate::product_eval::{
+    in_scope, parse_file_blocks, sanitize_rel_path, unbounded_benchmark_calls, AgentMode,
+    ArtifactChecker, CaseExecutor, EvalCategory, ExecContext, ExecProgress, ProductEvalCase,
+    RawExecOutcome,
+};
 use async_trait::async_trait;
-use owo_agent_core::agent::{Agent, AgentConfig, TurnEvent};
+use owo_agent_core::agent::{AgentConfig, TurnEvent};
 use owo_agent_core::cas_store::CasStore;
-use owo_agent_core::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage};
+use owo_agent_core::gateway::{
+    is_non_retryable_provider_failure, ChatMessage, ModelOutput, ModelProvider, TokenUsage,
+};
 use owo_agent_core::goal::{Worker, WorkerRegistry};
-use owo_agent_core::permissions::{AutoApprover, Policy};
+use owo_agent_core::permissions::AutoApprover;
 use owo_agent_core::plan::StepStatus;
 use owo_agent_core::project_space_store::{ProjectSpaceStoreBackend, SqliteProjectSpaceStore};
 use owo_agent_core::session::Session;
@@ -39,9 +46,10 @@ use owo_agent_core::worker_profile::{WorkerProfile, PROFILE_MAX_TURNS_CAP};
 use owo_agent_core::workswarm::{
     CreateTeamRequest, PhaseOutcome, RoleSpec, RoleWorker, SteerCommand, TeamCoordinator,
 };
+use owo_agent_core::{AgentError, SessionStore};
 use owo_agent_protocol::{Artifact, TeamMode};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -55,6 +63,9 @@ pub struct WorkerObservation {
     pub attempts: u32,
     pub model_calls: u32,
     pub tool_calls: u32,
+    /// 工具名调用次数（不含参数/结果正文），用于定位角色内重复读取和无效操作。
+    #[serde(default)]
+    pub tool_breakdown: BTreeMap<String, u32>,
     pub permission_denied: u32,
     pub tool_failures: u32,
     pub wall_ms: u64,
@@ -152,6 +163,7 @@ struct WorkerStats {
     attempts: Mutex<u32>,
     model_calls: Mutex<u32>,
     tool_calls: Mutex<u32>,
+    tool_breakdown: Mutex<BTreeMap<String, u32>>,
     permission_denied: Mutex<u32>,
     tool_failures: Mutex<u32>,
     output_repairs: Mutex<u32>,
@@ -159,16 +171,28 @@ struct WorkerStats {
     usage: Mutex<TokenUsage>,
     usage_known: Mutex<bool>,
     error: Mutex<Option<String>>,
+    progress: Option<Arc<ExecProgress>>,
 }
 
 impl WorkerStats {
-    fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+    fn with_progress(progress: Arc<ExecProgress>) -> Arc<Self> {
+        Arc::new(Self {
+            progress: Some(progress),
+            usage_known: Mutex::new(true),
+            ..Self::default()
+        })
     }
 
     fn bump(model_calls: &Mutex<u32>) {
         if let Ok(mut value) = model_calls.lock() {
             *value = value.saturating_add(1);
+        }
+    }
+
+    fn record_model_call(&self) {
+        Self::bump(&self.model_calls);
+        if let Some(progress) = &self.progress {
+            progress.record_model_call();
         }
     }
 
@@ -178,10 +202,25 @@ impl WorkerStats {
         }
     }
 
+    fn mark_usage_unknown(&self) {
+        if let Some(progress) = &self.progress {
+            progress.record_usage_unknown();
+        }
+        if let Ok(mut known) = self.usage_known.lock() {
+            *known = false;
+        }
+    }
+
     fn observe_turn(&self, event: &TurnEvent) {
         match event {
-            TurnEvent::ModelCall => Self::bump(&self.model_calls),
-            TurnEvent::ToolStart { .. } => Self::bump(&self.tool_calls),
+            TurnEvent::ModelCall => self.record_model_call(),
+            TurnEvent::ToolStart { tool, .. } => {
+                Self::bump(&self.tool_calls);
+                if let Ok(mut counts) = self.tool_breakdown.lock() {
+                    let count = counts.entry(tool.clone()).or_default();
+                    *count = count.saturating_add(1);
+                }
+            }
             TurnEvent::PermissionRequest(request) => {
                 // 最终拒绝信号：Policy::decision 以 reason 前缀「拒绝」表达
                 //（越界路径/危险命令/只读策略下的写请求等）。
@@ -194,25 +233,33 @@ impl WorkerStats {
         }
     }
 
-    fn record_success(&self, wall_ms: u64, usage: TokenUsage) {
+    fn record_success(&self, wall_ms: u64, usage: TokenUsage, usage_known: bool) {
         if let Ok(mut value) = self.wall_ms.lock() {
             *value = value.saturating_add(wall_ms);
         }
         if let Ok(mut value) = self.attempts.lock() {
             *value = value.saturating_add(1);
         }
-        if usage.total_tokens > 0 {
-            if let Ok(mut known) = self.usage_known.lock() {
-                *known = true;
+        if usage_known {
+            if let Some(progress) = &self.progress {
+                progress.record_usage(usage);
             }
             if let Ok(mut value) = self.usage.lock() {
                 value.add(&usage);
             }
+        } else {
+            self.mark_usage_unknown();
         }
     }
 
-    fn record_failure(&self, wall_ms: u64, error: String) {
-        self.record_success(wall_ms, TokenUsage::default());
+    fn record_failure_report(
+        &self,
+        wall_ms: u64,
+        usage: TokenUsage,
+        usage_known: bool,
+        error: String,
+    ) {
+        self.record_success(wall_ms, usage, usage_known);
         if let Ok(mut slot) = self.error.lock() {
             *slot = Some(error);
         }
@@ -221,43 +268,38 @@ impl WorkerStats {
     fn snapshot(&self, member_id: &str, role: &str) -> WorkerObservation {
         let usage = self.usage.lock().map(|u| *u).unwrap_or_default();
         let counter = |mutex: &Mutex<u32>| mutex.lock().map(|value| *value).unwrap_or(0);
+        let tool_breakdown = self
+            .tool_breakdown
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
         let wall = self.wall_ms.lock().map(|value| *value).unwrap_or(0);
+        let usage_known = counter(&self.attempts) > 0
+            && self.usage_known.lock().map(|known| *known).unwrap_or(false);
         WorkerObservation {
             member_id: member_id.to_string(),
             role: role.to_string(),
             attempts: counter(&self.attempts),
             model_calls: counter(&self.model_calls),
             tool_calls: counter(&self.tool_calls),
+            tool_breakdown,
             permission_denied: counter(&self.permission_denied),
             tool_failures: counter(&self.tool_failures),
             output_repairs: counter(&self.output_repairs),
             wall_ms: wall,
-            prompt_tokens: (usage.prompt_tokens > 0).then_some(usage.prompt_tokens),
-            completion_tokens: (usage.completion_tokens > 0).then_some(usage.completion_tokens),
-            total_tokens: (usage.total_tokens > 0).then_some(usage.total_tokens),
+            prompt_tokens: usage_known.then_some(usage.prompt_tokens),
+            completion_tokens: usage_known.then_some(usage.completion_tokens),
+            total_tokens: usage_known.then_some(usage.total_tokens),
             error: self.error.lock().ok().and_then(|e| e.clone()),
         }
     }
 }
 
-/// 内层 Agent worker（十期 · 三路对齐产品执行路径）：
+/// ProductEval 的 Worker 装配器：不再自行创建 Agent 或运行回合。
 ///
-/// 与产品 `AgentSubagentWorker` → `ProfileSubagentRunner`（七期 · 二路口径）逐字同构：
-/// - 工具注册表由 [`WorkerProfile::build_registry`] 按角色画像装配（注册表面即权限
-///   边界：分析/审查/校验族只读文件面、实现族读写+受控命令、研究族只读+浏览器）；
-/// - 回合上限取画像值（模板 `budget_calls_per_role`，硬上限 [`PROFILE_MAX_TURNS_CAP`]）；
-/// - 只读三层叠加的评测子集：步骤输入 `read_only`（coordinator 按 critic 角色注入）
-///   ∨ 角色画像只读（评测无团队绑定层）；
-/// - 系统提示 = 角色基线提示（critic/写角色/通用）+ 回合预算纪律 + 契约系统提示，
-///   与 `ProfileSubagentRunner::run` 同一段文案；
-/// - Prompt 本体来自 coordinator 的 `TeamPromptCompiler` 编译结果（模板段 + 字节
-///   预算 + 截断记录），评测不另造一套提示。
-///
-/// 与产品的差异（评测沙盒语义，逐条声明）：
-/// - 审批器恒为 `AutoApprover { allow: true }`——产品绑定工作区的
-///   `WorkspaceScopeApprover` 是 server 侧类型，评测以「注册表面即权限边界」+
-///   写白名单工具闸达到同等约束（写角色只能写 `write_allowed` 内路径）；
-/// - 每次调用统计经 `TurnEvent` 计入 [`WorkerStats`]（产品走 MeasuredRoleWorker）。
+/// Worker loop、角色工具表、会话恢复、系统提示和 WorkerOutput 契约都由生产
+/// ProfileSubagentRunner 执行。此处仅注入评测沙盒工作区、显式回合配置、自动审批
+/// 和观测事件出口；TaskGraph 的每个 task 使用独立会话键，局部 retry 复用该 task 历史。
 struct EvalAgentWorker {
     provider: Arc<dyn ModelProvider>,
     model: String,
@@ -273,6 +315,58 @@ struct EvalAgentWorker {
     /// ProductEval 取消令牌（贯通到 Agent 回合循环）。
     cancel: Arc<AtomicBool>,
     stats: Arc<WorkerStats>,
+    /// Task-keyed sessions mirror the production ProfileSubagentRunner retry path.
+    session_store: Arc<EvalSessionStore>,
+}
+
+#[derive(Default)]
+struct EvalSessionStore {
+    sessions: Mutex<HashMap<String, Session>>,
+}
+
+impl SessionStore for EvalSessionStore {
+    fn create(
+        &self,
+        workspace: &std::path::Path,
+        model: &str,
+        system_prompt: Option<&str>,
+    ) -> Result<Session, AgentError> {
+        let session = Session::new(workspace, model, system_prompt.map(str::to_string));
+        self.save(&session)?;
+        Ok(session)
+    }
+
+    fn load(&self, id: &str) -> Result<Session, AgentError> {
+        self.sessions
+            .lock()
+            .map_err(|_| AgentError::Session("评测 Worker 会话锁中毒".into()))?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| AgentError::Session(format!("评测 Worker 会话不存在：{id}")))
+    }
+
+    fn save(&self, session: &Session) -> Result<(), AgentError> {
+        self.sessions
+            .lock()
+            .map_err(|_| AgentError::Session("评测 Worker 会话锁中毒".into()))?
+            .insert(session.id.clone(), session.clone());
+        Ok(())
+    }
+
+    fn exists(&self, id: &str) -> Result<bool, AgentError> {
+        Ok(self
+            .sessions
+            .lock()
+            .map_err(|_| AgentError::Session("评测 Worker 会话锁中毒".into()))?
+            .contains_key(id))
+    }
+
+    fn list(&self) -> Vec<String> {
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl EvalAgentWorker {
@@ -289,10 +383,7 @@ impl Worker for EvalAgentWorker {
     }
 
     async fn run(&self, input: &serde_json::Value) -> Result<String, String> {
-        tracing::info!(
-            role = %self.role_for_tracing(),
-            "eval worker 开始执行"
-        );
+        tracing::info!(role = %self.role_for_tracing(), "eval worker 开始执行");
         if self.cancel.load(Ordering::Relaxed) {
             return Err("已取消（进入前检测）".to_string());
         }
@@ -300,104 +391,196 @@ impl Worker for EvalAgentWorker {
             .get("prompt")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
-            .filter(|p| !p.is_empty())
+            .filter(|prompt| !prompt.is_empty())
             .ok_or_else(|| "agent 步骤缺少 prompt 参数".to_string())?;
         let input_read_only = input
             .get("read_only")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
-        // 只读叠加（产品三层叠加的评测子集）：步骤输入 ∨ 角色画像。
         let read_only = input_read_only || self.profile.read_only;
+        let mut profile = self.profile.clone();
+        if read_only {
+            profile.read_only = true;
+            profile.can_run_command = false;
+            profile.visible_tools.retain(|tool| {
+                !matches!(tool.as_str(), "write_file" | "apply_patch" | "run_command")
+            });
+        }
 
-        let policy = if read_only {
-            Policy::read_only(self.workspace.clone())
-        } else {
-            Policy::new(self.workspace.clone())
-        };
-        // 注册表面即权限边界：写角色只注册白名单写工具（write_allowed 内），
-        // 读角色的注册表里根本没有写/执行工具。
-        let registry = self.profile.build_registry(self.write_allowed.clone());
+        let unbounded_calls = unbounded_benchmark_calls();
+        let defaults = AgentConfig::default();
         let config = AgentConfig {
-            max_turns: self.profile.max_turns.min(PROFILE_MAX_TURNS_CAP),
-            ..AgentConfig::default()
+            max_turns: if unbounded_calls {
+                profile.max_turns
+            } else {
+                profile.max_turns.min(PROFILE_MAX_TURNS_CAP)
+            },
+            max_tool_calls_per_turn: if unbounded_calls {
+                usize::MAX
+            } else {
+                defaults.max_tool_calls_per_turn
+            },
+            max_repeated_tool_calls: if unbounded_calls {
+                usize::MAX
+            } else {
+                defaults.max_repeated_tool_calls
+            },
+            ..defaults
         };
-        let agent = Agent::new(Arc::clone(&self.provider), registry, policy, config);
-        // 基线提示词与产品 ProfileSubagentRunner 同构：critic 探索口径 / 写角色
-        // 「必须真实落盘」/ 通用；回合预算纪律（末回合禁工具只出契约 JSON）；
-        // 输出契约（V1）system 条款。
-        let base_prompt = if self.is_critic {
-            "你是只读探索子代理：只能读取/搜索工作区文件，禁止写入或执行命令；调查完成后用简洁中文汇报发现。\n"
-        } else if self.profile.is_writer() {
-            "你是写角色子代理：凡涉及代码/文件变更，必须用 write_file 把最终内容真实写入工作区文件（仅限允许路径内的文件，工具面之外没有其他写入手段）；artifact.content 只写变更说明、影响面与验证方式，不要把完整变更只放在 artifact 里而不落盘。回合预算有限：先做必要读取，随后直接完成写入，最后一个回合只输出契约 JSON——不要重复读取同一文件或执行验证命令。工具调用仍需审批，完成后汇报结果。\n"
+        let budget_note = if unbounded_calls {
+            "本次运行只受外层墙钟截止控制，没有模型调用或工具调用次数上限。完成分配的实现后尽快真实落盘并交付；不要把源文件正文塞进 Artifact。\n".to_string()
         } else {
-            "你是通用子代理：独立完成委派任务，工具调用仍需审批，完成后汇报结果。\n"
+            format!(
+                "你的回合预算为 {} 回合：前 {} 回合完成必要的工具调用，最后一个回合必须直接输出最终 JSON（不要再调用任何工具）。尽量少花回合。\n",
+                profile.max_turns,
+                profile.max_turns.saturating_sub(1)
+            )
         };
-        let budget_note = format!(
-            "你的回合预算为 {} 回合：前 {} 回合完成必要的工具调用，最后一个回合必须直接输出最终 JSON（不要再调用任何工具）。尽量少花回合。\n",
-            self.profile.max_turns,
-            self.profile.max_turns.saturating_sub(1)
-        );
-        let system_prompt = format!(
-            "{base_prompt}{budget_note}{}",
-            owo_agent_core::workswarm_output::contract_system_prompt(self.is_critic)
-        );
-        let mut session = Session::new(&self.workspace, &self.model, Some(system_prompt));
+        let session_key = input
+            .get("assigned_task_id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                input
+                    .get("_workswarm")
+                    .and_then(|meta| meta.get("step_id"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .unwrap_or(&self.role);
+        let worker_session_id = format!("eval-{session_key}");
+        let stats = Arc::clone(&self.stats);
+        let event_sink: owo_agent_core::worker_profile::TurnEventSink =
+            Arc::new(move |event| stats.observe_turn(event));
+        let approver = AutoApprover { allow: true };
+        let runner = owo_agent_core::worker_profile::ProfileSubagentRunner {
+            provider: Arc::clone(&self.provider),
+            approver: &approver,
+            abort: &self.cancel,
+            depth: 0,
+            model: self.model.clone(),
+            is_critic: self.is_critic,
+            write_allowed: self.write_allowed.clone(),
+            profile,
+            agent_config: Some(config),
+            budget_note_override: Some(budget_note),
+            extra_tools: Vec::new(),
+            extra_system_prompt: None,
+            event_sink: Some(event_sink),
+            session_store: Some(self.session_store.clone()),
+            worker_session_id: Some(worker_session_id),
+            parent_session_id: None,
+        };
         let started = Instant::now();
         tracing::info!(
             role = %self.role_for_tracing(),
-            max_turns = self.profile.max_turns.min(PROFILE_MAX_TURNS_CAP),
-            "eval worker 进入 run_turn"
+            max_turns = runner.profile.max_turns,
+            "eval worker 进入共享 WorkerRuntime"
         );
-        let outcome = agent
-            .run_turn(
-                &mut session,
-                prompt,
-                &AutoApprover { allow: true },
-                &self.cancel,
-                &mut |event| self.stats.observe_turn(event),
-            )
-            .await;
-        tracing::info!(
-            role = %self.role_for_tracing(),
-            ok = outcome.is_ok(),
-            wall_ms = started.elapsed().as_millis() as u64,
-            "eval worker run_turn 返回"
-        );
-        let wall_ms = started.elapsed().as_millis() as u64;
-        match outcome {
-            Ok(turn) => {
-                self.stats.record_success(wall_ms, turn.usage);
-                let text = turn.final_text.unwrap_or_default();
-                // 七期一路：共享契约执行器（与生产 SubagentRunner 同一逻辑）；
-                // repairs 计数计入 stats（六期基线：修复一次即计，失败也计）。
-                match owo_agent_core::contract_worker::enforce_worker_output_contract(
-                    &self.provider,
-                    &text,
-                    self.is_critic,
-                )
-                .await
-                {
-                    Ok(enforced) if enforced.repairs > 0 => {
-                        WorkerStats::bump(&self.stats.model_calls);
-                        self.stats.bump_output_repairs();
-                        Ok(enforced.text)
-                    }
-                    Ok(enforced) => Ok(enforced.text),
-                    Err(error) if error.repairs > 0 => {
-                        WorkerStats::bump(&self.stats.model_calls);
-                        self.stats.bump_output_repairs();
-                        Err(error.message)
-                    }
-                    Err(error) => Err(error.message),
+        match runner.run_report(&self.workspace, prompt).await {
+            Ok(report) => {
+                tracing::info!(
+                    role = %self.role_for_tracing(),
+                    wall_ms = report.duration_ms,
+                    model_calls = report.model_calls,
+                    output_repairs = report.output_repairs,
+                    "eval worker 共享 WorkerRuntime 返回"
+                );
+                self.stats
+                    .record_success(report.duration_ms, report.usage, report.usage_known);
+                if report.output_repairs > 0 {
+                    self.stats.record_model_call();
+                    self.stats.bump_output_repairs();
                 }
+                Ok(report.output)
             }
             Err(error) => {
-                let message = format!("agent 回合失败：{error}");
-                self.stats.record_failure(wall_ms, message.clone());
-                Err(message)
+                if error.output_repairs > 0 {
+                    self.stats.record_model_call();
+                    self.stats.bump_output_repairs();
+                }
+                let wall_ms = started.elapsed().as_millis() as u64;
+                tracing::info!(
+                    role = %self.role_for_tracing(),
+                    wall_ms,
+                    model_calls = error.model_calls,
+                    output_repairs = error.output_repairs,
+                    usage_known = error.usage_known,
+                    "eval worker 共享 WorkerRuntime 失败"
+                );
+                self.stats.record_failure_report(
+                    wall_ms.max(error.duration_ms),
+                    error.usage,
+                    error.usage_known,
+                    error.message.clone(),
+                );
+                Err(error.message)
             }
         }
     }
+}
+
+fn worker_profile_and_write_scope(
+    spec: &RoleSpec,
+    role_budget: usize,
+    workspace: &std::path::Path,
+    configured_turn_cap: usize,
+    template_id: Option<&str>,
+) -> Result<(WorkerProfile, Vec<PathBuf>), crate::product_eval::ProductEvalError> {
+    let is_review_role = spec.is_reviewer();
+    let has_declared_write_scope = !spec.write_paths.is_empty();
+    if is_review_role && has_declared_write_scope {
+        return Err(crate::product_eval::ProductEvalError(format!(
+            "评审角色 {} 不能声明写路径",
+            spec.role
+        )));
+    }
+    let mut profile = if has_declared_write_scope {
+        // RoleSpec.write_paths is the authoritative declaration of write capability.
+        // Names such as frontend_engineer/backend_engineer are not in the generic
+        // keyword list, so for_role() alone incorrectly makes them read-only.
+        WorkerProfile::explicit_writer(role_budget)
+    } else {
+        WorkerProfile::for_role_with_capabilities(&spec.role, &spec.capabilities, role_budget)
+    };
+    if template_id == Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1)
+        && matches!(spec.role.as_str(), "w1" | "w2")
+    {
+        profile = profile.without_commands();
+    }
+    let scoped_write_paths = spec
+        .write_paths
+        .iter()
+        .map(|raw| {
+            let rel = sanitize_rel_path(raw).map_err(|error| {
+                crate::product_eval::ProductEvalError(format!(
+                    "角色 {} 声明了非法写路径 {}：{}",
+                    spec.role, raw, error
+                ))
+            })?;
+            Ok((raw.replace('\\', "/"), workspace.join(rel)))
+        })
+        .collect::<Result<Vec<_>, crate::product_eval::ProductEvalError>>()?;
+    profile.write_allowed_paths = scoped_write_paths
+        .iter()
+        .map(|(raw, _)| raw.clone())
+        .collect();
+    profile.max_turns = effective_worker_turn_budget(profile.max_turns, configured_turn_cap);
+    let mut write_allowed: Vec<PathBuf> = scoped_write_paths
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    if write_allowed.is_empty() && profile.is_writer() {
+        write_allowed.push(workspace.to_path_buf());
+    }
+    Ok((profile, write_allowed))
+}
+
+fn effective_worker_turn_budget(role_budget: usize, configured_cap: usize) -> usize {
+    if unbounded_benchmark_calls() {
+        return role_budget.max(configured_cap).max(1);
+    }
+    role_budget
+        .min(configured_cap.clamp(1, PROFILE_MAX_TURNS_CAP))
+        .clamp(1, PROFILE_MAX_TURNS_CAP)
 }
 
 /// 执行器配置（也承担默认值来源）。
@@ -484,6 +667,22 @@ impl WorkSwarmExecutor {
         }
     }
 
+    fn template_for_case(case: &ProductEvalCase) -> Option<&'static str> {
+        let has_frontend = case
+            .expected_artifacts
+            .iter()
+            .any(|path| path.starts_with("apps/web/"));
+        let has_backend = case
+            .expected_artifacts
+            .iter()
+            .any(|path| path.starts_with("apps/api/"));
+        if case.category == EvalCategory::Code && has_frontend && has_backend {
+            Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1)
+        } else {
+            Self::template_for_category(case.category)
+        }
+    }
+
     /// 策略计划 → 动态角色 DAG（producer → [critic] → [leader]）。
     ///
     /// 十期 · 三路起仅用于 **single 形态**（显式单 producer，与策略计划一致）；
@@ -542,14 +741,28 @@ impl WorkSwarmExecutor {
         specs
     }
 
-    fn objective_of(case: &crate::product_eval::ProductEvalCase) -> String {
-        format!(
+    fn objective_of(case: &ProductEvalCase) -> String {
+        let mut objective = format!(
             "[{}] {}\n\n{}\n\n最终交付物（登记为版本化 Artifact）：{}",
             case.category.as_str(),
             case.title,
             case.instruction.trim(),
             case.expected_artifacts.join("、")
-        )
+        );
+        let fullstack = Self::template_for_case(case)
+            == Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1);
+        if fullstack {
+            objective.push_str(
+                "\n\n前端和后端实现必须使用各自 write_file 工具直接写入分配的工作区目录；集成者同样直接写入自己的分配路径。最终 Artifact 只需交付运行与验证摘要，禁止把完整源文件重复塞进 Artifact。",
+            );
+        } else if case.expected_artifacts.len() > 1 {
+            objective.push_str(
+                "\n\n多文件交付必须在最终 Artifact.content 中使用下面的文件块协议，\
+                 每个预期路径各输出一个完整文件块；路径必须精确匹配，不能把多个文件\
+                 合并进第一个文件，也不能省略文件。\n=== FILE: 相对路径 ===\n<文件完整内容>\n=== END FILE ===",
+            );
+        }
+        objective
     }
 
     /// 带完整观测的执行入口（报告/测试用；`CaseExecutor::execute` 是其薄封装）。
@@ -572,6 +785,11 @@ impl WorkSwarmExecutor {
             ));
         }
 
+        let budgeted_provider = Arc::new(BudgetedProvider::new(
+            Arc::clone(&self.provider),
+            ctx.max_model_calls,
+        ));
+
         // —— 每单元格独立目录：CAS / sqlite / 运行状态 / worker 工作区 ——
         let slug = format!(
             "{}-{}-{}",
@@ -583,6 +801,7 @@ impl WorkSwarmExecutor {
         let cas_dir = root.join("cas");
         let runs_dir = root.join("runs");
         let ws_dir = root.join("workspace");
+        ctx.progress().set_team_workspace(ws_dir.clone());
         for dir in [&cas_dir, &runs_dir, &ws_dir] {
             std::fs::create_dir_all(dir)
                 .map_err(|e| ProductEvalError(format!("创建 TeamRun 目录失败：{e}")))?;
@@ -606,7 +825,7 @@ impl WorkSwarmExecutor {
         let template_id = if plan.is_single() {
             None
         } else {
-            Self::template_for_category(case.category)
+            Self::template_for_case(case)
         };
         if let Some(id) = template_id {
             // 安装内置模板进本单元格注册表（幂等落盘；与产品 catalog install 同一
@@ -691,7 +910,7 @@ impl WorkSwarmExecutor {
         let mut stats_by_member: BTreeMap<String, (String, Arc<WorkerStats>)> = BTreeMap::new();
         for spec in &meta.roles {
             let member_id = format!("m-{}", spec.role);
-            let stats = WorkerStats::new();
+            let stats = WorkerStats::with_progress(ctx.progress());
             // 每角色调用预算：模板角色取 RunMeta.budgets（模板 budget_calls_per_role），
             // 动态/single 角色退回策略计划（未知角色缺省 4）。
             let role_budget = meta
@@ -702,15 +921,22 @@ impl WorkSwarmExecutor {
                 .unwrap_or_else(|| plan.budget_for(&spec.role));
             // 角色画像（工具面/只读/回合上限）与 critic 代理（产品同口径：
             // role == "critic" 字面量；reviewer 等内置评审角色是只读 producer）。
-            let profile = WorkerProfile::for_role(&spec.role, role_budget);
-            let is_critic = spec.role == "critic";
-            registry.register(Arc::new(RoleWorker::new(
+            let (profile, write_allowed) = worker_profile_and_write_scope(
+                spec,
+                role_budget,
+                &ws_dir,
+                self.config.max_turns_per_worker,
+                template_id,
+            )?;
+            let is_critic = spec.is_reviewer();
+            registry.register(Arc::new(RoleWorker::new_with_capabilities(
                 Arc::clone(&coordinator),
                 team_id.clone(),
                 member_id.clone(),
                 spec.role.clone(),
+                spec.capabilities.clone(),
                 Arc::new(EvalAgentWorker {
-                    provider: Arc::clone(&self.provider),
+                    provider: Arc::clone(&budgeted_provider) as Arc<dyn ModelProvider>,
                     model: self.model.clone(),
                     workspace: ws_dir.clone(),
                     role: spec.role.clone(),
@@ -718,9 +944,10 @@ impl WorkSwarmExecutor {
                     is_critic,
                     // 评测无团队绑定 → 最终写白名单 = 单元格工作区根
                     //（白名单写工具闸把写角色的落盘限制在本单元格内）。
-                    write_allowed: vec![ws_dir.clone()],
+                    write_allowed,
                     cancel: Arc::clone(&ctx.cancel),
                     stats: Arc::clone(&stats),
+                    session_store: Arc::new(EvalSessionStore::default()),
                 }),
             )));
             stats_by_member.insert(member_id, (spec.role.clone(), stats));
@@ -774,21 +1001,92 @@ impl WorkSwarmExecutor {
                     continue;
                 }
                 Ok(PhaseOutcome::Done) => {
-                    if let Err(e) = coordinator.finalize_success(&team_id).await {
-                        tracing::warn!(team_id = %team_id, error = %e, "TeamRun 收尾失败（产物已登记）");
+                    if template_id == Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1)
+                    {
+                        let validation_started = Instant::now();
+                        let (passed, total, failed) =
+                            crate::product_eval::evaluate_all_on_dir(&case.checkers, &ws_dir).await;
+                        ctx.progress().record_validation_wall_ms(
+                            validation_started.elapsed().as_millis() as u64,
+                        );
+                        if !failed.is_empty() {
+                            if retries_used < self.config.max_retries_on_failure {
+                                if let Some((step_id, owner)) = checker_rework_target(
+                                    &coordinator,
+                                    &team_id,
+                                    &case.checkers,
+                                    &meta.roles,
+                                    &failed,
+                                ) {
+                                    let note = failed.join("；");
+                                    let instruction = format!(
+                                        "宿主检查器拒绝了当前全栈实现。请修复你负责范围内的问题并保留其他角色文件：{note}"
+                                    );
+                                    if coordinator
+                                        .rework_step_from_validator(
+                                            &team_id,
+                                            &step_id,
+                                            &instruction,
+                                            &format!("host_validator 将 {owner} 的任务退回修复"),
+                                        )
+                                        .await
+                                        .is_ok()
+                                    {
+                                        retries_used += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                            run_error = Some(format!(
+                                "宿主全栈验收失败（{}/{} 通过），无法定位可安全返工的最新任务或返工预算已耗尽：{}",
+                                passed,
+                                total,
+                                failed.join("；")
+                            ));
+                            break "failed".to_string();
+                        }
+                        ctx.progress().mark_checkers_prevalidated(passed, total);
                     }
-                    break "succeeded".to_string();
+                    let delivery_gate_started = Instant::now();
+                    let finalization = coordinator
+                        .finalize_success(&team_id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string());
+                    ctx.progress().record_delivery_gate_wall_ms(
+                        delivery_gate_started.elapsed().as_millis() as u64,
+                    );
+                    let (terminal_status, finalization_error) =
+                        terminal_after_delivery_gate(finalization);
+                    if let Some(error) = finalization_error {
+                        tracing::warn!(
+                            team_id = %team_id,
+                            error = %error,
+                            "TeamRun 交付门拒绝完成；评测不得将候选 Artifact 计作成功"
+                        );
+                        run_error = Some(error);
+                    }
+                    break terminal_status.to_string();
                 }
                 Ok(PhaseOutcome::Failed) => {
-                    // 局部 retry：只重置失败步骤及其未完成下游（已成功 Worker/Artifact 不动）。
-                    if retries_used < self.config.max_retries_on_failure {
-                        if let Some(step_id) = first_failed_step(&coordinator, &team_id).await {
+                    if let Some((step_id, diagnostic)) =
+                        first_failed_step(&coordinator, &team_id).await
+                    {
+                        let diagnostic = diagnostic.chars().take(1200).collect::<String>();
+                        if is_non_retryable_provider_failure(&diagnostic) {
+                            run_error = Some(format!(
+                                "TeamRun 遇到不可重试的模型资源错误，跳过重复返工：{diagnostic}"
+                            ));
+                            break "failed".to_string();
+                        }
+                        // 局部 retry：只重置失败步骤及其未完成下游（已成功 Worker/Artifact 不动）。
+                        if retries_used < self.config.max_retries_on_failure {
                             let applied = coordinator
                                 .apply_steer(
                                     &team_id,
                                     &SteerCommand::Retry {
                                         step_id: step_id.clone(),
-                                        note: "product-eval：局部重试失败步骤".to_string(),
+                                        note: format!("product-eval 局部返工诊断：{diagnostic}"),
                                     },
                                 )
                                 .await;
@@ -829,6 +1127,13 @@ impl WorkSwarmExecutor {
             }
         };
         coordinator.set_loop_alive(&team_id, false);
+        if terminal == "failed" {
+            if let Some(reason) = run_error.as_deref() {
+                if let Err(error) = coordinator.fail_delivery_validation(&team_id, reason).await {
+                    run_error = Some(format!("{reason}；TeamRun 失败状态持久化失败：{error}"));
+                }
+            }
+        }
         watcher.abort();
         let wall_ms = started.elapsed().as_millis() as u64;
         let cancelled = ctx.cancelled() || team_cancel.is_cancelled();
@@ -926,9 +1231,11 @@ impl WorkSwarmExecutor {
             return Ok((
                 RawExecOutcome {
                     aborted: true,
-                    model_calls: observation.workers.iter().map(|w| w.model_calls).sum(),
+                    model_calls: budgeted_provider.call_count(),
                     usage: TokenUsage::default(),
                     usage_known: false,
+                    validation_wall_ms: 0,
+                    delivery_gate_wall_ms: 0,
                     retries: retries_used,
                     error: None,
                     tool_log: Vec::new(),
@@ -939,11 +1246,13 @@ impl WorkSwarmExecutor {
 
         // —— 最终交付：从 ProjectSpace/CAS 复制**版本化 Artifact 内容**进沙盒 ——
         // 选择顺序：kind=final（leader 裁决）> producer 角色 kind > 最新版本。
+        // 分析/规划角色的 Artifact 是上下文，不是代码交付，不能在实现者失败时
+        // 被误写到第一个源文件（例如把分析报告写进 package.json）。
         let final_ref = pick_final_artifact(&observation.artifacts);
         let mut outcome = RawExecOutcome {
             aborted: false,
             error: None,
-            model_calls: observation.workers.iter().map(|w| w.model_calls).sum(),
+            model_calls: budgeted_provider.call_count(),
             usage: TokenUsage {
                 prompt_tokens: observation
                     .workers
@@ -961,10 +1270,58 @@ impl WorkSwarmExecutor {
                     .filter_map(|w| w.total_tokens)
                     .sum(),
             },
-            usage_known: observation.workers.iter().any(|w| w.total_tokens.is_some()),
+            usage_known: {
+                let executed = observation
+                    .workers
+                    .iter()
+                    .filter(|worker| worker.attempts > 0)
+                    .collect::<Vec<_>>();
+                !executed.is_empty() && executed.iter().all(|worker| worker.total_tokens.is_some())
+            },
+            validation_wall_ms: ctx.progress().snapshot().validation_wall_ms,
+            delivery_gate_wall_ms: ctx.progress().snapshot().delivery_gate_wall_ms,
             retries: retries_used,
             tool_log: Vec::new(),
         };
+
+        if let Some(error) =
+            unaccepted_team_run_error(&terminal, run_error.as_deref(), &observation.status)
+        {
+            outcome.error = Some(error);
+            persist_observation(&root, &observation);
+            return Ok((outcome, observation));
+        }
+
+        if template_id == Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1)
+            && terminal == "succeeded"
+        {
+            match materialize_workspace_files(case, &ws_dir) {
+                Ok(Some(files)) => {
+                    for (artifact_path, file_content) in files {
+                        if let Err(write_error) = ctx.write_file(&artifact_path, &file_content) {
+                            outcome.error = Some(write_error);
+                            persist_observation(&root, &observation);
+                            return Ok((outcome, observation));
+                        }
+                    }
+                    persist_observation(&root, &observation);
+                    return Ok((outcome, observation));
+                }
+                Ok(None) => {
+                    outcome.error = Some(
+                        "fullstack_delivery: TeamRun 成功但工作区未包含全部非空预期文件"
+                            .to_string(),
+                    );
+                    persist_observation(&root, &observation);
+                    return Ok((outcome, observation));
+                }
+                Err(error) => {
+                    outcome.error = Some(format!("fullstack_delivery:{error}"));
+                    persist_observation(&root, &observation);
+                    return Ok((outcome, observation));
+                }
+            }
+        }
 
         let Some(final_ref) = final_ref else {
             persist_observation(&root, &observation);
@@ -1029,20 +1386,21 @@ impl WorkSwarmExecutor {
         }
         observation.final_artifact_ref = Some(final_ref.artifact_id.clone());
 
-        // 写入走 ExecContext 受控通道（allow_write 范围强制）；
-        // 多预期产物时：首个承载最终交付文本，其余如实登记为不支持（单一最终文本）。
-        let mut first = true;
-        for artifact_path in &case.expected_artifacts {
-            if first {
-                first = false;
-                if let Err(write_err) = ctx.write_file(artifact_path, &content) {
-                    outcome.error = Some(write_err);
-                    return Ok((outcome, observation));
+        // 写入走 ExecContext 受控通道（allow_write 范围强制）。单文件任务保留
+        // 原始正文语义；多文件任务必须解析 FILE 块，并精确匹配预期路径。
+        match materialize_final_content(case, &content) {
+            Ok(files) => {
+                for (artifact_path, file_content) in files {
+                    if let Err(write_err) = ctx.write_file(&artifact_path, &file_content) {
+                        outcome.error = Some(write_err);
+                        return Ok((outcome, observation));
+                    }
                 }
-            } else {
-                ctx.record_failed_step(format!(
-                    "workswarm:最终交付为单一文本，无法填充额外预期产物 {artifact_path}"
-                ));
+            }
+            Err(error) => {
+                ctx.record_failed_step(format!("workswarm:multi_file_delivery:{error}"));
+                outcome.error = Some(error);
+                return Ok((outcome, observation));
             }
         }
         if terminal == "failed" || terminal == "error" {
@@ -1088,12 +1446,103 @@ impl WorkSwarmExecutor {
     }
 }
 
+/// Copy only declared, non-empty UTF-8 deliverables from the isolated TeamRun workspace.
+fn materialize_workspace_files(
+    case: &ProductEvalCase,
+    workspace: &std::path::Path,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    let canonical_root = workspace
+        .canonicalize()
+        .map_err(|error| format!("TeamRun 工作区不可解析：{error}"))?;
+    let mut files = BTreeMap::new();
+    for raw in &case.expected_artifacts {
+        let relative =
+            sanitize_rel_path(raw).map_err(|error| format!("非法预期产物路径 {raw}：{error}"))?;
+        if !in_scope(&case.allow_write, &relative) {
+            return Err(format!("预期产物不在任务写白名单内：{relative}"));
+        }
+        let candidate = canonical_root.join(&relative);
+        let Ok(path) = candidate.canonicalize() else {
+            return Ok(None);
+        };
+        if !path.starts_with(&canonical_root) {
+            return Err(format!("TeamRun 产物路径越出工作区：{relative}"));
+        }
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let body = std::fs::read_to_string(&path)
+            .map_err(|error| format!("读取 TeamRun 产物 {relative} 失败：{error}"))?;
+        if body.trim().is_empty() {
+            return Ok(None);
+        }
+        files.insert(relative, body);
+    }
+    Ok(Some(files))
+}
+
 /// 把 TeamRun 观测落盘为 `observation.json`（取证/报告用；失败不阻断执行）。
 fn persist_observation(root: &std::path::Path, observation: &TeamRunObservation) {
     let Ok(text) = serde_json::to_string_pretty(observation) else {
         return;
     };
     let _ = std::fs::write(root.join("observation.json"), text);
+}
+
+/// 将最终 Artifact 正文收敛为沙盒文件。多文件只能通过 FILE 块交付，
+/// 且每个块必须落在任务声明的 expected_artifacts 内。
+fn materialize_final_content(
+    case: &ProductEvalCase,
+    content: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let expected: std::collections::BTreeSet<&str> =
+        case.expected_artifacts.iter().map(String::as_str).collect();
+    if expected.is_empty() {
+        return Err("任务没有声明预期产物".to_string());
+    }
+    if expected.len() != case.expected_artifacts.len() {
+        return Err("任务的预期产物路径重复".to_string());
+    }
+
+    let (blocks, warnings) = parse_file_blocks(content);
+    if expected.len() == 1 && blocks.is_empty() {
+        let path = *expected.iter().next().expect("single expected path");
+        if content.trim().is_empty() {
+            return Err(format!("最终 Artifact 对 {path} 为空"));
+        }
+        return Ok(BTreeMap::from([(path.to_string(), content.to_string())]));
+    }
+    if !warnings.is_empty() {
+        return Err(format!("文件块格式无效：{}", warnings.join("；")));
+    }
+    if blocks.is_empty() {
+        return Err("最终 Artifact 未包含任何 === FILE: ... === 文件块".to_string());
+    }
+
+    let mut files = BTreeMap::new();
+    for (path, body) in blocks {
+        let normalized = path.trim().replace('\\', "/");
+        sanitize_rel_path(&normalized)
+            .map_err(|error| format!("非法文件块路径 {normalized}：{error}"))?;
+        if !expected.contains(normalized.as_str()) {
+            return Err(format!("文件块路径 {normalized} 不在预期产物清单内"));
+        }
+        if body.trim().is_empty() {
+            return Err(format!("文件块 {normalized} 内容为空"));
+        }
+        if files.insert(normalized.clone(), body).is_some() {
+            return Err(format!("文件块路径重复：{normalized}"));
+        }
+    }
+    let missing: Vec<&str> = expected
+        .iter()
+        .copied()
+        .filter(|path| !files.contains_key(*path))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("缺少预期文件块：{}", missing.join("、")));
+    }
+    Ok(files)
 }
 
 /// 最终交付选择（R4 输出契约）：只从 **producer 版本链**挑选——
@@ -1107,16 +1556,21 @@ fn pick_final_artifact(artifacts: &[ArtifactObservation]) -> Option<ArtifactObse
     // 评审/分析角色（producer 侧）永不入选：动态 critic + 模板评审角色
     //（reviewer / content_reviewer）。模板契约路径登记 kind=角色名
     //（role_kind 兜底），kind 过滤对模板角色失效 → 以 producer 角色判定为准。
-    let is_review_producer = |a: &ArtifactObservation| {
-        matches!(
-            a.producer_role(),
-            Some("critic") | Some("reviewer") | Some("content_reviewer")
-        )
+    let is_non_delivery = |a: &ArtifactObservation| {
+        a.kind == "review"
+            || a.kind == "analysis"
+            || a.kind == "plan"
+            || matches!(
+                a.producer_role(),
+                Some("critic")
+                    | Some("reviewer")
+                    | Some("content_reviewer")
+                    | Some("code_analyzer")
+            )
     };
     let chain: Vec<&ArtifactObservation> = artifacts
         .iter()
-        .filter(|a| a.kind != "review")
-        .filter(|a| !is_review_producer(a))
+        .filter(|artifact| !is_non_delivery(artifact))
         .collect();
     if chain.is_empty() {
         return None;
@@ -1148,13 +1602,137 @@ impl ArtifactObservation {
     }
 }
 
-async fn first_failed_step(coordinator: &TeamCoordinator, team_id: &str) -> Option<String> {
+fn checker_path(checker: &ArtifactChecker) -> Option<&str> {
+    match checker {
+        ArtifactChecker::Exists { path }
+        | ArtifactChecker::Contains { path, .. }
+        | ArtifactChecker::NotContains { path, .. }
+        | ArtifactChecker::Regex { path, .. }
+        | ArtifactChecker::LineCountMin { path, .. }
+        | ArtifactChecker::JsonFieldEquals { path, .. }
+        | ArtifactChecker::JsonKeysExact { path, .. } => Some(path),
+        ArtifactChecker::CommandCheck { .. } => None,
+    }
+}
+
+fn checker_owner_role(checker: &ArtifactChecker, roles: &[RoleSpec]) -> Option<String> {
+    let Some(path) = checker_path(checker) else {
+        return roles
+            .iter()
+            .find(|role| role.role == "project_integrator")
+            .map(|role| role.role.clone());
+    };
+    let matching_scopes = |role: &RoleSpec| {
+        role.write_paths
+            .iter()
+            .filter_map(|scope| {
+                let scope = scope.trim_end_matches("/**").trim_end_matches('/');
+                (path == scope || path.starts_with(&format!("{scope}/")))
+                    .then_some((role.role.clone(), scope.len()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let primary_writer = roles
+        .iter()
+        .filter(|role| !role.is_reviewer() && role.role != "project_integrator")
+        .flat_map(matching_scopes)
+        .max_by_key(|(_, scope_len)| *scope_len)
+        .map(|(role, _)| role);
+    primary_writer.or_else(|| {
+        roles
+            .iter()
+            .find(|role| role.role == "project_integrator")
+            .map(|role| role.role.clone())
+    })
+}
+
+fn latest_successful_task(
+    state: &owo_agent_core::goal::GoalRunState,
+    owner: &str,
+    path: Option<&str>,
+) -> Option<String> {
+    let role_worker = format!("m-{owner}");
+    let matching: Vec<_> = state
+        .plan
+        .steps
+        .iter()
+        .filter(|step| {
+            (step.worker == role_worker || step.worker.ends_with(owner))
+                && state
+                    .records
+                    .get(&step.id)
+                    .is_some_and(|record| record.status == StepStatus::Succeeded)
+        })
+        .collect();
+    let step = path
+        .and_then(|path| {
+            matching
+                .iter()
+                .rev()
+                .find(|step| step.input.to_string().contains(path))
+                .copied()
+        })
+        .or_else(|| matching.last().copied())?;
+    Some(step.id.clone())
+}
+
+fn checker_rework_target(
+    coordinator: &TeamCoordinator,
+    team_id: &str,
+    checkers: &[ArtifactChecker],
+    roles: &[RoleSpec],
+    failed: &[String],
+) -> Option<(String, String)> {
+    let state = coordinator.load_run_state(team_id).ok()?;
+    let failure = failed.first()?;
+    let checker = checkers
+        .iter()
+        .find(|checker| failure.starts_with(&format!("{} ⇒", checker.describe())))?;
+    let path = checker_path(checker);
+    let owner = checker_owner_role(checker, roles)?;
+    let step = latest_successful_task(&state, &owner, path)?;
+    Some((step, owner))
+}
+
+fn unaccepted_team_run_error(
+    terminal: &str,
+    run_error: Option<&str>,
+    team_status: &str,
+) -> Option<String> {
+    if terminal == "succeeded" && team_status == "Succeeded" {
+        return None;
+    }
+    Some(run_error.map(str::to_string).unwrap_or_else(|| {
+        format!("team_run_not_accepted:terminal={terminal};status={team_status}")
+    }))
+}
+
+fn terminal_after_delivery_gate(
+    finalization: Result<(), String>,
+) -> (&'static str, Option<String>) {
+    match finalization {
+        Ok(()) => ("succeeded", None),
+        Err(error) => ("failed", Some(format!("delivery_gate:{error}"))),
+    }
+}
+
+async fn first_failed_step(
+    coordinator: &TeamCoordinator,
+    team_id: &str,
+) -> Option<(String, String)> {
     let state = coordinator.load_run_state(team_id).ok()?;
     state
         .records
         .into_iter()
         .find(|(_, record)| matches!(record.status, StepStatus::Failed | StepStatus::Aborted))
-        .map(|(step_id, _)| step_id)
+        .map(|(step_id, record)| {
+            (
+                step_id,
+                record
+                    .error
+                    .unwrap_or_else(|| "步骤失败但没有诊断信息".to_string()),
+            )
+        })
 }
 
 #[async_trait]
@@ -1181,9 +1759,179 @@ mod tests {
     use super::*;
     use crate::product_eval::{ArtifactChecker, EvalCategory, InputFixture, ProductEvalCase};
     use owo_agent_core::gateway::{ChatMessage, ModelOutput};
+    use owo_agent_core::permissions::Policy;
     use owo_agent_core::tools::ToolSpec;
     use std::collections::VecDeque;
     use std::path::Path;
+
+    #[test]
+    fn only_completed_delivery_gate_runs_may_materialize_candidates() {
+        assert_eq!(
+            unaccepted_team_run_error("failed", Some("delivery_gate:rejected"), "Failed"),
+            Some("delivery_gate:rejected".to_string())
+        );
+        assert!(unaccepted_team_run_error("succeeded", None, "Failed").is_some());
+        assert!(unaccepted_team_run_error("succeeded", None, "Succeeded").is_none());
+    }
+
+    #[test]
+    fn delivery_gate_rejection_cannot_become_a_successful_eval_run() {
+        let rejected = terminal_after_delivery_gate(Err("required validator failed".to_string()));
+        assert_eq!(rejected.0, "failed");
+        assert_eq!(
+            rejected.1.as_deref(),
+            Some("delivery_gate:required validator failed")
+        );
+
+        let accepted = terminal_after_delivery_gate(Ok(()));
+        assert_eq!(accepted.0, "succeeded");
+        assert!(accepted.1.is_none());
+    }
+
+    #[test]
+    fn provider_resource_exhaustion_skips_team_retry_but_transient_rate_limits_remain_retryable() {
+        assert!(is_non_retryable_provider_failure(
+            r#"worker failed: 模型返回 429：{"code":"1113","msg":"余额不足"}"#
+        ));
+        assert!(is_non_retryable_provider_failure(
+            r#"worker failed: 模型返回 429: {"code":1113,"msg":"no package"} trailing"#
+        ));
+        assert!(!is_non_retryable_provider_failure(
+            r#"worker failed: 模型返回 429：{"code":"1302","msg":"rate limited"}"#
+        ));
+        assert!(!is_non_retryable_provider_failure(
+            "worker failed: 模型返回 429：invalid body"
+        ));
+        assert!(!is_non_retryable_provider_failure(
+            r#"worker failed: unrelated response {"code":"1113"}"#
+        ));
+    }
+
+    #[test]
+    fn host_checker_routes_frontend_files_to_primary_writer_before_integrator() {
+        let mut frontend = RoleSpec::agent("w1");
+        frontend.write_paths = vec!["apps/web".into()];
+        let mut integrator = RoleSpec::agent("project_integrator");
+        integrator.write_paths = vec!["apps/web/blog.mjs".into()];
+        let checker = ArtifactChecker::Contains {
+            path: "apps/web/blog.mjs".into(),
+            text: "render".into(),
+        };
+
+        assert_eq!(
+            checker_owner_role(&checker, &[frontend, integrator]).as_deref(),
+            Some("w1")
+        );
+    }
+
+    #[test]
+    fn host_checker_rework_selects_latest_dynamic_task_for_the_failed_file() {
+        let goal = owo_agent_core::goal::Goal::new("goal-checker-route", "test");
+        let mut plan = owo_agent_core::plan::Plan::new("plan-checker-route", "goal-checker-route");
+        for (id, path) in [
+            ("w1-old", "apps/web/other.mjs"),
+            ("w1-current", "apps/web/blog.mjs"),
+            ("integrator-current", "apps/web/blog.mjs"),
+        ] {
+            let worker = if id.starts_with("integrator") {
+                "m-project_integrator"
+            } else {
+                "m-w1"
+            };
+            let mut step = owo_agent_core::plan::StepSpec::new(id, worker);
+            step.input = serde_json::json!({"file": path});
+            plan.add_step(step);
+        }
+        let mut state = owo_agent_core::goal::GoalRunState::new(goal, plan);
+        for record in state.records.values_mut() {
+            record.status = StepStatus::Succeeded;
+        }
+
+        assert_eq!(
+            latest_successful_task(&state, "w1", Some("apps/web/blog.mjs")).as_deref(),
+            Some("w1-current")
+        );
+    }
+
+    #[test]
+    fn retry_reuses_only_the_same_task_session() {
+        let store = EvalSessionStore::default();
+        let mut first = Session::new(
+            Path::new("workspace"),
+            "model-a",
+            Some("system prompt".to_string()),
+        );
+        first.id = "eval-task-api".to_string();
+        store.save(&first).unwrap();
+
+        let retry = store.load("eval-task-api").unwrap();
+        assert_eq!(retry.system_prompt.as_deref(), Some("system prompt"));
+        assert!(store.load("eval-task-web").is_err());
+
+        let mut other = Session::new(
+            Path::new("workspace"),
+            "model-a",
+            Some("system prompt".to_string()),
+        );
+        other.id = "eval-task-web".to_string();
+        store.save(&other).unwrap();
+        assert_ne!(retry.id, store.load("eval-task-web").unwrap().id);
+        assert_eq!(store.list().len(), 2);
+    }
+
+    #[test]
+    fn workspace_materialization_copies_only_complete_scoped_files() {
+        let root = fresh_root("workspace-materialize");
+        let mut case = eval_case("fullstack-files", EvalCategory::Code);
+        case.expected_artifacts = vec!["apps/web/App.tsx".into(), "apps/api/routes.ts".into()];
+        case.allow_write = vec!["apps/**".into()];
+        std::fs::create_dir_all(root.join("apps/web")).unwrap();
+        std::fs::create_dir_all(root.join("apps/api")).unwrap();
+        std::fs::write(root.join("apps/web/App.tsx"), "export const App = 1;\n").unwrap();
+        std::fs::write(
+            root.join("apps/api/routes.ts"),
+            "export const routes = 2;\n",
+        )
+        .unwrap();
+        let files = materialize_workspace_files(&case, &root).unwrap().unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.contains_key("apps/web/App.tsx"));
+        assert!(files.contains_key("apps/api/routes.ts"));
+        std::fs::remove_file(root.join("apps/api/routes.ts")).unwrap();
+        assert!(materialize_workspace_files(&case, &root).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn final_artifact_selection_never_promotes_analyzer_notes_to_code() {
+        let analyzer = ArtifactObservation {
+            artifact_id: "team:code_analyzer:v1".to_string(),
+            kind: "code_analyzer".to_string(),
+            version: 1,
+            producer: "m-code_analyzer".to_string(),
+            content_ref: "cas://sha256:notes".to_string(),
+            review_state: "Draft".to_string(),
+        };
+        assert!(pick_final_artifact(&[analyzer]).is_none());
+    }
+
+    #[test]
+    fn multi_file_materialization_requires_exact_scoped_file_blocks() {
+        let mut case = eval_case("multi-file", EvalCategory::Code);
+        case.expected_artifacts = vec!["apps/web/App.tsx".into(), "apps/api/routes.ts".into()];
+        case.allow_write = vec!["apps/**".into()];
+        let text = "=== FILE: apps/web/App.tsx ===\nexport const App = 1;\n=== END FILE ===\n=== FILE: apps/api/routes.ts ===\nexport const routes = 2;\n=== END FILE ===";
+        let files = materialize_final_content(&case, text).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.contains_key("apps/web/App.tsx"));
+        assert!(files.contains_key("apps/api/routes.ts"));
+        assert!(materialize_final_content(&case, "single text").is_err());
+        assert!(materialize_final_content(
+            &case,
+            "=== FILE: ../escape.ts ===\nx\n=== END FILE ==="
+        )
+        .is_err());
+    }
 
     // ---------------------------------------------------------------------
     // 脚本化 Provider：按序回放文本；调用前计数（等价"已计费"）。
@@ -1273,10 +2021,10 @@ mod tests {
     // —— WorkerOutputV1 契约信封（六期一路：worker 必须返回结构化 JSON，正文在
     //    artifact.content；与 tests/product_eval_workswarm_tests.rs 同款写法）——
     // 十期 · 三路：Document 分类 multi 评测走 document-delivery-v1 模板
-    //（drafter → content_reviewer → finalizer）；脚本化输出按模板角色的契约语义
-    // 构造：评审结论 artifact.kind="review"（合法登记、不参与最终交付选择）。
+    //（drafter → content_reviewer → finalizer）；评审输出使用共享 WorkerOutputV1
+    // 契约，Coordinator 会据角色把 summary 记录为 review Artifact。
     const DRAFTER_CONTRACT: &str = r###"{"status":"done","summary":"初稿完成","artifact":{"kind":"draft","format":"markdown","content":"## 草稿\n关键结论 A 的初稿，结构完整，待评审。"},"evidence":[],"open_issues":[]}"###;
-    const CONTENT_REVIEWER_CONTRACT: &str = r###"{"status":"done","summary":"评审通过","artifact":{"kind":"review","format":"markdown","content":"{\"approved\":true,\"score\":88,\"comments\":[\"结构完整\",\"证据充分\"]}"},"evidence":[],"open_issues":[]}"###;
+    const CONTENT_REVIEWER_CONTRACT: &str = r###"{"status":"done","summary":"结构完整，证据充分","review_result":{"verdict":"approved","findings":[]},"evidence":[],"open_issues":[]}"###;
     const FINALIZER_CONTRACT: &str = r###"{"status":"done","summary":"最终交付","artifact":{"kind":"final","format":"markdown","content":"# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。"},"evidence":[],"open_issues":[]}"###;
 
     fn scripted_executor(provider: Arc<ScriptedProvider>, root: &Path) -> WorkSwarmExecutor {
@@ -1337,7 +2085,7 @@ mod tests {
         // 真实 TeamRun：终态 Succeeded；三个角色各有一次模型调用（≥2 个 Worker 记录）。
         assert!(
             outcome.error.is_none(),
-            "outcome.error = {:?}",
+            "outcome.error = {:?}; observation = {observation:#?}",
             outcome.error
         );
         assert_eq!(outcome.model_calls, 3);
@@ -1506,10 +2254,16 @@ mod tests {
             .iter()
             .find(|w| w.role == "drafter")
             .expect("必须有 producer（drafter）记录");
-        assert_eq!(writer.output_repairs, 1, "空输出必须触发恰好一次定向修复");
-        assert_eq!(writer.attempts, 1, "定向修复不算新尝试");
-        assert_eq!(writer.model_calls, 2, "首次空输出 + 一次修复");
-        assert_eq!(outcome.model_calls, 4, "成功 Worker 不得重跑（修复+1+1+1）");
+        assert_eq!(
+            writer.output_repairs, 0,
+            "Agent 内部空回复重试成功后不应重复修复"
+        );
+        assert_eq!(writer.attempts, 1, "Agent 内部空回复重试不算步骤级尝试");
+        assert_eq!(writer.model_calls, 2, "首次空输出 + Agent 内部重试");
+        assert_eq!(
+            outcome.model_calls, 4,
+            "成功 Worker 不得重跑（drafter 两次 + 后续各一次）"
+        );
         assert!(
             outcome.error.is_none(),
             "outcome.error = {:?}",
@@ -1596,12 +2350,300 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_profile_stays_read_only_and_uses_review_identity() {
+        let spec = RoleSpec::agent("content_reviewer");
+        let (profile, write_scope) =
+            worker_profile_and_write_scope(&spec, 5, Path::new("workspace"), 8, None)
+                .expect("reviewer profile should resolve");
+        assert!(!profile.is_writer());
+        assert!(write_scope.is_empty());
+        assert!(owo_agent_core::workswarm::is_review_role_name(&spec.role));
+
+        let mut invalid = spec;
+        invalid.write_paths = vec!["src".into()];
+        assert!(
+            worker_profile_and_write_scope(&invalid, 5, Path::new("workspace"), 8, None).is_err()
+        );
+    }
+
+    #[test]
+    fn worker_turn_cap_honors_role_budget_and_executor_ceiling() {
+        assert_eq!(effective_worker_turn_budget(15, 16), 15);
+        assert_eq!(effective_worker_turn_budget(15, 6), 6);
+        assert_eq!(effective_worker_turn_budget(0, 0), 1);
+    }
+
+    #[test]
+    fn deadline_snapshot_copies_only_changed_expected_in_scope_files() {
+        let root = fresh_root("deadline-snapshot");
+        let team_workspace = root.join("team-workspace");
+        let sandbox = root.join("sandbox");
+        std::fs::create_dir_all(team_workspace.join("apps/web")).unwrap();
+        std::fs::create_dir_all(team_workspace.join("apps/api")).unwrap();
+        std::fs::create_dir_all(sandbox.join("apps/web")).unwrap();
+        std::fs::create_dir_all(sandbox.join("apps/api")).unwrap();
+        std::fs::write(
+            team_workspace.join("apps/web/blog.mjs"),
+            "new implementation",
+        )
+        .unwrap();
+        std::fs::write(sandbox.join("apps/web/blog.mjs"), "starter implementation").unwrap();
+        std::fs::write(team_workspace.join("apps/api/posts.mjs"), "same baseline").unwrap();
+        std::fs::write(sandbox.join("apps/api/posts.mjs"), "same baseline").unwrap();
+        let mut case = eval_case("deadline-snapshot", EvalCategory::Code);
+        case.expected_artifacts = vec![
+            "apps/web/blog.mjs".into(),
+            "apps/api/posts.mjs".into(),
+            "outside/secret.txt".into(),
+        ];
+        case.allow_write = vec!["apps/web/**".into(), "apps/api/**".into()];
+        let progress = ExecProgress::default();
+        progress.set_team_workspace(team_workspace);
+        let copied = progress.copy_expected_artifacts(&case, &sandbox).unwrap();
+        assert_eq!(copied, vec!["apps/web/blog.mjs"]);
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("apps/web/blog.mjs")).unwrap(),
+            "new implementation"
+        );
+        assert!(!sandbox.join("outside/secret.txt").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn shared_provider_budget_caps_concurrent_team_requests() {
+        let upstream = ScriptedProvider::new(&["ok", "should-not-run"], 10);
+        let budget = Arc::new(BudgetedProvider::new(upstream.clone(), 1));
+        let (first, second) = tokio::join!(budget.complete(&[], &[]), budget.complete(&[], &[]),);
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        assert_eq!(upstream.calls(), 1);
+        assert_eq!(budget.call_count(), 1);
+        assert!(budget.exceeded());
+    }
+
+    #[test]
+    fn worker_usage_is_per_attempt_and_repair_usage_controls_totals() {
+        let progress = Arc::new(ExecProgress::default());
+        let stats = WorkerStats::with_progress(Arc::clone(&progress));
+        stats.record_success(
+            1,
+            TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+            },
+            true,
+        );
+        let observed = stats.snapshot("worker-1", "implementer");
+        assert_eq!(observed.total_tokens, Some(0));
+        assert!(progress.snapshot().usage_known);
+
+        stats.record_success(
+            2,
+            TokenUsage {
+                prompt_tokens: 7,
+                completion_tokens: 3,
+                total_tokens: 10,
+            },
+            true,
+        );
+        stats.bump_output_repairs();
+        let repaired = stats.snapshot("worker-1", "implementer");
+        assert_eq!(repaired.total_tokens, Some(10));
+        assert!(progress.snapshot().usage_known);
+
+        stats.record_failure_report(
+            3,
+            TokenUsage::default(),
+            false,
+            "unknown repair usage".into(),
+        );
+        assert_eq!(stats.snapshot("worker-1", "implementer").total_tokens, None);
+        assert!(!progress.snapshot().usage_known);
+    }
+
+    #[test]
+    fn timeout_progress_snapshot_preserves_calls_and_reported_usage() {
+        let progress = ExecProgress::default();
+        progress.record_model_call();
+        progress.record_model_call();
+        progress.record_usage(TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+        });
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.model_calls, 2);
+        assert!(snapshot.usage_known);
+        assert_eq!(snapshot.usage.total_tokens, 120);
+    }
+
+    #[test]
+    fn fullstack_write_paths_enable_only_the_declared_role_scope() {
+        let root = PathBuf::from("eval-workspace");
+        let descriptor = owo_agent_core::builtin_team_templates::descriptor(
+            owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1,
+        )
+        .unwrap();
+        for (role_name, expected_path) in [
+            ("w1", "apps/web"),
+            ("w2", "apps/api"),
+            ("project_integrator", "apps/api/posts.mjs"),
+        ] {
+            let template_role = descriptor
+                .template
+                .roles
+                .iter()
+                .find(|role| role.role == role_name)
+                .unwrap();
+            let mut spec = RoleSpec::agent(role_name);
+            spec.write_paths = template_role.write_paths.clone();
+            let (profile, allowed) = worker_profile_and_write_scope(
+                &spec,
+                15,
+                &root,
+                16,
+                Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1),
+            )
+            .unwrap();
+            assert!(profile.is_writer(), "{role_name} must receive write tools");
+            if matches!(role_name, "w1" | "w2") {
+                assert!(
+                    !profile.can_run_command,
+                    "source producers must not run commands"
+                );
+                assert!(!profile
+                    .visible_tools
+                    .iter()
+                    .any(|tool| tool == "run_command"));
+            } else {
+                assert!(profile.can_run_command, "integrator owns the test command");
+            }
+            let expected_paths: Vec<PathBuf> = template_role
+                .write_paths
+                .iter()
+                .map(|path| root.join(path))
+                .collect();
+            assert_eq!(allowed, expected_paths);
+            assert!(allowed.contains(&root.join(expected_path)));
+            assert_eq!(profile.write_allowed_paths, template_role.write_paths);
+        }
+        let reviewer_template_role = descriptor
+            .template
+            .roles
+            .iter()
+            .find(|role| role.role == "reviewer")
+            .unwrap();
+        let mut reviewer = RoleSpec::agent("reviewer");
+        reviewer.write_paths = reviewer_template_role.write_paths.clone();
+        let (profile, allowed) = worker_profile_and_write_scope(
+            &reviewer,
+            15,
+            &root,
+            16,
+            Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1),
+        )
+        .unwrap();
+        assert!(!profile.is_writer());
+        assert!(allowed.is_empty());
+    }
+
+    #[test]
+    fn wallclock_benchmark_removes_worker_turn_ceiling() {
+        let previous = std::env::var("OWO_PRODUCT_EVAL_UNBOUNDED_CALLS").ok();
+        std::env::set_var("OWO_PRODUCT_EVAL_UNBOUNDED_CALLS", "true");
+        assert_eq!(effective_worker_turn_budget(15, usize::MAX), usize::MAX);
+        match previous {
+            Some(value) => std::env::set_var("OWO_PRODUCT_EVAL_UNBOUNDED_CALLS", value),
+            None => std::env::remove_var("OWO_PRODUCT_EVAL_UNBOUNDED_CALLS"),
+        }
+    }
+
+    #[test]
     fn multi_mode_maps_categories_to_product_templates() {
         // 十期 · 三路：multi 评测与产品同一条模板路径（模板 = 任务分类的固定映射）。
         assert_eq!(
             WorkSwarmExecutor::template_for_category(EvalCategory::Code),
             Some(owo_agent_core::builtin_team_templates::CODE_CHANGE_V1)
         );
+        let descriptor = owo_agent_core::builtin_team_templates::descriptor(
+            owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1,
+        )
+        .unwrap();
+        let frontend = descriptor
+            .template
+            .roles
+            .iter()
+            .find(|r| r.role == "w1")
+            .unwrap();
+        let backend = descriptor
+            .template
+            .roles
+            .iter()
+            .find(|r| r.role == "w2")
+            .unwrap();
+        let integrator = descriptor
+            .template
+            .roles
+            .iter()
+            .find(|r| r.role == "project_integrator")
+            .unwrap();
+        assert_eq!(frontend.depends_on, vec!["lead"]);
+        assert_eq!(backend.depends_on, vec!["lead"]);
+        assert!(frontend.write_paths.contains(&"apps/web".to_string()));
+        assert!(backend.write_paths.contains(&"apps/api".to_string()));
+        assert_eq!(integrator.depends_on, vec!["w1", "w2"]);
+        let reviewer = descriptor
+            .template
+            .roles
+            .iter()
+            .find(|r| r.role == "reviewer")
+            .unwrap();
+        assert_eq!(
+            reviewer.depends_on,
+            vec!["w1", "w2"],
+            "reviewer should overlap integration after producer files are stable"
+        );
+        let integrator_prompt = owo_agent_core::builtin_team_templates::prompt_sections_for(
+            owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1,
+            "project_integrator",
+        )
+        .unwrap();
+        assert!(integrator_prompt
+            .acceptance
+            .iter()
+            .any(|criterion| criterion.contains("totalPages")));
+        let mut fullstack = eval_case("fullstack-template", EvalCategory::Code);
+        fullstack.expected_artifacts = vec![
+            "apps/web/src/App.tsx".into(),
+            "apps/api/src/routes.ts".into(),
+        ];
+        assert_eq!(
+            WorkSwarmExecutor::template_for_case(&fullstack),
+            Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1)
+        );
+        let fullstack_budget = descriptor
+            .budget_calls_per_role
+            .iter()
+            .map(|role| role.budget_calls)
+            .sum::<usize>();
+        assert_eq!(
+            fullstack_budget, 60,
+            "四个 Worker 的调用预算应允许多轮实现与收尾"
+        );
+        let lead_budget = descriptor
+            .budget_calls_per_role
+            .iter()
+            .find(|role| role.role == "lead")
+            .unwrap()
+            .budget_calls;
+        let producer_budget = descriptor
+            .budget_calls_per_role
+            .iter()
+            .find(|role| role.role == "w1")
+            .unwrap()
+            .budget_calls;
+        assert!(lead_budget < producer_budget);
+        assert_eq!(PROFILE_MAX_TURNS_CAP, 16);
         assert_eq!(
             WorkSwarmExecutor::template_for_category(EvalCategory::Research),
             Some(owo_agent_core::builtin_team_templates::RESEARCH_BRIEF_V1)

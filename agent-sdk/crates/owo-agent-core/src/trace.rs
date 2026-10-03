@@ -162,6 +162,7 @@ mod tests {
             prompt: "你好".to_string(),
             started_at: "2026-08-11T00:00:00Z".to_string(),
             duration_ms: 42,
+            usage_known: true,
             usage: TokenUsage {
                 prompt_tokens: 100,
                 completion_tokens: 50,
@@ -199,6 +200,7 @@ mod tests {
             prompt: "你好".to_string(),
             started_at: "2026-08-11T00:00:00Z".to_string(),
             duration_ms: 42,
+            usage_known: true,
             usage: TokenUsage {
                 prompt_tokens: 10,
                 completion_tokens: 5,

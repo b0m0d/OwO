@@ -29,7 +29,7 @@ async fn subagent_tool_forwards_nested_events_to_parent_stream() {
         ),
         // Step 3 质量门：委派返回后自动起只读复核（本脚本给"通过"）。
         ModelOutput::Text(
-            r#"{"status":"done","summary":"{\"approved\":true,\"score\":90}","evidence":[],"open_issues":[]}"#
+            r#"{"status":"done","summary":"评审通过","evidence":[],"open_issues":[],"review_result":{"verdict":"approved","findings":[]}}"#
                 .to_string(),
         ),
         ModelOutput::Text("父代理：子代理已完成".to_string()),
@@ -722,7 +722,7 @@ async fn explore_subagent_runs_read_only_child_and_returns_report() {
         call("c1", "explore", json!({ "query": "info.txt 的内容" })),
         // 七期一路：子代理最终结果必须是 WorkerOutputV1 契约 JSON（critic 角色禁带 artifact）。
         ModelOutput::Text(
-            r#"{"status":"done","summary":"子代理发现：重要信息","evidence":[],"open_issues":[]}"#
+            r#"{"status":"done","summary":"子代理发现：重要信息","evidence":[],"open_issues":[],"review_result":{"verdict":"approved","findings":[]}}"#
                 .to_string(),
         ),
         ModelOutput::Text("done".to_string()),
@@ -901,7 +901,7 @@ async fn direct_subagent_invocation_returns_result() {
     let provider = ScriptedProvider::new(vec![
         ModelOutput::Text("找到 x.txt".to_string()),
         ModelOutput::Text(
-            r#"{"status":"done","summary":"找到 x.txt","evidence":[],"open_issues":[]}"#
+            r#"{"status":"done","summary":"找到 x.txt","evidence":[],"open_issues":[],"review_result":{"verdict":"approved","findings":[]}}"#
                 .to_string(),
         ),
     ]);

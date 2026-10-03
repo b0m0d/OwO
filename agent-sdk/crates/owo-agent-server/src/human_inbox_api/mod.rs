@@ -318,7 +318,7 @@ fn dispatch_error_response(e: DispatchError) -> (StatusCode, Json<Value>) {
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": err.to_string() })),
             ),
-            WorkSwarmError::Conflict(_) => (
+            WorkSwarmError::Conflict(_) | WorkSwarmError::DeliveryPending(_) => (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": err.to_string() })),
             ),

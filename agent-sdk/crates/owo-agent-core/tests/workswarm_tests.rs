@@ -28,6 +28,35 @@ const OBJECTIVE: &str = "完成浏览器表单任务并提交报告";
 // 测试内 worker（内层 worker：echo / 慢速 echo）
 // ---------------------------------------------------------------------------
 
+struct TaskGraphLeadWorker {
+    calls: std::sync::Mutex<Vec<String>>,
+    tasks: Vec<Value>,
+}
+
+#[async_trait]
+impl Worker for TaskGraphLeadWorker {
+    fn name(&self) -> &str {
+        "task-graph-lead"
+    }
+
+    async fn run(&self, input: &Value) -> Result<String, String> {
+        let role = input
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        self.calls.lock().unwrap().push(role.clone());
+        if role == "lead" {
+            return Ok(serde_json::json!({
+                "version": 1,
+                "tasks": self.tasks
+            })
+            .to_string());
+        }
+        Ok("worker-called".to_string())
+    }
+}
+
 struct EchoWorker;
 
 #[async_trait]
@@ -36,11 +65,98 @@ impl Worker for EchoWorker {
         "echo"
     }
     async fn run(&self, input: &Value) -> Result<String, String> {
+        let is_reviewer = input
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|capabilities| capabilities.iter().any(|item| item == "review"))
+            || input
+                .get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|role| matches!(role, "critic" | "reviewer" | "content_reviewer"));
+        if is_reviewer {
+            return Ok(r#"{"status":"done","summary":"测试评审通过","review_result":{"verdict":"approved","findings":[]},"evidence":[],"open_issues":[]}"#.to_string());
+        }
         Ok(input
             .get("text")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string())
+    }
+}
+
+struct ReviewRepairWorker {
+    review_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Worker for ReviewRepairWorker {
+    fn name(&self) -> &str {
+        "review-repair"
+    }
+
+    async fn run(&self, input: &Value) -> Result<String, String> {
+        let role = input
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if role == "builder" {
+            let content = if input.get("rework").is_some() {
+                "修复后的候选交付"
+            } else {
+                "初始候选交付"
+            };
+            return Ok(serde_json::json!({
+                "status": "done",
+                "summary": "提交候选",
+                "artifact": {"kind": "document", "format": "markdown", "content": content},
+                "evidence": [],
+                "open_issues": []
+            })
+            .to_string());
+        }
+        let first_review = self
+            .review_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0;
+        let review_result = if first_review {
+            serde_json::json!({
+                "verdict": "changes_requested",
+                "findings": [{
+                    "severity": "blocker",
+                    "detail": "补齐失败路径的行为说明",
+                    "requirement_id": "REQ-1",
+                    "evidence_refs": ["artifact-content"],
+                    "suggested_owner": "m-builder"
+                }]
+            })
+        } else {
+            serde_json::json!({"verdict": "approved", "findings": []})
+        };
+        Ok(serde_json::json!({
+            "status": "done",
+            "summary": "结构化评审结论",
+            "review_result": review_result,
+            "evidence": [],
+            "open_issues": []
+        })
+        .to_string())
+    }
+}
+
+struct FixedWorker {
+    output: Value,
+}
+
+#[async_trait]
+impl Worker for FixedWorker {
+    fn name(&self) -> &str {
+        "fixed"
+    }
+    async fn run(&self, _input: &Value) -> Result<String, String> {
+        self.output
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "fixed output must be a string".to_string())
     }
 }
 
@@ -114,6 +230,26 @@ impl Drop for Harness {
 }
 
 /// 按角色表构建运行 worker 注册表（成员名 → RoleWorker；内层 worker 按引用共享）。
+async fn register_parallel_lead_artifact(h: &Harness, team_id: &str, step_id: &str, content: &str) {
+    let output = owo_agent_core::workswarm_output::WorkerOutputV1 {
+        status: owo_agent_core::workswarm_output::WorkerOutputStatus::Done,
+        summary: "已提交并行任务拆解".to_string(),
+        artifact: Some(owo_agent_core::workswarm_output::WorkerArtifactV1 {
+            kind: "plan".to_string(),
+            format: "json".to_string(),
+            content: content.to_string(),
+        }),
+        evidence: Vec::new(),
+        open_issues: Vec::new(),
+        handoff: None,
+        review_result: None,
+    };
+    h.coordinator
+        .register_step_output_contract(team_id, "m-lead", "lead", step_id, &output, None)
+        .await
+        .unwrap();
+}
+
 fn build_registry(
     h: &Harness,
     team_id: &str,
@@ -190,6 +326,10 @@ async fn relay_run_completes_with_artifacts_handoffs_and_proposal() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -217,6 +357,29 @@ async fn relay_run_completes_with_artifacts_handoffs_and_proposal() {
         .await
         .unwrap();
     assert_eq!(artifacts.len(), 4, "四角色接力应有 4 个产物");
+    let manifest_ref = space.delivery_manifest_ref.as_deref().unwrap();
+    let manifest_hash = manifest_ref.strip_prefix("cas://sha256:").unwrap();
+    let manifest_text = h.coordinator.cas().get_text(manifest_hash).unwrap();
+    let manifest: Value = serde_json::from_str(&manifest_text).unwrap();
+    let receipts = manifest["acceptance_receipts"].as_array().unwrap();
+    assert_eq!(receipts.len(), artifacts.len());
+    for receipt in receipts {
+        let artifact_id = receipt["artifact_id"].as_str().unwrap();
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_id == artifact_id)
+            .unwrap();
+        assert_eq!(receipt["content_sha256"], artifact.sha256);
+        assert_eq!(receipt["format_validator"]["verdict"], "passed");
+        let validations = receipt["validation_receipts"].as_array().unwrap();
+        assert!(!validations.is_empty());
+        assert!(validations.iter().all(|validation| {
+            validation["verdict"] == "passed"
+                && validation["attempt_id"].as_str().is_some()
+                && validation["input_sha256"].as_str().is_some()
+                && validation["changeset_sha256"].is_null()
+        }));
+    }
     let by_kind: HashMap<&str, &owo_agent_protocol::Artifact> =
         artifacts.iter().map(|a| (a.kind.as_str(), a)).collect();
     let planner = by_kind["plan"];
@@ -226,19 +389,16 @@ async fn relay_run_completes_with_artifacts_handoffs_and_proposal() {
     assert_eq!(builder.source_refs, vec![planner.artifact_id.clone()]);
     assert_eq!(critic.source_refs, vec![builder.artifact_id.clone()]);
     assert_eq!(leader.source_refs, vec![critic.artifact_id.clone()]);
-    // CAS 可解引用；内容中上游链可见（echo 把上下文切片（含上游内容）原样输出）。
+    // CAS 可解引用；最终步骤只接收直接上游评审快照，原始产物仍通过 source_refs 追溯。
     let cas = &h.coordinator;
     let leader_content = cas
         .cas()
         .get_text(leader.content_ref.strip_prefix("cas://sha256:").unwrap())
         .unwrap();
     assert!(leader_content.contains(OBJECTIVE), "上下文切片应含团队目标");
-    assert!(
-        leader_content.contains("planner"),
-        "上游链应可见 planner 产物"
-    );
-    assert!(leader_content.contains("builder"));
-    assert!(leader_content.contains("critic"));
+    assert!(leader_content.contains("reviewer_id"));
+    assert!(leader_content.contains(&critic.artifact_id));
+    assert!(leader_content.contains("reviewed_artifacts"));
 
     // 结构化交接记录：每步 → 下游（leader 无下游 → "*"）。
     let handoffs = h.store.list_handoffs_by_project(&project_id).await.unwrap();
@@ -283,6 +443,7 @@ async fn relay_run_completes_with_artifacts_handoffs_and_proposal() {
 fn human_relay_roles() -> Vec<RoleSpec> {
     let mut planner = RoleSpec::agent("planner");
     planner.worker = Some("echo".to_string());
+    planner.verify = Some("non_empty".to_string());
     let mut approver = RoleSpec {
         role: "approver".to_string(),
         assignee: "human".to_string(),
@@ -291,12 +452,122 @@ fn human_relay_roles() -> Vec<RoleSpec> {
         handoff_contract: Some("人工确认方案可执行后放行".to_string()),
         verify: Some("non_empty".to_string()),
         extra_input: Value::Null,
+        model: None,
+        write_paths: Vec::new(),
+        capabilities: Vec::new(),
     };
     approver.extra_input = Value::Null;
     let mut leader = RoleSpec::agent("leader");
     leader.depends_on = vec!["approver".to_string()];
     leader.worker = Some("echo".to_string());
+    leader.verify = Some("non_empty".to_string());
     vec![planner, approver, leader]
+}
+
+#[tokio::test]
+async fn blocked_reviewer_does_not_register_as_a_successful_review() {
+    let h = harness();
+    let mut reviewer = RoleSpec::agent("reviewer");
+    reviewer.worker = Some("echo".to_string());
+    reviewer.verify = Some("non_empty".to_string());
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: vec![reviewer],
+        budget: Value::Null,
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let input = state.plan.steps[0].input.clone();
+    let blocked = Value::String(
+        r#"{"status":"blocked","summary":"缺少可验证的目标文件快照","open_issues":["需要稳定的文件版本引用"]}"#.to_string(),
+    );
+    let fixed = FixedWorker { output: blocked };
+    let worker = RoleWorker::new(
+        Arc::clone(&h.coordinator),
+        team.team_id.clone(),
+        "m-reviewer".to_string(),
+        "reviewer".to_string(),
+        Arc::new(fixed),
+    );
+    let error = worker.run(&input).await.unwrap_err();
+    assert!(error.starts_with("worker_blocked:"));
+    assert!(h
+        .store
+        .list_artifacts_by_project(&team.project_space_id.clone().unwrap())
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn rework_invalidates_old_attempt_artifact_for_downstream_reads() {
+    let h = harness();
+    let mut request = CreateTeamRequest::new("rework attempt artifact identity", TeamMode::Team);
+    request.roles = human_relay_roles();
+    let team = h.coordinator.create_team_run(&request).await.unwrap();
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let producer = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-approver")
+        .unwrap()
+        .id
+        .clone();
+    let consumer = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-leader")
+        .unwrap()
+        .id
+        .clone();
+    let artifact = h
+        .coordinator
+        .record_human_result(&team.team_id, &producer, "通过")
+        .await
+        .unwrap();
+    assert!(artifact.attempt_id.is_some());
+
+    h.coordinator
+        .read_dependency_artifact(
+            &team.team_id,
+            "m-leader",
+            &consumer,
+            &artifact.artifact_id,
+            128,
+        )
+        .await
+        .expect("当前 attempt 的依赖产物可读取");
+
+    h.coordinator
+        .rework_step(&team.team_id, &producer, "更新方案", "测试返工")
+        .await
+        .unwrap();
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert!(state.records[&producer].attempt_id.is_none());
+    assert!(
+        h.coordinator
+            .read_dependency_artifact(
+                &team.team_id,
+                "m-leader",
+                &consumer,
+                &artifact.artifact_id,
+                128
+            )
+            .await
+            .is_err(),
+        "返工后旧 attempt 产物不能作为下游当前依赖"
+    );
 }
 
 #[tokio::test]
@@ -312,6 +583,10 @@ async fn human_node_waits_then_resumes_downstream() {
         budget: Value::Null,
         human_policy: Some("approve".to_string()),
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -350,6 +625,12 @@ async fn human_node_waits_then_resumes_downstream() {
         .await
         .unwrap();
     assert_eq!(artifact.version, 1);
+    assert_eq!(artifact.task_id.as_deref(), Some("s-approver"));
+    let human_record = h.coordinator.load_run_state(&team_id).unwrap();
+    assert_eq!(
+        artifact.attempt_id.as_deref(),
+        human_record.records["s-approver"].attempt_id.as_deref()
+    );
 
     // 重复录入 → 冲突。
     let err = h
@@ -406,6 +687,10 @@ async fn cancel_parked_run_retains_artifacts_and_continue_keeps_progress() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -481,6 +766,10 @@ async fn steer_changes_only_uncompleted_nodes_with_decision() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -565,6 +854,10 @@ async fn steer_during_active_run_conflicts_and_cancel_propagates() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -644,6 +937,10 @@ async fn dynamic_team_agent_members_capped_at_five() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let err = h.coordinator.create_team_run(&req).await.unwrap_err();
     assert!(
@@ -673,6 +970,10 @@ async fn dynamic_team_agent_members_capped_at_five() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     assert_eq!(team.members.len(), 5);
@@ -695,6 +996,10 @@ async fn adopted_template_is_reused_for_next_dynamic_run() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -726,6 +1031,10 @@ async fn adopted_template_is_reused_for_next_dynamic_run() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team2 = h.coordinator.create_team_run(&req2).await.unwrap();
     assert_eq!(
@@ -752,6 +1061,10 @@ async fn swarmflow_requires_versioned_template() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let err = h.coordinator.create_team_run(&req).await.unwrap_err();
     assert!(
@@ -775,6 +1088,9 @@ async fn swarmflow_requires_versioned_template() {
                 depends_on: Vec::new(),
                 handoff_contract: None,
                 verify: None,
+                model: None,
+                write_paths: Vec::new(),
+                capabilities: Vec::new(),
             },
             owo_agent_protocol::TeamTemplateRole {
                 role: "builder".into(),
@@ -783,6 +1099,9 @@ async fn swarmflow_requires_versioned_template() {
                 depends_on: vec!["planner".into()],
                 handoff_contract: None,
                 verify: None,
+                model: None,
+                write_paths: Vec::new(),
+                capabilities: Vec::new(),
             },
         ],
         applicability: OBJECTIVE.into(),
@@ -799,6 +1118,10 @@ async fn swarmflow_requires_versioned_template() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     assert_eq!(team.template_id.as_deref(), Some("tpl-fixed"));
@@ -826,6 +1149,10 @@ async fn single_mode_runs_one_step_and_skips_template_proposal() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     let team_id = team.team_id.clone();
@@ -861,6 +1188,10 @@ async fn strategy_auto_trims_default_relay_to_single_and_exposes_decision() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     assert_eq!(team.members.len(), 1, "auto+简单任务默认裁剪到单角色");
@@ -894,6 +1225,10 @@ async fn strategy_force_single_trims_explicit_multi_roles() {
         budget: Value::Null,
         human_policy: None,
         strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceSingle),
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     assert_eq!(team.members.len(), 1, "强制 single 必须裁剪显式多角色");
@@ -912,6 +1247,10 @@ async fn strategy_force_team_keeps_explicit_roles() {
         budget: Value::Null,
         human_policy: None,
         strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     assert_eq!(
@@ -955,6 +1294,10 @@ async fn adaptive_code_template_trims_reviewer_at_creation() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     // 简单代码任务：analyzer + implementer（reviewer 被自适应裁剪，减少 1 个 Worker）。
@@ -999,6 +1342,10 @@ async fn adaptive_research_template_rewrites_deps_and_keeps_one_summarizer() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     // 并行研究保留（researcher_a/b），核验被裁 → 只剩一个汇总角色。
@@ -1039,6 +1386,10 @@ async fn adaptive_runtime_skip_ends_dag_early_when_no_changes() {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
     assert_eq!(
@@ -1056,6 +1407,14 @@ async fn adaptive_runtime_skip_ends_dag_early_when_no_changes() {
     );
     // 运行：echo worker 不产生任何工作区变更 → reviewer 就绪时被运行期跳过，
     // 全部完成条件满足 → DAG 提前结束（Done + early_exit 指标）。
+    // 运行前写入有效的空变更记录；缺少/损坏的跟踪文件应视为未知并保留评审。
+    std::fs::write(
+        h.dir
+            .join("runs")
+            .join(format!("{}-workspace-changes.json", team.team_id)),
+        r#"[{"changed_files":[]}]"#,
+    )
+    .unwrap();
     let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &template_roles);
     let outcome = drive_next(&h, &team.team_id, &registry).await;
     assert!(
@@ -1064,6 +1423,11 @@ async fn adaptive_runtime_skip_ends_dag_early_when_no_changes() {
     );
     let team = h.store.get_team_run(&team.team_id).await.unwrap();
     assert_eq!(team.status, TeamRunStatus::Succeeded);
+    let persisted_state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert!(persisted_state.records["s-reviewer"]
+        .skip_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("提前结束")));
     let adaptive = team.strategy_decision.as_ref().unwrap()["adaptive"].clone();
     let runtime_skipped = adaptive["runtime_skipped"].as_array().unwrap();
     assert_eq!(runtime_skipped.len(), 1);
@@ -1085,4 +1449,1825 @@ async fn adaptive_runtime_skip_ends_dag_early_when_no_changes() {
         "early_exit_reason 应存在：{}",
         adaptive["early_exit_reason"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// 十一期 · 一路：角色模型 / 角色写范围（多模型并行开发的编排数据面）
+// ---------------------------------------------------------------------------
+
+/// `RoleSpec.model` → 步骤输入 `model`（AgentSubagentWorker 按 input.model 解析）；
+/// `RoleSpec.write_paths` → `TeamMember.write_scope`（服务端范围租约/白名单来源）。
+#[tokio::test]
+async fn role_model_and_write_paths_flow_into_steps_and_members() {
+    let h = harness();
+    let mut w1 = RoleSpec::agent("w1");
+    w1.worker = Some("echo".to_string());
+    w1.model = Some("glm-5.3-flash".to_string());
+    w1.write_paths = vec!["src/a".to_string()];
+    let mut w2 = RoleSpec::agent("w2");
+    w2.worker = Some("echo".to_string());
+    w2.model = Some("glm-4.6".to_string());
+    w2.write_paths = vec!["src/b".to_string(), "src/common".to_string()];
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: vec![w1, w2],
+        budget: Value::Null,
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    assert_eq!(team.members.len(), 2, "显式编排不得被策略裁剪");
+    let member = |role: &str| {
+        team.members
+            .iter()
+            .find(|m| m.role == role)
+            .unwrap_or_else(|| panic!("缺少成员 {role}"))
+    };
+    assert_eq!(member("w1").write_scope, vec!["src/a".to_string()]);
+    assert_eq!(
+        member("w2").write_scope,
+        vec!["src/b".to_string(), "src/common".to_string()]
+    );
+
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let step = |id: &str| {
+        state
+            .plan
+            .steps
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| panic!("缺少步骤 {id}"))
+    };
+    assert_eq!(step("s-w1").input["model"], "glm-5.3-flash");
+    assert_eq!(step("s-w2").input["model"], "glm-4.6");
+}
+
+#[tokio::test]
+async fn explicit_review_capability_is_read_only_and_requires_bound_upstream_snapshot() {
+    let h = harness();
+    let mut reviewer = RoleSpec::agent("quality_gate");
+    reviewer.capabilities = vec!["review".to_string()];
+    reviewer.worker = Some("echo".to_string());
+    let mut req = CreateTeamRequest::new(OBJECTIVE, TeamMode::Team);
+    req.roles = vec![reviewer];
+    req.strategy = Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam);
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let member = team.members.first().expect("review member");
+    assert_eq!(member.capabilities, vec!["review"]);
+    assert!(member.write_scope.is_empty());
+    assert_eq!(member.tool_scope, vec!["read"]);
+
+    let output = owo_agent_core::workswarm_output::WorkerOutputV1 {
+        status: owo_agent_core::workswarm_output::WorkerOutputStatus::Done,
+        summary: "评审通过".to_string(),
+        artifact: None,
+        evidence: Vec::new(),
+        open_issues: Vec::new(),
+        handoff: None,
+        review_result: Some(owo_agent_core::workswarm_output::WorkerReviewResultV1 {
+            verdict: owo_agent_core::workswarm_output::WorkerReviewVerdict::Approved,
+            findings: Vec::new(),
+        }),
+    };
+    let error = h
+        .coordinator
+        .register_step_output_contract(
+            &team.team_id,
+            &member.member_id,
+            "quality_gate",
+            "s-quality_gate",
+            &output,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("没有可绑定的上游产物快照"));
+}
+
+#[tokio::test]
+async fn review_finding_dispatches_bounded_repair_to_original_owner() {
+    let h = harness();
+    let mut builder = RoleSpec::agent("builder");
+    builder.worker = Some("review-repair".to_string());
+    builder.verify = Some("non_empty".to_string());
+    let mut reviewer = RoleSpec::agent("quality_gate");
+    reviewer.capabilities = vec!["review".to_string()];
+    reviewer.worker = Some("review-repair".to_string());
+    reviewer.verify = Some("non_empty".to_string());
+    reviewer.depends_on = vec!["builder".to_string()];
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: vec![builder, reviewer],
+        budget: Value::Null,
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let project_id = team.project_space_id.clone().unwrap();
+    let registry = build_registry(
+        &h,
+        &team.team_id,
+        Arc::new(ReviewRepairWorker {
+            review_calls: std::sync::atomic::AtomicUsize::new(0),
+        }),
+        &[RoleSpec::agent("builder"), {
+            let mut role = RoleSpec::agent("quality_gate");
+            role.capabilities = vec!["review".to_string()];
+            role
+        }],
+    );
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    let audit = h.audit.lock().unwrap().entries.clone();
+    assert!(
+        matches!(outcome, PhaseOutcome::Done),
+        "返修复验应收敛：{outcome:?}；audit={audit:#?}"
+    );
+
+    let artifacts = h
+        .store
+        .list_artifacts_by_project(&project_id)
+        .await
+        .unwrap();
+    let builder_versions = artifacts
+        .iter()
+        .filter(|artifact| artifact.producer == "m-builder")
+        .collect::<Vec<_>>();
+    assert_eq!(builder_versions.len(), 2, "finding 应让原 owner 产生新版本");
+    assert_eq!(
+        builder_versions[1].supersedes_artifact_id.as_deref(),
+        Some(builder_versions[0].artifact_id.as_str())
+    );
+    let reviews = artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "review")
+        .collect::<Vec<_>>();
+    assert_eq!(reviews.len(), 2, "修复后必须重新评审新快照");
+    let latest_review_hash = reviews[1]
+        .content_ref
+        .strip_prefix("cas://sha256:")
+        .unwrap();
+    let review: Value =
+        serde_json::from_slice(&h.coordinator.cas().get(latest_review_hash).unwrap()).unwrap();
+    assert_eq!(review["result"]["verdict"], "approved");
+    assert_eq!(
+        review["reviewed_artifacts"][0]["sha256"],
+        builder_versions[1].sha256
+    );
+
+    let space = h.store.get_project_space(&project_id).await.unwrap();
+    let manifest_ref = space.delivery_manifest_ref.as_deref().unwrap();
+    let manifest_hash = manifest_ref.strip_prefix("cas://sha256:").unwrap();
+    let manifest: Value =
+        serde_json::from_slice(&h.coordinator.cas().get(manifest_hash).unwrap()).unwrap();
+    let deliverables = manifest["artifacts"].as_array().unwrap();
+    assert!(
+        deliverables
+            .iter()
+            .all(|artifact| artifact["kind"] != "review"),
+        "review artifacts remain evidence and must not be published as user deliverables: {deliverables:#?}"
+    );
+    assert!(
+        manifest["acceptance_receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|receipt| receipt["artifact_kind"] == "review"),
+        "review artifact must remain represented in acceptance evidence"
+    );
+}
+
+/// 写路径必须是相对路径（权限默认 deny：非法声明在组队期直接拒绝）。
+#[tokio::test]
+async fn role_write_paths_must_be_relative() {
+    let h = harness();
+    let mut writer = RoleSpec::agent("writer");
+    writer.worker = Some("echo".to_string());
+    writer.write_paths = vec!["../escape".to_string()];
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: vec![writer],
+        budget: Value::Null,
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let err = h.coordinator.create_team_run(&req).await.unwrap_err();
+    assert!(
+        err.to_string().contains("写路径"),
+        "非法写路径必须报错：{err:?}"
+    );
+}
+
+/// 十一期 additive wire：`RoleSpec` / `TeamTemplateRole` 新字段可解析，旧体缺省。
+#[test]
+fn role_spec_and_template_role_deserialize_new_fields_additively() {
+    let spec: RoleSpec = serde_json::from_value(serde_json::json!({
+        "role": "w1",
+        "assignee": "agent",
+        "depends_on": [],
+        "model": "glm-5.3-flash",
+        "write_paths": ["src/a", "src/common"],
+    }))
+    .unwrap();
+    assert_eq!(spec.model.as_deref(), Some("glm-5.3-flash"));
+    assert_eq!(spec.write_paths, vec!["src/a", "src/common"]);
+
+    let legacy: RoleSpec = serde_json::from_value(serde_json::json!({"role": "builder"})).unwrap();
+    assert!(legacy.model.is_none(), "旧 wire 缺省 model");
+    assert!(legacy.write_paths.is_empty(), "旧 wire 缺省 write_paths");
+
+    let template_role: owo_agent_protocol::TeamTemplateRole =
+        serde_json::from_value(serde_json::json!({
+            "role": "w1",
+            "assignee": "agent",
+            "model": "glm-4.6",
+            "write_paths": ["src/b"],
+        }))
+        .unwrap();
+    assert_eq!(template_role.model.as_deref(), Some("glm-4.6"));
+    assert_eq!(template_role.write_paths, vec!["src/b"]);
+}
+
+// ---------------------------------------------------------------------------
+// 十一期 · 并行开发：统一模型 / 预算并行度 / lead 拆解的任务主动分配
+// ---------------------------------------------------------------------------
+
+/// 团队统一模型注入全部 agent 步骤；角色显式 model 覆盖统一值。
+#[tokio::test]
+async fn team_unified_model_injects_into_agent_steps_with_role_override() {
+    let h = harness();
+    let mut w1 = RoleSpec::agent("w1");
+    w1.worker = Some("echo".to_string());
+    let mut w2 = RoleSpec::agent("w2");
+    w2.worker = Some("echo".to_string());
+    w2.model = Some("glm-4.6".to_string());
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: vec![w1, w2],
+        budget: serde_json::json!({ "max_parallel": 3 }),
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: Some("glm-5.3-flashx".to_string()),
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let step = |id: &str| {
+        state
+            .plan
+            .steps
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| panic!("缺少步骤 {id}"))
+    };
+    assert_eq!(step("s-w1").input["model"], "glm-5.3-flashx");
+    assert_eq!(
+        step("s-w2").input["model"],
+        "glm-4.6",
+        "角色显式覆盖统一模型"
+    );
+    assert_eq!(
+        state.goal.budget.max_parallel, 3,
+        "团队预算 max_parallel 应进 GoalBudget（缺省 4）"
+    );
+}
+
+/// 空白 TeamRun 的首个阶段只应运行 lead；TaskGraph 持久化后再派发动态任务。
+#[tokio::test]
+async fn parallel_team_runs_only_lead_before_dynamic_task_assignment() {
+    let h = harness();
+    let mut roles = owo_agent_core::workswarm::parallel_roles(2);
+    for role in &mut roles {
+        role.worker = Some("task-graph-lead".to_string());
+    }
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "先拆分再执行动态任务".to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: serde_json::json!({ "max_parallel": 2 }),
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: Some("glm-5.3-flashx".to_string()),
+        parallel: true,
+        max_agent_members: Some(4),
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let inner = Arc::new(TaskGraphLeadWorker {
+        calls: std::sync::Mutex::new(Vec::new()),
+        tasks: vec![serde_json::json!({
+            "task_id": "only", "worker": "w1", "task": "实现唯一任务", "depends_on": [],
+            "read_refs": [], "write_paths": [], "contract_refs": [],
+            "required_capabilities": [], "estimated_effort": 1, "verification": "non_empty",
+            "risk": "low", "priority": 1, "acceptance": "交付任务结果"
+        })],
+    });
+    let registry = build_registry(&h, &team.team_id, inner.clone(), &roles);
+
+    let outcome = h
+        .coordinator
+        .run_phase(&team.team_id, &registry)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PhaseOutcome::MoreReady), "{outcome:?}");
+    assert_eq!(*inner.calls.lock().unwrap(), vec!["lead"]);
+
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert_eq!(
+        state
+            .plan
+            .steps
+            .iter()
+            .filter_map(|step| { step.input.get("assigned_task_id").and_then(Value::as_str) })
+            .collect::<Vec<_>>(),
+        vec!["only"]
+    );
+}
+
+/// 独立任务由宿主清单汇总；不存在跨任务集成需求时不启动固定 leader 模型调用。
+#[tokio::test]
+async fn parallel_independent_tasks_skip_leader_and_publish_host_manifest() {
+    let h = harness();
+    let mut roles = owo_agent_core::workswarm::parallel_roles(2);
+    for role in &mut roles {
+        role.worker = Some("task-graph-lead".to_string());
+    }
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "独立交付两个互不冲突的模块".to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: serde_json::json!({ "max_parallel": 2 }),
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: Some("glm-5.3-flashx".to_string()),
+        parallel: true,
+        max_agent_members: Some(4),
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let inner = Arc::new(TaskGraphLeadWorker {
+        calls: std::sync::Mutex::new(Vec::new()),
+        tasks: vec![
+            serde_json::json!({
+                "task_id": "module-a", "worker": "w1", "task": "交付模块 A", "depends_on": [],
+                "read_refs": [], "write_paths": ["src/a"], "contract_refs": [],
+                "required_capabilities": ["write_file"], "estimated_effort": 2,
+                "verification": "non_empty", "risk": "low", "priority": 80,
+                "acceptance": "模块 A 结果已提交"
+            }),
+            serde_json::json!({
+                "task_id": "module-b", "worker": "w2", "task": "交付模块 B", "depends_on": [],
+                "read_refs": [], "write_paths": ["src/b"], "contract_refs": [],
+                "required_capabilities": ["write_file"], "estimated_effort": 2,
+                "verification": "non_empty", "risk": "low", "priority": 80,
+                "acceptance": "模块 B 结果已提交"
+            }),
+        ],
+    });
+    let registry = build_registry(&h, &team.team_id, inner.clone(), &roles);
+
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    assert!(matches!(outcome, PhaseOutcome::Done), "{outcome:?}");
+    let calls = inner.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls.iter().filter(|role| role.as_str() == "lead").count(),
+        1
+    );
+    assert_eq!(calls.iter().filter(|role| role.as_str() == "w1").count(), 1);
+    assert_eq!(calls.iter().filter(|role| role.as_str() == "w2").count(), 1);
+    assert!(
+        !calls.iter().any(|role| role == "leader"),
+        "calls={calls:?}"
+    );
+
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let leader = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.id == "s-leader")
+        .unwrap();
+    assert_eq!(
+        state.records[&leader.id].status,
+        owo_agent_core::plan::StepStatus::Succeeded
+    );
+    assert_eq!(
+        state.records[&leader.id].skip_reason.as_deref(),
+        Some("host_manifest:independent_task_graph")
+    );
+    let project_space = h
+        .store
+        .get_project_space(team.project_space_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        project_space.status,
+        owo_agent_protocol::ProjectSpaceStatus::Completed
+    );
+    let manifest_ref = project_space.delivery_manifest_ref.as_deref().unwrap();
+    let manifest_hash = manifest_ref.strip_prefix("cas://sha256:").unwrap();
+    let manifest_bytes = owo_agent_core::cas_store::CasStore::new(h.dir.join("cas"))
+        .unwrap()
+        .get(manifest_hash)
+        .unwrap();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let manifest_artifacts = manifest["artifacts"].as_array().unwrap();
+    let producers = manifest_artifacts
+        .iter()
+        .filter_map(|artifact| artifact["producer"].as_str())
+        .collect::<Vec<_>>();
+    assert!(producers.contains(&"m-w1"), "producers={producers:?}");
+    assert!(producers.contains(&"m-w2"), "producers={producers:?}");
+    assert_eq!(
+        manifest["acceptance_receipts"].as_array().unwrap().len(),
+        manifest_artifacts.len()
+    );
+}
+
+/// 并行开发：`parallel_roles(N)` + parallel 标记 + 成员上限覆盖可建队；
+/// lead 产物就绪后，运行期把 subtasks（子任务 + 写范围）动态应用到 writer。
+#[tokio::test]
+async fn parallel_lead_assignment_applies_writer_scopes_and_tasks() {
+    let h = harness();
+    let mut roles = owo_agent_core::workswarm::parallel_roles(2);
+    let mut reviewer = RoleSpec::agent("reviewer");
+    reviewer.depends_on = vec!["lead".to_string()];
+    reviewer.verify = Some("non_empty".to_string());
+    roles.push(reviewer);
+    for role in &mut roles {
+        role.worker = Some("echo".to_string());
+    }
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "并行实现两个独立模块".to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: serde_json::json!({ "max_parallel": 2 }),
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: Some("glm-5.3-flashx".to_string()),
+        parallel: true,
+        max_agent_members: Some(5),
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    assert_eq!(team.members.len(), 5, "lead + w1 + w2 + reviewer + leader");
+    assert!(
+        !owo_agent_core::worker_profile::WorkerProfile::for_role("lead", 0).is_writer(),
+        "lead 必须只读（拆解不落盘）"
+    );
+
+    // 模拟 lead 已经成功并产出可解析的拆解 JSON（真实运行由模型产出同构实体）。
+    let mut state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let lead_id = state
+        .plan
+        .steps
+        .iter()
+        .find(|s| s.id == "s-lead")
+        .map(|s| s.id.clone())
+        .expect("lead 步骤");
+    state.records.get_mut(&lead_id).unwrap().status = owo_agent_core::plan::StepStatus::Succeeded;
+    state.records.get_mut(&lead_id).unwrap().output = Some(
+        serde_json::json!({
+            "version": 1,
+            "tasks": [
+                {"task_id":"a", "worker": "w1", "task": "实现模块 A", "depends_on":[], "read_refs":["src/lib.rs"], "write_paths": ["src/a"], "contract_refs":["API-A"], "required_capabilities":["write_file"], "estimated_effort":3, "verification":"contains:done", "risk":"normal", "priority":80, "acceptance": "A 通过"},
+                {"task_id":"b", "worker": "w2", "task": "实现模块 B", "depends_on":[], "read_refs":[], "write_paths": ["src/b"], "contract_refs":[], "required_capabilities":["write_file"], "estimated_effort":5, "verification":"non_empty", "risk":"normal", "priority":80, "acceptance": "B 通过"},
+                {"task_id":"c", "worker": "w1", "task": "实现模块 C", "depends_on":["a"], "read_refs":[], "write_paths": ["src/c"], "contract_refs":[], "required_capabilities":["apply_patch"], "estimated_effort":2, "verification":"non_empty", "risk":"critical", "priority":100, "acceptance": "C 通过"}
+            ]
+        })
+        .to_string(),
+    );
+    state
+        .goal
+        .transition(owo_agent_core::goal::GoalStatus::Running);
+    state.persist(&h.dir.join("runs")).unwrap();
+    let lead_output = state.records[&lead_id].output.clone().unwrap();
+    register_parallel_lead_artifact(&h, &team.team_id, &lead_id, &lead_output).await;
+
+    // 驱动：w1/w2 同一 wave 并行（echo），随后 leader 汇总，最终 Done。
+    let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &roles);
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    assert!(
+        matches!(outcome, PhaseOutcome::Done),
+        "{outcome:?}; state={:?}",
+        h.coordinator
+            .load_run_state(&team.team_id)
+            .ok()
+            .and_then(|state| state.goal.error)
+    );
+
+    // RunMeta：写范围与子任务说明已动态应用。
+    let meta_raw = std::fs::read_to_string(
+        h.dir
+            .join("runs")
+            .join(format!("{}-meta.json", team.team_id)),
+    )
+    .unwrap();
+    let meta: Value = serde_json::from_str(&meta_raw).unwrap();
+    let meta_role = |name: &str| {
+        meta["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|role| role["role"] == name)
+            .unwrap_or_else(|| panic!("meta 缺少角色 {name}"))
+            .clone()
+    };
+    assert_eq!(
+        meta_role("w1")["write_paths"],
+        serde_json::json!(["src/a", "src/c"])
+    );
+    assert_eq!(meta_role("w2")["write_paths"], serde_json::json!(["src/b"]));
+    assert!(meta_role("w1")["handoff_contract"]
+        .as_str()
+        .unwrap()
+        .contains("assigned_task"));
+
+    // 步骤输入：assigned_task 同步 + 团队统一模型已注入。
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let dispatched_task_order: Vec<_> = state
+        .plan
+        .steps
+        .iter()
+        .filter_map(|step| step.input.get("assigned_task_id").and_then(Value::as_str))
+        .collect();
+    assert_eq!(dispatched_task_order, vec!["c", "b", "a"]);
+    let step = |id: &str| {
+        state
+            .plan
+            .steps
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| panic!("缺少步骤 {id}"))
+    };
+    assert_eq!(step("s-w1").input["assigned_task"], "实现模块 A");
+    assert_eq!(step("s-w1").input["assigned_task_id"], "a");
+    assert_eq!(step("s-w1").input["assigned_acceptance"], "A 通过");
+    assert_eq!(step("s-w1").input["assigned_verification"], "contains:done");
+    assert_eq!(
+        step("s-w1").input["assigned_read_refs"],
+        serde_json::json!(["src/lib.rs"])
+    );
+    assert_eq!(
+        step("s-w1").input["assigned_contract_refs"],
+        serde_json::json!(["API-A"])
+    );
+    assert_eq!(step("s-w1").input["model"], "glm-5.3-flashx");
+    assert_eq!(step("s-w2").input["assigned_task"], "实现模块 B");
+    assert_eq!(step("s-task-c").input["assigned_task"], "实现模块 C");
+    assert_eq!(step("s-task-c").depends_on, vec!["s-w1"]);
+    assert_eq!(step("s-task-c").input["assigned_write_paths"][0], "src/c");
+    assert_eq!(
+        step("s-task-c").input["required_capabilities"],
+        serde_json::json!(["apply_patch"])
+    );
+    assert_eq!(
+        step("s-reviewer").depends_on,
+        vec![
+            "s-lead".to_string(),
+            "s-task-c".to_string(),
+            "s-w1".to_string(),
+            "s-w2".to_string(),
+        ]
+    );
+    assert!(step("s-leader")
+        .depends_on
+        .contains(&"s-reviewer".to_string()));
+    assert_eq!(
+        state.records["s-reviewer"].status,
+        owo_agent_core::plan::StepStatus::Succeeded
+    );
+    assert!(state.records["s-leader"].skip_reason.is_none());
+    assert!(state.records["s-leader"].output.is_some());
+}
+
+#[tokio::test]
+async fn invalid_parallel_lead_plan_fails_team_before_reporting_success() {
+    let h = harness();
+    let mut roles = owo_agent_core::workswarm::parallel_roles(2);
+    for role in &mut roles {
+        role.worker = Some("echo".to_string());
+    }
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "拒绝不完整的并行计划".to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: serde_json::json!({ "max_parallel": 2 }),
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: None,
+        parallel: true,
+        max_agent_members: Some(4),
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let mut state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let lead_id = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.id == "s-lead")
+        .map(|step| step.id.clone())
+        .expect("lead step");
+    state.records.get_mut(&lead_id).unwrap().status = owo_agent_core::plan::StepStatus::Succeeded;
+    state.records.get_mut(&lead_id).unwrap().output = Some(
+        serde_json::json!({
+            "subtasks": [
+                {"worker": "w1", "task": "task one", "acceptance": "", "write_paths": ["src/a"]}
+            ]
+        })
+        .to_string(),
+    );
+    state
+        .goal
+        .transition(owo_agent_core::goal::GoalStatus::Running);
+    state.persist(&h.dir.join("runs")).unwrap();
+
+    let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &roles);
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    assert!(matches!(outcome, PhaseOutcome::Failed), "{outcome:?}");
+    let failed = h.coordinator.get_team_run(&team.team_id).await.unwrap();
+    assert_eq!(format!("{:?}", failed.status), "Failed");
+}
+
+/// 用户显式预声明的写范围是硬约束：lead 的动态分配不得改写它（只更新子任务说明）。
+#[tokio::test]
+async fn parallel_assignment_respects_preexisting_write_scope() {
+    let h = harness();
+    let mut roles = owo_agent_core::workswarm::parallel_roles(2);
+    for role in &mut roles {
+        role.worker = Some("echo".to_string());
+    }
+    // w2 预声明 src/user（索引：lead=0,w1=1,w2=2,leader=3）。
+    roles[2].write_paths = vec!["src/user".to_string()];
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "并行实现并保留用户声明的写范围".to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: serde_json::json!({ "max_parallel": 2 }),
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: None,
+        parallel: true,
+        max_agent_members: Some(4),
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let mut state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let lead_id = state
+        .plan
+        .steps
+        .iter()
+        .find(|s| s.id == "s-lead")
+        .map(|s| s.id.clone())
+        .expect("lead 步骤");
+    state.records.get_mut(&lead_id).unwrap().status = owo_agent_core::plan::StepStatus::Succeeded;
+    state.records.get_mut(&lead_id).unwrap().output = Some(
+        serde_json::json!({
+            "subtasks": [
+                {"worker": "w1", "task": "任务一", "write_paths": ["src/a"], "acceptance": "A 通过"},
+                {"worker": "w2", "task": "任务二", "write_paths": ["src/user"], "acceptance": "B 通过"}
+            ]
+        })
+        .to_string(),
+    );
+    state
+        .goal
+        .transition(owo_agent_core::goal::GoalStatus::Running);
+    state.persist(&h.dir.join("runs")).unwrap();
+    let lead_output = state.records[&lead_id].output.clone().unwrap();
+    register_parallel_lead_artifact(&h, &team.team_id, &lead_id, &lead_output).await;
+
+    let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &roles);
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    assert!(matches!(outcome, PhaseOutcome::Done), "{outcome:?}");
+
+    let meta_raw = std::fs::read_to_string(
+        h.dir
+            .join("runs")
+            .join(format!("{}-meta.json", team.team_id)),
+    )
+    .unwrap();
+    let meta: Value = serde_json::from_str(&meta_raw).unwrap();
+    let meta_role = |name: &str| {
+        meta["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|role| role["role"] == name)
+            .unwrap_or_else(|| panic!("meta 缺少角色 {name}"))
+            .clone()
+    };
+    assert_eq!(
+        meta_role("w2")["write_paths"],
+        serde_json::json!(["src/user"]),
+        "用户声明的写范围不得被 lead 分配覆盖"
+    );
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let task_step = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.id == "s-w2")
+        .unwrap();
+    assert_eq!(
+        task_step.input["assigned_write_paths"],
+        serde_json::json!(["src/user"])
+    );
+    assert_eq!(
+        meta_role("w1")["write_paths"],
+        serde_json::json!(["src/a"]),
+        "未预声明的 writer 采用 lead 分配"
+    );
+}
+
+#[tokio::test]
+async fn adaptive_context_event_enters_team_audit_without_context_contents() {
+    let h = harness();
+    let team = h
+        .coordinator
+        .create_team_run(&CreateTeamRequest::new(OBJECTIVE, TeamMode::Single))
+        .await
+        .unwrap();
+    h.coordinator
+        .note_adaptive_event(
+            &team.team_id,
+            serde_json::json!({
+                "kind": "context",
+                "role": "w1",
+                "step_id": "s-w1",
+                "context_bytes": 42,
+                "context_revision": 7,
+                "body": "private context must not reach the audit",
+            }),
+        )
+        .await;
+    let audit = h.audit.lock().unwrap();
+    let entry = audit
+        .entries
+        .iter()
+        .find(|entry| entry.event == "team.context.revision")
+        .expect("context event should be visible to the team SSE audit feed");
+    assert!(entry.detail.contains("role=w1"));
+    assert!(entry.detail.contains("step_id=s-w1"));
+    assert!(entry.detail.contains("context_bytes=42"));
+    assert!(!entry.detail.contains("private context"));
+}
+
+#[tokio::test]
+async fn source_session_core_spec_is_saved_in_cas_and_restored_for_workers() {
+    let h = harness();
+    let mut req = CreateTeamRequest::new("根据源会话约束完成任务", TeamMode::Single);
+    req.parent_context_snapshot = Some(
+        serde_json::json!({
+            "kind": "source_session_context_v1",
+            "source_session_id": "session-source",
+            "source_updated_at": "2026-10-02T00:00:00Z",
+            "core_spec": {
+                "system_constraints": "保留现有 API，不要扩大写入范围。",
+                "recent_user_requirements": ["优先完成功能闭环。"]
+            }
+        })
+        .to_string(),
+    );
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    assert_eq!(team.shared_context_refs.len(), 1);
+    let step_id = h
+        .coordinator
+        .load_run_state(&team.team_id)
+        .unwrap()
+        .plan
+        .steps[0]
+        .id
+        .clone();
+    let slice = h
+        .coordinator
+        .assemble_context_slice(&team.team_id, "m-runner", &step_id)
+        .await
+        .unwrap();
+    assert!(slice["core_spec"].to_string().contains("保留现有 API"));
+    assert!(slice["core_spec"].to_string().contains("优先完成功能闭环"));
+}
+
+#[tokio::test]
+async fn dependency_artifact_read_is_scoped_to_step_and_bounded() {
+    let h = harness();
+    let mut producer = RoleSpec::agent("producer");
+    producer.worker = Some("echo".to_string());
+    let mut consumer = RoleSpec::agent("consumer");
+    consumer.worker = Some("echo".to_string());
+    consumer.depends_on = vec!["producer".to_string()];
+    let mut request = CreateTeamRequest::new("test scoped artifact read", TeamMode::Team);
+    request.roles = vec![producer, consumer];
+    let team = h.coordinator.create_team_run(&request).await.unwrap();
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let producer_step = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-producer")
+        .unwrap();
+    let consumer_step = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-consumer")
+        .unwrap();
+    let artifact = h
+        .coordinator
+        .register_step_output(
+            &team.team_id,
+            "m-producer",
+            "producer",
+            &producer_step.id,
+            "ABCDEFGHI",
+        )
+        .await
+        .unwrap();
+
+    let read = h
+        .coordinator
+        .read_dependency_artifact(
+            &team.team_id,
+            "m-consumer",
+            &consumer_step.id,
+            &artifact.artifact_id,
+            5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(read["content"], "ABCDE");
+    assert_eq!(read["truncated"], true);
+    assert_eq!(read["artifact_id"], artifact.artifact_id);
+    assert_eq!(artifact.task_id.as_deref(), Some(producer_step.id.as_str()));
+    assert!(artifact.attempt_id.as_deref().is_some_and(|attempt| {
+        attempt.starts_with(&format!("{}:{}:", team.team_id, producer_step.id))
+    }));
+
+    let denied = h
+        .coordinator
+        .read_dependency_artifact(
+            &team.team_id,
+            "m-producer",
+            &producer_step.id,
+            &artifact.artifact_id,
+            64,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        denied,
+        owo_agent_core::WorkSwarmError::Validation(_)
+    ));
+}
+
+#[tokio::test]
+async fn published_shared_context_is_versioned_and_reaches_worker_slice() {
+    let h = harness();
+    let team = h
+        .coordinator
+        .create_team_run(&CreateTeamRequest::new(
+            "实现接口并共享事实",
+            TeamMode::Single,
+        ))
+        .await
+        .unwrap();
+    let fact = h
+        .coordinator
+        .publish_team_context_fact(
+            &team.team_id,
+            0,
+            owo_agent_core::workswarm::SharedContextFactDraft {
+                key: "api.contract".to_string(),
+                value: "GET /v1/items returns ItemList; verified by route test.".to_string(),
+                producer: "m-runner".to_string(),
+                task_id: None,
+                source_refs: vec!["route_contract_tests.rs".to_string()],
+                file_hash: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(fact.revision, 1);
+    let revised_fact = h
+        .coordinator
+        .publish_team_context_fact(
+            &team.team_id,
+            1,
+            owo_agent_core::workswarm::SharedContextFactDraft {
+                key: "api.contract".to_string(),
+                value: "GET /items returns ItemList v2".to_string(),
+                producer: "m-runner".to_string(),
+                task_id: None,
+                source_refs: vec!["updated-test".to_string()],
+                file_hash: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(revised_fact.revision, 2);
+    let stale = h
+        .coordinator
+        .publish_team_context_fact(
+            &team.team_id,
+            0,
+            owo_agent_core::workswarm::SharedContextFactDraft {
+                key: "stale".to_string(),
+                value: "must be rejected".to_string(),
+                producer: "m-runner".to_string(),
+                task_id: None,
+                source_refs: vec![],
+                file_hash: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale, owo_agent_core::WorkSwarmError::Conflict(_)));
+    let step = h
+        .coordinator
+        .load_run_state(&team.team_id)
+        .unwrap()
+        .plan
+        .steps[0]
+        .id
+        .clone();
+    let slice = h
+        .coordinator
+        .assemble_context_slice(&team.team_id, "m-runner", &step)
+        .await
+        .unwrap();
+    assert_eq!(slice["shared_context_revision"], 2);
+    assert!(slice["shared_facts"]
+        .to_string()
+        .contains("GET /items returns ItemList v2"));
+    assert!(!slice["shared_facts"]
+        .to_string()
+        .contains("verified by route test"));
+    assert!(slice["shared_facts"].to_string().contains("unverified"));
+}
+
+#[tokio::test]
+async fn hash_bound_context_fact_is_not_injected_before_workspace_validation() {
+    let h = harness();
+    let team = h
+        .coordinator
+        .create_team_run(&CreateTeamRequest::new(
+            "defer hash-bound facts until validation",
+            TeamMode::Single,
+        ))
+        .await
+        .unwrap();
+    h.coordinator
+        .publish_team_context_fact(
+            &team.team_id,
+            0,
+            owo_agent_core::workswarm::SharedContextFactDraft {
+                key: "api.contract".into(),
+                value: "hash-bound private contract".into(),
+                producer: "m-runner".into(),
+                task_id: None,
+                source_refs: vec!["src/api.rs".into()],
+                file_hash: Some(format!("sha256:{}", "b".repeat(64))),
+            },
+        )
+        .await
+        .unwrap();
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let step = state.plan.steps[0].id.clone();
+    let slice = h
+        .coordinator
+        .assemble_context_slice(&team.team_id, "m-runner", &step)
+        .await
+        .unwrap();
+    assert!(!slice["shared_facts"]
+        .to_string()
+        .contains("hash-bound private contract"));
+}
+
+#[tokio::test]
+async fn stale_context_fact_is_appended_and_hides_the_previous_candidate() {
+    let h = harness();
+    let team = h
+        .coordinator
+        .create_team_run(&CreateTeamRequest::new(
+            "invalidate stale project fact",
+            TeamMode::Single,
+        ))
+        .await
+        .unwrap();
+    let published = h
+        .coordinator
+        .publish_team_context_fact(
+            &team.team_id,
+            0,
+            owo_agent_core::workswarm::SharedContextFactDraft {
+                key: "api.contract".into(),
+                value: "old contract".into(),
+                producer: "m-runner".into(),
+                task_id: None,
+                source_refs: vec!["src/api.rs".into()],
+                file_hash: Some(format!("sha256:{}", "a".repeat(64))),
+            },
+        )
+        .await
+        .unwrap();
+    let stale = h
+        .coordinator
+        .mark_team_context_fact_stale(&team.team_id, &published.key, published.revision, 1)
+        .await
+        .unwrap();
+    assert_eq!(stale.revision, 2);
+    assert_eq!(stale.status, "stale");
+    let snapshot = h
+        .coordinator
+        .read_team_context(&team.team_id)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.revision, 2);
+    assert_eq!(snapshot.facts.last().unwrap().status, "stale");
+    let conflict = h
+        .coordinator
+        .mark_team_context_fact_stale(
+            &team.team_id,
+            &published.key,
+            published.revision,
+            snapshot.revision,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        owo_agent_core::WorkSwarmError::Conflict(_)
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_team_context_publishers_cannot_both_commit_same_revision() {
+    let h = harness();
+    let second = Arc::new(SqliteProjectSpaceStore::open(&h.dir.join("space.db")).unwrap());
+    let fact = |key: &str| owo_agent_protocol::SharedContextFact {
+        key: key.to_string(),
+        value_ref: format!("cas://sha256:{key}"),
+        revision: 1,
+        producer: "user".to_string(),
+        task_id: None,
+        source_refs: vec![],
+        file_hash: None,
+        confidence: "unverified".to_string(),
+        status: "candidate".to_string(),
+        created_at: "2026-10-02T00:00:00Z".to_string(),
+    };
+    let store_a = Arc::clone(&h.store);
+    let store_b = second;
+    let fact_a = fact("a");
+    let fact_b = fact("b");
+    let (a, b) = tokio::join!(
+        store_a.compare_and_swap_team_context("team-race", 0, &fact_a),
+        store_b.compare_and_swap_team_context("team-race", 0, &fact_b),
+    );
+    let outcomes = [a.unwrap(), b.unwrap()];
+    assert_eq!(outcomes.iter().filter(|committed| **committed).count(), 1);
+    let snapshot = h.store.get_team_context("team-race").await.unwrap();
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.facts.len(), 1);
+}
+
+#[tokio::test]
+async fn finalize_success_rejects_unaccepted_changeset_for_current_attempt() {
+    let h = harness();
+    let roles = relay_roles("echo");
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &roles);
+    let mut completed = false;
+    for _ in 0..50 {
+        match h
+            .coordinator
+            .run_phase(&team.team_id, &registry)
+            .await
+            .unwrap()
+        {
+            PhaseOutcome::MoreReady => {}
+            PhaseOutcome::Done => {
+                completed = true;
+                break;
+            }
+            other => panic!("接力步骤未完成：{other:?}"),
+        }
+    }
+    assert!(completed, "接力步骤未在限制轮数内完成");
+
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let (step, attempt_id) = state
+        .plan
+        .steps
+        .iter()
+        .find_map(|step| {
+            state
+                .records
+                .get(&step.id)
+                .and_then(|record| record.attempt_id.as_deref())
+                .map(|attempt_id| (step, attempt_id))
+        })
+        .expect("已完成步骤应绑定 attempt_id");
+    let role = step.worker.strip_prefix("m-").expect("worker member id");
+    let change_set = owo_agent_protocol::ChangeSet {
+        change_set_id: format!("{}:{}:attempt-pending-old", team.team_id, step.id),
+        team_id: team.team_id.clone(),
+        step_id: step.id.clone(),
+        attempt_id: Some(attempt_id.to_string()),
+        role: role.to_string(),
+        base_hashes: Vec::new(),
+        result_hashes: Vec::new(),
+        changed_files: vec!["src/main.rs".to_string()],
+        diff_ref: Some("test.patch".to_string()),
+        status: owo_agent_protocol::ChangeSetStatus::PendingReview,
+        created_at: "2026-10-02T00:00:00Z".to_string(),
+        decision: None,
+        conflicts: Vec::new(),
+    };
+    let changes = owo_agent_core::change_set_store::ChangeSetStore::new(h.coordinator.run_dir());
+    changes.save_upsert(&change_set).unwrap();
+    let mut newer_accepted = change_set.clone();
+    newer_accepted.change_set_id = format!("{}:{}:attempt-accepted-new", team.team_id, step.id);
+    newer_accepted.status = owo_agent_protocol::ChangeSetStatus::Accepted;
+    newer_accepted.created_at = "2026-10-03T00:00:00Z".to_string();
+    newer_accepted.decision = Some(owo_agent_protocol::ChangeSetDecision {
+        action: "accept".to_string(),
+        idempotency_key: "accepted-newer".to_string(),
+        decided_at: newer_accepted.created_at.clone(),
+        note: None,
+    });
+    changes.save_upsert(&newer_accepted).unwrap();
+
+    let error = h
+        .coordinator
+        .finalize_success(&team.team_id)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("仍待人工接受"), "{error}");
+    let waiting_team = h.store.get_team_run(&team.team_id).await.unwrap();
+    assert_eq!(waiting_team.status, TeamRunStatus::AwaitingHuman);
+    let waiting_state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert_eq!(
+        waiting_state.goal.status,
+        owo_agent_core::goal::GoalStatus::Verifying
+    );
+    assert!(waiting_state
+        .goal
+        .error
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("delivery_pending:changeset:")));
+
+    let mut accepted_old = change_set;
+    accepted_old.status = owo_agent_protocol::ChangeSetStatus::Accepted;
+    accepted_old.decision = Some(owo_agent_protocol::ChangeSetDecision {
+        action: "accept".to_string(),
+        idempotency_key: "accept-older-pending".to_string(),
+        decided_at: "2026-10-04T00:00:00Z".to_string(),
+        note: None,
+    });
+    changes.save_upsert(&accepted_old).unwrap();
+    let finalized = h.coordinator.finalize_success(&team.team_id).await.unwrap();
+    assert_eq!(finalized.status, TeamRunStatus::Succeeded);
+    let project_id = team.project_space_id.as_deref().unwrap();
+    let space = h.store.get_project_space(project_id).await.unwrap();
+    let manifest_ref = space.delivery_manifest_ref.as_deref().unwrap();
+    let manifest_hash = manifest_ref.strip_prefix("cas://sha256:").unwrap();
+    let manifest_bytes = h.coordinator.cas().get(manifest_hash).unwrap();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let accepted = manifest["acceptance_receipts"].as_array().unwrap();
+    let step_receipt = accepted
+        .iter()
+        .find(|receipt| receipt["step_id"] == step.id)
+        .unwrap();
+    let refs = step_receipt["validation_receipts"][0]["evidence_refs"]
+        .as_array()
+        .unwrap();
+    assert!(refs
+        .iter()
+        .any(|item| item == &format!("changeset://{}", accepted_old.change_set_id)));
+    assert!(refs
+        .iter()
+        .any(|item| item == &format!("changeset://{}", newer_accepted.change_set_id)));
+}
+
+#[tokio::test]
+async fn finalize_success_rejects_missing_manifest_artifact_before_success() {
+    let h = harness();
+    let roles = relay_roles("echo");
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &roles);
+    let mut completed = false;
+    for _ in 0..50 {
+        match h
+            .coordinator
+            .run_phase(&team.team_id, &registry)
+            .await
+            .unwrap()
+        {
+            PhaseOutcome::MoreReady => {}
+            PhaseOutcome::Done => {
+                completed = true;
+                break;
+            }
+            other => panic!("接力步骤未完成：{other:?}"),
+        }
+    }
+    assert!(completed, "接力步骤未在限制轮数内完成");
+
+    let project_id = team.project_space_id.as_deref().unwrap();
+    let mut space = h.store.get_project_space(project_id).await.unwrap();
+    space.artifacts.push("missing-artifact-ref".to_string());
+    h.store.save_project_space(&space).await.unwrap();
+
+    assert!(h.coordinator.finalize_success(&team.team_id).await.is_err());
+    let saved_team = h.store.get_team_run(&team.team_id).await.unwrap();
+    assert_ne!(saved_team.status, TeamRunStatus::Succeeded);
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert_ne!(
+        state.goal.status,
+        owo_agent_core::goal::GoalStatus::Succeeded
+    );
+}
+
+#[tokio::test]
+async fn finalize_success_records_workspace_validation_bound_to_file_hash() {
+    let h = harness();
+    let roles = vec![RoleSpec::agent("builder")];
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let workspace = h.dir.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    let file_content = "export const result = 'READY';";
+    std::fs::write(workspace.join("src/result.js"), file_content).unwrap();
+    h.coordinator
+        .bind_verification_workspace(&team.team_id, &workspace)
+        .unwrap();
+
+    let mut state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let step = state.plan.steps.first().unwrap().clone();
+    state.plan.steps[0].verification_plan = Some(owo_agent_core::plan::VerificationPlanV1 {
+        plan_id: "verify-builder".to_string(),
+        requirements: vec![owo_agent_core::plan::VerificationRequirementV1 {
+            requirement_id: "req-workspace".to_string(),
+            covers_requirement_ids: Vec::new(),
+            validator_id: "workspace-file-contains-v1".to_string(),
+            validator_version: Some("1".to_string()),
+            scope: owo_agent_core::plan::VerificationScopeV1::WorkspacePaths {
+                relative_paths: vec!["src/result.js".to_string()],
+            },
+            arguments: serde_json::json!({"text":"READY"}),
+            required: true,
+            resources: owo_agent_core::plan::VerificationResourcesV1 {
+                cpu_slots: 1,
+                memory_mb: 16,
+                exclusive_workspace: false,
+                timeout_ms: 3_000,
+            },
+        }],
+    });
+    let record = state.records.get_mut(&step.id).unwrap();
+    record.status = owo_agent_core::plan::StepStatus::Succeeded;
+    record.phase_epoch = Some(0);
+    record.attempt_id = Some("attempt-workspace-validation".to_string());
+    record.output = Some("candidate artifact".to_string());
+    state.persist(&h.dir.join("runs")).unwrap();
+
+    let output = owo_agent_core::workswarm_output::WorkerOutputV1 {
+        status: owo_agent_core::workswarm_output::WorkerOutputStatus::Done,
+        summary: "提交候选交付".to_string(),
+        artifact: Some(owo_agent_core::workswarm_output::WorkerArtifactV1 {
+            kind: "document".to_string(),
+            format: "markdown".to_string(),
+            content: "candidate artifact".to_string(),
+        }),
+        evidence: Vec::new(),
+        open_issues: Vec::new(),
+        handoff: None,
+        review_result: None,
+    };
+    h.coordinator
+        .register_step_output_contract(
+            &team.team_id,
+            &step.worker,
+            "builder",
+            &step.id,
+            &output,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let finalized = h.coordinator.finalize_success(&team.team_id).await.unwrap();
+    assert_eq!(finalized.status, TeamRunStatus::Succeeded);
+    let accepted_state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let receipt = accepted_state.records[&step.id]
+        .validation_receipts
+        .iter()
+        .find(|receipt| receipt.requirement_id == "req-workspace")
+        .expect("DeliveryGate must persist the host workspace receipt");
+    let digest = owo_agent_core::cas_store::CasStore::hash_of(file_content.as_bytes());
+    assert_eq!(
+        receipt.verdict,
+        owo_agent_core::plan::ValidationVerdictV1::Passed
+    );
+    assert_eq!(
+        receipt.subject_sha256.get("workspace-path:src/result.js"),
+        Some(&digest)
+    );
+    assert!(receipt
+        .evidence_refs
+        .iter()
+        .any(|reference| reference == &format!("workspace-path:src/result.js@sha256:{digest}")));
+}
+
+#[tokio::test]
+async fn finalize_success_rechecks_workspace_after_a_previously_passed_receipt() {
+    let h = harness();
+    let roles = vec![RoleSpec::agent("builder")];
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let workspace = h.dir.join("workspace-final-version");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    let file_path = workspace.join("src/result.js");
+    let previously_checked = "export const result = 'READY';";
+    std::fs::write(&file_path, previously_checked).unwrap();
+    h.coordinator
+        .bind_verification_workspace(&team.team_id, &workspace)
+        .unwrap();
+
+    let mut state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let step = state.plan.steps.first().unwrap().clone();
+    state.plan.steps[0].verification_plan = Some(owo_agent_core::plan::VerificationPlanV1 {
+        plan_id: "verify-builder-final-version".to_string(),
+        requirements: vec![owo_agent_core::plan::VerificationRequirementV1 {
+            requirement_id: "req-workspace-final-version".to_string(),
+            covers_requirement_ids: Vec::new(),
+            validator_id: "workspace-file-contains-v1".to_string(),
+            validator_version: Some("1".to_string()),
+            scope: owo_agent_core::plan::VerificationScopeV1::WorkspacePaths {
+                relative_paths: vec!["src/result.js".to_string()],
+            },
+            arguments: serde_json::json!({"text":"READY"}),
+            required: true,
+            resources: owo_agent_core::plan::VerificationResourcesV1 {
+                cpu_slots: 1,
+                memory_mb: 16,
+                exclusive_workspace: false,
+                timeout_ms: 3_000,
+            },
+        }],
+    });
+    let previous_hash = owo_agent_core::cas_store::CasStore::hash_of(previously_checked.as_bytes());
+    let record = state.records.get_mut(&step.id).unwrap();
+    record.status = owo_agent_core::plan::StepStatus::Succeeded;
+    record.phase_epoch = Some(0);
+    record.attempt_id = Some("attempt-final-version".to_string());
+    record.output = Some("candidate artifact".to_string());
+    record
+        .validation_receipts
+        .push(owo_agent_core::plan::ValidationReceiptV1 {
+            receipt_id: "stale-passed-receipt".to_string(),
+            task_id: step.id.clone(),
+            attempt_id: "attempt-final-version".to_string(),
+            epoch: 0,
+            requirement_id: "req-workspace-final-version".to_string(),
+            validator_id: "workspace-file-contains-v1".to_string(),
+            validator_version: "1".to_string(),
+            arguments_sha256: owo_agent_core::cas_store::CasStore::hash_of(
+                serde_json::json!({"text":"READY"}).to_string().as_bytes(),
+            ),
+            input_sha256: owo_agent_core::cas_store::CasStore::hash_of(b"input"),
+            environment_id: "test-environment".to_string(),
+            changeset_sha256: None,
+            detail: None,
+            subject_sha256: std::collections::HashMap::from([(
+                "workspace-path:src/result.js".to_string(),
+                previous_hash,
+            )]),
+            verdict: owo_agent_core::plan::ValidationVerdictV1::Passed,
+            evidence_refs: vec!["workspace-path:src/result.js@old-version".to_string()],
+            started_at: "2026-10-03T00:00:00Z".to_string(),
+            completed_at: "2026-10-03T00:00:01Z".to_string(),
+        });
+    state.persist(&h.dir.join("runs")).unwrap();
+
+    let output = owo_agent_core::workswarm_output::WorkerOutputV1 {
+        status: owo_agent_core::workswarm_output::WorkerOutputStatus::Done,
+        summary: "提交候选交付".to_string(),
+        artifact: Some(owo_agent_core::workswarm_output::WorkerArtifactV1 {
+            kind: "document".to_string(),
+            format: "markdown".to_string(),
+            content: "candidate artifact".to_string(),
+        }),
+        evidence: Vec::new(),
+        open_issues: Vec::new(),
+        handoff: None,
+        review_result: None,
+    };
+    h.coordinator
+        .register_step_output_contract(
+            &team.team_id,
+            &step.worker,
+            "builder",
+            &step.id,
+            &output,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let final_content = "export const result = 'TAMPERED';";
+    std::fs::write(&file_path, final_content).unwrap();
+    let error = h
+        .coordinator
+        .finalize_success(&team.team_id)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("req-workspace-final-version"),
+        "{error}"
+    );
+    assert_ne!(
+        h.store.get_team_run(&team.team_id).await.unwrap().status,
+        TeamRunStatus::Succeeded,
+        "a prior passing receipt cannot authorize a changed workspace version"
+    );
+
+    let final_state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let receipts = &final_state.records[&step.id].validation_receipts;
+    assert!(receipts.iter().any(|receipt| {
+        receipt.receipt_id == "stale-passed-receipt"
+            && receipt.verdict == owo_agent_core::plan::ValidationVerdictV1::Passed
+    }));
+    let fresh_failure = receipts
+        .iter()
+        .find(|receipt| {
+            receipt.requirement_id == "req-workspace-final-version"
+                && receipt.subject_sha256.get("workspace-path:src/result.js")
+                    == Some(&owo_agent_core::cas_store::CasStore::hash_of(
+                        final_content.as_bytes(),
+                    ))
+        })
+        .expect("DeliveryGate must persist a fresh receipt for the final file hash");
+    assert_eq!(
+        fresh_failure.verdict,
+        owo_agent_core::plan::ValidationVerdictV1::Failed
+    );
+}
+
+#[tokio::test]
+async fn finalize_success_checks_assertion_against_artifact_not_worker_report() {
+    let h = harness();
+    let mut builder = RoleSpec::agent("builder");
+    builder.verify = Some("contains:ACCEPTED".to_string());
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: vec![builder],
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let mut state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let step = state.plan.steps.first().unwrap().clone();
+    let record = state.records.get_mut(&step.id).unwrap();
+    record.status = owo_agent_core::plan::StepStatus::Succeeded;
+    record.phase_epoch = Some(0);
+    record.attempt_id = Some("attempt-manual-test".to_string());
+    record.output = Some("ACCEPTED in worker report".to_string());
+    state.persist(&h.dir.join("runs")).unwrap();
+
+    let output = owo_agent_core::workswarm_output::WorkerOutputV1 {
+        status: owo_agent_core::workswarm_output::WorkerOutputStatus::Done,
+        summary: "ACCEPTED in worker report".to_string(),
+        artifact: Some(owo_agent_core::workswarm_output::WorkerArtifactV1 {
+            kind: "document".to_string(),
+            format: "markdown".to_string(),
+            content: "candidate body without the required marker".to_string(),
+        }),
+        evidence: Vec::new(),
+        open_issues: Vec::new(),
+        handoff: None,
+        review_result: None,
+    };
+    h.coordinator
+        .register_step_output_contract(
+            &team.team_id,
+            &step.worker,
+            "builder",
+            &step.id,
+            &output,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let error = h
+        .coordinator
+        .finalize_success(&team.team_id)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("验收要求") && error.to_string().contains("未通过"));
+    let saved_team = h.store.get_team_run(&team.team_id).await.unwrap();
+    assert_ne!(saved_team.status, TeamRunStatus::Succeeded);
+    let saved_state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let receipts = &saved_state.records[&step.id].validation_receipts;
+    assert!(receipts.iter().any(|receipt| {
+        receipt.verdict == owo_agent_core::plan::ValidationVerdictV1::Failed
+            && receipt.changeset_sha256.is_none()
+            && receipt.input_sha256.len() == 64
+    }));
+
+    h.coordinator
+        .rework_step(
+            &team.team_id,
+            &step.id,
+            "update the artifact to satisfy the required marker",
+            "validation repair",
+        )
+        .await
+        .unwrap();
+    let reworked_state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert!(reworked_state.records[&step.id]
+        .validation_receipts
+        .iter()
+        .any(|receipt| receipt.verdict == owo_agent_core::plan::ValidationVerdictV1::Stale));
+}
+
+#[tokio::test]
+async fn adaptive_runtime_keeps_review_when_change_tracker_is_missing() {
+    let h = harness();
+    let template_roles = install_template(&h, builtin_team_templates::CODE_CHANGE_V1);
+    let mut roles = template_roles.clone();
+    for role in &mut roles {
+        role.worker = Some("echo".to_string());
+    }
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "重构登录模块的错误处理".to_string(),
+        mode: TeamMode::Team,
+        template_id: Some(builtin_team_templates::CODE_CHANGE_V1.to_string()),
+        roles,
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &template_roles);
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    assert!(matches!(outcome, PhaseOutcome::Done));
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert_eq!(
+        state.records["s-reviewer"].status,
+        owo_agent_core::plan::StepStatus::Succeeded
+    );
+    assert!(state.records["s-reviewer"].skip_reason.is_none());
+}
+
+#[tokio::test]
+async fn finalize_success_rejects_non_review_runtime_skip() {
+    let h = harness();
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: vec![RoleSpec::agent("builder")],
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let mut state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let record = state.records.values_mut().next().unwrap();
+    record.status = owo_agent_core::plan::StepStatus::Succeeded;
+    record.skip_reason = Some("forged skip disposition".to_string());
+    state.persist(&h.dir.join("runs")).unwrap();
+
+    let error = h
+        .coordinator
+        .finalize_success(&team.team_id)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("不能作为已验收交付"));
+    let failed_team = h.coordinator.get_team_run(&team.team_id).await.unwrap();
+    assert_eq!(failed_team.status, TeamRunStatus::Failed);
+    let failed_state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert_eq!(
+        failed_state.goal.status,
+        owo_agent_core::goal::GoalStatus::Failed
+    );
+    assert!(failed_state
+        .goal
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("交付验收未通过"));
+}
+
+#[tokio::test]
+async fn finalize_success_rejects_succeeded_step_without_output() {
+    let h = harness();
+    let roles = relay_roles("echo");
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles,
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let mut state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    for record in state.records.values_mut() {
+        record.status = owo_agent_core::plan::StepStatus::Succeeded;
+        record.output = None;
+    }
+    state.persist(&h.dir.join("runs")).unwrap();
+
+    let error = h
+        .coordinator
+        .finalize_success(&team.team_id)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("没有提交候选输出"));
+}
+
+#[tokio::test]
+async fn finalize_success_rejects_latest_artifact_with_open_issues() {
+    let h = harness();
+    let roles = vec![RoleSpec::agent("builder")];
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.to_string(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles,
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let mut state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let step = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-builder")
+        .unwrap()
+        .clone();
+    let record = state.records.get_mut(&step.id).unwrap();
+    record.status = owo_agent_core::plan::StepStatus::Succeeded;
+    record.output = Some("候选交付".to_string());
+    for other in state.records.values_mut() {
+        other.status = owo_agent_core::plan::StepStatus::Succeeded;
+    }
+    state.persist(&h.dir.join("runs")).unwrap();
+
+    let output = owo_agent_core::workswarm_output::WorkerOutputV1 {
+        status: owo_agent_core::workswarm_output::WorkerOutputStatus::Done,
+        summary: "已提交候选结果".to_string(),
+        artifact: Some(owo_agent_core::workswarm_output::WorkerArtifactV1 {
+            kind: "document".to_string(),
+            format: "markdown".to_string(),
+            content: "候选内容".to_string(),
+        }),
+        evidence: Vec::new(),
+        open_issues: vec!["关键行为未验证".to_string()],
+        handoff: None,
+        review_result: None,
+    };
+    h.coordinator
+        .register_step_output_contract(
+            &team.team_id,
+            "m-builder",
+            "builder",
+            &step.id,
+            &output,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let error = h
+        .coordinator
+        .finalize_success(&team.team_id)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("未解决问题"));
 }

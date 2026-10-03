@@ -41,6 +41,17 @@ impl Worker for EchoWorker {
         "echo"
     }
     async fn run(&self, input: &Value) -> Result<String, String> {
+        let is_reviewer = input
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| matches!(role, "critic" | "reviewer"))
+            || input
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| item == "review"));
+        if is_reviewer {
+            return Ok(r#"{"status":"done","summary":"恢复测试评审通过","review_result":{"verdict":"approved","findings":[]},"evidence":[],"open_issues":[]}"#.to_string());
+        }
         Ok(input
             .get("text")
             .and_then(Value::as_str)
@@ -98,6 +109,85 @@ impl Worker for RouterWorker {
     }
 }
 
+struct InterruptGateWorker {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl Worker for InterruptGateWorker {
+    fn name(&self) -> &str {
+        "interrupt-gate"
+    }
+
+    async fn run(&self, input: &Value) -> Result<String, String> {
+        let step_id = input
+            .get("_workswarm")
+            .and_then(|value| value.get("step_id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if step_id == "s-builder" {
+            let _ = self.started.send(());
+            let release = self
+                .release
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| "builder release already consumed".to_string())?;
+            release
+                .await
+                .map_err(|_| "builder release sender dropped".to_string())?;
+        }
+        Ok(input
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or(step_id)
+            .to_string())
+    }
+}
+
+struct ReadyQueueWorker {
+    coordinator: Arc<TeamCoordinator>,
+    team_id: String,
+    events: tokio::sync::mpsc::UnboundedSender<&'static str>,
+    releases: std::sync::Mutex<[Option<tokio::sync::oneshot::Receiver<()>>; 3]>,
+}
+
+#[async_trait]
+impl Worker for ReadyQueueWorker {
+    fn name(&self) -> &str {
+        "ready-queue"
+    }
+
+    async fn run(&self, input: &Value) -> Result<String, String> {
+        let step_id = input
+            .get("_workswarm")
+            .and_then(|value| value.get("step_id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        self.coordinator
+            .mark_phase_step_running(&self.team_id, step_id);
+        let (index, event, output) = match step_id {
+            "s-root" => (0, "root-started", "root-output"),
+            "s-slow" => (1, "slow-started", "slow-output"),
+            "s-child" => (2, "child-started", "child-output"),
+            other => return Err(format!("unexpected step id: {other}")),
+        };
+        let _ = self.events.send(event);
+        let release = self
+            .releases
+            .lock()
+            .unwrap()
+            .get_mut(index)
+            .and_then(Option::take)
+            .ok_or_else(|| format!("release for {step_id} already consumed"))?;
+        release
+            .await
+            .map_err(|_| format!("release sender for {step_id} dropped"))?;
+        Ok(output.to_string())
+    }
+}
+
 /// 注入失败的 echo：`fail_step` 前 `fail_times` 次执行失败；输出带全局执行序号
 /// （内容随重跑变化，可区分「重跑过」与「没跑过」）。
 struct FlakyEchoWorker {
@@ -136,6 +226,21 @@ impl Worker for FlakyEchoWorker {
         if step == self.fail_step && self.remaining.load(Ordering::SeqCst) > 0 {
             self.remaining.fetch_sub(1, Ordering::SeqCst);
             return Err(format!("注入失败（第 {n} 次执行）"));
+        }
+        let is_reviewer = input.get("role").and_then(Value::as_str) == Some("reviewer")
+            || input
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| item == "review"));
+        if is_reviewer {
+            return Ok(serde_json::json!({
+                "status": "done",
+                "summary": format!("恢复评审通过 #{n}"),
+                "evidence": [],
+                "open_issues": [],
+                "review_result": {"verdict": "approved", "findings": []}
+            })
+            .to_string());
         }
         Ok(format!("{text}#run{n}"))
     }
@@ -324,6 +429,10 @@ fn create_req(roles: &[RoleSpec]) -> CreateTeamRequest {
         budget: Value::Null,
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     }
 }
 
@@ -440,6 +549,10 @@ async fn retry_failed_step_resets_only_target_closure() {
     // 只重置目标 + 未完成下游（reviewer）；已成功步骤原样。
     let state = h.coordinator.load_run_state(&team_id).unwrap();
     assert_eq!(state.records["s-builder"].status, StepStatus::Pending);
+    assert_eq!(
+        state.plan.step("s-builder").unwrap().input["_workswarm"]["retry_note"],
+        "修复输入后重试"
+    );
     assert_eq!(state.records["s-reviewer"].status, StepStatus::Pending);
     assert_eq!(state.records["s-planner"].status, StepStatus::Succeeded);
     assert_eq!(
@@ -940,6 +1053,94 @@ async fn restart_leftover_running_detected_then_continue_recovers() {
     assert_eq!(arts.len(), 4, "恢复后四步骤各 1 个产物（无重复执行）");
 }
 
+#[tokio::test]
+async fn run_phase_dispatches_and_persists_ready_child_before_slow_sibling_finishes() {
+    let h = harness();
+    let mut root = RoleSpec::agent("root");
+    root.worker = Some("ready-queue".to_string());
+    root.verify = Some("non_empty".to_string());
+    let mut slow = RoleSpec::agent("slow");
+    slow.worker = Some("ready-queue".to_string());
+    slow.verify = Some("non_empty".to_string());
+    let mut child = RoleSpec::agent("child");
+    child.worker = Some("ready-queue".to_string());
+    child.depends_on = vec!["root".to_string()];
+    child.verify = Some("non_empty".to_string());
+    let roles = vec![root, slow, child];
+    let team = h
+        .coordinator
+        .create_team_run(&create_req(&roles))
+        .await
+        .unwrap();
+    let team_id = team.team_id.clone();
+
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_root_tx, release_root_rx) = tokio::sync::oneshot::channel();
+    let (release_slow_tx, release_slow_rx) = tokio::sync::oneshot::channel();
+    let (release_child_tx, release_child_rx) = tokio::sync::oneshot::channel();
+    let worker = Arc::new(ReadyQueueWorker {
+        coordinator: Arc::clone(&h.coordinator),
+        team_id: team_id.clone(),
+        events: events_tx,
+        releases: std::sync::Mutex::new([
+            Some(release_root_rx),
+            Some(release_slow_rx),
+            Some(release_child_rx),
+        ]),
+    });
+    let registry = build_registry(&h.coordinator, &team_id, worker, &roles);
+    let coordinator = Arc::clone(&h.coordinator);
+    let running_team = team_id.clone();
+    let run = tokio::spawn(async move { coordinator.run_phase(&running_team, &registry).await });
+
+    let mut saw_root = false;
+    let mut saw_slow = false;
+    while !saw_root || !saw_slow {
+        match tokio::time::timeout(Duration::from_secs(2), events_rx.recv()).await {
+            Ok(Some("root-started")) => saw_root = true,
+            Ok(Some("slow-started")) => saw_slow = true,
+            event => panic!("initial ready steps did not both start: {event:?}"),
+        }
+    }
+    release_root_tx.send(()).unwrap();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), events_rx.recv()).await {
+            Ok(Some("child-started")) => break,
+            Ok(Some("slow-started")) => continue,
+            event => panic!("downstream child waited for slow sibling: {event:?}"),
+        }
+    }
+
+    let root_record = record_of(&h, &team_id, "s-root");
+    assert_eq!(root_record.status, StepStatus::Succeeded);
+    assert_eq!(root_record.output.as_deref(), Some("root-output"));
+    wait_for(
+        || record_of(&h, &team_id, "s-child").status == StepStatus::Running,
+        "child running state persistence",
+    )
+    .await;
+    let progress = h.coordinator.progress_snapshot(&team_id).await.unwrap();
+    assert!(progress
+        .current_steps
+        .iter()
+        .any(|step| { step.step_id == "s-child" && step.status == "Running" }));
+
+    release_child_tx.send(()).unwrap();
+    wait_for(
+        || record_of(&h, &team_id, "s-child").status == StepStatus::Succeeded,
+        "child completion persistence while slow sibling is blocked",
+    )
+    .await;
+    assert_eq!(
+        record_of(&h, &team_id, "s-slow").status,
+        StepStatus::Running
+    );
+    release_slow_tx.send(()).unwrap();
+
+    assert!(matches!(run.await.unwrap().unwrap(), PhaseOutcome::Done));
+    h.coordinator.finalize_success(&team_id).await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // 6. retry 恢复中断步骤（不触碰已成功兄弟分支）
 // ---------------------------------------------------------------------------
@@ -956,18 +1157,32 @@ async fn retry_recovers_interrupted_step_without_touching_siblings() {
     let team_id = team.team_id.clone();
     let project_id = team.project_space_id.clone().unwrap();
 
-    // 阶段 1：planner（唯一就绪）完成 → MoreReady（planner 产物已落盘）。
-    let registry = build_registry(&h.coordinator, &team_id, Arc::new(EchoWorker), &roles);
-    let outcome = h.coordinator.run_phase(&team_id, &registry).await.unwrap();
-    assert!(matches!(outcome, PhaseOutcome::MoreReady));
-    let plan_before = artifact_of_kind(&h, &project_id, "plan").await;
+    // 让 planner 完成并令 builder 真正进入执行，再在 builder 阻塞时模拟崩溃。
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let worker = Arc::new(InterruptGateWorker {
+        started: started_tx,
+        release: std::sync::Mutex::new(Some(release_rx)),
+    });
+    let registry = build_registry(&h.coordinator, &team_id, worker, &roles);
+    let coordinator = Arc::clone(&h.coordinator);
+    let running_team = team_id.clone();
+    let run = tokio::spawn(async move { coordinator.run_phase(&running_team, &registry).await });
+    tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
+        .await
+        .expect("builder should start in the same event-driven phase")
+        .expect("builder start signal should be delivered");
     assert_eq!(
         record_of(&h, &team_id, "s-planner").status,
         StepStatus::Succeeded
     );
-
-    // 模拟崩溃遗留：磁盘 Running + builder（wave2 成员）记录为 Running。
-    tamper_step_running(&h, &team_id, "s-builder");
+    assert_eq!(
+        record_of(&h, &team_id, "s-builder").status,
+        StepStatus::Running
+    );
+    let plan_before = artifact_of_kind(&h, &project_id, "plan").await;
+    run.abort();
+    let _ = run.await;
 
     // 重启识别（新协调器：无活动循环）。
     let coordinator2 = reopen(&h);

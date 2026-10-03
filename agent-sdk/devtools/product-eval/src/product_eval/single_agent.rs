@@ -12,16 +12,16 @@
 //!   复核 `allow_read`，写入复核 `allow_write`——即使未来 Policy 放宽也不越界。
 //!
 //! 遥测从 [`TurnEvent`] 流采集：模型调用数、工具调用（含真实实参摘要）、审批拒绝、
-//! 工具失败、失败步骤、耗时与 token 用量（provider 快照差值）；取消/预算超限经
+//! 工具失败、失败步骤、耗时与 token 用量（请求级 usage 元数据）；取消/预算超限经
 //! 同一 abort 令牌收口——命中后 run_turn 在下一检查点停止，不再调用模型或工具。
 
 use crate::product_eval::{
-    in_scope, sanitize_rel_path, CaseExecutor, EvalCategory, ExecContext, ProductEvalCase,
-    RawExecOutcome,
+    in_scope, sanitize_rel_path, unbounded_benchmark_calls, CaseExecutor, EvalCategory,
+    ExecContext, ProductEvalCase, RawExecOutcome,
 };
 use owo_agent_core::agent::{Agent, AgentConfig, TurnEvent};
 use owo_agent_core::error::AgentError;
-use owo_agent_core::gateway::{ModelProvider, TokenUsage};
+use owo_agent_core::gateway::{ChatMessage, ModelOutput, ModelProvider, StreamChunk, TokenUsage};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest, Policy};
 use owo_agent_core::session::Session;
 use owo_agent_core::tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
@@ -31,10 +31,106 @@ use owo_agent_kernel::required_string;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 工具结果文本上限（与 agent.rs 的 MAX_TOOL_RESULT_CHARS 口径一致）。
 const TOOL_RESULT_TEXT_CAP: usize = 50_000;
+
+/// Enforces the per-cell model-call budget at the provider boundary. `max_turns` is not a
+/// call budget: an Agent turn can make another provider request after processing tool output.
+pub(crate) struct BudgetedProvider {
+    inner: Arc<dyn ModelProvider>,
+    calls: AtomicU32,
+    max_calls: u32,
+    exceeded: AtomicBool,
+}
+
+impl BudgetedProvider {
+    pub(crate) fn new(inner: Arc<dyn ModelProvider>, max_calls: u32) -> Self {
+        Self {
+            inner,
+            calls: AtomicU32::new(0),
+            max_calls,
+            exceeded: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn call_count(&self) -> u32 {
+        self.calls.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn exceeded(&self) -> bool {
+        self.exceeded.load(Ordering::Relaxed)
+    }
+
+    fn reserve_call(&self) -> Result<(), String> {
+        self.calls
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |calls| {
+                (calls < self.max_calls).then_some(calls + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                self.exceeded.store(true, Ordering::Relaxed);
+                format!("模型调用预算耗尽：已达 max_model_calls={}", self.max_calls)
+            })
+    }
+}
+
+#[async_trait]
+impl ModelProvider for BudgetedProvider {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        self.reserve_call()?;
+        self.inner.complete(messages, tools).await
+    }
+
+    async fn complete_stream_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.reserve_call()?;
+        self.inner
+            .complete_stream_with_model(model, messages, tools, on_delta)
+            .await
+    }
+
+    async fn complete_stream_with_reasoning_and_model(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<ModelOutput, String> {
+        self.reserve_call()?;
+        self.inner
+            .complete_stream_with_reasoning_and_model(model, messages, tools, on_chunk)
+            .await
+    }
+
+    async fn complete_stream_with_reasoning_and_model_observed(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<owo_agent_core::gateway::ObservedModelOutput, String> {
+        self.reserve_call()?;
+        self.inner
+            .complete_stream_with_reasoning_and_model_observed(model, messages, tools, on_chunk)
+            .await
+    }
+
+    fn usage_snapshot(&self) -> TokenUsage {
+        self.inner.usage_snapshot()
+    }
+}
 
 /// 命令链式/重定向元字符检测：白名单按"单命令"收口，禁止通过管道、
 /// 顺序执行、后台执行或重定向把放行命令拼接成任意命令。
@@ -576,8 +672,8 @@ const SYSTEM_PROMPT: &str =
 1. 只使用提供的工具读写工作区内的文件；不请求网络，不猜测输入中不存在的内容。\n\
 2. 只在允许写入范围内写文件；必须生成全部预期产物，内容完整、非空、符合任务格式要求。\n\
 3. 命令只能执行任务白名单内的单条命令；未列入白名单的命令一律不要尝试。\n\
-4. 逐步执行：先列目录/读输入材料，再完成任务，最后用 write_file 落盘产物。\n\
-5. 完成后输出一段简短总结（做了什么、产物在哪），不要输出文件块协议。";
+4. 先列目录/读输入材料，然后立即用 write_file 分批落盘；多文件按小批次创建，不要等所有源码都构思完，也不要在聊天回复里一次输出整仓实现。\n\
+5. 每个回合尽量完成一个有用的工具动作，需要更多文件就继续新回合；全部预期产物非空后，再输出简短总结，不要输出文件块协议。";
 
 fn build_user_prompt(case: &ProductEvalCase) -> String {
     let mut sections = Vec::new();
@@ -632,6 +728,11 @@ fn build_user_prompt(case: &ProductEvalCase) -> String {
         EvalCategory::Research => "执行建议：完整读取全部输入材料，提炼/结构化后写入产物，引用材料中的事实而非编造。".to_string(),
         EvalCategory::Document => "执行建议：读取输入材料与格式要求，按要求撰写文档并写入产物。".to_string(),
     });
+    if case.category == EvalCategory::Code && case.expected_artifacts.len() > 1 {
+        sections.push(
+            "多文件实现节奏：只用一句话说明模块拆分，随后立即分批 write_file；每个回合只生成少量相互独立的文件，先落地可运行骨架和清晰接口，再补功能、样式、数据与测试。不要在模型回复里展开整站源码或长篇计划。每批落盘后再读取/检查必要文件，继续下一批，直到预期路径全部非空。".to_string(),
+        );
+    }
     sections.push("完成后输出简短总结。".to_string());
     sections.join("\n\n")
 }
@@ -722,11 +823,15 @@ impl CaseExecutor for SingleAgentExecutor {
                 ..RawExecOutcome::default()
             };
         }
-        let usage_before = self.provider.usage_snapshot();
         let scope = Arc::new(ProductEvalScope::from_case(ctx.case));
         let tool_log: ToolLog = Arc::new(Mutex::new(Vec::new()));
         let state = Arc::new(Mutex::new(RunState::default()));
-        let max_model_calls = ctx.max_model_calls;
+        let unbounded_calls = unbounded_benchmark_calls();
+        let max_model_calls = if unbounded_calls {
+            u32::MAX
+        } else {
+            ctx.max_model_calls
+        };
         let abort = Arc::clone(&ctx.cancel);
 
         let registry = scope_registry(Arc::clone(&scope), Arc::clone(&tool_log));
@@ -737,12 +842,27 @@ impl CaseExecutor for SingleAgentExecutor {
         policy.set_profile(owo_agent_core::permissions::PermissionProfile::AutoReview);
         // 回合上限 = 模型调用预算：预算内完成即产出总结；预算耗尽（无总结）按 Error 计。
         // compaction 会额外调用模型且不计入 ModelCall 事件，评测全程关闭以防预算失真。
+        let defaults = AgentConfig::default();
         let config = AgentConfig {
             max_turns: (max_model_calls as usize).max(1),
-            compaction_enabled: false,
-            ..AgentConfig::default()
+            max_tool_calls_per_turn: if unbounded_calls {
+                usize::MAX
+            } else {
+                defaults.max_tool_calls_per_turn
+            },
+            max_repeated_tool_calls: if unbounded_calls {
+                usize::MAX
+            } else {
+                defaults.max_repeated_tool_calls
+            },
+            compaction_enabled: unbounded_calls,
+            ..defaults
         };
-        let agent = Agent::new(self.provider.clone(), registry, policy, config);
+        let budgeted_provider = Arc::new(BudgetedProvider::new(
+            self.provider.clone(),
+            max_model_calls,
+        ));
+        let agent = Agent::new(budgeted_provider.clone(), registry, policy, config);
         let approver = ProductEvalApprover::new(Arc::clone(&scope), Arc::clone(&tool_log));
 
         let mut session = Session::new(
@@ -755,10 +875,14 @@ impl CaseExecutor for SingleAgentExecutor {
         // TurnEvent 遥测：预算计数器只记账不中止——回合上限已由 max_turns 收口，
         // 预算耗尽绝不触碰共享取消令牌（防止一次超限毒化整个矩阵的后续单元格）。
         let state_for_events = Arc::clone(&state);
+        let progress = ctx.progress();
         let mut on_event = |event: &TurnEvent| {
             let mut state = state_for_events.lock().expect("遥测锁中毒");
             match event {
-                TurnEvent::ModelCall => state.model_calls += 1,
+                TurnEvent::ModelCall => {
+                    state.model_calls += 1;
+                    progress.record_model_call();
+                }
                 TurnEvent::ToolStart { .. } => state.tool_calls += 1,
                 TurnEvent::ToolResult {
                     tool, ok, error, ..
@@ -794,7 +918,7 @@ impl CaseExecutor for SingleAgentExecutor {
         // 遥测 → 失败步骤登记（journal 的 failed_steps 全程保留）。
         // 审批拒绝不产生 ToolResult 事件（agent 的 Deny 分支直接返回错误），
         // 因此拒绝证据取自审批器写入共享日志的 "approver DENY" 条目。
-        let (snapshot_state, log_entries) = {
+        let (mut snapshot_state, log_entries) = {
             let state_guard = state.lock().expect("遥测锁中毒");
             let log_entries = tool_log
                 .lock()
@@ -802,6 +926,10 @@ impl CaseExecutor for SingleAgentExecutor {
                 .unwrap_or_default();
             (state_guard.clone(), log_entries)
         };
+        // TurnEvent::ModelCall is emitted before the provider boundary. When the budget
+        // rejects the next request, it still counts as an event, but no upstream request
+        // was made. Report the provider's reserved-call counter as the billable call count.
+        snapshot_state.model_calls = budgeted_provider.call_count();
         let mut denials = snapshot_state.denials.clone();
         for entry in &log_entries {
             if entry.starts_with("approver DENY") && !denials.contains(entry) {
@@ -815,9 +943,10 @@ impl CaseExecutor for SingleAgentExecutor {
             ctx.record_failed_step(format!("tool_error:{tool_error}"));
         }
         // 预算耗尽判定：调用数达到上限且未产出总结（run_turn 会以"达到最大回合数"失败）。
-        let budget_exhausted = snapshot_state.model_calls >= max_model_calls
-            && snapshot_state.final_text.is_none()
-            && !ctx.cancelled();
+        let budget_exhausted = budgeted_provider.exceeded()
+            || (snapshot_state.model_calls >= max_model_calls
+                && snapshot_state.final_text.is_none()
+                && !ctx.cancelled());
         if budget_exhausted {
             ctx.record_failed_step(format!(
                 "budget:模型调用预算耗尽（max_model_calls={max_model_calls}，实际 {} 次，未在预算内产出总结）",
@@ -850,25 +979,24 @@ impl CaseExecutor for SingleAgentExecutor {
             ctx.record_failed_step(desc.clone());
         }
 
-        let usage_snapshot = self.provider.usage_snapshot();
-        let usage = TokenUsage {
-            prompt_tokens: usage_snapshot
-                .prompt_tokens
-                .saturating_sub(usage_before.prompt_tokens),
-            completion_tokens: usage_snapshot
-                .completion_tokens
-                .saturating_sub(usage_before.completion_tokens),
-            total_tokens: usage_snapshot
-                .total_tokens
-                .saturating_sub(usage_before.total_tokens),
+        let (usage, usage_known) = match &result {
+            Ok(turn) => (turn.usage, turn.usage_known),
+            Err(_) => (TokenUsage::default(), false),
         };
+        if usage_known {
+            progress.record_usage(usage);
+        } else {
+            progress.record_usage_unknown();
+        }
 
         let mut outcome = RawExecOutcome {
             aborted: false,
             error: None,
             model_calls: snapshot_state.model_calls,
             usage,
-            usage_known: usage.total_tokens > 0,
+            usage_known,
+            validation_wall_ms: 0,
+            delivery_gate_wall_ms: 0,
             retries: 0,
             tool_log: log_entries.clone(),
         };
@@ -898,7 +1026,11 @@ impl CaseExecutor for SingleAgentExecutor {
             outcome.aborted = true;
         }
         if !missing.is_empty() && !outcome.aborted && !budget_exhausted {
-            outcome.error = Some(format!("预期产物缺失：{}", missing.join("、")));
+            let missing_error = format!("预期产物缺失：{}", missing.join("、"));
+            outcome.error = Some(match outcome.error.take() {
+                Some(original) => format!("{original}；{missing_error}"),
+                None => missing_error,
+            });
         }
 
         let telemetry = TelemetrySnapshot {
@@ -935,4 +1067,38 @@ fn is_denial(error: &str) -> bool {
     denied_prefixes
         .iter()
         .any(|prefix| error.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::{build_user_prompt, EvalCategory, ProductEvalCase, SYSTEM_PROMPT};
+
+    fn case(paths: &[&str]) -> ProductEvalCase {
+        ProductEvalCase {
+            schema_version: crate::product_eval::PRODUCT_EVAL_SCHEMA_VERSION,
+            id: "prompt-batching".into(),
+            category: EvalCategory::Code,
+            title: "Multi-file code task".into(),
+            instruction: "Create the requested files".into(),
+            inputs: Vec::new(),
+            allow_read: Vec::new(),
+            allow_write: vec!["**".into()],
+            expected_artifacts: paths.iter().map(|path| (*path).into()).collect(),
+            checkers: Vec::new(),
+            reference_outputs: std::collections::BTreeMap::new(),
+            timeout_secs: Some(300),
+            max_model_calls: Some(20),
+            repetitions: Some(1),
+            allow_commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn large_code_tasks_are_prompted_to_write_incrementally() {
+        let prompt = build_user_prompt(&case(&["apps/web/App.tsx", "apps/api/index.ts"]));
+        assert!(SYSTEM_PROMPT.contains("分批落盘"));
+        assert!(prompt.contains("每个回合只生成少量相互独立的文件"));
+        let single_file = build_user_prompt(&case(&["src/main.rs"]));
+        assert!(!single_file.contains("多文件实现节奏"));
+    }
 }

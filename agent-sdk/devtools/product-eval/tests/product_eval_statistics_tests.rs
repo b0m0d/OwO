@@ -3,8 +3,9 @@
 //! 单/多对照启用条件（成功率 +5% / 质量 +10% / 耗时 −30%）与 JSON 契约形状。
 
 use owo_agent_product_eval::product_eval::{
-    compare_mode_statistics, format_mode_comparison, format_mode_statistics, mode_statistics,
-    percentile, report_statistics, wilson_interval, CI95_Z, SUFFICIENT_SAMPLE_SIZE,
+    aggregate_metrics, compare_mode_statistics, format_mode_comparison, format_mode_statistics,
+    mode_statistics, percentile, report_statistics, wilson_interval, CI95_Z,
+    SUFFICIENT_SAMPLE_SIZE,
 };
 use owo_agent_product_eval::product_eval::{
     AgentMode, EvalCategory, MatrixKey, ProductEvalRun, RunStatus,
@@ -16,6 +17,9 @@ fn dummy_run(case_id: &str, mode: AgentMode, status: RunStatus, wall_ms: u64) ->
         category: EvalCategory::Code,
         status,
         wall_ms,
+        executor_wall_ms: wall_ms,
+        validation_wall_ms: 0,
+        delivery_gate_wall_ms: 0,
         model_calls: 2,
         prompt_tokens: None,
         completion_tokens: None,
@@ -274,6 +278,36 @@ fn enablement_wall_minus_30pct_rule() {
 }
 
 #[test]
+fn quality_regression_blocks_speed_only_enablement() {
+    let single_runs: Vec<ProductEvalRun> = (0..30)
+        .map(|_| dummy_run("c", AgentMode::Single, RunStatus::Passed, 1000))
+        .collect();
+    let multi_runs: Vec<ProductEvalRun> = (0..30)
+        .map(|index| {
+            dummy_run(
+                "c",
+                AgentMode::Multi,
+                if index < 29 {
+                    RunStatus::Passed
+                } else {
+                    RunStatus::Failed
+                },
+                500,
+            )
+        })
+        .collect();
+    let comparison = compare_mode_statistics(
+        &mode_statistics(&single_runs, AgentMode::Single),
+        &mode_statistics(&multi_runs, AgentMode::Multi),
+    );
+
+    assert!(comparison.rules[2].satisfied, "速度收益应单独达到门槛");
+    assert!(comparison.multi_success_rate_diff < 0.0);
+    assert!(!comparison.enabled, "质量退化不得被速度收益抵消");
+    assert!(format_mode_comparison(&comparison).contains("速度收益不抵消质量退化"));
+}
+
+#[test]
 fn enablement_insufficient_samples_flagged() {
     let small: Vec<ProductEvalRun> = (0..3)
         .map(|_| dummy_run("c", AgentMode::Single, RunStatus::Passed, 1000))
@@ -286,9 +320,42 @@ fn enablement_insufficient_samples_flagged() {
         &mode_statistics(&small_multi, AgentMode::Multi),
     );
     assert!(!comparison.sample_sufficient);
+    assert!(!comparison.enabled);
+
+    let fast_multi: Vec<ProductEvalRun> = (0..3)
+        .map(|_| dummy_run("c", AgentMode::Multi, RunStatus::Passed, 600))
+        .collect();
+    let small_speed_only = compare_mode_statistics(
+        &mode_statistics(&small, AgentMode::Single),
+        &mode_statistics(&fast_multi, AgentMode::Multi),
+    );
+    assert!(small_speed_only.rules[2].satisfied);
+    assert!(!small_speed_only.sample_sufficient);
+    assert!(!small_speed_only.enabled, "小样本速度不能作为启用证据");
     // 渲染段落必须显式提示样本不足（UI/API 同样以此为标注依据）。
     let text = format_mode_comparison(&comparison);
     assert!(text.contains("样本不足"), "{text}");
+}
+
+#[test]
+fn stage_wall_times_are_reported_for_single_and_multi_comparisons() {
+    let mut single = dummy_run("stage-times", AgentMode::Single, RunStatus::Passed, 100);
+    single.executor_wall_ms = 70;
+    single.validation_wall_ms = 30;
+    let mut multi = dummy_run("stage-times", AgentMode::Multi, RunStatus::Passed, 160);
+    multi.executor_wall_ms = 120;
+    multi.validation_wall_ms = 25;
+    multi.delivery_gate_wall_ms = 15;
+
+    let aggregate = aggregate_metrics(&[single.clone(), multi.clone()]);
+    assert_eq!(aggregate.mean_executor_wall_ms, 95.0);
+    assert_eq!(aggregate.mean_validation_wall_ms, 27.5);
+    assert_eq!(aggregate.mean_delivery_gate_wall_ms, 7.5);
+
+    let stats = mode_statistics(&[single, multi], AgentMode::Multi);
+    assert_eq!(stats.mean_executor_wall_ms, 120.0);
+    assert_eq!(stats.mean_validation_wall_ms, 25.0);
+    assert_eq!(stats.mean_delivery_gate_wall_ms, 15.0);
 }
 
 #[test]
@@ -310,9 +377,17 @@ fn statistics_render_and_json_contract_shapes() {
             ]
         })
         .collect();
+    let mut runs = runs;
+    runs[0].executor_wall_ms = 900;
+    runs[0].validation_wall_ms = 100;
+    runs[1].delivery_gate_wall_ms = 25;
     let text = format_mode_statistics(&runs);
     assert!(text.contains("CI95"), "{text}");
     assert!(text.contains("p50"), "{text}");
+    assert!(text.contains("executor="), "{text}");
+    assert!(text.contains("validate="), "{text}");
+    assert!(text.contains("gate="), "{text}");
+    assert!(text.contains("不可相加替代总 wall_ms"), "{text}");
     assert!(text.contains("多 Agent 启用条件"), "{text}");
 
     let json = report_statistics(&runs);
@@ -325,6 +400,9 @@ fn statistics_render_and_json_contract_shapes() {
     assert_eq!(modes[1]["mode"], "multi");
     assert!(modes[0]["ci95_low"].is_number());
     assert!(modes[0]["p95_wall_ms"].is_number());
+    assert!(modes[0]["mean_executor_wall_ms"].is_number());
+    assert!(modes[0]["mean_validation_wall_ms"].is_number());
+    assert!(modes[0]["mean_delivery_gate_wall_ms"].is_number());
     let comparison = json.get("comparison").unwrap();
     assert!(comparison["multi_success_rate_diff"].is_number());
     assert!(comparison["rules"].is_array());

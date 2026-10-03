@@ -46,6 +46,7 @@ pub mod team_prompt;
 pub mod team_strategy;
 pub mod tools;
 pub mod trace;
+pub mod verification;
 pub mod worker_pool;
 /// 角色画像（七期 · 二路）：模板角色 → 工具面/只读/写白名单/回合上限/浏览器/命令，
 /// 画像驱动子代理执行器（注册表面即权限边界）。
@@ -376,7 +377,11 @@ pub use perception::{
     SituationStore, TaskHypothesis, UiContext,
 };
 pub use permissions::{Approver, Decision, Level, PermissionProfile, PermissionRequest, Policy};
-pub use plan::{verify_output, Plan, StepSpec, StepStatus, VerificationSpec};
+pub use plan::{
+    verify_output, Plan, StepSpec, StepStatus, ValidationReceiptV1, ValidationVerdictV1,
+    VerificationPlanV1, VerificationRequirementV1, VerificationResourcesV1, VerificationScopeV1,
+    VerificationSpec,
+};
 pub use platform::{capture_screen, clipboard_sequence, poll_foreground_app};
 pub use plugin::{
     discover_plugins, plugin_mcp_config, scan_plugin_for_risks, verify_plugin_signature,
@@ -405,7 +410,7 @@ pub use scene::{
     SceneGraph, WindowState,
 };
 pub use session::{JsonSessionStore, Session, SessionStore, TurnEventRecord};
-pub use settings::{EgressSettings, Settings};
+pub use settings::{EgressSettings, Settings, TeamSettings};
 pub use share::{export_html, export_markdown};
 pub use share_skill::{export_flow_skill_package, import_flow_skill_package};
 pub use skill::{Skill, SkillRegistry};

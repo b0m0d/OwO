@@ -82,6 +82,55 @@ fn registry_with(workers: Vec<Arc<EchoWorker>>) -> WorkerRegistry {
     registry
 }
 
+struct DispatchOrderWorker {
+    events: tokio::sync::mpsc::UnboundedSender<&'static str>,
+    release_root: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    release_slow: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl Worker for DispatchOrderWorker {
+    fn name(&self) -> &str {
+        "dispatch-order"
+    }
+
+    async fn run(&self, input: &serde_json::Value) -> Result<String, String> {
+        match input.get("step").and_then(|value| value.as_str()) {
+            Some("slow") => {
+                let _ = self.events.send("slow-started");
+                let release = self
+                    .release_slow
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .ok_or_else(|| "slow step release already consumed".to_string())?;
+                release
+                    .await
+                    .map_err(|_| "slow step release sender dropped".to_string())?;
+                Ok("slow-finished".to_string())
+            }
+            Some("root") => {
+                let _ = self.events.send("root-started");
+                let release = self
+                    .release_root
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .ok_or_else(|| "root release already consumed".to_string())?;
+                release
+                    .await
+                    .map_err(|_| "root release sender dropped".to_string())?;
+                Ok("root-finished".to_string())
+            }
+            Some("child") => {
+                let _ = self.events.send("child-started");
+                Ok("child-finished".to_string())
+            }
+            other => Err(format!("unexpected step input: {other:?}")),
+        }
+    }
+}
+
 /// 三步骤并行 + 汇合验证样例计划。
 fn three_parallel_join_plan(goal_id: &str) -> Plan {
     let mut plan = Plan::new("plan-join", goal_id);
@@ -198,6 +247,76 @@ async fn sample_three_parallel_steps_join_verify() {
     assert_eq!(
         runner.state.records["join"].output.as_deref(),
         Some("out-ABC")
+    );
+}
+
+#[tokio::test]
+async fn newly_ready_child_starts_while_independent_slow_step_is_still_running() {
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_root_tx, release_root_rx) = tokio::sync::oneshot::channel();
+    let (release_slow_tx, release_slow_rx) = tokio::sync::oneshot::channel();
+    let worker = Arc::new(DispatchOrderWorker {
+        events: events_tx,
+        release_root: Mutex::new(Some(release_root_rx)),
+        release_slow: Mutex::new(Some(release_slow_rx)),
+    });
+    let registry = WorkerRegistry::new();
+    registry.register(worker);
+
+    let mut plan = Plan::new("plan-ready-dispatch", "g-ready-dispatch");
+    let mut root = StepSpec::new("root", "dispatch-order");
+    root.input = json!({"step": "root"});
+    plan.add_step(root);
+    let mut slow = StepSpec::new("slow", "dispatch-order");
+    slow.input = json!({"step": "slow"});
+    plan.add_step(slow);
+    let mut child = StepSpec::new("child", "dispatch-order");
+    child.depends_on = vec!["root".to_string()];
+    child.input = json!({"step": "child"});
+    plan.add_step(child);
+
+    let runner = GoalRunner::new(
+        Goal::new("g-ready-dispatch", "ready task dispatch"),
+        plan,
+        RunnerConfig {
+            max_parallel: 2,
+            allow_replan: false,
+            ..Default::default()
+        },
+    );
+    let running = tokio::spawn(async move {
+        let mut runner = runner;
+        let status = runner.run(&registry).await.unwrap();
+        (status, runner.state)
+    });
+
+    let mut saw_slow_start = false;
+    let mut saw_root_start = false;
+    while !saw_slow_start || !saw_root_start {
+        match tokio::time::timeout(Duration::from_secs(2), events_rx.recv()).await {
+            Ok(Some("slow-started")) => saw_slow_start = true,
+            Ok(Some("root-started")) => saw_root_start = true,
+            event => panic!("both initial steps must start before release: {event:?}"),
+        }
+    }
+    release_root_tx.send(()).unwrap();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), events_rx.recv()).await {
+            Ok(Some("child-started")) => break,
+            Ok(Some("slow-started")) => continue,
+            event => panic!("child did not start before slow step finished: {event:?}"),
+        }
+    }
+    release_slow_tx.send(()).unwrap();
+    let (status, state) = running.await.unwrap();
+    assert_eq!(status, GoalStatus::Succeeded);
+    assert_eq!(
+        state.records["slow"].output.as_deref(),
+        Some("slow-finished")
+    );
+    assert_eq!(
+        state.records["child"].output.as_deref(),
+        Some("child-finished")
     );
 }
 

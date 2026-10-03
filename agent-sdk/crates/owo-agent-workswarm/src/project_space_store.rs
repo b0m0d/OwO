@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 use owo_agent_protocol::{
     Artifact, ArtifactReviewDecision, ArtifactReviewRecord, ArtifactReworkTask, DecisionRecord,
-    HandoffRecord, ProjectSpace, TeamRun,
+    HandoffRecord, ProjectSpace, SharedContextFact, SharedContextSnapshot, TeamRun,
 };
 use rusqlite::{params, Connection};
 use std::path::Path;
@@ -28,6 +28,8 @@ pub enum ProjectSpaceStoreError {
     Serialization(String),
     #[error("未找到：{0}")]
     NotFound(String),
+    #[error("交付状态不一致：{0}")]
+    InvalidState(String),
 }
 
 impl From<serde_json::Error> for ProjectSpaceStoreError {
@@ -53,6 +55,13 @@ pub trait ProjectSpaceStoreBackend: Send + Sync {
     async fn get_project_space(&self, project_id: &str) -> Result<ProjectSpace>;
     async fn list_project_spaces(&self) -> Result<Vec<ProjectSpace>>;
     async fn delete_project_space(&self, project_id: &str) -> Result<()>;
+    async fn get_team_context(&self, team_id: &str) -> Result<SharedContextSnapshot>;
+    async fn compare_and_swap_team_context(
+        &self,
+        team_id: &str,
+        expected_revision: u64,
+        fact: &SharedContextFact,
+    ) -> Result<bool>;
 
     // -- Artifact --
     /// 保存产物；`project_id` 落真实关联列（`list_artifacts_by_project` 按索引过滤）。
@@ -73,6 +82,8 @@ pub trait ProjectSpaceStoreBackend: Send + Sync {
 
     // -- TeamRun --
     async fn save_team_run(&self, team_run: &TeamRun) -> Result<()>;
+    /// Atomically publish a succeeded TeamRun and its completed ProjectSpace delivery pointer.
+    async fn commit_team_delivery(&self, team_run: &TeamRun, space: &ProjectSpace) -> Result<()>;
     async fn get_team_run(&self, team_id: &str) -> Result<TeamRun>;
     async fn list_team_runs(&self) -> Result<Vec<TeamRun>>;
     async fn delete_team_run(&self, team_id: &str) -> Result<()>;
@@ -113,6 +124,11 @@ fn worksarm_schema() -> &'static str {
          data_json TEXT NOT NULL,
          created_at TEXT NOT NULL,
          updated_at TEXT NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS team_contexts (
+         team_id TEXT PRIMARY KEY,
+         revision INTEGER NOT NULL,
+         facts_json TEXT NOT NULL
      );
      CREATE TABLE IF NOT EXISTS artifacts (
          artifact_id TEXT PRIMARY KEY,
@@ -241,6 +257,71 @@ impl ProjectSpaceStoreBackend for SqliteProjectSpaceStore {
             params![space.project_id, json, space.created_at, space.updated_at],
         )?;
         Ok(())
+    }
+
+    async fn get_team_context(&self, team_id: &str) -> Result<SharedContextSnapshot> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT revision, facts_json FROM team_contexts WHERE team_id = ?1",
+            params![team_id],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+        );
+        match row {
+            Ok((revision, json)) => {
+                let facts: Vec<SharedContextFact> = Self::deserialize(&json)?;
+                Ok(SharedContextSnapshot { revision, facts })
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(SharedContextSnapshot::default()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn compare_and_swap_team_context(
+        &self,
+        team_id: &str,
+        expected_revision: u64,
+        fact: &SharedContextFact,
+    ) -> Result<bool> {
+        let next_revision = expected_revision
+            .checked_add(1)
+            .filter(|revision| *revision <= i64::MAX as u64);
+        if next_revision != Some(fact.revision) {
+            return Err(ProjectSpaceStoreError::Serialization(
+                "共享上下文 revision 必须递增 1 且不超过 SQLite 整数上限".to_string(),
+            ));
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row = tx.query_row(
+            "SELECT revision, facts_json FROM team_contexts WHERE team_id = ?1",
+            params![team_id],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+        );
+        let (current_revision, mut facts) = match row {
+            Ok((revision, json)) => (
+                revision,
+                Self::deserialize::<Vec<SharedContextFact>>(&json)?,
+            ),
+            Err(rusqlite::Error::QueryReturnedNoRows) => (0, Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        if current_revision != expected_revision {
+            return Ok(false);
+        }
+        if facts.len() >= 128 {
+            return Err(ProjectSpaceStoreError::Serialization(
+                "团队共享事实最多保存 128 个版本".to_string(),
+            ));
+        }
+        facts.push(fact.clone());
+        let encoded = Self::serialize(&facts)?;
+        tx.execute(
+            "INSERT INTO team_contexts (team_id, revision, facts_json) VALUES (?1, ?2, ?3)
+             ON CONFLICT(team_id) DO UPDATE SET revision = excluded.revision, facts_json = excluded.facts_json",
+            params![team_id, fact.revision, encoded],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     async fn get_project_space(&self, project_id: &str) -> Result<ProjectSpace> {
@@ -477,6 +558,37 @@ impl ProjectSpaceStoreBackend for SqliteProjectSpaceStore {
              ON CONFLICT(team_id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at",
             params![team_run.team_id, json, team_run.created_at, team_run.updated_at],
         )?;
+        Ok(())
+    }
+
+    async fn commit_team_delivery(&self, team_run: &TeamRun, space: &ProjectSpace) -> Result<()> {
+        if team_run.status != owo_agent_protocol::TeamRunStatus::Succeeded
+            || space.status != owo_agent_protocol::ProjectSpaceStatus::Completed
+            || team_run.project_space_id.as_deref() != Some(space.project_id.as_str())
+            || space.team_id.as_deref() != Some(team_run.team_id.as_str())
+        {
+            return Err(ProjectSpaceStoreError::InvalidState(format!(
+                "TeamRun {} 与 ProjectSpace {} 未形成匹配的成功交付",
+                team_run.team_id, space.project_id
+            )));
+        }
+        let team_json = Self::serialize(team_run)?;
+        let space_json = Self::serialize(space)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO team_runs (team_id, data_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(team_id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at",
+            params![team_run.team_id, team_json, team_run.created_at, team_run.updated_at],
+        )?;
+        tx.execute(
+            "INSERT INTO project_spaces (project_id, data_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at",
+            params![space.project_id, space_json, space.created_at, space.updated_at],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -961,6 +1073,8 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             // 七期（第三路）交付扩展字段：测试样例取缺省值。
             team_id: String::new(),
+            task_id: None,
+            attempt_id: None,
             format: "text".to_string(),
             media_type: "text/plain".to_string(),
             file_name: String::new(),
@@ -1035,6 +1149,79 @@ mod tests {
         store.delete_project_space("proj-crud").await.unwrap();
         let err = store.get_project_space("proj-crud").await;
         assert!(matches!(err, Err(ProjectSpaceStoreError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn team_delivery_commit_publishes_both_terminal_records() {
+        let store = test_store();
+        let mut team = sample_team_run("team-1");
+        team.status = TeamRunStatus::Succeeded;
+        let mut space = sample_project_space("proj-1");
+        space.status = owo_agent_protocol::ProjectSpaceStatus::Completed;
+        space.delivery_manifest_ref = Some("cas://sha256:manifest".to_string());
+
+        store.commit_team_delivery(&team, &space).await.unwrap();
+        assert_eq!(
+            store.get_team_run("team-1").await.unwrap().status,
+            TeamRunStatus::Succeeded
+        );
+        let committed_space = store.get_project_space("proj-1").await.unwrap();
+        assert_eq!(
+            committed_space.status,
+            owo_agent_protocol::ProjectSpaceStatus::Completed
+        );
+        assert_eq!(
+            committed_space.delivery_manifest_ref.as_deref(),
+            Some("cas://sha256:manifest")
+        );
+    }
+
+    #[tokio::test]
+    async fn team_delivery_commit_rejects_mismatched_records() {
+        let store = test_store();
+        let mut team = sample_team_run("team-1");
+        team.status = TeamRunStatus::Succeeded;
+        let mut space = sample_project_space("proj-1");
+        space.status = owo_agent_protocol::ProjectSpaceStatus::Completed;
+        space.team_id = Some("another-team".to_string());
+
+        assert!(matches!(
+            store.commit_team_delivery(&team, &space).await,
+            Err(ProjectSpaceStoreError::InvalidState(_))
+        ));
+        assert!(matches!(
+            store.get_team_run("team-1").await,
+            Err(ProjectSpaceStoreError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn team_delivery_commit_rolls_back_if_project_space_write_fails() {
+        let store = test_store();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_project_space_delivery
+             BEFORE INSERT ON project_spaces
+             BEGIN SELECT RAISE(ABORT, 'injected project space failure'); END;",
+            )
+            .unwrap();
+        let mut team = sample_team_run("team-1");
+        team.status = TeamRunStatus::Succeeded;
+        let mut space = sample_project_space("proj-1");
+        space.status = owo_agent_protocol::ProjectSpaceStatus::Completed;
+
+        assert!(store.commit_team_delivery(&team, &space).await.is_err());
+        assert!(matches!(
+            store.get_team_run("team-1").await,
+            Err(ProjectSpaceStoreError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.get_project_space("proj-1").await,
+            Err(ProjectSpaceStoreError::NotFound(_))
+        ));
     }
 
     #[tokio::test]

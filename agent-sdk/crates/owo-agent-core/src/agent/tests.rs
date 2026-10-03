@@ -895,6 +895,76 @@ impl crate::gateway::ModelProvider for ReasoningProvider {
     }
 }
 
+struct RequestUsageProvider;
+
+#[async_trait::async_trait]
+impl crate::gateway::ModelProvider for RequestUsageProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        unreachable!("Agent should use the observed streaming interface")
+    }
+
+    async fn complete_stream_with_reasoning_and_model_observed(
+        &self,
+        _model: Option<&str>,
+        messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+        _on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<crate::gateway::ObservedModelOutput, String> {
+        let user_text = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .and_then(|message| message.content.as_deref())
+            .unwrap_or_default();
+        let tokens = if user_text == "worker-a" { 11 } else { 101 };
+        Ok(crate::gateway::ObservedModelOutput {
+            output: ModelOutput::Text("ok".to_string()),
+            metadata: crate::gateway::ModelCallMetadata {
+                usage: Some(crate::gateway::TokenUsage {
+                    prompt_tokens: tokens,
+                    completion_tokens: 1,
+                    total_tokens: tokens + 1,
+                }),
+                ..Default::default()
+            },
+        })
+    }
+}
+
+#[tokio::test]
+async fn concurrent_turns_keep_request_usage_separate() {
+    let provider = Arc::new(RequestUsageProvider);
+    let make_agent = || {
+        Agent::new(
+            provider.clone(),
+            ToolRegistry::new(),
+            Policy::new("."),
+            AgentConfig::default(),
+        )
+    };
+    let agent_a = make_agent();
+    let agent_b = make_agent();
+    let mut session_a = Session::new(std::env::temp_dir(), "test-model", None);
+    let mut session_b = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let abort = AtomicBool::new(false);
+    let mut sink_a = |_event: &TurnEvent| {};
+    let mut sink_b = |_event: &TurnEvent| {};
+    let (turn_a, turn_b) = tokio::join!(
+        agent_a.run_turn(&mut session_a, "worker-a", &approver, &abort, &mut sink_a),
+        agent_b.run_turn(&mut session_b, "worker-b", &approver, &abort, &mut sink_b),
+    );
+    let turn_a = turn_a.expect("worker A should finish");
+    let turn_b = turn_b.expect("worker B should finish");
+    assert_eq!(turn_a.usage.total_tokens, 12);
+    assert_eq!(turn_b.usage.total_tokens, 102);
+    assert!(turn_a.usage_known && turn_b.usage_known);
+}
+
 #[tokio::test]
 async fn reasoning_chunks_are_emitted_as_events() {
     let agent = Agent::new(

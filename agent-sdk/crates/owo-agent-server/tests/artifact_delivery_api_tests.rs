@@ -159,6 +159,8 @@ fn make_artifact(
             .next()
             .unwrap_or_default()
             .to_string(),
+        task_id: Some(format!("task-{artifact_id}")),
+        attempt_id: Some(format!("attempt-{artifact_id}")),
         format: format.to_string(),
         media_type: media_type_of(format).to_string(),
         file_name: file_name_of(kind, format),
@@ -414,6 +416,8 @@ async fn artifact_metadata_shape_and_legacy_fallback() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["artifact_id"], "team-d1:researcher:v1");
     assert_eq!(body["team_id"], "team-d1");
+    assert_eq!(body["task_id"], "task-team-d1:researcher:v1");
+    assert_eq!(body["attempt_id"], "attempt-team-d1:researcher:v1");
     assert_eq!(body["kind"], "research");
     assert_eq!(body["format"], "research");
     assert_eq!(body["version"], 1);
@@ -638,6 +642,7 @@ async fn gate_coordinator(
         roles: vec![],
         template_id: None,           // 八期一路 additive：动态组队为 None
         budgets: Default::default(), // 八期一路 additive：角色 → 调用预算
+        parallel: false,             // 十一期 additive：非并行模式
     };
     std::fs::create_dir_all(&run_dir).unwrap();
     std::fs::write(
@@ -682,6 +687,7 @@ async fn contract_gate_rejects_invalid_and_registers_valid_artifacts() {
         evidence: vec![],
         open_issues: vec![],
         handoff: Some("不应被登记".to_string()),
+        review_result: None,
     };
     let err = coordinator
         .register_step_output_contract(
@@ -721,6 +727,7 @@ async fn contract_gate_rejects_invalid_and_registers_valid_artifacts() {
         evidence: vec![],
         open_issues: vec![],
         handoff: None,
+        review_result: None,
     };
     let err = coordinator
         .register_step_output_contract(
@@ -760,6 +767,7 @@ async fn contract_gate_rejects_invalid_and_registers_valid_artifacts() {
         }],
         open_issues: vec!["边界用例未覆盖".to_string()],
         handoff: Some(handoff_note.to_string()),
+        review_result: None,
     };
     let artifact = coordinator
         .register_step_output_contract(
@@ -812,6 +820,7 @@ async fn contract_gate_rejects_invalid_and_registers_valid_artifacts() {
         evidence: vec![],
         open_issues: vec![],
         handoff: None,
+        review_result: None,
     };
     let csv_artifact = coordinator
         .register_step_output_contract(
@@ -846,6 +855,7 @@ async fn contract_gate_rejects_invalid_and_registers_valid_artifacts() {
         }],
         open_issues: vec![],
         handoff: None,
+        review_result: None,
     };
     let research_artifact = coordinator
         .register_step_output_contract(
@@ -886,6 +896,7 @@ async fn contract_gate_rejects_invalid_and_registers_valid_artifacts() {
         evidence: vec![],
         open_issues: vec![],
         handoff: None,
+        review_result: None,
     };
     let err = coordinator
         .register_step_output_contract(
@@ -923,6 +934,7 @@ async fn contract_gate_rejects_invalid_and_registers_valid_artifacts() {
         evidence: vec![],
         open_issues: vec![],
         handoff: None,
+        review_result: None,
     };
     let markdown_artifact = coordinator
         .register_step_output_contract(

@@ -207,6 +207,8 @@ pub(crate) async fn artifact_metadata(
     let mut body = json!({
         "artifact_id": artifact.artifact_id,
         "team_id": team_id,
+        "task_id": artifact.task_id,
+        "attempt_id": artifact.attempt_id,
         "kind": artifact.kind,
         "format": artifact.format,
         "version": artifact.version,

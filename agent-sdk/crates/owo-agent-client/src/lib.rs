@@ -15,6 +15,7 @@ pub mod approvals;
 pub mod auth;
 pub mod diagnostics;
 pub mod discovery;
+pub mod events;
 pub mod http;
 pub mod sessions;
 pub mod sse;
@@ -25,7 +26,7 @@ mod error;
 pub use error::{ClientError, Result};
 pub use http::{AgentClient, ClientConfig};
 pub use owo_agent_protocol::DaemonDescriptor;
-pub use sse::{SseBuffer, SseFrame, TurnStream};
+pub use sse::{JsonEventStream, JsonSseBuffer, SseBuffer, SseFrame, TurnStream};
 
 /// 发现并连接当前数据根下的 Daemon（不存在/进程已退出 → `ClientError::NotFound`）。
 ///

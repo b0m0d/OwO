@@ -277,6 +277,10 @@ impl Approver for WorkspaceScopeApprover {
                 if !self.allow_writes {
                     return Decision::Deny;
                 }
+                // 团队 CAS 写不改项目文件，仅对已通过 Worker 写权限判定者开放。
+                if request.tool == "team_context_publish" {
+                    return Decision::Allow;
+                }
                 let path = request
                     .args
                     .get("path")
@@ -658,6 +662,14 @@ mod tests {
             Decision::Allow
         );
 
+        let publish = PermissionRequest::new(
+            "team_context_publish",
+            json!({"key":"contract","expected_revision":0}),
+            Level::Write,
+            "test",
+        );
+        assert_eq!(ro.decide(&publish).await, Decision::Deny);
+
         // 非只读 + 白名单 docs/：白名单内放行；root 内白名单外拒绝；root 外绝对路径拒绝。
         let scoped = WorkspaceScopeApprover {
             allow_writes: true,
@@ -674,6 +686,7 @@ mod tests {
             Decision::Deny,
             "root 内白名单外应拒绝"
         );
+        assert_eq!(scoped.decide(&publish).await, Decision::Allow);
         let outside = tempfile::tempdir().unwrap();
         let outside_root = simplify(&std::fs::canonicalize(outside.path()).unwrap());
         let outside_path = outside_root.join("escape.txt");

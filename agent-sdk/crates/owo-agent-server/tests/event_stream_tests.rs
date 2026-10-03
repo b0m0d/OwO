@@ -250,6 +250,33 @@ async fn events_endpoint_returns_event_stream_content_type() {
 }
 
 #[tokio::test]
+async fn dropping_event_stream_body_releases_subscription_promptly() {
+    let _guard = METRICS_TEST_LOCK.lock().await;
+    let hub = event_stream::hub();
+    let baseline = hub.active_connections();
+    let (state, _temp) = test_state().await;
+    let response = event_stream::router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/events/stream")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body();
+    drop(body);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while hub.active_connections() > baseline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("断开 HTTP body 后应及时回收 SSE 订阅");
+}
+
+#[tokio::test]
 async fn sse_frame_text_has_event_and_data_lines() {
     let _guard = METRICS_TEST_LOCK.lock().await;
     let hub = EventStreamHub::new();

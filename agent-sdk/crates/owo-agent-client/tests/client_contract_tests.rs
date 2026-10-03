@@ -4,7 +4,7 @@
 //!   * 对**假 Daemon**（tokio 原生 TCP，无 server 依赖）的端到端往返。
 
 use owo_agent_client::discovery::{descriptor_path, DaemonDiscovery};
-use owo_agent_client::sse::{parse_sse_data_line, SseBuffer};
+use owo_agent_client::sse::{parse_sse_data_line, JsonSseBuffer, SseBuffer};
 use owo_agent_client::{AgentClient, ClientConfig};
 use owo_agent_protocol::{DaemonDescriptor, SseEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -123,7 +123,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-async fn read_request(socket: &mut TcpStream) -> (String, String) {
+async fn read_request(socket: &mut TcpStream) -> (String, String, String) {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 1024];
     loop {
@@ -140,6 +140,7 @@ async fn read_request(socket: &mut TcpStream) -> (String, String) {
         .map(|p| p + 4)
         .unwrap_or(buf.len());
     let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let header_block = head.clone();
     let mut lines = head.lines();
     let request_line = lines.next().unwrap_or("").to_string();
     let mut parts = request_line.split_whitespace();
@@ -162,10 +163,10 @@ async fn read_request(socket: &mut TcpStream) -> (String, String) {
         }
         body.extend_from_slice(&tmp[..read]);
     }
-    (method, path)
+    (method, path, header_block)
 }
 
-fn route(method: &str, path: &str) -> (u16, &'static str, Vec<u8>) {
+fn route(method: &str, path: &str, headers: &str) -> (u16, &'static str, Vec<u8>) {
     if method == "GET" && path.starts_with("/health") {
         return (
             200,
@@ -184,6 +185,30 @@ fn route(method: &str, path: &str) -> (u16, &'static str, Vec<u8>) {
             "event: final\ndata: {\"type\":\"final\",\"text\":\"你好\",\"v\":1}\n\n"
         );
         return (200, "text/event-stream", body.as_bytes().to_vec());
+    }
+    if method == "GET" && path == "/teams/team/events/cursor-check" {
+        let received = headers.lines().any(|line| {
+            line.to_ascii_lowercase()
+                .starts_with("last-event-id: 2026-10-02t00:00:00z#4")
+        });
+        let body = if received {
+            b"data: {\"type\":\"cursor\",\"accepted\":true}\n\n".to_vec()
+        } else {
+            b"data: {\"type\":\"cursor\",\"accepted\":false}\n\n".to_vec()
+        };
+        return (200, "text/event-stream", body);
+    }
+    if method == "GET" && path == "/teams/team/events" {
+        return (
+            200,
+            "text/event-stream",
+            concat!(
+                "id: 7\nevent: progress\ndata: {\"type\":\"progress\",\"progress\":{\"current_steps\":[]}}\n\n",
+                "id: 8\nevent: state\ndata: {\"type\":\"state\",\"status\":\"Succeeded\"}\n\n"
+            )
+            .as_bytes()
+            .to_vec(),
+        );
     }
     if method == "POST" && path.ends_with("/abort") {
         return (200, "application/json", br#"{"ok":true}"#.to_vec());
@@ -211,8 +236,8 @@ async fn spawn_fake_daemon() -> String {
                 break;
             };
             tokio::spawn(async move {
-                let (method, path) = read_request(&mut socket).await;
-                let (status, content_type, body) = route(&method, &path);
+                let (method, path, headers) = read_request(&mut socket).await;
+                let (status, content_type, body) = route(&method, &path, &headers);
                 let reason = if status == 200 { "OK" } else { "Not Found" };
                 let head = format!(
                     "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -237,7 +262,7 @@ async fn spawn_replay_daemon(interrupted: bool) -> String {
                 break;
             };
             tokio::spawn(async move {
-                let (method, path) = read_request(&mut socket).await;
+                let (method, path, _headers) = read_request(&mut socket).await;
                 let (content_type, extra_headers, body) = if method == "POST"
                     && path.ends_with("/turn")
                 {
@@ -356,4 +381,81 @@ async fn client_round_trips_against_fake_daemon() {
 
     let cancelled = client.cancel_turn(&session.id).await.expect("cancel");
     assert_eq!(cancelled["ok"], true);
+}
+
+#[tokio::test]
+async fn client_sends_last_event_id_when_reopening_stream() {
+    let base_url = spawn_fake_daemon().await;
+    let client = AgentClient::new(ClientConfig::new(base_url, None)).expect("client");
+    let mut stream = client
+        .open_event_stream_after(
+            "/teams/team/events/cursor-check",
+            Some("2026-10-02T00:00:00Z#4"),
+        )
+        .await
+        .expect("reopen team events");
+    let event = stream
+        .next_event()
+        .await
+        .expect("cursor response")
+        .expect("valid SSE");
+    assert_eq!(event["accepted"], true);
+}
+
+#[tokio::test]
+async fn client_reads_team_event_stream_incrementally() {
+    let base_url = spawn_fake_daemon().await;
+    let client = AgentClient::new(ClientConfig::new(base_url, None)).expect("client");
+    let mut stream = client
+        .open_event_stream("/teams/team/events")
+        .await
+        .expect("open team events");
+
+    let progress = stream
+        .next_event()
+        .await
+        .expect("progress frame")
+        .expect("valid frame");
+    assert_eq!(progress["type"], "progress");
+    assert_eq!(progress["progress"]["current_steps"], serde_json::json!([]));
+    assert_eq!(stream.last_event_id(), Some("7"));
+
+    let state = stream
+        .next_event()
+        .await
+        .expect("state frame")
+        .expect("valid frame");
+    assert_eq!(state["type"], "state");
+    assert_eq!(state["status"], "Succeeded");
+    assert_eq!(stream.last_event_id(), Some("8"));
+    assert!(
+        stream.next_event().await.is_none(),
+        "EOF should terminate the stream"
+    );
+}
+
+#[test]
+fn json_sse_buffer_handles_fragmented_utf8_and_multiline_frames() {
+    let mut buffer = JsonSseBuffer::new();
+    buffer.push(b": keepalive\r\ndata: {\"type\":\"progress\",\"text\":\"\xe4\xb8");
+    assert!(buffer.next_event().is_none());
+    buffer.push(b"\xad\"}\r\n\r\n");
+    assert_eq!(buffer.next_event().unwrap().unwrap()["text"], "中");
+
+    buffer.push(b"data: {\"type\":\"progress\",\n");
+    buffer.push(b"data: \"n\":2}\n\n");
+    assert_eq!(buffer.next_event().unwrap().unwrap()["n"], 2);
+}
+
+#[test]
+fn json_sse_buffer_flushes_eof_frame_and_rejects_oversized_input() {
+    let mut buffer = JsonSseBuffer::new();
+    buffer.push(b"data: {\"ok\":true}");
+    buffer.finish();
+    assert_eq!(buffer.next_event().unwrap().unwrap()["ok"], true);
+    assert!(buffer.next_event().is_none());
+
+    let mut oversized = JsonSseBuffer::new();
+    oversized.push(&vec![b'x'; 1024 * 1024 + 1]);
+    assert!(oversized.next_event().unwrap().is_err());
 }

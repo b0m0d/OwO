@@ -1,7 +1,7 @@
 use super::git::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// 单次 Worker 执行的变更记录（`workspace-changes.json` 数组元素）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +23,30 @@ pub struct ChangeRecord {
     pub diff_ref: Option<String>,
     /// 白名单越界原因（None = 通过）。
     pub violation: Option<String>,
+}
+
+type RecordAppendLocks = std::collections::HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>;
+
+static RECORD_APPEND_LOCKS: OnceLock<Mutex<RecordAppendLocks>> = OnceLock::new();
+
+fn record_append_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let key = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(file_name)) => std::fs::canonicalize(parent)
+            .map(|parent| parent.join(file_name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    };
+    let locks = RECORD_APPEND_LOCKS.get_or_init(|| Mutex::new(RecordAppendLocks::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 /// 变更追踪器：一个写角色 worker 的追踪配置（由 TrackedRoleWorker 包装层持有）。
@@ -222,6 +246,8 @@ impl Tracker {
     /// run_dir 缺失时先建目录（无变更路径不会创建 changes 子目录，记录仍须落盘）。
     pub(crate) async fn append_record(&self, record: ChangeRecord) -> Result<(), String> {
         let path = self.records_path();
+        let append_lock = record_append_lock(&path);
+        let _guard = append_lock.lock().await;
         if let Some(parent) = path.parent() {
             if tokio::fs::create_dir_all(parent).await.is_err() {
                 return Err("变更记录目录创建失败".to_string());
@@ -243,10 +269,63 @@ impl Tracker {
 /// 读取变更记录（HTTP 读取面；缺失 → 空数组；损坏 → Err，由路由转 500）。
 pub async fn load_records(run_dir: &Path, team_id: &str) -> Result<Vec<ChangeRecord>, String> {
     let path = run_dir.join(format!("{team_id}-workspace-changes.json"));
+    let append_lock = record_append_lock(&path);
+    let _guard = append_lock.lock().await;
     match tokio::fs::read(&path).await {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|error| format!("变更记录文件损坏（{}）：{error}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(format!("读取变更记录失败：{error}")),
+    }
+}
+
+#[cfg(test)]
+mod append_record_tests {
+    use super::*;
+
+    fn tracker(run_dir: &Path, role: &str) -> Tracker {
+        Tracker {
+            root: run_dir.to_path_buf(),
+            run_dir: run_dir.to_path_buf(),
+            team_id: "team-concurrent".to_string(),
+            role: role.to_string(),
+            allowed: Vec::new(),
+            cas: owo_agent_core::cas_store::CasStore::new(run_dir.join(format!("{role}-cas")))
+                .expect("CAS should initialize"),
+            audit: None,
+        }
+    }
+
+    fn record(role: &str, step: &str) -> ChangeRecord {
+        ChangeRecord {
+            role: role.to_string(),
+            step: step.to_string(),
+            at: 1,
+            git: false,
+            changed_files: Vec::new(),
+            diff_summary: String::new(),
+            diff_ref: None,
+            violation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_appends_preserve_both_task_records() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        let first = tracker(temp.path(), "w1");
+        let second = tracker(temp.path(), "w2");
+        let (first_result, second_result) = tokio::join!(
+            first.append_record(record("w1", "task-a")),
+            second.append_record(record("w2", "task-b")),
+        );
+        assert!(first_result.is_ok());
+        assert!(second_result.is_ok());
+
+        let records = load_records(temp.path(), "team-concurrent")
+            .await
+            .expect("records should remain valid JSON");
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().any(|record| record.step == "task-a"));
+        assert!(records.iter().any(|record| record.step == "task-b"));
     }
 }

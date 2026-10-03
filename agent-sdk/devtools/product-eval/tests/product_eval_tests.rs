@@ -107,6 +107,9 @@ fn dummy_run(key: MatrixKey, status: RunStatus) -> ProductEvalRun {
         category: EvalCategory::Code,
         status,
         wall_ms: 10,
+        executor_wall_ms: 10,
+        validation_wall_ms: 0,
+        delivery_gate_wall_ms: 0,
         model_calls: 0,
         prompt_tokens: None,
         completion_tokens: None,
@@ -1282,6 +1285,9 @@ fn effective_values_and_filters() {
     assert_eq!(case.effective_repetitions(&defaults, Some(2)), 2);
     assert_eq!(case.effective_timeout_secs(&defaults), 30);
     assert_eq!(case.effective_max_model_calls(&defaults), 3);
+    let mut multi_round = make_case("eff-c", EvalCategory::Code);
+    multi_round.max_model_calls = Some(64);
+    assert_eq!(multi_round.effective_max_model_calls(&defaults), 64);
     let bare = make_case("eff-b", EvalCategory::Research);
     assert_eq!(bare.effective_repetitions(&defaults, None), 20);
     assert_eq!(bare.effective_timeout_secs(&defaults), 180);
@@ -1312,6 +1318,29 @@ fn effective_values_and_filters() {
 }
 
 // ---------------------------------------------------------------------------
+#[test]
+fn wallclock_benchmark_accepts_full_model_call_range() {
+    let previous = std::env::var("OWO_PRODUCT_EVAL_UNBOUNDED_CALLS").ok();
+    std::env::set_var("OWO_PRODUCT_EVAL_UNBOUNDED_CALLS", "1");
+    let mut case = make_case("wallclock-budget", EvalCategory::Code);
+    case.max_model_calls = Some(u32::MAX);
+    assert_eq!(
+        case.effective_max_model_calls(&SuiteDefaults::default()),
+        u32::MAX
+    );
+    let issues = validate_case(&case, &mut std::collections::BTreeSet::new());
+    assert!(
+        issues
+            .iter()
+            .all(|issue| !issue.contains("max_model_calls")),
+        "opt-in timed benchmark should accept the full u32 range: {issues:?}"
+    );
+    match previous {
+        Some(value) => std::env::set_var("OWO_PRODUCT_EVAL_UNBOUNDED_CALLS", value),
+        None => std::env::remove_var("OWO_PRODUCT_EVAL_UNBOUNDED_CALLS"),
+    }
+}
+
 // 13) R1 统计段：模式快照按拓扑过滤 + 对照 JSON 形状（live 基线用）
 // ---------------------------------------------------------------------------
 

@@ -1,15 +1,15 @@
 use super::sanitize::*;
 use super::util::*;
 use async_trait::async_trait;
-use owo_agent_core::gateway::{ModelProvider, TokenUsage};
+use owo_agent_core::gateway::{ModelCallMetadata, ModelProvider, StreamChunk, TokenUsage};
 use owo_agent_core::goal::Worker;
 use owo_agent_core::workswarm::{TeamCoordinator, WorkSwarmError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 /// 单次 worker 执行（span）指标记录。一条 JSONL 行 = 一个 span。
@@ -29,6 +29,10 @@ pub struct WorkerSpanRecord {
     #[serde(default)]
     pub ended_at_ms: u64,
     pub wall_ms: u64,
+    #[serde(default)]
+    pub provider_wait_ms: u64,
+    #[serde(default)]
+    pub lease_wait_ms: u64,
     /// succeeded | failed
     pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,6 +46,12 @@ pub struct WorkerSpanRecord {
     pub completion_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
+    /// shared_snapshot_serial | unknown_concurrent_overlap | usage_unreported | not_applicable.
+    #[serde(default)]
+    pub usage_attribution: String,
+    /// Per-request IDs/model/usage only; never prompt or response content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<ModelCallMetadata>,
     #[serde(default)]
     pub cost_usd: f64,
     /// 该步骤的第几次尝试（1 起；>1 = 返工/重试 span）。
@@ -132,14 +142,118 @@ impl MetricsJournal {
 
 /// ModelProvider 计数装饰器：`complete`/`complete_stream` 各计一次（每次模型调用
 /// 恰好经过其一），`usage_snapshot` 透传内层（token 快照差值归因不受影响）。
+pub(crate) struct RequestUsageCollector {
+    by_step: Mutex<HashMap<String, Vec<ModelCallMetadata>>>,
+}
+
+impl Default for RequestUsageCollector {
+    fn default() -> Self {
+        Self {
+            by_step: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+pub(crate) fn request_scope_key(step_id: &str, phase_epoch: Option<u64>) -> String {
+    format!("{}#{}", step_id, phase_epoch.unwrap_or(0))
+}
+
+impl RequestUsageCollector {
+    pub(crate) fn clear(&self, step_id: &str) {
+        self.by_step
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(step_id);
+    }
+
+    pub(crate) fn record(&self, step_id: &str, metadata: ModelCallMetadata) {
+        self.by_step
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(step_id.to_string())
+            .or_default()
+            .push(metadata);
+    }
+
+    pub(crate) fn take(&self, step_id: &str) -> Vec<ModelCallMetadata> {
+        self.by_step
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(step_id)
+            .unwrap_or_default()
+    }
+}
+
+pub(crate) struct LeaseWaitTracker {
+    by_step: Mutex<HashMap<String, u64>>,
+}
+
+impl Default for LeaseWaitTracker {
+    fn default() -> Self {
+        Self {
+            by_step: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl LeaseWaitTracker {
+    pub(crate) fn record(&self, step_id: &str, wait_ms: u64) {
+        self.by_step
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(step_id.to_string(), wait_ms);
+    }
+
+    pub(crate) fn take(&self, step_id: &str) -> u64 {
+        self.by_step
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(step_id)
+            .unwrap_or(0)
+    }
+}
+
 pub struct MeasuredProvider {
     inner: Arc<dyn ModelProvider>,
     calls: Arc<AtomicU64>,
+    request_usage: Option<Arc<RequestUsageCollector>>,
+    step_id: Option<String>,
 }
 
 impl MeasuredProvider {
     pub fn new(inner: Arc<dyn ModelProvider>, calls: Arc<AtomicU64>) -> Self {
-        Self { inner, calls }
+        Self {
+            inner,
+            calls,
+            request_usage: None,
+            step_id: None,
+        }
+    }
+
+    pub(crate) fn new_with_request_usage(
+        inner: Arc<dyn ModelProvider>,
+        calls: Arc<AtomicU64>,
+        request_usage: Arc<RequestUsageCollector>,
+        step_id: String,
+    ) -> Self {
+        Self {
+            inner,
+            calls,
+            request_usage: Some(request_usage),
+            step_id: Some(step_id),
+        }
+    }
+
+    fn record_unknown_request(&self, latency_ms: u64) {
+        if let (Some(collector), Some(step_id)) = (&self.request_usage, &self.step_id) {
+            collector.record(
+                step_id,
+                ModelCallMetadata {
+                    latency_ms: Some(latency_ms),
+                    ..ModelCallMetadata::default()
+                },
+            );
+        }
     }
 }
 
@@ -151,7 +265,10 @@ impl ModelProvider for MeasuredProvider {
         tools: &[owo_agent_core::tools::ToolSpec],
     ) -> Result<owo_agent_core::ModelOutput, String> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.inner.complete(messages, tools).await
+        let started = Instant::now();
+        let result = self.inner.complete(messages, tools).await;
+        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        result
     }
 
     async fn complete_stream(
@@ -161,7 +278,96 @@ impl ModelProvider for MeasuredProvider {
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<owo_agent_core::ModelOutput, String> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.inner.complete_stream(messages, tools, on_delta).await
+        let started = Instant::now();
+        let result = self.inner.complete_stream(messages, tools, on_delta).await;
+        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        result
+    }
+
+    async fn complete_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[owo_agent_core::ChatMessage],
+        tools: &[owo_agent_core::tools::ToolSpec],
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let result = self.inner.complete_with_model(model, messages, tools).await;
+        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        result
+    }
+
+    async fn complete_stream_with_model(
+        &self,
+        model: Option<&str>,
+        messages: &[owo_agent_core::ChatMessage],
+        tools: &[owo_agent_core::tools::ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let result = self
+            .inner
+            .complete_stream_with_model(model, messages, tools, on_delta)
+            .await;
+        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        result
+    }
+
+    async fn complete_stream_with_reasoning(
+        &self,
+        messages: &[owo_agent_core::ChatMessage],
+        tools: &[owo_agent_core::tools::ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let result = self
+            .inner
+            .complete_stream_with_reasoning(messages, tools, on_chunk)
+            .await;
+        self.record_unknown_request(started.elapsed().as_millis() as u64);
+        result
+    }
+
+    async fn complete_stream_with_reasoning_and_model(
+        &self,
+        model: Option<&str>,
+        messages: &[owo_agent_core::ChatMessage],
+        tools: &[owo_agent_core::tools::ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<owo_agent_core::ModelOutput, String> {
+        self.complete_stream_with_reasoning_and_model_observed(model, messages, tools, on_chunk)
+            .await
+            .map(|observed| observed.output)
+    }
+
+    async fn complete_stream_with_reasoning_and_model_observed(
+        &self,
+        model: Option<&str>,
+        messages: &[owo_agent_core::ChatMessage],
+        tools: &[owo_agent_core::tools::ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+    ) -> Result<owo_agent_core::gateway::ObservedModelOutput, String> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        match self
+            .inner
+            .complete_stream_with_reasoning_and_model_observed(model, messages, tools, on_chunk)
+            .await
+        {
+            Ok(mut observed) => {
+                observed.metadata.latency_ms = Some(started.elapsed().as_millis() as u64);
+                if let (Some(collector), Some(step_id)) = (&self.request_usage, &self.step_id) {
+                    collector.record(step_id, observed.metadata.clone());
+                }
+                Ok(observed)
+            }
+            Err(error) => {
+                self.record_unknown_request(started.elapsed().as_millis() as u64);
+                Err(error)
+            }
+        }
     }
 
     fn usage_snapshot(&self) -> TokenUsage {
@@ -173,9 +379,41 @@ impl ModelProvider for MeasuredProvider {
 // MeasuredRoleWorker（角色 worker 指标包装层）
 // ---------------------------------------------------------------------------
 
-/// 角色 worker 包装层：span 级起止/墙钟/终态/失败原因/尝试序数/输出 Artifact，
-/// 以及 model_calls（MeasuredProvider 计数）与 token/费用（provider 快照差值）。
-/// 指标追加落盘到 [`MetricsJournal`]，写失败仅记 tracing 警告（不中断运行）。
+/// Marks overlapping worker spans so shared provider snapshot deltas are not
+/// falsely attributed to one concurrent worker.
+#[derive(Default)]
+pub(crate) struct UsageAttributionTracker {
+    active: Mutex<Vec<Weak<AtomicBool>>>,
+}
+
+impl UsageAttributionTracker {
+    pub(crate) fn begin(&self) -> Arc<AtomicBool> {
+        let current = Arc::new(AtomicBool::new(false));
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        active.retain(|span| span.strong_count() > 0);
+        if !active.is_empty() {
+            current.store(true, Ordering::Relaxed);
+            for span in active.iter().filter_map(Weak::upgrade) {
+                span.store(true, Ordering::Relaxed);
+            }
+        }
+        active.push(Arc::downgrade(&current));
+        current
+    }
+
+    pub(crate) fn finish(&self, current: &Arc<AtomicBool>) {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        active.retain(|span| {
+            span.upgrade()
+                .map(|active| !Arc::ptr_eq(&active, current))
+                .unwrap_or(false)
+        });
+    }
+}
+
+/// 角色 worker 包装层：记录 span 级状态、model_calls 与无重叠时的 provider 快照用量。
+/// 并发重叠期间 token/费用留空并标记原因，避免把共享差值错误分配给某个角色。
+/// 指标追加落盘到 [MetricsJournal]，写失败仅记 tracing 警告（不中断运行）。
 pub struct MeasuredRoleWorker {
     inner: Arc<dyn Worker>,
     coordinator: Arc<TeamCoordinator>,
@@ -188,10 +426,14 @@ pub struct MeasuredRoleWorker {
     provider: Option<Arc<dyn ModelProvider>>,
     /// agent 角色 = per-span 模型调用计数（由 AgentSubagentWorker 递增）。
     model_calls: Option<Arc<AtomicU64>>,
+    usage_tracker: Arc<UsageAttributionTracker>,
+    request_usage: Option<Arc<RequestUsageCollector>>,
+    lease_waits: Option<Arc<LeaseWaitTracker>>,
 }
 
 impl MeasuredRoleWorker {
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn new(
         inner: Arc<dyn Worker>,
         coordinator: Arc<TeamCoordinator>,
@@ -203,6 +445,37 @@ impl MeasuredRoleWorker {
         provider: Option<Arc<dyn ModelProvider>>,
         model_calls: Option<Arc<AtomicU64>>,
     ) -> Self {
+        Self::new_with_usage_tracker(
+            inner,
+            coordinator,
+            journal,
+            team_id,
+            member_id,
+            role,
+            worker_kind,
+            provider,
+            model_calls,
+            Arc::new(UsageAttributionTracker::default()),
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_usage_tracker(
+        inner: Arc<dyn Worker>,
+        coordinator: Arc<TeamCoordinator>,
+        journal: MetricsJournal,
+        team_id: String,
+        member_id: String,
+        role: String,
+        worker_kind: String,
+        provider: Option<Arc<dyn ModelProvider>>,
+        model_calls: Option<Arc<AtomicU64>>,
+        usage_tracker: Arc<UsageAttributionTracker>,
+        request_usage: Option<Arc<RequestUsageCollector>>,
+        lease_waits: Option<Arc<LeaseWaitTracker>>,
+    ) -> Self {
         Self {
             inner,
             coordinator,
@@ -213,6 +486,9 @@ impl MeasuredRoleWorker {
             worker_kind,
             provider,
             model_calls,
+            usage_tracker,
+            request_usage,
+            lease_waits,
         }
     }
 
@@ -241,16 +517,43 @@ impl Worker for MeasuredRoleWorker {
     }
 
     async fn run(&self, input: &Value) -> Result<String, String> {
-        let step_id = input
-            .get("_workswarm")
+        let workswarm = input.get("_workswarm");
+        let raw_step_id = workswarm
             .and_then(|w| w.get("step_id"))
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or("");
+        let step_id = raw_step_id.to_string();
+        let scope_key = request_scope_key(
+            &step_id,
+            workswarm
+                .and_then(|w| w.get("phase_epoch"))
+                .and_then(Value::as_u64),
+        );
         let attempt = self.journal.count_step_spans(&step_id).saturating_add(1);
+        self.coordinator
+            .mark_phase_step_running(&self.team_id, &step_id);
+        self.coordinator.record_runtime_event(
+            &self.team_id,
+            "team.worker.started",
+            format!(
+                "role={} step_id={} epoch={}",
+                self.role,
+                step_id,
+                scope_key.rsplit('#').next().unwrap_or("0")
+            ),
+        );
         let started_at_ms = now_ms();
         let started_at = rfc3339();
         let usage_before = self.provider.as_ref().map(|p| p.usage_snapshot());
+        let calls_before = self
+            .model_calls
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        if let Some(collector) = &self.request_usage {
+            collector.clear(&scope_key);
+        }
+        let overlap = self.usage_tracker.begin();
         let started = Instant::now();
 
         let result = self.inner.run(input).await;
@@ -258,22 +561,69 @@ impl Worker for MeasuredRoleWorker {
         let wall_ms = started.elapsed().as_millis() as u64;
         let ended_at_ms = now_ms();
         let ended_at = rfc3339();
-        let usage_delta = match (&usage_before, self.provider.as_ref()) {
-            (Some(before), Some(provider)) => {
-                let after = provider.usage_snapshot();
+        // 先采集快照，再关闭追踪窗口；若下一 Worker 在快照期间启动，双方均标为重叠。
+        let usage_after = self
+            .provider
+            .as_ref()
+            .map(|provider| provider.usage_snapshot());
+        self.usage_tracker.finish(&overlap);
+        let overlapped = overlap.load(Ordering::Relaxed);
+        let atomic_call_delta = self
+            .model_calls
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed).saturating_sub(calls_before))
+            .unwrap_or(0);
+        let requests = self
+            .request_usage
+            .as_ref()
+            .map(|collector| collector.take(&scope_key))
+            .unwrap_or_default();
+        let model_calls = if self.request_usage.is_some() {
+            requests.len() as u64
+        } else {
+            atomic_call_delta
+        };
+        let request_usage = if model_calls > 0
+            && requests.len() as u64 == model_calls
+            && requests.iter().all(|request| request.usage.is_some())
+        {
+            let mut total = TokenUsage::default();
+            for request in &requests {
+                if let Some(usage) = &request.usage {
+                    total.add(usage);
+                }
+            }
+            Some(total)
+        } else {
+            None
+        };
+        let usage_delta = request_usage.or_else(|| match (&usage_before, &usage_after) {
+            (Some(before), Some(after)) if !overlapped => {
                 let delta = after.saturating_sub(before);
-                // 并发批次下快照差值可能为 0 但确实有调用（无 usage 上报的 provider）：
-                // 仅有调用且差值为零时也记 None，避免把「未知用量」伪装成「零用量」。
+                // 未上报 usage 不伪装为零用量。
                 (delta.total_tokens > 0 || delta.prompt_tokens > 0 || delta.completion_tokens > 0)
                     .then_some(delta)
             }
             _ => None,
+        });
+        let request_usage_complete = model_calls > 0
+            && requests.len() as u64 == model_calls
+            && requests.iter().all(|request| request.usage.is_some());
+        let usage_attribution = if self.provider.is_none() {
+            "not_applicable"
+        } else if request_usage_complete {
+            if requests.iter().all(|request| request.request_id.is_some()) {
+                "request_id_scoped"
+            } else {
+                "request_scoped_without_id"
+            }
+        } else if overlapped {
+            "unknown_concurrent_overlap"
+        } else if usage_delta.is_some() {
+            "shared_snapshot_serial"
+        } else {
+            "usage_unreported"
         };
-        let model_calls = self
-            .model_calls
-            .as_ref()
-            .map(|c| c.load(Ordering::Relaxed))
-            .unwrap_or(0);
         let cost_usd = usage_delta
             .as_ref()
             .map(|d| estimate_cost_usd(d.prompt_tokens, d.completion_tokens))
@@ -287,6 +637,15 @@ impl Worker for MeasuredRoleWorker {
         } else {
             None
         };
+        let provider_wait_ms = requests
+            .iter()
+            .filter_map(|request| request.latency_ms)
+            .sum();
+        let lease_wait_ms = self
+            .lease_waits
+            .as_ref()
+            .map(|waits| waits.take(&scope_key))
+            .unwrap_or(0);
         let record = WorkerSpanRecord {
             span_id: format!("span-{}", &uuid::Uuid::new_v4().to_string()[..8]),
             team_id: self.team_id.clone(),
@@ -299,16 +658,53 @@ impl Worker for MeasuredRoleWorker {
             started_at_ms,
             ended_at_ms,
             wall_ms,
+            provider_wait_ms,
+            lease_wait_ms,
             outcome: outcome.to_string(),
             error,
             model_calls,
             prompt_tokens: usage_delta.as_ref().map(|d| d.prompt_tokens),
             completion_tokens: usage_delta.as_ref().map(|d| d.completion_tokens),
             total_tokens: usage_delta.as_ref().map(|d| d.total_tokens),
+            usage_attribution: usage_attribution.to_string(),
+            requests,
             cost_usd,
             attempt,
             artifact,
         };
+        for request in &record.requests {
+            self.coordinator.record_runtime_event(
+                &self.team_id,
+                "team.model.request_completed",
+                format!(
+                    "role={} step_id={} request_id={} model={} latency_ms={} usage_tokens={}",
+                    self.role,
+                    record.step_id,
+                    request.request_id.as_deref().unwrap_or("unknown"),
+                    request.model.as_deref().unwrap_or("unknown"),
+                    request.latency_ms.unwrap_or(0),
+                    request.usage.map(|usage| usage.total_tokens).unwrap_or(0),
+                ),
+            );
+        }
+        if record.lease_wait_ms > 0 {
+            self.coordinator.record_runtime_event(
+                &self.team_id,
+                "team.lease.wait_completed",
+                format!(
+                    "role={} step_id={} wait_ms={}",
+                    self.role, record.step_id, record.lease_wait_ms
+                ),
+            );
+        }
+        self.coordinator.record_runtime_event(
+            &self.team_id,
+            "team.worker.finished",
+            format!(
+                "role={} step_id={} outcome={} wall_ms={}",
+                self.role, record.step_id, record.outcome, record.wall_ms
+            ),
+        );
         if let Err(e) = self.journal.append(&record) {
             tracing::warn!(
                 team_id = %self.team_id,
@@ -336,6 +732,8 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
     let failed_spans = spans.iter().filter(|r| r.outcome == "failed").count() as u64;
     let rework_count = spans.iter().filter(|r| r.attempt > 1).count() as u64;
     let worker_wall_ms_sum: u64 = spans.iter().map(|r| r.wall_ms).sum();
+    let provider_wait_ms_sum: u64 = spans.iter().map(|r| r.provider_wait_ms).sum();
+    let lease_wait_ms_sum: u64 = spans.iter().map(|r| r.lease_wait_ms).sum();
     let wall_window_ms = match spans.first() {
         Some(first) => now.saturating_sub(first.started_at_ms),
         None => 0,
@@ -370,6 +768,8 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
         failed: u64,
         rework: u64,
         wall_ms_sum: u64,
+        provider_wait_ms_sum: u64,
+        lease_wait_ms_sum: u64,
         model_calls: u64,
         prompt_tokens: Option<u64>,
         completion_tokens: Option<u64>,
@@ -390,6 +790,8 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
             agg.rework += 1;
         }
         agg.wall_ms_sum += r.wall_ms;
+        agg.provider_wait_ms_sum += r.provider_wait_ms;
+        agg.lease_wait_ms_sum += r.lease_wait_ms;
         agg.model_calls += r.model_calls;
         agg.prompt_tokens = add_opt(agg.prompt_tokens, r.prompt_tokens);
         agg.completion_tokens = add_opt(agg.completion_tokens, r.completion_tokens);
@@ -409,6 +811,8 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
                 "failed": agg.failed,
                 "rework": agg.rework,
                 "wall_ms_sum": agg.wall_ms_sum,
+                "provider_wait_ms_sum": agg.provider_wait_ms_sum,
+                "lease_wait_ms_sum": agg.lease_wait_ms_sum,
                 "model_calls": agg.model_calls,
                 "prompt_tokens": agg.prompt_tokens,
                 "completion_tokens": agg.completion_tokens,
@@ -427,7 +831,7 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
     json!({
         "team_id": team_id,
         "generated_at": rfc3339(),
-        "attribution_note": "token/费用按共享 provider 快照差值归因：串行链精确，并发批次下逐角色近似（团队总量守恒）；model_calls 逐 span 精确",
+        "attribution_note": "model_calls 逐 span 精确；响应提供逐请求 usage 时按 request_id 与 span 精确归因；否则仅在无并发重叠时使用共享 provider 快照，并发重叠且无逐请求 usage 的 token/cost 留空",
         "summary": {
             "span_count": span_count,
             "succeeded_spans": succeeded_spans,
@@ -435,6 +839,8 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
             "rework_count": rework_count,
             "wall_window_ms": wall_window_ms,
             "worker_wall_ms_sum": worker_wall_ms_sum,
+            "provider_wait_ms_sum": provider_wait_ms_sum,
+            "lease_wait_ms_sum": lease_wait_ms_sum,
             "model_calls": model_calls,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -480,6 +886,18 @@ pub fn budget_exhaustion_reason(
     now_ms: u64,
 ) -> Option<String> {
     if let Some(limit) = budget.get("max_cost_usd").and_then(Value::as_f64) {
+        let usage_unknown = records.iter().any(|record| {
+            record.model_calls > 0
+                && !matches!(
+                    record.usage_attribution.as_str(),
+                    "shared_snapshot_serial" | "request_id_scoped" | "request_scoped_without_id"
+                )
+        });
+        if usage_unknown {
+            return Some(
+                "费用预算无法核验：存在未归因的模型用量（包括并发重叠）；为避免超支，已停止调度下一阶段".to_string(),
+            );
+        }
         let spent: f64 = records.iter().map(|r| r.cost_usd).sum();
         if spent > limit {
             return Some(format!(
@@ -515,4 +933,65 @@ pub async fn team_budget_exhaustion(
     let journal = MetricsJournal::for_team(coordinator.run_dir(), team_id);
     let records = journal.read_records();
     Ok(budget_exhaustion_reason(&team.budget, &records, now_ms()))
+}
+
+#[cfg(test)]
+mod measured_provider_tests {
+    use super::MeasuredProvider;
+    use async_trait::async_trait;
+    use owo_agent_core::gateway::{ModelProvider, StreamChunk};
+    use owo_agent_core::tools::ToolSpec;
+    use owo_agent_core::{ChatMessage, ModelOutput};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingProvider {
+        model: Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RecordingProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            Ok(ModelOutput::Text("ok".to_string()))
+        }
+
+        async fn complete_stream_with_reasoning_and_model(
+            &self,
+            model: Option<&str>,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+            on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+        ) -> Result<ModelOutput, String> {
+            *self.model.lock().unwrap() = model.map(str::to_string);
+            on_chunk(StreamChunk::Content("ok".to_string()));
+            Ok(ModelOutput::Text("ok".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn model_and_reasoning_override_pass_through_exactly_once() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let inner = Arc::new(RecordingProvider {
+            model: Mutex::new(None),
+        });
+        let measured = MeasuredProvider::new(inner.clone(), calls.clone());
+        let mut chunks = Vec::new();
+        measured
+            .complete_stream_with_reasoning_and_model(
+                Some("worker-model"),
+                &[ChatMessage::user("task".to_string())],
+                &[],
+                &mut |chunk| chunks.push(chunk),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(inner.model.lock().unwrap().as_deref(), Some("worker-model"));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(chunks.len(), 1);
+    }
 }

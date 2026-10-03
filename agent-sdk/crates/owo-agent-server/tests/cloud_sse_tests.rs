@@ -245,6 +245,34 @@ async fn events_endpoint_replays_history_in_first_frame() {
 }
 
 #[tokio::test]
+async fn dropping_cloud_event_body_releases_broadcast_receiver() {
+    let task_id = format!("task-disconnect-{}", uuid::Uuid::new_v4());
+    let (state, _temp) = test_state().await;
+    let response = sse::router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/cloud/tasks/{task_id}/events"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body();
+    drop(body);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if sse::hub().publish(&task_id, "{}".to_string()) == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("断开 HTTP body 后应回收云任务 SSE 广播接收端");
+}
+
+#[tokio::test]
 async fn hub_history_isolated_by_task_id() {
     // 单例 hub 无法重置（OnceLock）；按 task_id 隔离历史即可并行安全。
     let task_a = format!("task-iso-{}", uuid::Uuid::new_v4());

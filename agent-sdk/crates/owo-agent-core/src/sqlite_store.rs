@@ -534,6 +534,17 @@ impl SessionStore for SqliteSessionStore {
         Self::save_locked(&conn, session)
     }
 
+    fn exists(&self, id: &str) -> Result<bool, AgentError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AgentError::Session("SQLite 锁中毒".into()))?;
+        conn.query_row("SELECT 1 FROM sessions WHERE id = ?1", [id], |_| Ok(()))
+            .optional()
+            .map(|value| value.is_some())
+            .map_err(sqlite_error)
+    }
+
     fn append_turn_event(
         &self,
         session_id: &str,

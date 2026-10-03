@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use super::message::*;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct StreamDelta {
+    pub request_id: Option<String>,
+    pub model: Option<String>,
+    pub finish_reason: Option<String>,
     pub content: Option<String>,
     /// 思考通道增量（`reasoning_content`，GLM/DeepSeek 约定）；不写入对话历史。
     pub reasoning: Option<String>,
@@ -20,7 +23,12 @@ pub fn parse_sse_payload(payload: &str) -> Option<StreamDelta> {
         return None;
     }
     let value: Value = serde_json::from_str(payload).ok()?;
-    let delta = value.pointer("/choices/0/delta")?;
+    // usage 尾帧允许 choices=[] 或缺省；不能先要求 choices/0/delta。
+    let delta = value.pointer("/choices/0/delta").unwrap_or(&Value::Null);
+    let finish_reason = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let content = delta
         .get("content")
         .and_then(Value::as_str)
@@ -41,11 +49,25 @@ pub fn parse_sse_payload(payload: &str) -> Option<StreamDelta> {
         .get("usage")
         .map(parse_usage_value)
         .filter(|usage| usage.total_tokens > 0 || usage.prompt_tokens > 0);
-    if content.is_none() && reasoning.is_none() && tool_call_fragments.is_empty() && usage.is_none()
+    let request_id = value.get("id").and_then(Value::as_str).map(str::to_string);
+    let model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if content.is_none()
+        && reasoning.is_none()
+        && tool_call_fragments.is_empty()
+        && usage.is_none()
+        && request_id.is_none()
+        && model.is_none()
+        && finish_reason.is_none()
     {
         return None;
     }
     Some(StreamDelta {
+        request_id,
+        model,
+        finish_reason,
         content,
         reasoning,
         tool_call_fragments,
@@ -127,37 +149,60 @@ pub(super) fn append_utf8_chunk(buffer: &mut String, pending: &mut Vec<u8>, chun
     }
 }
 
+#[derive(Debug, Default)]
+pub(super) struct StreamState {
+    pub(super) buffer: String,
+    pub(super) utf8_pending: Vec<u8>,
+    pub(super) content: String,
+    pub(super) tool_call_accumulators: HashMap<usize, ToolCallAccumulator>,
+    pub(super) saw_sse: bool,
+    pub(super) request_id: Option<String>,
+    pub(super) response_model: Option<String>,
+    pub(super) finish_reason: Option<String>,
+    pub(super) saw_done: bool,
+}
+
 pub(super) fn consume_stream_buffer(
-    buffer: &mut String,
-    content: &mut String,
-    accumulators: &mut HashMap<usize, ToolCallAccumulator>,
+    state: &mut StreamState,
     on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
-    saw_sse: &mut bool,
 ) -> Option<TokenUsage> {
     let mut usage = None;
-    while let Some(newline) = buffer.find('\n') {
-        let line = buffer[..newline].trim().to_string();
-        buffer.drain(..=newline);
+    while let Some(newline) = state.buffer.find('\n') {
+        let line = state.buffer[..newline].trim().to_string();
+        state.buffer.drain(..=newline);
         let Some(payload) = line.strip_prefix("data:") else {
             continue;
         };
-        *saw_sse = true;
+        state.saw_sse = true;
         if payload.trim() == "[DONE]" {
+            state.saw_done = true;
             continue;
         }
         if let Some(delta) = parse_sse_payload(payload) {
+            if delta.request_id.is_some() {
+                state.request_id = delta.request_id;
+            }
+            if delta.model.is_some() {
+                state.response_model = delta.model;
+            }
+            if delta.finish_reason.is_some() {
+                state.finish_reason = delta.finish_reason;
+            }
             if delta.usage.is_some() {
                 usage = delta.usage;
             }
             if let Some(delta_content) = delta.content {
-                content.push_str(&delta_content);
+                state.content.push_str(&delta_content);
                 on_chunk(StreamChunk::Content(delta_content));
             }
             // 思考通道（GLM/DeepSeek）：与正文分开回调，由上层决定展示方式。
             if let Some(reasoning) = delta.reasoning {
                 on_chunk(StreamChunk::Reasoning(reasoning));
             }
-            accumulate_tool_fragments(accumulators, &delta.tool_call_fragments);
+            accumulate_tool_fragments(
+                &mut state.tool_call_accumulators,
+                &delta.tool_call_fragments,
+            );
         }
     }
     usage

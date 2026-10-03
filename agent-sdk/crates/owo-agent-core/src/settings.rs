@@ -181,6 +181,46 @@ pub struct AgentToolCapabilities {
     pub browser: bool,
 }
 
+/// 十一期：团队（`/team`）统一配置——`<workspace>/settings.json` 的 `team` 段。
+///
+/// **一个文件统一配置 + 支持自定义**：模型、并行路数、并行度、角色编排都写在
+/// 同一份设置文件里；建队请求（CLI `--model/--parallel/--role/--write`、UI 表单）
+/// 的显式字段优先级更高，配置只在缺省时生效。
+///
+/// 示例：
+/// ```json
+/// {
+///   "team": {
+///     "model": "glm-5.3-flashx",
+///     "parallel": 4,
+///     "max_parallel": 4,
+///     "roles": [
+///       { "role": "lead", "assignee": "agent", "worker": "agent" },
+///       { "role": "w1", "assignee": "agent", "worker": "agent", "depends_on": ["lead"], "write_paths": ["src/auth"] },
+///       { "role": "w2", "assignee": "agent", "worker": "agent", "depends_on": ["lead"], "write_paths": ["src/order"] },
+///       { "role": "leader", "assignee": "agent", "worker": "agent", "depends_on": ["w1", "w2"] }
+///     ]
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TeamSettings {
+    /// 团队统一模型（None = 回退 [`Settings::model`] / 环境变量 / 服务端内置缺省）。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 并行路数：Some(N) = 缺省启用「lead 拆解 → w1..wN 并行 → leader 汇总」。
+    #[serde(default)]
+    pub parallel: Option<usize>,
+    /// 同一 wave 的并行度上限（None = 用 [`TeamSettings::parallel`]；运行期 1..=8 收敛）。
+    #[serde(default)]
+    pub max_parallel: Option<usize>,
+    /// 自定义角色编排（非空 = 建队未显式给角色时使用；字段同 `RoleSpec`，
+    /// 支持 `model`/`write_paths`/`depends_on`/`worker`，写范围相对工作区根）。
+    #[serde(default)]
+    pub roles: Vec<crate::workswarm::RoleSpec>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -252,6 +292,9 @@ pub struct Settings {
     /// 不含任何消息/提示词/输出/文件内容——数据字典经 /metrics/telemetry/status 暴露）。
     #[serde(default)]
     pub telemetry_enabled: Option<bool>,
+    /// 十一期：团队（`/team`）统一配置（模型/并行/自定义角色；请求显式字段优先）。
+    #[serde(default)]
+    pub team: TeamSettings,
 }
 
 impl Settings {
@@ -562,9 +605,6 @@ mod tests {
         assert!(std::env::var("OWO_REASONING_EFFORT").is_err());
     }
 
-    /// 回归：工作台保存模型时提交 `{"provider": {"base_url", "api_key"}}`。
-    /// 此前 `Settings` 没有 provider 段，serde 对未知字段静默忽略 → 用户填的端点与
-    /// 密钥从未落盘，表现为「测试连接通过，但首启门仍拦着发不出消息」。
     #[test]
     fn round_trips_provider_segment_from_workspace_json() {
         let workspace = std::env::temp_dir().join(format!("owo-provider-{}", uuid::Uuid::new_v4()));
@@ -581,21 +621,17 @@ mod tests {
             }"#,
         )
         .unwrap();
-
         let settings = Settings::load(&workspace);
         assert_eq!(
             settings.provider.base_url.as_deref(),
-            Some("https://api.deepseek.com/v1"),
-            "provider.base_url 必须能从 settings.json 读回（否则保存后丢失）"
+            Some("https://api.deepseek.com/v1")
         );
-        assert!(settings.provider.has_api_key(), "api_key 应被读回");
+        assert!(settings.provider.has_api_key());
         assert!(settings.provider.has_base_url());
         assert_eq!(
             settings.provider.api_key_env.as_deref(),
             Some("DEEPSEEK_API_KEY")
         );
-
-        // 空串视同未填（前端留空密钥 = 保留旧值，不应被当成"已配置"）。
         let blank = ProviderSettings {
             base_url: Some("   ".to_string()),
             api_key: Some("".to_string()),
@@ -605,15 +641,14 @@ mod tests {
         assert!(!blank.has_api_key());
 
         // 默认值：缺 provider 段的旧 settings.json 必须能正常加载。
-        let legacy = std::fs::write(
+        std::fs::write(
             workspace.join("settings.json"),
             r#"{"model":"glm-5.3-flash"}"#,
-        );
-        legacy.unwrap();
+        )
+        .unwrap();
         let old = Settings::load(&workspace);
         assert!(!old.provider.has_base_url());
         assert!(!old.provider.has_api_key());
-
         std::fs::remove_dir_all(&workspace).ok();
     }
 
@@ -626,7 +661,54 @@ mod tests {
         };
         assert!(provider.has_api_key());
         provider.clear_api_key();
-        assert!(!provider.has_api_key(), "清除后不得残留明文密钥");
-        assert!(provider.has_base_url(), "清除密钥不影响端点");
+        assert!(!provider.has_api_key());
+        assert!(provider.has_base_url());
+    }
+
+    #[test]
+    fn team_settings_load_roundtrip_and_legacy_default() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-settings-team-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("settings.json"),
+            r#"{
+              "model": "glm-5.3-flash",
+              "team": {
+                "model": "glm-5.3-flashx",
+                "parallel": 3,
+                "max_parallel": 2,
+                "roles": [
+                  {"role": "w1", "assignee": "agent", "depends_on": ["lead"], "write_paths": ["src/a"], "model": "glm-5.3-flashx"},
+                  {"role": "w2", "assignee": "agent", "depends_on": ["lead"], "write_paths": ["src/b"]}
+                ]
+              }
+            }"#,
+        ).unwrap();
+        let settings = Settings::load(&workspace);
+        assert_eq!(settings.team.model.as_deref(), Some("glm-5.3-flashx"));
+        assert_eq!(settings.team.parallel, Some(3));
+        assert_eq!(settings.team.max_parallel, Some(2));
+        assert_eq!(settings.team.roles.len(), 2);
+        assert_eq!(settings.team.roles[0].role, "w1");
+        assert_eq!(settings.team.roles[0].write_paths, vec!["src/a"]);
+        assert_eq!(
+            settings.team.roles[0].model.as_deref(),
+            Some("glm-5.3-flashx")
+        );
+        settings.save(&workspace).unwrap();
+        let reloaded = Settings::load(&workspace);
+        assert_eq!(reloaded.team.roles[1].role, "w2");
+        assert_eq!(reloaded.team.parallel, Some(3));
+        std::fs::write(
+            workspace.join("settings.json"),
+            r#"{"model":"glm-5.3-flash","read_only":false}"#,
+        )
+        .unwrap();
+        let legacy = Settings::load(&workspace);
+        assert!(legacy.team.model.is_none());
+        assert!(legacy.team.parallel.is_none());
+        assert!(legacy.team.roles.is_empty());
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 }

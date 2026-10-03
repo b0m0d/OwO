@@ -178,6 +178,12 @@ pub struct Artifact {
     /// 所属团队运行（七期 additive；旧记录缺省为空）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub team_id: String,
+    /// 创建此产物的任务身份；旧产物为空时按 legacy 处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// 创建此产物的尝试身份；旧产物为空时不能作为新任务验收证据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     /// 内容格式（七期：text|markdown|json|csv|research；旧记录缺省 "text"）。
     #[serde(default = "default_artifact_format")]
     pub format: String,
@@ -403,6 +409,9 @@ pub struct ChangeSet {
     pub team_id: String,
     /// 产生该变更集合的步骤（`s-{role}`）。
     pub step_id: String,
+    /// 产生该变更集合的任务尝试；旧记录缺失时不能与新 attempt 收据绑定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     /// 产生该变更集合的角色。
     pub role: String,
     /// 执行前基线（仅本次变更涉及的文件；三态见 [`ChangeSetFileHash`]）。
@@ -498,6 +507,32 @@ pub enum ProjectSpaceStatus {
     Completed,
 }
 
+/// 可追溯共享事实的元数据；正文单独存放在 CAS。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedContextFact {
+    pub key: String,
+    pub value_ref: String,
+    pub revision: u64,
+    pub producer: String,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub source_refs: Vec<String>,
+    #[serde(default)]
+    pub file_hash: Option<String>,
+    pub confidence: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+/// 团队共享事实快照；revision 由 SQLite CAS 写入更新。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SharedContextSnapshot {
+    pub revision: u64,
+    #[serde(default)]
+    pub facts: Vec<SharedContextFact>,
+}
+
 /// 项目空间（§6.6 ProjectSpace）。
 ///
 /// WorkSwarm 式协同的核心：统一的任务、产物、决策、审批和活动流工作空间。
@@ -566,6 +601,17 @@ pub struct TeamTemplateRole {
     /// 验证断言（`non_empty` / `contains:<text>` / `equals:<text>`）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verify: Option<String>,
+    /// 角色模型（十一期 additive）：None = 服务端缺省解析链
+    /// （`input.model` 未注入时回退 `OWO_AGENT_MODEL` → 内置缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 角色级写白名单（相对工作区根；空 = 工作区内可写）。
+    /// 声明后写角色可与其他**范围不重叠**的写角色并发落盘（范围租约）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_paths: Vec<String>,
+    /// 职责能力（例如 review）；缺失时由旧角色名兼容推导。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// 团队模板：已验证的角色组合、Swarmflow 与适用条件（§6.1）。

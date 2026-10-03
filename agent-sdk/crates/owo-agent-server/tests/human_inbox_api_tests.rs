@@ -200,8 +200,12 @@ fn seed_run_state(
                 step_id: (*step_id).to_string(),
                 status: *status,
                 attempts: *attempts,
+                attempt_id: None,
                 output: None,
                 error: error.map(|e| e.to_string()),
+                skip_reason: None,
+                phase_epoch: None,
+                validation_receipts: Vec::new(),
             },
         );
     }
@@ -223,6 +227,7 @@ fn seed_run_meta(state: &owo_agent_server::AppState, team_id: &str, worker: &str
         }],
         template_id: None,
         budgets: std::collections::BTreeMap::new(),
+        parallel: false,
     };
     std::fs::write(
         coordinator.run_dir().join(format!("{team_id}-meta.json")),
@@ -260,6 +265,8 @@ fn make_artifact(
         supersedes_artifact_id: None,
         created_at: now(),
         team_id: project_team.to_string(),
+        task_id: None,
+        attempt_id: None,
         format: "markdown".to_string(),
         media_type: "text/markdown".to_string(),
         file_name: String::new(),
@@ -719,6 +726,7 @@ fn created_file_change_set(team_id: &str, cs_id: &str, rel: &str, content: &[u8]
         change_set_id: cs_id.to_string(),
         team_id: team_id.to_string(),
         step_id: "s-impl".to_string(),
+        attempt_id: None,
         role: "implementer".to_string(),
         base_hashes: vec![ChangeSetFileHash {
             path: rel.to_string(),

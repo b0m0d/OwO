@@ -7,6 +7,7 @@
 use crate::error::{ClientError, Result};
 use crate::http::AgentClient;
 use owo_agent_protocol::{SseEvent, TurnEventRecord, TurnEventReplayPage, TurnReplayState};
+use serde_json::Value;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -102,6 +103,179 @@ fn parse_sse_id_line(line: &str) -> Option<String> {
         return None;
     }
     Some(value.to_string())
+}
+
+/// JSON data 帧解析器，支持分片、CRLF、多 data 行及有界事件大小。
+#[derive(Debug, Default)]
+pub struct JsonSseBuffer {
+    buffer: Vec<u8>,
+    data_lines: Vec<String>,
+    data_bytes: usize,
+    finished: bool,
+    overflowed: bool,
+    last_event_id: Option<String>,
+}
+
+impl JsonSseBuffer {
+    const MAX_EVENT_BYTES: usize = 1024 * 1024;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        if self.buffer.len().saturating_add(bytes.len()) > Self::MAX_EVENT_BYTES {
+            self.buffer.clear();
+            self.data_lines.clear();
+            self.data_bytes = 0;
+            self.overflowed = true;
+            return;
+        }
+        self.buffer.extend_from_slice(bytes);
+    }
+
+    pub fn finish(&mut self) {
+        self.finished = true;
+    }
+
+    pub fn last_event_id(&self) -> Option<&str> {
+        self.last_event_id.as_deref()
+    }
+
+    pub fn next_event(&mut self) -> Option<Result<Value>> {
+        if self.overflowed {
+            self.overflowed = false;
+            return Some(Err(ClientError::Protocol(
+                "SSE JSON 事件超过 1 MiB 上限".to_string(),
+            )));
+        }
+        loop {
+            let line = if let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
+                self.buffer.drain(..=newline).collect::<Vec<_>>()
+            } else if self.finished && !self.buffer.is_empty() {
+                std::mem::take(&mut self.buffer)
+            } else if self.finished && !self.data_lines.is_empty() {
+                return self.dispatch().transpose();
+            } else {
+                return None;
+            };
+            match self.process_line(&line) {
+                Ok(Some(event)) => return Some(Ok(event)),
+                Ok(None) => {}
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+
+    fn process_line(&mut self, raw: &[u8]) -> Result<Option<Value>> {
+        let mut line = raw.strip_suffix(b"\n").unwrap_or(raw);
+        line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            return self.dispatch();
+        }
+        if line.starts_with(b":") {
+            return Ok(None);
+        }
+        if let Some(id) = line.strip_prefix(b"id:") {
+            let id = id.strip_prefix(b" ").unwrap_or(id);
+            let id = std::str::from_utf8(id).map_err(|error| {
+                ClientError::Protocol(format!("SSE id 不是有效 UTF-8：{error}"))
+            })?;
+            if id.contains('\0') {
+                return Ok(None);
+            }
+            self.last_event_id = if id.is_empty() {
+                None
+            } else {
+                Some(id.to_string())
+            };
+            return Ok(None);
+        }
+        let Some(data) = line.strip_prefix(b"data:") else {
+            return Ok(None);
+        };
+        let data = data.strip_prefix(b" ").unwrap_or(data);
+        self.data_bytes = self.data_bytes.saturating_add(data.len());
+        if self.data_bytes > Self::MAX_EVENT_BYTES {
+            self.data_lines.clear();
+            self.data_bytes = 0;
+            return Err(ClientError::Protocol(
+                "SSE JSON 事件超过 1 MiB 上限".to_string(),
+            ));
+        }
+        let data = match std::str::from_utf8(data) {
+            Ok(data) => data,
+            Err(error) => {
+                self.data_lines.clear();
+                self.data_bytes = 0;
+                return Err(ClientError::Protocol(format!(
+                    "SSE data 不是有效 UTF-8：{error}"
+                )));
+            }
+        };
+        self.data_lines.push(data.to_string());
+        Ok(None)
+    }
+
+    fn dispatch(&mut self) -> Result<Option<Value>> {
+        if self.data_lines.is_empty() {
+            return Ok(None);
+        }
+        self.data_bytes = 0;
+        let data = self.data_lines.drain(..).collect::<Vec<_>>().join("\n");
+        serde_json::from_str(&data)
+            .map(Some)
+            .map_err(|error| ClientError::Protocol(format!("SSE JSON 解析失败：{error}：{data}")))
+    }
+}
+
+/// 非 turn JSON SSE 流；事件按需从 reqwest body 读取，不预缓冲整个响应。
+pub struct JsonEventStream {
+    response: reqwest::Response,
+    buffer: JsonSseBuffer,
+    stream_ended: bool,
+    stream_error: Option<String>,
+}
+
+impl JsonEventStream {
+    pub(crate) fn new(response: reqwest::Response) -> Self {
+        Self {
+            response,
+            buffer: JsonSseBuffer::new(),
+            stream_ended: false,
+            stream_error: None,
+        }
+    }
+
+    pub fn last_event_id(&self) -> Option<&str> {
+        self.buffer.last_event_id()
+    }
+
+    pub(crate) async fn next_value(&mut self) -> Option<Result<Value>> {
+        loop {
+            if let Some(event) = self.buffer.next_event() {
+                return Some(event);
+            }
+            if self.stream_ended {
+                return self
+                    .stream_error
+                    .take()
+                    .map(|error| Err(ClientError::Transport(error)));
+            }
+            match self.response.chunk().await {
+                Ok(Some(bytes)) => self.buffer.push(&bytes),
+                Ok(None) => {
+                    self.buffer.finish();
+                    self.stream_ended = true;
+                }
+                Err(error) => {
+                    self.buffer.finish();
+                    self.stream_error = Some(error.to_string());
+                    self.stream_ended = true;
+                }
+            }
+        }
+    }
 }
 
 /// turn 事件流：底层是 reqwest 响应，逐事件拉取。

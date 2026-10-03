@@ -173,6 +173,8 @@ pub struct ContractEnforcementResult {
     /// 已消耗的定向修复次数（0 = 首轮即合规；1 = 修复一次后接受）。
     /// 调用方（如 EvalAgentWorker stats）据此计 model_calls/output_repairs 计数。
     pub repairs: u32,
+    /// Usage attributable to the optional contract-repair request.
+    pub usage: Option<crate::gateway::TokenUsage>,
 }
 
 /// 契约执行失败（唯一的一次定向修复已消耗）。
@@ -182,6 +184,8 @@ pub struct ContractEnforcementError {
     pub message: String,
     /// 已消耗的定向修复次数（失败路径恒为 1）。
     pub repairs: u32,
+    /// Usage attributable to the repair attempt, including invalid repaired output.
+    pub usage: Option<crate::gateway::TokenUsage>,
 }
 
 /// 角色规则校验（producer / critic）。
@@ -204,12 +208,24 @@ pub async fn enforce_worker_output_contract(
     text: &str,
     is_critic: bool,
 ) -> Result<ContractEnforcementResult, ContractEnforcementError> {
+    enforce_worker_output_contract_with_model(provider, None, text, is_critic).await
+}
+
+/// Same output-contract path with an explicit request model, used by task-scoped workers
+/// so a repair request stays on the same model route as the work it repairs.
+pub async fn enforce_worker_output_contract_with_model(
+    provider: &Arc<dyn ModelProvider>,
+    model: Option<&str>,
+    text: &str,
+    is_critic: bool,
+) -> Result<ContractEnforcementResult, ContractEnforcementError> {
     let first_violation = match parse_worker_output(text) {
         WorkerOutputParse::Parsed(output) => match validate_by_role(&output, is_critic) {
             Ok(()) => {
                 return Ok(ContractEnforcementResult {
                     text: text.to_string(),
                     repairs: 0,
+                    usage: None,
                 })
             }
             Err(violation) => violation,
@@ -220,8 +236,6 @@ pub async fn enforce_worker_output_contract(
         }
     };
 
-    // 至多一次定向修复（一次直接 provider 调用；不计入 Agent turn，由调用方按
-    // 返回的 repairs 计 stats）。
     let messages = [ChatMessage {
         role: "user".to_string(),
         content: Some(contract_repair_prompt(is_critic, &first_violation, text)),
@@ -229,9 +243,18 @@ pub async fn enforce_worker_output_contract(
         tool_call_id: None,
         images: Vec::new(),
     }];
-    let repaired = match provider.complete(&messages, &[]).await {
-        Ok(ModelOutput::Text(text)) => strip_code_fences(&text),
-        _ => String::new(),
+    let (repaired, repair_usage) = match provider
+        .complete_with_model_observed(model, &messages, &[])
+        .await
+    {
+        Ok(observed) => {
+            let text = match observed.output {
+                ModelOutput::Text(text) => strip_code_fences(&text),
+                _ => String::new(),
+            };
+            (text, observed.metadata.usage)
+        }
+        Err(_) => (String::new(), None),
     };
     let violation = match parse_worker_output(&repaired) {
         WorkerOutputParse::Parsed(output) => match validate_by_role(&output, is_critic) {
@@ -239,6 +262,7 @@ pub async fn enforce_worker_output_contract(
                 return Ok(ContractEnforcementResult {
                     text: repaired,
                     repairs: 1,
+                    usage: repair_usage,
                 })
             }
             Err(violation) => violation,
@@ -251,6 +275,7 @@ pub async fn enforce_worker_output_contract(
     Err(ContractEnforcementError {
         message: format!("output_contract_invalid: 定向修复一次后仍不符合契约：{violation}"),
         repairs: 1,
+        usage: repair_usage,
     })
 }
 
@@ -364,9 +389,87 @@ impl ContractSubagentRunner<'_> {
         let text = outcome
             .final_text
             .unwrap_or_else(|| format!("（子代理无最终文本，共 {} 步）", outcome.steps));
-        match enforce_worker_output_contract(&self.provider, &text, read_only).await {
+        match enforce_worker_output_contract_with_model(
+            &self.provider,
+            Some(&self.model),
+            &text,
+            read_only,
+        )
+        .await
+        {
             Ok(result) => Ok(result.text),
             Err(error) => Err(error.message),
         }
+    }
+}
+
+#[cfg(test)]
+mod enforcement_usage_tests {
+    use super::enforce_worker_output_contract_with_model;
+    use crate::gateway::{
+        ChatMessage, ModelCallMetadata, ModelOutput, ModelProvider, ObservedModelOutput, TokenUsage,
+    };
+    use crate::tools::ToolSpec;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    struct RepairUsageProvider {
+        requested_model: Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RepairUsageProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            Ok(ModelOutput::Text(String::new()))
+        }
+
+        async fn complete_with_model_observed(
+            &self,
+            model: Option<&str>,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ObservedModelOutput, String> {
+            *self.requested_model.lock().unwrap() = model.map(str::to_string);
+            Ok(ObservedModelOutput {
+                output: ModelOutput::Text(
+                    r#"{"status":"done","summary":"fixed","artifact":{"kind":"note","format":"text","content":"accepted"},"evidence":[],"open_issues":[]}"#.to_string(),
+                ),
+                metadata: ModelCallMetadata {
+                    usage: Some(TokenUsage {
+                        prompt_tokens: 11,
+                        completion_tokens: 5,
+                        total_tokens: 16,
+                    }),
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn repair_usage_and_model_are_retained() {
+        let provider = Arc::new(RepairUsageProvider {
+            requested_model: Mutex::new(None),
+        });
+        let provider_dyn: Arc<dyn ModelProvider> = provider.clone();
+        let result = enforce_worker_output_contract_with_model(
+            &provider_dyn,
+            Some("worker-model"),
+            "not a contract",
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.repairs, 1);
+        assert_eq!(result.usage.unwrap().total_tokens, 16);
+        assert_eq!(
+            provider.requested_model.lock().unwrap().as_deref(),
+            Some("worker-model")
+        );
     }
 }

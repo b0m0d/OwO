@@ -1,4 +1,66 @@
 use super::*;
+
+pub(crate) fn workspace_change_status(path: &std::path::Path) -> Option<bool> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let records = value.as_array()?;
+    if records.is_empty() {
+        return None;
+    }
+    let mut changed = false;
+    for record in records {
+        let files = record.get("changed_files")?.as_array()?;
+        changed |= !files.is_empty();
+    }
+    Some(changed)
+}
+
+fn context_capabilities(ctx: &Value) -> Vec<String> {
+    ctx.get("capabilities")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+const MAX_SHARED_FACT_INLINE_BYTES: usize = 2400;
+const MAX_SHARED_FACT_CONTEXT_BYTES: usize = 8 * 1024;
+
+fn truncate_utf8_to_bytes(text: &str, max_bytes: usize) -> (&str, bool) {
+    if text.len() <= max_bytes {
+        return (text, false);
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+fn context_fact_matches_step(
+    fact: &owo_agent_protocol::SharedContextFact,
+    step: &crate::plan::StepSpec,
+) -> bool {
+    let assigned_task_id = step.input.get("assigned_task_id").and_then(Value::as_str);
+    if fact.task_id.is_none()
+        || fact.task_id.as_deref() == Some(step.id.as_str())
+        || fact.task_id.as_deref() == assigned_task_id
+    {
+        return true;
+    }
+    ["assigned_read_refs", "assigned_contract_refs"]
+        .iter()
+        .filter_map(|key| step.input.get(*key).and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|reference| fact.source_refs.iter().any(|source| source == reference))
+}
+
 impl TeamCoordinator {
     /// 步骤完成 → 版本化 Artifact（CAS ref）+ HandoffRecord + 项目空间更新 + 总线消息 + 审计。
     ///
@@ -11,8 +73,15 @@ impl TeamCoordinator {
         step_id: &str,
         output: &str,
     ) -> WorkSwarmResult<Artifact> {
-        self.register_step_output_checked(team_id, member_id, role, step_id, output, None)
-            .await
+        self.register_step_output_checked_bound(
+            team_id,
+            member_id,
+            role,
+            step_id,
+            output,
+            OutputAttemptBinding::default(),
+        )
+        .await
     }
 
     /// 带阶段代次校验的产物登记（legacy 纯文本路径，行为不变）：`phase_epoch`
@@ -32,6 +101,29 @@ impl TeamCoordinator {
         output: &str,
         phase_epoch: Option<u64>,
     ) -> WorkSwarmResult<Artifact> {
+        self.register_step_output_checked_bound(
+            team_id,
+            member_id,
+            role,
+            step_id,
+            output,
+            OutputAttemptBinding {
+                phase_epoch,
+                attempt_id: None,
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn register_step_output_checked_bound(
+        &self,
+        team_id: &str,
+        member_id: &str,
+        role: &str,
+        step_id: &str,
+        output: &str,
+        attempt: OutputAttemptBinding<'_>,
+    ) -> WorkSwarmResult<Artifact> {
         let out = StepOutput {
             content: output.to_string(),
             kind: role_kind(role).to_string(),
@@ -44,7 +136,7 @@ impl TeamCoordinator {
             validation: None,
             handoff_note: None,
         };
-        self.register_step_output_inner(team_id, member_id, role, step_id, &out, phase_epoch)
+        self.register_step_output_inner(team_id, member_id, role, step_id, &out, attempt)
             .await
     }
 
@@ -70,22 +162,115 @@ impl TeamCoordinator {
         output: &WorkerOutputV1,
         phase_epoch: Option<u64>,
     ) -> WorkSwarmResult<Artifact> {
-        if is_critic_role(role) {
-            // critic：评审结论（kind=review/markdown），证据与未决问题随落盘。
+        self.register_step_output_contract_bound(
+            team_id,
+            member_id,
+            role,
+            step_id,
+            output,
+            OutputAttemptBinding {
+                phase_epoch,
+                attempt_id: None,
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn register_step_output_contract_bound(
+        &self,
+        team_id: &str,
+        member_id: &str,
+        role: &str,
+        step_id: &str,
+        output: &WorkerOutputV1,
+        attempt: OutputAttemptBinding<'_>,
+    ) -> WorkSwarmResult<Artifact> {
+        let reviewer = RunMeta::load(&self.run_dir, team_id)
+            .ok()
+            .and_then(|meta| {
+                Self::role_spec_of_member(&meta, member_id)
+                    .ok()
+                    .map(|spec| super::util::is_review_role(&spec.role, &spec.capabilities))
+            })
+            .unwrap_or_else(|| is_review_role_name(role));
+        if reviewer {
+            let result = output.review_result.as_ref().ok_or_else(|| {
+                WorkSwarmError::Validation(
+                    "review capability 必须提交结构化 review_result".to_string(),
+                )
+            })?;
+            // 审查范围由宿主从本步骤当前依赖快照计算，模型不能自报身份或哈希。
+            let context = self
+                .assemble_context_slice(team_id, member_id, step_id)
+                .await?;
+            let reviewed_artifacts = context
+                .get("upstream")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|artifact| {
+                    let producer = artifact
+                        .get("producer")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if producer == member_id {
+                        return Err(WorkSwarmError::Validation(
+                            "独立 reviewer 不能评审自己生产的产物".to_string(),
+                        ));
+                    }
+                    Ok(json!({
+                        "artifact_id": artifact.get("artifact_id").cloned().unwrap_or(Value::Null),
+                        "version": artifact.get("version").cloned().unwrap_or(Value::Null),
+                        "sha256": artifact.get("sha256").cloned().unwrap_or(Value::Null),
+                        "producer": producer,
+                    }))
+                })
+                .collect::<WorkSwarmResult<Vec<_>>>()?;
+            if reviewed_artifacts.is_empty() {
+                return Err(WorkSwarmError::Validation(
+                    "review capability 没有可绑定的上游产物快照".to_string(),
+                ));
+            }
+            let review_document = json!({
+                "schema": "team-review-result-v1",
+                "reviewer_id": member_id,
+                "reviewed_artifacts": reviewed_artifacts,
+                "result": result,
+            });
+            let review_content = serde_json::to_string_pretty(&review_document)
+                .map_err(|e| WorkSwarmError::Run(format!("ReviewResult 序列化失败：{e}")))?;
+            let blocking_issues = result
+                .findings
+                .iter()
+                .filter(|finding| {
+                    finding.severity == crate::workswarm_output::WorkerReviewSeverity::Blocker
+                })
+                .map(|finding| finding.detail.clone())
+                .collect::<Vec<_>>();
+            let mut review_evidence_refs = evidence_refs_of(&output.evidence);
+            review_evidence_refs.extend(
+                result
+                    .findings
+                    .iter()
+                    .flat_map(|finding| finding.evidence_refs.iter().cloned()),
+            );
+            review_evidence_refs.sort();
+            review_evidence_refs.dedup();
+            // review capability：结构化结论、身份、不可变快照和阻断项共同封存。
             let out = StepOutput {
-                content: output.summary.clone(),
+                content: review_content,
                 kind: "review".to_string(),
-                format: "markdown".to_string(),
-                media_type: "text/markdown".to_string(),
-                file_name: file_name_of("review", "markdown"),
-                evidence_refs: evidence_refs_of(&output.evidence),
-                open_issues: Some(output.open_issues.clone()),
+                format: "json".to_string(),
+                media_type: "application/json".to_string(),
+                file_name: file_name_of("review", "json"),
+                evidence_refs: review_evidence_refs,
+                open_issues: Some(blocking_issues),
                 known_risks: Some(Vec::new()),
                 validation: None,
                 handoff_note: Some(output.summary.clone()),
             };
             return self
-                .register_step_output_inner(team_id, member_id, role, step_id, &out, phase_epoch)
+                .register_step_output_inner(team_id, member_id, role, step_id, &out, attempt)
                 .await;
         }
 
@@ -102,14 +287,21 @@ impl TeamCoordinator {
             declared_kind.to_string()
         };
         let eff = effective_format(&declared.format, &kind_for_meta);
+        self.audit(
+            team_id,
+            "team.artifact.validation_started",
+            format!("member={member_id} step={step_id} format={eff}"),
+        );
+        let validation_started = std::time::Instant::now();
         let validation = validate_artifact_content(&eff, &declared.content, &output.evidence);
+        let validation_ms = validation_started.elapsed().as_millis() as u64;
         if !validation.valid {
             // 门控（登记前）：未通过格式校验的产物不进任何登记流程。
             self.audit(
                 team_id,
                 "team.artifact.validation_rejected",
                 format!(
-                    "产物格式校验未通过（{eff}，{}）：member={member_id} step={step_id}，不登记",
+                    "产物格式校验未通过（{eff}，{}）：member={member_id} step={step_id} duration_ms={validation_ms}，不登记",
                     validation.reason.as_deref().unwrap_or("")
                 ),
             );
@@ -118,6 +310,13 @@ impl TeamCoordinator {
                 validation.reason.as_deref().unwrap_or("未知原因")
             )));
         }
+        self.audit(
+            team_id,
+            "team.artifact.validation_passed",
+            format!(
+                "member={member_id} step={step_id} kind={kind_for_meta} format={eff} duration_ms={validation_ms}"
+            ),
+        );
         let out = StepOutput {
             content: declared.content.clone(),
             kind: chain_kind,
@@ -130,7 +329,7 @@ impl TeamCoordinator {
             validation: Some(validation),
             handoff_note: output.handoff.clone(),
         };
-        self.register_step_output_inner(team_id, member_id, role, step_id, &out, phase_epoch)
+        self.register_step_output_inner(team_id, member_id, role, step_id, &out, attempt)
             .await
     }
 
@@ -144,9 +343,9 @@ impl TeamCoordinator {
         role: &str,
         step_id: &str,
         out: &StepOutput,
-        phase_epoch: Option<u64>,
+        attempt: OutputAttemptBinding<'_>,
     ) -> WorkSwarmResult<Artifact> {
-        if let Some(epoch) = phase_epoch {
+        if let Some(epoch) = attempt.phase_epoch {
             let current = self.phase_epoch(team_id);
             if current != epoch {
                 self.audit(
@@ -161,18 +360,79 @@ impl TeamCoordinator {
                 )));
             }
         }
-        let (_team, space, state) = self.load_bundle(team_id).await?;
+        let (_team, space, mut state) = self.load_bundle(team_id).await?;
+        if let Some(expected_attempt_id) = attempt.attempt_id {
+            let record = state
+                .records
+                .get(step_id)
+                .ok_or_else(|| WorkSwarmError::NotFound(format!("任务 {step_id} 缺少执行记录")))?;
+            if record.attempt_id.as_deref() != Some(expected_attempt_id)
+                || attempt
+                    .phase_epoch
+                    .is_none_or(|epoch| record.phase_epoch != Some(epoch))
+            {
+                self.audit(
+                    team_id,
+                    "team.phase.stale_drop",
+                    format!("过期 attempt 产物回传丢弃：step={step_id}"),
+                );
+                return Err(WorkSwarmError::Conflict(format!(
+                    "任务 {step_id} 的 attempt/epoch 已失效，回传结果已丢弃"
+                )));
+            }
+        } else {
+            // Legacy/direct registration has no worker-supplied identity. Bind it to
+            // the active host attempt, or mint and persist an explicit compatibility
+            // attempt before publishing any artifact. Production RoleWorker paths use
+            // the bound API above and cannot refresh a stale attempt this way.
+            let current_epoch = self.phase_epoch(team_id);
+            let record = state
+                .records
+                .get(step_id)
+                .ok_or_else(|| WorkSwarmError::NotFound(format!("任务 {step_id} 缺少执行记录")))?;
+            if record
+                .phase_epoch
+                .is_some_and(|epoch| epoch != current_epoch)
+            {
+                self.audit(
+                    team_id,
+                    "team.phase.stale_drop",
+                    format!("过期兼容产物回传丢弃：step={step_id}"),
+                );
+                return Err(WorkSwarmError::Conflict(format!(
+                    "任务 {step_id} 的阶段已失效，兼容回传结果已丢弃"
+                )));
+            }
+            if record.attempt_id.is_none() || record.phase_epoch.is_none() {
+                let record = state
+                    .records
+                    .get_mut(step_id)
+                    .expect("record checked above");
+                record.attempt_id = Some(format!(
+                    "{team_id}:{step_id}:legacy:{}",
+                    uuid::Uuid::new_v4()
+                ));
+                record.phase_epoch = Some(current_epoch);
+                record.attempts = record.attempts.saturating_add(1);
+                self.persist_state(&state)?;
+                self.audit(
+                    team_id,
+                    "team.attempt.legacy_registration",
+                    format!("兼容产物登记由宿主创建 attempt：step={step_id}"),
+                );
+            }
+        }
         let project_id = space.project_id.clone();
         let meta = RunMeta::load(&self.run_dir, team_id)?;
         let correlation = meta.correlation_id.clone();
 
+        let kind = out.kind.clone();
         let version = self.next_artifact_version(&space, role).await?;
         let hash = self
             .cas
             .put(out.content.as_bytes())
             .map_err(|e| WorkSwarmError::Run(format!("产物 CAS 落盘失败：{e}")))?;
         let content_ref = format!("cas://sha256:{hash}");
-        let kind = out.kind.clone();
 
         // 来源引用：直接上游的最新产物（ref 传递）。
         let step = state
@@ -191,10 +451,13 @@ impl TeamCoordinator {
             else {
                 continue;
             };
-            let Some(dep_role) = worker_role(&dep_step.worker) else {
+            let Some(_dep_role) = worker_role(&dep_step.worker) else {
                 continue;
             };
-            if let Some(a) = self.latest_artifact_for_role(&space, &dep_role).await {
+            if let Some(a) = self
+                .latest_artifact_for_step(&space, &state, &dep_step.id)
+                .await
+            {
                 source_refs.push(a.artifact_id);
             }
         }
@@ -210,7 +473,7 @@ impl TeamCoordinator {
         let mut supersedes_artifact_id: Option<String> = None;
         let mut retire_prev: Option<Artifact> = None;
         if is_rework {
-            if let Some(prev) = self.latest_artifact_for_role(&space, role).await {
+            if let Some(prev) = self.latest_artifact_for_task(&space, step_id).await {
                 if prev.review_state != ReviewState::Superseded {
                     supersedes_artifact_id = Some(prev.artifact_id.clone());
                     if prev.review_state != ReviewState::Approved {
@@ -224,6 +487,10 @@ impl TeamCoordinator {
         let parsed = Self::parse_optional_json_lists(&out.content);
         let open_issues = out.open_issues.clone().unwrap_or_else(|| parsed.0.clone());
         let known_risks = out.known_risks.clone().unwrap_or(parsed.1);
+        let attempt_id = state
+            .records
+            .get(step_id)
+            .and_then(|record| record.attempt_id.clone());
         let artifact = Artifact {
             artifact_id: format!("{team_id}:{role}:v{version}"),
             kind,
@@ -233,7 +500,7 @@ impl TeamCoordinator {
             schema_ref: None,
             source_refs,
             classification: ArtifactClassification::Private,
-            review_state: if is_critic_role(role) {
+            review_state: if out.kind == "review" {
                 ReviewState::PendingReview
             } else {
                 ReviewState::Draft
@@ -241,6 +508,8 @@ impl TeamCoordinator {
             supersedes_artifact_id,
             created_at: now_ts(),
             team_id: team_id.to_string(),
+            task_id: Some(step_id.to_string()),
+            attempt_id,
             format: out.format.clone(),
             media_type: out.media_type.clone(),
             file_name: out.file_name.clone(),
@@ -356,29 +625,58 @@ impl TeamCoordinator {
         space: &ProjectSpace,
         role: &str,
     ) -> WorkSwarmResult<u32> {
-        let kind = role_kind(role);
+        let identity = format!(":{role}:v");
         let mut max = 0u32;
         for id in &space.artifacts {
-            if let Ok(a) = self.store.get_artifact(id).await {
-                if a.kind == kind && a.version > max {
-                    max = a.version;
+            if let Ok(artifact) = self.store.get_artifact(id).await {
+                if artifact.artifact_id.contains(&identity) && artifact.version > max {
+                    max = artifact.version;
                 }
             }
         }
         Ok(max + 1)
     }
 
-    pub(crate) async fn latest_artifact_for_role(
+    /// 依赖产物必须同时匹配 task_id 与当前宿主 attempt_id；历史/迟到 attempt 不参与读取。
+    pub(crate) async fn latest_artifact_for_step(
         &self,
         space: &ProjectSpace,
-        role: &str,
+        state: &GoalRunState,
+        step_id: &str,
     ) -> Option<Artifact> {
-        let kind = role_kind(role);
+        let record = state.records.get(step_id)?;
+        let attempt_id = record.attempt_id.as_deref()?;
         let mut best: Option<Artifact> = None;
         for id in &space.artifacts {
-            if let Ok(a) = self.store.get_artifact(id).await {
-                if a.kind == kind && best.as_ref().is_none_or(|b| a.version > b.version) {
-                    best = Some(a);
+            if let Ok(artifact) = self.store.get_artifact(id).await {
+                if artifact.task_id.as_deref() == Some(step_id)
+                    && artifact.attempt_id.as_deref() == Some(attempt_id)
+                    && best
+                        .as_ref()
+                        .is_none_or(|current| artifact.created_at > current.created_at)
+                {
+                    best = Some(artifact);
+                }
+            }
+        }
+        best
+    }
+
+    /// 返工版本链只从同一 task_id 选择前版，避免同角色的其他任务串链。
+    pub(crate) async fn latest_artifact_for_task(
+        &self,
+        space: &ProjectSpace,
+        step_id: &str,
+    ) -> Option<Artifact> {
+        let mut best: Option<Artifact> = None;
+        for id in &space.artifacts {
+            if let Ok(artifact) = self.store.get_artifact(id).await {
+                if artifact.task_id.as_deref() == Some(step_id)
+                    && best
+                        .as_ref()
+                        .is_none_or(|current| artifact.created_at > current.created_at)
+                {
+                    best = Some(artifact);
                 }
             }
         }
@@ -395,7 +693,7 @@ impl TeamCoordinator {
         member_id: &str,
         step_id: &str,
     ) -> WorkSwarmResult<Value> {
-        let (_team, space, state) = self.load_bundle(team_id).await?;
+        let (team, space, state) = self.load_bundle(team_id).await?;
         let meta = RunMeta::load(&self.run_dir, team_id)?;
         let spec = Self::role_spec_of_member(&meta, member_id)?;
         let step = state
@@ -404,6 +702,63 @@ impl TeamCoordinator {
             .iter()
             .find(|s| s.id == step_id)
             .ok_or_else(|| WorkSwarmError::NotFound(format!("步骤 {step_id} 不存在")))?;
+        let mut core_specs = Vec::new();
+        for reference in &team.shared_context_refs {
+            let raw = self.cas_content_text(reference);
+            if let Ok(snapshot) = serde_json::from_str::<Value>(&raw) {
+                if snapshot.get("kind").and_then(Value::as_str) == Some("source_session_context_v1")
+                {
+                    if let Some(spec) = snapshot.get("core_spec") {
+                        core_specs.push(spec.clone());
+                    }
+                }
+            }
+        }
+        let shared_context = self
+            .store
+            .get_team_context(team_id)
+            .await
+            .map_err(|e| WorkSwarmError::Run(e.to_string()))?;
+        let mut shared_facts = Vec::new();
+        let mut latest_fact_keys = HashSet::new();
+        // Keep shared facts within the same scale as upstream artifacts; workers can fetch full CAS content on demand.
+        let mut fact_budget = MAX_SHARED_FACT_CONTEXT_BYTES;
+        for fact in shared_context.facts.iter().rev().take(128) {
+            if !latest_fact_keys.insert(fact.key.as_str()) {
+                continue;
+            }
+            // A file-hash-bound fact must be checked against the bound workspace by
+            // the server before it can enter a model prompt. Workers can request it
+            // through team_context_read, which performs that freshness check.
+            if fact.file_hash.is_some() {
+                continue;
+            }
+            if !context_fact_matches_step(fact, step) {
+                continue;
+            }
+            if fact.status != "candidate" && fact.status != "confirmed" {
+                continue;
+            }
+            if fact_budget == 0 {
+                break;
+            }
+            let full = self.cas_content_text(&fact.value_ref);
+            if full.is_empty() {
+                continue;
+            }
+            let (value, truncated) =
+                truncate_utf8_to_bytes(&full, fact_budget.min(MAX_SHARED_FACT_INLINE_BYTES));
+            let value = value.to_string();
+            fact_budget = fact_budget.saturating_sub(value.len());
+            shared_facts.push(json!({
+                "key": fact.key, "value": value, "value_ref": fact.value_ref,
+                "truncated": truncated,
+                "revision": fact.revision, "producer": fact.producer,
+                "task_id": fact.task_id, "source_refs": fact.source_refs,
+                "file_hash": fact.file_hash, "confidence": fact.confidence,
+                "status": fact.status
+            }));
+        }
         let mut upstream = Vec::new();
         for dep in &step.depends_on {
             let dep_step = match state
@@ -418,13 +773,21 @@ impl TeamCoordinator {
             let Some(dep_role) = worker_role(&dep_step.worker) else {
                 continue;
             };
-            if let Some(a) = self.latest_artifact_for_role(&space, &dep_role).await {
+            if let Some(a) = self
+                .latest_artifact_for_step(&space, &state, &dep_step.id)
+                .await
+            {
                 let content = self.cas_content_text(&a.content_ref);
                 upstream.push(json!({
                     "role": dep_role,
+                    "task_id": a.task_id,
+                    "attempt_id": a.attempt_id,
                     "artifact_id": a.artifact_id,
                     "version": a.version,
                     "content": content,
+                    // 评审绑定实际读取到的 CAS 字节，不信任模型声明或可变角色索引。
+                    "sha256": CasStore::hash_of(content.as_bytes()),
+                    "producer": a.producer,
                     // 八期一路：CAS ref 随切片透出（大 Artifact 摘要块需带哈希与 ref）。
                     "cas_ref": a.content_ref,
                     "review_state": format!("{:?}", a.review_state),
@@ -435,13 +798,83 @@ impl TeamCoordinator {
             "team_id": team_id,
             "objective_text": state.goal.objective,
             "role": spec.role,
+            "capabilities": spec.capabilities,
+            "write_paths": spec.write_paths,
             "member_id": member_id,
             "handoff_contract": spec.handoff_contract,
+            "core_spec": core_specs,
+            "shared_context_revision": shared_context.revision,
+            "shared_facts": shared_facts,
             // 八期一路：模板 id + 角色调用预算（角色专属 Prompt 编译输入）。
             "template_id": meta.template_id,
             "budget_calls": meta.budgets.get(&spec.role).copied().unwrap_or(0),
+            "retry_note": step.input.get("_workswarm").and_then(|meta| meta.get("retry_note")),
             "upstream": upstream,
         }))
+    }
+
+    /// Read a dependency artifact by id with step-level authorization and bounded text output.
+    pub async fn read_dependency_artifact(
+        &self,
+        team_id: &str,
+        member_id: &str,
+        step_id: &str,
+        artifact_id: &str,
+        max_bytes: usize,
+    ) -> WorkSwarmResult<Value> {
+        let (_team, space, state) = self.load_bundle(team_id).await?;
+        let meta = RunMeta::load(&self.run_dir, team_id)?;
+        let _spec = Self::role_spec_of_member(&meta, member_id)?;
+        let step = state
+            .plan
+            .steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| WorkSwarmError::NotFound(format!("步骤 {step_id} 不存在")))?;
+        for dependency in &step.depends_on {
+            let Some(dep_step) = state.plan.steps.iter().find(|item| item.id == *dependency) else {
+                continue;
+            };
+            let Some(_dep_role) = worker_role(&dep_step.worker) else {
+                continue;
+            };
+            let Some(artifact) = self
+                .latest_artifact_for_step(&space, &state, &dep_step.id)
+                .await
+            else {
+                continue;
+            };
+            if artifact.artifact_id != artifact_id || artifact.team_id != team_id {
+                continue;
+            }
+            let full = self.cas_content_text(&artifact.content_ref);
+            if full.is_empty() {
+                return Err(WorkSwarmError::NotFound(format!(
+                    "产物正文不存在：{artifact_id}"
+                )));
+            }
+            let budget = max_bytes.clamp(1, 64 * 1024);
+            let content = full
+                .char_indices()
+                .take_while(|(offset, ch)| offset + ch.len_utf8() <= budget)
+                .map(|(_, ch)| ch)
+                .collect::<String>();
+            return Ok(json!({
+                "artifact_id": artifact.artifact_id,
+                "kind": artifact.kind,
+                "version": artifact.version,
+                "producer": artifact.producer,
+                "task_id": artifact.task_id,
+                "attempt_id": artifact.attempt_id,
+                "review_state": format!("{:?}", artifact.review_state),
+                "content_ref": artifact.content_ref,
+                "content": content,
+                "truncated": content.len() < full.len()
+            }));
+        }
+        Err(WorkSwarmError::Validation(format!(
+            "产物不属于当前步骤的直接依赖：{artifact_id}"
+        )))
     }
 
     pub(crate) fn cas_content_text(&self, content_ref: &str) -> String {
@@ -458,6 +891,34 @@ impl TeamCoordinator {
     /// （运行期跳过名单，上限 16 条）、`early_exit`（提前结束原因）。事件 kind：
     /// `context` | `role_skipped` | `early_exit`；第四路 UI 直接读 strategy_decision。
     pub async fn note_adaptive_event(&self, team_id: &str, event: Value) {
+        // 仅把白名单诊断字段送入实时事件流；不把 context 详情或任意 JSON 写进审计。
+        let kind = event
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let role = event
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let step_id = event
+            .get("step_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let context_bytes = event
+            .get("context_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let audit_event = match kind {
+            "context" => "team.context.revision",
+            "role_skipped" => "team.task.skipped",
+            "early_exit" => "team.execution.early_exit",
+            _ => "team.runtime.diagnostic",
+        };
+        self.audit(
+            team_id,
+            audit_event,
+            format!("kind={kind} role={role} step_id={step_id} context_bytes={context_bytes}"),
+        );
         let lock = self.team_lock(team_id);
         let _guard = lock.lock().await;
         let Ok(mut team) = self.store.get_team_run(team_id).await else {
@@ -520,28 +981,13 @@ impl TeamCoordinator {
         let _ = self.store.save_team_run(&team).await;
     }
 
-    /// 八期一路：服务端 Git 变更跟踪记录是否存在实际工作区变更
-    /// （读 `<run_dir>/<team_id>-workspace-changes.json`；文件缺失/无记录/解析
-    /// 失败一律视为无变更——运行期 reviewer 跳过判定的输入）。
-    pub(crate) fn workspace_has_changes(&self, team_id: &str) -> bool {
+    /// Read tracked workspace changes. None means the tracker has not produced
+    /// an authoritative snapshot; callers must treat that as unknown, not clean.
+    pub(crate) fn workspace_change_status(&self, team_id: &str) -> Option<bool> {
         let path = self
             .run_dir
             .join(format!("{team_id}-workspace-changes.json"));
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            return false;
-        };
-        serde_json::from_str::<Value>(&raw)
-            .ok()
-            .and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter().any(|r| {
-                        r.get("changed_files")
-                            .and_then(Value::as_array)
-                            .is_some_and(|files| !files.is_empty())
-                    })
-                })
-            })
-            .unwrap_or(false)
+        workspace_change_status(&path)
     }
 
     /// 组装内层 worker 输入：agent 角色注入 prompt（critic 只读）；内置 worker 注入 text。
@@ -554,6 +1000,18 @@ impl TeamCoordinator {
         let Some(obj) = out.as_object_mut() else {
             return out;
         };
+        // 可信角色元数据对所有 Worker adapter 可见；内置/自定义 worker 也必须能
+        // 按 capability 选择契约行为，而不是靠猜测 text 中的上下文字符串。
+        obj.insert(
+            "role".to_string(),
+            ctx.get("role").cloned().unwrap_or(Value::Null),
+        );
+        obj.insert(
+            "capabilities".to_string(),
+            ctx.get("capabilities")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        );
         if worker_kind == "agent" {
             let has_prompt = obj
                 .get("prompt")
@@ -564,14 +1022,24 @@ impl TeamCoordinator {
                 // 八期一路：角色专属 Prompt 由 TeamPromptCompiler 编译（模板段 +
                 // 上下文字节预算 + 截断记录）；prompt 元数据随步骤输入回传，
                 // RoleWorker 转报自适应指标（best-effort，不阻塞执行）。
-                let (prompt_text, prompt_meta) = Self::compile_role_prompt_with_meta(ctx);
+                let (mut prompt_text, prompt_meta) = Self::compile_role_prompt_with_meta(ctx);
+                if let Some(rework) = input.get("rework") {
+                    let instruction = rework
+                        .get("instruction")
+                        .and_then(Value::as_str)
+                        .unwrap_or("按评审意见修复指定问题");
+                    prompt_text.push_str(&format!(
+                        "\n\n## 本次评审返修（保持原任务范围与写权限）\n{instruction}\n"
+                    ));
+                }
                 obj.insert("prompt".to_string(), json!(prompt_text));
                 if let Some(ws) = obj.get_mut("_workswarm").and_then(Value::as_object_mut) {
                     ws.insert("prompt_meta".to_string(), prompt_meta);
                 }
             }
             let role = ctx.get("role").and_then(Value::as_str).unwrap_or("");
-            obj.insert("read_only".to_string(), json!(is_critic_role(role)));
+            let is_reviewer = super::util::is_review_role(role, &context_capabilities(ctx));
+            obj.insert("read_only".to_string(), json!(is_reviewer));
             // 输出契约需要角色身份（producer 类 / critic 类的修复提示不同）。
             obj.insert("role".to_string(), json!(role));
         } else if obj.get("text").map(Value::is_null).unwrap_or(true) {
@@ -597,7 +1065,34 @@ impl TeamCoordinator {
             crate::team_prompt::PromptBudget::default(),
         );
         let role = ctx.get("role").and_then(Value::as_str).unwrap_or("member");
+        let core_spec = ctx
+            .get("core_spec")
+            .map(Value::to_string)
+            .unwrap_or_default();
+        let shared_fact_value = ctx
+            .get("shared_facts")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let shared_facts = shared_fact_value.to_string();
+        let shared_fact_truncated_count = shared_fact_value
+            .as_array()
+            .map(|facts| {
+                facts
+                    .iter()
+                    .filter(|fact| fact.get("truncated").and_then(Value::as_bool) == Some(true))
+                    .count()
+            })
+            .unwrap_or(0);
+        let shared_context_revision = ctx
+            .get("shared_context_revision")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let capabilities = context_capabilities(ctx);
+        let is_reviewer = super::util::is_review_role(role, &capabilities);
         let pctx = crate::team_prompt::PromptContext {
+            core_spec: &core_spec,
+            shared_facts: &shared_facts,
+            shared_context_revision,
             objective: ctx
                 .get("objective_text")
                 .and_then(Value::as_str)
@@ -613,12 +1108,25 @@ impl TeamCoordinator {
                 .and_then(Value::as_u64)
                 .map(|v| v as usize)
                 .unwrap_or(0),
-            is_critic: is_critic_role(role),
+            explicit_writer: !is_reviewer
+                && ctx
+                    .get("write_paths")
+                    .and_then(Value::as_array)
+                    .is_some_and(|paths| !paths.is_empty()),
+            task_scoped: ctx
+                .get("task_scoped")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            is_critic: is_reviewer,
             upstream: &compiled,
         };
         let prompt = crate::team_prompt::compile_prompt(&pctx);
+        let shared_fact_bytes = shared_facts.len();
         let meta = json!({
-            "context_bytes": compiled.context_bytes,
+            "context_bytes": compiled.context_bytes.saturating_add(shared_fact_bytes),
+            "upstream_context_bytes": compiled.context_bytes,
+            "shared_fact_bytes": shared_fact_bytes,
+            "shared_fact_truncated_count": shared_fact_truncated_count,
             "full_count": compiled.full_count,
             "summarized_count": compiled.summarized_count,
             "ref_only_count": compiled.ref_only_count,
@@ -649,4 +1157,92 @@ impl TeamCoordinator {
     }
 
     // -- 人节点（结果录入 → 产物 + 状态推进；运行任务自动唤醒下游） --
+}
+
+#[cfg(test)]
+mod context_fact_filter_tests {
+    use super::{context_fact_matches_step, workspace_change_status};
+    use crate::plan::StepSpec;
+    use owo_agent_protocol::SharedContextFact;
+    use serde_json::json;
+
+    #[test]
+    fn missing_or_invalid_workspace_tracker_is_unknown_not_clean() {
+        let path =
+            std::env::temp_dir().join(format!("owo-change-status-{}.json", uuid::Uuid::new_v4()));
+        assert_eq!(workspace_change_status(&path), None);
+        std::fs::write(&path, "not-json").unwrap();
+        assert_eq!(workspace_change_status(&path), None);
+        std::fs::write(&path, "[]").unwrap();
+        assert_eq!(workspace_change_status(&path), None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn workspace_tracker_distinguishes_confirmed_clean_and_changed() {
+        let path =
+            std::env::temp_dir().join(format!("owo-change-status-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, r#"[{"changed_files":[]}]"#).unwrap();
+        assert_eq!(workspace_change_status(&path), Some(false));
+        std::fs::write(&path, r#"[{"changed_files":["src/lib.rs"]}]"#).unwrap();
+        assert_eq!(workspace_change_status(&path), Some(true));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn shared_fact_truncation_respects_utf8_byte_budget() {
+        let full = "\u{4e8b}\u{5b9e}".repeat(8);
+        let (kept, truncated) = super::truncate_utf8_to_bytes(&full, 5);
+        assert!(truncated);
+        assert!(kept.len() <= 5);
+        assert_eq!(kept, "\u{4e8b}");
+        let (empty, truncated) = super::truncate_utf8_to_bytes(&full, 0);
+        assert!(truncated);
+        assert!(empty.is_empty());
+        let (unchanged, truncated) = super::truncate_utf8_to_bytes("ok", 2);
+        assert!(!truncated);
+        assert_eq!(unchanged, "ok");
+    }
+
+    fn fact(task_id: Option<&str>, source_refs: &[&str]) -> SharedContextFact {
+        SharedContextFact {
+            key: "contract".to_string(),
+            value_ref: "cas://sha256:abc".to_string(),
+            revision: 1,
+            producer: "m-worker".to_string(),
+            task_id: task_id.map(str::to_string),
+            source_refs: source_refs
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            file_hash: None,
+            confidence: "unverified".to_string(),
+            status: "candidate".to_string(),
+            created_at: "2026-10-02T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn task_slice_keeps_global_task_and_referenced_facts_only() {
+        let mut step = StepSpec::new("s-worker", "m-worker");
+        step.input = json!({
+            "assigned_task_id": "task-api",
+            "assigned_read_refs": ["src/api.rs"],
+            "assigned_contract_refs": ["contract:v2"]
+        });
+
+        assert!(context_fact_matches_step(&fact(None, &[]), &step));
+        assert!(context_fact_matches_step(
+            &fact(Some("task-api"), &[]),
+            &step
+        ));
+        assert!(context_fact_matches_step(
+            &fact(Some("other-task"), &["contract:v2"]),
+            &step
+        ));
+        assert!(!context_fact_matches_step(
+            &fact(Some("other-task"), &["docs/unrelated.md"]),
+            &step
+        ));
+    }
 }

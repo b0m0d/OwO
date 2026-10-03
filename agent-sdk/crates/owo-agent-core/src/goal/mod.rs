@@ -21,7 +21,7 @@ use crate::execution_target::{
     WorkerBinding,
 };
 use crate::experience_store::{Attribution, ExperienceStore, Outcome};
-use crate::plan::{verify_output, Plan, StepSpec, StepStatus};
+use crate::plan::{Plan, StepSpec, StepStatus};
 use crate::worker_pool::{PoolWorker, WorkerPool};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,6 +32,8 @@ mod types;
 mod tests;
 
 pub use types::*;
+
+type StepSkipper = Arc<dyn Fn(&StepSpec) -> Option<String> + Send + Sync>;
 
 /// Goal/Plan 调度器：wave 拓扑 + 并行限流 + 重试 + 验证 + replan + 恢复 + 审计。
 ///
@@ -51,6 +53,11 @@ pub struct GoalRunner {
     blackboard: Option<Blackboard>,
     /// 可选经验库（worker/Goal 结果幂等写入；空闲期由主控调 `aggregate` 蒸馏技能元数据）。
     experience: Option<ExperienceStore>,
+    /// 可选单步完成流（上层可在 DAG 继续执行时同步持久化结果）。
+    step_progress: Option<tokio::sync::mpsc::UnboundedSender<StepProgressUpdate>>,
+    /// 可选动态 ready 节点跳过判定（用于运行期质量策略）。
+    step_skipper: Option<StepSkipper>,
+    workspace_verification_root: Option<std::path::PathBuf>,
 }
 
 impl GoalRunner {
@@ -63,12 +70,22 @@ impl GoalRunner {
             critic: None,
             blackboard: None,
             experience: None,
+            step_progress: None,
+            step_skipper: None,
+            workspace_verification_root: None,
         }
     }
 
     /// 从持久化状态恢复（崩溃重启；已完成步骤不重跑）。
-    pub fn from_state(state: GoalRunState, config: RunnerConfig) -> Self {
+    pub fn from_state(mut state: GoalRunState, config: RunnerConfig) -> Self {
         let aborted = state.aborted;
+        if !aborted {
+            for record in state.records.values_mut() {
+                if record.status == StepStatus::Running {
+                    record.status = StepStatus::Pending;
+                }
+            }
+        }
         Self {
             state,
             config,
@@ -77,10 +94,66 @@ impl GoalRunner {
             critic: None,
             blackboard: None,
             experience: None,
+            step_progress: None,
+            step_skipper: None,
+            workspace_verification_root: None,
         }
     }
 
-    /// 注入审计日志（每次动作写一条 audit 记录 + 顶层事件）。
+    /// 把每步终态推送给上层；WorkSwarm 用它逐任务写入完整运行状态。
+    pub fn attach_step_progress(
+        &mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<StepProgressUpdate>,
+    ) {
+        self.step_progress = Some(sender);
+    }
+
+    /// 为显式 WorkspacePaths 计划绑定宿主提供的验证根目录。
+    /// 没有绑定时验证结果保持 Unverified，必需要求会阻止下游依赖解锁。
+    pub fn attach_workspace_verification_root(&mut self, root: impl Into<std::path::PathBuf>) {
+        self.workspace_verification_root = Some(root.into());
+    }
+
+    /// 对刚就绪步骤执行确定性跳过判定；返回原因时该节点以成功跳过方式收敛。
+    pub fn attach_step_skipper<F>(&mut self, skipper: F)
+    where
+        F: Fn(&StepSpec) -> Option<String> + Send + Sync + 'static,
+    {
+        self.step_skipper = Some(Arc::new(skipper));
+    }
+
+    fn notify_step_progress(&self, step_id: &str) {
+        self.notify_step_progress_with_skip(step_id, None);
+    }
+
+    fn notify_step_progress_with_skip(&self, step_id: &str, skip_reason: Option<String>) {
+        let Some(sender) = &self.step_progress else {
+            return;
+        };
+        if let Some(record) = self.state.records.get(step_id) {
+            let worker = self
+                .state
+                .plan
+                .step(step_id)
+                .map(|step| step.worker.clone())
+                .unwrap_or_default();
+            let _ = sender.send(StepProgressUpdate {
+                step_id: step_id.to_string(),
+                worker,
+                record: record.clone(),
+                steps_taken: self.state.steps_taken,
+                total_retries: self.state.total_retries,
+                skip_reason,
+            });
+        }
+    }
+
+    fn notify_all_step_progress(&self) {
+        for step_id in self.state.records.keys() {
+            self.notify_step_progress(step_id);
+        }
+    }
+
     pub fn attach_audit(&mut self, log: Arc<Mutex<AuditLog>>) {
         self.audit = Some(log);
     }
@@ -138,6 +211,7 @@ impl GoalRunner {
         self.mark_remaining(StepStatus::Aborted);
         self.state.goal.transition(GoalStatus::Aborted);
         self.persist_if_needed();
+        self.notify_all_step_progress();
         self.log("goal.abort", "协调器取消：协作退出并保留已完成产物");
     }
 
@@ -150,6 +224,7 @@ impl GoalRunner {
         self.log("goal.abort", "调度器收到 abort 请求");
         self.state.goal.transition(GoalStatus::Aborted);
         self.persist_if_needed();
+        self.notify_all_step_progress();
     }
 
     /// 暴露只读 abort 标志（供协调器取消链置位，不必强占运行 Future 的 &mut 借用）。
@@ -193,6 +268,9 @@ impl GoalRunner {
             self.enter_aborted();
             return Ok(GoalStatus::Aborted);
         }
+        if let Err(reason) = self.state.plan.validate() {
+            return self.fail_goal(format!("执行计划非法：{reason}"));
+        }
         self.state.goal.transition(GoalStatus::Running);
         self.log("goal.start", format!("目标 {}", self.state.goal.objective));
 
@@ -221,6 +299,7 @@ impl GoalRunner {
             bindings: self.config.bindings.clone(),
             run_id: self.state.run_id.clone(),
             cancels: DispatchCancelRegistry::default(),
+            workspace_verification_root: self.workspace_verification_root.clone(),
         };
 
         loop {
@@ -284,41 +363,99 @@ impl GoalRunner {
                 return self.fail_goal("死锁：存在未完成步骤但无就绪步骤".to_string());
             }
 
-            // 并行执行就绪步骤（JoinSet + max_parallel 限流）。
+            // 就绪即派发（JoinSet + max_parallel 限流）：任一步骤返回后立即合并，
+            // 重算 DAG 并填充空出的 Worker 槽位，不等待同一批次里的慢步骤结束。
             let mut set = tokio::task::JoinSet::new();
             let mut pending: std::collections::VecDeque<StepSpec> = ready.into_iter().collect();
+            let mut scheduled = std::collections::HashSet::new();
             let mut failed: Vec<StepSpec> = Vec::new();
             let mut stop_error: Option<StepStop> = None;
-            while let Some(step) = pending.pop_front() {
-                while set.len() >= max_parallel && stop_error.is_none() {
-                    if let Err(stop) = self.merge_step_outcome(set.join_next().await, &mut failed) {
-                        stop_error = Some(stop);
+            loop {
+                while set.len() < max_parallel && stop_error.is_none() {
+                    if pending.is_empty() {
+                        pending.extend(
+                            self.state
+                                .plan
+                                .steps
+                                .iter()
+                                .filter(|step| {
+                                    !scheduled.contains(&step.id)
+                                        && self.state.records[&step.id].status.can_resume()
+                                        && self.deps_succeeded(step)
+                                })
+                                .cloned(),
+                        );
                     }
+                    let Some(step) = pending.pop_front() else {
+                        break;
+                    };
+                    if !scheduled.insert(step.id.clone()) {
+                        continue;
+                    }
+                    if let Some(reason) = self
+                        .step_skipper
+                        .as_ref()
+                        .and_then(|skipper| skipper(&step))
+                    {
+                        if let Some(record) = self.state.records.get_mut(&step.id) {
+                            record.status = StepStatus::Succeeded;
+                            record.attempts = 0;
+                            record.output = None;
+                            record.error = None;
+                            record.skip_reason = Some(reason.clone());
+                        }
+                        self.log(
+                            "goal.step.skipped",
+                            format!("步骤 {} 按运行期策略跳过", step.id),
+                        );
+                        self.persist_if_needed();
+                        self.notify_step_progress_with_skip(&step.id, Some(reason));
+                        continue;
+                    }
+                    let target_note = select_binding(&self.config.bindings, &step.id, &step.worker)
+                        .map(|b| {
+                            format!(
+                                "，target={} node={}",
+                                b.target.kind(),
+                                b.target.node_id().unwrap_or("-")
+                            )
+                        })
+                        .unwrap_or_default();
+                    self.log(
+                        "goal.step.start",
+                        format!("步骤 {}（worker {}）{}", step.id, step.worker, target_note),
+                    );
+                    let epoch = self
+                        .state
+                        .records
+                        .get(&step.id)
+                        .and_then(|record| record.phase_epoch)
+                        .unwrap_or_else(|| self.state.replan_count.saturating_add(1) as u64);
+                    let attempt_id = self
+                        .state
+                        .records
+                        .get(&step.id)
+                        .and_then(|record| record.attempt_id.clone())
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    if let Some(record) = self.state.records.get_mut(&step.id) {
+                        record.status = StepStatus::Running;
+                        record.attempt_id = Some(attempt_id.clone());
+                        record.phase_epoch = Some(epoch);
+                    }
+                    self.notify_step_progress(&step.id);
+                    set.spawn(run_step_attempts(
+                        workers.clone(),
+                        step,
+                        rt.clone(),
+                        attempt_id,
+                        epoch,
+                    ));
                 }
-                if stop_error.is_some() {
+                if set.is_empty() || stop_error.is_some() {
                     break;
                 }
-                let target_note = select_binding(&self.config.bindings, &step.id, &step.worker)
-                    .map(|b| {
-                        format!(
-                            "，target={} node={}",
-                            b.target.kind(),
-                            b.target.node_id().unwrap_or("-")
-                        )
-                    })
-                    .unwrap_or_default();
-                self.log(
-                    "goal.step.start",
-                    format!("步骤 {}（worker {}）{}", step.id, step.worker, target_note),
-                );
-                set.spawn(run_step_attempts(workers.clone(), step, rt.clone()));
-            }
-            if stop_error.is_none() {
-                while let Some(joined) = set.join_next().await {
-                    if let Err(stop) = self.merge_step_outcome(Some(joined), &mut failed) {
-                        stop_error = Some(stop);
-                        break;
-                    }
+                if let Err(stop) = self.merge_step_outcome(set.join_next().await, &mut failed) {
+                    stop_error = Some(stop);
                 }
             }
             // 早退路径（abort/预算熔断/目标拒绝）：先置位 abort 标志（通知在飞
@@ -395,12 +532,45 @@ impl GoalRunner {
         self.state.steps_taken = self.state.steps_taken.saturating_add(outcome.attempts);
         self.state.total_retries = self.state.total_retries.saturating_add(outcome.attempts);
         match outcome.result {
-            StepResult::Ok { ref output } => {
+            StepResult::Ok {
+                ref output,
+                ref attempt_id,
+                ref validation_receipts,
+                epoch,
+            } => {
+                let output_hash = crate::cas_store::CasStore::hash_of(output.as_bytes());
                 let record = self.record_mut(&outcome.step_id);
+                for previous in &mut record.validation_receipts {
+                    if previous.verdict == crate::plan::ValidationVerdictV1::Passed
+                        && previous.subject_sha256.get("step-output") != Some(&output_hash)
+                    {
+                        previous.verdict = crate::plan::ValidationVerdictV1::Stale;
+                        previous.detail = Some("步骤输出版本已变化，旧收据失效".to_string());
+                    }
+                }
+                for receipt in validation_receipts {
+                    let mut receipt = receipt.clone();
+                    if receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+                        && receipt.subject_sha256.get("step-output") != Some(&output_hash)
+                    {
+                        receipt.verdict = crate::plan::ValidationVerdictV1::Stale;
+                        receipt.detail = Some("验收收据绑定的输出不是最终接受版本".to_string());
+                    }
+                    if !record
+                        .validation_receipts
+                        .iter()
+                        .any(|previous| previous.receipt_id == receipt.receipt_id)
+                    {
+                        record.validation_receipts.push(receipt);
+                    }
+                }
                 record.status = StepStatus::Succeeded;
                 record.attempts = outcome.attempts;
+                record.attempt_id = Some(attempt_id.clone());
+                record.phase_epoch = Some(epoch);
                 record.output = Some(output.clone());
                 record.error = None;
+                record.skip_reason = None;
                 self.record_worker_experience(&outcome, true, None);
                 self.mark_step_health(&outcome, true);
                 self.log(
@@ -411,12 +581,63 @@ impl GoalRunner {
                     ),
                 );
                 self.persist_if_needed();
+                self.notify_step_progress(&outcome.step_id);
+            }
+            StepResult::FailedWithReceipts {
+                ref error,
+                ref attempt_id,
+                ref validation_receipts,
+                epoch,
+            } => {
+                let record = self.record_mut(&outcome.step_id);
+                for previous in &mut record.validation_receipts {
+                    if previous.verdict == crate::plan::ValidationVerdictV1::Passed
+                        && previous.attempt_id != *attempt_id
+                    {
+                        previous.verdict = crate::plan::ValidationVerdictV1::Stale;
+                        previous.detail = Some("步骤进入新尝试，旧收据失效".to_string());
+                    }
+                }
+                for receipt in validation_receipts {
+                    let mut receipt = receipt.clone();
+                    if receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+                        && receipt.attempt_id != *attempt_id
+                    {
+                        receipt.verdict = crate::plan::ValidationVerdictV1::Stale;
+                        receipt.detail = Some("验收收据不属于最终失败的尝试".to_string());
+                    }
+                    if !record
+                        .validation_receipts
+                        .iter()
+                        .any(|previous| previous.receipt_id == receipt.receipt_id)
+                    {
+                        record.validation_receipts.push(receipt);
+                    }
+                }
+                record.status = StepStatus::Failed;
+                record.attempts = outcome.attempts;
+                record.attempt_id = Some(attempt_id.clone());
+                record.phase_epoch = Some(epoch);
+                record.error = Some(error.clone());
+                record.skip_reason = None;
+                self.record_worker_experience(&outcome, false, Some(error));
+                self.mark_step_health(&outcome, false);
+                self.log(
+                    "goal.step.failed",
+                    format!("步骤 {} 验证失败：{error}", outcome.step_id),
+                );
+                if let Some(step) = self.state.plan.step(&outcome.step_id) {
+                    failed.push(step.clone());
+                }
+                self.persist_if_needed();
+                self.notify_step_progress(&outcome.step_id);
             }
             StepResult::Retried { ref error } => {
                 let record = self.record_mut(&outcome.step_id);
                 record.status = StepStatus::Failed;
                 record.attempts = outcome.attempts;
                 record.error = Some(error.clone());
+                record.skip_reason = None;
                 self.record_worker_experience(&outcome, false, Some(error));
                 self.mark_step_health(&outcome, false);
                 self.log(
@@ -426,6 +647,8 @@ impl GoalRunner {
                 if let Some(step) = self.state.plan.step(&outcome.step_id) {
                     failed.push(step.clone());
                 }
+                self.persist_if_needed();
+                self.notify_step_progress(&outcome.step_id);
             }
             StepResult::Budget { reason } => {
                 return Err(StepStop::Budget(reason));
@@ -437,11 +660,13 @@ impl GoalRunner {
                 record.status = StepStatus::Failed;
                 record.attempts = outcome.attempts;
                 record.error = Some(reason.clone());
+                record.skip_reason = None;
                 self.log(
                     "goal.step.rejected",
                     format!("步骤 {} 目标不可用终止：{reason}", outcome.step_id),
                 );
                 self.persist_if_needed();
+                self.notify_step_progress(&outcome.step_id);
                 return Err(StepStop::Fatal(reason.clone()));
             }
         }
@@ -523,6 +748,8 @@ impl GoalRunner {
             record.status = StepStatus::Pending;
             record.error = None;
             record.attempts = 0;
+            record.attempt_id = None;
+            record.phase_epoch = None;
         }
         // 失败的步骤本身也要重置（含在 to_reset 中，因为 depends_on_any 对自身成立时）——
         // 显式重置避免依赖判断遗漏。
@@ -532,10 +759,13 @@ impl GoalRunner {
                     record.status = StepStatus::Pending;
                     record.error = None;
                     record.attempts = 0;
+                    record.attempt_id = None;
+                    record.phase_epoch = None;
                 }
             }
         }
         self.persist_if_needed();
+        self.notify_all_step_progress();
     }
 
     fn depends_on_any(&self, step: &StepSpec, targets: &[&str]) -> bool {
@@ -565,22 +795,111 @@ impl GoalRunner {
         })
     }
 
-    /// 目标级验收：全部 acceptance 通过才 Succeeded。
+    /// Goal completion is backed by host receipts over the accepted aggregate output.
     fn verify_goal(&mut self) -> Result<GoalStatus, String> {
         self.state.goal.transition(GoalStatus::Verifying);
         self.log("goal.verifying", "全部步骤成功，进入目标验收");
-        for spec in &self.state.goal.acceptance {
-            // 验收条件对"最终汇总输出"断言：取全部成功步骤输出拼接。
-            let summary = self
+        let plan = if let Some(plan) = self.state.goal.verification_plan.clone() {
+            Some(plan)
+        } else if self.state.goal.acceptance.is_empty() {
+            None
+        } else {
+            Some(crate::verification::plan_for_specs(
+                &format!("verify-goal-{}", self.state.goal.id),
+                &self.state.goal.acceptance,
+            ))
+        };
+        if let Some(plan) = plan {
+            if let Err(reason) = plan.validate() {
+                return self.fail_goal(format!("目标 VerificationPlan 非法：{reason}"));
+            }
+            let accepted_steps = self
                 .state
                 .records
                 .values()
-                .filter(|r| r.status == StepStatus::Succeeded)
-                .filter_map(|r| r.output.clone())
+                .filter(|record| record.status == StepStatus::Succeeded)
+                .filter_map(|record| record.output.as_ref().map(|output| (record, output)))
+                .collect::<Vec<_>>();
+            let summary = accepted_steps
+                .iter()
+                .map(|(_, output)| output.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            if let Err(e) = verify_output(spec, &summary) {
-                return self.fail_goal(format!("目标验收失败：{e}"));
+            let input_sha256 = crate::cas_store::CasStore::hash_of(summary.as_bytes());
+            let subject_sha256 = std::collections::HashMap::from([(
+                "goal-aggregate-output".to_string(),
+                input_sha256.clone(),
+            )]);
+            let evidence_refs = accepted_steps
+                .iter()
+                .map(|(record, _)| {
+                    format!(
+                        "goal-step:{}:attempt:{}",
+                        record.step_id,
+                        record.attempt_id.as_deref().unwrap_or("legacy")
+                    )
+                })
+                .collect::<Vec<_>>();
+            for requirement in &plan.requirements {
+                let (verdict, detail) =
+                    crate::verification::execute_requirement(requirement, &summary);
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                let arguments = serde_json::to_string(&requirement.arguments)
+                    .unwrap_or_else(|_| "null".to_string());
+                let attempt_id = format!("{}:goal-verification", self.state.run_id);
+                let arguments_sha256 = crate::cas_store::CasStore::hash_of(arguments.as_bytes());
+                let validator_version = requirement
+                    .validator_version
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let verdict_label =
+                    serde_json::to_string(&verdict).unwrap_or_else(|_| "unknown".to_string());
+                let identity = format!(
+                    "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                    self.state.goal.id,
+                    attempt_id,
+                    self.state.replan_count,
+                    requirement.requirement_id,
+                    requirement.validator_id,
+                    validator_version,
+                    arguments_sha256,
+                    input_sha256,
+                    verdict_label
+                );
+                let receipt = crate::plan::ValidationReceiptV1 {
+                    receipt_id: crate::cas_store::CasStore::hash_of(identity.as_bytes()),
+                    task_id: self.state.goal.id.clone(),
+                    attempt_id,
+                    epoch: self.state.replan_count as u64,
+                    requirement_id: requirement.requirement_id.clone(),
+                    validator_id: requirement.validator_id.clone(),
+                    validator_version,
+                    arguments_sha256,
+                    input_sha256: input_sha256.clone(),
+                    environment_id: "goal-aggregate-output-v1".to_string(),
+                    changeset_sha256: None,
+                    detail: detail.clone(),
+                    subject_sha256: subject_sha256.clone(),
+                    verdict,
+                    evidence_refs: evidence_refs.clone(),
+                    started_at: timestamp.clone(),
+                    completed_at: timestamp,
+                };
+                if !self
+                    .state
+                    .validation_receipts
+                    .iter()
+                    .any(|stored| stored.receipt_id == receipt.receipt_id)
+                {
+                    self.state.validation_receipts.push(receipt);
+                }
+                if requirement.required && verdict != crate::plan::ValidationVerdictV1::Passed {
+                    return self.fail_goal(format!(
+                        "目标验收要求 {} 未通过或未验证：{}",
+                        requirement.requirement_id,
+                        detail.as_deref().unwrap_or("验证器未返回通过")
+                    ));
+                }
             }
         }
         self.state.goal.transition(GoalStatus::Succeeded);
@@ -618,6 +937,15 @@ impl GoalRunner {
 enum StepResult {
     Ok {
         output: String,
+        attempt_id: String,
+        validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+        epoch: u64,
+    },
+    FailedWithReceipts {
+        error: String,
+        attempt_id: String,
+        validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+        epoch: u64,
     },
     Retried {
         error: String,
@@ -668,6 +996,7 @@ struct StepRuntime {
     run_id: String,
     /// 在飞远端派发任务登记表（abort 收尾统一 cancel）。
     cancels: DispatchCancelRegistry,
+    workspace_verification_root: Option<std::path::PathBuf>,
 }
 
 /// 显式绑定解析结果（A2 定向派发与旧解析链的分界）。
@@ -924,6 +1253,8 @@ async fn run_step_attempts(
     workers: WorkerRegistry,
     step: StepSpec,
     rt: StepRuntime,
+    attempt_id: String,
+    epoch: u64,
 ) -> StepOutcome {
     // A2：显式绑定优先（严格定向），未配置时走旧解析链。
     let mut directed_binding: Option<WorkerBinding> = None;
@@ -1008,6 +1339,7 @@ async fn run_step_attempts(
         .unwrap_or(0);
     let started_at = std::time::Instant::now();
     let mut attempts = 0u32;
+    let mut validation_receipts = Vec::new();
     while attempts < max_attempts {
         if rt.aborted.load(std::sync::atomic::Ordering::SeqCst) {
             return StepOutcome {
@@ -1054,21 +1386,9 @@ async fn run_step_attempts(
                         };
                     }
                 }
-                if let Some(spec) = &step.verify {
-                    if let Err(e) = verify_output(spec, &output) {
-                        if attempts >= max_attempts {
-                            return StepOutcome {
-                                step_id: step.id.clone(),
-                                attempts,
-                                result: StepResult::Retried { error: e },
-                            };
-                        }
-                        continue;
-                    }
-                }
-                // 可选 critic 评审：意见回流 worker 重跑。
-                if critic_rounds > 0 {
-                    let final_output = match run_step_critic(
+                // 可选 critic 评审：先得到最终候选，再对最终字节执行验收。
+                let candidate = if critic_rounds > 0 {
+                    match run_step_critic(
                         &worker,
                         &input,
                         &output,
@@ -1084,29 +1404,75 @@ async fn run_step_attempts(
                             return StepOutcome {
                                 step_id: step.id.clone(),
                                 attempts,
-                                result: StepResult::Retried { error: e },
+                                result: if validation_receipts.is_empty() {
+                                    StepResult::Retried { error: e }
+                                } else {
+                                    StepResult::FailedWithReceipts {
+                                        error: e,
+                                        attempt_id,
+                                        validation_receipts,
+                                        epoch,
+                                    }
+                                },
                             }
                         }
+                    }
+                } else {
+                    output
+                };
+                if attempts > rt.budget.max_steps {
+                    return StepOutcome {
+                        step_id: step.id.clone(),
+                        attempts,
+                        result: StepResult::Budget {
+                            reason: format!("critic 评审后步骤数超过 {}", rt.budget.max_steps),
+                        },
                     };
-                    if attempts > rt.budget.max_steps {
+                }
+                let (receipts, validation_error) =
+                    verify_step_output(&step, &rt, &input, &attempt_id, epoch, &candidate);
+                validation_receipts.extend(receipts);
+                if let Some(error) = validation_error {
+                    if attempts >= max_attempts {
                         return StepOutcome {
                             step_id: step.id.clone(),
                             attempts,
-                            result: StepResult::Budget {
-                                reason: format!("critic 评审后步骤数超过 {}", rt.budget.max_steps),
+                            result: StepResult::FailedWithReceipts {
+                                error,
+                                attempt_id,
+                                validation_receipts,
+                                epoch,
                             },
                         };
                     }
-                    return finish_step(&step, &rt, final_output, attempts).await;
+                    continue;
                 }
-                return finish_step(&step, &rt, output, attempts).await;
+                return finish_step(
+                    &step,
+                    &rt,
+                    candidate,
+                    attempts,
+                    attempt_id,
+                    validation_receipts,
+                    epoch,
+                )
+                .await;
             }
             Err(e) => {
                 if attempts >= max_attempts {
                     return StepOutcome {
                         step_id: step.id.clone(),
                         attempts,
-                        result: StepResult::Retried { error: e },
+                        result: if validation_receipts.is_empty() {
+                            StepResult::Retried { error: e }
+                        } else {
+                            StepResult::FailedWithReceipts {
+                                error: e,
+                                attempt_id,
+                                validation_receipts,
+                                epoch,
+                            }
+                        },
                     };
                 }
             }
@@ -1173,11 +1539,113 @@ async fn wait_aborted(flag: Arc<std::sync::atomic::AtomicBool>) {
 }
 
 /// 步骤成功收尾：可选黑板写回 + 组装成功结果。
+fn verify_step_output(
+    step: &StepSpec,
+    rt: &StepRuntime,
+    input: &serde_json::Value,
+    attempt_id: &str,
+    epoch: u64,
+    output: &str,
+) -> (Vec<crate::plan::ValidationReceiptV1>, Option<String>) {
+    let plan = step.verification_plan.clone().or_else(|| {
+        step.verify.as_ref().map(|spec| {
+            crate::verification::plan_for_specs(
+                &format!("verify-step-{}", step.id),
+                std::slice::from_ref(spec),
+            )
+        })
+    });
+    let Some(plan) = plan else {
+        return (Vec::new(), None);
+    };
+    let input_bytes = serde_json::to_vec(input).unwrap_or_default();
+    let input_sha256 = crate::cas_store::CasStore::hash_of(&input_bytes);
+    let output_sha256 = crate::cas_store::CasStore::hash_of(output.as_bytes());
+    let mut receipts = Vec::with_capacity(plan.requirements.len());
+    let mut failures = Vec::new();
+    for requirement in &plan.requirements {
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let (verdict, detail, workspace_subjects) =
+            crate::verification::execute_registered_requirement(
+                requirement,
+                output,
+                rt.workspace_verification_root.as_deref(),
+            );
+        let arguments = serde_json::to_vec(&requirement.arguments).unwrap_or_default();
+        let validator_version = requirement
+            .validator_version
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let arguments_sha256 = crate::cas_store::CasStore::hash_of(&arguments);
+        let receipt_id_seed = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            rt.run_id,
+            step.id,
+            attempt_id,
+            epoch,
+            requirement.requirement_id,
+            requirement.validator_id,
+            validator_version,
+            arguments_sha256,
+            output_sha256,
+            workspace_subjects
+                .iter()
+                .map(|(path, hash)| format!("{path}:{hash}"))
+                .collect::<Vec<_>>()
+                .join("|")
+        );
+        receipts.push(crate::plan::ValidationReceiptV1 {
+            receipt_id: crate::cas_store::CasStore::hash_of(receipt_id_seed.as_bytes()),
+            task_id: step.id.clone(),
+            attempt_id: attempt_id.to_string(),
+            epoch,
+            requirement_id: requirement.requirement_id.clone(),
+            validator_id: requirement.validator_id.clone(),
+            validator_version,
+            arguments_sha256,
+            input_sha256: input_sha256.clone(),
+            environment_id: format!("owo-agent-core/{}", env!("CARGO_PKG_VERSION")),
+            changeset_sha256: None,
+            detail: detail.clone(),
+            subject_sha256: {
+                let mut subjects = std::collections::HashMap::from([(
+                    "step-output".to_string(),
+                    output_sha256.clone(),
+                )]);
+                subjects.extend(workspace_subjects);
+                subjects
+            },
+            verdict,
+            evidence_refs: vec![format!(
+                "goal-step://{}/{}/{}",
+                rt.run_id, step.id, attempt_id
+            )],
+            started_at,
+            completed_at: chrono::Utc::now().to_rfc3339(),
+        });
+        if requirement.required && verdict != crate::plan::ValidationVerdictV1::Passed {
+            failures.push(format!(
+                "{}: {}",
+                requirement.requirement_id,
+                detail.as_deref().unwrap_or("验证器未返回通过")
+            ));
+        }
+    }
+    (
+        receipts,
+        (!failures.is_empty()).then(|| failures.join("；")),
+    )
+}
+
+/// 步骤成功收尾：可选黑板写回 + 组装成功结果。
 async fn finish_step(
     step: &StepSpec,
     rt: &StepRuntime,
     output: String,
     attempts: u32,
+    attempt_id: String,
+    validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+    epoch: u64,
 ) -> StepOutcome {
     if let (Some(bb), Some(writer)) = (&rt.blackboard, &rt.bb_writer) {
         if let Some(key) = step
@@ -1193,8 +1661,11 @@ async fn finish_step(
                 return StepOutcome {
                     step_id: step.id.clone(),
                     attempts,
-                    result: StepResult::Retried {
+                    result: StepResult::FailedWithReceipts {
                         error: format!("blackboard 写入失败：{e}"),
+                        attempt_id,
+                        validation_receipts,
+                        epoch,
                     },
                 };
             }
@@ -1203,7 +1674,12 @@ async fn finish_step(
     StepOutcome {
         step_id: step.id.clone(),
         attempts,
-        result: StepResult::Ok { output },
+        result: StepResult::Ok {
+            output,
+            attempt_id,
+            validation_receipts,
+            epoch,
+        },
     }
 }
 

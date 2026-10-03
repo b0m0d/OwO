@@ -96,9 +96,12 @@ pub struct TurnOutcome {
     pub prompt: String,
     pub started_at: String,
     pub duration_ms: u64,
-    /// 本回合模型 token 用量增量（provider 累计快照差值）。
+    /// 本回合按请求累加的模型 token 用量。
     #[serde(default)]
     pub usage: TokenUsage,
+    /// true 表示回合内每个模型请求都返回了可归属的 usage 元数据。
+    #[serde(default)]
+    pub usage_known: bool,
     /// §9.3：阶段耗时瀑布（model/approval/tool/persistence，按发生顺序）。
     #[serde(default)]
     pub phase_timings: Vec<crate::deadline::PhaseTiming>,
@@ -499,7 +502,9 @@ impl Agent {
         let started_at = Utc::now().to_rfc3339();
         let started = std::time::Instant::now();
         let turn_id = uuid::Uuid::new_v4().to_string();
-        let usage_before = self.provider.usage_snapshot();
+        let mut usage = TokenUsage::default();
+        let mut usage_known = true;
+        let mut model_requests = 0usize;
         // §9.2：turn 入口建立统一预算（None = 不限时，仅记账不强制）；
         // §9.3：阶段耗时瀑布按发生顺序累积。
         let mut budget = DeadlineBudget::new(self.config.turn_deadline, PhaseBudgets::default());
@@ -609,6 +614,8 @@ impl Agent {
                 }
             };
             if let Some(summary) = summary {
+                // 压缩请求目前未暴露 per-request usage，因此总用量必须标为不完整。
+                usage_known = false;
                 emit(
                     &mut events,
                     &event_cell,
@@ -653,7 +660,7 @@ impl Agent {
             let wire_model = session.model_override.clone();
             let attempt = async {
                 tokio::select! {
-                    output = self.provider.complete_stream_with_reasoning_and_model(
+                    output = self.provider.complete_stream_with_reasoning_and_model_observed(
                         wire_model.as_deref(),
                         &messages,
                         &tools,
@@ -683,13 +690,20 @@ impl Agent {
                 }
                 None => attempt.await,
             };
-            let output = match output {
-                Ok(output) => output,
+            let observed = match output {
+                Ok(observed) => observed,
                 Err(error) => {
                     commit_turn_messages(session, &messages);
                     return Err(error);
                 }
             };
+            model_requests = model_requests.saturating_add(1);
+            if let Some(request_usage) = observed.metadata.usage {
+                usage.add(&request_usage);
+            } else {
+                usage_known = false;
+            }
+            let output = observed.output;
             let model_elapsed = model_started.elapsed();
             budget.record(Phase::Model, model_elapsed);
             phase_timings.push(PhaseTiming {
@@ -1288,15 +1302,35 @@ impl Agent {
             let mut emit_wrap_delta = |delta: String| {
                 emit(&mut events, &event_cell, TurnEvent::TokenDelta { delta });
             };
+            let mut wrap_chunks = |chunk: StreamChunk| {
+                if let StreamChunk::Content(delta) = chunk {
+                    emit_wrap_delta(delta);
+                }
+            };
             let wrap_up = self
                 .provider
-                .complete_stream_with_model(
+                .complete_stream_with_reasoning_and_model_observed(
                     wrap_model.as_deref(),
                     &wrap_messages,
                     &[],
-                    &mut emit_wrap_delta,
+                    &mut wrap_chunks,
                 )
                 .await;
+            model_requests = model_requests.saturating_add(1);
+            let wrap_up = match wrap_up {
+                Ok(observed) => {
+                    if let Some(request_usage) = observed.metadata.usage {
+                        usage.add(&request_usage);
+                    } else {
+                        usage_known = false;
+                    }
+                    Ok(observed.output)
+                }
+                Err(error) => {
+                    usage_known = false;
+                    Err(error)
+                }
+            };
             // 收尾总结同样不允许「空手而归」：模型没产出内容（或调用失败）时，
             // 用本回合已执行的工具动作摘要兜底——回合必须以可见结论结束。
             let text = match wrap_up {
@@ -1347,7 +1381,7 @@ impl Agent {
             target: String::new(),
             first_token_ms: None,
         });
-        let usage = self.provider.usage_snapshot().saturating_sub(&usage_before);
+        usage_known &= model_requests > 0;
         Ok(TurnOutcome {
             final_text,
             steps,
@@ -1356,6 +1390,7 @@ impl Agent {
             started_at,
             duration_ms: started.elapsed().as_millis() as u64,
             usage,
+            usage_known,
             phase_timings,
             tools_fingerprint: schema_report.fingerprint,
         })

@@ -1,5 +1,5 @@
 use crate::goal::GoalBudget;
-use crate::plan::VerificationSpec;
+use crate::plan::{VerificationPlanV1, VerificationSpec};
 use serde_json::Value;
 use std::path::Path;
 pub(super) fn now_ts() -> String {
@@ -200,8 +200,36 @@ pub(super) fn parse_verify(s: &str) -> VerificationSpec {
     }
 }
 
-pub(super) fn is_critic_role(role: &str) -> bool {
-    role == "critic"
+/// Compile the legacy role assertion into a host-known, bounded verification
+/// obligation. Custom validator names stay unknown and will be rejected as
+/// unsupported by the execution registry.
+pub(super) fn verification_plan_for_step(
+    step_id: &str,
+    spec: &VerificationSpec,
+) -> VerificationPlanV1 {
+    VerificationPlanV1 {
+        plan_id: format!("verify-{step_id}"),
+        requirements: vec![crate::verification::requirement_for_spec(step_id, spec)],
+    }
+}
+
+/// Capability is authoritative when present; role-name inference remains for legacy records.
+pub fn is_review_role(role: &str, capabilities: &[String]) -> bool {
+    if capabilities.is_empty() {
+        return is_review_role_name(role);
+    }
+    capabilities
+        .iter()
+        .any(|capability| capability.eq_ignore_ascii_case("review"))
+}
+
+/// Legacy role-name inference used only when an old record has no capability declaration.
+pub fn is_review_role_name(role: &str) -> bool {
+    let role = role.to_ascii_lowercase();
+    matches!(
+        role.rsplit(['_', '-']).next(),
+        Some("critic" | "reviewer" | "review")
+    )
 }
 
 pub(super) fn worker_role(worker: &str) -> Option<String> {
@@ -226,6 +254,10 @@ pub(super) fn parse_goal_budget(budget: &Value) -> GoalBudget {
         }
         if let Some(v) = obj.get("max_duration_secs").and_then(Value::as_u64) {
             b.max_duration_secs = v;
+        }
+        // 十一期：并行开发度（同一 wave 并发步骤数；1..=8 收敛，防误配爆并发）。
+        if let Some(v) = obj.get("max_parallel").and_then(Value::as_u64) {
+            b.max_parallel = (v as u32).clamp(1, 8);
         }
     }
     b

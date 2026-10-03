@@ -7,6 +7,8 @@ pub enum WorkSwarmError {
     Validation(String),
     #[error("状态冲突：{0}")]
     Conflict(String),
+    #[error("等待人工处理：{0}")]
+    DeliveryPending(String),
     #[error("未找到：{0}")]
     NotFound(String),
     #[error("存储错误：{0}")]

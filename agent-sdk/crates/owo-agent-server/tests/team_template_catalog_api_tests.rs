@@ -1,6 +1,6 @@
 //! 内置团队模板目录集成测试（六期 · 第三路）。
 //!
-//! 断面：① 目录只展示四类候选（未安装不进入注册表）；② 安装幂等且非破坏
+//! 断面：① 目录只展示五类候选（未安装不进入注册表）；② 安装幂等且非破坏
 //! （重复安装不覆盖用户定制）；③ **自动模式只匹配已安装模板**（安装前不命中、
 //! 安装后 applicability 关键词命中即自动建队）；④ 模板建队后角色数/成员/预算与
 //! 模板一致（DAG 持久化保真在 core 模块单测覆盖）；⑤ 安装只新增模板文件，
@@ -115,7 +115,7 @@ fn dir_entries(path: &std::path::Path) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn catalog_lists_four_builtins_as_candidates() {
+async fn catalog_lists_five_builtins_as_candidates() {
     let (state, _temp) = test_state().await;
     let catalog_router = team_template_catalog_api::team_template_catalog_router(state.clone());
     let (status, body) = call(
@@ -128,7 +128,7 @@ async fn catalog_lists_four_builtins_as_candidates() {
     .await;
     assert_eq!(status, 200, "目录应 200：{body}");
     let entries = body["catalog"].as_array().expect("catalog 数组");
-    assert_eq!(entries.len(), 4, "四类内置模板：{entries:?}");
+    assert_eq!(entries.len(), 5, "五类内置模板：{entries:?}");
     let ids: Vec<&str> = entries
         .iter()
         .map(|e| e["template"]["template_id"].as_str().unwrap())
@@ -137,6 +137,7 @@ async fn catalog_lists_four_builtins_as_candidates() {
         ids,
         vec![
             "code-change-v1",
+            "fullstack-web-v1",
             "research-brief-v1",
             "document-delivery-v1",
             "structured-extract-v1"

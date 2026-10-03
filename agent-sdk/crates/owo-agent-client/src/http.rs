@@ -29,6 +29,7 @@ impl ClientConfig {
 #[derive(Debug, Clone)]
 pub struct AgentClient {
     http: reqwest::Client,
+    stream_http: reqwest::Client,
     base_url: String,
     token: Option<String>,
     descriptor: Option<DaemonDescriptor>,
@@ -40,8 +41,13 @@ impl AgentClient {
             .timeout(config.timeout)
             .build()
             .map_err(|error| ClientError::Transport(error.to_string()))?;
+        // Streaming requests have no total-body timeout; their caller owns cancellation.
+        let stream_http = reqwest::Client::builder()
+            .build()
+            .map_err(|error| ClientError::Transport(error.to_string()))?;
         Ok(Self {
             http,
+            stream_http,
             base_url: config.base_url.trim_end_matches('/').to_string(),
             token: config.token,
             descriptor: None,
@@ -69,6 +75,15 @@ impl AgentClient {
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
         let builder = self.http.request(method, url);
+        match &self.token {
+            Some(token) => builder.bearer_auth(token),
+            None => builder,
+        }
+    }
+
+    fn stream_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let url = format!("{}{}", self.base_url, path);
+        let builder = self.stream_http.request(method, url);
         match &self.token {
             Some(token) => builder.bearer_auth(token),
             None => builder,
@@ -109,13 +124,18 @@ impl AgentClient {
         Self::decode(response).await
     }
 
+    /// 发起长期 GET 流（如团队事件 SSE）；关闭请求级超时，由调用方控制生命周期。
+    pub(crate) fn get_stream(&self, path: &str) -> reqwest::RequestBuilder {
+        self.stream_request(reqwest::Method::GET, path)
+    }
+
     /// 发起流式请求（SSE）：成功返回未读取 body 的 `Response`，失败读回错误体。
     pub(crate) fn post_stream<B: Serialize>(
         &self,
         path: &str,
         body: &B,
     ) -> reqwest::RequestBuilder {
-        self.request(reqwest::Method::POST, path).json(body)
+        self.stream_request(reqwest::Method::POST, path).json(body)
     }
 
     pub(crate) async fn send_stream(

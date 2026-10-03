@@ -156,8 +156,14 @@ impl TeamCoordinator {
                 if !r.status.is_terminal() || r.status == StepStatus::Aborted {
                     r.status = StepStatus::Pending;
                     r.attempts = 0;
+                    r.attempt_id = None;
                     r.output = None;
                     r.error = None;
+                    for receipt in &mut r.validation_receipts {
+                        receipt.verdict = crate::plan::ValidationVerdictV1::Stale;
+                        receipt.detail =
+                            Some("continue invalidated the prior attempt receipt".into());
+                    }
                 }
             }
             state.aborted = false;
@@ -391,8 +397,14 @@ impl TeamCoordinator {
             if reset_ids.contains(r.step_id.as_str()) && r.status != StepStatus::Succeeded {
                 r.status = StepStatus::Pending;
                 r.attempts = 0;
+                r.attempt_id = None;
                 r.output = None;
                 r.error = None;
+                for receipt in &mut r.validation_receipts {
+                    receipt.verdict = crate::plan::ValidationVerdictV1::Stale;
+                    receipt.detail =
+                        Some("retry/rework invalidated the prior attempt receipt".into());
+                }
             }
         }
         state.aborted = false;
@@ -416,6 +428,17 @@ impl TeamCoordinator {
         }
         team.status = TeamRunStatus::Created;
         team.updated_at = now_ts();
+
+        // 将返工诊断绑定到目标任务输入，供同一任务会话继续执行；不改验收或授权。
+        if let Some(step) = state.plan.step_mut(&step.id) {
+            if let Some(input) = step.input.as_object_mut() {
+                let metadata = input.entry("_workswarm").or_insert_with(|| json!({}));
+                if let Some(metadata) = metadata.as_object_mut() {
+                    let bounded_note = note.chars().take(1600).collect::<String>();
+                    metadata.insert("retry_note".to_string(), json!(bounded_note));
+                }
+            }
+        }
 
         // 变更留痕：DecisionRecord（affected_refs = 目标 + 未完成下游闭包）。
         let decision = DecisionRecord {
@@ -481,6 +504,41 @@ impl TeamCoordinator {
         instruction: &str,
         note: &str,
     ) -> WorkSwarmResult<TeamRun> {
+        self.rework_step_with_actor(team_id, step_id, instruction, note, "user")
+            .await
+    }
+
+    /// Rework accepted worker output at the request of a deterministic host validator.
+    pub async fn rework_step_from_validator(
+        &self,
+        team_id: &str,
+        step_id: &str,
+        instruction: &str,
+        note: &str,
+    ) -> WorkSwarmResult<TeamRun> {
+        self.rework_step_with_actor(team_id, step_id, instruction, note, "host_validator")
+            .await
+    }
+
+    pub(crate) async fn rework_from_review(
+        &self,
+        team_id: &str,
+        step_id: &str,
+        instruction: &str,
+        note: &str,
+    ) -> WorkSwarmResult<TeamRun> {
+        self.rework_step_with_actor(team_id, step_id, instruction, note, "reviewer")
+            .await
+    }
+
+    async fn rework_step_with_actor(
+        &self,
+        team_id: &str,
+        step_id: &str,
+        instruction: &str,
+        note: &str,
+        actor: &str,
+    ) -> WorkSwarmResult<TeamRun> {
         if instruction.trim().is_empty() {
             return Err(WorkSwarmError::Validation(
                 "返工指令（instruction）不能为空".to_string(),
@@ -512,6 +570,13 @@ impl TeamCoordinator {
             .find(|s| s.id == step_id)
             .ok_or_else(|| WorkSwarmError::NotFound(format!("任务 {step_id} 不存在")))?
             .clone();
+        let rework_attempt = step
+            .input
+            .get("rework")
+            .and_then(|value| value.get("attempt"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .saturating_add(1);
         let target_status = state
             .records
             .get(&step.id)
@@ -526,8 +591,11 @@ impl TeamCoordinator {
             )));
         }
 
+        // Review repair bypasses apply_steer; advance the epoch here so stale
+        // worker returns and prior validation receipts cannot match the new attempt.
+        self.bump_phase_epoch(team_id);
         // ---- 校验全部通过，开始变更：重置目标 + 未成功下游 ----
-        let downstream = Self::downstream_reset_closure(&state, &step.id);
+        let downstream = Self::downstream_recheck_closure(&state, &step.id);
         let mut affected = vec![step.id.clone()];
         affected.extend(downstream.iter().cloned());
         let reset_ids: std::collections::HashSet<&str> =
@@ -536,8 +604,14 @@ impl TeamCoordinator {
             if reset_ids.contains(r.step_id.as_str()) {
                 r.status = StepStatus::Pending;
                 r.attempts = 0;
+                r.attempt_id = None;
                 r.output = None;
                 r.error = None;
+                for receipt in &mut r.validation_receipts {
+                    receipt.verdict = crate::plan::ValidationVerdictV1::Stale;
+                    receipt.detail =
+                        Some("retry/rework invalidated the prior attempt receipt".into());
+                }
             }
         }
         state.aborted = false;
@@ -554,6 +628,7 @@ impl TeamCoordinator {
                 json!({
                     "instruction": instruction.trim(),
                     "note": note,
+                    "attempt": rework_attempt,
                     "requested_at": now_ts(),
                 }),
             );
@@ -581,7 +656,7 @@ impl TeamCoordinator {
         // 变更留痕：DecisionRecord。
         let decision = DecisionRecord {
             decision_id: format!("{team_id}:rework:{}", now_ms()),
-            proposer: "user".to_string(),
+            proposer: actor.to_string(),
             choice: format!(
                 "rework：{note}（目标 {} 及未完成下游共 {} 个节点）",
                 step.id,

@@ -51,7 +51,7 @@ pub enum VerificationSpec {
     OutputEquals(String),
     /// 输出非空。
     OutputNonEmpty,
-    /// 保留扩展（自定义校验器名称，默认按“非空”处理）。
+    /// 保留扩展（自定义校验器名称）；宿主未注册校验器时保持未验证。
     Custom(String),
 }
 
@@ -85,14 +85,225 @@ pub fn verify_output(spec: &VerificationSpec, output: &str) -> Result<(), String
                 Ok(())
             }
         }
-        VerificationSpec::Custom(_) => {
-            if output.trim().is_empty() {
-                Err("验证失败：自定义校验输出为空".to_string())
-            } else {
-                Ok(())
-            }
+        VerificationSpec::Custom(name) => {
+            Err(format!("验证器「{name}」未注册；自定义验收保持未验证"))
         }
     }
+}
+
+/// Scope bound to a registered validator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VerificationScopeV1 {
+    StepOutput,
+    ArtifactRefs { artifact_ids: Vec<String> },
+    WorkspacePaths { relative_paths: Vec<String> },
+    Manual,
+}
+
+/// Resource budget reserved before a validator starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationResourcesV1 {
+    #[serde(default = "default_validator_cpu_slots")]
+    pub cpu_slots: u16,
+    #[serde(default)]
+    pub memory_mb: u32,
+    #[serde(default)]
+    pub exclusive_workspace: bool,
+    #[serde(default)]
+    pub timeout_ms: u64,
+}
+
+fn default_validator_cpu_slots() -> u16 {
+    1
+}
+
+impl Default for VerificationResourcesV1 {
+    fn default() -> Self {
+        Self {
+            cpu_slots: 1,
+            memory_mb: 0,
+            exclusive_workspace: false,
+            timeout_ms: 0,
+        }
+    }
+}
+
+/// One host-resolved verification obligation. The executor must resolve its
+/// validator_id against an immutable host registry before execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerificationRequirementV1 {
+    pub requirement_id: String,
+    #[serde(default)]
+    pub covers_requirement_ids: Vec<String>,
+    pub validator_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validator_version: Option<String>,
+    pub scope: VerificationScopeV1,
+    #[serde(default = "empty_validator_arguments")]
+    pub arguments: serde_json::Value,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    #[serde(default)]
+    pub resources: VerificationResourcesV1,
+}
+
+fn empty_validator_arguments() -> serde_json::Value {
+    serde_json::json!({})
+}
+fn default_true() -> bool {
+    true
+}
+
+/// Verification obligations attached to a task, independent of worker prose.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerificationPlanV1 {
+    pub plan_id: String,
+    #[serde(default)]
+    pub requirements: Vec<VerificationRequirementV1>,
+}
+
+impl VerificationPlanV1 {
+    /// Structural safety only; validator support is checked by the host executor.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.plan_id.trim().is_empty() {
+            return Err("验证计划缺少 plan_id".into());
+        }
+        if self.requirements.is_empty() {
+            return Err("验证计划没有任何验收要求".into());
+        }
+        if !self
+            .requirements
+            .iter()
+            .any(|requirement| requirement.required)
+        {
+            return Err("验证计划至少需要一个必需验收要求".into());
+        }
+        let mut ids = HashSet::new();
+        for req in &self.requirements {
+            if req.requirement_id.trim().is_empty() {
+                return Err("验证要求缺少 requirement_id".into());
+            }
+            if !ids.insert(req.requirement_id.as_str()) {
+                return Err(format!("验证要求 id 重复：{}", req.requirement_id));
+            }
+            if req.validator_id.trim().is_empty() {
+                return Err(format!("验证要求 {} 缺少 validator_id", req.requirement_id));
+            }
+            if req.required
+                && !matches!(&req.scope, VerificationScopeV1::Manual)
+                && req
+                    .validator_version
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|version| !version.is_empty())
+                    .is_none()
+            {
+                return Err(format!(
+                    "必需验证要求 {} 必须固定 validator_version",
+                    req.requirement_id
+                ));
+            }
+            if !req.arguments.is_object() {
+                return Err(format!(
+                    "验证要求 {} 的 arguments 必须是 JSON object",
+                    req.requirement_id
+                ));
+            }
+            if req
+                .covers_requirement_ids
+                .iter()
+                .any(|id| id.trim().is_empty())
+            {
+                return Err(format!(
+                    "验证要求 {} 包含空的覆盖 requirement id",
+                    req.requirement_id
+                ));
+            }
+            match &req.scope {
+                VerificationScopeV1::ArtifactRefs { artifact_ids }
+                    if artifact_ids.is_empty()
+                        || artifact_ids.iter().any(|id| id.trim().is_empty()) =>
+                {
+                    return Err(format!(
+                        "验证要求 {} 的 artifact scope 为空或含空引用",
+                        req.requirement_id
+                    ));
+                }
+                VerificationScopeV1::WorkspacePaths { relative_paths }
+                    if relative_paths.is_empty()
+                        || relative_paths.iter().any(|raw| {
+                            let path = std::path::Path::new(raw);
+                            path.as_os_str().is_empty()
+                                || path.is_absolute()
+                                || path.components().any(|part| {
+                                    matches!(
+                                        part,
+                                        std::path::Component::ParentDir
+                                            | std::path::Component::Prefix(_)
+                                    )
+                                })
+                        }) =>
+                {
+                    return Err(format!(
+                        "验证要求 {} 的 workspace scope 为空或越界",
+                        req.requirement_id
+                    ));
+                }
+                _ => {}
+            }
+            if req.required
+                && !matches!(&req.scope, VerificationScopeV1::Manual)
+                && (req.resources.cpu_slots == 0 || req.resources.timeout_ms == 0)
+            {
+                return Err(format!(
+                    "必需的自动验证要求 {} 必须声明正数 CPU 与超时预算",
+                    req.requirement_id
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Host-produced evidence receipt. Consumers must recheck these hashes against
+/// the accepted snapshot; model output is never a source for this structure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationReceiptV1 {
+    pub receipt_id: String,
+    pub task_id: String,
+    pub attempt_id: String,
+    pub epoch: u64,
+    pub requirement_id: String,
+    pub validator_id: String,
+    pub validator_version: String,
+    #[serde(default)]
+    pub arguments_sha256: String,
+    pub input_sha256: String,
+    #[serde(default)]
+    pub environment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changeset_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub subject_sha256: HashMap<String, String>,
+    pub verdict: ValidationVerdictV1,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub started_at: String,
+    pub completed_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationVerdictV1 {
+    Passed,
+    Failed,
+    Unsupported,
+    Unverified,
+    Stale,
+    ManualAccepted,
 }
 
 fn preview(text: &str) -> String {
@@ -120,9 +331,12 @@ pub struct StepSpec {
     /// 传给 worker 的输入规格（任意 JSON）。
     #[serde(default)]
     pub input: serde_json::Value,
-    /// 可选验证断言；缺省不验证（成功即通过）。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 兼容旧计划的输出断言；不代表行为验收。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<VerificationSpec>,
+    /// 任务级验证计划；执行时必须由宿主注册表解析 validator_id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_plan: Option<VerificationPlanV1>,
     /// 重试次数（预算内；失败/验证失败重试）。
     #[serde(default)]
     pub retries: u32,
@@ -137,6 +351,7 @@ impl StepSpec {
             worker: worker.into(),
             input: serde_json::Value::Null,
             verify: None,
+            verification_plan: None,
             retries: 0,
         }
     }
@@ -183,6 +398,11 @@ impl Plan {
         for step in &self.steps {
             if !seen.insert(step.id.as_str()) {
                 return Err(format!("步骤 id 重复：{}", step.id));
+            }
+            if let Some(verification_plan) = &step.verification_plan {
+                verification_plan
+                    .validate()
+                    .map_err(|error| format!("步骤 {} 验证计划非法：{error}", step.id))?;
             }
             for dep in &step.depends_on {
                 if dep == &step.id {
@@ -424,6 +644,87 @@ mod tests {
     }
 
     #[test]
+    fn verification_plan_rejects_duplicate_ids_and_unbounded_workspace_scope() {
+        let requirement = VerificationRequirementV1 {
+            requirement_id: "tests".into(),
+            covers_requirement_ids: vec!["REQ-1".into()],
+            validator_id: "cargo-test-v1".into(),
+            validator_version: Some("1".into()),
+            scope: VerificationScopeV1::WorkspacePaths {
+                relative_paths: vec!["crates/app".into()],
+            },
+            arguments: serde_json::json!({"target": "app"}),
+            required: true,
+            resources: VerificationResourcesV1 {
+                cpu_slots: 1,
+                memory_mb: 1024,
+                exclusive_workspace: true,
+                timeout_ms: 60_000,
+            },
+        };
+        let mut plan = VerificationPlanV1 {
+            plan_id: "verify-1".into(),
+            requirements: vec![requirement.clone()],
+        };
+        assert!(plan.validate().is_ok());
+        plan.requirements.push(requirement.clone());
+        assert!(plan.validate().unwrap_err().contains("重复"));
+
+        plan.requirements.truncate(1);
+        plan.requirements[0].scope = VerificationScopeV1::WorkspacePaths {
+            relative_paths: vec!["../outside".into()],
+        };
+        assert!(plan.validate().unwrap_err().contains("越界"));
+    }
+
+    #[test]
+    fn verification_plan_requires_bounded_resources_for_required_automated_check() {
+        let mut plan = VerificationPlanV1 {
+            plan_id: "verify-2".into(),
+            requirements: vec![VerificationRequirementV1 {
+                requirement_id: "REQ-1".into(),
+                covers_requirement_ids: vec!["REQ-1".into()],
+                validator_id: "cargo-test-v1".into(),
+                validator_version: Some("1".into()),
+                scope: VerificationScopeV1::StepOutput,
+                arguments: serde_json::json!({}),
+                required: true,
+                resources: VerificationResourcesV1::default(),
+            }],
+        };
+        assert!(plan.validate().unwrap_err().contains("超时预算"));
+        plan.requirements[0].scope = VerificationScopeV1::Manual;
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn validation_receipt_roundtrips_with_explicit_non_passing_verdict() {
+        let receipt = ValidationReceiptV1 {
+            receipt_id: "receipt-1".into(),
+            task_id: "task-1".into(),
+            attempt_id: "attempt-2".into(),
+            epoch: 3,
+            requirement_id: "REQ-1".into(),
+            validator_id: "cargo-test-v1".into(),
+            validator_version: "1".into(),
+            arguments_sha256: "b".repeat(64),
+            input_sha256: "a".repeat(64),
+            environment_id: "test".into(),
+            changeset_sha256: None,
+            detail: Some("not registered".into()),
+            subject_sha256: HashMap::new(),
+            verdict: ValidationVerdictV1::Unsupported,
+            evidence_refs: vec![],
+            started_at: "start".into(),
+            completed_at: "end".into(),
+        };
+        let encoded = serde_json::to_vec(&receipt).unwrap();
+        let decoded: ValidationReceiptV1 = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, receipt);
+        assert_ne!(decoded.verdict, ValidationVerdictV1::Passed);
+    }
+
+    #[test]
     fn verify_output_semantics() {
         assert!(verify_output(
             &VerificationSpec::OutputContains("ok".into()),
@@ -435,6 +736,8 @@ mod tests {
         assert!(verify_output(&VerificationSpec::OutputEquals("x".into()), "y").is_err());
         assert!(verify_output(&VerificationSpec::OutputNonEmpty, "  ").is_err());
         assert!(verify_output(&VerificationSpec::OutputNonEmpty, "data").is_ok());
-        assert!(verify_output(&VerificationSpec::Custom("x".into()), "data").is_ok());
+        let custom = verify_output(&VerificationSpec::Custom("x".into()), "data");
+        assert!(custom.is_err());
+        assert!(custom.unwrap_err().contains("未注册"));
     }
 }

@@ -15,20 +15,23 @@
 //!   `SubagentRunner` / `ContractSubagentRunner` 签名与字段零改动。
 
 use crate::agent::{Agent, AgentConfig, TurnEvent};
-use crate::contract_worker::enforce_worker_output_contract;
+use crate::contract_worker::enforce_worker_output_contract_with_model;
 use crate::gateway::ModelProvider;
 use crate::permissions::{Approver, Policy};
 use crate::session::Session;
 use crate::subagent::MAX_SUBAGENT_DEPTH;
 use crate::tools::ToolRegistry;
-use crate::workswarm_output::contract_system_prompt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Instant;
 
-/// 画像回合上限（与 `SubagentRunner` 子代理口径一致：max_turns 硬上限 12）。
-pub const PROFILE_MAX_TURNS_CAP: usize = 12;
+/// 可选 Worker 回合事件回调；事件使用方应只记录安全元数据。
+pub type TurnEventSink = Arc<dyn Fn(&TurnEvent) + Send + Sync>;
+
+/// 画像回合上限（与 `SubagentRunner` 子代理口径一致：max_turns 硬上限 16）。
+pub const PROFILE_MAX_TURNS_CAP: usize = 16;
 
 /// 模板未声明该角色预算（`budget_calls == 0`）时的缺省回合上限。
 pub const DEFAULT_PROFILE_MAX_TURNS: usize = 12;
@@ -45,6 +48,13 @@ pub enum RoleFamily {
     Researcher,
 }
 
+/// Whether a role name is one of the reserved finite TaskGraph writer slots.
+pub fn is_parallel_writer_name(role: &str) -> bool {
+    role.strip_prefix('w')
+        .map(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
 /// 角色权限画像：单角色的实际工具面与执行上限（七期 · 二路）。
 ///
 /// 由模板角色名（`budget_calls_per_role[].role`）派生；服务端在每个 TeamRun 阶段
@@ -57,7 +67,7 @@ pub struct WorkerProfile {
     pub read_only: bool,
     /// 角色级写白名单（相对工作区根；空 = 交由团队绑定白名单决定）。
     pub write_allowed_paths: Vec<String>,
-    /// 回合上限（模板 `budget_calls_per_role[].budget_calls`；硬上限 12）。
+    /// 回合上限（模板 `budget_calls_per_role[].budget_calls`；硬上限 16）。
     pub max_turns: usize,
     /// 允许浏览器（搜索/导航/快照；写工作区变体不在可见面）。
     pub can_use_browser: bool,
@@ -66,6 +76,26 @@ pub struct WorkerProfile {
 }
 
 impl WorkerProfile {
+    /// Assemble the base profile for a Team role before any task is claimed.
+    /// Parallel writer slots start with a writable tool ceiling so a later
+    /// host-validated TaskGraph scope can narrow it; the task input must still
+    /// explicitly grant write_file/apply_patch before those tools are exposed.
+    pub fn for_team_role(
+        role: &str,
+        capabilities: &[String],
+        budget_calls: usize,
+        has_declared_write_scope: bool,
+        is_parallel_writer_slot: bool,
+    ) -> Self {
+        if crate::workswarm::is_review_role(role, capabilities) {
+            Self::for_role("reviewer", budget_calls)
+        } else if has_declared_write_scope || is_parallel_writer_slot {
+            Self::explicit_writer(budget_calls)
+        } else {
+            Self::for_role_with_capabilities(role, capabilities, budget_calls)
+        }
+    }
+
     /// 内置角色 → 画像。`budget_calls` = 模板每角色调用预算（0 = 未声明 → 缺省 12）。
     ///
     /// 映射口径（与四类内置模板对齐）：
@@ -77,6 +107,17 @@ impl WorkerProfile {
     /// - 其余（code_analyzer / reviewer / evidence_verifier / schema_validator /
     ///   extractor / artifact_formatter / critic 等分析·审查·校验·抽取族）：
     ///   只读文件面；未知角色同样落这里（默认 deny）。
+    pub fn for_role_with_capabilities(
+        role: &str,
+        capabilities: &[String],
+        budget_calls: usize,
+    ) -> Self {
+        if crate::workswarm::is_review_role(role, capabilities) {
+            return Self::for_role("reviewer", budget_calls);
+        }
+        Self::for_role(role, budget_calls)
+    }
+
     pub fn for_role(role: &str, budget_calls: usize) -> Self {
         let name = role.trim().to_ascii_lowercase();
         // 写角色关键词：实现/交付族。**必须包含通用 producer/writer/leader**——
@@ -129,6 +170,7 @@ impl WorkerProfile {
                 visible_tools: [
                     "read_file",
                     "write_file",
+                    "apply_patch",
                     "list_dir",
                     "search_files",
                     "run_command",
@@ -168,9 +210,26 @@ impl WorkerProfile {
         }
     }
 
-    /// 是否写角色（单写租约与变更追踪只作用于写角色）。
+    /// 是否写角色（范围写租约与变更追踪只作用于写角色）。
     pub fn is_writer(&self) -> bool {
         !self.read_only
+    }
+
+    /// 显式写角色画像（十一期 · 二路）：角色声明了写范围（`RoleSpec.write_paths`）
+    /// 时使用——即使角色名未命中实现族关键词（如自定义 `w1`），也按实现族装配
+    /// 工具面（读写 + 搜索 + 受控命令；注册表面即权限边界）；最终写面仍由
+    /// 「角色 ∩ 团队绑定」白名单收窄。避免自定义角色名落进只读分支导致团队
+    /// "成功"却零产出。
+    pub fn explicit_writer(budget_calls: usize) -> Self {
+        Self::for_role("implementer", budget_calls)
+    }
+
+    /// 移除受控命令能力，但保留白名单文件读写；用于源码实现角色，避免模型
+    /// 看到与任务无关的 shell 工具后重复运行测试或探测命令。
+    pub fn without_commands(mut self) -> Self {
+        self.can_run_command = false;
+        self.visible_tools.retain(|tool| tool != "run_command");
+        self
     }
 
     /// 按画像装配工具注册表：注册表面即权限边界。
@@ -183,7 +242,8 @@ impl WorkerProfile {
         let mut registry = ToolRegistry::empty();
         registry.register_file_read_tools();
         if !self.read_only {
-            registry.register_whitelist_write_file(write_allowed);
+            registry.register_whitelist_write_file(write_allowed.clone());
+            registry.register_whitelist_apply_patch(write_allowed);
         }
         if self.can_run_command {
             registry.register_run_command();
@@ -218,7 +278,7 @@ impl WorkerProfile {
             );
         } else {
             lines.push(
-                "只允许在允许写路径内用 write_file 落盘最终变更；禁止改写白名单外文件，\
+                "只允许在允许写路径内用 write_file 或 apply_patch 落盘最终变更；精确补丁应基于 read_file 返回的 sha256 传 expected_hashes；禁止改写白名单外文件，\
                  禁止把变更只留在说明里而不落盘。"
                     .to_string(),
             );
@@ -257,11 +317,32 @@ pub fn intersect_paths(a: &[PathBuf], b: &[PathBuf]) -> Vec<PathBuf> {
     intersection
 }
 
+/// Compile the shared Worker system prompt used by production and product evaluation.
+pub fn compile_worker_system_prompt(
+    profile: &WorkerProfile,
+    is_review_role: bool,
+    budget_note: &str,
+    extra_system_prompt: Option<&str>,
+) -> String {
+    let base_prompt = if is_review_role {
+        "你是只读评审子代理：critic 不得提交 artifact；只能读取/搜索工作区文件，禁止写入或执行命令；独立检查交付并简洁汇报发现。\n"
+    } else if profile.is_writer() {
+        "你是写角色子代理：凡涉及代码/文件变更，必须在允许路径内真实落盘：小范围修改优先用 apply_patch，并传入 read_file 返回的 sha256 作为 expected_hashes；整文件生成或确需重写时使用 write_file（工具面之外没有其他写入手段）；artifact.content 只写变更说明、影响面与验证方式，不要把完整变更只放在 artifact 里而不落盘。回合预算有限：先做必要读取并完成写入；仅当任务验收需要且权限允许时，运行范围明确的定向检查，避免重复读取和全仓构建。最后一个回合只输出契约 JSON，不再调用工具。工具调用仍需审批；无法验证时如实说明。\n"
+    } else {
+        "你是通用子代理：独立完成委派任务，工具调用仍需审批，完成后汇报结果。\n"
+    };
+    format!(
+        "{}{base_prompt}{budget_note}{}",
+        extra_system_prompt.unwrap_or_default(),
+        crate::workswarm_output::contract_system_prompt(is_review_role)
+    )
+}
+
 /// 画像驱动子代理执行器（七期 · 二路）：与一路 `ContractSubagentRunner` 同口径
 /// （完整回合循环 + `WorkerOutputV1` 输出契约执行 + 至多一次定向修复），区别仅在：
 ///
 /// - 工具注册表由 [`WorkerProfile::build_registry`] 按角色装配（注册表面即权限边界）；
-/// - 回合上限取画像值（模板预算，硬上限 12）；
+/// - 回合上限取画像值（模板预算，硬上限 16）；
 /// - 写面为「角色 ∩ 绑定」交集白名单工具（越界写入在工具层被拒）；
 /// - `is_critic` 由服务端按角色名判定（`role == "critic"`；引擎注入的 `read_only`
 ///   只覆盖 critic，其余内置角色都是 producer，画像另管只读面）。
@@ -277,52 +358,153 @@ pub struct ProfileSubagentRunner<'a> {
     /// 最终写白名单（角色 ∩ 绑定交集；空 = 工作区内可写）。
     pub write_allowed: Vec<PathBuf>,
     pub profile: WorkerProfile,
+    /// Optional runtime limits supplied by a controlled harness; execution still uses this runner.
+    pub agent_config: Option<AgentConfig>,
+    /// Optional caller-specific budget wording; role contract/tool assembly stay shared.
+    pub budget_note_override: Option<String>,
+    /// Team 宿主提供的额外受控工具（仍由 ToolHost 执行）。
+    pub extra_tools: Vec<Arc<dyn crate::tools::Tool>>,
+    /// 可选的 Team 共享上下文使用说明。
+    pub extra_system_prompt: Option<String>,
+    /// 可选的脱敏回合事件出口；调用方只应记录安全元数据，不记录参数/结果正文。
+    pub event_sink: Option<TurnEventSink>,
+    /// Daemon session store, used to resume this team/task history on local rework.
+    pub session_store: Option<Arc<dyn crate::session::SessionStore>>,
+    pub worker_session_id: Option<String>,
+    /// Source user session retained as the worker session parent.
+    pub parent_session_id: Option<String>,
+}
+
+/// Measured result from the shared Team worker runtime.
+#[derive(Debug, Clone)]
+pub struct ProfileSubagentRunReport {
+    pub output: String,
+    pub duration_ms: u64,
+    pub steps: usize,
+    pub model_calls: u32,
+    pub usage: crate::gateway::TokenUsage,
+    /// False whenever any request, including contract repair, lacks attributable usage.
+    pub usage_known: bool,
+    pub output_repairs: u32,
+}
+
+/// Failure telemetry is retained so eval and production diagnostics do not hide
+/// the cost of a rejected worker submission or its contract-repair request.
+#[derive(Debug, Clone)]
+pub struct ProfileSubagentRunError {
+    pub message: String,
+    pub duration_ms: u64,
+    pub steps: usize,
+    pub model_calls: u32,
+    pub usage: crate::gateway::TokenUsage,
+    pub usage_known: bool,
+    pub output_repairs: u32,
+}
+
+impl From<String> for ProfileSubagentRunError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            duration_ms: 0,
+            steps: 0,
+            model_calls: 0,
+            usage: crate::gateway::TokenUsage::default(),
+            usage_known: false,
+            output_repairs: 0,
+        }
+    }
 }
 
 impl ProfileSubagentRunner<'_> {
-    /// 运行一个画像子代理会话，返回契约校验后的 `WorkerOutputV1` JSON 本体。
+    /// Compatibility entry point for production call sites.
     pub async fn run(&self, workspace: &Path, prompt: &str) -> Result<String, String> {
+        self.run_report(workspace, prompt)
+            .await
+            .map(|report| report.output)
+            .map_err(|error| error.message)
+    }
+
+    /// Run the shared worker loop and output contract while retaining per-invocation telemetry.
+    pub async fn run_report(
+        &self,
+        workspace: &Path,
+        prompt: &str,
+    ) -> Result<ProfileSubagentRunReport, ProfileSubagentRunError> {
+        let started = Instant::now();
         if self.depth >= MAX_SUBAGENT_DEPTH {
-            return Err(format!("子代理深度超限（最多 {MAX_SUBAGENT_DEPTH} 层）"));
+            return Err(format!("子代理深度超限（最多 {MAX_SUBAGENT_DEPTH} 层）").into());
         }
         let policy = if self.profile.read_only {
             Policy::read_only(workspace.to_path_buf())
         } else {
             Policy::new(workspace.to_path_buf())
         };
-        let registry = self.profile.build_registry(self.write_allowed.clone());
-        let config = AgentConfig {
+        let mut registry = self.profile.build_registry(self.write_allowed.clone());
+        for tool in &self.extra_tools {
+            registry.register_arc(Arc::clone(tool));
+        }
+        let mut config = self.agent_config.clone().unwrap_or_else(|| AgentConfig {
             max_turns: self.profile.max_turns.min(PROFILE_MAX_TURNS_CAP),
             subagent_depth: self.depth + 1,
             ..Default::default()
-        };
+        });
+        config.subagent_depth = self.depth + 1;
         let agent = Agent::new(Arc::clone(&self.provider), registry, policy, config);
-        // 基线提示词：critic 探索口径与一路同款；写角色追加「必须真实落盘」约束——
-        // 防止把变更只塞进 artifact 内容而不写工作区文件（假交付；评审对照的
-        // 是工作区真实文件，git 变更追踪也以真实落盘为准）。
-        let base_prompt = if self.is_critic {
-            "你是只读探索子代理：只能读取/搜索工作区文件，禁止写入或执行命令；调查完成后用简洁中文汇报发现。\n"
-        } else if self.profile.is_writer() {
-            "你是写角色子代理：凡涉及代码/文件变更，必须用 write_file 把最终内容真实写入工作区文件（仅限允许路径内的文件，工具面之外没有其他写入手段）；artifact.content 只写变更说明、影响面与验证方式，不要把完整变更只放在 artifact 里而不落盘。回合预算有限：先做必要读取，随后直接完成写入，最后一个回合只输出契约 JSON——不要重复读取同一文件或执行验证命令。工具调用仍需审批，完成后汇报结果。\n"
+        let budget_note = self.budget_note_override.clone().unwrap_or_else(|| {
+            format!(
+                "你的回合预算为 {} 回合：前 {} 回合完成必要的读取、写入和任务要求的定向验证；最后一个回合必须直接输出最终 JSON（不要再调用任何工具）。尽量少花回合。\n",
+                self.profile.max_turns,
+                self.profile.max_turns.saturating_sub(1)
+            )
+        });
+        let system_prompt = compile_worker_system_prompt(
+            &self.profile,
+            self.is_critic,
+            &budget_note,
+            self.extra_system_prompt.as_deref(),
+        );
+        let mut session = if let (Some(store), Some(session_id)) =
+            (&self.session_store, &self.worker_session_id)
+        {
+            if store
+                .exists(session_id)
+                .map_err(|error| format!("Worker 会话索引查询失败：{error}"))?
+            {
+                let loaded = store
+                    .load(session_id)
+                    .map_err(|error| format!("Worker 会话 {session_id} 恢复失败：{error}"))?;
+                if loaded.workspace != workspace
+                    || loaded.id != *session_id
+                    || loaded.parent_id != self.parent_session_id
+                {
+                    return Err(
+                        format!("Worker 会话 {session_id} 的工作区或父会话归属不匹配").into(),
+                    );
+                }
+                loaded.with_model_override(Some(self.model.clone()))
+            } else {
+                Session::new(workspace, self.model.clone(), Some(system_prompt))
+                    .with_model_override(Some(self.model.clone()))
+            }
         } else {
-            "你是通用子代理：独立完成委派任务，工具调用仍需审批，完成后汇报结果。\n"
+            Session::new(workspace, self.model.clone(), Some(system_prompt))
+                .with_model_override(Some(self.model.clone()))
         };
-        // 回合预算指引（七期二路冒烟结论）：预算经 max_turns 成为硬上限，引擎在
-        // 「回合耗尽且未正常结束」时报错——必须显式告诉模型最后一回合只产出契约
-        // JSON、不再调用工具，否则读/写角色会稳定在预算上溢出失败。
-        let budget_note = format!(
-            "你的回合预算为 {} 回合：前 {} 回合完成必要的工具调用，最后一个回合必须直接输出最终 JSON（不要再调用任何工具）。尽量少花回合。\n",
-            self.profile.max_turns,
-            self.profile.max_turns.saturating_sub(1)
-        );
-        // 输出契约（V1）：system prompt 追加契约条款，让模型首轮即可按
-        // WorkerOutputV1 JSON 输出；不合规时共享执行器最多定向修复一次。
-        let system_prompt = format!(
-            "{base_prompt}{budget_note}{}",
-            contract_system_prompt(self.is_critic)
-        );
-        let mut session = Session::new(workspace, self.model.clone(), Some(system_prompt));
-        let mut on_event = |_event: &TurnEvent| {};
+        if let Some(session_id) = &self.worker_session_id {
+            session.id = session_id.clone();
+        }
+        session.parent_id = self.parent_session_id.clone();
+        if let (Some(store), Some(_)) = (&self.session_store, &self.worker_session_id) {
+            store
+                .save(&session)
+                .map_err(|error| format!("Worker 会话初始化保存失败：{error}"))?;
+        }
+        let event_sink = self.event_sink.clone();
+        let mut on_event = move |event: &TurnEvent| {
+            if let Some(sink) = &event_sink {
+                sink(event);
+            }
+        };
         let outcome = agent
             .run_turn(
                 &mut session,
@@ -331,16 +513,67 @@ impl ProfileSubagentRunner<'_> {
                 self.abort,
                 &mut on_event,
             )
-            .await
-            .map_err(|error| format!("子代理执行失败：{error}"))?;
-        // 连兜底文本（无最终文本）也走契约执行——自由文本路径不豁免。
+            .await;
+        if let (Some(store), Some(_)) = (&self.session_store, &self.worker_session_id) {
+            store
+                .save(&session)
+                .map_err(|error| format!("Worker 会话执行后保存失败：{error}"))?;
+        }
+        let outcome = outcome.map_err(|error| format!("子代理执行失败：{error}"))?;
+        let model_calls_from_turn = outcome
+            .events
+            .iter()
+            .filter(|event| matches!(event, TurnEvent::ModelCall))
+            .count() as u32;
+        let steps = outcome.steps;
+        let mut usage = outcome.usage;
+        let mut usage_known = outcome.usage_known;
         let text = outcome
             .final_text
             .unwrap_or_else(|| format!("（子代理无最终文本，共 {} 步）", outcome.steps));
-        match enforce_worker_output_contract(&self.provider, &text, self.is_critic).await {
-            Ok(result) => Ok(result.text),
-            Err(error) => Err(error.message),
+        let enforced = match enforce_worker_output_contract_with_model(
+            &self.provider,
+            Some(&self.model),
+            &text,
+            self.is_critic,
+        )
+        .await
+        {
+            Ok(enforced) => enforced,
+            Err(error) => {
+                let repair_usage_known = error.repairs == 0 || error.usage.is_some();
+                let mut failure_usage = usage;
+                if let Some(repair_usage) = error.usage {
+                    failure_usage.add(&repair_usage);
+                }
+                return Err(ProfileSubagentRunError {
+                    message: error.message,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    steps,
+                    model_calls: model_calls_from_turn.saturating_add(error.repairs),
+                    usage: failure_usage,
+                    usage_known: usage_known && repair_usage_known,
+                    output_repairs: error.repairs,
+                });
+            }
+        };
+        let output_repairs = enforced.repairs;
+        if output_repairs > 0 {
+            if let Some(repair_usage) = enforced.usage {
+                usage.add(&repair_usage);
+            } else {
+                usage_known = false;
+            }
         }
+        Ok(ProfileSubagentRunReport {
+            output: enforced.text,
+            duration_ms: started.elapsed().as_millis() as u64,
+            steps,
+            model_calls: model_calls_from_turn.saturating_add(output_repairs),
+            usage,
+            usage_known,
+            output_repairs,
+        })
     }
 }
 
@@ -367,6 +600,7 @@ mod tests {
         for expected in [
             "read_file",
             "write_file",
+            "apply_patch",
             "list_dir",
             "search_files",
             "run_command",
@@ -376,7 +610,40 @@ mod tests {
                 "implementer 缺工具 {expected}：{names:?}"
             );
         }
-        assert_eq!(names.len(), 5, "implementer 不应有多余工具：{names:?}");
+        assert_eq!(names.len(), 6, "implementer 不应有多余工具：{names:?}");
+    }
+
+    #[test]
+    fn team_parallel_writer_slots_start_writable_but_review_roles_stay_read_only() {
+        assert!(is_parallel_writer_name("w1"));
+        assert!(is_parallel_writer_name("w12"));
+        assert!(!is_parallel_writer_name("writer1"));
+        assert!(!is_parallel_writer_name("w1x"));
+
+        let writer = WorkerProfile::for_team_role("w1", &[], 4, false, true);
+        assert!(!writer.read_only);
+        assert!(writer.visible_tools.iter().any(|tool| tool == "write_file"));
+
+        let ordinary = WorkerProfile::for_team_role("w1", &[], 4, false, false);
+        assert!(ordinary.read_only);
+        assert!(!ordinary
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "write_file"));
+
+        let scoped_custom = WorkerProfile::for_team_role("frontend_engineer", &[], 4, true, false);
+        assert!(!scoped_custom.read_only);
+        assert!(scoped_custom
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "write_file"));
+
+        let reviewer = WorkerProfile::for_team_role("w1", &["review".to_string()], 4, false, true);
+        assert!(reviewer.read_only);
+        assert!(!reviewer
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "write_file"));
     }
 
     #[test]
@@ -400,12 +667,78 @@ mod tests {
     }
 
     #[test]
+    fn source_writer_profile_removes_command_tool_but_keeps_scoped_file_writes() {
+        let profile = WorkerProfile::explicit_writer(8).without_commands();
+        assert!(!profile.can_run_command);
+        assert!(!profile
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "run_command"));
+        assert!(profile
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "write_file"));
+        assert!(profile
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "apply_patch"));
+        assert!(profile.is_writer());
+    }
+
+    #[test]
+    fn explicit_writer_profile_overrides_read_only_role_names() {
+        // 十一期：声明了写范围的自定义角色（w1/w2…）不能落进只读分支。
+        for role in ["w1", "module-b", "some_future_role"] {
+            assert!(
+                !WorkerProfile::for_role(role, 0).is_writer(),
+                "{role} 无名命中 → 缺省只读（权限默认 deny）"
+            );
+            let profile = WorkerProfile::explicit_writer(4);
+            assert!(profile.is_writer(), "{role} 显式写角色应为写面");
+            assert_eq!(profile.max_turns, 4, "预算应透传");
+            assert!(profile.can_run_command, "写角色应可执行命令");
+            let names = tool_names(&profile.build_registry(Vec::new()));
+            assert!(
+                names.iter().any(|name| name == "write_file"),
+                "{role} 显式写角色注册表缺 write_file：{names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_review_capability_keeps_custom_role_read_only() {
+        let profile =
+            WorkerProfile::for_role_with_capabilities("quality_gate", &["review".to_string()], 4);
+        assert!(profile.read_only);
+        assert!(!profile.is_writer());
+        assert_eq!(profile.max_turns, 4);
+        let names = tool_names(&profile.build_registry(Vec::new()));
+        assert!(!names.iter().any(|name| name == "write_file"));
+        assert!(!names.iter().any(|name| name == "run_command"));
+    }
+
+    #[test]
+    fn writer_prompt_recommends_hash_guarded_patch_for_small_changes() {
+        let profile = WorkerProfile::for_role("implementer", 5);
+        let lines = profile.prompt_guard_lines().join("\n");
+        assert!(lines.contains("apply_patch"));
+        assert!(lines.contains("expected_hashes"));
+        assert!(lines.contains("read_file 返回的 sha256"));
+
+        let read_only = WorkerProfile::for_role("reviewer", 5);
+        let read_only_lines = read_only.prompt_guard_lines().join("\n");
+        assert!(!read_only_lines.contains("apply_patch"));
+        assert!(read_only_lines.contains("禁止写入工作区文件"));
+    }
+
+    #[test]
     fn implementer_write_tool_is_whitelist_wrapped_but_names_unchanged() {
         // 白名单包装不改变工具名（模型可见面不变），仅在执行时做前缀校验。
         let profile = WorkerProfile::for_role("implementer", 5);
         let allowed = vec![PathBuf::from("T:/ws/src")];
         let names = tool_names(&profile.build_registry(allowed));
         assert!(names.iter().any(|name| name == "write_file"));
+        assert!(names.iter().any(|name| name == "apply_patch"));
     }
 
     #[test]
@@ -478,6 +811,22 @@ mod tests {
     }
 
     #[test]
+    fn compiled_worker_system_prompt_uses_shared_role_contract() {
+        let writer = WorkerProfile::explicit_writer(4);
+        let writer_prompt = compile_worker_system_prompt(&writer, false, "budget", Some("host"));
+        assert!(writer_prompt.starts_with("host"));
+        assert!(writer_prompt.contains("apply_patch"));
+        assert!(writer_prompt.contains("write_file"));
+        assert!(writer_prompt.contains("无法验证时如实说明"));
+
+        let reviewer = WorkerProfile::for_role("reviewer", 4);
+        let review_prompt = compile_worker_system_prompt(&reviewer, true, "budget", None);
+        assert!(review_prompt.contains("只读评审子代理"));
+        assert!(review_prompt.contains("critic 不得提交 artifact"));
+        assert!(!review_prompt.contains("必须在允许路径内真实落盘"));
+    }
+
+    #[test]
     fn budget_maps_to_turn_cap() {
         assert_eq!(
             WorkerProfile::for_role("implementer", 0).max_turns,
@@ -488,7 +837,7 @@ mod tests {
         assert_eq!(
             WorkerProfile::for_role("implementer", 99).max_turns,
             PROFILE_MAX_TURNS_CAP,
-            "预算超硬上限 → 截到 12"
+            "预算超硬上限 → 截到 16"
         );
     }
 
@@ -498,6 +847,8 @@ mod tests {
         let writer = WorkerProfile::for_role("implementer", 5);
         let writer_lines = writer.prompt_guard_lines().join("\n");
         assert!(writer_lines.contains("write_file"));
+        assert!(writer_lines.contains("apply_patch"));
+        assert!(writer_lines.contains("sha256"));
         assert!(writer_lines.contains("允许写路径"));
         assert!(!writer_lines.contains("禁止写入工作区文件"));
         assert!(writer_lines.contains("禁止联网浏览"));

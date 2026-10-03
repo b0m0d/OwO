@@ -44,7 +44,8 @@ use crate::audit::AuditLog;
 use crate::cas_store::CasStore;
 use crate::fleet::{new_correlation_id, AgentBus, MessageKind, OverflowPolicy};
 use crate::goal::{
-    Goal, GoalRunState, GoalRunner, GoalStatus, RunnerConfig, Worker, WorkerRegistry,
+    Goal, GoalRunState, GoalRunner, GoalStatus, RunnerConfig, StepProgressUpdate, Worker,
+    WorkerRegistry,
 };
 use crate::plan::{verify_output, Plan, StepSpec, StepStatus};
 use crate::project_space_store::{ProjectSpaceStoreBackend, ProjectSpaceStoreError};
@@ -67,15 +68,18 @@ use util::*;
 
 mod coord_accessors;
 mod coord_artifacts;
+mod coord_context;
 mod coord_handoff;
 mod coord_human;
 mod coord_lifecycle;
 mod coord_load;
 mod coord_run;
 mod coord_steer;
+mod delivery_gate_evidence;
 mod role_worker;
 
 pub use role_worker::*;
+pub use util::{is_review_role, is_review_role_name};
 /// 阶段领取记录（进程内；进度视图 current_steps 的数据源）。
 #[derive(Debug, Clone)]
 pub(crate) struct PhaseClaim {
@@ -112,6 +116,8 @@ pub struct TeamCoordinator {
     pub(crate) phase_claims: Arc<Mutex<HashMap<String, PhaseClaim>>>,
     /// per-team 进度事件序号（进程内单调；状态转移时 +1）。
     pub(crate) progress_seqs: Arc<Mutex<HashMap<String, u64>>>,
+    /// Host-bound workspace roots used only by the registered read-only Validator lane.
+    pub(crate) verification_workspaces: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 /// 产物登记载荷（七期 · 第三路：legacy 纯文本 / 契约 V1 两条路径的统一内部形状）。
@@ -140,4 +146,10 @@ pub(crate) struct StepOutput {
     pub(crate) validation: Option<ArtifactValidation>,
     /// Worker 交接说明原文（WorkerOutputV1.handoff；critic 为评审结论）。
     pub(crate) handoff_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct OutputAttemptBinding<'a> {
+    pub(crate) phase_epoch: Option<u64>,
+    pub(crate) attempt_id: Option<&'a str>,
 }

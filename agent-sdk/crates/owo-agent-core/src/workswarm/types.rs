@@ -29,6 +29,17 @@ pub struct HumanWait {
     pub role: String,
 }
 
+/// 共享事实发布载荷；正文进入 CAS，元数据按团队 revision 原子提交。
+#[derive(Debug, Clone)]
+pub struct SharedContextFactDraft {
+    pub key: String,
+    pub value: String,
+    pub producer: String,
+    pub task_id: Option<String>,
+    pub source_refs: Vec<String>,
+    pub file_hash: Option<String>,
+}
+
 /// 组队请求。
 #[derive(Debug, Clone)]
 pub struct CreateTeamRequest {
@@ -44,6 +55,16 @@ pub struct CreateTeamRequest {
     /// 五期：组队策略（auto 判定 / single / team 强制；缺省 auto——
     /// 默认不再盲目启用多 Agent，由 TeamStrategyEngine 按任务画像判定）。
     pub strategy: Option<crate::team_strategy::TeamSelectionMode>,
+    /// 十一期：团队统一模型（所有 agent 步骤缺省使用；`RoleSpec.model` 显式覆盖）。
+    pub model: Option<String>,
+    /// 十一期：并行开发模式——配合 [`super::roles::parallel_roles`]：lead 拆解 →
+    /// w1..wN 并行 → leader 汇总；运行期把 lead 产物的 `subtasks`（子任务说明 +
+    /// 写范围）动态应用到对应 writer 角色（见 `TeamCoordinator::run_phase`）。
+    pub parallel: bool,
+    /// 十一期：Agent 成员上限覆盖（并行模式 lead+writers+leader > 默认 5）。
+    pub max_agent_members: Option<usize>,
+    /// 由 Daemon 从同工作区父会话生成的受限 CoreSpec 快照（JSON）。
+    pub parent_context_snapshot: Option<String>,
 }
 
 impl CreateTeamRequest {
@@ -57,6 +78,10 @@ impl CreateTeamRequest {
             budget: Value::Null,
             human_policy: None,
             strategy: None,
+            model: None,
+            parallel: false,
+            max_agent_members: None,
+            parent_context_snapshot: None,
         }
     }
 }
@@ -136,6 +161,9 @@ pub struct ProgressStep {
     pub worker: String,
     pub status: String,
     pub attempts: u32,
+    /// 调度器领取时间；尚未进入 Worker 时 started_at 为空。
+    pub claimed_at: String,
+    /// Worker 包装层实际开始调用的时间；Claimed 阶段为空。
     pub started_at: String,
 }
 
@@ -143,6 +171,10 @@ pub struct ProgressStep {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ProgressCounts {
     pub pending: u32,
+    /// Steps claimed for this phase but not yet inside Worker::run.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub claimed: u32,
+    /// Steps that have entered Worker::run.
     pub running: u32,
     pub succeeded: u32,
     pub failed: u32,

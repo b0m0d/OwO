@@ -386,7 +386,11 @@ fn sample_body(path: &str) -> Option<&'static str> {
             r#"{"suite":"v1","execution":"reference","modes":["single"],"repetitions":1,"category":null,"only":null}"#,
         ),
         // R13 WorkSwarm（§8.5）：空 objective 快速 400，避免契约测试触发真实模型运行。
-        "/teams" => Some(r#"{"objective":"","roles":[]}"#),
+        // 十一期（二路）additive：roles[].model / write_paths + 团队统一 model /
+        // parallel / max_agent_members / budget.max_parallel 进入请求体解析面。
+        "/teams" => Some(
+            r#"{"objective":"","roles":[{"role":"w1","assignee":"agent","model":"glm-5.3-flash","write_paths":["src/a"]}],"model":"glm-5.3-flashx","parallel":true,"max_agent_members":4,"budget":{"max_parallel":2}}"#,
+        ),
         // 五期（第一路）：组队策略（auto 缺省）；空 objective 快速 400 语义不变。
         // "/teams" 的 strategy 字段随 auto 缺省可省略；此处维持最小体。
         "/teams/{id}/steer" => Some(r#"{"command":"cancel"}"#),
@@ -552,6 +556,7 @@ fn resource_404_ok(path: &str) -> bool {
             | "/artifacts/{id}/rework"
             | "/projects/{id}/deliverables"
             | "/teams/{id}/metrics"
+            | "/teams/{id}/context"
             | "/teams/{id}/diagnostic"
             // 六期：工作区绑定四路由 + 模板目录安装——占位 id 指向不存在资源 → 404 非路由缺失。
             | "/projects/{id}/workspace"
@@ -3629,4 +3634,147 @@ async fn pet_static_routes_are_mounted_and_no_store() {
         200,
         "/pet-assets 应挂载并直读皮肤资产"
     );
+}
+
+#[tokio::test]
+async fn team_context_api_persists_facts_and_rejects_stale_revision() {
+    let (state, _temp) = test_state().await;
+    let coordinator = state.workswarm.coordinator().unwrap();
+    let team = coordinator
+        .create_team_run(&owo_agent_core::CreateTeamRequest::new(
+            "验证共享上下文 API",
+            owo_agent_protocol::TeamMode::Single,
+        ))
+        .await
+        .unwrap();
+    let app = build_router(Arc::clone(&state));
+    let path = format!("/teams/{}/context", team.team_id);
+    let first = serde_json::json!({
+        "expected_revision": 0,
+        "key": "api.contract",
+        "value": "GET /items returns ItemList",
+        "producer": "user",
+        "source_refs": ["manual-check"]
+    })
+    .to_string();
+    let response = app
+        .clone()
+        .oneshot(request(&state, "POST", &path, Some(&first)))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 201);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["fact"]["revision"], 1);
+    assert_eq!(parsed["fact"]["status"], "candidate");
+
+    let read = app
+        .clone()
+        .oneshot(request(&state, "GET", &path, None))
+        .await
+        .unwrap();
+    assert_eq!(read.status().as_u16(), 200);
+    let body = axum::body::to_bytes(read.into_body(), 128 * 1024)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["revision"], 1);
+    assert_eq!(parsed["facts"][0]["value"], "GET /items returns ItemList");
+
+    let forged = serde_json::json!({
+        "expected_revision": 1,
+        "key": "forged",
+        "value": "cannot claim another worker identity",
+        "producer": "not-a-team-member"
+    })
+    .to_string();
+    let response = app
+        .clone()
+        .oneshot(request(&state, "POST", &path, Some(&forged)))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 400);
+
+    let stale = serde_json::json!({
+        "expected_revision": 0,
+        "key": "stale",
+        "value": "must not commit",
+        "producer": "user"
+    })
+    .to_string();
+    let response = app
+        .oneshot(request(&state, "POST", &path, Some(&stale)))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 409);
+}
+
+#[tokio::test]
+async fn team_create_snapshots_only_same_workspace_source_session_constraints() {
+    let (state, _temp) = test_state().await;
+    let mut session = owo_agent_core::session::Session::new(
+        state.workspace.clone(),
+        "test-model",
+        Some("系统约束：保留现有协议，不要扩大写范围。".to_string()),
+    );
+    session.messages.push(owo_agent_core::ChatMessage::user(
+        "验收要求：CLI 与 Daemon 的会话要贯通。".to_string(),
+    ));
+    state.store.save(&session).unwrap();
+    let body = serde_json::json!({
+        "objective": "验证父会话约束进入团队 Worker",
+        "mode": "single",
+        "parent_session_id": session.id,
+    })
+    .to_string();
+    let app = build_router(Arc::clone(&state));
+    let response = app
+        .oneshot(request(&state, "POST", "/teams", Some(&body)))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 202);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let team_id = created["team_id"].as_str().unwrap();
+    let coordinator = state.workswarm.coordinator().unwrap();
+    let run = coordinator.get_team_run(team_id).await.unwrap();
+    assert_eq!(run.shared_context_refs.len(), 1);
+    let step = coordinator.load_run_state(team_id).unwrap().plan.steps[0]
+        .id
+        .clone();
+    let slice = coordinator
+        .assemble_context_slice(team_id, "m-runner", &step)
+        .await
+        .unwrap();
+    assert!(slice["core_spec"].to_string().contains("保留现有协议"));
+    assert!(slice["core_spec"].to_string().contains("会话要贯通"));
+}
+
+#[tokio::test]
+async fn team_create_rejects_parent_session_from_another_workspace() {
+    let (state, temp) = test_state().await;
+    let other_workspace = temp.path().join("other-workspace");
+    std::fs::create_dir_all(&other_workspace).unwrap();
+    let session = owo_agent_core::session::Session::new(
+        other_workspace,
+        "test-model",
+        Some("foreign constraints".to_string()),
+    );
+    state.store.save(&session).unwrap();
+    let body = serde_json::json!({
+        "objective": "不得注入其他工作区的会话约束",
+        "mode": "single",
+        "parent_session_id": session.id,
+    })
+    .to_string();
+    let app = build_router(Arc::clone(&state));
+    let response = app
+        .oneshot(request(&state, "POST", "/teams", Some(&body)))
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 400);
 }

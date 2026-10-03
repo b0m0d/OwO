@@ -563,8 +563,8 @@ pub fn plan_adaptive_roles(
 /// 「实际变更」由调用方判定：服务端 Git 变更跟踪文件
 /// （`<run_dir>/<team_id>-workspace-changes.json`，含 `changed_files` 窗口增量）
 /// 或评测执行器的等价信号；无记录视为无变更。
-pub fn reviewer_runtime_skip_reason(role: &str, has_actual_changes: bool) -> Option<String> {
-    if role != "reviewer" || has_actual_changes {
+pub fn review_runtime_skip_reason(is_reviewer: bool, has_actual_changes: bool) -> Option<String> {
+    if !is_reviewer || has_actual_changes {
         return None;
     }
     Some(
@@ -572,6 +572,10 @@ pub fn reviewer_runtime_skip_reason(role: &str, has_actual_changes: bool) -> Opt
          下游完成条件已满足，DAG 提前结束"
             .to_string(),
     )
+}
+
+pub fn reviewer_runtime_skip_reason(role: &str, has_actual_changes: bool) -> Option<String> {
+    review_runtime_skip_reason(role == "reviewer", has_actual_changes)
 }
 
 #[cfg(test)]
@@ -715,6 +719,9 @@ mod adaptive_role_tests {
     #[test]
     fn reviewer_runtime_skip_only_without_changes() {
         assert!(reviewer_runtime_skip_reason("reviewer", true).is_none());
+        assert!(review_runtime_skip_reason(true, true).is_none());
+        assert!(review_runtime_skip_reason(false, false).is_none());
+        assert!(review_runtime_skip_reason(true, false).is_some());
         assert!(reviewer_runtime_skip_reason("code_analyzer", false).is_none());
         let reason = reviewer_runtime_skip_reason("reviewer", false).expect("无变更应跳过");
         assert!(reason.contains("提前结束"));

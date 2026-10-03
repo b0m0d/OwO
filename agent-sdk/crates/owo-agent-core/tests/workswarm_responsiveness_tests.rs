@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, Semaphore};
 
 use async_trait::async_trait;
 use owo_agent_core::goal::{Worker, WorkerRegistry};
@@ -39,6 +40,24 @@ impl Worker for SlowEchoWorker {
     }
     async fn run(&self, input: &Value) -> Result<String, String> {
         tokio::time::sleep(Duration::from_millis(self.ms)).await;
+        let is_reviewer = input
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| matches!(role, "critic" | "reviewer"))
+            || input
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| item == "review"));
+        if is_reviewer {
+            return Ok(serde_json::json!({
+                "status": "done",
+                "summary": "响应性测试评审通过",
+                "evidence": [],
+                "open_issues": [],
+                "review_result": {"verdict": "approved", "findings": []}
+            })
+            .to_string());
+        }
         Ok(input
             .get("text")
             .and_then(Value::as_str)
@@ -123,6 +142,10 @@ async fn create_team(h: &Harness, roles: Vec<RoleSpec>) -> String {
         budget: json!(null),
         human_policy: None,
         strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
     };
     h.coordinator
         .create_team_run(&req)
@@ -145,7 +168,10 @@ async fn drive(
                 assert!(rounds < 200, "MoreReady 循环超限");
             }
             Ok(PhaseOutcome::Done) => {
-                let _ = coordinator.finalize_success(&team_id).await;
+                coordinator
+                    .finalize_success(&team_id)
+                    .await
+                    .expect("DeliveryGate finalization failed");
                 return PhaseOutcome::Done;
             }
             Ok(other) => return other,
@@ -173,10 +199,118 @@ async fn wait_running(coordinator: &Arc<TeamCoordinator>, team_id: &str) {
     }
 }
 
+struct DispatchGateWorker {
+    started: mpsc::UnboundedSender<String>,
+    release_a: Arc<Semaphore>,
+    release_b: Arc<Semaphore>,
+}
+
+#[async_trait]
+impl Worker for DispatchGateWorker {
+    fn name(&self) -> &str {
+        "dispatch-gate"
+    }
+
+    async fn run(&self, input: &Value) -> Result<String, String> {
+        let step_id = input
+            .get("_workswarm")
+            .and_then(|meta| meta.get("step_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let _ = self.started.send(step_id.clone());
+        let gate = match step_id.as_str() {
+            "s-a" => Some(Arc::clone(&self.release_a)),
+            "s-b" => Some(Arc::clone(&self.release_b)),
+            _ => None,
+        };
+        if let Some(gate) = gate {
+            gate.acquire()
+                .await
+                .map_err(|error| format!("dispatch gate closed: {error}"))?
+                .forget();
+        }
+        Ok(format!("completed {step_id}"))
+    }
+}
+
+#[tokio::test]
+async fn coordinator_dispatches_ready_child_before_independent_slow_step_finishes() {
+    let h = harness();
+    let mut roles = vec![
+        RoleSpec::agent("a"),
+        RoleSpec::agent("b"),
+        RoleSpec::agent("a2"),
+    ];
+    for role in &mut roles {
+        role.verify = Some("non_empty".to_string());
+    }
+    roles[2].depends_on = vec!["a".to_string()];
+    let team_id = create_team(&h, roles.clone()).await;
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let release_a = Arc::new(Semaphore::new(0));
+    let release_b = Arc::new(Semaphore::new(0));
+    let worker = Arc::new(DispatchGateWorker {
+        started: started_tx,
+        release_a: Arc::clone(&release_a),
+        release_b: Arc::clone(&release_b),
+    });
+    let registry = build_registry(&h, &team_id, worker, &roles);
+    let driver = tokio::spawn(drive(Arc::clone(&h.coordinator), team_id.clone(), registry));
+
+    let initial_ready = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut seen = std::collections::HashSet::new();
+        while !(seen.contains("s-a") && seen.contains("s-b")) {
+            let step = started_rx.recv().await.expect("worker channel closed");
+            seen.insert(step);
+        }
+    })
+    .await
+    .is_ok();
+
+    release_a.add_permits(1);
+    let child_ready_while_b_blocked = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if started_rx.recv().await.as_deref() == Some("s-a2") {
+                break;
+            }
+        }
+    })
+    .await
+    .is_ok();
+    let completed_a_was_persisted = h
+        .coordinator
+        .load_run_state(&team_id)
+        .ok()
+        .and_then(|state| state.records.get("s-a").map(|record| record.status))
+        == Some(owo_agent_core::plan::StepStatus::Succeeded);
+
+    release_b.add_permits(1);
+    let outcome = tokio::time::timeout(Duration::from_secs(8), driver)
+        .await
+        .expect("WorkSwarm driver failed to finish")
+        .expect("WorkSwarm driver panicked");
+
+    assert!(
+        initial_ready,
+        "independent steps A and B must start together"
+    );
+    assert!(
+        child_ready_while_b_blocked,
+        "A2 must start after A while independent B is still blocked"
+    );
+    assert!(
+        completed_a_was_persisted,
+        "A completion must be persisted before the phase containing B ends"
+    );
+    assert!(matches!(outcome, PhaseOutcome::Done), "{outcome:?}");
+}
+
 fn chain_roles(names: &[&str]) -> Vec<RoleSpec> {
     let mut roles: Vec<RoleSpec> = Vec::new();
     for (index, name) in names.iter().enumerate() {
         let mut role = RoleSpec::agent(*name);
+        role.verify = Some("non_empty".to_string());
         if index > 0 {
             role.depends_on = vec![names[index - 1].to_string()];
         }
@@ -319,8 +453,9 @@ async fn stale_epoch_registration_is_rejected_and_audited() {
     let artifacts = h.store.list_artifacts_by_project(&space_id).await.unwrap();
     assert!(artifacts.is_empty(), "过期回传不得创建 Artifact");
 
-    // 兼容入口（None = 人节点/诊断路径）不受代次校验影响。
-    h.coordinator
+    // 兼容入口仍不得绕过已取消阶段的失效状态；迟到的人工/诊断回传也不能落 Artifact。
+    let legacy_error = h
+        .coordinator
         .register_step_output(
             &team_id,
             "m-builder",
@@ -329,9 +464,13 @@ async fn stale_epoch_registration_is_rejected_and_audited() {
             "人工补录产物",
         )
         .await
-        .expect("legacy 入口应保持兼容");
+        .expect_err("已取消阶段不得通过无 epoch 兼容入口写入");
+    assert!(
+        legacy_error.to_string().contains("阶段已失效"),
+        "{legacy_error}"
+    );
     let artifacts = h.store.list_artifacts_by_project(&space_id).await.unwrap();
-    assert_eq!(artifacts.len(), 1);
+    assert!(artifacts.is_empty(), "取消后迟到回传不得创建 Artifact");
 
     // 阶段 C / 回传校验都应留下 stale_drop 审计。
     let audit = h.audit.lock().unwrap();

@@ -1,4 +1,5 @@
 use super::workers::*;
+use super::write_lease::{manager_for_workspace, WriteLease, WriteScope};
 use super::{project_workspace, workspace_change_tracker, workswarm_metrics};
 use owo_agent_core::goal::{Worker, WorkerRegistry};
 use owo_agent_core::worker_profile::{intersect_paths, WorkerProfile};
@@ -8,6 +9,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// 声明写范围与团队绑定无交集时的不可达写白名单哨兵（工具/审批层据此拒绝一切写入）。
+const NO_WRITE_SCOPE_MARKER: &str = ".owo-no-write-scope";
 
 /// 按角色 worker 名解析内层 worker（"agent"/缺省 = 模型驱动）。
 ///
@@ -21,11 +25,16 @@ pub(super) fn inner_worker_for(
     state: &AppState,
     worker_name: Option<&str>,
     model_calls: Option<&Arc<AtomicU64>>,
+    request_usage: Option<&Arc<workswarm_metrics::RequestUsageCollector>>,
     scope: Option<&project_workspace::WorkspaceScope>,
     profile: &WorkerProfile,
     is_critic: bool,
     cancel_flag: &Arc<AtomicBool>,
     write_allowed: Vec<PathBuf>,
+    coordinator: &Arc<TeamCoordinator>,
+    team_id: &str,
+    parent_session_id: Option<&str>,
+    role: &str,
 ) -> Option<Arc<dyn Worker>> {
     match worker_name.map(str::trim).filter(|w| !w.is_empty()) {
         Some("echo") => Some(Arc::new(EchoWorker)),
@@ -41,11 +50,17 @@ pub(super) fn inner_worker_for(
                 agent: Arc::clone(&state.agent),
                 workspace,
                 model_calls: model_calls.cloned(),
+                request_usage: request_usage.cloned(),
                 workspace_scope,
                 profile: Some(profile.clone()),
                 is_critic,
                 cancel_flag: Some(Arc::clone(cancel_flag)),
                 write_allowed,
+                coordinator: Arc::clone(coordinator),
+                session_store: Arc::clone(&state.store),
+                parent_session_id: parent_session_id.map(str::to_string),
+                team_id: team_id.to_string(),
+                role: role.to_string(),
             }))
         }
     }
@@ -62,8 +77,9 @@ pub(super) fn inner_worker_for(
 /// 七期（第二路）：
 /// - 角色画像：模板 `budget_calls_per_role` → 真实 `max_turns`；`WorkerProfile::for_role`
 ///   决定每个角色实际可见工具面（注册表面即权限边界，不靠审批事后拒绝）；
-/// - 单写租约 + 变更追踪：写角色包 `TrackedRoleWorker`（同一工作区同时只允许一个
-///   写角色；执行前后 git 快照 → 变更摘要/diff ref 落盘 → 白名单越界 `scope_violation`）；
+/// - 范围写租约 + 变更追踪：写角色包 `TrackedRoleWorker`（未声明写范围 = 工作区级
+///   全局互斥；声明 `write_paths` 且互不重叠 = 并发落盘；执行前后 git 快照 →
+///   变更摘要/diff ref 落盘 → 白名单越界 `scope_violation`）；
 /// - 取消桥：`cancel_flag` 由 run_team_loop 的令牌监听任务置位，Worker 协作中断。
 pub(super) async fn build_run_registry(
     coordinator: &Arc<TeamCoordinator>,
@@ -76,10 +92,20 @@ pub(super) async fn build_run_registry(
     // 绑定生命周期独立于运行状态，恢复后继续生效）。
     let scope = project_workspace::load_binding(coordinator.run_dir(), team_id).map(|b| b.scope());
     // 七期（第二路）：模板角色预算 → 真实 max_turns（无模板 / 未知角色 → 缺省 12）。
-    let budgets: Vec<owo_agent_core::builtin_team_templates::RoleBudget> = coordinator
-        .get_team_run(team_id)
-        .await
-        .ok()
+    let team_run = coordinator.get_team_run(team_id).await.ok();
+    let parent_session_id = team_run.as_ref().and_then(|run| {
+        run.shared_context_refs.iter().find_map(|reference| {
+            let hash = reference.strip_prefix("cas://sha256:")?;
+            let snapshot = coordinator.cas().get_text(hash)?;
+            serde_json::from_str::<serde_json::Value>(&snapshot)
+                .ok()?
+                .get("source_session_id")?
+                .as_str()
+                .map(str::to_string)
+        })
+    });
+    let budgets: Vec<owo_agent_core::builtin_team_templates::RoleBudget> = team_run
+        .as_ref()
         .and_then(|run| {
             run.template_id
                 .as_deref()
@@ -88,8 +114,14 @@ pub(super) async fn build_run_registry(
         .map(|descriptor| descriptor.budget_calls_per_role)
         .unwrap_or_default();
     let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), team_id);
-    // 单写租约（每次重建注册表新发一份：同一轮注册表内的写角色互斥）。
-    let write_lease = Arc::new(tokio::sync::Mutex::new(()));
+    // 范围写租约按实际工作区共享：跨调度阶段和不同 TeamRun 仍能互斥重叠写面。
+    // 未声明范围的写角色全局互斥；声明写范围且互不重叠的写角色可并发落盘。
+    let tracking_root = scope
+        .as_ref()
+        .map(|s| s.root.as_path())
+        .unwrap_or(state.workspace.as_path());
+    let write_lease_manager = manager_for_workspace(tracking_root);
+    let usage_tracker = Arc::new(workswarm_metrics::UsageAttributionTracker::default());
     let registry = WorkerRegistry::new();
     for r in &meta.roles {
         let member_id = format!("m-{}", r.role);
@@ -101,14 +133,31 @@ pub(super) async fn build_run_registry(
             .unwrap_or("agent")
             .to_string();
         let model_calls = (worker_kind == "agent").then(|| Arc::new(AtomicU64::new(0)));
-        // 七期（第二路）：角色画像（模板预算 → 回合上限；工具面/只读按角色族）。
+        let request_usage = (worker_kind == "agent")
+            .then(|| Arc::new(workswarm_metrics::RequestUsageCollector::default()));
+        // 角色画像：显式 write_paths 是写能力声明；并行 TaskGraph writer 槽位
+        // 以可写工具面启动，再由每个任务的 host-validated capability scope 收窄。
         let budget_calls = budgets
             .iter()
             .find(|budget| budget.role == r.role)
             .map(|budget| budget.budget_calls)
             .unwrap_or(0);
-        let profile = WorkerProfile::for_role(&r.role, budget_calls);
-        let is_critic = r.role == "critic";
+        let profile = WorkerProfile::for_team_role(
+            &r.role,
+            &r.capabilities,
+            budget_calls,
+            !r.write_paths.is_empty(),
+            meta.parallel && owo_agent_core::worker_profile::is_parallel_writer_name(&r.role),
+        );
+        let profile = if meta.template_id.as_deref()
+            == Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1)
+            && matches!(r.role.as_str(), "w1" | "w2")
+        {
+            profile.without_commands()
+        } else {
+            profile
+        };
+        let is_critic = r.is_reviewer();
         let is_writer = profile.is_writer();
         // 最终写面 = 角色白名单 ∩ 团队绑定白名单（角色白名单空 = 交由绑定决定；
         // 两侧都空 = 工作区内可写，仍受审批约束）。
@@ -120,21 +169,59 @@ pub(super) async fn build_run_registry(
             .as_ref()
             .map(|s| s.allowed.clone())
             .unwrap_or_default();
-        let profile_allowed: Vec<PathBuf> = profile
-            .write_allowed_paths
-            .iter()
-            .map(|relative| tracking_root.join(relative))
-            .collect();
-        let write_allowed = intersect_paths(&profile_allowed, &scope_allowed);
+        // 十一期（二路）：角色级写范围优先（RoleSpec.write_paths，相对工作区根）；
+        // 未声明沿用画像白名单（当前内置画像恒为空 = 工作区级）。
+        let role_allowed: Vec<PathBuf> = if r.write_paths.is_empty() {
+            profile
+                .write_allowed_paths
+                .iter()
+                .map(|relative| tracking_root.join(relative))
+                .collect()
+        } else {
+            r.write_paths
+                .iter()
+                .map(|relative| tracking_root.join(relative))
+                .collect()
+        };
+        // 角色 ∩ 绑定：两侧都非空且无交集 = 该角色在此绑定下不可写任何文件
+        // （哨兵路径保证工具/审批/租约三层一致拒绝；空白的「未约束」语义不被复用）。
+        let write_allowed = if role_allowed.is_empty() {
+            scope_allowed.clone()
+        } else if scope_allowed.is_empty() {
+            role_allowed
+        } else {
+            let intersection = intersect_paths(&role_allowed, &scope_allowed);
+            if intersection.is_empty() {
+                vec![tracking_root.join(NO_WRITE_SCOPE_MARKER)]
+            } else {
+                intersection
+            }
+        };
+        let lease_waits =
+            is_writer.then(|| Arc::new(workswarm_metrics::LeaseWaitTracker::default()));
+        let lease = is_writer.then(|| {
+            // 空写面 = 工作区级（全局互斥）；声明写面 = 范围租约（不重叠可并发）。
+            let scope = if write_allowed.is_empty() {
+                WriteScope::global()
+            } else {
+                WriteScope::from_paths(&write_allowed)
+            };
+            WriteLease::new(Arc::clone(&write_lease_manager), scope)
+        });
         let inner = inner_worker_for(
             state,
             r.worker.as_deref(),
             model_calls.as_ref(),
+            request_usage.as_ref(),
             scope.as_ref(),
             &profile,
             is_critic,
             cancel_flag,
             write_allowed.clone(),
+            coordinator,
+            team_id,
+            parent_session_id.as_deref(),
+            &r.role,
         )?;
         // 追踪 + 租约只作用于写角色（读角色没有写工具不会改文件；并行读角色的
         // 快照窗口会误捕写角色的变更）。
@@ -150,28 +237,35 @@ pub(super) async fn build_run_registry(
         });
         let inner: Arc<dyn Worker> = Arc::new(TrackedRoleWorker {
             inner,
-            lease: is_writer.then(|| Arc::clone(&write_lease)),
+            lease,
+            lease_waits: lease_waits.clone(),
             tracking,
         });
-        let role_worker = Arc::new(RoleWorker::new(
+        let role_worker = Arc::new(RoleWorker::new_with_capabilities(
             Arc::clone(coordinator),
             team_id.to_string(),
             member_id.clone(),
             r.role.clone(),
+            r.capabilities.clone(),
             inner,
         ));
         let provider = (worker_kind == "agent").then(|| state.agent.provider());
-        registry.register(Arc::new(workswarm_metrics::MeasuredRoleWorker::new(
-            role_worker,
-            Arc::clone(coordinator),
-            journal.clone(),
-            team_id.to_string(),
-            member_id,
-            r.role.clone(),
-            worker_kind,
-            provider,
-            model_calls,
-        )));
+        registry.register(Arc::new(
+            workswarm_metrics::MeasuredRoleWorker::new_with_usage_tracker(
+                role_worker,
+                Arc::clone(coordinator),
+                journal.clone(),
+                team_id.to_string(),
+                member_id,
+                r.role.clone(),
+                worker_kind,
+                provider,
+                model_calls,
+                Arc::clone(&usage_tracker),
+                request_usage,
+                lease_waits,
+            ),
+        ));
     }
     Some(registry)
 }
@@ -270,6 +364,12 @@ pub(crate) async fn run_team_loop(
             }
         });
     }
+    let verification_root = project_workspace::load_binding(coordinator.run_dir(), &team_id)
+        .map(|binding| binding.scope().root)
+        .unwrap_or_else(|| state.workspace.clone());
+    if let Err(error) = coordinator.bind_verification_workspace(&team_id, &verification_root) {
+        tracing::warn!(team_id = %team_id, %error, "workswarm 验证工作区未绑定；WorkspacePaths 要求将在 DeliveryGate 中失败关闭");
+    }
     let mut backoff = Duration::from_secs(1);
     loop {
         // 五期（第三路）：指标预算门（外层调度点；门闩内调度点见下方 latch 循环）。
@@ -294,6 +394,8 @@ pub(crate) async fn run_team_loop(
                     continue;
                 }
                 owo_agent_core::PhaseOutcome::Done => {
+                    let _delivery_lease =
+                        super::acquire_workspace_delivery_lease(&verification_root).await;
                     if let Err(e) = coordinator.finalize_success(&team_id).await {
                         tracing::error!(team_id = %team_id, %e, "workswarm 收尾失败");
                     }
@@ -326,6 +428,9 @@ pub(crate) async fn run_team_loop(
                         match coordinator.run_phase(&team_id, &registry).await {
                             Ok(owo_agent_core::PhaseOutcome::AwaitingHuman { .. }) => continue,
                             Ok(owo_agent_core::PhaseOutcome::Done) => {
+                                let _delivery_lease =
+                                    super::acquire_workspace_delivery_lease(&verification_root)
+                                        .await;
                                 let _ = coordinator.finalize_success(&team_id).await;
                                 return;
                             }

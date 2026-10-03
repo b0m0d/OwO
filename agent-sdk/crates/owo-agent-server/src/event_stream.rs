@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 
 /// 订阅队列默认容量（事件数）。
 pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
@@ -45,6 +45,8 @@ pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 pub const HISTORY_CAPACITY: usize = 4096;
 /// SSE 空闲心跳间隔。
 pub const HEARTBEAT_INTERVAL_MS: u64 = 15_000;
+/// HTTP 转发队列上限；订阅队列和 HTTP 缓冲都保持有界。
+pub const SSE_FORWARD_QUEUE_CAPACITY: usize = 64;
 
 /// 事件类型常量：关键事件（审批/熔断/告警）与可合并事件（进度/心跳）。
 pub const KIND_APPROVAL: &str = "approval";
@@ -160,6 +162,9 @@ impl Subscription {
             if let Some(event) = queue.pop_front() {
                 self.last_delivered.store(event.seq, Ordering::Relaxed);
                 return Some(event);
+            }
+            if self.closed.load(Ordering::Relaxed) {
+                return None;
             }
             let (guard, wait_result) = condvar
                 .wait_timeout(queue, timeout)
@@ -626,7 +631,11 @@ impl EventStreamHub {
 
     /// 标记订阅关闭（SSE 连接结束/被断开时调用），随后从注册表回收。
     pub fn close(&self, subscription: &Arc<Subscription>) {
-        subscription.closed.store(true, Ordering::Relaxed);
+        if subscription.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (_, condvar) = &*subscription.queue;
+        condvar.notify_all();
         {
             let mut subscribers = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
             subscribers.retain(|s| !s.closed.load(Ordering::Relaxed));
@@ -712,17 +721,24 @@ fn resolve_last_event_id(headers: &axum::http::HeaderMap, query: &StreamQuery) -
 async fn events_stream(
     Query(query): Query<StreamQuery>,
     headers: axum::http::HeaderMap,
-) -> Sse<UnboundedReceiverStream<Result<Event, Infallible>>> {
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (subscription, replay) = match resolve_last_event_id(&headers, &query) {
         Some(last_event_id) => hub().subscribe_after(last_event_id),
         None => hub().subscribe_live_only(),
     };
-    let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_FORWARD_QUEUE_CAPACITY);
 
     // 帧泵运行在专用 std 线程：recv_blocking 是 std Condvar 阻塞等待，
     // 之前放在 tokio::spawn 里会占死 worker 线程（§16.1"移除阻塞接收器"——
     // 运行时冒烟发现：live /events/stream 连心跳都收不到、订阅者永不关闭、
-    // 路由级续传测试挂起，同一根因）。unbounded tx 从 std 线程发送安全。
+    // 路由级续传测试挂起，同一根因）。blocking_send 仅在此专用 std 线程调用。
+    let disconnect_subscription = Arc::clone(&subscription);
+    let disconnect_signal = tx.clone();
+    tokio::spawn(async move {
+        disconnect_signal.closed().await;
+        hub().close(&disconnect_subscription);
+    });
+
     std::thread::spawn(move || {
         for event in replay {
             if send_frame(&tx, &event).is_err() {
@@ -738,7 +754,10 @@ async fn events_stream(
                     }
                 }
                 None => {
-                    if tx.send(Ok(Event::default().comment("keep-alive"))).is_err() {
+                    if tx
+                        .blocking_send(Ok(Event::default().comment("keep-alive")))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -751,14 +770,11 @@ async fn events_stream(
         hub().close(&subscription);
     });
 
-    Sse::new(UnboundedReceiverStream::new(rx))
+    Sse::new(ReceiverStream::new(rx))
 }
 
-fn send_frame(
-    tx: &mpsc::UnboundedSender<Result<Event, Infallible>>,
-    event: &StreamEvent,
-) -> Result<(), ()> {
-    tx.send(Ok(Event::default()
+fn send_frame(tx: &mpsc::Sender<Result<Event, Infallible>>, event: &StreamEvent) -> Result<(), ()> {
+    tx.blocking_send(Ok(Event::default()
         .event(&event.kind)
         .id(event.seq.to_string())
         .data(event_json(event))))

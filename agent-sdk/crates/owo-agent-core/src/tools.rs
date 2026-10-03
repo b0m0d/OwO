@@ -510,6 +510,11 @@ impl ToolRegistry {
         self.register(WhitelistWriteFileTool { allowed });
     }
 
+    /// 白名单受限精确补丁：每个补丁目标都必须落入同一授权路径前缀内。
+    pub fn register_whitelist_apply_patch(&mut self, allowed: Vec<PathBuf>) {
+        self.register(WhitelistApplyPatchTool { allowed });
+    }
+
     /// 受控命令执行：`run_command`（实现族角色专用；沙箱 + 审批约束不变）。
     pub fn register_run_command(&mut self) {
         self.register(RunCommandTool);
@@ -583,6 +588,11 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: impl Tool + 'static) {
         self.tools.push(Arc::new(tool));
+    }
+
+    /// 注册由宿主构造的共享工具实例；执行仍经 ToolHost 与审批/审计门控。
+    pub fn register_arc(&mut self, tool: Arc<dyn Tool>) {
+        self.tools.push(tool);
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -939,9 +949,12 @@ impl Tool for ReadFileTool {
             .clamp(1, 2000) as usize;
         let number = args.get("number").and_then(Value::as_bool).unwrap_or(false);
         let abs = resolve_session_path(ctx, &path)?;
-        let raw = tokio::fs::read_to_string(&abs)
+        let raw_bytes = tokio::fs::read(&abs)
             .await
             .map_err(|e| format!("读取 {path} 失败：{e}"))?;
+        let sha256 = crate::CasStore::hash_of(&raw_bytes);
+        let raw = String::from_utf8(raw_bytes)
+            .map_err(|e| format!("读取 {path} 失败：文件不是有效 UTF-8：{e}"))?;
         let total_lines = raw.lines().count();
         let start = offset.min(total_lines.saturating_add(1));
         let selected: Vec<&str> = raw.lines().skip(start - 1).take(limit).collect();
@@ -965,6 +978,7 @@ impl Tool for ReadFileTool {
             "total_lines": total_lines,
             "truncated": truncated,
             "bytes": content.len(),
+            "sha256": format!("sha256:{sha256}"),
         }))
     }
 }
@@ -1256,6 +1270,12 @@ enum PatchOp {
     Update { path: String, hunks: Vec<PatchHunk> },
 }
 
+fn patch_op_path(op: &PatchOp) -> &str {
+    match op {
+        PatchOp::Add { path, .. } | PatchOp::Delete { path } | PatchOp::Update { path, .. } => path,
+    }
+}
+
 /// 解析 Codex 风格补丁：`*** Add/Update/Delete File:` + `@@` 段落 + `+`/`-`/空格 行。
 fn parse_patch(patch: &str) -> Result<Vec<PatchOp>, String> {
     fn close(
@@ -1417,7 +1437,7 @@ fn apply_hunks(original: &str, hunks: &[PatchHunk]) -> Result<String, String> {
     Ok(result)
 }
 
-/// `apply_patch`：多文件原子补丁（Add/Update/Delete），写入走快照可 diff/revert。
+/// `apply_patch`：先校验整组补丁，再逐文件写入；写入走快照可 diff/revert。
 struct ApplyPatchTool;
 
 #[async_trait]
@@ -1426,11 +1446,18 @@ impl Tool for ApplyPatchTool {
         ToolSpec {
             name: "apply_patch".into(),
             description:
-                "应用多文件补丁（*** Add/Update/Delete File: + @@ 段落；写入记录快照，可 diff/revert）"
+                "应用多文件补丁；可传 expected_hashes 做并发修改保护，成功后返回每个文件的哈希收据"
                     .into(),
             input_schema: json!({
                 "type": "object",
-                "properties": { "patch": { "type": "string" } },
+                "properties": {
+                    "patch": { "type": "string" },
+                    "expected_hashes": {
+                        "type": "object",
+                        "description": "可选并发保护；按补丁中的相对路径提供全部文件的基线，Add 用 absent，Update/Delete 用 sha256:<hex>",
+                        "additionalProperties": { "type": "string" }
+                    }
+                },
                 "required": ["patch"]
             }),
             effect: None,
@@ -1440,62 +1467,151 @@ impl Tool for ApplyPatchTool {
     async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
         let patch = required_string(&args, "patch")?;
         let ops = parse_patch(&patch)?;
-        // 先全部解析/校验/计算，再落盘：任一文件失败即整体失败，不留半成品。
-        let mut prepared: Vec<(String, PathBuf, String)> = Vec::with_capacity(ops.len());
+        let expected_hashes = match args.get("expected_hashes") {
+            None => None,
+            Some(Value::Object(values)) => Some(values),
+            Some(_) => return Err("expected_hashes 必须是对象".to_string()),
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut prepared: Vec<(String, PathBuf, String, Option<Vec<u8>>, String)> =
+            Vec::with_capacity(ops.len());
         for op in &ops {
-            match op {
-                PatchOp::Add { path, content } => {
-                    let abs = resolve_session_path(ctx, path)?;
-                    if abs.exists() {
-                        return Err(format!("Add File 目标已存在：{path}"));
-                    }
-                    prepared.push((path.clone(), abs, content.clone()));
+            let path = patch_op_path(op).to_string();
+            let abs = resolve_session_path(ctx, &path)?;
+            let key = snapshot_key(&abs);
+            if !seen.insert(key) {
+                return Err(format!("补丁重复操作同一文件：{path}"));
+            }
+            let (content, base, kind) = match op {
+                PatchOp::Add { content, .. } => {
+                    let base = match tokio::fs::read(&abs).await {
+                        Ok(_) => return Err(format!("Add File 目标已存在：{path}")),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => return Err(format!("Add File 检查 {path} 失败：{error}")),
+                    };
+                    (content.clone(), base, "add")
                 }
-                PatchOp::Delete { path } => {
-                    let abs = resolve_session_path(ctx, path)?;
-                    let original = tokio::fs::read_to_string(&abs)
+                PatchOp::Delete { .. } => {
+                    let base = tokio::fs::read(&abs)
                         .await
                         .map_err(|e| format!("Delete File 读取 {path} 失败：{e}"))?;
-                    prepared.push((path.clone(), abs, original));
+                    let content = String::from_utf8(base.clone())
+                        .map_err(|e| format!("Delete File {path} 不是有效 UTF-8：{e}"))?;
+                    (content, Some(base), "delete")
                 }
-                PatchOp::Update { path, hunks } => {
-                    let abs = resolve_session_path(ctx, path)?;
-                    let original = tokio::fs::read_to_string(&abs)
+                PatchOp::Update { hunks, .. } => {
+                    let base = tokio::fs::read(&abs)
                         .await
                         .map_err(|e| format!("Update File 读取 {path} 失败：{e}"))?;
-                    let updated = apply_hunks(&original, hunks)?;
-                    prepared.push((path.clone(), abs, updated));
+                    let original = String::from_utf8(base.clone())
+                        .map_err(|e| format!("Update File {path} 不是有效 UTF-8：{e}"))?;
+                    (apply_hunks(&original, hunks)?, Some(base), "update")
                 }
+            };
+            if let Some(expected) = expected_hashes {
+                let expected = expected
+                    .get(&path)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("expected_hashes 缺少文件基线：{path}"))?;
+                let actual = base
+                    .as_deref()
+                    .map(|bytes| format!("sha256:{}", crate::CasStore::hash_of(bytes)))
+                    .unwrap_or_else(|| "absent".to_string());
+                if expected != actual {
+                    return Err(format!(
+                        "补丁基线冲突：{path} 当前为 {actual}，期望 {expected}"
+                    ));
+                }
+            }
+            prepared.push((path, abs, content, base, kind.to_string()));
+        }
+        if let Some(expected) = expected_hashes {
+            if expected.len() != ops.len()
+                || expected
+                    .keys()
+                    .any(|path| !ops.iter().any(|op| patch_op_path(op) == path))
+            {
+                return Err("expected_hashes 必须且只能包含补丁涉及的文件路径".to_string());
             }
         }
+
         let mut applied = Vec::with_capacity(ops.len());
-        for (op, (path, abs, content)) in ops.iter().zip(prepared) {
-            match op {
-                PatchOp::Delete { .. } => {
-                    // 删除也落快照（original_b64），revert 可恢复。
-                    let key = snapshot_key(&abs);
-                    ctx.session.snapshots.entry(key).or_insert_with(|| {
+        for (path, abs, content, base, kind) in prepared {
+            let current = match tokio::fs::read(&abs).await {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(format!("写入前重新读取 {path} 失败：{error}")),
+            };
+            if current != base {
+                let actual = current
+                    .as_deref()
+                    .map(|bytes| format!("sha256:{}", crate::CasStore::hash_of(bytes)))
+                    .unwrap_or_else(|| "absent".to_string());
+                return Err(format!(
+                    "补丁基线冲突：{path} 在准备期间已变化，当前为 {actual}"
+                ));
+            }
+            let base_hash = base
+                .as_deref()
+                .map(|bytes| format!("sha256:{}", crate::CasStore::hash_of(bytes)));
+            let result_hash = if kind == "delete" {
+                let key = snapshot_key(&abs);
+                if let Some(snapshot) = ctx.session.snapshots.get(&key) {
+                    let matches_snapshot = if let Some(expected_after) =
+                        snapshot.expected_after_sha256.as_deref()
+                    {
+                        base.as_deref()
+                            .is_some_and(|bytes| crate::CasStore::hash_of(bytes) == expected_after)
+                    } else {
+                        let original = snapshot
+                            .original_b64
+                            .as_deref()
+                            .map(|encoded| BASE64.decode(encoded))
+                            .transpose()
+                            .map_err(|error| format!("快照解码失败：{error}"))?;
+                        original == base
+                    };
+                    if !matches_snapshot {
+                        return Err(format!(
+                            "删除冲突：{path} 已在 Agent 记录的文件状态后再次变化"
+                        ));
+                    }
+                } else {
+                    ctx.session.snapshots.insert(
+                        key,
                         crate::session::SnapshotEntry {
-                            original_b64: Some(BASE64.encode(content.as_bytes())),
+                            original_b64: base.as_deref().map(|bytes| BASE64.encode(bytes)),
                             expected_after_sha256: None,
                             turn: ctx.session.messages.len(),
-                        }
+                        },
+                    );
+                }
+                tokio::fs::remove_file(&abs)
+                    .await
+                    .map_err(|e| format!("删除 {path} 失败：{e}"))?;
+                Value::Null
+            } else {
+                let key = snapshot_key(&abs);
+                ctx.session
+                    .snapshots
+                    .entry(key)
+                    .or_insert_with(|| crate::session::SnapshotEntry {
+                        original_b64: base.as_deref().map(|bytes| BASE64.encode(bytes)),
+                        expected_after_sha256: None,
+                        turn: ctx.session.messages.len(),
                     });
-                    tokio::fs::remove_file(&abs)
-                        .await
-                        .map_err(|e| format!("删除 {path} 失败：{e}"))?;
-                    applied.push(json!({ "path": path, "op": "delete" }));
-                }
-                PatchOp::Add { .. } | PatchOp::Update { .. } => {
-                    write_file_body(ctx, &path, &abs, &content).await?;
-                    let kind = if matches!(op, PatchOp::Add { .. }) {
-                        "add"
-                    } else {
-                        "update"
-                    };
-                    applied.push(json!({ "path": path, "op": kind }));
-                }
-            }
+                write_file_body(ctx, &path, &abs, &content).await?;
+                json!(format!(
+                    "sha256:{}",
+                    crate::CasStore::hash_of(content.as_bytes())
+                ))
+            };
+            applied.push(json!({
+                "path": path,
+                "op": kind,
+                "base_sha256": base_hash,
+                "result_sha256": result_hash,
+            }));
         }
         Ok(json!({ "ok": true, "files": applied }))
     }
@@ -2229,6 +2345,32 @@ impl Tool for WhitelistWriteFileTool {
         let content = required_string(&args, "content")?;
         let abs = self.resolve_whitelisted(ctx, &path)?;
         write_file_body(ctx, &path, &abs, &content).await
+    }
+}
+
+/// 白名单受限补丁工具：在交给补丁执行器前校验每个文件目标。
+struct WhitelistApplyPatchTool {
+    allowed: Vec<PathBuf>,
+}
+
+#[async_trait]
+impl Tool for WhitelistApplyPatchTool {
+    fn spec(&self) -> ToolSpec {
+        let mut spec = ApplyPatchTool.spec();
+        spec.description =
+            "应用多文件精确补丁（仅限白名单路径；支持 expected_hashes 与哈希收据）".into();
+        spec
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let patch = required_string(&args, "patch")?;
+        let guard = WhitelistWriteFileTool {
+            allowed: self.allowed.clone(),
+        };
+        for op in parse_patch(&patch)? {
+            guard.resolve_whitelisted(ctx, patch_op_path(&op))?;
+        }
+        ApplyPatchTool.run(ctx, args).await
     }
 }
 
@@ -3212,11 +3354,17 @@ mod tests {
         assert_eq!(decode_process_output(b""), "");
         // 「中文」的 GBK 字节（D6D0 CEC4）：严格 UTF-8 解不了，须按系统代码页还原。
         #[cfg(windows)]
-        assert_eq!(
-            decode_process_output(&[0xD6, 0xD0, 0xCE, 0xC4]),
-            "中文",
-            "GBK 字节未按系统代码页解码（中文命令输出会乱码）"
-        );
+        unsafe {
+            // GBK 固定字节只适用于 OEM 936；部分 Windows 已把 OEM 页设成 UTF-8。
+            // 在这类机器上，此测试仍覆盖 UTF-8 优先分支，不把环境配置差异判成缺陷。
+            if windows::Win32::Globalization::GetOEMCP() == 936 {
+                assert_eq!(
+                    decode_process_output(&[0xD6, 0xD0, 0xCE, 0xC4]),
+                    "中文",
+                    "GBK 字节未按系统代码页解码（中文命令输出会乱码）"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -3348,6 +3496,172 @@ mod tests {
             Some(crate::CasStore::hash_of(b"agent version").as_str()),
             "被拒绝的写入不得推进快照中的 Agent 版本"
         );
+        drop(context);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn read_file_returns_content_hash_and_apply_patch_checks_base_receipt() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-patch-receipt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = workspace.join("shared.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        let policy = crate::Policy::new(&workspace);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let mut context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+            fanout: None,
+            abort: None,
+            questioner: None,
+        };
+
+        let before_hash = format!("sha256:{}", crate::CasStore::hash_of(b"old\n"));
+        let read = ReadFileTool
+            .run(&mut context, json!({ "path": "shared.txt" }))
+            .await
+            .unwrap();
+        assert_eq!(read["sha256"], before_hash);
+
+        let patch = "*** Begin Patch\n*** Update File: shared.txt\n@@\n-old\n+new\n*** End Patch";
+        let stale = ApplyPatchTool
+            .run(
+                &mut context,
+                json!({ "patch": patch, "expected_hashes": { "shared.txt": "sha256:stale" } }),
+            )
+            .await
+            .expect_err("旧基线必须被拒绝");
+        assert!(stale.contains("补丁基线冲突"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
+
+        let applied = ApplyPatchTool
+            .run(
+                &mut context,
+                json!({ "patch": patch, "expected_hashes": { "shared.txt": before_hash } }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        assert_eq!(applied["files"][0]["base_sha256"], before_hash);
+        assert_eq!(
+            applied["files"][0]["result_sha256"],
+            format!("sha256:{}", crate::CasStore::hash_of(b"new\n"))
+        );
+
+        let add = ApplyPatchTool
+            .run(
+                &mut context,
+                json!({
+                    "patch": "*** Begin Patch\n*** Add File: created.txt\n+hello\n*** End Patch",
+                    "expected_hashes": { "created.txt": "absent" }
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("created.txt")).unwrap(),
+            "hello\n"
+        );
+        assert_eq!(add["files"][0]["base_sha256"], Value::Null);
+        let created_hash = format!("sha256:{}", crate::CasStore::hash_of(b"hello\n"));
+        assert_eq!(add["files"][0]["result_sha256"], created_hash);
+
+        let delete = ApplyPatchTool
+            .run(
+                &mut context,
+                json!({
+                    "patch": "*** Begin Patch\n*** Delete File: created.txt\n*** End Patch",
+                    "expected_hashes": { "created.txt": created_hash }
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!workspace.join("created.txt").exists());
+        assert_eq!(delete["files"][0]["base_sha256"], created_hash);
+        assert_eq!(delete["files"][0]["result_sha256"], Value::Null);
+        drop(context);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn whitelist_apply_patch_rejects_targets_outside_allowed_paths() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-patch-whitelist-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(workspace.join("allowed")).unwrap();
+        let outside = workspace.join("outside.txt");
+        let policy = crate::Policy::new(&workspace);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let mut context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+            fanout: None,
+            abort: None,
+            questioner: None,
+        };
+        let tool = WhitelistApplyPatchTool {
+            allowed: vec![workspace.join("allowed")],
+        };
+        let error = tool
+            .run(
+                &mut context,
+                json!({ "patch": "*** Begin Patch\n*** Add File: outside.txt\n+denied\n*** End Patch" }),
+            )
+            .await
+            .expect_err("白名单外补丁必须拒绝");
+        assert!(error.contains("写入目标不在写白名单内"));
+        assert!(!outside.exists());
+        drop(context);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_duplicate_file_operations_before_writing() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-patch-duplicate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = workspace.join("shared.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        let policy = crate::Policy::new(&workspace);
+        let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
+        let skills = crate::SkillRegistry::default();
+        let elements = Arc::new(Mutex::new(crate::ElementRegistry::new()));
+        let mut session = Session::new(&workspace, "mock", None);
+        let mut context = ToolContext {
+            workspace: &workspace,
+            policy: &policy,
+            session: &mut session,
+            audit: &audit,
+            subagent: None,
+            skills: &skills,
+            elements: &elements,
+            fanout: None,
+            abort: None,
+            questioner: None,
+        };
+        let patch = "*** Begin Patch\n*** Update File: shared.txt\n@@\n-old\n+new\n*** Update File: shared.txt\n@@\n-old\n+later\n*** End Patch";
+        let error = ApplyPatchTool
+            .run(&mut context, json!({ "patch": patch }))
+            .await
+            .expect_err("同一文件重复操作应拒绝");
+        assert!(error.contains("重复操作"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
         drop(context);
         let _ = std::fs::remove_dir_all(&workspace);
     }

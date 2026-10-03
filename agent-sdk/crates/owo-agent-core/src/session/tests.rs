@@ -67,6 +67,19 @@ fn model_override_roundtrip_legacy_compat_and_fork_inherits() {
 }
 
 #[test]
+fn session_store_exists_checks_presence_without_loading_session_list() {
+    let root =
+        std::env::temp_dir().join(format!("owo-session-exists-test-{}", uuid::Uuid::new_v4()));
+    let store = JsonSessionStore::new(&root);
+    let session = store
+        .create(std::path::Path::new("."), "mock", None)
+        .unwrap();
+    assert!(store.exists(&session.id).unwrap());
+    assert!(!store.exists("missing-session").unwrap());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn fork_creates_child_with_history() {
     let mut session = Session::new(".", "mock", None);
     session.push(ChatMessage::user("a".to_string()));

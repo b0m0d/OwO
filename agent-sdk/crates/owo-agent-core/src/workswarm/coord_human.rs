@@ -231,6 +231,37 @@ impl TeamCoordinator {
         closure
     }
 
+    /// 生产步骤返工后的完整下游闭包；内容版本变化后，已成功的评审/集成结果也必须失效重跑。
+    pub(crate) fn downstream_recheck_closure(
+        state: &GoalRunState,
+        target_step_id: &str,
+    ) -> Vec<String> {
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for step in &state.plan.steps {
+            for dependency in &step.depends_on {
+                dependents
+                    .entry(dependency.as_str())
+                    .or_default()
+                    .push(step.id.as_str());
+            }
+        }
+        let mut closure = Vec::new();
+        let mut visited = HashSet::new();
+        let mut queue = vec![target_step_id];
+        while let Some(current) = queue.pop() {
+            if let Some(next) = dependents.get(current) {
+                for &dependent in next {
+                    if visited.insert(dependent.to_string()) {
+                        closure.push(dependent.to_string());
+                        queue.push(dependent);
+                    }
+                }
+            }
+        }
+        closure.sort();
+        closure
+    }
+
     /// 合并阶段子状态到完整状态（仅阶段内步骤记录 + 计数器增量；已完成步骤记录不被覆盖）。
     pub(crate) fn merge_phase_into_full(&self, full: &mut GoalRunState, sub: &GoalRunState) {
         let sub_ids: HashSet<String> = sub.plan.steps.iter().map(|s| s.id.clone()).collect();

@@ -2,7 +2,7 @@ use owo_agent_protocol::TeamTemplateRole;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::error::{WorkSwarmError, WorkSwarmResult};
 /// 角色规格（组队输入；模板角色的运行时展开）。
@@ -21,24 +21,93 @@ pub struct RoleSpec {
     pub verify: Option<String>,
     /// 附加步骤输入（透传给内层 worker：echo 的 text / agent 的 prompt 覆盖等）。
     pub extra_input: Value,
+    /// 角色模型（十一期 additive；None = 服务端缺省解析链）。
+    pub model: Option<String>,
+    /// 角色级写白名单（相对工作区根；空 = 工作区内可写）。
+    /// 声明后写角色可与其他范围不重叠的写角色并发落盘（范围租约）。
+    pub write_paths: Vec<String>,
+    /// 职责能力。review 控制只读与评审语义；未知能力不授予工具权限。
+    pub capabilities: Vec<String>,
 }
 
 impl RoleSpec {
     pub fn agent(role: impl Into<String>) -> Self {
+        let role = role.into();
+        let capabilities = if super::util::is_review_role_name(&role) {
+            vec!["review".to_string()]
+        } else {
+            Vec::new()
+        };
         Self {
-            role: role.into(),
+            role,
             assignee: "agent".to_string(),
             worker: None,
             depends_on: Vec::new(),
             handoff_contract: None,
             verify: None,
             extra_input: Value::Null,
+            model: None,
+            write_paths: Vec::new(),
+            capabilities,
         }
     }
+
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(capability))
+    }
+
+    pub fn is_reviewer(&self) -> bool {
+        super::util::is_review_role(&self.role, &self.capabilities)
+    }
+}
+
+/// 校验角色级写白名单：相对路径、非空、不允许 `..`/根/盘符。
+///
+/// 写路径是权限声明（权限默认 deny 口径）：非法路径在组队期直接拒绝，
+/// 不允许把越界语义带进运行期。
+pub fn validate_role_write_paths(role: &str, paths: &[String]) -> Result<(), String> {
+    validate_role_write_paths_with_capabilities(role, &[], paths)
+}
+
+pub fn validate_role_write_paths_with_capabilities(
+    role: &str,
+    capabilities: &[String],
+    paths: &[String],
+) -> Result<(), String> {
+    if super::util::is_review_role(role, capabilities) && !paths.is_empty() {
+        return Err(format!("评审角色 {role} 不能声明写路径"));
+    }
+    for raw in paths {
+        let path = Path::new(raw.trim());
+        if raw.trim().is_empty() {
+            return Err(format!("角色 {role} 的写路径不能为空"));
+        }
+        if path.is_absolute() {
+            return Err(format!("角色 {role} 的写路径必须是相对路径：{raw}"));
+        }
+        for component in path.components() {
+            match component {
+                Component::Normal(_) => {}
+                Component::CurDir => {}
+                _ => {
+                    return Err(format!("角色 {role} 的写路径不允许 `..`/根/盘符：{raw}"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 impl From<TeamTemplateRole> for RoleSpec {
     fn from(r: TeamTemplateRole) -> Self {
+        let capabilities = if r.capabilities.is_empty() && super::util::is_review_role_name(&r.role)
+        {
+            vec!["review".to_string()]
+        } else {
+            r.capabilities
+        };
         Self {
             role: r.role,
             assignee: r.assignee,
@@ -47,8 +116,63 @@ impl From<TeamTemplateRole> for RoleSpec {
             handoff_contract: r.handoff_contract,
             verify: r.verify,
             extra_input: Value::Null,
+            model: r.model,
+            write_paths: r.write_paths,
+            capabilities,
         }
     }
+}
+
+/// 并行开发角色组（十一期）：`lead`（只读拆解）→ `w1..wN`（依赖 lead，彼此无依赖 =
+/// 同一 wave 真并行）→ `leader`（依赖全部 writer，汇总交付）。
+///
+/// - `writers` 收敛到 2..=8（≥2 才有并行收益；上限防误配爆并发/成员上限）；
+/// - lead 被要求输出版本化 TaskGraphV1：任务数与 worker 槽位解耦，校验后按依赖绑定任务；
+/// - 运行期据此**动态**给 writer 收窄写范围 + 注入任务验收与验证要求；
+/// - 未声明 `--write` 时 writer 初始为只读（权限默认 deny），由 lead 分配写范围后
+///   升级为写角色；若 lead 产物不可解析，writer 保持只读但产物仍可经 Artifact 交付。
+pub fn parallel_roles(writers: usize) -> Vec<RoleSpec> {
+    let writers = writers.clamp(2, 8);
+    let writer_names: Vec<String> = (1..=writers).map(|i| format!("w{i}")).collect();
+
+    let mut lead = RoleSpec::agent("lead");
+    lead.handoff_contract = Some(format!(
+        "只读拆分目标，输出 TaskGraphV1 JSON。任务数 1 到 128，可多于 {writers} 个 Worker 槽位。\
+         对象包含 version=1 和 tasks 数组；每项包含 task_id、worker（可省略）、task、depends_on、\
+         read_refs、write_paths、contract_refs、required_capabilities、estimated_effort、verification、risk、priority、acceptance。\
+         依赖引用 task_id；重叠写范围必须有依赖顺序；目标和验收不能为空。\
+         代码任务的 verification 使用宿主注册的 WorkspacePaths 计划（scope.kind=workspace_paths，validator_id 为 workspace-file-contains-v1，arguments 提供 text）；\
+         scope 路径必须位于该任务 write_paths 内；required=true，resources 用 cpu_slots=1、memory_mb=8..128、exclusive_workspace=false、timeout_ms=1..30000。\
+         仅对报告文本断言使用 non_empty、contains:<文本> 或 equals:<文本>。\
+         禁止在验证计划中指定 shell/命令。risk 使用 low/normal/high/critical。\
+         不要无意义拆分，只声明任务确需写入的路径。"
+    ));
+    lead.verify = Some("non_empty".to_string());
+
+    let mut roles = vec![lead];
+    for (index, name) in writer_names.iter().enumerate() {
+        let mut writer = RoleSpec::agent(name.clone());
+        writer.depends_on = vec!["lead".to_string()];
+        writer.handoff_contract = Some(format!(
+            "你是并行执行者 {name}（第 {} 路）：只执行当前步骤输入中的 assigned_task，\
+             按 assigned_acceptance 验收；写权限仅限 assigned_write_paths。不要承担队友任务；\
+             完成当前任务后交付结果与证据。",
+            index + 1
+        ));
+        writer.verify = Some("non_empty".to_string());
+        roles.push(writer);
+    }
+
+    let mut leader = RoleSpec::agent("leader");
+    leader.depends_on = writer_names;
+    leader.handoff_contract = Some(
+        "汇总全部 writer 产物：逐条核对子任务验收与证据，标出未完成/冲突/越界项，\
+         产出最终交付物与交付清单（不要重做已完成的子任务）。"
+            .to_string(),
+    );
+    leader.verify = Some("non_empty".to_string());
+    roles.push(leader);
+    roles
 }
 
 /// 运行元数据（sidecar 文件 `<run_dir>/<team_id>-meta.json`）：
@@ -65,6 +189,10 @@ pub struct RunMeta {
     /// 运行期跳过的 `saved_budget_calls` 口径来源）。旧 sidecar 缺省为空。
     #[serde(default)]
     pub budgets: BTreeMap<String, usize>,
+    /// 十一期：并行开发模式标记（lead 拆解 → w1..wN 并行 → leader 汇总；
+    /// 运行期动态应用 lead 产物的子任务分配）。旧 sidecar 缺省 false。
+    #[serde(default)]
+    pub parallel: bool,
 }
 
 impl RunMeta {
