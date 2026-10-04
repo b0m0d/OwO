@@ -34,7 +34,8 @@ pub struct AgentConfig {
     pub max_tool_calls_per_turn: usize,
     /// Host-enforced upper bound for run_command in a task-specific validation plan.
     pub max_command_timeout_ms: Option<u64>,
-    /// 循环保护：同一 `name + 规范化参数` 的调用在同一回合内允许重复的次数（默认 3）。
+    /// 循环保护：同一 `name + 规范化参数` 的连续无进展调用上限（默认 3）；
+    /// 成功的非只读操作会重置其他调用的计数。
     /// 超过即拦截该调用并回灌"改变策略"提示，不再执行。
     pub max_repeated_tool_calls: usize,
     /// §9.2：turn 级统一截止时间；None = 不限时（保持既有行为，仅记账）。

@@ -1521,6 +1521,12 @@ impl Agent {
                     }
                     // —— 回填：按原 tool-call 顺序生成 tool 消息 + 审计 + 计步 ——
                     for (call, result) in calls.iter().zip(results) {
+                        if result.is_ok() && !self.call_is_concurrent_eligible(call) {
+                            reset_loop_guard_after_progress(
+                                &mut call_signatures,
+                                &tool_call_signature(call),
+                            );
+                        }
                         let raw_content = match &result {
                             Ok(value) => value.to_string(),
                             Err(error) => format!("工具错误：{error}"),
@@ -1833,6 +1839,15 @@ fn tool_args_preview(args: &serde_json::Value) -> Option<String> {
         let truncated: String = text.chars().take(MAX_CHARS).collect();
         Some(format!("{truncated}…"))
     }
+}
+
+/// Successful serialized operations provide a new opportunity for the model to make progress.
+/// Keep the current operation count so a command cannot reset its own repeat guard.
+fn reset_loop_guard_after_progress(
+    call_signatures: &mut HashMap<String, usize>,
+    current_signature: &str,
+) {
+    call_signatures.retain(|signature, _| signature == current_signature);
 }
 
 /// 循环保护签名：`name` + 规范化参数（键序稳定，避免 provider 参数键序不同导致漏判）。

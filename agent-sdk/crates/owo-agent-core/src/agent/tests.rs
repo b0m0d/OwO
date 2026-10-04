@@ -1077,6 +1077,69 @@ async fn repeated_identical_tool_call_is_loop_guarded() {
     );
 }
 
+#[tokio::test]
+async fn successful_write_allows_repeating_the_same_validation_command() {
+    let state = ProbeState::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(ProbeTool {
+        label: "probe_test",
+        delay_ms: 0,
+        class: EffectClass::Read,
+        host_verified: true,
+        state: Arc::clone(&state),
+    });
+    registry.register(ProbeTool {
+        label: "probe_write",
+        delay_ms: 0,
+        class: EffectClass::Write,
+        host_verified: true,
+        state: Arc::clone(&state),
+    });
+    let repeated_test = |id: &str| crate::gateway::ToolCall {
+        id: id.to_string(),
+        name: "probe_test".to_string(),
+        arguments: serde_json::json!({"command":"cargo test --test feature"}),
+    };
+    let outputs = Mutex::new(VecDeque::from(vec![
+        ModelOutput::ToolCalls(vec![repeated_test("test-1")]),
+        ModelOutput::ToolCalls(vec![repeated_test("test-2")]),
+        ModelOutput::ToolCalls(vec![crate::gateway::ToolCall {
+            id: "write".to_string(),
+            name: "probe_write".to_string(),
+            arguments: serde_json::json!({"path":"src/lib.rs","content":"fixed"}),
+        }]),
+        ModelOutput::ToolCalls(vec![repeated_test("test-3")]),
+        ModelOutput::ToolCalls(vec![repeated_test("test-4")]),
+        ModelOutput::Text("修复后测试通过".to_string()),
+    ]));
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider { outputs }),
+        registry,
+        Policy::new("."),
+        AgentConfig {
+            max_turns: 10,
+            max_tool_calls_per_turn: 10,
+            max_repeated_tool_calls: 2,
+            ..Default::default()
+        },
+    );
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "修改后重新运行相同测试",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("成功写入后应允许重新运行相同验收命令");
+
+    assert_eq!(outcome.final_text.as_deref(), Some("修复后测试通过"));
+    assert_eq!(state.completed.lock().unwrap().len(), 5);
+}
+
 /// 取优合并（远端 engine）：思考通道增量以 ReasoningDelta 事件外发。
 struct ReasoningProvider;
 
@@ -1580,4 +1643,18 @@ fn single_workspace_receipt_can_bind_a_deleted_file_and_detect_recreation() {
     let actual = crate::CasStore::hash_of(b"recreated source");
     assert!(super::single_workspace_path_matches(&root, relative, &actual));
     std::fs::remove_dir_all(root).expect("remove test workspace");
+}
+
+#[test]
+fn successful_progress_resets_other_tool_repeat_counts_but_keeps_current_count() {
+    let mut repeats = std::collections::HashMap::from([
+        ("run_test:{}".to_string(), 2),
+        ("write_file:{}".to_string(), 1),
+    ]);
+
+    reset_loop_guard_after_progress(&mut repeats, "write_file:{}");
+
+    assert_eq!(repeats.len(), 1);
+    assert_eq!(repeats.get("write_file:{}"), Some(&1));
+    assert!(!repeats.contains_key("run_test:{}"));
 }
