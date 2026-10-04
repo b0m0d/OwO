@@ -229,7 +229,10 @@ pub fn compile_prompt(ctx: &PromptContext) -> String {
         Some((_, s)) => s.must_do.join("\n"),
         None => ctx.handoff_contract.to_string(),
     };
-    if ctx.task_scoped && sections.is_some() && !ctx.handoff_contract.trim().is_empty() {
+    if (ctx.task_scoped || ctx.is_critic)
+        && sections.is_some()
+        && !ctx.handoff_contract.trim().is_empty()
+    {
         must_do.push_str("\n\n");
         must_do.push_str(ctx.handoff_contract);
     }
@@ -567,6 +570,30 @@ mod tests {
         assert!(prompt.contains("write_file"));
         assert!(prompt.contains("只允许在允许写路径内用 write_file"));
         assert!(!prompt.contains("禁止写入工作区文件"));
+    }
+
+    #[test]
+    fn template_critic_prompt_includes_host_review_contract_without_task_scope() {
+        let compiled = compile_upstream(&[], PromptBudget::default());
+        let ctx = PromptContext {
+            core_spec: "",
+            shared_facts: "[]",
+            shared_context_revision: 0,
+            objective: "核查交付是否符合要求",
+            role: "reviewer",
+            handoff_contract: "host review manifest: step-a:behavior",
+            template_id: Some(crate::builtin_team_templates::FULLSTACK_WEB_V1),
+            budget_calls: 5,
+            explicit_writer: false,
+            task_scoped: false,
+            is_critic: true,
+            upstream: &compiled,
+        };
+
+        let prompt = compile_prompt(&ctx);
+
+        assert!(prompt.contains("host review manifest: step-a:behavior"));
+        assert!(prompt.contains("不得修改或覆盖上游产物"));
     }
 
     #[test]

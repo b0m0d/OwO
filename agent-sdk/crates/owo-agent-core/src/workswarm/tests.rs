@@ -157,6 +157,31 @@ fn existing_agent_prompt_receives_the_host_resolved_task_contract() {
 }
 
 #[test]
+fn existing_template_reviewer_prompt_keeps_host_review_manifest() {
+    let task = crate::task_context::ResolvedTaskContext::from_worker_input(&json!({
+        "assigned_task_id": "task-review",
+        "assigned_task": "审查已实现的 API",
+        "assigned_acceptance": "确认错误路径和边界行为"
+    }))
+    .unwrap();
+    let ctx = json!({
+        "role": "reviewer",
+        "capabilities": ["review"],
+        "handoff_contract": "host review manifest: step-api:behavior",
+        "_resolved_task_context": task.to_value().unwrap()
+    });
+    let input = json!({"prompt": "已有模板评审提示"});
+    let enriched = TeamCoordinator::build_enriched_input(&ctx, &input, "agent");
+    let prompt = enriched["prompt"].as_str().unwrap();
+
+    assert!(prompt.contains("已有模板评审提示"));
+    assert!(prompt.contains("host review manifest: step-api:behavior"));
+    assert!(prompt.contains("审查已实现的 API"));
+    assert!(prompt.contains("确认错误路径和边界行为"));
+    assert_eq!(enriched["read_only"], true);
+}
+
+#[test]
 fn enriched_input_agent_and_echo_paths() {
     let ctx = json!({
         "team_id": "t", "objective_text": "O", "role": "critic",

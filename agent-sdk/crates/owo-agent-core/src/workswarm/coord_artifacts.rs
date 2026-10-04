@@ -1175,13 +1175,27 @@ impl TeamCoordinator {
                         .ok()
                     })
                     .and_then(|task| task.prompt_contract());
-                if let (Some(prompt), Some(task_contract)) = (
+                let role = ctx.get("role").and_then(Value::as_str).unwrap_or("");
+                let is_reviewer = super::util::is_review_role(role, &context_capabilities(ctx));
+                let reviewer_contract = is_reviewer
+                    .then(|| ctx.get("handoff_contract").and_then(Value::as_str))
+                    .flatten()
+                    .map(str::trim)
+                    .filter(|contract| !contract.is_empty())
+                    .map(str::to_string);
+                let host_contract = reviewer_contract.or(task_contract);
+                if let (Some(prompt), Some(host_contract)) = (
                     obj.get("prompt").and_then(Value::as_str),
-                    task_contract,
+                    host_contract,
                 ) {
-                    if !prompt.contains(&task_contract) {
+                    if !prompt.contains(&host_contract) {
+                        let section = if is_reviewer {
+                            "宿主解析的评审与任务合同"
+                        } else {
+                            "宿主解析的当前任务与验收范围"
+                        };
                         let enriched = format!(
-                            "{prompt}\n\n## 宿主解析的当前任务与验收范围\n{task_contract}"
+                            "{prompt}\n\n## {section}\n{host_contract}"
                         );
                         obj.insert("prompt".to_string(), json!(enriched));
                     }
