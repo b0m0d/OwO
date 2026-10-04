@@ -849,19 +849,33 @@ impl GoalRunner {
             let Some(step_plan) = &step.verification_plan else {
                 continue;
             };
-            let receipts = self
-                .state
-                .records
-                .get(&step.id)
+            let record = self.state.records.get(&step.id);
+            let receipts = record
                 .map(|record| record.validation_receipts.as_slice())
                 .unwrap_or_default();
+            let active_attempt_id = record.and_then(|record| record.attempt_id.as_deref());
+            let active_epoch = record.and_then(|record| record.phase_epoch);
+            let output_sha256 = record
+                .and_then(|record| record.output.as_deref())
+                .map(|output| crate::cas_store::CasStore::hash_of(output.as_bytes()));
             for requirement in step_plan.requirements.iter().filter(|item| item.required) {
                 required_validation_count += 1;
-                match receipts
-                    .iter()
-                    .find(|receipt| receipt.requirement_id == requirement.requirement_id)
-                    .map(|receipt| receipt.verdict)
-                {
+                let receipt = active_attempt_id
+                    .zip(active_epoch)
+                    .zip(output_sha256.as_deref())
+                    .and_then(|((attempt_id, epoch), output_sha256)| {
+                        receipts.iter().rev().find(|receipt| {
+                            step_validation_receipt_matches(
+                                &step.id,
+                                attempt_id,
+                                epoch,
+                                output_sha256,
+                                requirement,
+                                receipt,
+                            )
+                        })
+                    });
+                match receipt.map(|receipt| receipt.verdict) {
                     Some(crate::plan::ValidationVerdictV1::Passed) => {
                         passed_required_validation_count += 1;
                     }
@@ -1719,6 +1733,34 @@ async fn wait_aborted(flag: Arc<std::sync::atomic::AtomicBool>) {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// A step receipt only satisfies the active requirement when every identity field
+/// still matches the accepted attempt, output, validator version, and arguments.
+fn step_validation_receipt_matches(
+    step_id: &str,
+    attempt_id: &str,
+    epoch: u64,
+    output_sha256: &str,
+    requirement: &crate::plan::VerificationRequirementV1,
+    receipt: &crate::plan::ValidationReceiptV1,
+) -> bool {
+    let arguments_sha256 = crate::cas_store::CasStore::hash_of(
+        &serde_json::to_vec(&requirement.arguments).unwrap_or_default(),
+    );
+    receipt.task_id == step_id
+        && receipt.attempt_id == attempt_id
+        && receipt.epoch == epoch
+        && receipt.requirement_id == requirement.requirement_id
+        && receipt.validator_id == requirement.validator_id
+        && receipt.validator_version
+            == requirement
+                .validator_version
+                .as_deref()
+                .unwrap_or("unknown")
+        && receipt.arguments_sha256 == arguments_sha256
+        && receipt.subject_sha256.get("step-output").map(String::as_str)
+            == Some(output_sha256)
 }
 
 /// 步骤成功收尾：可选黑板写回 + 组装成功结果。

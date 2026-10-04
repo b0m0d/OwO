@@ -110,6 +110,72 @@ fn goal_verification_persists_receipt_bound_to_accepted_output() {
 }
 
 #[test]
+fn prior_attempt_receipt_cannot_satisfy_the_current_step_requirement() {
+    let output = "same output from a retried attempt";
+    let mut step = owo_agent_contracts::plan::StepSpec::new("step-1", "worker");
+    let requirement = crate::verification::requirement_for_spec(
+        "step-check",
+        &crate::plan::VerificationSpec::OutputContains("same output".to_string()),
+    );
+    step.verification_plan = Some(crate::plan::VerificationPlanV1 {
+        plan_id: "step-plan".to_string(),
+        requirements: vec![requirement.clone()],
+    });
+    let mut plan = Plan::new("p-attempt-bound", "g-attempt-bound");
+    plan.steps.push(step);
+    let mut runner = GoalRunner::new(
+        Goal::new("g-attempt-bound", "当前 attempt 必须有自己的验收收据"),
+        plan,
+        RunnerConfig::default(),
+    );
+    let output_sha256 = crate::cas_store::CasStore::hash_of(output.as_bytes());
+    let arguments_sha256 = crate::cas_store::CasStore::hash_of(
+        &serde_json::to_vec(&requirement.arguments).unwrap(),
+    );
+    runner.state.records.insert(
+        "step-1".to_string(),
+        StepRecord {
+            step_id: "step-1".to_string(),
+            status: StepStatus::Succeeded,
+            attempts: 2,
+            attempt_id: Some("attempt-current".to_string()),
+            output: Some(output.to_string()),
+            error: None,
+            skip_reason: None,
+            phase_epoch: Some(4),
+            validation_receipts: vec![crate::plan::ValidationReceiptV1 {
+                receipt_id: "receipt-prior-attempt".to_string(),
+                task_id: "step-1".to_string(),
+                attempt_id: "attempt-prior".to_string(),
+                epoch: 3,
+                requirement_id: requirement.requirement_id.clone(),
+                validator_id: requirement.validator_id.clone(),
+                validator_version: requirement.validator_version.clone().unwrap(),
+                arguments_sha256,
+                input_sha256: "prior-input".to_string(),
+                environment_id: "test".to_string(),
+                changeset_sha256: None,
+                detail: None,
+                subject_sha256: std::collections::HashMap::from([(
+                    "step-output".to_string(),
+                    output_sha256,
+                )]),
+                verdict: crate::plan::ValidationVerdictV1::Passed,
+                evidence_refs: Vec::new(),
+                started_at: "t1".to_string(),
+                completed_at: "t1".to_string(),
+            }],
+        },
+    );
+
+    assert_eq!(runner.verify_goal().unwrap(), GoalStatus::Failed);
+    assert_eq!(
+        runner.state.completion_record.unwrap().status,
+        owo_agent_protocol::CompletionStatusV1::Blocked
+    );
+}
+
+#[test]
 fn unsupported_goal_verifier_is_recorded_and_cannot_succeed() {
     let mut goal = Goal::new("g-unsupported", "未知验证器不得通过");
     let mut requirement = crate::verification::requirement_for_spec(
