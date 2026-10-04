@@ -958,8 +958,16 @@ impl Agent {
                                 || budget.remaining(Phase::Model).is_ok());
                     let plan_is_current =
                         single_verification_plan_matches_turn(session, prompt, &turn_id);
-                    let retry_feedback = if plan_is_current
-                        && can_retry_after_validation
+                    let has_turn_file_candidate = session
+                        .execution_receipts
+                        .iter()
+                        .any(|receipt| {
+                            receipt.turn_id == turn_id
+                                && receipt.status == "executed"
+                                && !receipt.changed_files.is_empty()
+                        });
+                    let retry_feedback = if can_retry_after_validation
+                        && plan_is_current
                         && matches!(
                             completion_status,
                             owo_agent_protocol::CompletionStatusV1::Unverified
@@ -967,6 +975,16 @@ impl Agent {
                         )
                     {
                         single_validation_retry_feedback(session, &turn_id)
+                    } else if can_retry_after_validation
+                        && !plan_is_current
+                        && has_turn_file_candidate
+                        && matches!(
+                            completion_status,
+                            owo_agent_protocol::CompletionStatusV1::Candidate
+                                | owo_agent_protocol::CompletionStatusV1::Unverified
+                        )
+                    {
+                        single_missing_verification_plan_feedback(session, &turn_id)
                     } else {
                         None
                     };
@@ -2172,6 +2190,50 @@ fn single_validation_retry_feedback(session: &Session, turn_id: &str) -> Option<
     ))
 }
 
+fn single_missing_verification_plan_feedback(
+    session: &Session,
+    turn_id: &str,
+) -> Option<(String, String)> {
+    let mut changed = std::collections::BTreeMap::<String, Option<String>>::new();
+    for receipt in session.execution_receipts.iter().filter(|receipt| {
+        receipt.turn_id == turn_id && receipt.status == "executed"
+    }) {
+        for path in &receipt.changed_files {
+            let normalized = path.replace('\\', "/");
+            let hash = receipt
+                .after_hashes
+                .iter()
+                .find(|(candidate, _)| candidate.replace('\\', "/") == normalized)
+                .map(|(_, hash)| hash.clone())
+                .unwrap_or(None);
+            changed.insert(normalized, hash);
+        }
+    }
+    if changed.is_empty() {
+        return None;
+    }
+
+    let fingerprint =
+        crate::CasStore::hash_of(serde_json::to_vec(&changed).unwrap_or_default().as_slice());
+    let changed_files = changed
+        .iter()
+        .map(|(path, hash)| {
+            format!(
+                "- {}  sha256:{}",
+                path,
+                hash.as_deref().unwrap_or("missing-write-hash")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((
+        fingerprint,
+        format!(
+            "宿主发现本回合写入了文件，但当前用户请求没有绑定有效的 VerificationPlan，因此这些变更仍是候选结果。请不要结束回合或声称已验证：先调用 verification_plan，为每个相关用户验收点登记当前请求原文中的精确引用、覆盖的变更路径和宿主已登记的检查；源码变更还需要登记并实际运行获准的行为命令。之后根据真实检查结果修复失败并重新验收。不得降低、替换验收要求。\n本回合变更：\n{changed_files}\n若显示 missing-write-hash，宿主无法把该文件绑定到写入后的版本；修复或重写后需取得有效宿主写入收据。"
+        ),
+    ))
+}
+
 fn single_path_is_source_code(path: &str) -> bool {
     let extension = std::path::Path::new(path)
         .extension()
@@ -2828,6 +2890,27 @@ mod single_verification_plan_tests {
         let (stale_status, stale_verdict, _, _, _, _, _) = run_case(true).await;
         assert_eq!(stale_status, owo_agent_protocol::CompletionStatusV1::Unverified);
         assert_eq!(stale_verdict, crate::plan::ValidationVerdictV1::Stale);
+    }
+
+    #[test]
+    fn missing_current_plan_returns_stable_feedback_for_written_candidate() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut session = Session::new(workspace.path(), "mock", None);
+        add_write(&mut session, "turn-unplanned", "src/lib.rs", "source-hash");
+
+        let first =
+            super::single_missing_verification_plan_feedback(&session, "turn-unplanned");
+        let second =
+            super::single_missing_verification_plan_feedback(&session, "turn-unplanned");
+        assert_eq!(first, second);
+        let (fingerprint, feedback) = first.unwrap();
+        assert!(!fingerprint.is_empty());
+        assert!(feedback.contains("verification_plan"));
+        assert!(feedback.contains("src/lib.rs"));
+        assert!(feedback.contains("source-hash"));
+        assert!(
+            super::single_missing_verification_plan_feedback(&session, "other-turn").is_none()
+        );
     }
 
     #[test]
