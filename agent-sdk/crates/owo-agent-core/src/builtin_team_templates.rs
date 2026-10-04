@@ -235,7 +235,7 @@ fn fullstack_web_v1() -> BuiltinTemplateDescriptor {
             integrator,
             role(
                 "reviewer",
-                &["w1", "w2"],
+                &["project_integrator"],
                 concat!(
                     "在 TaskGraph 写入任务完成后，对 apps/web、apps/api 及其测试做只读独立评审。\n",
                     "只报告带文件/证据引用的 findings；不修改文件、不声称运行未执行的命令。"
@@ -1067,6 +1067,17 @@ mod tests {
         }
         assert!(prompt_sections_for("no-such-template", "any").is_none());
         assert!(prompt_sections_for(CODE_CHANGE_V1, "unknown_role").is_none());
+    }
+
+    #[test]
+    fn fullstack_reviewer_waits_for_integrated_candidate() {
+        let template = descriptor(FULLSTACK_WEB_V1).unwrap().template;
+        let reviewer = template
+            .roles
+            .iter()
+            .find(|role| role.role == "reviewer")
+            .unwrap();
+        assert_eq!(reviewer.depends_on, vec!["project_integrator"]);
     }
 
     #[test]

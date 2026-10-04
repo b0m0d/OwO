@@ -672,7 +672,11 @@ impl TeamCoordinator {
                 for step in agent_steps {
                     let role = worker_role(&step.worker).unwrap_or_default();
                     let leader_can_use_host_manifest =
-                        meta.parallel && role == "leader" && !parallel_tasks_require_integration;
+                        host_manifest_can_replace_integration(
+                            meta.parallel,
+                            &role,
+                            parallel_tasks_require_integration,
+                        );
                     let skip_reason = if leader_can_use_host_manifest {
                         Some(PARALLEL_LEADER_HOST_MANIFEST_SKIP_REASON.to_string())
                     } else if meta.template_id.as_deref()
@@ -1005,8 +1009,9 @@ impl TeamCoordinator {
         };
         let is_code_change_template = claim.meta.template_id.as_deref()
             == Some(crate::builtin_team_templates::CODE_CHANGE_V1);
-        let parallel_leader_uses_host_manifest =
-            claim.meta.parallel && !parallel_tasks_require_integration(&claim.sub_state.plan.steps);
+        let integration_required = parallel_tasks_require_integration(&claim.sub_state.plan.steps);
+        let parallel_enabled = claim.meta.parallel;
+        let parallel_host_manifest_enabled = parallel_enabled && !integration_required;
         let mut runner = GoalRunner::from_state(claim.sub_state, config);
         if let Some(root) = self.verification_workspace(team_id) {
             runner.attach_workspace_verification_root(root);
@@ -1048,7 +1053,7 @@ impl TeamCoordinator {
         });
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         runner.attach_step_progress(progress_tx);
-        if is_code_change_template || parallel_leader_uses_host_manifest {
+        if is_code_change_template || parallel_host_manifest_enabled {
             let changes_path = self
                 .run_dir
                 .join(format!("{team_id}-workspace-changes.json"));
@@ -1062,7 +1067,7 @@ impl TeamCoordinator {
             let review_issues_pending = claim.review_issues_pending;
             runner.attach_step_skipper(move |step| {
                 let role = worker_role(&step.worker).unwrap_or_default();
-                if parallel_leader_uses_host_manifest && role == "leader" {
+                if host_manifest_can_replace_integration(parallel_enabled, &role, integration_required) {
                     return Some(PARALLEL_LEADER_HOST_MANIFEST_SKIP_REASON.to_string());
                 }
                 if is_code_change_template {
@@ -2011,6 +2016,16 @@ fn is_independent_reviewer_role(role: &RoleSpec) -> bool {
 pub(super) const PARALLEL_LEADER_HOST_MANIFEST_SKIP_REASON: &str =
     "host_manifest:independent_task_graph";
 
+pub(super) fn host_manifest_can_replace_integration(
+    parallel_enabled: bool,
+    role: &str,
+    integration_required: bool,
+) -> bool {
+    parallel_enabled
+        && !integration_required
+        && matches!(role, "leader" | "project_integrator")
+}
+
 fn should_enable_parallel_assignment(explicit: bool, roles: &[RoleSpec]) -> bool {
     explicit || roles.iter().any(|role| role.role == "lead")
 }
@@ -2916,8 +2931,9 @@ mod delivery_issue_resolution_tests {
 #[cfg(test)]
 mod parallel_assignment_validation_tests {
     use super::{
-        bind_dynamic_follow_up_dependencies, parallel_tasks_require_integration,
-        should_enable_parallel_assignment, validate_parallel_subtasks, RoleSpec,
+        bind_dynamic_follow_up_dependencies, host_manifest_can_replace_integration,
+        parallel_tasks_require_integration, should_enable_parallel_assignment,
+        validate_parallel_subtasks, RoleSpec,
     };
     use owo_agent_contracts::plan::StepSpec;
 
@@ -2935,6 +2951,18 @@ mod parallel_assignment_validation_tests {
         step.input = input;
         step.input["assigned_task_id"] = serde_json::json!(task_id);
         step
+    }
+
+    #[test]
+    fn host_manifest_replaces_only_optional_parallel_integration_roles() {
+        for role in ["leader", "project_integrator"] {
+            assert!(host_manifest_can_replace_integration(true, role, false));
+            assert!(!host_manifest_can_replace_integration(true, role, true));
+            assert!(!host_manifest_can_replace_integration(false, role, false));
+        }
+        for role in ["reviewer", "implementer"] {
+            assert!(!host_manifest_can_replace_integration(true, role, false));
+        }
     }
 
     #[test]

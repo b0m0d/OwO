@@ -220,10 +220,12 @@ impl TeamCoordinator {
                     && run_meta.template_id.as_deref()
                         == Some(crate::builtin_team_templates::CODE_CHANGE_V1)
                     && self.workspace_change_status(team_id) == Some(false);
-                let allowed_host_manifest = run_meta.parallel
-                    && role == "leader"
-                    && skip_reason == super::coord_run::PARALLEL_LEADER_HOST_MANIFEST_SKIP_REASON
-                    && !super::coord_run::parallel_tasks_require_integration(&state.plan.steps);
+                let allowed_host_manifest = super::coord_run::host_manifest_can_replace_integration(
+                        run_meta.parallel,
+                        &role,
+                        super::coord_run::parallel_tasks_require_integration(&state.plan.steps),
+                    )
+                    && skip_reason == super::coord_run::PARALLEL_LEADER_HOST_MANIFEST_SKIP_REASON;
                 if !allowed_review_skip && !allowed_host_manifest {
                     return Err(WorkSwarmError::Conflict(format!(
                         "任务 {} 的运行期跳过没有得到允许或有效的宿主交付证据，不能作为已验收交付",
