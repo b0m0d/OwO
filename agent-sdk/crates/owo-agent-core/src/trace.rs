@@ -162,7 +162,15 @@ fn single_completion_record(
     let current_attempt_validation_ids = session
         .validation_receipts
         .iter()
-        .filter(|receipt| receipt.attempt_id == attempt_id)
+        .filter(|receipt| {
+            receipt.attempt_id == attempt_id
+                && (status != owo_agent_protocol::CompletionStatusV1::Accepted
+                    || matches!(
+                        receipt.verdict,
+                        crate::plan::ValidationVerdictV1::Passed
+                            | crate::plan::ValidationVerdictV1::ManualAccepted
+                    ))
+        })
         .map(|receipt| receipt.receipt_id.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     let mut changed_paths = std::collections::BTreeMap::new();
@@ -174,9 +182,13 @@ fn single_completion_record(
                 && receipt.validation_receipt_id.as_deref().is_some_and(|id| {
                     current_attempt_validation_ids.contains(id)
                 });
-            (receipt.turn_id == attempt_id || accepted_by_current_attempt)
-                && receipt.status != "reverted"
-                && receipt.status != "stale"
+            if status == owo_agent_protocol::CompletionStatusV1::Accepted {
+                accepted_by_current_attempt
+            } else {
+                (receipt.turn_id == attempt_id || accepted_by_current_attempt)
+                    && receipt.status != "reverted"
+                    && receipt.status != "stale"
+            }
         })
     {
         evidence_ids.insert(receipt.receipt_id.clone());
@@ -195,7 +207,15 @@ fn single_completion_record(
         .validation_receipts
         .iter()
         .rev()
-        .filter(|receipt| receipt.attempt_id == attempt_id)
+        .filter(|receipt| {
+            receipt.attempt_id == attempt_id
+                && (status != owo_agent_protocol::CompletionStatusV1::Accepted
+                    || matches!(
+                        receipt.verdict,
+                        crate::plan::ValidationVerdictV1::Passed
+                            | crate::plan::ValidationVerdictV1::ManualAccepted
+                    ))
+        })
     {
         evidence_ids.insert(receipt.receipt_id.clone());
         for (subject, hash) in &receipt.subject_sha256 {
@@ -386,6 +406,12 @@ mod tests {
             started_at: "2026-10-04T00:00:00Z".to_string(),
             completed_at: "2026-10-04T00:00:01Z".to_string(),
         });
+        let mut failed_receipt = session.validation_receipts.last().unwrap().clone();
+        failed_receipt.receipt_id = "failed-current".to_string();
+        failed_receipt.requirement_id = "failed-requirement".to_string();
+        failed_receipt.validator_id = "failed-validator".to_string();
+        failed_receipt.verdict = crate::plan::ValidationVerdictV1::Failed;
+        session.validation_receipts.push(failed_receipt);
 
         let record = single_completion_record(
             &session,
@@ -402,6 +428,15 @@ mod tests {
         assert_eq!(record.candidate_version_sha256.as_deref(), Some(expected.as_str()));
         assert!(record.evidence_receipt_ids.contains(&"exec-prior".to_string()));
         assert!(record.evidence_receipt_ids.contains(&"manual-current".to_string()));
+        assert!(!record.evidence_receipt_ids.contains(&"failed-current".to_string()));
+        let diagnostic_record = single_completion_record(
+            &session,
+            owo_agent_protocol::CompletionStatusV1::Unverified,
+        )
+        .unwrap();
+        assert!(diagnostic_record
+            .evidence_receipt_ids
+            .contains(&"failed-current".to_string()));
     }
 
     #[test]
