@@ -25,6 +25,20 @@ pub const DEFAULT_MODEL_ID: &str = "glm-5.3-flash";
 /// 保证哨兵值绝不泄漏进请求体 `model` 字段。
 pub const MODEL_DEFAULT_SENTINEL: &str = "default";
 
+/// Resolve a task-level model override without taking model selection away from Provider.
+///
+/// The explicit task/role model wins, followed by the worker-specific environment override.
+/// Empty values and the default sentinel defer to the Provider's runtime/configured model.
+pub fn resolve_subagent_model(task_model: Option<&str>, worker_model: Option<&str>) -> String {
+    [task_model, worker_model]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|model| !model.is_empty() && *model != MODEL_DEFAULT_SENTINEL)
+        .map(str::to_string)
+        .unwrap_or_else(|| MODEL_DEFAULT_SENTINEL.to_string())
+}
+
 /// 模型档位（M4.2 任务类型路由）：main = 会话/回合主模型；fast = 子代理/压缩等
 /// 轻量任务；vision = 图像理解任务（视觉通道端点由 `vision` 模块自身配置）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

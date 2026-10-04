@@ -2,7 +2,7 @@
 //!
 //! 独立编译模块（不使用 crate::/super::）。实现 `Worker`（name="agent"）：
 //! run() 解析 `{prompt 必填, read_only 默认 true, model 可选}`，调用
-//! `Agent::run_subagent`；model 取 input.model → OWO_AGENT_MODEL → 缺省 gpt-4.1-mini；
+//! `Agent::run_subagent`；model 取 input.model → OWO_AGENT_MODEL → Provider 默认解析链；
 //! 无 OPENAI_API_KEY 返回可读错误（走既有重试/replan 语义），不 panic。
 //!
 //! 接线：lib.rs 需 `pub mod agent_worker;`（已在 DEPENDENCIES-agent1.md 留言）。
@@ -24,23 +24,15 @@ impl AgentWorker {
         Self { agent, workspace }
     }
 
-    /// 模型解析：input.model → OWO_AGENT_MODEL → OPENAI_MODEL → 缺省。
+    /// 模型解析：input.model → OWO_AGENT_MODEL → Provider 默认解析链。
     ///
-    /// 第三档（OPENAI_MODEL）是必需的：无人值守任务跑在用户实际配置的端点上，
-    /// 而 `gpt-4.1-mini` 是厂商专名——在 BigModel / DeepSeek / 本地端点上一律不存在，
-    /// 缺了这一档会让所有「定时跑任务」以"模型不存在"失败。
+    /// 返回 default 哨兵时，由 Provider 解析运行时配置和内置默认，避免把 OpenAI 专名发送给其他端点。
     pub fn resolve_model(input: &Value) -> String {
-        input
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                std::env::var("OWO_AGENT_MODEL")
-                    .ok()
-                    .filter(|v| !v.is_empty())
-            })
-            .or_else(|| std::env::var("OPENAI_MODEL").ok().filter(|v| !v.is_empty()))
-            .unwrap_or_else(|| "gpt-4.1-mini".to_string())
+        let worker_model = std::env::var("OWO_AGENT_MODEL").ok();
+        owo_agent_core::gateway::resolve_subagent_model(
+            input.get("model").and_then(Value::as_str),
+            worker_model.as_deref(),
+        )
     }
 
     /// 凭据检查：无 OPENAI_API_KEY → Err（可读，不 panic）。

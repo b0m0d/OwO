@@ -158,8 +158,13 @@ impl TeamCoordinator {
         // `gate_auto`（无证据/不达标/样本不足/过期/绑定不匹配/非预选组 → 默认
         // single，附理由）；显式 single/team 不被 gate 降级（decide_with_policy
         // 内部保证）。gate 理由随 strategy_decision 暴露给 UI。
-        let (gate, gate_verdict, gate_evidence) =
-            benefit_gate_for_runtime(template_id.as_deref(), objective, &self.run_dir);
+        let (gate, gate_verdict, gate_evidence) = benefit_gate_for_runtime(
+            template_id.as_deref(),
+            objective,
+            &self.run_dir,
+            &specs,
+            req.model.as_deref(),
+        );
         let mut strategy_plan = engine.decide_with_policy(selection, &profile, Some(&gate));
         let gate_reason = if gate.allow_team {
             format!("收益 gate 放行组队：{gate_evidence}")

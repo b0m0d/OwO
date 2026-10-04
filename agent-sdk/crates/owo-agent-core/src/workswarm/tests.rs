@@ -4,6 +4,37 @@ use crate::plan::VerificationSpec;
 use owo_agent_protocol::TeamTemplate;
 
 #[test]
+fn team_benefit_model_binding_requires_one_effective_agent_model() {
+    let mut writer = RoleSpec::agent("writer");
+    let provider_model = "glm-5.3-flash";
+    assert_eq!(
+        resolve_team_model_binding(std::slice::from_ref(&writer), None, provider_model).as_deref(),
+        Some(provider_model)
+    );
+
+    writer.model = Some("writer-model".to_string());
+    writer.extra_input = serde_json::json!({ "model": "input-model" });
+    assert_eq!(
+        resolve_team_model_binding(std::slice::from_ref(&writer), Some("team-model"), provider_model)
+            .as_deref(),
+        Some("input-model")
+    );
+    writer.extra_input = Value::Null;
+    assert_eq!(
+        resolve_team_model_binding(std::slice::from_ref(&writer), Some("team-model"), provider_model)
+            .as_deref(),
+        Some("writer-model")
+    );
+
+    let mut reviewer = RoleSpec::agent("reviewer");
+    reviewer.model = Some("review-model".to_string());
+    assert_eq!(
+        resolve_team_model_binding(&[writer, reviewer], None, provider_model),
+        None
+    );
+}
+
+#[test]
 fn default_relay_roles_form_valid_dag() {
     let roles = default_relay_roles();
     assert_eq!(roles.len(), 4);

@@ -31,6 +31,8 @@ pub(super) fn benefit_gate_for_runtime(
     template_id: Option<&str>,
     objective: &str,
     run_dir: &Path,
+    roles: &[super::RoleSpec],
+    request_model: Option<&str>,
 ) -> (
     crate::team_benefit::PolicyGate,
     Option<crate::team_benefit::BenefitVerdict>,
@@ -39,20 +41,34 @@ pub(super) fn benefit_gate_for_runtime(
     let policy = load_team_policy_for_runtime(run_dir);
     let task_group = infer_benefit_task_group(template_id, objective);
     let verdict = load_benefit_verdict_for_runtime(&policy, &task_group);
-    let current = crate::team_benefit::BenefitBindings {
-        model: std::env::var("OPENAI_MODEL").ok(),
+    let provider_model = std::env::var("OWO_AGENT_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value != crate::gateway::MODEL_DEFAULT_SENTINEL)
+        .or_else(|| {
+            std::env::var("OPENAI_MODEL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| crate::gateway::DEFAULT_MODEL_ID.to_string());
+    let model_binding = resolve_team_model_binding(roles, request_model, &provider_model);
+    let current = model_binding.as_ref().map(|model| crate::team_benefit::BenefitBindings {
+        model: Some(model.clone()),
         template: template_id.map(str::to_string),
         task_set: None,
         strategy_version: policy.strategy_version.clone(),
-    };
+    });
     let gate = crate::team_benefit::gate_auto(
         &policy,
         &task_group,
         verdict.as_ref(),
-        Some(&current),
+        current.as_ref(),
         &now_ts(),
     );
-    let evidence = if verdict.is_some() {
+    let evidence = if model_binding.is_none() {
+        "无法确认唯一模型，配对报告不背书（默认 single）".to_string()
+    } else if verdict.is_some() {
         "有配对报告证据".to_string()
     } else {
         "无配对报告证据（默认 single，等二路验收报告）".to_string()

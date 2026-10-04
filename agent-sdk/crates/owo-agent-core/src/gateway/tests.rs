@@ -442,6 +442,26 @@ async fn model_switch_applies_without_reconstruction() {
     std::env::remove_var("OPENAI_MODEL");
 }
 
+#[test]
+fn subagent_model_resolution_uses_provider_fallback_for_empty_or_default() {
+    assert_eq!(
+        resolve_subagent_model(Some(" task-model "), Some("worker-model")),
+        "task-model"
+    );
+    assert_eq!(
+        resolve_subagent_model(None, Some(" worker-model ")),
+        "worker-model"
+    );
+    assert_eq!(
+        resolve_subagent_model(Some(MODEL_DEFAULT_SENTINEL), Some("worker-model")),
+        "worker-model"
+    );
+    assert_eq!(
+        resolve_subagent_model(Some(" "), None),
+        MODEL_DEFAULT_SENTINEL
+    );
+}
+
 /// M4.2 会话级路由：显式覆盖进请求体；空串/`"default"` 哨兵回退解析链且
 /// 哨兵值绝不泄漏进请求体 `model` 字段。
 #[test]

@@ -7,6 +7,32 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[test]
+fn team_worker_model_uses_provider_default_unless_explicitly_overridden() {
+    assert_eq!(
+        super::workers::resolve_agent_model(&json!({}), None),
+        owo_agent_core::gateway::MODEL_DEFAULT_SENTINEL
+    );
+    assert_eq!(
+        super::workers::resolve_agent_model(&json!({}), Some(" configured-model ")),
+        "configured-model"
+    );
+    assert_eq!(
+        super::workers::resolve_agent_model(
+            &json!({ "model": " task-model " }),
+            Some("configured-model")
+        ),
+        "task-model"
+    );
+    assert_eq!(
+        super::workers::resolve_agent_model(
+            &json!({ "model": "default" }),
+            Some("configured-model")
+        ),
+        "configured-model"
+    );
+}
+
 /// 唯一临时目录。
 fn unique_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(

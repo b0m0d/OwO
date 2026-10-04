@@ -467,18 +467,8 @@ async fn r5_agent_worker_online_skipped_without_key() {
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
-    // 模型选择：OWO_AGENT_MODEL > DeepSeek 端点适配 > 缺省（由 worker 决定）。
-    let model = std::env::var("OWO_AGENT_MODEL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| {
-            let base = std::env::var("OPENAI_BASE_URL").unwrap_or_default();
-            if base.contains("deepseek") {
-                "deepseek-chat".to_string()
-            } else {
-                "gpt-4.1-mini".to_string()
-            }
-        });
+    // 与生产 Worker 使用同一模型解析路径；default 由 Provider 解析当前端点模型。
+    let model = goal_api::agent_worker::AgentWorker::resolve_model(&serde_json::json!({}));
     let (state, _temp) = test_state().await;
     let steps = format!(
         r#"[{{"id":"a1","worker":"agent","input":{{"prompt":"回复 ok 即可","read_only":true,"model":"{model}"}}}}]"#
@@ -498,13 +488,14 @@ async fn r5_agent_worker_online_skipped_without_key() {
 
 #[tokio::test]
 async fn r5_agent_worker_resolve_model_default() {
-    // resolve_model 纯逻辑：无 OWO_AGENT_MODEL / input.model → 缺省值
+    // 无任务级模型时保留 Provider 解析权，避免覆盖运行时端点模型。
     let input = serde_json::json!({ "prompt": "x" });
     let ok = goal_api::agent_worker::validate_agent_input(&input).is_ok();
     assert!(ok, "含 prompt 的 agent input 应通过预校验");
+    let configured_model = std::env::var("OWO_AGENT_MODEL").ok();
     assert_eq!(
         goal_api::agent_worker::AgentWorker::resolve_model(&input),
-        "gpt-4.1-mini"
+        owo_agent_core::gateway::resolve_subagent_model(None, configured_model.as_deref())
     );
     let input_model = serde_json::json!({ "prompt": "x", "model": "my-model" });
     assert_eq!(

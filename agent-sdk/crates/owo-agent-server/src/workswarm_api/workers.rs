@@ -19,6 +19,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
+pub(super) fn resolve_agent_model(input: &Value, configured_model: Option<&str>) -> String {
+    owo_agent_core::gateway::resolve_subagent_model(
+        input.get("model").and_then(Value::as_str),
+        configured_model,
+    )
+}
+
 /// 真实 Agent 子代理 worker（name="agent"）：prompt → 子代理执行。
 ///
 /// 五期（第三路）：与 `Agent::run_subagent` 同口径（顶层 depth=0、
@@ -97,16 +104,8 @@ impl Worker for AgentSubagentWorker {
                 "缺少 OPENAI_API_KEY，agent 角色无法调用模型（请配置凭据后重试）".to_string(),
             );
         }
-        let model = input
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                std::env::var("OWO_AGENT_MODEL")
-                    .ok()
-                    .filter(|v| !v.is_empty())
-            })
-            .unwrap_or_else(|| "gpt-4.1-mini".to_string());
+        let configured_model = std::env::var("OWO_AGENT_MODEL").ok();
+        let model = resolve_agent_model(input, configured_model.as_deref());
         // 指标计数注入：MeasuredProvider 包装共享 provider（计数仅对本 span 生效）。
         let provider: Arc<dyn ModelProvider> = match &self.model_calls {
             Some(counter) => {
