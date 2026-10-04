@@ -48,25 +48,52 @@ pub(crate) fn workspace_subjects_match_current(
         {
             return false;
         }
-        let Ok(canonical) = root.join(relative).canonicalize() else {
-            return false;
-        };
-        if !canonical.starts_with(&root) {
-            return false;
-        }
-        let Ok(metadata) = std::fs::metadata(&canonical) else {
-            return false;
-        };
-        if !metadata.is_file() || metadata.len() > 8 * 1024 * 1024 {
-            return false;
-        }
-        let Ok(bytes) = std::fs::read(&canonical) else {
-            return false;
-        };
-        if bytes.len() as u64 != metadata.len()
-            || format!("{:x}", Sha256::digest(&bytes)) != *expected
-        {
-            return false;
+        let target = root.join(relative);
+        match std::fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if expected != &workspace_path_absence_sha256() {
+                    return false;
+                }
+                let mut ancestor = target.as_path();
+                let mut contained = false;
+                loop {
+                    if let Ok(canonical) = ancestor.canonicalize() {
+                        contained = canonical.starts_with(&root);
+                        break;
+                    }
+                    let Some(parent) = ancestor.parent() else {
+                        break;
+                    };
+                    ancestor = parent;
+                }
+                if !contained {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+            Ok(_) => {
+                let Ok(canonical) = target.canonicalize() else {
+                    return false;
+                };
+                if !canonical.starts_with(&root) {
+                    return false;
+                }
+                let Ok(metadata) = std::fs::metadata(&canonical) else {
+                    return false;
+                };
+                if !metadata.is_file() || metadata.len() > 8 * 1024 * 1024 {
+                    return false;
+                }
+                let Ok(bytes) = std::fs::read(&canonical) else {
+                    return false;
+                };
+                if bytes.len() as u64 != metadata.len()
+                    || format!("{:x}", Sha256::digest(&bytes)) != *expected
+                    || expected == &workspace_path_absence_sha256()
+                {
+                    return false;
+                }
+            }
         }
     }
     true
@@ -766,6 +793,15 @@ mod tests {
 
         std::fs::write(&path, "pub fn broken() {}\n").unwrap();
         assert!(!workspace_subjects_match_current(root.path(), &subjects));
+
+        std::fs::remove_file(&path).unwrap();
+        let absent = std::collections::HashMap::from([(
+            "workspace-path:src/lib.rs".to_string(),
+            workspace_path_absence_sha256(),
+        )]);
+        assert!(workspace_subjects_match_current(root.path(), &absent));
+        std::fs::write(&path, "recreated").unwrap();
+        assert!(!workspace_subjects_match_current(root.path(), &absent));
 
         let escaped = std::collections::HashMap::from([(
             "workspace-path:../outside".to_string(),

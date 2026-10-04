@@ -258,6 +258,21 @@ pub(super) fn review_source_snapshot(
     })
 }
 
+pub(super) fn workspace_receipt_snapshot_matches_current(
+    workspace_root: Option<&std::path::Path>,
+    subjects: &std::collections::HashMap<String, String>,
+) -> bool {
+    if !subjects
+        .keys()
+        .any(|subject| subject.starts_with("workspace-path:"))
+    {
+        return true;
+    }
+    workspace_root.is_some_and(|root| {
+        crate::verification::workspace_subjects_match_current(root, subjects)
+    })
+}
+
 pub(super) fn validate_review_artifact_kind(is_reviewer: bool, kind: &str) -> Result<(), String> {
     match (is_reviewer, kind == "review") {
         (true, true) | (false, false) => Ok(()),

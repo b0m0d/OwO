@@ -204,6 +204,7 @@ impl TeamCoordinator {
         let mut validated_review_count = 0usize;
         let mut validated_review_closures = HashSet::new();
         let mut acceptance_receipts = Vec::new();
+        let mut final_workspace_receipts = Vec::new();
         for step in state.plan.steps.clone() {
             let record = state.records.get(&step.id).cloned().ok_or_else(|| {
                 WorkSwarmError::Conflict(format!("任务 {} 缺少执行记录", step.id))
@@ -723,6 +724,17 @@ impl TeamCoordinator {
                         additional_evidence_refs,
                         subject_hashes,
                     });
+                    if verdict == crate::plan::ValidationVerdictV1::Passed
+                        && receipt
+                            .subject_sha256
+                            .keys()
+                            .any(|subject| subject.starts_with("workspace-path:"))
+                    {
+                        final_workspace_receipts.push((
+                            receipt.receipt_id.clone(),
+                            receipt.subject_sha256.clone(),
+                        ));
+                    }
                     store_validation_receipt(state, &step.id, &receipt);
                     validation_receipts.push(receipt);
                     if requirement.required && verdict != crate::plan::ValidationVerdictV1::Passed {
@@ -794,6 +806,18 @@ impl TeamCoordinator {
                     },
                     "validation_receipts": validation_receipts,
                 }));
+            }
+        }
+
+        let final_workspace_root = self.verification_workspace(team_id);
+        for (receipt_id, subjects) in &final_workspace_receipts {
+            if !super::delivery_gate_evidence::workspace_receipt_snapshot_matches_current(
+                final_workspace_root.as_deref(),
+                subjects,
+            ) {
+                return Err(WorkSwarmError::Conflict(format!(
+                    "最终交付时工作区已偏离已通过的验证收据 {receipt_id}"
+                )));
             }
         }
 
@@ -1195,6 +1219,24 @@ mod validation_receipt_identity_tests {
             }),
             conflicts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn final_delivery_recheck_requires_the_bound_workspace_snapshot() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        let source = workspace.path().join("src/lib.rs");
+        std::fs::write(&source, "pub fn ready() {}\n").unwrap();
+        let subjects = std::collections::HashMap::from([(
+            "workspace-path:src/lib.rs".to_string(),
+            crate::CasStore::hash_of(b"pub fn ready() {}\n"),
+        )]);
+        let matches = super::super::delivery_gate_evidence::workspace_receipt_snapshot_matches_current;
+        assert!(matches(Some(workspace.path()), &subjects));
+        assert!(!matches(None, &subjects));
+
+        std::fs::write(&source, "pub fn changed() {}\n").unwrap();
+        assert!(!matches(Some(workspace.path()), &subjects));
     }
 
     #[test]
