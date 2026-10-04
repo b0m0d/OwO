@@ -403,6 +403,7 @@ mod tests {
             )]),
             verdict: crate::plan::ValidationVerdictV1::ManualAccepted,
             evidence_refs: vec!["manual-question:q1".to_string()],
+            review_result: None,
             started_at: "2026-10-04T00:00:00Z".to_string(),
             completed_at: "2026-10-04T00:00:01Z".to_string(),
         });

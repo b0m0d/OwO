@@ -1080,6 +1080,7 @@ impl GoalRunner {
                     subject_sha256: receipt_subjects,
                     verdict,
                     evidence_refs: evidence_refs.clone(),
+                    review_result: None,
                     started_at: timestamp.clone(),
                     completed_at: timestamp,
                 };

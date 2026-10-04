@@ -136,6 +136,7 @@ fn goal_verification_persists_receipt_bound_to_accepted_output() {
         subject_sha256: std::collections::HashMap::new(),
         verdict: crate::plan::ValidationVerdictV1::Failed,
         evidence_refs: Vec::new(),
+        review_result: None,
         started_at: "old".to_string(),
         completed_at: "old".to_string(),
     });
@@ -230,6 +231,7 @@ fn prior_attempt_receipt_cannot_satisfy_the_current_step_requirement() {
                 )]),
                 verdict: crate::plan::ValidationVerdictV1::Passed,
                 evidence_refs: Vec::new(),
+                review_result: None,
                 started_at: "t1".to_string(),
                 completed_at: "t1".to_string(),
             }],

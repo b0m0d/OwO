@@ -363,6 +363,7 @@ pub(super) async fn request_single_manual_acceptance(
                 subject_sha256: HashMap::new(),
                 verdict: ValidationVerdictV1::Unverified,
                 evidence_refs: Vec::new(),
+                review_result: None,
                 started_at: started_at.clone(),
                 completed_at: started_at.clone(),
             });
@@ -495,6 +496,7 @@ mod tests {
             subject_sha256: HashMap::from([("workspace-path:src/lib.rs".to_string(), "source-hash".to_string())]),
             verdict: ValidationVerdictV1::Passed,
             evidence_refs: vec![plan_ref.clone()],
+            review_result: None,
             started_at: "2026-10-04T00:00:00Z".to_string(),
             completed_at: "2026-10-04T00:00:01Z".to_string(),
         });
@@ -514,6 +516,7 @@ mod tests {
             subject_sha256: HashMap::from([("workspace-path:src/lib.rs".to_string(), "source-hash".to_string())]),
             verdict: ValidationVerdictV1::Passed,
             evidence_refs: vec![plan_ref],
+            review_result: None,
             started_at: "2026-10-04T00:00:00Z".to_string(),
             completed_at: "2026-10-04T00:00:01Z".to_string(),
         });

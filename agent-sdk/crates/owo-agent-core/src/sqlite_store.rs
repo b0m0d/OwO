@@ -932,6 +932,7 @@ mod tests {
                 )]),
                 verdict: crate::plan::ValidationVerdictV1::Passed,
                 evidence_refs: vec!["command-result:sha256:result-hash".to_string()],
+                review_result: None,
                 started_at: "2026-10-04T00:00:00Z".to_string(),
                 completed_at: "2026-10-04T00:00:01Z".to_string(),
             });

@@ -286,6 +286,9 @@ pub struct ValidationReceiptV1 {
     pub changeset_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Validated structured reviewer output, retained so receipt hashes are auditable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_result: Option<serde_json::Value>,
     #[serde(default)]
     pub subject_sha256: HashMap<String, String>,
     pub verdict: ValidationVerdictV1,
@@ -715,6 +718,7 @@ mod tests {
             subject_sha256: HashMap::new(),
             verdict: ValidationVerdictV1::Unsupported,
             evidence_refs: vec![],
+            review_result: None,
             started_at: "start".into(),
             completed_at: "end".into(),
         };
@@ -722,6 +726,10 @@ mod tests {
         let decoded: ValidationReceiptV1 = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, receipt);
         assert_ne!(decoded.verdict, ValidationVerdictV1::Passed);
+        let mut legacy = serde_json::to_value(&receipt).unwrap();
+        legacy.as_object_mut().unwrap().remove("review_result");
+        let legacy: ValidationReceiptV1 = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.review_result, None);
     }
 
     #[test]

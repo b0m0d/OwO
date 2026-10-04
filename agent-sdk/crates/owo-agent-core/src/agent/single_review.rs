@@ -255,11 +255,12 @@ pub(super) async fn review_candidate(
             };
             let usage = observed.metadata.usage;
             let usage_known = usage.is_some();
-            let (verdict, detail, evidence_refs) = parse_review_output(
+            let (verdict, detail, evidence_refs, review_result) = parse_review_output(
                 observed.output,
                 &snapshot,
                 &expected_requirement_ids,
             );
+            receipt.review_result = review_result;
             (Some(request), usage, usage_known, verdict, detail, evidence_refs)
         }
         Err(error) => {
@@ -457,12 +458,18 @@ fn parse_review_output(
     output: ModelOutput,
     snapshot: &BTreeMap<String, (String, String)>,
     expected_requirement_ids: &BTreeSet<String>,
-) -> (ValidationVerdictV1, String, Vec<String>) {
+) -> (
+    ValidationVerdictV1,
+    String,
+    Vec<String>,
+    Option<serde_json::Value>,
+) {
     let ModelOutput::Text(text) = output else {
         return (
             ValidationVerdictV1::Unverified,
             "独立评审没有返回结构化文本结论".to_string(),
             Vec::new(),
+            None,
         );
     };
     let normalized = owo_agent_workswarm::strip_code_fences(&text);
@@ -490,6 +497,7 @@ fn parse_review_output(
             ValidationVerdictV1::Unverified,
             "评审没有结构化回报其逐项核对的需求 ID".to_string(),
             Vec::new(),
+            None,
         );
     };
     let reviewed_set = reviewed_ids.iter().cloned().collect::<BTreeSet<_>>();
@@ -500,22 +508,23 @@ fn parse_review_output(
                 "评审需求覆盖回报与宿主清单不一致；expected={expected_requirement_ids:?}, reported={reviewed_ids:?}"
             ),
             Vec::new(),
+            None,
         );
     }
     let worker = match crate::workswarm_output::parse_worker_output(&text) {
         crate::workswarm_output::WorkerOutputParse::Parsed(worker) => worker,
         crate::workswarm_output::WorkerOutputParse::Invalid { error } => {
-            return (ValidationVerdictV1::Unverified, format!("评审输出契约非法：{error}"), Vec::new())
+            return (ValidationVerdictV1::Unverified, format!("评审输出契约非法：{error}"), Vec::new(), None)
         }
         crate::workswarm_output::WorkerOutputParse::Legacy => {
-            return (ValidationVerdictV1::Unverified, "评审未按结构化契约返回结论".to_string(), Vec::new())
+            return (ValidationVerdictV1::Unverified, "评审未按结构化契约返回结论".to_string(), Vec::new(), None)
         }
     };
     if let Err(error) = worker.validate_critic() {
-        return (ValidationVerdictV1::Unverified, format!("评审输出未通过契约校验：{error}"), Vec::new());
+        return (ValidationVerdictV1::Unverified, format!("评审输出未通过契约校验：{error}"), Vec::new(), None);
     }
     let Some(review) = worker.review_result else {
-        return (ValidationVerdictV1::Unverified, "评审缺少 ReviewResult".to_string(), Vec::new());
+        return (ValidationVerdictV1::Unverified, "评审缺少 ReviewResult".to_string(), Vec::new(), None);
     };
     if let Some(unexpected) = review
         .findings
@@ -527,10 +536,12 @@ fn parse_review_output(
             ValidationVerdictV1::Unverified,
             format!("评审 finding 引用了宿主清单外的验收要求：{unexpected}"),
             Vec::new(),
+            None,
         );
     }
+    let review_result = serde_json::to_value(&review).unwrap_or(serde_json::Value::Null);
     let result_hash = crate::CasStore::hash_of(
-        serde_json::to_vec(&review).unwrap_or_default().as_slice(),
+        serde_json::to_vec(&review_result).unwrap_or_default().as_slice(),
     );
     let reviewed_ids_hash = crate::CasStore::hash_of(
         serde_json::to_vec(&reviewed_ids).unwrap_or_default().as_slice(),
@@ -582,7 +593,7 @@ fn parse_review_output(
     } else {
         format!("{}；{}", worker.summary, detail)
     };
-    (verdict, detail, evidence_refs)
+    (verdict, detail, evidence_refs, Some(review_result))
 }
 
 
@@ -695,6 +706,7 @@ mod tests {
             subject_sha256: HashMap::new(),
             verdict: ValidationVerdictV1::Passed,
             evidence_refs: Vec::new(),
+            review_result: None,
             started_at: "t1".to_string(),
             completed_at: "t1".to_string(),
         });
@@ -753,13 +765,31 @@ mod tests {
             },
             "evidence": [{"source": "src/lib.rs", "note": "已检查"}]
         });
-        let (verdict, detail, _) = parse_review_output(
+        let (verdict, detail, _, _) = parse_review_output(
             crate::gateway::ModelOutput::Text(output.to_string()),
             &snapshot,
             &BTreeSet::from(["known-requirement".to_string()]),
         );
         assert_eq!(verdict, ValidationVerdictV1::Unverified);
         assert!(detail.contains("invented-requirement"));
+    }
+
+    #[test]
+    fn accepted_review_returns_the_exact_structured_payload_for_its_hash() {
+        let snapshot = BTreeMap::from([(
+            "src/lib.rs".to_string(),
+            ("sha".to_string(), "code".to_string()),
+        )]);
+        let expected = BTreeSet::from(["REQ-1".to_string()]);
+        let output = crate::gateway::ModelOutput::Text(
+            r#"{"status":"done","summary":"reviewed","evidence":[{"source":"src/lib.rs"}],"review_result":{"verdict":"approved","reviewed_requirement_ids":["REQ-1"],"findings":[]}}"#.to_string(),
+        );
+        let (verdict, _, refs, review_result) =
+            parse_review_output(output, &snapshot, &expected);
+        assert_eq!(verdict, ValidationVerdictV1::Passed);
+        let review_result = review_result.expect("validated review is retained");
+        let hash = crate::CasStore::hash_of(&serde_json::to_vec(&review_result).unwrap());
+        assert!(refs.contains(&format!("review-result:sha256:{hash}")));
     }
 
     #[test]
@@ -783,7 +813,7 @@ mod tests {
             },
             "evidence": [{"source":"src/pagination.rs", "note":"已检查"}]
         });
-        let (verdict, detail, _) = parse_review_output(
+        let (verdict, detail, _, _) = parse_review_output(
             crate::gateway::ModelOutput::Text(output.to_string()),
             &snapshot,
             &BTreeSet::from(["pagination-boundary".to_string()]),
@@ -807,7 +837,7 @@ mod tests {
                 {"source":"src/policy.rs", "note":"已核对权限策略"}
             ]
         });
-        let (verdict, _, refs) = parse_review_output(
+        let (verdict, _, refs, _) = parse_review_output(
             crate::gateway::ModelOutput::Text(approved.to_string()),
             &snapshot,
             &BTreeSet::from(["req-page".to_string(), "user-request:分页正常工作".to_string()]),
@@ -822,7 +852,7 @@ mod tests {
             "review_result": {"verdict":"approved", "findings":[], "reviewed_requirement_ids":["req-page","user-request:分页正常工作"]},
             "evidence": [{"source":"src/auth.rs", "note":"已检查"}]
         });
-        let (verdict, _, _) = parse_review_output(
+        let (verdict, _, _, _) = parse_review_output(
             crate::gateway::ModelOutput::Text(missing_evidence.to_string()),
             &snapshot,
             &BTreeSet::from(["req-page".to_string(), "user-request:分页正常工作".to_string()]),
@@ -838,7 +868,7 @@ mod tests {
                 {"source":"src/policy.rs", "note":"已核对权限策略"}
             ]
         });
-        let (verdict, detail, _) = parse_review_output(
+        let (verdict, detail, _, _) = parse_review_output(
             crate::gateway::ModelOutput::Text(missing_coverage.to_string()),
             &snapshot,
             &BTreeSet::from(["req-page".to_string(), "user-request:分页正常工作".to_string()]),
@@ -863,7 +893,7 @@ mod tests {
                     {"source":"src/policy.rs", "note":"已核对权限策略"}
                 ]
             });
-            let (verdict, _, _) = parse_review_output(
+            let (verdict, _, _, _) = parse_review_output(
                 crate::gateway::ModelOutput::Text(invalid_coverage.to_string()),
                 &snapshot,
                 &BTreeSet::from(["req-page".to_string(), "user-request:分页正常工作".to_string()]),

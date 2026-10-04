@@ -2982,6 +2982,7 @@ async fn finalize_success_rechecks_workspace_after_a_previously_passed_receipt()
             )]),
             verdict: owo_agent_core::plan::ValidationVerdictV1::Passed,
             evidence_refs: vec!["workspace-path:src/result.js@old-version".to_string()],
+            review_result: None,
             started_at: "2026-10-03T00:00:00Z".to_string(),
             completed_at: "2026-10-03T00:00:01Z".to_string(),
         });

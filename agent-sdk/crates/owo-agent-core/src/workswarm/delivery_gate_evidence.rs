@@ -832,6 +832,7 @@ pub(super) fn make_validation_receipt(
         subject_sha256,
         verdict: input.verdict,
         evidence_refs,
+        review_result: None,
         started_at: input.started_at.to_string(),
         completed_at: now_ts(),
     }

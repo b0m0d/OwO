@@ -2573,6 +2573,7 @@ fn execute_single_verification_plan(
             ValidationVerdictV1::Unverified
         },
         evidence_refs: vec![verification_plan_evidence_ref],
+        review_result: None,
         started_at: started_at.clone(),
         completed_at: chrono::Utc::now().to_rfc3339(),
     });
