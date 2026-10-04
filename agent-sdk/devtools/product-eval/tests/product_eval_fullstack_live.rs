@@ -220,7 +220,7 @@ async fn live_single_vs_team_paired_suite() {
                 "order_seed_sha256": format!("{:x}", Sha256::digest(batch_label.as_bytes())),
                 "order_assignment": "lowest SHA-256 bit of batch_label + case_id + pair_block selects block orientation; next repetition reverses it",
                 "causal_comparison_eligible": false,
-                "causal_limit": "external provider contention and model-service drift remain; paired confidence intervals are not yet implemented",
+                "causal_limit": "external provider contention and model-service drift remain; task-clustered 95% bootstrap intervals describe task-sample uncertainty but do not establish a causal advantage",
                 "sample_assessment": {
                     "paired_cells": paired_cells,
                     "minimum_paired_cells": 30,
