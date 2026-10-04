@@ -67,6 +67,17 @@ pub fn decide_completion(evidence: CompletionEvidence) -> CompletionStatusV1 {
     if evidence.blocking_issue_count > 0 || evidence.failed_required_validation_count > 0 {
         return CompletionStatusV1::Blocked;
     }
+    // The shared decision boundary must fail closed if a caller reports more
+    // passed checks than the plan requires. Otherwise a broken receipt counter
+    // could promote an inconsistent candidate to Accepted.
+    if evidence.passed_required_validation_count > evidence.required_validation_count
+        || evidence
+            .passed_required_validation_count
+            .saturating_add(evidence.failed_required_validation_count)
+            > evidence.required_validation_count
+    {
+        return CompletionStatusV1::Unverified;
+    }
     if evidence.reached_turn_limit || !evidence.response_finished || evidence.stale_evidence {
         return CompletionStatusV1::Unverified;
     }
@@ -173,6 +184,29 @@ mod tests {
                 ..CompletionEvidence::default()
             }),
             CompletionStatusV1::Candidate
+        );
+    }
+
+    #[test]
+    fn inconsistent_validation_totals_cannot_be_accepted() {
+        assert_eq!(
+            decide_completion(CompletionEvidence {
+                response_finished: true,
+                has_candidate_changes: true,
+                required_validation_count: 1,
+                passed_required_validation_count: 2,
+                ..CompletionEvidence::default()
+            }),
+            CompletionStatusV1::Unverified
+        );
+        assert_eq!(
+            decide_completion(CompletionEvidence {
+                response_finished: true,
+                has_candidate_changes: true,
+                passed_required_validation_count: 1,
+                ..CompletionEvidence::default()
+            }),
+            CompletionStatusV1::Unverified
         );
     }
 
