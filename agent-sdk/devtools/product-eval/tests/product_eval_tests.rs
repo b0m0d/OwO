@@ -607,16 +607,21 @@ async fn dry_run_single_multi_parity() {
     assert_eq!(report.runs.len(), 4);
     assert!(report.runs.iter().all(|r| r.status == RunStatus::Passed));
     let modes: Vec<AgentMode> = report.runs.iter().map(|run| run.key.agent_mode).collect();
-    assert_eq!(
-        modes,
-        vec![
-            AgentMode::Single,
-            AgentMode::Multi,
-            AgentMode::Multi,
-            AgentMode::Single,
-        ],
-        "paired cells alternate first-run order across repetitions"
+    assert_eq!(modes.len(), 4);
+    assert_ne!(
+        modes[0], modes[1],
+        "each paired repetition must contain both topologies"
     );
+    assert_eq!(
+        modes[0..2].iter().copied().collect::<std::collections::HashSet<_>>(),
+        modes[2..4]
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>(),
+        "the partner repetition must reverse the same topology pair"
+    );
+    assert_eq!(modes[0], modes[3]);
+    assert_eq!(modes[1], modes[2]);
     let aggregate_modes: Vec<AgentMode> = report.per_case.iter().map(|r| r.agent_mode).collect();
     assert_eq!(aggregate_modes, vec![AgentMode::Single, AgentMode::Multi]);
     assert!(report.per_case.iter().all(|r| r.success_rate == 1.0));

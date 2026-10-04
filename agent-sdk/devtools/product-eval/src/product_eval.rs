@@ -2142,13 +2142,30 @@ impl MatrixRunner {
                 continue;
             }
             for repetition in 0..reps {
-                // Counterbalance mode order inside each task's repetition blocks. The
-                // same paired cell set is retained, but wall-clock drift no longer puts
-                // every Single sample before every Team sample.
-                let offset = (repetition as usize) % opts.modes.len();
-                for index in 0..opts.modes.len() {
-                    let mode = opts.modes[(offset + index) % opts.modes.len()];
-                    keys.push(MatrixKey::new(case.id.clone(), mode, repetition));
+                // For a Single/Multi pair, hash the batch, task, and two-repetition
+                // block to choose AB or BA, then reverse it in the partner repetition.
+                // This is reproducible, randomized block order with exact balance per
+                // complete two-repetition block.
+                let paired_modes = opts.modes.len() == 2
+                    && opts.modes.contains(&AgentMode::Single)
+                    && opts.modes.contains(&AgentMode::Multi);
+                if paired_modes {
+                    let block = repetition / 2;
+                    let batch = opts.batch_label.as_deref().unwrap_or_default();
+                    let seed_material = format!("{batch}\\0{}\\0{block}", case.id);
+                    let digest = Sha256::digest(seed_material.as_bytes());
+                    let block_first = (digest[0] & 1) as usize;
+                    let first_index = block_first ^ ((repetition % 2) as usize);
+                    let first = AgentMode::all()[first_index];
+                    let second = AgentMode::all()[1 - first_index];
+                    keys.push(MatrixKey::new(case.id.clone(), first, repetition));
+                    keys.push(MatrixKey::new(case.id.clone(), second, repetition));
+                } else {
+                    let offset = (repetition as usize) % opts.modes.len();
+                    for index in 0..opts.modes.len() {
+                        let mode = opts.modes[(offset + index) % opts.modes.len()];
+                        keys.push(MatrixKey::new(case.id.clone(), mode, repetition));
+                    }
                 }
             }
         }

@@ -9,6 +9,7 @@ use owo_agent_product_eval::workswarm_executor::{WorkSwarmExecutor, WorkSwarmExe
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use sha2::{Digest, Sha256};
 
 struct PairedDispatchExecutor {
     single: Arc<dyn CaseExecutor>,
@@ -213,10 +214,13 @@ async fn live_single_vs_team_paired_suite() {
                 "suite_hash": matrix.suite_hash.clone(),
                 "run_contract_sha256": matrix.run_contract_sha256.clone(),
                 "provider_endpoint_sha256": endpoint_sha256.clone(),
-                "execution_order": "within each task, paired mode order alternates by repetition: Single-first then Team-first",
+                "execution_order": "within each task, two-repetition blocks use a batch/task-derived randomized AB/BA order",
                 "order_counterbalanced": true,
+                "order_randomized": true,
+                "order_seed_sha256": format!("{:x}", Sha256::digest(batch_label.as_bytes())),
+                "order_assignment": "lowest SHA-256 bit of batch_label + case_id + pair_block selects block orientation; next repetition reverses it",
                 "causal_comparison_eligible": false,
-                "causal_limit": "deterministic order is counterbalanced but not randomized; external provider contention and model-service drift remain",
+                "causal_limit": "external provider contention and model-service drift remain; paired confidence intervals are not yet implemented",
                 "sample_assessment": {
                     "paired_cells": paired_cells,
                     "minimum_paired_cells": 30,
