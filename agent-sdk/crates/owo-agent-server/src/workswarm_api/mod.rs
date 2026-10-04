@@ -29,7 +29,7 @@
 //!
 //! 五期（第三路）指标接线：`build_run_registry` 用 `MeasuredRoleWorker` 包装每个
 //! `RoleWorker`（span 指标 JSONL 落盘 TeamRun 数据目录，重启可读）；`run_team_loop`
-//! 在每阶段前做指标预算门（`TeamRun.budget` additive 支持 `max_cost_usd`/`max_wall_secs`，
+//! 在每阶段前做指标预算门（`TeamRun.budget` additive 支持 max_cost_usd / max_wall_secs / max_model_calls，
 //! 超限停止调度下一阶段并留审计）。指标/脱敏实现见子模块 [`workswarm_metrics`]。
 //!
 //! 七期（第二路）权限接线：`build_run_registry` 按角色画像（`WorkerProfile`）装配

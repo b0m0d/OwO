@@ -361,6 +361,95 @@ fn request_scoped_usage_is_accepted_by_cost_budget_gate() {
     );
 }
 
+#[test]
+fn team_request_budget_is_concurrent_and_survives_recreation() {
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = RequestReservationJournal::for_team(&dir, "team-budget");
+    let budget = std::sync::Arc::new(TeamModelRequestBudget::new(4, journal.clone()).unwrap());
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handles = (0..12)
+        .map(|_| {
+            let budget = std::sync::Arc::clone(&budget);
+            let completed = std::sync::Arc::clone(&completed);
+            std::thread::spawn(move || {
+                if budget.reserve("step#1").is_ok() {
+                    completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert_eq!(journal.reservation_count().unwrap(), 4);
+
+    let resumed = TeamModelRequestBudget::new(8, journal.clone()).unwrap();
+    assert_eq!(resumed.used(), 4);
+    assert!(resumed.reserve("step-next#2").is_ok());
+    assert_eq!(journal.reservation_count().unwrap(), 5);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn request_budget_status_is_reported_without_claiming_usd_exhaustion() {
+    let mut payload = aggregate_metrics("team-budget", &[], &json!({"max_model_calls": 7}));
+    attach_request_budget_status(
+        &mut payload,
+        &json!({"max_model_calls": 7}),
+        Ok(5),
+    );
+    assert_eq!(payload["budget"]["max_model_calls"], 7);
+    assert_eq!(payload["budget"]["reserved_model_calls"], 5);
+    assert_eq!(payload["budget"]["remaining_model_calls"], 2);
+    assert_eq!(payload["budget"]["request_budget_known"], true);
+    assert_eq!(payload["budget"]["request_limit_reached"], false);
+    assert_eq!(payload["budget"]["exceeded"], false);
+}
+
+#[tokio::test]
+async fn measured_provider_does_not_call_provider_after_team_budget_is_full() {
+    struct CountingProvider(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl ModelProvider for CountingProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ModelOutput::Text("ok".to_string()))
+        }
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-provider-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = RequestReservationJournal::for_team(&dir, "team-budget");
+    let budget = std::sync::Arc::new(TeamModelRequestBudget::new(1, journal).unwrap());
+    let inner = std::sync::Arc::new(CountingProvider(std::sync::atomic::AtomicUsize::new(0)));
+    let calls = std::sync::Arc::new(AtomicU64::new(0));
+    let provider = MeasuredProvider::new_with_request_budget(
+        inner.clone(),
+        calls.clone(),
+        std::sync::Arc::new(RequestUsageCollector::default()),
+        "step#1".to_string(),
+        Some(budget),
+    );
+
+    assert!(provider.complete(&[], &[]).await.is_ok());
+    let error = provider.complete(&[], &[]).await.unwrap_err();
+    assert!(error.contains("team_model_call_budget_exhausted"));
+    assert_eq!(inner.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn measured_provider_preserves_request_metadata_once() {
     struct ObservedStub;

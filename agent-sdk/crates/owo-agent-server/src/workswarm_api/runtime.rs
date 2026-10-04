@@ -59,6 +59,7 @@ pub(super) fn inner_worker_for(
     worker_name: Option<&str>,
     model_calls: Option<&Arc<AtomicU64>>,
     request_usage: Option<&Arc<workswarm_metrics::RequestUsageCollector>>,
+    team_request_budget: Option<&Arc<workswarm_metrics::TeamModelRequestBudget>>,
     scope: Option<&project_workspace::WorkspaceScope>,
     profile: &WorkerProfile,
     is_critic: bool,
@@ -84,6 +85,7 @@ pub(super) fn inner_worker_for(
                 workspace,
                 model_calls: model_calls.cloned(),
                 request_usage: request_usage.cloned(),
+                team_request_budget: team_request_budget.cloned(),
                 workspace_scope,
                 profile: Some(profile.clone()),
                 is_critic,
@@ -97,6 +99,10 @@ pub(super) fn inner_worker_for(
             }))
         }
     }
+}
+
+fn worker_kind_uses_agent_provider(worker_kind: &str) -> bool {
+    !matches!(worker_kind, "echo" | "sleep" | "fail")
 }
 
 /// 构建团队运行 worker 注册表（成员名 → MeasuredRoleWorker(RoleWorker(Tracked(inner)))）。
@@ -147,6 +153,25 @@ pub(super) async fn build_run_registry(
         .map(|descriptor| descriptor.budget_calls_per_role)
         .unwrap_or_default();
     let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), team_id);
+    let team_request_budget = match team_run
+        .as_ref()
+        .and_then(|run| run.budget.get("max_model_calls"))
+    {
+        Some(value) => {
+            let limit = value.as_u64()?;
+            Some(Arc::new(
+                workswarm_metrics::TeamModelRequestBudget::new(
+                    limit,
+                    workswarm_metrics::RequestReservationJournal::for_team(
+                        coordinator.run_dir(),
+                        team_id,
+                    ),
+                )
+                .ok()?,
+            ))
+        }
+        None => None,
+    };
     // 范围写租约按实际工作区共享：跨调度阶段和不同 TeamRun 仍能互斥重叠写面。
     // 未声明范围的写角色全局互斥；声明写范围且互不重叠的写角色可并发落盘。
     let tracking_root = scope
@@ -165,8 +190,9 @@ pub(super) async fn build_run_registry(
             .filter(|w| !w.is_empty())
             .unwrap_or("agent")
             .to_string();
-        let model_calls = (worker_kind == "agent").then(|| Arc::new(AtomicU64::new(0)));
-        let request_usage = (worker_kind == "agent")
+        let model_calls = worker_kind_uses_agent_provider(&worker_kind)
+            .then(|| Arc::new(AtomicU64::new(0)));
+        let request_usage = worker_kind_uses_agent_provider(&worker_kind)
             .then(|| Arc::new(workswarm_metrics::RequestUsageCollector::default()));
         // 角色画像：显式 write_paths 是写能力声明；并行 TaskGraph writer 槽位
         // 以可写工具面启动，再由每个任务的 host-validated capability scope 收窄。
@@ -246,6 +272,7 @@ pub(super) async fn build_run_registry(
             r.worker.as_deref(),
             model_calls.as_ref(),
             request_usage.as_ref(),
+            team_request_budget.as_ref(),
             scope.as_ref(),
             &profile,
             is_critic,
@@ -282,7 +309,7 @@ pub(super) async fn build_run_registry(
             r.capabilities.clone(),
             inner,
         ));
-        let provider = (worker_kind == "agent").then(|| state.agent.provider());
+        let provider = worker_kind_uses_agent_provider(&worker_kind).then(|| state.agent.provider());
         registry.register(Arc::new(
             workswarm_metrics::MeasuredRoleWorker::new_with_usage_tracker(
                 role_worker,
@@ -512,3 +539,18 @@ pub(crate) async fn run_team_loop(
 
 // ---------------------------------------------------------------------------
 // 请求模型
+
+
+#[cfg(test)]
+mod worker_kind_budget_tests {
+    use super::worker_kind_uses_agent_provider;
+
+    #[test]
+    fn every_fallback_agent_worker_is_metered_and_budgeted() {
+        assert!(worker_kind_uses_agent_provider("agent"));
+        assert!(worker_kind_uses_agent_provider("custom-agent"));
+        assert!(!worker_kind_uses_agent_provider("echo"));
+        assert!(!worker_kind_uses_agent_provider("sleep"));
+        assert!(!worker_kind_uses_agent_provider("fail"));
+    }
+}

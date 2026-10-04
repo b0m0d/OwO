@@ -853,6 +853,12 @@ async fn team_metrics(
     let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), &id);
     let records = journal.read_records();
     let mut payload = workswarm_metrics::aggregate_metrics(&id, &records, &team.budget);
+    workswarm_metrics::attach_request_budget_status(
+        &mut payload,
+        &team.budget,
+        workswarm_metrics::RequestReservationJournal::for_team(coordinator.run_dir(), &id)
+            .reservation_count(),
+    );
     // 数据源路径（可观测：UI/运维可直接定位 TeamRun 数据目录里的指标文件）。
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(
@@ -966,7 +972,13 @@ async fn team_diagnostic(
 
     // 指标（与 /teams/{id}/metrics 同一聚合口径）。
     let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), &id);
-    let metrics = workswarm_metrics::aggregate_metrics(&id, &journal.read_records(), &team.budget);
+    let mut metrics = workswarm_metrics::aggregate_metrics(&id, &journal.read_records(), &team.budget);
+    workswarm_metrics::attach_request_budget_status(
+        &mut metrics,
+        &team.budget,
+        workswarm_metrics::RequestReservationJournal::for_team(coordinator.run_dir(), &id)
+            .reservation_count(),
+    );
     let metrics_file = journal.path().display().to_string();
 
     // TeamRun 本体（budget 等自由 JSON 脱敏）+ 运行标志。

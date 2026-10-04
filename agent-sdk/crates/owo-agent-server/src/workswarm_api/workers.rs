@@ -33,6 +33,7 @@ pub struct AgentSubagentWorker {
     /// 指标层注入的 per-span 模型调用计数（None = 不计数，行为不变）。
     pub(super) model_calls: Option<Arc<AtomicU64>>,
     pub(super) request_usage: Option<Arc<workswarm_metrics::RequestUsageCollector>>,
+    pub(super) team_request_budget: Option<Arc<workswarm_metrics::TeamModelRequestBudget>>,
     /// 六期（第二路）：项目工作区绑定作用域（None = 全局工作区，行为不变）。
     /// 绑定后：运行目录 = 绑定根；只读绑定强制 read_only；写白名单经审批器强制。
     pub(super) workspace_scope: Option<project_workspace::WorkspaceScope>,
@@ -107,23 +108,24 @@ impl Worker for AgentSubagentWorker {
             })
             .unwrap_or_else(|| "gpt-4.1-mini".to_string());
         // 指标计数注入：MeasuredProvider 包装共享 provider（计数仅对本 span 生效）。
-        let provider: Arc<dyn ModelProvider> = match (&self.model_calls, &self.request_usage) {
-            (Some(counter), Some(request_usage)) => {
-                Arc::new(workswarm_metrics::MeasuredProvider::new_with_request_usage(
+        let provider: Arc<dyn ModelProvider> = match &self.model_calls {
+            Some(counter) => {
+                let request_usage = self
+                    .request_usage
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(workswarm_metrics::RequestUsageCollector::default()));
+                Arc::new(workswarm_metrics::MeasuredProvider::new_with_request_budget(
                     self.agent.provider(),
                     Arc::clone(counter),
-                    Arc::clone(request_usage),
+                    request_usage,
                     workswarm_metrics::request_scope_key(
                         task_context.step_id.as_deref().unwrap_or("unknown"),
                         task_context.phase_epoch,
                     ),
+                    self.team_request_budget.clone(),
                 ))
             }
-            (Some(counter), None) => Arc::new(workswarm_metrics::MeasuredProvider::new(
-                self.agent.provider(),
-                Arc::clone(counter),
-            )),
-            _ => self.agent.provider(),
+            None => self.agent.provider(),
         };
         // 审批器（七期 · 二路）：绑定作用域 → 白名单审批器，白名单取「角色 ∩ 绑定」
         // 交集（角色白名单空 = 绑定原样）；未绑定保持 AutoApprover 原行为。

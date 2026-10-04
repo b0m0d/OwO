@@ -152,8 +152,143 @@ impl MetricsJournal {
 // 模型调用计数装饰器（per-span 精确 model_calls）
 // ---------------------------------------------------------------------------
 
-/// ModelProvider 计数装饰器：`complete`/`complete_stream` 各计一次（每次模型调用
-/// 恰好经过其一），`usage_snapshot` 透传内层（token 快照差值归因不受影响）。
+/// ModelProvider 计数装饰器：complete/complete_stream 各计一次（每次模型调用
+/// 恰好经过其一），usage_snapshot 透传内层（token 快照差值归因不受影响）。
+///
+/// Durable write-ahead slots for a TeamRun-wide model request ceiling.
+#[derive(Clone)]
+pub(crate) struct RequestReservationJournal {
+    path: Arc<PathBuf>,
+    write_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RequestReservationRecord {
+    schema_version: u32,
+    reservation_id: String,
+    scope_key: String,
+    reserved_at: String,
+}
+
+impl RequestReservationJournal {
+    pub(crate) fn for_team(run_dir: &Path, team_id: &str) -> Self {
+        Self {
+            path: Arc::new(run_dir.join(format!("{team_id}-request-reservations.jsonl"))),
+            write_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub(crate) fn reservation_count(&self) -> Result<u64, String> {
+        let text = match std::fs::read_to_string(&*self.path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(format!("模型请求预算账本读取失败：{error}")),
+        };
+        let mut count = 0u64;
+        for (line_number, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let record: RequestReservationRecord = serde_json::from_str(line).map_err(|error| {
+                format!(
+                    "模型请求预算账本第 {} 行损坏：{error}",
+                    line_number.saturating_add(1)
+                )
+            })?;
+            if record.schema_version != 1
+                || record.reservation_id.trim().is_empty()
+                || record.scope_key.trim().is_empty()
+                || record.reserved_at.trim().is_empty()
+            {
+                return Err(format!(
+                    "模型请求预算账本第 {} 行字段无效",
+                    line_number.saturating_add(1)
+                ));
+            }
+            count = count.saturating_add(1);
+        }
+        Ok(count)
+    }
+
+    fn append_reservation(&self, scope_key: &str) -> Result<(), String> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("模型请求预算账本目录创建失败：{error}"))?;
+        }
+        let record = RequestReservationRecord {
+            schema_version: 1,
+            reservation_id: uuid::Uuid::new_v4().to_string(),
+            scope_key: scope_key.to_string(),
+            reserved_at: rfc3339(),
+        };
+        let mut line = serde_json::to_vec(&record)
+            .map_err(|error| format!("模型请求预算记录序列化失败：{error}"))?;
+        line.push(b'\n');
+        let _guard = self.write_lock.lock().unwrap_or_else(|error| error.into_inner());
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&*self.path)
+            .map_err(|error| format!("模型请求预算账本打开失败：{error}"))?;
+        file.write_all(&line)
+            .map_err(|error| format!("模型请求预算记录写入失败：{error}"))?;
+        file.sync_data()
+            .map_err(|error| format!("模型请求预算记录持久化失败：{error}"))
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TeamModelRequestBudget {
+    state: Arc<Mutex<TeamModelRequestBudgetState>>,
+}
+
+struct TeamModelRequestBudgetState {
+    limit: u64,
+    used: u64,
+    journal: RequestReservationJournal,
+}
+
+impl TeamModelRequestBudget {
+    pub(crate) fn new(
+        limit: u64,
+        journal: RequestReservationJournal,
+    ) -> Result<Self, String> {
+        let used = journal.reservation_count()?;
+        Ok(Self {
+            state: Arc::new(Mutex::new(TeamModelRequestBudgetState {
+                limit,
+                used,
+                journal,
+            })),
+        })
+    }
+
+    /// Write-ahead reservation: a request can reach the provider only after its slot
+    /// is durably counted. A crash between reservation and send conservatively spends it.
+    pub(crate) fn reserve(&self, scope_key: &str) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.used >= state.limit {
+            return Err(format!(
+                "team_model_call_budget_exhausted:已预留 {} 次模型请求，TeamRun 上限为 {}",
+                state.used, state.limit
+            ));
+        }
+        state.journal.append_reservation(scope_key)?;
+        state.used = state.used.saturating_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn used(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .used
+    }
+
+}
+
 pub(crate) struct RequestUsageCollector {
     by_step: Mutex<HashMap<String, Vec<(ModelCallMetadata, bool)>>>,
 }
@@ -246,6 +381,7 @@ pub struct MeasuredProvider {
     calls: Arc<AtomicU64>,
     request_usage: Option<Arc<RequestUsageCollector>>,
     step_id: Option<String>,
+    team_request_budget: Option<Arc<TeamModelRequestBudget>>,
 }
 
 impl MeasuredProvider {
@@ -255,6 +391,7 @@ impl MeasuredProvider {
             calls,
             request_usage: None,
             step_id: None,
+            team_request_budget: None,
         }
     }
 
@@ -269,7 +406,33 @@ impl MeasuredProvider {
             calls,
             request_usage: Some(request_usage),
             step_id: Some(step_id),
+            team_request_budget: None,
         }
+    }
+
+    pub(crate) fn new_with_request_budget(
+        inner: Arc<dyn ModelProvider>,
+        calls: Arc<AtomicU64>,
+        request_usage: Arc<RequestUsageCollector>,
+        scope_key: String,
+        team_request_budget: Option<Arc<TeamModelRequestBudget>>,
+    ) -> Self {
+        Self {
+            inner,
+            calls,
+            request_usage: Some(request_usage),
+            step_id: Some(scope_key),
+            team_request_budget,
+        }
+    }
+
+    fn reserve_request(&self) -> Result<(), String> {
+        if let Some(budget) = &self.team_request_budget {
+            let scope_key = self.step_id.as_deref().unwrap_or("unknown");
+            budget.reserve(scope_key)?;
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     fn record_unknown_request(&self, latency_ms: u64, succeeded: bool) {
@@ -293,7 +456,7 @@ impl ModelProvider for MeasuredProvider {
         messages: &[owo_agent_core::ChatMessage],
         tools: &[owo_agent_core::tools::ToolSpec],
     ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.reserve_request()?;
         let started = Instant::now();
         let result = self.inner.complete(messages, tools).await;
         self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
@@ -306,7 +469,7 @@ impl ModelProvider for MeasuredProvider {
         tools: &[owo_agent_core::tools::ToolSpec],
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.reserve_request()?;
         let started = Instant::now();
         let result = self.inner.complete_stream(messages, tools, on_delta).await;
         self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
@@ -319,7 +482,7 @@ impl ModelProvider for MeasuredProvider {
         messages: &[owo_agent_core::ChatMessage],
         tools: &[owo_agent_core::tools::ToolSpec],
     ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.reserve_request()?;
         let started = Instant::now();
         let result = self.inner.complete_with_model(model, messages, tools).await;
         self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
@@ -333,7 +496,7 @@ impl ModelProvider for MeasuredProvider {
         tools: &[owo_agent_core::tools::ToolSpec],
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.reserve_request()?;
         let started = Instant::now();
         let result = self
             .inner
@@ -349,7 +512,7 @@ impl ModelProvider for MeasuredProvider {
         tools: &[owo_agent_core::tools::ToolSpec],
         on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
     ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.reserve_request()?;
         let started = Instant::now();
         let result = self
             .inner
@@ -378,7 +541,7 @@ impl ModelProvider for MeasuredProvider {
         tools: &[owo_agent_core::tools::ToolSpec],
         on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
     ) -> Result<owo_agent_core::gateway::ObservedModelOutput, String> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.reserve_request()?;
         let started = Instant::now();
         match self
             .inner
@@ -924,6 +1087,39 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
         "workers": workers_json,
         "budget": budget_state(budget, records, now),
     })
+}
+
+/// Attach durable TeamRun request-cap status to the existing metrics response.
+pub(crate) fn attach_request_budget_status(
+    payload: &mut Value,
+    budget: &Value,
+    reservations: Result<u64, String>,
+) {
+    let Some(limit) = budget.get("max_model_calls").and_then(Value::as_u64) else {
+        return;
+    };
+    let Some(output_budget) = payload.get_mut("budget").and_then(Value::as_object_mut) else {
+        return;
+    };
+    output_budget.insert("max_model_calls".to_string(), json!(limit));
+    match reservations {
+        Ok(used) => {
+            output_budget.insert("reserved_model_calls".to_string(), json!(used));
+            output_budget.insert(
+                "remaining_model_calls".to_string(),
+                json!(limit.saturating_sub(used)),
+            );
+            output_budget.insert("request_budget_known".to_string(), json!(true));
+            output_budget.insert("request_limit_reached".to_string(), json!(used >= limit));
+        }
+        Err(error) => {
+            output_budget.insert("request_budget_known".to_string(), json!(false));
+            output_budget.insert(
+                "request_budget_error".to_string(),
+                json!(sanitize_text(&error)),
+            );
+        }
+    }
 }
 
 /// 预算状态（对比 TeamRun.budget 的 additive 扩展字段与当前累计指标）。
