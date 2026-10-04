@@ -67,6 +67,7 @@ fn span(role: &str, step: &str, cost: f64, attempt: u32, started_ms: u64) -> Wor
         usage_attribution: "not_applicable".to_string(),
         requests: Vec::new(),
         cost_usd: cost,
+        cost_known: cost > 0.0,
         attempt,
         artifact: Some(SpanArtifact {
             artifact_id: format!("team-t:{role}:v{attempt}"),
@@ -106,10 +107,12 @@ fn task_budget_metrics_roundtrip_and_legacy_records_remain_readable() {
     object.remove("task_id");
     object.remove("attempt_id");
     object.remove("model_call_budget");
+    object.remove("cost_known");
     let decoded_legacy: WorkerSpanRecord = serde_json::from_value(legacy).unwrap();
     assert_eq!(decoded_legacy.task_id, None);
     assert_eq!(decoded_legacy.attempt_id, None);
     assert_eq!(decoded_legacy.model_call_budget, None);
+    assert!(!decoded_legacy.cost_known);
 }
 
 #[test]
@@ -226,7 +229,10 @@ fn aggregate_empty_is_well_formed() {
 
 #[test]
 fn budget_exhaustion_cost_and_wall() {
-    let records = vec![span("planner", "s1", 12.5, 1, 1_000)];
+    let mut cost_span = span("planner", "s1", 12.5, 1, 1_000);
+    cost_span.model_calls = 1;
+    cost_span.usage_attribution = "request_id_scoped".to_string();
+    let records = vec![cost_span];
     // 费用超限（严格大于）。
     let reason = budget_exhaustion_reason(&json!({"max_cost_usd": 10.0}), &records, 2_000).unwrap();
     assert!(reason.contains("费用预算耗尽"), "{reason}");
@@ -291,6 +297,17 @@ fn sanitize_value_redacts_nested_sensitive_keys_and_truncates() {
 }
 
 #[test]
+fn cost_budget_fails_closed_when_prices_are_unconfigured() {
+    let mut record = span("builder", "step-1", 0.0, 1, 1000);
+    record.model_calls = 1;
+    record.usage_attribution = "request_id_scoped".to_string();
+    record.cost_known = false;
+    let reason = budget_exhaustion_reason(&json!({"max_cost_usd": 10.0}), &[record], 2_000)
+        .expect("unknown price must not be treated as zero cost");
+    assert!(reason.contains("费用预算无法核验"), "{reason}");
+}
+
+#[test]
 fn cost_budget_fails_closed_when_concurrent_usage_is_unknown() {
     let mut record = span("builder", "step-1", 0.0, 1, 1000);
     record.model_calls = 1;
@@ -323,6 +340,7 @@ fn request_scoped_usage_is_accepted_by_cost_budget_gate() {
     record.completion_tokens = Some(50);
     record.total_tokens = Some(150);
     record.usage_attribution = "request_id_scoped".to_string();
+    record.cost_known = true;
     record
         .requests
         .push(owo_agent_protocol::ModelRequestMetricV1 {

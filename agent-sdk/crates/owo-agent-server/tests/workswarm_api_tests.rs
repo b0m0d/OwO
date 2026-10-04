@@ -815,7 +815,9 @@ fn inject_cost_span(temp: &std::path::Path, team_id: &str, cost_usd: f64) {
         "prompt_tokens": 1000,
         "completion_tokens": 500,
         "total_tokens": 1500,
+        "usage_attribution": "request_id_scoped",
         "cost_usd": cost_usd,
+        "cost_known": true,
         "attempt": 1
     });
     writeln!(file, "{line}").expect("注入 span 行应写入成功");
@@ -854,6 +856,9 @@ async fn team_metrics_report_role_spans_after_relay() {
     assert_eq!(summary["succeeded_spans"], 4);
     assert_eq!(summary["failed_spans"], 0);
     assert_eq!(summary["rework_count"], 0);
+    assert_eq!(summary["task_budgeted_spans"], 0);
+    assert_eq!(summary["task_model_call_budget_overruns"], 0);
+    assert_eq!(summary["cost_known"], true, "没有模型调用时成本为已知零");
     assert_eq!(summary["model_calls"], 0, "echo worker 零模型调用");
     assert_eq!(
         summary["total_tokens"],
@@ -872,6 +877,7 @@ async fn team_metrics_report_role_spans_after_relay() {
         "窗口墙钟 ≥ span 墙钟和：{m}"
     );
     assert_eq!(m["budget"]["exceeded"], false, "未配置预算 → 不超限：{m}");
+    assert_eq!(m["budget"]["spent_known"], true);
     assert_eq!(m["budget"]["reason"], Value::Null);
     assert!(m["metrics_file"].as_str().unwrap().contains(&team_id));
 

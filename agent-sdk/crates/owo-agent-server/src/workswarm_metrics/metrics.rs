@@ -63,6 +63,9 @@ pub struct WorkerSpanRecord {
     pub requests: Vec<owo_agent_protocol::ModelRequestMetricV1>,
     #[serde(default)]
     pub cost_usd: f64,
+    /// Whether this span has complete usage attribution and valid configured prices.
+    #[serde(default)]
+    pub cost_known: bool,
     /// 该步骤的第几次尝试（1 起；>1 = 返工/重试 span）。
     #[serde(default)]
     pub attempt: u32,
@@ -665,10 +668,15 @@ impl Worker for MeasuredRoleWorker {
         } else {
             "usage_unreported"
         };
-        let cost_usd = usage_delta
-            .as_ref()
-            .map(|d| estimate_cost_usd(d.prompt_tokens, d.completion_tokens))
-            .unwrap_or(0.0);
+        let cost_known = usage_delta.is_some() && configured_token_prices().is_some();
+        let cost_usd = if cost_known {
+            usage_delta
+                .as_ref()
+                .map(|usage| estimate_cost_usd(usage.prompt_tokens, usage.completion_tokens))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         let (outcome, error) = match &result {
             Ok(_) => ("succeeded", None),
             Err(e) => ("failed", Some(sanitize_text(&truncate_chars(e, 500)))),
@@ -713,6 +721,7 @@ impl Worker for MeasuredRoleWorker {
             usage_attribution: usage_attribution.to_string(),
             requests,
             cost_usd,
+            cost_known,
             attempt,
             artifact,
         };
@@ -799,6 +808,9 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
     let completion_tokens = sum_opt(spans.iter().filter_map(|r| r.completion_tokens));
     let total_tokens = sum_opt(spans.iter().filter_map(|r| r.total_tokens));
     let cost_usd = round6(spans.iter().map(|r| r.cost_usd).sum());
+    let cost_known = spans
+        .iter()
+        .all(|record| record.model_calls == 0 || record.cost_known);
     let slowest = spans
         .iter()
         .max_by_key(|r| (r.wall_ms, r.span_id.clone()))
@@ -904,6 +916,7 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "cost_usd": cost_usd,
+            "cost_known": cost_known,
             "slowest_worker": slowest,
             "artifact_versions": artifact_versions.len(),
         },
@@ -923,9 +936,13 @@ pub fn budget_state(budget: &Value, records: &[WorkerSpanRecord], now_ms: u64) -
         .map(|first| now_ms.saturating_sub(first))
         .unwrap_or(0);
     let reason = budget_exhaustion_reason(budget, records, now_ms);
+    let cost_known = records
+        .iter()
+        .all(|record| record.model_calls == 0 || record.cost_known);
     json!({
         "max_cost_usd": budget.get("max_cost_usd").and_then(Value::as_f64),
         "spent_usd": spent,
+        "spent_known": cost_known,
         "max_wall_secs": budget.get("max_wall_secs").and_then(Value::as_u64),
         "wall_window_ms": window,
         "exceeded": reason.is_some(),
@@ -985,10 +1002,11 @@ pub fn budget_exhaustion_reason(
     if let Some(limit) = budget.get("max_cost_usd").and_then(Value::as_f64) {
         let usage_unknown = records.iter().any(|record| {
             record.model_calls > 0
-                && !matches!(
-                    record.usage_attribution.as_str(),
-                    "shared_snapshot_serial" | "request_id_scoped" | "request_scoped_without_id"
-                )
+                && (!record.cost_known
+                    || !matches!(
+                        record.usage_attribution.as_str(),
+                        "shared_snapshot_serial" | "request_id_scoped" | "request_scoped_without_id"
+                    ))
         });
         if usage_unknown {
             return Some(
