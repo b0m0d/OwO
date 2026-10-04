@@ -99,7 +99,12 @@ impl WorkerRuntime<'_> {
             store.save(&session).map_err(|error| format!("Worker 会话初始化保存失败：{error}"))?;
         }
         let event_sink = self.event_sink.clone();
+        let observed_steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_steps_for_sink = Arc::clone(&observed_steps);
         let mut on_event = move |event: &TurnEvent| {
+            if matches!(event, TurnEvent::ToolResult { .. }) {
+                observed_steps_for_sink.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if let Some(sink) = &event_sink {
                 sink(event);
             }
@@ -126,7 +131,7 @@ impl WorkerRuntime<'_> {
                 return Err(worker_runtime_error(
                     message,
                     started.elapsed().as_millis() as u64,
-                    0,
+                    observed_steps.load(std::sync::atomic::Ordering::Relaxed),
                     &session.transient_model_calls,
                 ));
             }
@@ -320,6 +325,59 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             Err("provider unavailable".to_string())
         }
+    }
+
+    struct ToolThenFailedProvider(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl ModelProvider for ToolThenFailedProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(ModelOutput::ToolCalls(vec![crate::gateway::ToolCall {
+                    id: "todo-call".to_string(),
+                    name: "todo".to_string(),
+                    arguments: serde_json::json!({
+                        "todos": [{"content": "completed tool step", "status": "completed"}]
+                    }),
+                }]))
+            } else {
+                Err("provider unavailable after tool".to_string())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_failure_preserves_completed_tool_steps() {
+        let workspace = tempfile::tempdir().unwrap();
+        let approver = AutoApprover { allow: true };
+        let abort = AtomicBool::new(false);
+        let runtime = WorkerRuntime {
+            provider: Arc::new(ToolThenFailedProvider(AtomicUsize::new(0))),
+            approver: &approver,
+            abort: &abort,
+            depth: 0,
+            model: "test-model".to_string(),
+            workspace: workspace.path().to_path_buf(),
+            registry: ToolRegistry::new(),
+            policy: Policy::new(workspace.path()),
+            config: AgentConfig::default(),
+            system_prompt: None,
+            is_critic: false,
+            event_sink: None,
+            session_store: None,
+            worker_session_id: None,
+            parent_session_id: None,
+        };
+
+        let error = runtime.run_report("execute a tool then continue").await.unwrap_err();
+
+        assert!(error.message.contains("provider unavailable after tool"));
+        assert_eq!(error.steps, 1);
+        assert_eq!(error.model_calls, 2);
     }
 
     #[tokio::test]
