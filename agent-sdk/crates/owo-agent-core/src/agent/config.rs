@@ -76,10 +76,10 @@ impl AgentConfig {
         if let Some(value) = env_usize("OWO_MODEL_TIMEOUT_SECS") {
             self.request_timeout_secs = Some(value);
         }
-        if let Some(value) = env_usize("OWO_AGENT_MAX_MODEL_TURNS") {
+        if let Some(value) = env_usize_allow_zero("OWO_AGENT_MAX_MODEL_TURNS") {
             self.max_turns = value;
         }
-        if let Some(value) = env_usize("OWO_AGENT_MAX_TOOL_CALLS") {
+        if let Some(value) = env_usize_allow_zero("OWO_AGENT_MAX_TOOL_CALLS") {
             self.max_tool_calls_per_turn = value;
         }
         if let Some(value) = env_usize("OWO_AGENT_MAX_REPEATED_TOOL_CALLS") {
@@ -91,12 +91,22 @@ impl AgentConfig {
 
 /// 读一个正整数环境变量；空串/非法/0 一律当作"未设置"。
 fn env_usize(name: &str) -> Option<usize> {
+    env_value(name).and_then(|value| parse_env_usize(&value).filter(|value| *value > 0))
+}
+
+fn env_usize_allow_zero(name: &str) -> Option<usize> {
+    env_value(name).and_then(|value| parse_env_usize(&value))
+}
+
+fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
+}
+
+fn parse_env_usize(value: &str) -> Option<usize> {
+    value.trim().parse::<usize>().ok()
 }
 
 fn env_f64(name: &str) -> Option<f64> {
@@ -136,5 +146,19 @@ impl Default for AgentConfig {
             temperature: None,
             request_timeout_secs: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod env_limit_tests {
+    use super::parse_env_usize;
+
+    #[test]
+    fn zero_is_a_valid_value_for_uncapped_turn_limits() {
+        assert_eq!(parse_env_usize("0"), Some(0));
+        assert_eq!(parse_env_usize(" 12 "), Some(12));
+        assert_eq!(parse_env_usize(""), None);
+        assert_eq!(parse_env_usize("-1"), None);
+        assert_eq!(parse_env_usize("unlimited"), None);
     }
 }
