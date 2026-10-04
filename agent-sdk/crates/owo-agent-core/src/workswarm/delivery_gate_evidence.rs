@@ -315,6 +315,41 @@ pub(super) fn review_requirements_for_step(
             }));
         }
     }
+    let mut used_requirement_ids = requirements
+        .iter()
+        .filter_map(|item| item.get("requirement_id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(plan) = &step.verification_plan {
+        used_requirement_ids.extend(
+            plan.requirements
+                .iter()
+                .map(|item| format!("{}:{}", step.id, item.requirement_id)),
+        );
+    }
+    let mut add_explicit_items = |source: &str, prefix: &str| {
+        for (index, item) in crate::request_requirements::explicit_acceptance_items(source)
+            .into_iter()
+            .enumerate()
+        {
+            let mut requirement_id = format!("{}:{prefix}:{index}", step.id);
+            while !used_requirement_ids.insert(requirement_id.clone()) {
+                requirement_id.push_str(":host");
+            }
+            requirements.push(serde_json::json!({
+                "requirement_id": requirement_id,
+                "kind": "explicit_acceptance_item",
+                "description": item,
+            }));
+        }
+    };
+    add_explicit_items(goal_objective, "goal-checklist");
+    if let Some(task) = step.input.get("assigned_task").and_then(Value::as_str) {
+        add_explicit_items(task, "task-checklist");
+    }
+    if let Some(acceptance) = step.input.get("assigned_acceptance").and_then(Value::as_str) {
+        add_explicit_items(acceptance, "acceptance-checklist");
+    }
     if let Some(plan) = &step.verification_plan {
         for requirement in plan.requirements.iter().filter(|item| item.required) {
             requirements.push(serde_json::json!({
@@ -866,11 +901,12 @@ mod review_requirement_tests {
         let mut step = crate::plan::StepSpec::new("step-a", "m-builder");
         step.input = serde_json::json!({
             "assigned_task": "implement the API",
-            "assigned_acceptance": "returns the saved record"
+            "assigned_acceptance": "Acceptance criteria\n- returns the saved record"
         });
         step.verification_plan = Some(crate::plan::VerificationPlanV1 {
             plan_id: "verify-step-a".to_string(),
-            requirements: vec![crate::plan::VerificationRequirementV1 {
+            requirements: vec![
+                crate::plan::VerificationRequirementV1 {
                 requirement_id: "behavior".to_string(),
                 covers_requirement_ids: Vec::new(),
                 validator_id: "workspace-command-success-v1".to_string(),
@@ -881,16 +917,34 @@ mod review_requirement_tests {
                 arguments: serde_json::json!({"command":"cargo test"}),
                 required: true,
                 resources: Default::default(),
-            }],
+            },
+                crate::plan::VerificationRequirementV1 {
+                    requirement_id: "goal-checklist:0".to_string(),
+                    covers_requirement_ids: Vec::new(),
+                    validator_id: "workspace-command-success-v1".to_string(),
+                    validator_version: Some("1".to_string()),
+                    scope: crate::plan::VerificationScopeV1::WorkspacePaths {
+                        relative_paths: vec!["src/api.rs".to_string()],
+                    },
+                    arguments: serde_json::json!({"command":"cargo test"}),
+                    required: true,
+                    resources: Default::default(),
+                },
+            ],
         });
-        let requirements = review_requirements_for_step(&step, "complete the feature");
+        let requirements = review_requirements_for_step(
+            &step,
+            "## Acceptance criteria\n- complete the feature behavior",
+        );
         let ids = requirements
             .iter()
             .filter_map(|item| item.get("requirement_id").and_then(Value::as_str))
             .collect::<std::collections::BTreeSet<_>>();
         assert!(ids.contains("step-a:goal-objective"));
+        assert!(ids.contains("step-a:goal-checklist:0:host"));
         assert!(ids.contains("step-a:task-objective"));
         assert!(ids.contains("step-a:task-acceptance"));
+        assert!(ids.contains("step-a:acceptance-checklist:0"));
         assert!(ids.contains("step-a:behavior"));
     }
 }

@@ -1774,6 +1774,7 @@ fn validate_single_request_coverage(
             }
         }
     }
+    crate::request_requirements::validate_plan_covers_explicit_acceptance(plan, request)?;
     Ok(())
 }
 
@@ -3677,9 +3678,14 @@ mod tests {
         );
         assert!(validate_single_request_coverage(
             &plan,
-            "请实现并确保用户要求功能正常运行"
+            "请实现并确保用户要求功能正常运行\n## 验收标准\n- 用户要求功能正常运行"
         )
         .is_ok());
+        assert!(validate_single_request_coverage(
+            &plan,
+            "请实现并确保用户要求功能正常运行\n## 验收标准\n- 用户要求功能正常运行\n- 保留错误码"
+        )
+        .is_err());
         assert!(validate_single_request_coverage(&plan, "请更新文档并运行检查").is_err());
     }
 
