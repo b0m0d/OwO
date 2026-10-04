@@ -214,6 +214,18 @@ impl TeamCoordinator {
                 .get("upstream")
                 .and_then(Value::as_array)
                 .ok_or_else(|| WorkSwarmError::Validation("review context 缺少 upstream".to_string()))?;
+            let mut expected_review_requirement_ids = std::collections::BTreeSet::new();
+            for item in current_upstream {
+                if let Some(requirements) = item.get("review_requirements").and_then(Value::as_array) {
+                    for requirement in requirements {
+                        if let Some(id) = requirement.get("requirement_id").and_then(Value::as_str) {
+                            expected_review_requirement_ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+            super::delivery_gate_evidence::validate_review_requirement_coverage(result, &expected_review_requirement_ids)
+                .map_err(WorkSwarmError::Validation)?;
             let reviewed_artifacts = current_upstream
                 .iter()
                 .map(|artifact| {
@@ -238,6 +250,7 @@ impl TeamCoordinator {
                         )))?;
                     if seen.get("sha256") != artifact.get("sha256")
                         || seen.get("reviewed_source") != artifact.get("reviewed_source")
+                        || seen.get("review_requirements") != artifact.get("review_requirements")
                     {
                         return Err(WorkSwarmError::Conflict(format!(
                             "reviewer 的 Artifact 或源码快照已过期：{artifact_id}"
@@ -278,6 +291,7 @@ impl TeamCoordinator {
                         "sha256": artifact.get("sha256").cloned().unwrap_or(Value::Null),
                         "producer": producer,
                         "reviewed_source": reviewed_source,
+                        "review_requirements": artifact.get("review_requirements").cloned().unwrap_or_else(|| json!([])),
                     }))
                 })
                 .collect::<WorkSwarmResult<Vec<_>>>()?;
@@ -872,6 +886,10 @@ impl TeamCoordinator {
                         &review_change_sets,
                         review_workspace.as_deref(),
                     ),
+                    "review_requirements": super::delivery_gate_evidence::review_requirements_for_step(
+                        dep_step,
+                        &state.goal.objective,
+                    ),
                     "version": a.version,
                     "content": content,
                     // 评审绑定实际读取到的 CAS 字节，不信任模型声明或可变角色索引。
@@ -887,19 +905,17 @@ impl TeamCoordinator {
         if super::util::is_review_role(&spec.role, &spec.capabilities) {
             let source_manifest = upstream
                 .iter()
-                .filter_map(|artifact| {
-                    let source = artifact.get("reviewed_source")?;
-                    let hashes = source.get("source_hashes")?.as_object()?;
-                    (!hashes.is_empty()).then(|| {
-                        json!({
-                            "artifact_id": artifact.get("artifact_id"),
-                            "task_id": artifact.get("task_id"),
-                            "attempt_id": artifact.get("attempt_id"),
-                            "kind": artifact.get("kind"),
-                            "change_set_ids": source.get("change_set_ids"),
-                            "change_set_sha256": source.get("change_set_sha256"),
-                            "source_hashes": hashes,
-                        })
+                .map(|artifact| {
+                    let source = artifact.get("reviewed_source");
+                    json!({
+                        "artifact_id": artifact.get("artifact_id"),
+                        "task_id": artifact.get("task_id"),
+                        "attempt_id": artifact.get("attempt_id"),
+                        "kind": artifact.get("kind"),
+                        "change_set_ids": source.and_then(|value| value.get("change_set_ids")),
+                        "change_set_sha256": source.and_then(|value| value.get("change_set_sha256")),
+                        "source_hashes": source.and_then(|value| value.get("source_hashes")),
+                        "review_requirements": artifact.get("review_requirements").cloned().unwrap_or_else(|| json!([])),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -918,7 +934,7 @@ impl TeamCoordinator {
                 review_handoff_contract = Some(format!(
                     "{base}
 
-宿主绑定的最终源码审查清单（只读）：{manifest}。请逐个读取清单中的工作区文件，按实际源码提交 findings；交付门会校验这些哈希在评审期间和交付时未变化。"
+宿主绑定的评审清单（只读）：{manifest}。逐项审查每个上游任务的 review_requirements，最终在 review_result.reviewed_requirement_ids 中原样列出全部 requirement_id，且不得重复、遗漏或增加；对 code/source artifact 逐个读取清单中的工作区文件并按源码证据提交 findings。交付门会校验这些哈希及要求在评审期间和交付时未变化。"
                 ));
             }
         }

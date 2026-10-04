@@ -50,7 +50,32 @@ impl Worker for EchoWorker {
                 .and_then(Value::as_array)
                 .is_some_and(|items| items.iter().any(|item| item == "review"));
         if is_reviewer {
-            return Ok(r#"{"status":"done","summary":"恢复测试评审通过","review_result":{"verdict":"approved","findings":[]},"evidence":[],"open_issues":[]}"#.to_string());
+            let team_context = input
+                .get("text")
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                .unwrap_or_else(|| input.clone());
+            let reviewed_requirement_ids = team_context
+                .get("upstream")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+                .flatten()
+                .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            return Ok(serde_json::json!({
+                "status": "done",
+                "summary": "测试评审通过",
+                "review_result": {
+                    "verdict": "approved",
+                    "reviewed_requirement_ids": reviewed_requirement_ids,
+                    "findings": []
+                },
+                "evidence": [],
+                "open_issues": []
+            }).to_string());
         }
         Ok(input
             .get("text")
@@ -233,12 +258,31 @@ impl Worker for FlakyEchoWorker {
                 .and_then(Value::as_array)
                 .is_some_and(|items| items.iter().any(|item| item == "review"));
         if is_reviewer {
+            let team_context = input
+                .get("text")
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                .unwrap_or_else(|| input.clone());
+            let reviewed_requirement_ids = team_context
+                .get("upstream")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+                .flatten()
+                .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
             return Ok(serde_json::json!({
                 "status": "done",
                 "summary": format!("恢复评审通过 #{n}"),
                 "evidence": [],
                 "open_issues": [],
-                "review_result": {"verdict": "approved", "findings": []}
+                "review_result": {
+                    "verdict": "approved",
+                    "reviewed_requirement_ids": reviewed_requirement_ids,
+                    "findings": []
+                }
             })
             .to_string());
         }

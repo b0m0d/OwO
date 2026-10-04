@@ -67,6 +67,9 @@ pub struct WorkerEvidenceV1 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerReviewResultV1 {
     pub verdict: WorkerReviewVerdict,
+    /// Exact host-provided requirement IDs the reviewer considered.
+    #[serde(default)]
+    pub reviewed_requirement_ids: Vec<String>,
     #[serde(default)]
     pub findings: Vec<WorkerReviewFindingV1>,
 }
@@ -271,12 +274,12 @@ pub fn contract_system_prompt(is_critic: bool) -> String {
   \"artifact\": {\"kind\": \"产物分类\", \"format\": \"text|markdown|json|csv\", \"content\": \"产物正文本体\"},\n\
   \"evidence\": [{\"source\": \"来源\", \"note\": \"说明\"}],\n\
   \"open_issues\": [\"未解决问题\"],\n  \"handoff\": \"给下游的交接说明（可省略）\"\n}\n\
-review_result（reviewer必填）：对象含 verdict（approved/changes_requested/rejected）与 findings 列表；finding 含 severity（blocker/major/minor/note）、detail、requirement_id、evidence_refs、suggested_owner、target_task_id、target_artifact_id；同一 owner 有多个被审任务时必须从上游上下文的宿主 Artifact 身份复制 target_task_id 或 target_artifact_id 精确定位；其他角色省略。\nartifact.format 只能取 text|markdown|json|csv 之一（大小写敏感，用小写）。\n",
+review_result（reviewer必填）：对象含 verdict（approved/changes_requested/rejected）、reviewed_requirement_ids（从宿主评审清单逐项原样复制且不得重复）与 findings 列表；finding 含 severity（blocker/major/minor/note）、detail、requirement_id、evidence_refs、suggested_owner、target_task_id、target_artifact_id；同一 owner 有多个被审任务时必须从上游上下文的宿主 Artifact 身份复制 target_task_id 或 target_artifact_id 精确定位；其他角色省略。\nartifact.format 只能取 text|markdown|json|csv 之一（大小写敏感，用小写）。\n",
     );
     if is_critic {
         prompt.push_str(
             "你是评审角色（review capability）：**禁止**提交 artifact；status=done 时必须提交 review_result，\
-包含 verdict 和 findings（severity/detail/requirement_id/evidence_refs/suggested_owner/target_task_id/target_artifact_id）；owner 有多个被审任务时必须精确定位。\
+包含 verdict、reviewed_requirement_ids（从宿主清单逐项原样复制且不得重复）和 findings（severity/detail/requirement_id/evidence_refs/suggested_owner/target_task_id/target_artifact_id）；owner 有多个被审任务时必须精确定位。\
 只报告有证据的问题；approved 不得包含 blocker。summary 可写简要结论。被审查产物由宿主绑定，\
 不要自行编造哈希或身份。交付物归 producer 链，评审无权覆盖。\n",
         );
@@ -320,7 +323,7 @@ pub fn strip_code_fences(text: &str) -> String {
 /// 修复提示只回显了违例原因，模型第二次仍输出白名单外格式（如 "md"/"Markdown"）。
 pub fn contract_repair_prompt(is_critic: bool, violation: &str, broken: &str) -> String {
     let role_rule = if is_critic {
-        "你是 review capability：禁止 artifact；status=done 必须提交 review_result={verdict,findings}，只报告有证据的问题；同一 owner 多任务时从上游上下文的宿主 Artifact 身份原样复制 target_task_id 或 target_artifact_id 精确定位；宿主绑定评审快照"
+        "你是 review capability：禁止 artifact；status=done 必须提交 review_result={verdict,reviewed_requirement_ids,findings}，reviewed_requirement_ids 必须逐项复制宿主清单且不得重复，只报告有证据的问题；同一 owner 多任务时从上游上下文的宿主 Artifact 身份原样复制 target_task_id 或 target_artifact_id 精确定位；宿主绑定评审快照"
     } else {
         "你是交付角色：status=done 必须携带 artifact（content=交付物正文本体；artifact.format 只能取 text|markdown|json|csv 之一，代码分析与补丁/变更报告一律用 \"markdown\"，kind 用 \"analysis\"/\"code\"）"
     };
@@ -483,6 +486,7 @@ mod tests {
             handoff: None,
             review_result: Some(WorkerReviewResultV1 {
                 verdict: WorkerReviewVerdict::Approved,
+                reviewed_requirement_ids: Vec::new(),
                 findings: vec![WorkerReviewFindingV1 {
                     severity: WorkerReviewSeverity::Blocker,
                     detail: "行为验收缺失".to_string(),
@@ -508,6 +512,7 @@ mod tests {
             handoff: None,
             review_result: Some(WorkerReviewResultV1 {
                 verdict: WorkerReviewVerdict::Approved,
+                reviewed_requirement_ids: Vec::new(),
                 findings: vec![WorkerReviewFindingV1 {
                     severity: WorkerReviewSeverity::Major,
                     detail: "核心验收行为没有覆盖".to_string(),

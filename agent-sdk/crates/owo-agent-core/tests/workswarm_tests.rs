@@ -74,7 +74,32 @@ impl Worker for EchoWorker {
                 .and_then(Value::as_str)
                 .is_some_and(|role| matches!(role, "critic" | "reviewer" | "content_reviewer"));
         if is_reviewer {
-            return Ok(r#"{"status":"done","summary":"测试评审通过","review_result":{"verdict":"approved","findings":[]},"evidence":[],"open_issues":[]}"#.to_string());
+            let team_context = input
+                .get("text")
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                .unwrap_or_else(|| input.clone());
+            let reviewed_requirement_ids = team_context
+                .get("upstream")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+                .flatten()
+                .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            return Ok(serde_json::json!({
+                "status": "done",
+                "summary": "测试评审通过",
+                "review_result": {
+                    "verdict": "approved",
+                    "reviewed_requirement_ids": reviewed_requirement_ids,
+                    "findings": []
+                },
+                "evidence": [],
+                "open_issues": []
+            }).to_string());
         }
         Ok(input
             .get("text")
@@ -114,6 +139,21 @@ impl Worker for ReviewRepairWorker {
             })
             .to_string());
         }
+        let team_context = input
+            .get("text")
+            .and_then(Value::as_str)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .unwrap_or_else(|| input.clone());
+        let reviewed_requirement_ids = team_context
+            .get("upstream")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         let first_review = self
             .review_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -121,16 +161,21 @@ impl Worker for ReviewRepairWorker {
         let review_result = if first_review {
             serde_json::json!({
                 "verdict": "changes_requested",
+                "reviewed_requirement_ids": reviewed_requirement_ids,
                 "findings": [{
                     "severity": "blocker",
                     "detail": "补齐失败路径的行为说明",
-                    "requirement_id": "REQ-1",
+                    "requirement_id": reviewed_requirement_ids.first(),
                     "evidence_refs": ["artifact-content"],
                     "suggested_owner": "m-builder"
                 }]
             })
         } else {
-            serde_json::json!({"verdict": "approved", "findings": []})
+            serde_json::json!({
+                "verdict": "approved",
+                "reviewed_requirement_ids": reviewed_requirement_ids,
+                "findings": []
+            })
         };
         Ok(serde_json::json!({
             "status": "done",
@@ -1533,6 +1578,7 @@ async fn explicit_review_capability_is_read_only_and_requires_bound_upstream_sna
         handoff: None,
         review_result: Some(owo_agent_core::workswarm_output::WorkerReviewResultV1 {
             verdict: owo_agent_core::workswarm_output::WorkerReviewVerdict::Approved,
+            reviewed_requirement_ids: Vec::new(),
             findings: Vec::new(),
         }),
     };

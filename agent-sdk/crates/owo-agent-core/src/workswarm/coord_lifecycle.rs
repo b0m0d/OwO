@@ -490,6 +490,10 @@ impl TeamCoordinator {
                                 reviewed_source,
                                 dep_step.id.clone(),
                                 current_attempt.to_string(),
+                                super::delivery_gate_evidence::review_requirements_for_step(
+                                    dep_step,
+                                    &state.goal.objective,
+                                ),
                             ));
                         }
                     }
@@ -499,6 +503,7 @@ impl TeamCoordinator {
                             artifact.artifact_id
                         )));
                     }
+                    let mut expected_requirement_ids = std::collections::BTreeSet::new();
                     for (
                         artifact_id,
                         hash,
@@ -507,6 +512,7 @@ impl TeamCoordinator {
                         reviewed_source,
                         reviewed_task_id,
                         reviewed_attempt_id,
+                        review_requirements,
                     ) in expected
                     {
                         let Some(binding) = bound.iter().find(|item| {
@@ -530,12 +536,19 @@ impl TeamCoordinator {
                             || binding.get("attempt_id").and_then(Value::as_str)
                                 != Some(reviewed_attempt_id.as_str())
                             || binding.get("reviewed_source") != Some(&reviewed_source)
+                            || binding.get("review_requirements").and_then(Value::as_array)
+                                != Some(&review_requirements)
                             || producer == artifact.producer
                         {
                             return Err(WorkSwarmError::Conflict(format!(
                                 "ReviewResult {} 的 Artifact、源码快照或独立评审身份已过期",
                                 artifact.artifact_id
                             )));
+                        }
+                        for requirement in &review_requirements {
+                            if let Some(id) = requirement.get("requirement_id").and_then(Value::as_str) {
+                                expected_requirement_ids.insert(id.to_string());
+                            }
                         }
                         if review_is_approved {
                             validated_review_closures.insert((
@@ -577,6 +590,16 @@ impl TeamCoordinator {
                             }
                         }
                     }
+                    let result = review.get("result").and_then(|value| {
+                        serde_json::from_value::<owo_agent_workswarm::WorkerReviewResultV1>(value.clone()).ok()
+                    }).ok_or_else(|| WorkSwarmError::Conflict(
+                        "ReviewResult 的结构化 requirement 覆盖声明无效".to_string()
+                    ))?;
+                    super::delivery_gate_evidence::validate_review_requirement_coverage(
+                        &result,
+                        &expected_requirement_ids,
+                    )
+                    .map_err(WorkSwarmError::Conflict)?;
                 }
                 if !artifact.open_issues.is_empty() {
                     return Err(WorkSwarmError::Conflict(format!(

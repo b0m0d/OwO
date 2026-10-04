@@ -281,6 +281,95 @@ pub(super) fn validate_review_artifact_kind(is_reviewer: bool, kind: &str) -> Re
     }
 }
 
+/// Host-authored review obligations derived from the exact upstream step contract.
+pub(super) fn review_requirements_for_step(
+    step: &crate::plan::StepSpec,
+    goal_objective: &str,
+) -> Vec<Value> {
+    let mut requirements = Vec::new();
+    let goal_objective = goal_objective.trim();
+    if !goal_objective.is_empty() {
+        requirements.push(serde_json::json!({
+            "requirement_id": format!("{}:goal-objective", step.id),
+            "kind": "goal_objective",
+            "description": goal_objective,
+        }));
+    }
+    if let Some(task) = step.input.get("assigned_task").and_then(Value::as_str) {
+        let task = task.trim();
+        if !task.is_empty() {
+            requirements.push(serde_json::json!({
+                "requirement_id": format!("{}:task-objective", step.id),
+                "kind": "task_objective",
+                "description": task,
+            }));
+        }
+    }
+    if let Some(acceptance) = step.input.get("assigned_acceptance").and_then(Value::as_str) {
+        let acceptance = acceptance.trim();
+        if !acceptance.is_empty() {
+            requirements.push(serde_json::json!({
+                "requirement_id": format!("{}:task-acceptance", step.id),
+                "kind": "task_acceptance",
+                "description": acceptance,
+            }));
+        }
+    }
+    if let Some(plan) = &step.verification_plan {
+        for requirement in plan.requirements.iter().filter(|item| item.required) {
+            requirements.push(serde_json::json!({
+                "requirement_id": format!("{}:{}", step.id, requirement.requirement_id),
+                "kind": "verification",
+                "source_requirement_id": requirement.requirement_id,
+                "validator_id": requirement.validator_id,
+                "validator_version": requirement.validator_version,
+                "scope": requirement.scope,
+                "arguments": requirement.arguments,
+                "covers_requirement_ids": requirement.covers_requirement_ids,
+            }));
+        }
+    }
+    requirements.sort_by(|left, right| {
+        left.get("requirement_id")
+            .and_then(Value::as_str)
+            .cmp(&right.get("requirement_id").and_then(Value::as_str))
+    });
+    requirements
+}
+
+pub(super) fn validate_review_requirement_coverage(
+    result: &owo_agent_workswarm::WorkerReviewResultV1,
+    expected_ids: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let reported = result
+        .reviewed_requirement_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if reported.len() != result.reviewed_requirement_ids.len() {
+        return Err("ReviewResult 重复声明 reviewed_requirement_ids".to_string());
+    }
+    if &reported != expected_ids {
+        return Err(format!(
+            "ReviewResult 未精确覆盖宿主验收要求：expected={expected_ids:?}, reported={reported:?}"
+        ));
+    }
+    if let Some(unexpected) = result
+        .findings
+        .iter()
+        .filter_map(|finding| {
+            finding
+                .requirement_id
+                .as_deref()
+                .filter(|id| !expected_ids.contains(*id))
+        })
+        .next()
+    {
+        return Err(format!("ReviewResult finding 引用了未知验收要求：{unexpected}"));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_review_approval(result: &Value) -> Result<(), String> {
     let result: owo_agent_workswarm::WorkerReviewResultV1 = serde_json::from_value(result.clone())
         .map_err(|error| format!("ReviewResult 结构非法：{error}"))?;
@@ -710,5 +799,98 @@ pub(super) fn make_validation_receipt(
         evidence_refs,
         started_at: input.started_at.to_string(),
         completed_at: now_ts(),
+    }
+}
+
+
+#[cfg(test)]
+mod review_requirement_tests {
+    use super::*;
+
+    #[test]
+    fn review_requirement_coverage_requires_exact_unique_host_ids() {
+        let expected = std::collections::BTreeSet::from([
+            "step-a:goal-objective".to_string(),
+            "step-a:verify-behavior".to_string(),
+        ]);
+        let valid: owo_agent_workswarm::WorkerReviewResultV1 =
+            serde_json::from_value(serde_json::json!({
+                "verdict": "approved",
+                "reviewed_requirement_ids": [
+                    "step-a:goal-objective",
+                    "step-a:verify-behavior"
+                ],
+                "findings": []
+            }))
+            .unwrap();
+        assert!(validate_review_requirement_coverage(&valid, &expected).is_ok());
+
+        let missing: owo_agent_workswarm::WorkerReviewResultV1 =
+            serde_json::from_value(serde_json::json!({
+                "verdict": "approved",
+                "reviewed_requirement_ids": ["step-a:goal-objective"],
+                "findings": []
+            }))
+            .unwrap();
+        assert!(validate_review_requirement_coverage(&missing, &expected).is_err());
+
+        let extra: owo_agent_workswarm::WorkerReviewResultV1 =
+            serde_json::from_value(serde_json::json!({
+                "verdict": "approved",
+                "reviewed_requirement_ids": [
+                    "step-a:goal-objective",
+                    "step-a:verify-behavior",
+                    "invented-requirement"
+                ],
+                "findings": []
+            }))
+            .unwrap();
+        assert!(validate_review_requirement_coverage(&extra, &expected).is_err());
+
+        let duplicate: owo_agent_workswarm::WorkerReviewResultV1 =
+            serde_json::from_value(serde_json::json!({
+                "verdict": "approved",
+                "reviewed_requirement_ids": [
+                    "step-a:goal-objective",
+                    "step-a:goal-objective",
+                    "step-a:verify-behavior"
+                ],
+                "findings": []
+            }))
+            .unwrap();
+        assert!(validate_review_requirement_coverage(&duplicate, &expected).is_err());
+    }
+
+    #[test]
+    fn review_requirements_include_goal_task_acceptance_and_required_verification() {
+        let mut step = crate::plan::StepSpec::new("step-a", "m-builder");
+        step.input = serde_json::json!({
+            "assigned_task": "implement the API",
+            "assigned_acceptance": "returns the saved record"
+        });
+        step.verification_plan = Some(crate::plan::VerificationPlanV1 {
+            plan_id: "verify-step-a".to_string(),
+            requirements: vec![crate::plan::VerificationRequirementV1 {
+                requirement_id: "behavior".to_string(),
+                covers_requirement_ids: Vec::new(),
+                validator_id: "workspace-command-success-v1".to_string(),
+                validator_version: Some("1".to_string()),
+                scope: crate::plan::VerificationScopeV1::WorkspacePaths {
+                    relative_paths: vec!["src/api.rs".to_string()],
+                },
+                arguments: serde_json::json!({"command":"cargo test"}),
+                required: true,
+                resources: Default::default(),
+            }],
+        });
+        let requirements = review_requirements_for_step(&step, "complete the feature");
+        let ids = requirements
+            .iter()
+            .filter_map(|item| item.get("requirement_id").and_then(Value::as_str))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(ids.contains("step-a:goal-objective"));
+        assert!(ids.contains("step-a:task-objective"));
+        assert!(ids.contains("step-a:task-acceptance"));
+        assert!(ids.contains("step-a:behavior"));
     }
 }
