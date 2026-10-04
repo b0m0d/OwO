@@ -517,6 +517,18 @@ fn parse_review_output(
     let Some(review) = worker.review_result else {
         return (ValidationVerdictV1::Unverified, "评审缺少 ReviewResult".to_string(), Vec::new());
     };
+    if let Some(unexpected) = review
+        .findings
+        .iter()
+        .filter_map(|finding| finding.requirement_id.as_deref())
+        .find(|requirement_id| !expected_requirement_ids.contains(*requirement_id))
+    {
+        return (
+            ValidationVerdictV1::Unverified,
+            format!("评审 finding 引用了宿主清单外的验收要求：{unexpected}"),
+            Vec::new(),
+        );
+    }
     let result_hash = crate::CasStore::hash_of(
         serde_json::to_vec(&review).unwrap_or_default().as_slice(),
     );
@@ -719,6 +731,35 @@ mod tests {
 
         std::fs::write(&source, "changed after review\n").unwrap();
         assert!(!super::review_targets_still_match(workspace.path(), &paths));
+    }
+
+    #[test]
+    fn reviewer_finding_cannot_reference_requirement_outside_host_manifest() {
+        let snapshot = BTreeMap::from([(
+            ("src/lib.rs".to_string(), ("hash-a".to_string(), "source".to_string())),
+        )]);
+        let output = serde_json::json!({
+            "status": "done",
+            "summary": "检查通过",
+            "review_result": {
+                "verdict": "approved",
+                "reviewed_requirement_ids": ["known-requirement"],
+                "findings": [{
+                    "severity": "minor",
+                    "detail": "存在未映射的建议",
+                    "requirement_id": "invented-requirement",
+                    "evidence_refs": ["src/lib.rs"]
+                }]
+            },
+            "evidence": [{"source": "src/lib.rs", "note": "已检查"}]
+        });
+        let (verdict, detail, _) = parse_review_output(
+            crate::gateway::ModelOutput::Text(output.to_string()),
+            &snapshot,
+            &BTreeSet::from(["known-requirement".to_string()]),
+        );
+        assert_eq!(verdict, ValidationVerdictV1::Unverified);
+        assert!(detail.contains("invented-requirement"));
     }
 
     #[test]
