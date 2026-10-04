@@ -3434,11 +3434,77 @@ fn paired_snapshot_json(mode: AgentMode, runs: &[&ProductEvalRun]) -> serde_json
     })
 }
 
+/// Case-cluster percentile bootstrap. Repetitions for one task remain in the same
+/// cluster so repeated runs are not treated as independent task samples.
+fn paired_case_cluster_bootstrap_ci(
+    task_means: &[f64],
+    pairing_is_complete: bool,
+    configuration_aligned: bool,
+) -> serde_json::Value {
+    const RESAMPLES: usize = 5_000;
+    if !pairing_is_complete || !configuration_aligned {
+        return serde_json::json!({
+            "available": false,
+            "reason": if !pairing_is_complete {
+                "incomplete_or_duplicate_pairing"
+            } else {
+                "configuration_mismatch"
+            },
+            "independent_case_clusters": task_means.len(),
+        });
+    }
+    if task_means.len() < 3 {
+        return serde_json::json!({
+            "available": false,
+            "reason": "requires_at_least_3_independent_cases",
+            "independent_case_clusters": task_means.len(),
+        });
+    }
+
+    let mut seed = 0xcbf29ce484222325_u64;
+    for value in task_means {
+        seed ^= value.to_bits();
+        seed = seed.wrapping_mul(0x100000001b3);
+    }
+    if seed == 0 {
+        seed = 0x9e3779b97f4a7c15;
+    }
+    let mut draws = Vec::with_capacity(RESAMPLES);
+    for _ in 0..RESAMPLES {
+        let mut total = 0.0;
+        for _ in 0..task_means.len() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            total += task_means[(seed % task_means.len() as u64) as usize];
+        }
+        draws.push(total / task_means.len() as f64);
+    }
+    draws.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let percentile = |p: f64| {
+        let rank = p * (draws.len() - 1) as f64;
+        let lower = rank.floor() as usize;
+        let upper = rank.ceil() as usize;
+        let fraction = rank - lower as f64;
+        draws[lower] * (1.0 - fraction) + draws[upper] * fraction
+    };
+    serde_json::json!({
+        "available": true,
+        "method": "deterministic case-cluster percentile bootstrap",
+        "confidence_level": 0.95,
+        "resamples": RESAMPLES,
+        "independent_case_clusters": task_means.len(),
+        "lower": percentile(0.025),
+        "upper": percentile(0.975),
+    })
+}
+
 /// Matched per-cell statistics; positive wall deltas mean Team took longer.
 fn paired_cell_deltas_json(
     single_runs: &[&ProductEvalRun],
     multi_runs: &[&ProductEvalRun],
     include_cell_details: bool,
+    configuration_aligned: bool,
 ) -> serde_json::Value {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -3469,6 +3535,8 @@ fn paired_cell_deltas_json(
     let mut team_only_pass = 0usize;
     let mut both_pass = 0usize;
     let mut neither_pass = 0usize;
+    let mut success_deltas_by_case = BTreeMap::<String, Vec<f64>>::new();
+    let mut wall_deltas_by_case = BTreeMap::<String, Vec<f64>>::new();
     let mut cells = Vec::new();
     let mut paired_cells = 0usize;
 
@@ -3477,6 +3545,10 @@ fn paired_cell_deltas_json(
         let left = single[key];
         let right = multi[key];
         let wall_delta = right.wall_ms as f64 - left.wall_ms as f64;
+        let success_delta = (if right.status == RunStatus::Passed { 1.0 } else { 0.0 })
+            - (if left.status == RunStatus::Passed { 1.0 } else { 0.0 });
+        success_deltas_by_case.entry(key.0.clone()).or_default().push(success_delta);
+        wall_deltas_by_case.entry(key.0.clone()).or_default().push(wall_delta);
         let call_delta = right.model_calls as f64 - left.model_calls as f64;
         wall_deltas.push(wall_delta);
         call_deltas.push(call_delta);
@@ -3534,6 +3606,22 @@ fn paired_cell_deltas_json(
         }
     }
 
+    let task_means = |by_case: &BTreeMap<String, Vec<f64>>| {
+        by_case
+            .values()
+            .map(|values| values.iter().sum::<f64>() / values.len() as f64)
+            .collect::<Vec<_>>()
+    };
+    let task_success_deltas = task_means(&success_deltas_by_case);
+    let task_wall_deltas = task_means(&wall_deltas_by_case);
+    let task_mean_value = |values: &[f64]| {
+        if values.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(values.iter().sum::<f64>() / values.len() as f64)
+        }
+    };
+    let complete_pairing = keys_equal && !duplicate_cells;
     let quantiles = |values: &[f64]| {
         if values.is_empty() {
             return serde_json::json!({"mean": null, "median": null, "p95": null});
@@ -3561,7 +3649,7 @@ fn paired_cell_deltas_json(
         "paired_cells": paired_cells,
         "keys_equal": keys_equal,
         "duplicate_cells": duplicate_cells,
-        "valid_complete_pairing": keys_equal && !duplicate_cells,
+        "valid_complete_pairing": complete_pairing,
         "single_only_pass": single_only_pass,
         "team_only_pass": team_only_pass,
         "both_pass": both_pass,
@@ -3577,6 +3665,23 @@ fn paired_cell_deltas_json(
         "team_minus_single_total_tokens": quantiles(&token_deltas),
         "team_minus_single_cost_usd": quantiles(&cost_deltas),
         "team_minus_single_checker_quality": quantiles(&quality_deltas),
+        "uncertainty": {
+            "estimand": "equal-weight mean of per-case paired differences",
+            "configuration_aligned": configuration_aligned,
+            "success_rate_delta_task_balanced_mean": task_mean_value(&task_success_deltas),
+            "wall_ms_delta_task_balanced_mean": task_mean_value(&task_wall_deltas),
+            "success_rate_delta_case_cluster_bootstrap_95_ci": paired_case_cluster_bootstrap_ci(
+                &task_success_deltas,
+                complete_pairing,
+                configuration_aligned,
+            ),
+            "wall_ms_delta_case_cluster_bootstrap_95_ci": paired_case_cluster_bootstrap_ci(
+                &task_wall_deltas,
+                complete_pairing,
+                configuration_aligned,
+            ),
+            "warning": "Repeated runs are clustered by case_id; intervals describe between-case sampling uncertainty and do not establish causal advantage."
+        },
         "cell_deltas": if include_cell_details {
             serde_json::Value::Array(cells)
         } else {
@@ -3750,6 +3855,10 @@ pub fn build_paired_report_json(
         "strategy_version": opts.strategy_version,
     });
     let run_alignment = paired_run_alignment(single, multi, opts);
+    let configuration_aligned = run_alignment
+        .get("configuration_aligned")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let mut pairs: Vec<serde_json::Value> = Vec::new();
 
     let mut categories: BTreeSet<String> = BTreeSet::new();
@@ -3781,6 +3890,7 @@ pub fn build_paired_report_json(
                 &single_runs,
                 &multi_runs,
                 label == "overall",
+                configuration_aligned,
             ),
             "bindings": bindings.clone(),
             "generated_at": generated_at,
@@ -4114,5 +4224,39 @@ mod tests {
             evaluate_checker_on_map(&checker, &negative).is_err(),
             "反例（无映射语义）必须失败"
         );
+    }
+}
+
+#[cfg(test)]
+mod paired_case_cluster_bootstrap_tests {
+    use super::paired_case_cluster_bootstrap_ci;
+
+    #[test]
+    fn bootstrap_is_reproducible_and_requires_three_independent_cases() {
+        let insufficient = paired_case_cluster_bootstrap_ci(&[0.2, 0.4], true, true);
+        assert_eq!(insufficient["available"], false);
+        assert_eq!(insufficient["reason"], "requires_at_least_3_independent_cases");
+
+        let values = [-0.1, 0.2, 0.4, 0.0];
+        let first = paired_case_cluster_bootstrap_ci(&values, true, true);
+        let second = paired_case_cluster_bootstrap_ci(&values, true, true);
+        assert_eq!(first, second);
+        assert_eq!(first["available"], true);
+        assert_eq!(first["resamples"], 5000);
+        assert!(first["lower"].as_f64().unwrap() <= first["upper"].as_f64().unwrap());
+    }
+
+    #[test]
+    fn configuration_mismatch_never_emits_an_interval() {
+        let result = paired_case_cluster_bootstrap_ci(&[0.1, 0.2, 0.3], true, false);
+        assert_eq!(result["available"], false);
+        assert_eq!(result["reason"], "configuration_mismatch");
+    }
+
+    #[test]
+    fn incomplete_pairing_never_emits_an_interval() {
+        let result = paired_case_cluster_bootstrap_ci(&[0.1, 0.2, 0.3], false, true);
+        assert_eq!(result["available"], false);
+        assert_eq!(result["reason"], "incomplete_or_duplicate_pairing");
     }
 }

@@ -1300,6 +1300,14 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
     assert_eq!(matched["both_pass"], 1);
     assert_eq!(matched["net_success_rate_delta"], 0.0);
     assert_eq!(
+        matched["uncertainty"]["success_rate_delta_case_cluster_bootstrap_95_ci"]["available"],
+        false
+    );
+    assert_eq!(
+        matched["uncertainty"]["success_rate_delta_case_cluster_bootstrap_95_ci"]["reason"],
+        "requires_at_least_3_independent_cases"
+    );
+    assert_eq!(
         matched["team_minus_single_wall_ms_all"]["mean"],
         15.0
     );
@@ -1349,6 +1357,17 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
     assert_eq!(
         different_contract["run_alignment"]["configuration_aligned"],
         serde_json::Value::Bool(false)
+    );
+    let different_contract_overall = different_contract["pairs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["task_group"] == "overall")
+        .unwrap();
+    assert_eq!(
+        different_contract_overall["matched_comparison"]["uncertainty"]
+            ["wall_ms_delta_case_cluster_bootstrap_95_ci"]["reason"],
+        "configuration_mismatch"
     );
     let mut different_binary_multi = multi.clone();
     different_binary_multi.evaluator_binary_sha256 = Some("binary-v2".into());
