@@ -592,7 +592,10 @@ async fn dry_run_single_multi_parity() {
     let b = bundle(vec![make_case("parity-a", EvalCategory::Research)]);
     let out = temp_out("parity");
     let runner = MatrixRunner::new(b, &out);
-    let opts = opts1(AgentMode::all().to_vec()); // single + multi
+    let opts = RunOptions {
+        reps_override: Some(2),
+        ..opts1(AgentMode::all().to_vec())
+    };
     let report = run_matrix(
         &runner,
         Arc::new(ReferenceDryExecutor),
@@ -601,11 +604,67 @@ async fn dry_run_single_multi_parity() {
         no_cancel(),
     )
     .await;
-    assert_eq!(report.runs.len(), 2);
+    assert_eq!(report.runs.len(), 4);
     assert!(report.runs.iter().all(|r| r.status == RunStatus::Passed));
-    let modes: Vec<AgentMode> = report.per_case.iter().map(|r| r.agent_mode).collect();
-    assert_eq!(modes, vec![AgentMode::Single, AgentMode::Multi]);
+    let modes: Vec<AgentMode> = report.runs.iter().map(|run| run.key.agent_mode).collect();
+    assert_eq!(
+        modes,
+        vec![
+            AgentMode::Single,
+            AgentMode::Multi,
+            AgentMode::Multi,
+            AgentMode::Single,
+        ],
+        "paired cells alternate first-run order across repetitions"
+    );
+    let aggregate_modes: Vec<AgentMode> = report.per_case.iter().map(|r| r.agent_mode).collect();
+    assert_eq!(aggregate_modes, vec![AgentMode::Single, AgentMode::Multi]);
     assert!(report.per_case.iter().all(|r| r.success_rate == 1.0));
+    let (single, multi) = split_paired_mode_reports(&report).expect("split paired report");
+    assert_eq!(single.execution, "live-agent");
+    assert_eq!(multi.execution, "live-workswarm");
+    assert_eq!(single.runs.len(), 2);
+    assert_eq!(multi.runs.len(), 2);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[tokio::test]
+async fn matrix_runner_rejects_empty_and_duplicate_modes() {
+    let b = bundle(vec![make_case("invalid-modes", EvalCategory::Code)]);
+    let out = temp_out("invalid-modes");
+    let runner = MatrixRunner::new(b, &out);
+
+    let empty = RunOptions {
+        modes: Vec::new(),
+        ..RunOptions::default()
+    };
+    let error = runner
+        .run(
+            Arc::new(ReferenceDryExecutor),
+            "dry-reference",
+            None,
+            &empty,
+            no_cancel(),
+        )
+        .await
+        .expect_err("empty topology list must be rejected");
+    assert!(error.0.contains("不能为空"));
+
+    let duplicate = RunOptions {
+        modes: vec![AgentMode::Single, AgentMode::Single],
+        ..RunOptions::default()
+    };
+    let error = runner
+        .run(
+            Arc::new(ReferenceDryExecutor),
+            "dry-reference",
+            None,
+            &duplicate,
+            no_cancel(),
+        )
+        .await
+        .expect_err("duplicate topology list must be rejected");
+    assert!(error.0.contains("重复"));
     let _ = std::fs::remove_dir_all(&out);
 }
 

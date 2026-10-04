@@ -2138,9 +2138,17 @@ impl MatrixRunner {
         let mut keys = Vec::new();
         for case in cases {
             let reps = case.effective_repetitions(&self.bundle.suite.defaults, opts.reps_override);
-            for mode in &opts.modes {
-                for repetition in 0..reps {
-                    keys.push(MatrixKey::new(case.id.clone(), *mode, repetition));
+            if opts.modes.is_empty() {
+                continue;
+            }
+            for repetition in 0..reps {
+                // Counterbalance mode order inside each task's repetition blocks. The
+                // same paired cell set is retained, but wall-clock drift no longer puts
+                // every Single sample before every Team sample.
+                let offset = (repetition as usize) % opts.modes.len();
+                for index in 0..opts.modes.len() {
+                    let mode = opts.modes[(offset + index) % opts.modes.len()];
+                    keys.push(MatrixKey::new(case.id.clone(), mode, repetition));
                 }
             }
         }
@@ -2330,6 +2338,12 @@ impl MatrixRunner {
         let cases = filter_cases(&self.bundle, opts);
         if cases.is_empty() {
             return err("过滤条件下没有可执行的任务");
+        }
+        if opts.modes.is_empty() {
+            return err("运行模式列表不能为空");
+        }
+        if opts.modes.iter().enumerate().any(|(index, mode)| opts.modes[..index].contains(mode)) {
+            return err("运行模式列表不能包含重复模式");
         }
         let run_contract_sha256 = self.run_contract_sha256(&cases, opts);
         let evaluator_binary_sha256 = current_executable_sha256().ok_or_else(|| {
@@ -3523,6 +3537,28 @@ fn paired_run_alignment(
         "multi_cells": multi_rows.len(),
         "evaluator_revision_binding": "not present in ProductEvalReport; verify from freeze/git metadata",
     })
+}
+
+/// Split a matrix report containing exactly the Single and Multi sides into aligned
+/// reports that can be consumed by the paired-report builder.
+pub fn split_paired_mode_reports(
+    report: &ProductEvalReport,
+) -> Result<(ProductEvalReport, ProductEvalReport), ProductEvalError> {
+    let split = |mode: AgentMode, execution: &str| {
+        let mut side = report.clone();
+        side.execution = execution.to_string();
+        side.runs.retain(|run| run.key.agent_mode == mode);
+        side.pending.retain(|key| key.agent_mode == mode);
+        side.metrics = aggregate_metrics(&side.runs);
+        side.per_case = aggregate_per_case(&side.runs);
+        side
+    };
+    let single = split(AgentMode::Single, "live-agent");
+    let multi = split(AgentMode::Multi, "live-workswarm");
+    if single.runs.is_empty() || multi.runs.is_empty() {
+        return err("配对拆分要求 Single 与 Multi 都至少有一个运行单元");
+    }
+    Ok((single, multi))
 }
 
 /// 生成三路可直接读取的配对对照报告 JSON（一个包里含全部任务组）。
