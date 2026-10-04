@@ -9,6 +9,8 @@ use super::{ModelCallRecord, workspace_file_hash};
 use crate::gateway::{ChatMessage, ModelCallMetadata, ModelOutput, ModelProvider, TokenUsage};
 use crate::plan::{ValidationReceiptV1, ValidationVerdictV1};
 use crate::session::Session;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -52,12 +54,15 @@ pub(super) fn accepted_candidate_paths(session: &Session, turn_id: &str) -> BTre
         }
         for raw in &execution.changed_files {
             let normalized = raw.replace('\\', "/");
-            if let Some((_, Some(hash))) = execution
+            if let Some((_, hash)) = execution
                 .after_hashes
                 .iter()
                 .find(|(path, _)| path.replace('\\', "/") == normalized)
             {
-                paths.insert(normalized, hash.clone());
+                let review_hash = hash
+                    .clone()
+                    .unwrap_or_else(crate::verification::workspace_path_absence_sha256);
+                paths.insert(normalized, review_hash);
             }
         }
     }
@@ -122,7 +127,7 @@ pub(super) async fn review_candidate(
         serde_json::to_vec(&changeset).unwrap_or_default().as_slice(),
     );
     let environment_id = crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
-    let (snapshot, snapshot_error) = read_review_snapshot(&session.workspace, expected_paths);
+    let (snapshot, snapshot_error) = read_review_snapshot(session, expected_paths);
     let mut receipt = ValidationReceiptV1 {
         receipt_id: format!("single-review-{}", uuid::Uuid::new_v4()),
         task_id: session.id.clone(),
@@ -279,15 +284,13 @@ pub(super) async fn review_candidate(
     receipt.verdict = verdict;
     receipt.detail = Some(detail);
     receipt.evidence_refs = evidence_refs;
+    receipt
+        .evidence_refs
+        .extend(deleted_source_evidence_refs(session, expected_paths));
     let canonical_root = session.workspace.canonicalize().ok();
-    let snapshot_still_matches = canonical_root.as_deref().is_some_and(|root| {
-        expected_paths.iter().all(|(path, expected)| {
-            workspace_file_hash(root, path)
-                .and_then(|value| value)
-                .as_deref()
-                == Some(expected.as_str())
-        })
-    });
+    let snapshot_still_matches = canonical_root
+        .as_deref()
+        .is_some_and(|root| review_targets_still_match(root, expected_paths));
     if !snapshot_still_matches {
         receipt.verdict = ValidationVerdictV1::Stale;
         receipt.detail = Some("独立评审期间源码变化，评审收据与最终版本不一致".to_string());
@@ -303,7 +306,7 @@ pub(super) async fn review_candidate(
 }
 
 fn read_review_snapshot(
-    workspace: &Path,
+    session: &Session,
     expected_paths: &BTreeMap<String, String>,
 ) -> (Option<BTreeMap<String, (String, String)>>, Option<String>) {
     if expected_paths.is_empty() {
@@ -312,12 +315,13 @@ fn read_review_snapshot(
     if expected_paths.len() > MAX_REVIEW_FILES {
         return (None, Some(format!("评审候选文件数超过宿主上限 {MAX_REVIEW_FILES}")));
     }
-    let root = match workspace.canonicalize() {
+    let root = match session.workspace.canonicalize() {
         Ok(root) => root,
         Err(error) => return (None, Some(format!("工作区根目录无法解析：{error}"))),
     };
     let mut total_bytes = 0usize;
     let mut snapshot = BTreeMap::new();
+    let absent_digest = crate::verification::workspace_path_absence_sha256();
     for (relative, expected_hash) in expected_paths {
         let rel = Path::new(relative);
         if rel.is_absolute()
@@ -344,6 +348,34 @@ fn read_review_snapshot(
         {
             return (None, Some(format!("敏感凭据路径不进入云端独立评审：{relative}")));
         }
+
+        if expected_hash == &absent_digest {
+            if workspace_file_hash(&root, relative) != Some(None) {
+                return (None, Some(format!("源码删除状态已变化或无法确认：{relative}")));
+            }
+            let Some((before_hash, bytes)) = deleted_source_snapshot(session, relative) else {
+                return (None, Some(format!("缺少源码删除前的宿主快照：{relative}")));
+            };
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if total_bytes > MAX_REVIEW_BYTES {
+                return (None, Some(format!("评审源码快照超过宿主输入预算 {MAX_REVIEW_BYTES} bytes")));
+            }
+            let content = match String::from_utf8(bytes) {
+                Ok(content) => content,
+                Err(_) => return (None, Some(format!("删除前源码不是 UTF-8：{relative}"))),
+            };
+            snapshot.insert(
+                relative.clone(),
+                (
+                    absent_digest.clone(),
+                    format!(
+                        "【宿主确认：该路径在候选版本中已删除】\n删除前 SHA-256={before_hash}\n【删除前源码】\n{content}\n【删除前源码结束】",
+                    ),
+                ),
+            );
+            continue;
+        }
+
         let full = match root.join(rel).canonicalize() {
             Ok(full) if full.starts_with(&root) => full,
             Ok(_) => return (None, Some(format!("评审文件解析后越出工作区：{relative}"))),
@@ -368,6 +400,57 @@ fn read_review_snapshot(
         snapshot.insert(relative.clone(), (actual_hash, content));
     }
     (Some(snapshot), None)
+}
+
+fn deleted_source_snapshot(session: &Session, relative: &str) -> Option<(String, Vec<u8>)> {
+    let execution = session.execution_receipts.iter().rev().find(|execution| {
+        execution.status == "accepted"
+            && execution.changed_files.iter().any(|path| path.replace('\\', "/") == relative)
+            && execution.after_hashes.iter().any(|(path, hash)| {
+                path.replace('\\', "/") == relative && hash.is_none()
+            })
+    })?;
+    let baseline_hash = execution
+        .before_hashes
+        .iter()
+        .find(|(path, hash)| path.replace('\\', "/") == relative && hash.is_some())
+        .and_then(|(_, hash)| hash.clone())?;
+    let key = execution
+        .snapshot_keys
+        .iter()
+        .find(|(path, _)| path.replace('\\', "/") == relative)
+        .map(|(_, key)| key)?;
+    let encoded = session.snapshots.get(key)?.original_b64.as_deref()?;
+    let bytes = BASE64.decode(encoded).ok()?;
+    (crate::CasStore::hash_of(&bytes) == baseline_hash)
+        .then_some((baseline_hash, bytes))
+}
+
+fn deleted_source_evidence_refs(
+    session: &Session,
+    expected_paths: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let absent_digest = crate::verification::workspace_path_absence_sha256();
+    expected_paths
+        .iter()
+        .filter(|(_, hash)| *hash == &absent_digest)
+        .filter_map(|(path, _)| {
+            deleted_source_snapshot(session, path).map(|(baseline_hash, _)| {
+                format!("deleted-source-baseline:{path}:sha256:{baseline_hash}")
+            })
+        })
+        .collect()
+}
+
+fn review_targets_still_match(root: &Path, expected_paths: &BTreeMap<String, String>) -> bool {
+    let absent_digest = crate::verification::workspace_path_absence_sha256();
+    expected_paths.iter().all(|(path, expected)| {
+        if expected == &absent_digest {
+            workspace_file_hash(root, path) == Some(None)
+        } else {
+            workspace_file_hash(root, path).flatten().as_deref() == Some(expected.as_str())
+        }
+    })
 }
 
 fn parse_review_output(
@@ -558,6 +641,84 @@ mod tests {
             "修改支付说明文档",
             &BTreeMap::from([("docs/payment.md".to_string(), "hash".to_string())])
         ));
+    }
+
+    #[test]
+    fn deleting_the_last_source_file_still_requires_snapshot_bound_review() {
+        use crate::session::{ExecutionReceipt, Session, SnapshotEntry};
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use std::collections::HashMap;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("src/lib.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let original = b"pub fn old_entry() {}\n";
+        std::fs::write(&source, original).unwrap();
+        let baseline_hash = crate::CasStore::hash_of(original);
+        std::fs::remove_file(&source).unwrap();
+        let mut session = Session::new(workspace.path(), "mock", None);
+        let snapshot_key = source.to_string_lossy().replace('\\', "/");
+        session.snapshots.insert(
+            snapshot_key.clone(),
+            SnapshotEntry {
+                original_b64: Some(BASE64.encode(original)),
+                expected_after_sha256: None,
+                turn: 1,
+            },
+        );
+        session.validation_receipts.push(crate::plan::ValidationReceiptV1 {
+            receipt_id: "validation-delete".to_string(),
+            task_id: session.id.clone(),
+            attempt_id: "turn-delete".to_string(),
+            epoch: 1,
+            requirement_id: "source-delete".to_string(),
+            validator_id: "workspace-command-success-v1".to_string(),
+            validator_version: "1".to_string(),
+            arguments_sha256: "args".to_string(),
+            input_sha256: "input".to_string(),
+            environment_id: "environment".to_string(),
+            changeset_sha256: None,
+            detail: None,
+            subject_sha256: HashMap::new(),
+            verdict: ValidationVerdictV1::Passed,
+            evidence_refs: Vec::new(),
+            started_at: "t1".to_string(),
+            completed_at: "t1".to_string(),
+        });
+        session.execution_receipts.push(ExecutionReceipt {
+            receipt_id: "execution-delete".to_string(),
+            tool: "write_file".to_string(),
+            turn_id: "turn-delete".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+            snapshot_keys: HashMap::from([("src/lib.rs".to_string(), snapshot_key)]),
+            before_hashes: HashMap::from([("src/lib.rs".to_string(), Some(baseline_hash))]),
+            after_hashes: HashMap::from([("src/lib.rs".to_string(), None)]),
+            diff_sha256: "diff".to_string(),
+            created_at: "t1".to_string(),
+            status: "accepted".to_string(),
+            validation_receipt_id: Some("validation-delete".to_string()),
+        });
+
+        let paths = super::accepted_candidate_paths(&session, "turn-delete");
+        let absent_digest = crate::verification::workspace_path_absence_sha256();
+        assert_eq!(paths.get("src/lib.rs"), Some(&absent_digest));
+        assert!(super::is_required("删除入口文件", &paths));
+        let (snapshot, error) = super::read_review_snapshot(&session, &paths);
+        assert!(error.is_none());
+        let snapshot = snapshot.unwrap();
+        let (candidate_hash, reviewed_content) = &snapshot["src/lib.rs"];
+        assert_eq!(candidate_hash, &crate::verification::workspace_path_absence_sha256());
+        assert!(reviewed_content.contains("候选版本中已删除"));
+        assert!(reviewed_content.contains("pub fn old_entry"));
+        assert_eq!(
+            super::deleted_source_evidence_refs(&session, &paths),
+            vec![format!("deleted-source-baseline:src/lib.rs:sha256:{baseline_hash}")]
+        );
+        assert!(super::review_targets_still_match(workspace.path(), &paths));
+
+        std::fs::write(&source, "changed after review\n").unwrap();
+        assert!(!super::review_targets_still_match(workspace.path(), &paths));
     }
 
     #[test]
