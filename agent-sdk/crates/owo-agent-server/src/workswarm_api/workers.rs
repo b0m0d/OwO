@@ -96,14 +96,6 @@ impl Worker for AgentSubagentWorker {
         let effective_write_allowed = task_write_allowed
             .clone()
             .unwrap_or_else(|| self.write_allowed.clone());
-        if std::env::var("OPENAI_API_KEY")
-            .map(|v| v.trim().is_empty())
-            .unwrap_or(true)
-        {
-            return Err(
-                "缺少 OPENAI_API_KEY，agent 角色无法调用模型（请配置凭据后重试）".to_string(),
-            );
-        }
         let configured_model = std::env::var("OWO_AGENT_MODEL").ok();
         let model = resolve_agent_model(input, configured_model.as_deref());
         // 指标计数注入：MeasuredProvider 包装共享 provider（计数仅对本 span 生效）。

@@ -35,17 +35,7 @@ impl AgentWorker {
         )
     }
 
-    /// 凭据检查：无 OPENAI_API_KEY → Err（可读，不 panic）。
-    pub fn check_credentials() -> Result<(), String> {
-        let missing = std::env::var("OPENAI_API_KEY")
-            .map(|v| v.trim().is_empty())
-            .unwrap_or(true);
-        if missing {
-            Err("缺少 OPENAI_API_KEY，agent worker 无法调用模型（请配置凭据后重试）".to_string())
-        } else {
-            Ok(())
-        }
-    }
+
 }
 
 #[async_trait]
@@ -65,7 +55,6 @@ impl Worker for AgentWorker {
             .get("read_only")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        Self::check_credentials()?;
         let model = Self::resolve_model(input);
         let output = self
             .agent
