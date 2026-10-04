@@ -197,9 +197,12 @@ async fn live_single_vs_team_paired_suite() {
         .iter()
         .map(|case| case.category.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    let paired_cells = single.runs.len().min(team.runs.len());
+    let paired_cells = paired
+        .pointer("/run_alignment/paired_cells")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
     let coverage_evidence_sufficient =
-        paired_cells >= 30 && selected.len() >= 3 && selected_categories.len() >= 2;
+        alignment && paired_cells >= 30 && selected.len() >= 3 && selected_categories.len() >= 2;
     if let Some(object) = paired.as_object_mut() {
         object.insert(
             "evaluation_contract".to_string(),

@@ -1215,11 +1215,22 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         RunStatus::Passed,
     );
     a.model = Some("glm-5.3-flash".into());
+    a.model_calls = 2;
+    a.total_tokens = Some(100);
+    a.cost_usd = Some(0.10);
+    a.checker_passed = 3;
+    a.checker_total = 4;
     let mut b = dummy_run(
         MatrixKey::new(String::from("code-one"), AgentMode::Multi, 0),
         RunStatus::Passed,
     );
     b.model = Some("glm-5.3-flash".into());
+    b.wall_ms = 25;
+    b.model_calls = 4;
+    b.total_tokens = Some(250);
+    b.cost_usd = Some(0.16);
+    b.checker_passed = 1;
+    b.checker_total = 4;
     let single = ProductEvalReport {
         schema_version: 1,
         suite_name: "s".into(),
@@ -1273,6 +1284,34 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
             .and_then(|value| value.get("paired_cells")),
         Some(&serde_json::json!(1))
     );
+    let overall = paired["pairs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["task_group"] == "overall")
+        .unwrap();
+    let matched = &overall["matched_comparison"];
+    assert_eq!(matched["valid_complete_pairing"], true);
+    assert_eq!(matched["both_pass"], 1);
+    assert_eq!(matched["net_success_rate_delta"], 0.0);
+    assert_eq!(
+        matched["team_minus_single_wall_ms_all"]["mean"],
+        15.0
+    );
+    assert_eq!(
+        matched["team_minus_single_model_calls"]["mean"],
+        2.0
+    );
+    assert_eq!(
+        matched["team_minus_single_checker_quality"]["mean"],
+        -0.5
+    );
+    assert_eq!(matched["team_minus_single_total_tokens"]["mean"], 150.0);
+    assert!(
+        (matched["team_minus_single_cost_usd"]["mean"].as_f64().unwrap() - 0.06).abs() < 1e-9
+    );
+    assert_eq!(matched["cell_deltas"].as_array().unwrap().len(), 1);
+
     let mut unmatched_multi = multi.clone();
     unmatched_multi.runs[0].key.repetition = 1;
     let unmatched = build_paired_report_json(&single, &unmatched_multi, &opts, Some("t4"));
@@ -1281,6 +1320,16 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
             .get("run_alignment")
             .and_then(|value| value.get("configuration_aligned")),
         Some(&serde_json::Value::Bool(false))
+    );
+    let unmatched_overall = unmatched["pairs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["task_group"] == "overall")
+        .unwrap();
+    assert_eq!(
+        unmatched_overall["matched_comparison"]["valid_complete_pairing"],
+        false
     );
     assert!(unmatched
         .get("run_alignment")

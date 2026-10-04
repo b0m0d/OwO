@@ -3417,6 +3417,157 @@ fn paired_snapshot_json(mode: AgentMode, runs: &[&ProductEvalRun]) -> serde_json
     })
 }
 
+/// Matched per-cell statistics; positive wall deltas mean Team took longer.
+fn paired_cell_deltas_json(
+    single_runs: &[&ProductEvalRun],
+    multi_runs: &[&ProductEvalRun],
+    include_cell_details: bool,
+) -> serde_json::Value {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let by_key = |runs: &[&ProductEvalRun], mode| {
+        let mut rows = BTreeMap::new();
+        let mut duplicates = false;
+        for run in runs.iter().filter(|run| run.key.agent_mode == mode) {
+            let key = (run.key.case_id.clone(), run.key.repetition);
+            if rows.insert(key, *run).is_some() {
+                duplicates = true;
+            }
+        }
+        (rows, duplicates)
+    };
+    let (single, single_duplicates) = by_key(single_runs, AgentMode::Single);
+    let (multi, multi_duplicates) = by_key(multi_runs, AgentMode::Multi);
+    let single_keys = single.keys().cloned().collect::<BTreeSet<_>>();
+    let multi_keys = multi.keys().cloned().collect::<BTreeSet<_>>();
+    let keys_equal = !single_keys.is_empty() && single_keys == multi_keys;
+    let duplicate_cells = single_duplicates || multi_duplicates;
+    let mut wall_deltas = Vec::<f64>::new();
+    let mut both_passed_wall_deltas = Vec::<f64>::new();
+    let mut call_deltas = Vec::<f64>::new();
+    let mut token_deltas = Vec::<f64>::new();
+    let mut cost_deltas = Vec::<f64>::new();
+    let mut quality_deltas = Vec::<f64>::new();
+    let mut single_only_pass = 0usize;
+    let mut team_only_pass = 0usize;
+    let mut both_pass = 0usize;
+    let mut neither_pass = 0usize;
+    let mut cells = Vec::new();
+    let mut paired_cells = 0usize;
+
+    for key in single_keys.intersection(&multi_keys) {
+        paired_cells += 1;
+        let left = single[key];
+        let right = multi[key];
+        let wall_delta = right.wall_ms as f64 - left.wall_ms as f64;
+        let call_delta = right.model_calls as f64 - left.model_calls as f64;
+        wall_deltas.push(wall_delta);
+        call_deltas.push(call_delta);
+        if let (Some(single_tokens), Some(team_tokens)) = (left.total_tokens, right.total_tokens) {
+            token_deltas.push(team_tokens as f64 - single_tokens as f64);
+        }
+        if let (Some(single_cost), Some(team_cost)) = (left.cost_usd, right.cost_usd) {
+            cost_deltas.push(team_cost - single_cost);
+        }
+        if left.checker_total > 0 && right.checker_total > 0 {
+            let single_quality = left.checker_passed as f64 / left.checker_total as f64;
+            let team_quality = right.checker_passed as f64 / right.checker_total as f64;
+            quality_deltas.push(team_quality - single_quality);
+        }
+        match (left.status == RunStatus::Passed, right.status == RunStatus::Passed) {
+            (true, true) => {
+                both_pass += 1;
+                both_passed_wall_deltas.push(wall_delta);
+            }
+            (true, false) => single_only_pass += 1,
+            (false, true) => team_only_pass += 1,
+            (false, false) => neither_pass += 1,
+        }
+        if include_cell_details {
+            cells.push(serde_json::json!({
+            "case_id": key.0.clone(),
+            "repetition": key.1,
+            "single_status": left.status,
+            "team_status": right.status,
+            "team_minus_single_wall_ms": wall_delta,
+            "team_minus_single_model_calls": call_delta,
+            "single_total_tokens": left.total_tokens,
+            "team_total_tokens": right.total_tokens,
+            "team_minus_single_total_tokens": match (left.total_tokens, right.total_tokens) {
+                (Some(single_tokens), Some(team_tokens)) => Some(team_tokens as f64 - single_tokens as f64),
+                _ => None,
+            },
+            "single_cost_usd": left.cost_usd,
+            "team_cost_usd": right.cost_usd,
+            "team_minus_single_cost_usd": match (left.cost_usd, right.cost_usd) {
+                (Some(single_cost), Some(team_cost)) => Some(team_cost - single_cost),
+                _ => None,
+            },
+            "single_checker_quality": if left.checker_total > 0 {
+                Some(left.checker_passed as f64 / left.checker_total as f64)
+            } else {
+                None
+            },
+            "team_checker_quality": if right.checker_total > 0 {
+                Some(right.checker_passed as f64 / right.checker_total as f64)
+            } else {
+                None
+            },
+            }));
+        }
+    }
+
+    let quantiles = |values: &[f64]| {
+        if values.is_empty() {
+            return serde_json::json!({"mean": null, "median": null, "p95": null});
+        }
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        let percentile = |p: f64| {
+            if sorted.len() == 1 {
+                return sorted[0];
+            }
+            let rank = p * (sorted.len() - 1) as f64;
+            let lo = rank.floor() as usize;
+            let hi = rank.ceil() as usize;
+            let fraction = rank - lo as f64;
+            sorted[lo] * (1.0 - fraction) + sorted[hi] * fraction
+        };
+        serde_json::json!({
+            "mean": mean,
+            "median": percentile(0.5),
+            "p95": percentile(0.95),
+        })
+    };
+    serde_json::json!({
+        "paired_cells": paired_cells,
+        "keys_equal": keys_equal,
+        "duplicate_cells": duplicate_cells,
+        "valid_complete_pairing": keys_equal && !duplicate_cells,
+        "single_only_pass": single_only_pass,
+        "team_only_pass": team_only_pass,
+        "both_pass": both_pass,
+        "neither_pass": neither_pass,
+        "net_success_rate_delta": if paired_cells == 0 {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!((team_only_pass as f64 - single_only_pass as f64) / paired_cells as f64)
+        },
+        "team_minus_single_wall_ms_all": quantiles(&wall_deltas),
+        "team_minus_single_wall_ms_both_passed": quantiles(&both_passed_wall_deltas),
+        "team_minus_single_model_calls": quantiles(&call_deltas),
+        "team_minus_single_total_tokens": quantiles(&token_deltas),
+        "team_minus_single_cost_usd": quantiles(&cost_deltas),
+        "team_minus_single_checker_quality": quantiles(&quality_deltas),
+        "cell_deltas": if include_cell_details {
+            serde_json::Value::Array(cells)
+        } else {
+            serde_json::Value::Null
+        },
+    })
+}
+
 /// Check the two report sides before presenting aggregate numbers as a matched pair.
 /// This validates report/suite/model/batch and (case_id, repetition) alignment; the
 /// evaluator binary revision still needs an external freeze binding.
@@ -3609,6 +3760,11 @@ pub fn build_paired_report_json(
             "task_group": label,
             "single": paired_snapshot_json(AgentMode::Single, &single_runs),
             "multi": paired_snapshot_json(AgentMode::Multi, &multi_runs),
+            "matched_comparison": paired_cell_deltas_json(
+                &single_runs,
+                &multi_runs,
+                label == "overall",
+            ),
             "bindings": bindings.clone(),
             "generated_at": generated_at,
         }));
