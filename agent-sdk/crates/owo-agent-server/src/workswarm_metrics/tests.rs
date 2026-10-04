@@ -48,6 +48,9 @@ fn span(role: &str, step: &str, cost: f64, attempt: u32, started_ms: u64) -> Wor
         role: role.to_string(),
         worker_kind: "echo".to_string(),
         step_id: step.to_string(),
+        task_id: None,
+        attempt_id: None,
+        model_call_budget: None,
         started_at: "2026-08-28T00:00:00+00:00".to_string(),
         ended_at: "2026-08-28T00:00:01+00:00".to_string(),
         started_at_ms: started_ms,
@@ -71,6 +74,42 @@ fn span(role: &str, step: &str, cost: f64, attempt: u32, started_ms: u64) -> Wor
             version: attempt,
         }),
     }
+}
+
+#[test]
+fn host_task_budget_metadata_is_extracted_from_worker_input() {
+    let input = json!({
+        "assigned_task_id": "task-api",
+        "assigned_model_calls_per_attempt": 6,
+        "_workswarm": {"attempt_id": "attempt-7"}
+    });
+    let metadata = task_budget_metadata(&input);
+    assert_eq!(metadata.0.as_deref(), Some("task-api"));
+    assert_eq!(metadata.1.as_deref(), Some("attempt-7"));
+    assert_eq!(metadata.2, Some(6));
+}
+
+#[test]
+fn task_budget_metrics_roundtrip_and_legacy_records_remain_readable() {
+    let mut record = span("builder", "s-task", 0.0, 1, 1);
+    record.task_id = Some("task-api".to_string());
+    record.attempt_id = Some("attempt-7".to_string());
+    record.model_call_budget = Some(6);
+    let encoded = serde_json::to_value(&record).unwrap();
+    let decoded: WorkerSpanRecord = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(decoded.task_id.as_deref(), Some("task-api"));
+    assert_eq!(decoded.attempt_id.as_deref(), Some("attempt-7"));
+    assert_eq!(decoded.model_call_budget, Some(6));
+
+    let mut legacy = encoded;
+    let object = legacy.as_object_mut().unwrap();
+    object.remove("task_id");
+    object.remove("attempt_id");
+    object.remove("model_call_budget");
+    let decoded_legacy: WorkerSpanRecord = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded_legacy.task_id, None);
+    assert_eq!(decoded_legacy.attempt_id, None);
+    assert_eq!(decoded_legacy.model_call_budget, None);
 }
 
 #[test]
@@ -98,6 +137,54 @@ fn journal_roundtrip_and_corrupt_line_skip() {
     assert_eq!(records[1].role, "builder");
     assert_eq!(journal.count_step_spans("s2"), 1);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn task_model_call_budget_overrun_stops_next_stage() {
+    let mut record = span("builder", "s-task-a", 0.0, 1, 100);
+    record.task_id = Some("task-a".to_string());
+    record.model_call_budget = Some(4);
+    record.model_calls = 5;
+
+    let reason = budget_exhaustion_reason(&json!({}), &[record], 200).unwrap();
+    assert!(reason.contains("task_id=task-a"));
+    assert!(reason.contains("observed=5 limit=4"));
+}
+
+#[test]
+fn repaired_latest_attempt_clears_prior_attempt_budget_stop() {
+    let mut prior = span("builder", "s-task-a", 0.0, 1, 100);
+    prior.task_id = Some("task-a".to_string());
+    prior.attempt_id = Some("attempt-1".to_string());
+    prior.model_call_budget = Some(4);
+    prior.model_calls = 5;
+    prior.ended_at_ms = 200;
+
+    let mut repaired = span("builder", "s-task-a", 0.0, 2, 300);
+    repaired.task_id = Some("task-a".to_string());
+    repaired.attempt_id = Some("attempt-2".to_string());
+    repaired.model_call_budget = Some(4);
+    repaired.model_calls = 4;
+    repaired.ended_at_ms = 400;
+
+    assert!(budget_exhaustion_reason(&json!({}), &[prior, repaired], 500).is_none());
+}
+
+#[test]
+fn aggregate_reports_task_model_call_budget_overruns() {
+    let mut within_budget = span("builder", "s-task-a", 0.0, 1, 100);
+    within_budget.task_id = Some("task-a".to_string());
+    within_budget.model_call_budget = Some(4);
+    within_budget.model_calls = 4;
+
+    let mut over_budget = span("builder", "s-task-b", 0.0, 1, 200);
+    over_budget.task_id = Some("task-b".to_string());
+    over_budget.model_call_budget = Some(5);
+    over_budget.model_calls = 6;
+
+    let aggregate = aggregate_metrics("team-t", &[within_budget, over_budget], &json!({}));
+    assert_eq!(aggregate["summary"]["task_budgeted_spans"], 2);
+    assert_eq!(aggregate["summary"]["task_model_call_budget_overruns"], 1);
 }
 
 #[test]

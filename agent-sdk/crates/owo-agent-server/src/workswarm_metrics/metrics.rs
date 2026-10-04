@@ -22,6 +22,15 @@ pub struct WorkerSpanRecord {
     /// 内层 worker 类型（agent / echo / sleep / fail…）。
     pub worker_kind: String,
     pub step_id: String,
+    /// TaskGraph identity; absent for legacy role steps and non-TaskGraph workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Host-issued attempt identity; absent in legacy metric records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    /// Host-assigned total request ceiling for this attempt, including output repair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_call_budget: Option<u64>,
     pub started_at: String,
     pub ended_at: String,
     #[serde(default)]
@@ -152,6 +161,22 @@ impl Default for RequestUsageCollector {
             by_step: Mutex::new(HashMap::new()),
         }
     }
+}
+
+fn task_budget_metadata(input: &Value) -> (Option<String>, Option<String>, Option<u64>) {
+    let task_id = input
+        .get("assigned_task_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let workswarm = input.get("_workswarm");
+    let attempt_id = workswarm
+        .and_then(|metadata| metadata.get("attempt_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let model_call_budget = input
+        .get("assigned_model_calls_per_attempt")
+        .and_then(Value::as_u64);
+    (task_id, attempt_id, model_call_budget)
 }
 
 pub(crate) fn request_scope_key(step_id: &str, phase_epoch: Option<u64>) -> String {
@@ -524,6 +549,7 @@ impl Worker for MeasuredRoleWorker {
             .and_then(Value::as_str)
             .unwrap_or("");
         let step_id = raw_step_id.to_string();
+        let (task_id, attempt_id, model_call_budget) = task_budget_metadata(input);
         let scope_key = request_scope_key(
             &step_id,
             workswarm
@@ -668,6 +694,9 @@ impl Worker for MeasuredRoleWorker {
             role: self.role.clone(),
             worker_kind: self.worker_kind.clone(),
             step_id,
+            task_id,
+            attempt_id,
+            model_call_budget,
             started_at,
             ended_at,
             started_at_ms,
@@ -746,6 +775,18 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
     let succeeded_spans = spans.iter().filter(|r| r.outcome == "succeeded").count() as u64;
     let failed_spans = spans.iter().filter(|r| r.outcome == "failed").count() as u64;
     let rework_count = spans.iter().filter(|r| r.attempt > 1).count() as u64;
+    let task_budgeted_spans = spans
+        .iter()
+        .filter(|record| record.model_call_budget.is_some())
+        .count() as u64;
+    let task_model_call_budget_overruns = spans
+        .iter()
+        .filter(|record| {
+            record
+                .model_call_budget
+                .is_some_and(|budget| record.model_calls > budget)
+        })
+        .count() as u64;
     let worker_wall_ms_sum: u64 = spans.iter().map(|r| r.wall_ms).sum();
     let provider_wait_ms_sum: u64 = spans.iter().map(|r| r.provider_wait_ms).sum();
     let lease_wait_ms_sum: u64 = spans.iter().map(|r| r.lease_wait_ms).sum();
@@ -852,6 +893,8 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
             "succeeded_spans": succeeded_spans,
             "failed_spans": failed_spans,
             "rework_count": rework_count,
+            "task_budgeted_spans": task_budgeted_spans,
+            "task_model_call_budget_overruns": task_model_call_budget_overruns,
             "wall_window_ms": wall_window_ms,
             "worker_wall_ms_sum": worker_wall_ms_sum,
             "provider_wait_ms_sum": provider_wait_ms_sum,
@@ -890,6 +933,30 @@ pub fn budget_state(budget: &Value, records: &[WorkerSpanRecord], now_ms: u64) -
     })
 }
 
+fn latest_task_budget_spans(
+    records: &[WorkerSpanRecord],
+) -> BTreeMap<String, &WorkerSpanRecord> {
+    let mut latest = BTreeMap::new();
+    for record in records
+        .iter()
+        .filter(|record| record.model_call_budget.is_some())
+    {
+        let key = record
+            .task_id
+            .as_deref()
+            .unwrap_or(&record.step_id)
+            .to_string();
+        let replace = latest.get(&key).is_none_or(|current: &&WorkerSpanRecord| {
+            (record.ended_at_ms, record.span_id.as_str())
+                > (current.ended_at_ms, current.span_id.as_str())
+        });
+        if replace {
+            latest.insert(key, record);
+        }
+    }
+    latest
+}
+
 /// 预算耗尽判定（运行循环预算门 + metrics budget.reason 复查共用）。
 ///
 /// `max_cost_usd`（f64）：累计估算费用 `spent > limit` → 耗尽；
@@ -900,6 +967,21 @@ pub fn budget_exhaustion_reason(
     records: &[WorkerSpanRecord],
     now_ms: u64,
 ) -> Option<String> {
+    if let Some(record) = latest_task_budget_spans(records)
+        .into_values()
+        .find(|record| {
+            record
+                .model_call_budget
+                .is_some_and(|limit| record.model_calls > limit)
+        })
+    {
+        return Some(format!(
+            "任务模型请求超出宿主上限：task_id={} observed={} limit={}；已停止调度下一阶段",
+            record.task_id.as_deref().unwrap_or("unknown"),
+            record.model_calls,
+            record.model_call_budget.unwrap_or_default()
+        ));
+    }
     if let Some(limit) = budget.get("max_cost_usd").and_then(Value::as_f64) {
         let usage_unknown = records.iter().any(|record| {
             record.model_calls > 0

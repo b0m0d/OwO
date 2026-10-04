@@ -314,7 +314,8 @@ impl Worker for AgentSubagentWorker {
                     depth: 0,
                     max_turns: task_context
                         .model_calls_per_attempt
-                        .map(usize::from)
+                        .map(|total| WorkerProfile::task_agent_turn_cap(usize::from(total)))
+                        .transpose()?
                         .unwrap_or(12),
                     model,
                     events: None,

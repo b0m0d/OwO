@@ -124,8 +124,8 @@ impl ResolvedTaskContext {
             return Err("TaskGraph 任务缺少宿主解析的任务目标".to_string());
         }
         if let Some(calls) = self.model_calls_per_attempt {
-            if self.origin != TaskContextOrigin::TaskGraph || !(3..=16).contains(&calls) {
-                return Err("任务模型调用预算必须是 TaskGraph 的 3..=16 次".to_string());
+            if self.origin != TaskContextOrigin::TaskGraph || !(4..=16).contains(&calls) {
+                return Err("任务模型调用预算必须是 TaskGraph 的 4..=16 次".to_string());
             }
         }
         Ok(())
@@ -240,7 +240,7 @@ mod tests {
         let invalid = ResolvedTaskContext::from_worker_input(&json!({
             "assigned_task_id":"task-budgeted",
             "assigned_task":"implement one module",
-            "assigned_model_calls_per_attempt":17,
+            "assigned_model_calls_per_attempt":3,
         }));
         assert!(invalid.is_err());
     }

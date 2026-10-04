@@ -224,16 +224,22 @@ impl WorkerProfile {
         Self::for_role("implementer", budget_calls)
     }
 
+    /// Convert a total TaskGraph request ceiling into Agent turns, keeping one
+    /// request available for the WorkerOutputV1 correction path.
+    pub fn task_agent_turn_cap(total_calls: usize) -> Result<usize, String> {
+        if !(4..=PROFILE_MAX_TURNS_CAP).contains(&total_calls) {
+            return Err("TaskGraph 单次尝试预算必须在 4..=16 次模型请求之间".to_string());
+        }
+        Ok(total_calls - 1)
+    }
+
     /// Limit a TaskGraph attempt to its host-assigned total request budget. The final
     /// request remains available to the single WorkerOutputV1 correction path.
     pub fn with_task_model_call_budget(
         mut self,
         total_calls: usize,
     ) -> Result<Self, String> {
-        if !(3..=PROFILE_MAX_TURNS_CAP).contains(&total_calls) {
-            return Err("TaskGraph 单次尝试预算必须在 3..=16 次模型请求之间".to_string());
-        }
-        self.max_turns = self.max_turns.min(total_calls - 1);
+        self.max_turns = self.max_turns.min(Self::task_agent_turn_cap(total_calls)?);
         Ok(self)
     }
 
@@ -784,6 +790,8 @@ mod tests {
             .with_task_model_call_budget(5)
             .unwrap();
         assert_eq!(profile.max_turns, 4);
+        assert_eq!(WorkerProfile::task_agent_turn_cap(5).unwrap(), 4);
+        assert!(WorkerProfile::task_agent_turn_cap(3).is_err());
         assert!(WorkerProfile::for_role("implementer", 12)
             .with_task_model_call_budget(2)
             .is_err());
