@@ -62,6 +62,9 @@ pub struct Session {
     /// Host-produced behavior validation evidence for ordinary Agent work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+    /// Durable Single review findings and their receipt-bound repair closure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub single_review_issues: Vec<crate::goal::DeliveryIssueV1>,
     /// Model-proposed host-registered acceptance checks for the active task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub single_verification_plan: Option<crate::plan::VerificationPlanV1>,
@@ -132,6 +135,7 @@ impl Session {
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
             validation_receipts: Vec::new(),
+            single_review_issues: Vec::new(),
             single_verification_plan: None,
             single_verification_plan_input_sha256: None,
             single_verification_plan_turn_id: None,
@@ -523,6 +527,7 @@ impl Session {
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
             validation_receipts: Vec::new(),
+            single_review_issues: Vec::new(),
             single_verification_plan: self.single_verification_plan.clone(),
             single_verification_plan_input_sha256: self.single_verification_plan_input_sha256.clone(),
             single_verification_plan_turn_id: self.single_verification_plan_turn_id.clone(),

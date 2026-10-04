@@ -911,6 +911,11 @@ impl Agent {
                             let review_verdict = review.receipt.verdict;
                             let review_passed =
                                 review_verdict == crate::plan::ValidationVerdictV1::Passed;
+                            single_review::apply_review_issue_receipt(
+                                session,
+                                &turn_id,
+                                &review.receipt,
+                            );
                             session.validation_receipts.push(review.receipt);
                             if !review_passed {
                                 let current_validation_ids = session
@@ -998,6 +1003,7 @@ impl Agent {
                             emit(&mut events, &event_cell, TurnEvent::Final { text });
                             break;
                         }
+                        single_review::mark_review_issue_repair_dispatched(session, &turn_id);
                         messages.push(ChatMessage::system(feedback));
                         final_text = None;
                         continue;
