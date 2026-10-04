@@ -940,6 +940,7 @@ impl GoalRunner {
         let mut required_validation_count = 0usize;
         let mut passed_required_validation_count = 0usize;
         let mut failed_required_validation_count = 0usize;
+        let mut completion_evidence_receipt_ids = Vec::new();
         for step in &self.state.plan.steps {
             let Some(step_plan) = &step.verification_plan else {
                 continue;
@@ -973,6 +974,9 @@ impl GoalRunner {
                 match receipt.map(|receipt| receipt.verdict) {
                     Some(crate::plan::ValidationVerdictV1::Passed) => {
                         passed_required_validation_count += 1;
+                        if let Some(receipt) = receipt {
+                            completion_evidence_receipt_ids.push(receipt.receipt_id.clone());
+                        }
                     }
                     Some(crate::plan::ValidationVerdictV1::Failed) => {
                         failed_required_validation_count += 1;
@@ -1079,6 +1083,9 @@ impl GoalRunner {
                     started_at: timestamp.clone(),
                     completed_at: timestamp,
                 };
+                if requirement.required && verdict == crate::plan::ValidationVerdictV1::Passed {
+                    completion_evidence_receipt_ids.push(receipt.receipt_id.clone());
+                }
                 if !self
                     .state
                     .validation_receipts
@@ -1159,22 +1166,7 @@ impl GoalRunner {
                 completion_status,
             );
         }
-        let step_receipts = self
-            .state
-            .records
-            .values()
-            .flat_map(|record| record.validation_receipts.iter())
-            .collect::<Vec<_>>();
-        let receipts = self
-            .state
-            .validation_receipts
-            .iter()
-            .chain(step_receipts)
-            .collect::<Vec<_>>();
-        let evidence_receipt_ids = receipts
-            .iter()
-            .map(|receipt| receipt.receipt_id.clone())
-            .collect::<Vec<_>>();
+        let evidence_receipt_ids = completion_evidence_receipt_ids;
         let candidate_version_sha256 = if has_candidate_changes {
             match self.candidate_version_sha256(false, true) {
                 Ok(candidate_version_sha256) => candidate_version_sha256,
@@ -1183,7 +1175,6 @@ impl GoalRunner {
         } else {
             None
         };
-        drop(receipts);
         let final_stale_workspace_receipts = self.invalidate_stale_workspace_receipts();
         if !final_stale_workspace_receipts.is_empty() {
             return self.fail_goal_with_status(

@@ -101,11 +101,10 @@ fn goal_verification_persists_receipt_bound_to_accepted_output() {
             &crate::plan::VerificationSpec::OutputContains("ready".to_string()),
         )],
     });
-    let mut runner = GoalRunner::new(
-        goal,
-        Plan::new("p-receipt", "g-receipt"),
-        RunnerConfig::default(),
-    );
+    let mut plan = Plan::new("p-receipt", "g-receipt");
+    plan.steps
+        .push(owo_agent_contracts::plan::StepSpec::new("step-1", "worker"));
+    let mut runner = GoalRunner::new(goal, plan, RunnerConfig::default());
     runner.state.records.insert(
         "step-1".to_string(),
         StepRecord {
@@ -121,8 +120,36 @@ fn goal_verification_persists_receipt_bound_to_accepted_output() {
         },
     );
 
+    runner.state.validation_receipts.push(crate::plan::ValidationReceiptV1 {
+        receipt_id: "prior-failed".to_string(),
+        task_id: "g-receipt".to_string(),
+        attempt_id: "old-attempt".to_string(),
+        epoch: 1,
+        requirement_id: "old-requirement".to_string(),
+        validator_id: "old-validator".to_string(),
+        validator_version: "1".to_string(),
+        arguments_sha256: "old-arguments".to_string(),
+        input_sha256: "old-input".to_string(),
+        environment_id: "old-environment".to_string(),
+        changeset_sha256: None,
+        detail: Some("prior attempt failed".to_string()),
+        subject_sha256: std::collections::HashMap::new(),
+        verdict: crate::plan::ValidationVerdictV1::Failed,
+        evidence_refs: Vec::new(),
+        started_at: "old".to_string(),
+        completed_at: "old".to_string(),
+    });
+
     assert_eq!(runner.verify_goal().unwrap(), GoalStatus::Succeeded);
-    let receipt = runner.state.validation_receipts.first().unwrap();
+    let receipt = runner
+        .state
+        .validation_receipts
+        .iter()
+        .find(|receipt| {
+            receipt.requirement_id == "goal-ready"
+                && receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+        })
+        .unwrap();
     assert_eq!(receipt.task_id, "g-receipt");
     assert_eq!(receipt.requirement_id, "goal-ready");
     assert_eq!(receipt.validator_id, "artifact-output-contains-v1");
@@ -134,6 +161,12 @@ fn goal_verification_persists_receipt_bound_to_accepted_output() {
     assert_eq!(
         receipt.evidence_refs,
         vec!["goal-step:step-1:attempt:attempt-1"]
+    );
+
+    let completion = runner.state.completion_record.as_ref().unwrap();
+    assert_eq!(
+        completion.evidence_receipt_ids,
+        vec![receipt.receipt_id.clone()]
     );
 
     let encoded = serde_json::to_vec(&runner.state).unwrap();
