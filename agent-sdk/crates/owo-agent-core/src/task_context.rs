@@ -43,6 +43,9 @@ pub struct ResolvedTaskContext {
     /// None is distinct from an explicit empty capability set (which grants no tools).
     #[serde(default)]
     pub required_capabilities: Option<Vec<String>>,
+    /// Host-assigned model requests allowed per TaskGraph attempt, including one output repair.
+    #[serde(default)]
+    pub model_calls_per_attempt: Option<u8>,
 }
 
 impl ResolvedTaskContext {
@@ -94,6 +97,12 @@ impl ResolvedTaskContext {
             read_refs: optional_string_array(input, "assigned_read_refs", false)?,
             contract_refs: optional_string_array(input, "assigned_contract_refs", false)?,
             required_capabilities: optional_string_array(input, "required_capabilities", false)?,
+            model_calls_per_attempt: optional_u64(input, "assigned_model_calls_per_attempt")?
+                .map(|value| {
+                    u8::try_from(value)
+                        .map_err(|_| "任务模型调用预算超出可表示范围".to_string())
+                })
+                .transpose()?,
         };
         context.validate()?;
         Ok(context)
@@ -113,6 +122,11 @@ impl ResolvedTaskContext {
         }
         if self.task_id.is_some() && self.objective.is_none() {
             return Err("TaskGraph 任务缺少宿主解析的任务目标".to_string());
+        }
+        if let Some(calls) = self.model_calls_per_attempt {
+            if self.origin != TaskContextOrigin::TaskGraph || !(3..=16).contains(&calls) {
+                return Err("任务模型调用预算必须是 TaskGraph 的 3..=16 次".to_string());
+            }
         }
         Ok(())
     }
@@ -136,8 +150,12 @@ impl ResolvedTaskContext {
         let read_refs = self.read_refs.clone().unwrap_or_default();
         let contract_refs = self.contract_refs.clone().unwrap_or_default();
         let capabilities = self.required_capabilities.clone().unwrap_or_default();
+        let model_budget = self
+            .model_calls_per_attempt
+            .map(|calls| format!("本次任务尝试最多使用 {calls} 次模型请求（包含最多一次输出契约修复）。"))
+            .unwrap_or_default();
         Some(format!(
-            "当前任务 ID：{}。当前任务：{objective}。验收：{acceptance}。确定性验证：{verification}。读取参考：{read_refs:?}。接口契约：{contract_refs:?}。所需能力：{capabilities:?}。写入白名单：{paths:?}。仅完成这个任务并提供证据。",
+            "当前任务 ID：{}。当前任务：{objective}。验收：{acceptance}。确定性验证：{verification}。读取参考：{read_refs:?}。接口契约：{contract_refs:?}。所需能力：{capabilities:?}。写入白名单：{paths:?}。{model_budget}仅完成这个任务并提供证据。",
             self.task_id.as_deref().unwrap_or("unassigned")
         ))
     }
@@ -207,6 +225,25 @@ fn optional_string_array(
 mod tests {
     use super::ResolvedTaskContext;
     use serde_json::json;
+
+    #[test]
+    fn task_model_budget_is_host_bound_and_visible_to_the_worker() {
+        let task = ResolvedTaskContext::from_worker_input(&json!({
+            "assigned_task_id":"task-budgeted",
+            "assigned_task":"implement one module",
+            "assigned_acceptance":"behavior passes",
+            "assigned_model_calls_per_attempt":5,
+        }))
+        .unwrap();
+        assert_eq!(task.model_calls_per_attempt, Some(5));
+        assert!(task.prompt_contract().unwrap().contains("最多使用 5 次模型请求"));
+        let invalid = ResolvedTaskContext::from_worker_input(&json!({
+            "assigned_task_id":"task-budgeted",
+            "assigned_task":"implement one module",
+            "assigned_model_calls_per_attempt":17,
+        }));
+        assert!(invalid.is_err());
+    }
 
     #[test]
     fn resolution_preserves_missing_vs_empty_permissions_and_binds_attempt() {

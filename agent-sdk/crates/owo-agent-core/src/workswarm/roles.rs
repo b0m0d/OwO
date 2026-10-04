@@ -139,7 +139,7 @@ pub fn parallel_roles(writers: usize) -> Vec<RoleSpec> {
     lead.handoff_contract = Some(format!(
         "只读拆分目标，输出 TaskGraphV1 JSON。任务数 1 到 128，可多于 {writers} 个 Worker 槽位。\
          对象包含 version=1 和 tasks 数组；每项包含 task_id、worker（可省略）、task、depends_on、\
-         read_refs、write_paths、contract_refs、required_capabilities、estimated_effort、verification、risk、priority、acceptance。\
+         read_refs、write_paths、contract_refs、required_capabilities、estimated_effort、verification、risk、priority、acceptance。模型只估算 estimated_effort；宿主按该值和 Worker 角色上限计算每任务每次尝试的模型请求上限，模型不得输出或覆盖预算字段。\
          依赖引用 task_id；重叠写范围必须有依赖顺序；目标和验收不能为空。\
          代码实现任务必须包含 required=true 的 workspace-command-success-v1 行为检查，scope.kind=workspace_paths 且 relative_paths 覆盖被改代码；arguments.command 使用宿主登记的测试入口，并在 required_capabilities 声明 run_command。\
          scope 路径必须位于该任务 write_paths 内；required=true，resources 用 cpu_slots=1、memory_mb=8..128、exclusive_workspace=false、timeout_ms=1..30000。\

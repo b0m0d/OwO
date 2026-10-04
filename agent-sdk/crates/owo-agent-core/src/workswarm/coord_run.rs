@@ -1678,7 +1678,9 @@ impl TeamCoordinator {
                 "unsupported TaskGraph version".to_string(),
             ));
         }
-        let assignments = task_graph.tasks;
+        let mut assignments = task_graph.tasks;
+        assign_task_model_call_budgets(&mut assignments, &meta.budgets)
+        .map_err(WorkSwarmError::Validation)?;
         let writers: Vec<String> = meta
             .roles
             .iter()
@@ -1752,6 +1754,10 @@ impl TeamCoordinator {
             }
             if let Some(obj) = input.as_object_mut() {
                 obj.insert("assigned_task_id".into(), json!(task.task_id));
+                obj.insert(
+                    "assigned_model_calls_per_attempt".into(),
+                    json!(task.model_calls_per_attempt),
+                );
                 obj.insert("assigned_task".into(), json!(task.task));
                 obj.insert("assigned_acceptance".into(), json!(task.acceptance));
                 let assigned_verification = task
@@ -1986,6 +1992,38 @@ struct TaskGraphV1 {
     tasks: Vec<ParallelTaskAssignment>,
 }
 
+const MIN_TASK_MODEL_CALLS_PER_ATTEMPT: usize = 4;
+
+/// Assign a bounded per-attempt request budget from host role limits and task effort.
+/// One request is reserved for WorkerOutputV1 correction; effort only raises the cap,
+/// never grants more than the resolved writer role's ceiling.
+fn assign_task_model_call_budgets(
+    tasks: &mut [ParallelTaskAssignment],
+    role_budgets: &std::collections::BTreeMap<String, usize>,
+) -> Result<(), String> {
+    for task in tasks {
+        let declared_budget = role_budgets.get(&task.worker).copied().unwrap_or(0);
+        let role_budget = if declared_budget == 0 {
+            crate::worker_profile::DEFAULT_PROFILE_MAX_TURNS
+        } else {
+            declared_budget
+        }
+        .clamp(1, crate::worker_profile::PROFILE_MAX_TURNS_CAP);
+        if role_budget < MIN_TASK_MODEL_CALLS_PER_ATTEMPT {
+            return Err(format!(
+                "TaskGraph worker {} budget is below the {}-request minimum needed for a task attempt and one output repair",
+                task.worker, MIN_TASK_MODEL_CALLS_PER_ATTEMPT
+            ));
+        }
+        let effort = task.estimated_effort.max(1);
+        let effort_turns = u64::BITS.saturating_sub((effort - 1).leading_zeros()) as usize;
+        task.model_calls_per_attempt = MIN_TASK_MODEL_CALLS_PER_ATTEMPT
+            .saturating_add(effort_turns)
+            .min(role_budget);
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ParallelTaskAssignment {
     task_id: String,
@@ -1999,6 +2037,8 @@ struct ParallelTaskAssignment {
     contract_refs: Vec<String>,
     required_capabilities: Vec<String>,
     estimated_effort: u64,
+    /// Host-computed total model-request ceiling for one task attempt, including one output repair.
+    model_calls_per_attempt: usize,
     verification: Option<String>,
     verification_plan: Option<crate::plan::VerificationPlanV1>,
     risk: String,
@@ -2489,6 +2529,7 @@ fn validate_parallel_subtasks(
             contract_refs,
             required_capabilities,
             estimated_effort,
+            model_calls_per_attempt: 0,
             verification,
             verification_plan,
             risk,
@@ -2951,6 +2992,37 @@ mod parallel_assignment_validation_tests {
         step.input = input;
         step.input["assigned_task_id"] = serde_json::json!(task_id);
         step
+    }
+
+    #[test]
+    fn task_model_call_budget_grows_with_effort_but_stays_within_role_ceiling() {
+        let input = [
+            serde_json::json!({"task_id":"small", "worker":"w1", "task":"small", "acceptance":"done", "write_paths":[], "estimated_effort":1}),
+            serde_json::json!({"task_id":"large", "worker":"w1", "task":"large", "acceptance":"done", "write_paths":[], "estimated_effort":3}),
+        ];
+        let mut assignments = validate_parallel_subtasks(&roles(), &input, false).unwrap().tasks;
+        let budgets = std::collections::BTreeMap::from([("w1".to_string(), 14)]);
+        assign_task_model_call_budgets(&mut assignments, &budgets).unwrap();
+        let assigned = assignments
+            .iter()
+            .map(|task| (task.task_id.as_str(), task.model_calls_per_attempt))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(assigned["small"], 4);
+        assert_eq!(assigned["large"], 6);
+        assert!(assigned.values().all(|budget| *budget <= 14));
+    }
+
+    #[test]
+    fn task_model_call_budget_rejects_a_role_cap_below_the_output_repair_reserve() {
+        let input = [serde_json::json!({
+            "task_id":"small", "worker":"w1", "task":"small", "acceptance":"done",
+            "write_paths":[], "estimated_effort":1
+        })];
+        let mut assignments = validate_parallel_subtasks(&roles(), &input, false).unwrap().tasks;
+        let budgets = std::collections::BTreeMap::from([("w1".to_string(), 3)]);
+        let error = assign_task_model_call_budgets(&mut assignments, &budgets)
+            .expect_err("budget below the output repair reserve must fail before dispatch");
+        assert!(error.contains("below the 4-request minimum"));
     }
 
     #[test]

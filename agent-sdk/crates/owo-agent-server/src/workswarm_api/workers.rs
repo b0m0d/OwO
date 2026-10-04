@@ -168,6 +168,10 @@ impl Worker for AgentSubagentWorker {
                         &task_context,
                         task_has_no_write_scope,
                     );
+                    if let Some(total_calls) = task_context.model_calls_per_attempt {
+                        task_profile = task_profile
+                            .with_task_model_call_budget(total_calls as usize)?;
+                    }
                 }
                 if task_write_allowed.is_some() {
                     let command_was_assigned = task_context
@@ -285,7 +289,12 @@ impl Worker for AgentSubagentWorker {
                     write_allowed: effective_write_allowed,
                     profile: task_profile,
                     agent_config: None,
-                    budget_note_override: None,
+                    budget_note_override: task_context.model_calls_per_attempt.map(|total| {
+                        format!(
+                            "宿主分配的当前任务尝试总预算为 {total} 次模型请求；Agent 执行最多 {} 轮，最多保留 1 次请求修复 WorkerOutputV1 格式。达到上限必须如实返回状态，不得将未完成工作报告为 Done。\n",
+                            usize::from(total).saturating_sub(1)
+                        )
+                    }),
                     extra_tools,
                     extra_system_prompt: Some(
                          "如需获取执行期间新增的团队事实，请调用 team_context_read。需要上游产物全文时使用 team_artifact_read，它仅允许读取直接依赖产物。具备当前任务写权限时可使用 team_context_publish：先读取 revision，再以 expected_revision 发布；冲突后重读。发布结果始终是 candidate/unverified\n".to_string(),
@@ -303,7 +312,10 @@ impl Worker for AgentSubagentWorker {
                     approver,
                     abort,
                     depth: 0,
-                    max_turns: 12,
+                    max_turns: task_context
+                        .model_calls_per_attempt
+                        .map(usize::from)
+                        .unwrap_or(12),
                     model,
                     events: None,
                 };

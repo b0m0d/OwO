@@ -224,6 +224,19 @@ impl WorkerProfile {
         Self::for_role("implementer", budget_calls)
     }
 
+    /// Limit a TaskGraph attempt to its host-assigned total request budget. The final
+    /// request remains available to the single WorkerOutputV1 correction path.
+    pub fn with_task_model_call_budget(
+        mut self,
+        total_calls: usize,
+    ) -> Result<Self, String> {
+        if !(3..=PROFILE_MAX_TURNS_CAP).contains(&total_calls) {
+            return Err("TaskGraph 单次尝试预算必须在 3..=16 次模型请求之间".to_string());
+        }
+        self.max_turns = self.max_turns.min(total_calls - 1);
+        Ok(self)
+    }
+
     /// 移除受控命令能力，但保留白名单文件读写；用于源码实现角色，避免模型
     /// 看到与任务无关的 shell 工具后重复运行测试或探测命令。
     pub fn without_commands(mut self) -> Self {
@@ -763,6 +776,17 @@ mod tests {
         assert!(review_prompt.contains("只读评审子代理"));
         assert!(review_prompt.contains("critic 不得提交 artifact"));
         assert!(!review_prompt.contains("必须在允许路径内真实落盘"));
+    }
+
+    #[test]
+    fn task_total_call_budget_reserves_one_output_repair_request() {
+        let profile = WorkerProfile::for_role("implementer", 12)
+            .with_task_model_call_budget(5)
+            .unwrap();
+        assert_eq!(profile.max_turns, 4);
+        assert!(WorkerProfile::for_role("implementer", 12)
+            .with_task_model_call_budget(2)
+            .is_err());
     }
 
     #[test]
