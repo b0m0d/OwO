@@ -107,23 +107,39 @@ impl WorkerRuntime<'_> {
         let outcome = agent
             .run_turn(&mut session, prompt, self.approver, self.abort, &mut on_event)
             .await;
-        if let (Some(store), Some(_)) = (&self.session_store, &self.worker_session_id) {
-            store.save(&session).map_err(|error| format!("Worker 会话执行后保存失败：{error}"))?;
-        }
+        let session_save_error = if let (Some(store), Some(_)) =
+            (&self.session_store, &self.worker_session_id)
+        {
+            store
+                .save(&session)
+                .err()
+                .map(|error| format!("Worker 会话执行后保存失败：{error}"))
+        } else {
+            None
+        };
         let outcome = match outcome {
-            Ok(outcome) => outcome,
             Err(error) => {
-                let (model_calls, usage, usage_known) =
-                    summarize_model_calls(&session.transient_model_calls);
-                return Err(WorkerRuntimeError {
-                    message: format!("子代理执行失败：{error}"),
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    steps: 0,
-                    model_calls,
-                    usage,
-                    usage_known,
-                    output_repairs: 0,
-                });
+                let mut message = format!("子代理执行失败：{error}");
+                if let Some(save_error) = session_save_error {
+                    message.push_str(&format!("；{save_error}"));
+                }
+                return Err(worker_runtime_error(
+                    message,
+                    started.elapsed().as_millis() as u64,
+                    0,
+                    &session.transient_model_calls,
+                ));
+            }
+            Ok(outcome) => {
+                if let Some(save_error) = session_save_error {
+                    return Err(worker_runtime_error(
+                        save_error,
+                        started.elapsed().as_millis() as u64,
+                        outcome.steps,
+                        &session.transient_model_calls,
+                    ));
+                }
+                outcome
             }
         };
         let model_calls = u32::try_from(outcome.model_calls.len()).unwrap_or(u32::MAX);
@@ -191,6 +207,24 @@ impl WorkerRuntime<'_> {
     }
 }
 
+fn worker_runtime_error(
+    message: String,
+    duration_ms: u64,
+    steps: usize,
+    calls: &[crate::agent::ModelCallRecord],
+) -> WorkerRuntimeError {
+    let (model_calls, usage, usage_known) = summarize_model_calls(calls);
+    WorkerRuntimeError {
+        message,
+        duration_ms,
+        steps,
+        model_calls,
+        usage,
+        usage_known,
+        output_repairs: 0,
+    }
+}
+
 fn summarize_model_calls(calls: &[crate::agent::ModelCallRecord]) -> (u32, TokenUsage, bool) {
     let mut usage = TokenUsage::default();
     for call in calls {
@@ -237,9 +271,42 @@ fn load_worker_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::AgentError;
     use crate::gateway::{ChatMessage, ModelOutput};
     use crate::permissions::AutoApprover;
+    use crate::session::Session;
     use crate::tools::ToolSpec;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FailingSecondSave(AtomicUsize);
+
+    impl SessionStore for FailingSecondSave {
+        fn create(
+            &self,
+            workspace: &Path,
+            model: &str,
+            system_prompt: Option<&str>,
+        ) -> Result<Session, AgentError> {
+            Ok(Session::new(
+                workspace,
+                model.to_string(),
+                system_prompt.map(str::to_string),
+            ))
+        }
+
+        fn load(&self, _id: &str) -> Result<Session, AgentError> {
+            Err(AgentError::Session("test store does not load".to_string()))
+        }
+
+        fn save(&self, _session: &Session) -> Result<(), AgentError> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                Err(AgentError::Session("test save failure".to_string()))
+            }
+        }
+    }
 
     struct FailedProvider;
 
@@ -273,14 +340,15 @@ mod tests {
             system_prompt: None,
             is_critic: false,
             event_sink: None,
-            session_store: None,
-            worker_session_id: None,
+            session_store: Some(Arc::new(FailingSecondSave(AtomicUsize::new(0)))),
+            worker_session_id: Some("worker-test".to_string()),
             parent_session_id: None,
         };
 
         let error = runtime.run_report("run one request").await.unwrap_err();
 
         assert!(error.message.contains("provider unavailable"));
+        assert!(error.message.contains("test save failure"));
         assert_eq!(error.model_calls, 1);
         assert!(error.duration_ms >= 5);
         assert!(!error.usage_known);
