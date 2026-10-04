@@ -48,54 +48,139 @@ pub(super) fn manual_acceptance_answer_verdict(
     }
 }
 
+fn single_candidate_hashes(
+    session: &Session,
+    turn_id: &str,
+) -> std::collections::BTreeMap<String, Option<String>> {
+    let mut pending_hashes = std::collections::BTreeMap::new();
+    for execution in session.execution_receipts.iter().filter(|execution| {
+        execution.status == "executed" || (execution.turn_id == turn_id && execution.status == "accepted")
+    }) {
+        for relative in &execution.changed_files {
+            let normalized = relative.replace('\\', "/");
+            if let Some((_, hash)) = execution.after_hashes.iter().find(|(path, _)| path.replace('\\', "/") == normalized) {
+                pending_hashes.insert(normalized, hash.clone());
+            }
+        }
+    }
+    pending_hashes
+}
+
+fn current_candidate_changeset_sha256(session: &Session, turn_id: &str) -> Option<String> {
+    let pending_hashes = single_candidate_hashes(session, turn_id);
+    if pending_hashes.is_empty() {
+        return None;
+    }
+    serde_json::to_vec(&pending_hashes)
+        .ok()
+        .map(|bytes| crate::CasStore::hash_of(&bytes))
+}
+
+fn verification_plan_sha256(plan: &crate::plan::VerificationPlanV1) -> String {
+    serde_json::to_vec(plan)
+        .map(|bytes| crate::CasStore::hash_of(&bytes))
+        .unwrap_or_default()
+}
+
+fn current_plan_receipt<'a>(
+    session: &'a Session,
+    plan: &crate::plan::VerificationPlanV1,
+    turn_id: &str,
+    requirement: &crate::plan::VerificationRequirementV1,
+) -> Option<&'a crate::plan::ValidationReceiptV1> {
+    if session.single_verification_plan.as_ref() != Some(plan) {
+        return None;
+    }
+    let input_sha256 = session.single_verification_plan_input_sha256.as_deref()?;
+    let changeset_sha256 = current_candidate_changeset_sha256(session, turn_id)?;
+    let environment_id = crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
+    let validator_version = requirement.validator_version.as_deref().unwrap_or("unknown");
+    let arguments_sha256 = crate::CasStore::hash_of(requirement.arguments.to_string().as_bytes());
+    let plan_sha256 = verification_plan_sha256(plan);
+    session.validation_receipts.iter().rev().find(|receipt| {
+        receipt.task_id == session.id
+            && receipt.attempt_id == turn_id
+            && receipt.requirement_id == requirement.requirement_id
+            && receipt.validator_id == requirement.validator_id
+            && receipt.validator_version == validator_version
+            && receipt.arguments_sha256 == arguments_sha256
+            && receipt.input_sha256 == input_sha256
+            && receipt.environment_id == environment_id
+            && receipt.changeset_sha256.as_deref() == Some(changeset_sha256.as_str())
+            && receipt.evidence_refs.iter().any(|reference| {
+                reference == &format!("verification-plan-sha256:{plan_sha256}")
+            })
+    })
+}
+
+fn current_coverage_receipt<'a>(
+    session: &'a Session,
+    plan: &crate::plan::VerificationPlanV1,
+    turn_id: &str,
+) -> Option<&'a crate::plan::ValidationReceiptV1> {
+    if session.single_verification_plan.as_ref() != Some(plan) {
+        return None;
+    }
+    let input_sha256 = session.single_verification_plan_input_sha256.as_deref()?;
+    let changeset_sha256 = current_candidate_changeset_sha256(session, turn_id)?;
+    let environment_id = crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
+    let arguments_sha256 = crate::CasStore::hash_of(plan.plan_id.as_bytes());
+    let plan_sha256 = verification_plan_sha256(plan);
+    session.validation_receipts.iter().rev().find(|receipt| {
+        receipt.task_id == session.id
+            && receipt.attempt_id == turn_id
+            && receipt.requirement_id == "host-change-scope-coverage"
+            && receipt.validator_id == "host-change-scope-coverage-v1"
+            && receipt.validator_version == "1"
+            && receipt.arguments_sha256 == arguments_sha256
+            && receipt.input_sha256 == input_sha256
+            && receipt.environment_id == environment_id
+            && receipt.changeset_sha256.as_deref() == Some(changeset_sha256.as_str())
+            && receipt.evidence_refs.iter().any(|reference| {
+                reference == &format!("verification-plan-sha256:{plan_sha256}")
+            })
+    })
+}
+
 fn completion_from_single_plan_receipts(
     session: &Session,
     plan: &crate::plan::VerificationPlanV1,
     turn_id: &str,
 ) -> owo_agent_protocol::CompletionStatusV1 {
     use crate::plan::ValidationVerdictV1;
-    let required_count = plan.requirements.iter().filter(|requirement| requirement.required).count();
-    let mut latest = std::collections::BTreeMap::new();
-    for receipt in session.validation_receipts.iter().filter(|receipt| receipt.attempt_id == turn_id) {
-        latest.insert(receipt.requirement_id.as_str(), receipt);
+    if current_candidate_changeset_sha256(session, turn_id).is_none() {
+        return owo_agent_protocol::CompletionStatusV1::Unverified;
     }
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    let mut stale = false;
+    let mut required_count = 0usize;
+    let mut passed_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut stale_evidence = false;
+
     for requirement in plan.requirements.iter().filter(|requirement| requirement.required) {
-        match latest.get(requirement.requirement_id.as_str()).map(|receipt| receipt.verdict) {
-            Some(ValidationVerdictV1::Passed | ValidationVerdictV1::ManualAccepted) => passed += 1,
-            Some(ValidationVerdictV1::Failed) => failed += 1,
-            Some(ValidationVerdictV1::Stale) => stale = true,
+        required_count += 1;
+        match current_plan_receipt(session, plan, turn_id, requirement).map(|receipt| receipt.verdict) {
+            Some(ValidationVerdictV1::Passed | ValidationVerdictV1::ManualAccepted) => passed_count += 1,
+            Some(ValidationVerdictV1::Failed) => failed_count += 1,
+            Some(ValidationVerdictV1::Stale) => stale_evidence = true,
             _ => {}
         }
     }
-    if let Some(receipt) = latest.get("host-change-scope-coverage") {
-        if receipt.verdict == ValidationVerdictV1::Passed {
-            passed += 1;
-        } else {
-            if receipt.verdict == ValidationVerdictV1::Failed {
-                failed += 1;
-            }
-            stale |= receipt.verdict == ValidationVerdictV1::Stale;
-            return crate::completion::decide_completion(crate::completion::CompletionEvidence {
-                response_finished: true,
-                has_candidate_changes: true,
-                required_validation_count: required_count + 1,
-                passed_required_validation_count: passed,
-                failed_required_validation_count: failed,
-                stale_evidence: stale,
-                ..crate::completion::CompletionEvidence::default()
-            });
-        }
+
+    required_count += 1;
+    match current_coverage_receipt(session, plan, turn_id).map(|receipt| receipt.verdict) {
+        Some(ValidationVerdictV1::Passed) => passed_count += 1,
+        Some(ValidationVerdictV1::Failed) => failed_count += 1,
+        Some(ValidationVerdictV1::Stale) => stale_evidence = true,
+        _ => {}
     }
+
     crate::completion::decide_completion(crate::completion::CompletionEvidence {
         response_finished: true,
         has_candidate_changes: true,
-        required_validation_count: required_count + usize::from(latest.contains_key("host-change-scope-coverage")),
-        passed_required_validation_count: passed,
-        failed_required_validation_count: failed,
-        stale_evidence: stale,
+        required_validation_count: required_count,
+        passed_required_validation_count: passed_count,
+        failed_required_validation_count: failed_count,
+        stale_evidence,
         ..crate::completion::CompletionEvidence::default()
     })
 }
@@ -122,32 +207,20 @@ pub(super) async fn request_single_manual_acceptance(
     }
 
     let required_manual_ids = manual_requirements.iter().map(|requirement| requirement.requirement_id.as_str()).collect::<BTreeSet<_>>();
-    let mut latest = BTreeMap::new();
-    for receipt in session.validation_receipts.iter().filter(|receipt| receipt.attempt_id == turn_id) {
-        latest.insert(receipt.requirement_id.as_str(), receipt);
-    }
     let other_requirements_passed = plan.requirements.iter().filter(|requirement| {
         requirement.required
             && requirement.validator_id != crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
     }).all(|requirement| {
-        latest.get(requirement.requirement_id.as_str()).is_some_and(|receipt| receipt.verdict == ValidationVerdictV1::Passed)
+        current_plan_receipt(session, plan, turn_id, requirement)
+            .is_some_and(|receipt| receipt.verdict == ValidationVerdictV1::Passed)
     });
-    let coverage_passed = latest.get("host-change-scope-coverage").is_none_or(|receipt| receipt.verdict == ValidationVerdictV1::Passed);
+    let coverage_passed = current_coverage_receipt(session, plan, turn_id)
+        .is_some_and(|receipt| receipt.verdict == ValidationVerdictV1::Passed);
     if !other_requirements_passed || !coverage_passed {
         return completion_from_single_plan_receipts(session, plan, turn_id);
     }
 
-    let mut pending_hashes = BTreeMap::<String, Option<String>>::new();
-    for execution in session.execution_receipts.iter().filter(|execution| {
-        execution.status == "executed" || (execution.turn_id == turn_id && execution.status == "accepted")
-    }) {
-        for relative in &execution.changed_files {
-            let normalized = relative.replace('\\', "/");
-            if let Some((_, hash)) = execution.after_hashes.iter().find(|(path, _)| path.replace('\\', "/") == normalized) {
-                pending_hashes.insert(normalized, hash.clone());
-            }
-        }
-    }
+    let pending_hashes = single_candidate_hashes(session, turn_id);
     if pending_hashes.is_empty() {
         return completion_from_single_plan_receipts(session, plan, turn_id);
     }
@@ -183,10 +256,12 @@ pub(super) async fn request_single_manual_acceptance(
         return completion_from_single_plan_receipts(session, plan, turn_id);
     }
 
+    let plan_evidence_ref = format!("verification-plan-sha256:{}", verification_plan_sha256(plan));
     let prior_decision = session.validation_receipts.iter().rev().find(|receipt| {
         receipt.attempt_id == turn_id
             && receipt.validator_id == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
             && receipt.changeset_sha256.as_deref() == Some(changeset_sha256.as_str())
+            && receipt.evidence_refs.iter().any(|reference| reference == &plan_evidence_ref)
             && receipt.evidence_refs.iter().any(|reference| {
                 reference.starts_with("manual-question:")
                     || reference == "manual-question-unavailable"
@@ -316,6 +391,10 @@ pub(super) async fn request_single_manual_acceptance(
                 receipt.evidence_refs.push(format!("user-answer-sha256:{answer_hash}"));
             }
         }
+        receipt.evidence_refs.push(format!(
+            "verification-plan-sha256:{}",
+            verification_plan_sha256(plan)
+        ));
         receipt.evidence_refs.push(format!("candidate-version-sha256:{candidate_version_sha256}"));
         receipt.completed_at = completed_at.clone();
         manual_receipt_ids.insert(requirement.requirement_id.as_str(), receipt.receipt_id.clone());
@@ -347,4 +426,102 @@ pub(super) async fn request_single_manual_acceptance(
         }
     }
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::{
+        ValidationReceiptV1, ValidationVerdictV1, VerificationPlanV1,
+        VerificationRequirementV1, VerificationResourcesV1, VerificationScopeV1,
+    };
+    use crate::session::{ExecutionReceipt, Session};
+    use std::collections::HashMap;
+
+    #[test]
+    fn completion_ignores_receipt_from_another_validator_for_same_requirement_id() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut session = Session::new(workspace.path(), "mock", None);
+        let turn_id = "turn-bound-receipt";
+        let input_sha256 = crate::CasStore::hash_of(b"implement behavior");
+        let requirement = VerificationRequirementV1 {
+            requirement_id: "user-behavior".to_string(),
+            covers_requirement_ids: vec!["user-request:implement behavior".to_string()],
+            validator_id: "workspace-file-exists-v1".to_string(),
+            validator_version: Some("1".to_string()),
+            scope: VerificationScopeV1::WorkspacePaths {
+                relative_paths: vec!["src/lib.rs".to_string()],
+            },
+            arguments: serde_json::json!({}),
+            required: true,
+            resources: VerificationResourcesV1::default(),
+        };
+        let plan = VerificationPlanV1 {
+            plan_id: "bound-plan".to_string(),
+            requirements: vec![requirement.clone()],
+        };
+        session.single_verification_plan = Some(plan.clone());
+        session.single_verification_plan_input_sha256 = Some(input_sha256.clone());
+        session.single_verification_plan_turn_id = Some(turn_id.to_string());
+        session.execution_receipts.push(ExecutionReceipt {
+            receipt_id: "write-1".to_string(),
+            tool: "write_file".to_string(),
+            turn_id: turn_id.to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+            snapshot_keys: HashMap::new(),
+            before_hashes: HashMap::from([("src/lib.rs".to_string(), None)]),
+            after_hashes: HashMap::from([("src/lib.rs".to_string(), Some("source-hash".to_string()))]),
+            diff_sha256: "diff-hash".to_string(),
+            created_at: "2026-10-04T00:00:00Z".to_string(),
+            status: "executed".to_string(),
+            validation_receipt_id: None,
+        });
+        let changeset_sha256 = current_candidate_changeset_sha256(&session, turn_id).unwrap();
+        let environment_id = crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
+        let plan_ref = format!("verification-plan-sha256:{}", verification_plan_sha256(&plan));
+        session.validation_receipts.push(ValidationReceiptV1 {
+            receipt_id: "wrong-validator".to_string(),
+            task_id: session.id.clone(),
+            attempt_id: turn_id.to_string(),
+            epoch: 1,
+            requirement_id: requirement.requirement_id.clone(),
+            validator_id: "different-validator-v1".to_string(),
+            validator_version: "1".to_string(),
+            arguments_sha256: crate::CasStore::hash_of(requirement.arguments.to_string().as_bytes()),
+            input_sha256,
+            environment_id: environment_id.clone(),
+            changeset_sha256: Some(changeset_sha256.clone()),
+            detail: None,
+            subject_sha256: HashMap::from([("workspace-path:src/lib.rs".to_string(), "source-hash".to_string())]),
+            verdict: ValidationVerdictV1::Passed,
+            evidence_refs: vec![plan_ref.clone()],
+            started_at: "2026-10-04T00:00:00Z".to_string(),
+            completed_at: "2026-10-04T00:00:01Z".to_string(),
+        });
+        session.validation_receipts.push(ValidationReceiptV1 {
+            receipt_id: "coverage-passed".to_string(),
+            task_id: session.id.clone(),
+            attempt_id: turn_id.to_string(),
+            epoch: 1,
+            requirement_id: "host-change-scope-coverage".to_string(),
+            validator_id: "host-change-scope-coverage-v1".to_string(),
+            validator_version: "1".to_string(),
+            arguments_sha256: crate::CasStore::hash_of(plan.plan_id.as_bytes()),
+            input_sha256: crate::CasStore::hash_of(b"implement behavior"),
+            environment_id,
+            changeset_sha256: Some(changeset_sha256),
+            detail: None,
+            subject_sha256: HashMap::from([("workspace-path:src/lib.rs".to_string(), "source-hash".to_string())]),
+            verdict: ValidationVerdictV1::Passed,
+            evidence_refs: vec![plan_ref],
+            started_at: "2026-10-04T00:00:00Z".to_string(),
+            completed_at: "2026-10-04T00:00:01Z".to_string(),
+        });
+
+        assert!(current_plan_receipt(&session, &plan, turn_id, &requirement).is_none());
+        assert_eq!(
+            completion_from_single_plan_receipts(&session, &plan, turn_id),
+            owo_agent_protocol::CompletionStatusV1::Unverified
+        );
+    }
 }

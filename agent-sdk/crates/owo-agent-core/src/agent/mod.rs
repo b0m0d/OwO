@@ -2330,6 +2330,11 @@ fn execute_single_verification_plan(
     let changeset_sha256 = crate::CasStore::hash_of(&changeset_bytes);
     let environment_id = crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
     let validation_epoch = session.validation_receipts.len() as u64 + 1;
+    let verification_plan_sha256 = serde_json::to_vec(plan)
+        .map(|bytes| crate::CasStore::hash_of(&bytes))
+        .unwrap_or_default();
+    let verification_plan_evidence_ref =
+        format!("verification-plan-sha256:{verification_plan_sha256}");
     let mut required_count = required_requirements.len();
     let mut passed_count = 0usize;
     let mut failed_count = 0usize;
@@ -2340,7 +2345,7 @@ fn execute_single_verification_plan(
     for requirement in &plan.requirements {
         let requirement_started = chrono::Utc::now().to_rfc3339();
         let mut subjects = std::collections::HashMap::new();
-        let mut evidence_refs = Vec::new();
+        let mut evidence_refs = vec![verification_plan_evidence_ref.clone()];
         let (mut verdict, mut detail) = if requirement.validator_id
             == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
             && matches!(&requirement.scope, VerificationScopeV1::Manual)
@@ -2512,39 +2517,47 @@ fn execute_single_verification_plan(
             completed_at: chrono::Utc::now().to_rfc3339(),
         });
     }
-    if !coverage_ok {
-        required_count += 1;
-        let mut subjects = std::collections::HashMap::new();
-        for (path, hash) in pending_hashes {
-            subjects.insert(
-                format!("workspace-path:{path}"),
-                hash.clone().unwrap_or_else(crate::verification::workspace_path_absence_sha256),
-            );
-        }
-        plan_receipts.push(ValidationReceiptV1 {
-            receipt_id: format!("single-coverage-{}", uuid::Uuid::new_v4()),
-            task_id: session.id.clone(),
-            attempt_id: turn_id.to_string(),
-            epoch: validation_epoch,
-            requirement_id: "host-change-scope-coverage".to_string(),
-            validator_id: "host-change-scope-coverage-v1".to_string(),
-            validator_version: "1".to_string(),
-            arguments_sha256: crate::CasStore::hash_of(plan.plan_id.as_bytes()),
-            input_sha256: input_sha256.to_string(),
-            environment_id,
-            changeset_sha256: Some(changeset_sha256),
-            detail: Some(format!(
-                "候选变更不在必需验证范围内；遗漏路径={}，未行为验证源码路径={}",
-                missing_paths.join(","),
-                missing_behavior_paths.join(",")
-            )),
-            subject_sha256: subjects,
-            verdict: ValidationVerdictV1::Unverified,
-            evidence_refs: Vec::new(),
-            started_at: started_at.clone(),
-            completed_at: chrono::Utc::now().to_rfc3339(),
-        });
+    required_count += 1;
+    let mut subjects = std::collections::HashMap::new();
+    for (path, hash) in pending_hashes {
+        subjects.insert(
+            format!("workspace-path:{path}"),
+            hash.clone().unwrap_or_else(crate::verification::workspace_path_absence_sha256),
+        );
     }
+    let coverage_detail = if coverage_ok {
+        passed_count += 1;
+        Some("宿主已确认所有候选变更路径均被必需验证范围覆盖，且所有源码路径均有行为命令覆盖".to_string())
+    } else {
+        Some(format!(
+            "候选变更不在必需验证范围内；遗漏路径={}，未行为验证源码路径={}",
+            missing_paths.join(","),
+            missing_behavior_paths.join(",")
+        ))
+    };
+    plan_receipts.push(ValidationReceiptV1 {
+        receipt_id: format!("single-coverage-{}", uuid::Uuid::new_v4()),
+        task_id: session.id.clone(),
+        attempt_id: turn_id.to_string(),
+        epoch: validation_epoch,
+        requirement_id: "host-change-scope-coverage".to_string(),
+        validator_id: "host-change-scope-coverage-v1".to_string(),
+        validator_version: "1".to_string(),
+        arguments_sha256: crate::CasStore::hash_of(plan.plan_id.as_bytes()),
+        input_sha256: input_sha256.to_string(),
+        environment_id,
+        changeset_sha256: Some(changeset_sha256),
+        detail: coverage_detail,
+        subject_sha256: subjects,
+        verdict: if coverage_ok {
+            ValidationVerdictV1::Passed
+        } else {
+            ValidationVerdictV1::Unverified
+        },
+        evidence_refs: vec![verification_plan_evidence_ref],
+        started_at: started_at.clone(),
+        completed_at: chrono::Utc::now().to_rfc3339(),
+    });
     session.validation_receipts.extend(plan_receipts);
 
     let status = base_evidence(required_count, passed_count, failed_count, stale_evidence);
@@ -2836,6 +2849,20 @@ mod single_verification_plan_tests {
                     resources: VerificationResourcesV1::default(),
                 }],
             };
+            let prompt = "实现可用功能";
+            session.single_verification_plan = Some(plan.clone());
+            session.single_verification_plan_input_sha256 =
+                Some(crate::CasStore::hash_of(prompt.as_bytes()));
+            session.single_verification_plan_turn_id = Some("turn-manual".to_string());
+            let initial_status = assess_single_turn_completion(
+                &mut session,
+                prompt,
+                "turn-manual",
+                &[],
+                false,
+                Some("候选版本已准备验收。"),
+            );
+            assert_eq!(initial_status, owo_agent_protocol::CompletionStatusV1::Unverified);
             let questioner = FixedQuestioner {
                 answer: SINGLE_MANUAL_ACCEPT_OPTION.to_string(),
                 mutate_path: mutate.then(|| source.clone()),
@@ -2942,9 +2969,12 @@ hello
             Some("已完成说明。"),
         );
         assert_eq!(status, owo_agent_protocol::CompletionStatusV1::Accepted);
-        assert_eq!(session.validation_receipts.len(), 1);
+        assert_eq!(session.validation_receipts.len(), 2);
         assert_eq!(session.validation_receipts[0].verdict, crate::plan::ValidationVerdictV1::Passed);
         assert_eq!(session.validation_receipts[0].subject_sha256["workspace-path:README.md"], hash);
+        assert_eq!(session.validation_receipts[1].requirement_id, "host-change-scope-coverage");
+        assert_eq!(session.validation_receipts[1].verdict, crate::plan::ValidationVerdictV1::Passed);
+        assert!(session.validation_receipts[1].evidence_refs[0].starts_with("verification-plan-sha256:"));
         assert_eq!(session.execution_receipts[0].status, "accepted");
     }
 }
