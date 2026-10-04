@@ -2139,7 +2139,9 @@ fn single_validation_retry_feedback(session: &Session, turn_id: &str) -> Option<
         .into_iter()
         .filter(|(requirement_id, receipt)| {
             (required_ids.contains(requirement_id)
-                || receipt.validator_id == "workspace-independent-review-v1")
+                || receipt.validator_id == "workspace-independent-review-v1"
+                || (requirement_id == "host-change-scope-coverage"
+                    && receipt.validator_id == "host-change-scope-coverage-v1"))
                 && !matches!(
                     receipt.verdict,
                     crate::plan::ValidationVerdictV1::Passed
@@ -2596,7 +2598,8 @@ fn execute_single_verification_plan(
 #[cfg(test)]
 mod single_verification_plan_tests {
     use super::{
-        assess_single_turn_completion, CommandExecutionReceipt, TurnEvent,
+        assess_single_turn_completion, single_validation_retry_feedback, CommandExecutionReceipt,
+        TurnEvent,
     };
     use super::single_manual_acceptance::{
         manual_acceptance_answer_verdict, request_single_manual_acceptance,
@@ -2733,6 +2736,42 @@ mod single_verification_plan_tests {
         );
         assert_eq!(status, owo_agent_protocol::CompletionStatusV1::Candidate);
         assert!(session.validation_receipts.is_empty());
+    }
+
+    #[test]
+    fn uncovered_change_receipt_is_included_in_single_repair_feedback() {
+        let workspace = tempfile::tempdir().unwrap();
+        let checked = workspace.path().join("README.md");
+        std::fs::write(&checked, "present").unwrap();
+        let mut session = Session::new(workspace.path(), "mock", None);
+        add_write(
+            &mut session,
+            "turn-uncovered",
+            "src/uncovered.rs",
+            "candidate-hash",
+        );
+        let prompt = "实现功能 req-user-visible";
+        session.single_verification_plan = Some(plan(
+            "workspace-file-exists-v1",
+            "README.md",
+            serde_json::json!({}),
+        ));
+        session.single_verification_plan_input_sha256 =
+            Some(crate::CasStore::hash_of(prompt.as_bytes()));
+        session.single_verification_plan_turn_id = Some("turn-uncovered".to_string());
+
+        let status = assess_single_turn_completion(
+            &mut session,
+            prompt,
+            "turn-uncovered",
+            &[],
+            false,
+            Some("实现完成。"),
+        );
+        assert_eq!(status, owo_agent_protocol::CompletionStatusV1::Unverified);
+        let (_, feedback) = single_validation_retry_feedback(&session, "turn-uncovered").unwrap();
+        assert!(feedback.contains("host-change-scope-coverage"));
+        assert!(feedback.contains("src/uncovered.rs"));
     }
 
     #[test]
