@@ -1892,6 +1892,42 @@ fn step_validation_receipt_matches(
             == Some(output_sha256)
 }
 
+fn validate_host_command_validation(
+    requirement: &crate::plan::VerificationRequirementV1,
+    result: &HostCommandValidationV1,
+) -> Result<(), &'static str> {
+    let crate::plan::VerificationScopeV1::WorkspacePaths { relative_paths } =
+        &requirement.scope
+    else {
+        return Err("宿主命令回执范围不是 WorkspacePaths");
+    };
+    let expected_subjects = relative_paths
+        .iter()
+        .map(|path| format!("workspace-path:{path}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    if expected_subjects.len() != relative_paths.len()
+        || result.subject_sha256.len() != expected_subjects.len()
+        || result.subject_sha256.keys().any(|key| !expected_subjects.contains(key))
+    {
+        return Err("宿主命令回执的源码路径证据与声明范围不一致");
+    }
+    if result.subject_sha256.values().any(|hash| {
+        hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err("宿主命令回执包含非法源码 SHA-256");
+    }
+    let Some(evidence_ref) = result.evidence_ref.as_deref() else {
+        return Err("宿主命令回执缺少命令结果证据引用");
+    };
+    let Some(command_hash) = evidence_ref.strip_prefix("command-result:sha256:") else {
+        return Err("宿主命令回执证据引用格式无效");
+    };
+    if command_hash.len() != 64 || !command_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("宿主命令回执证据引用缺少有效 SHA-256");
+    }
+    Ok(())
+}
+
 /// 步骤成功收尾：可选黑板写回 + 组装成功结果。
 fn verify_step_output(
     step: &StepSpec,
@@ -1943,7 +1979,17 @@ fn verify_step_output(
                         None,
                     )
                 } else if let Some(verifier) = &rt.workspace_command_verifier {
-                    let host_result = verifier(&step.id, attempt_id, requirement);
+                    let mut host_result = verifier(&step.id, attempt_id, requirement);
+                    if host_result.verdict == crate::plan::ValidationVerdictV1::Passed {
+                        if let Err(reason) =
+                            validate_host_command_validation(requirement, &host_result)
+                        {
+                            host_result.verdict = crate::plan::ValidationVerdictV1::Unverified;
+                            host_result.detail = Some(reason.to_string());
+                            host_result.subject_sha256.clear();
+                            host_result.evidence_ref = None;
+                        }
+                    }
                     (
                         host_result.verdict,
                         host_result.detail,
