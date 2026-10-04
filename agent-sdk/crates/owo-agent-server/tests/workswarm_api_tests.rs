@@ -828,7 +828,11 @@ async fn team_metrics_report_role_spans_after_relay() {
     let (state, temp) = test_state().await;
     let app = build_router(Arc::clone(&state));
 
-    let create = json!({ "objective": "指标接力", "roles": echo_relay_roles() });
+    let create = json!({
+        "objective": "指标接力",
+        "roles": echo_relay_roles(),
+        "budget": { "max_model_calls": 3 }
+    });
     let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
     assert_eq!(status, 202, "{created}");
     let team_id = created["team_id"].as_str().unwrap().to_string();
@@ -876,7 +880,12 @@ async fn team_metrics_report_role_spans_after_relay() {
             >= summary["worker_wall_ms_sum"].as_u64().unwrap_or(0),
         "窗口墙钟 ≥ span 墙钟和：{m}"
     );
-    assert_eq!(m["budget"]["exceeded"], false, "未配置预算 → 不超限：{m}");
+    assert_eq!(m["budget"]["max_model_calls"], 3);
+    assert_eq!(m["budget"]["reserved_model_calls"], 0);
+    assert_eq!(m["budget"]["remaining_model_calls"], 3);
+    assert_eq!(m["budget"]["request_budget_known"], true);
+    assert_eq!(m["budget"]["request_limit_reached"], false);
+    assert_eq!(m["budget"]["exceeded"], false, "未配置美元预算 → 不超限：{m}");
     assert_eq!(m["budget"]["spent_known"], true);
     assert_eq!(m["budget"]["reason"], Value::Null);
     assert!(m["metrics_file"].as_str().unwrap().contains(&team_id));

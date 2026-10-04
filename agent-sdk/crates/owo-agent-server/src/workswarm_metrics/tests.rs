@@ -653,3 +653,39 @@ fn lease_wait_measurements_are_isolated_by_step() {
     assert_eq!(waits.take(&request_scope_key("step-a", Some(4))), 41);
     assert_eq!(waits.take(&request_scope_key("step-a", Some(3))), 0);
 }
+
+#[test]
+fn corrupt_request_reservation_journal_fails_closed() {
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-corrupt-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let journal = RequestReservationJournal::for_team(&dir, "team-budget");
+    std::fs::write(
+        dir.join("team-budget-request-reservations.jsonl"),
+        b"{invalid json}\\n",
+    )
+    .unwrap();
+
+    assert!(TeamModelRequestBudget::new(4, journal).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn invalid_team_request_budget_is_reported_as_unknown() {
+    let mut payload = aggregate_metrics("team-budget", &[], &json!({}));
+    attach_request_budget_status(
+        &mut payload,
+        &json!({"max_model_calls": "not-a-number"}),
+        Ok(0),
+    );
+    assert_eq!(payload["budget"]["max_model_calls"], "not-a-number");
+    assert_eq!(payload["budget"]["request_budget_known"], false);
+    assert!(payload["budget"]["request_budget_error"]
+        .as_str()
+        .unwrap()
+        .contains("nonnegative integer"));
+    assert_eq!(payload["budget"]["exceeded"], false);
+}

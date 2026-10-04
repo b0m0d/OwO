@@ -1095,13 +1095,21 @@ pub(crate) fn attach_request_budget_status(
     budget: &Value,
     reservations: Result<u64, String>,
 ) {
-    let Some(limit) = budget.get("max_model_calls").and_then(Value::as_u64) else {
+    let Some(configured_limit) = budget.get("max_model_calls") else {
         return;
     };
     let Some(output_budget) = payload.get_mut("budget").and_then(Value::as_object_mut) else {
         return;
     };
-    output_budget.insert("max_model_calls".to_string(), json!(limit));
+    output_budget.insert("max_model_calls".to_string(), configured_limit.clone());
+    let Some(limit) = configured_limit.as_u64() else {
+        output_budget.insert("request_budget_known".to_string(), json!(false));
+        output_budget.insert(
+            "request_budget_error".to_string(),
+            json!("max_model_calls must be a nonnegative integer"),
+        );
+        return;
+    };
     match reservations {
         Ok(used) => {
             output_budget.insert("reserved_model_calls".to_string(), json!(used));
