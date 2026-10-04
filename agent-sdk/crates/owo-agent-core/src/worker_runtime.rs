@@ -110,12 +110,23 @@ impl WorkerRuntime<'_> {
         if let (Some(store), Some(_)) = (&self.session_store, &self.worker_session_id) {
             store.save(&session).map_err(|error| format!("Worker 会话执行后保存失败：{error}"))?;
         }
-        let outcome = outcome.map_err(|error| format!("子代理执行失败：{error}"))?;
-        let model_calls = outcome
-            .events
-            .iter()
-            .filter(|event| matches!(event, TurnEvent::ModelCall))
-            .count() as u32;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let (model_calls, usage, usage_known) =
+                    summarize_model_calls(&session.transient_model_calls);
+                return Err(WorkerRuntimeError {
+                    message: format!("子代理执行失败：{error}"),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    steps: 0,
+                    model_calls,
+                    usage,
+                    usage_known,
+                    output_repairs: 0,
+                });
+            }
+        };
+        let model_calls = u32::try_from(outcome.model_calls.len()).unwrap_or(u32::MAX);
         if outcome.reached_model_turn_limit {
             return Err(WorkerRuntimeError {
                 message: format!(
@@ -180,6 +191,17 @@ impl WorkerRuntime<'_> {
     }
 }
 
+fn summarize_model_calls(calls: &[crate::agent::ModelCallRecord]) -> (u32, TokenUsage, bool) {
+    let mut usage = TokenUsage::default();
+    for call in calls {
+        if let Some(request_usage) = call.metadata.usage {
+            usage.add(&request_usage);
+        }
+    }
+    let usage_known = !calls.is_empty() && calls.iter().all(|call| call.metadata.usage.is_some());
+    (u32::try_from(calls.len()).unwrap_or(u32::MAX), usage, usage_known)
+}
+
 fn load_worker_session(
     workspace: &Path,
     model: &str,
@@ -210,4 +232,57 @@ fn load_worker_session(
     };
     session.parent_id = parent_session_id.clone();
     Ok(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::{ChatMessage, ModelOutput};
+    use crate::permissions::AutoApprover;
+    use crate::tools::ToolSpec;
+
+    struct FailedProvider;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for FailedProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            Err("provider unavailable".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_failure_keeps_worker_request_count_and_elapsed_time() {
+        let workspace = tempfile::tempdir().unwrap();
+        let approver = AutoApprover { allow: true };
+        let abort = AtomicBool::new(false);
+        let runtime = WorkerRuntime {
+            provider: Arc::new(FailedProvider),
+            approver: &approver,
+            abort: &abort,
+            depth: 0,
+            model: "test-model".to_string(),
+            workspace: workspace.path().to_path_buf(),
+            registry: ToolRegistry::new(),
+            policy: Policy::new(workspace.path()),
+            config: AgentConfig::default(),
+            system_prompt: None,
+            is_critic: false,
+            event_sink: None,
+            session_store: None,
+            worker_session_id: None,
+            parent_session_id: None,
+        };
+
+        let error = runtime.run_report("run one request").await.unwrap_err();
+
+        assert!(error.message.contains("provider unavailable"));
+        assert_eq!(error.model_calls, 1);
+        assert!(error.duration_ms >= 5);
+        assert!(!error.usage_known);
+    }
 }
