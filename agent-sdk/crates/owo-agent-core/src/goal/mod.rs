@@ -822,6 +822,56 @@ impl GoalRunner {
         })
     }
 
+    /// Invalidate Passed receipts if their workspace snapshot no longer matches the final tree.
+    fn invalidate_stale_workspace_receipts(&mut self) -> Vec<String> {
+        fn invalidate(
+            receipts: &mut [crate::plan::ValidationReceiptV1],
+            workspace_root: Option<&std::path::Path>,
+            stale_ids: &mut Vec<String>,
+        ) {
+            for receipt in receipts {
+                if receipt.verdict != crate::plan::ValidationVerdictV1::Passed
+                    || !receipt
+                        .subject_sha256
+                        .keys()
+                        .any(|subject| subject.starts_with("workspace-path:"))
+                {
+                    continue;
+                }
+                let matches = workspace_root.is_some_and(|root| {
+                    crate::verification::workspace_subjects_match_current(
+                        root,
+                        &receipt.subject_sha256,
+                    )
+                });
+                if !matches {
+                    receipt.verdict = crate::plan::ValidationVerdictV1::Stale;
+                    receipt.detail = Some(
+                        "Goal 最终交付时工作区文件已偏离该验证回执绑定的快照".to_string(),
+                    );
+                    receipt.completed_at = chrono::Utc::now().to_rfc3339();
+                    stale_ids.push(receipt.receipt_id.clone());
+                }
+            }
+        }
+
+        let workspace_root = self.workspace_verification_root.clone();
+        let mut stale_ids = Vec::new();
+        for record in self.state.records.values_mut() {
+            invalidate(
+                &mut record.validation_receipts,
+                workspace_root.as_deref(),
+                &mut stale_ids,
+            );
+        }
+        invalidate(
+            &mut self.state.validation_receipts,
+            workspace_root.as_deref(),
+            &mut stale_ids,
+        );
+        stale_ids
+    }
+
     /// Goal completion is backed by host receipts over the accepted aggregate output.
     fn verify_goal(&mut self) -> Result<GoalStatus, String> {
         self.state.goal.transition(GoalStatus::Verifying);
@@ -1013,6 +1063,14 @@ impl GoalRunner {
                 }
             }
         }
+        let stale_workspace_receipts = self.invalidate_stale_workspace_receipts();
+        if !stale_workspace_receipts.is_empty() {
+            return self.fail_goal(format!(
+                "目标最终验收发现工作区文件已偏离通过验证的快照：{}",
+                stale_workspace_receipts.join(", ")
+            ));
+        }
+
         let completion_status = crate::completion::decide_completion(
             crate::completion::CompletionEvidence {
                 response_finished: true,
@@ -1067,12 +1125,46 @@ impl GoalRunner {
                     })
                 })
                 .collect::<Vec<_>>();
-            Some(crate::completion::hash_candidate_version(&accepted_outputs).map_err(
+            let mut workspace_paths = std::collections::BTreeMap::new();
+            let mut conflicting_path = None;
+            for receipt in receipts.iter().filter(|receipt| {
+                receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+            }) {
+                for (subject, hash) in &receipt.subject_sha256 {
+                    if let Some(relative) = subject.strip_prefix("workspace-path:") {
+                        if workspace_paths
+                            .insert(relative.to_string(), hash.clone())
+                            .is_some_and(|previous| previous != *hash)
+                        {
+                            conflicting_path = Some(relative.to_string());
+                        }
+                    }
+                }
+            }
+            if let Some(relative) = conflicting_path {
+                drop(receipts);
+                return self.fail_goal(format!(
+                    "目标最终工作区快照中同一路径存在冲突验证摘要：{relative}"
+                ));
+            }
+            let candidate_snapshot = serde_json::json!({
+                "accepted_step_outputs": accepted_outputs,
+                "workspace_paths": workspace_paths,
+            });
+            Some(crate::completion::hash_candidate_version(&candidate_snapshot).map_err(
                 |error| format!("目标候选版本摘要生成失败：{error}"),
             )?)
         } else {
             None
         };
+        drop(receipts);
+        let final_stale_workspace_receipts = self.invalidate_stale_workspace_receipts();
+        if !final_stale_workspace_receipts.is_empty() {
+            return self.fail_goal(format!(
+                "目标候选摘要生成后工作区再次变化，验证快照已失效：{}",
+                final_stale_workspace_receipts.join(", ")
+            ));
+        }
         self.state.completion_record = Some(crate::completion::build_completion_record(
             &self.state.goal.id,
             &self.state.run_id,

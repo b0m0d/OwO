@@ -8,6 +8,69 @@ use serde_json::Value;
 pub(crate) fn workspace_path_absence_sha256() -> String {
     crate::CasStore::hash_of(b"owo-agent:workspace-path-absence:v1")
 }
+
+/// Recheck every workspace file hash carried by a host validation receipt.
+/// A receipt with no workspace subjects is independent of the workspace snapshot.
+pub(crate) fn workspace_subjects_match_current(
+    workspace_root: &Path,
+    subjects: &std::collections::HashMap<String, String>,
+) -> bool {
+    let workspace_subjects = subjects
+        .iter()
+        .filter_map(|(subject, expected)| {
+            subject
+                .strip_prefix("workspace-path:")
+                .map(|relative| (relative, expected))
+        })
+        .collect::<Vec<_>>();
+    if workspace_subjects.is_empty() {
+        return true;
+    }
+    let Ok(root) = workspace_root.canonicalize() else {
+        return false;
+    };
+    if !root.is_dir() {
+        return false;
+    }
+
+    for (raw, expected) in workspace_subjects {
+        let relative = Path::new(raw);
+        if raw.trim().is_empty()
+            || raw.len() > 512
+            || raw.contains('\0')
+            || relative.is_absolute()
+            || relative.components().any(|part| {
+                matches!(
+                    part,
+                    Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                )
+            })
+        {
+            return false;
+        }
+        let Ok(canonical) = root.join(relative).canonicalize() else {
+            return false;
+        };
+        if !canonical.starts_with(&root) {
+            return false;
+        }
+        let Ok(metadata) = std::fs::metadata(&canonical) else {
+            return false;
+        };
+        if !metadata.is_file() || metadata.len() > 8 * 1024 * 1024 {
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(&canonical) else {
+            return false;
+        };
+        if bytes.len() as u64 != metadata.len()
+            || format!("{:x}", Sha256::digest(&bytes)) != *expected
+        {
+            return false;
+        }
+    }
+    true
+}
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
@@ -686,6 +749,29 @@ mod tests {
         assert!(!is_registered_behavior_command("pytest --collect-only"));
         assert!(!is_registered_behavior_command("npm test && echo passed"));
         assert!(!is_registered_behavior_command("cargo check"));
+    }
+
+
+    #[test]
+    fn workspace_subject_snapshot_recheck_detects_mutation_and_escape() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        let path = root.path().join("src/lib.rs");
+        std::fs::write(&path, "pub fn ready() {}\n").unwrap();
+        let subjects = std::collections::HashMap::from([(
+            "workspace-path:src/lib.rs".to_string(),
+            crate::CasStore::hash_of(b"pub fn ready() {}\n"),
+        )]);
+        assert!(workspace_subjects_match_current(root.path(), &subjects));
+
+        std::fs::write(&path, "pub fn broken() {}\n").unwrap();
+        assert!(!workspace_subjects_match_current(root.path(), &subjects));
+
+        let escaped = std::collections::HashMap::from([(
+            "workspace-path:../outside".to_string(),
+            "any-hash".to_string(),
+        )]);
+        assert!(!workspace_subjects_match_current(root.path(), &escaped));
     }
 
 }

@@ -302,6 +302,72 @@ async fn typed_step_plan_executes_and_persists_attempt_bound_receipt() {
     );
 }
 
+struct MutateWorkspaceWorker(std::path::PathBuf);
+
+#[async_trait::async_trait]
+impl Worker for MutateWorkspaceWorker {
+    fn name(&self) -> &str {
+        "mutate-workspace"
+    }
+
+    async fn run(&self, _input: &serde_json::Value) -> Result<String, String> {
+        std::fs::write(&self.0, "pub fn changed_after_validation() {}\n")
+            .map_err(|error| error.to_string())?;
+        Ok("target ok".to_string())
+    }
+}
+
+#[tokio::test]
+async fn goal_cannot_accept_a_workspace_receipt_after_a_later_step_mutates_its_file() {
+    let root = std::env::temp_dir().join(format!(
+        "owo-goal-final-snapshot-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let source = root.join("src/lib.rs");
+    std::fs::write(&source, "pub fn ready() {}\n").unwrap();
+
+    let mut goal = Goal::new("g-final-snapshot", "reject stale workspace evidence");
+    goal.verification_plan = Some(crate::plan::VerificationPlanV1 {
+        plan_id: "final-snapshot-goal-plan".to_string(),
+        requirements: vec![crate::verification::requirement_for_spec(
+            "goal-output",
+            &crate::plan::VerificationSpec::OutputContains("target ok".to_string()),
+        )],
+    });
+    let mut plan = Plan::new("p-final-snapshot", "g-final-snapshot");
+    plan.add_step(workspace_plan_step("step-workspace", "ready"));
+    let mut mutate = crate::plan::StepSpec::new("step-mutate", "mutate-workspace");
+    mutate.depends_on = vec!["step-workspace".to_string()];
+    mutate.verify = Some(crate::plan::VerificationSpec::OutputNonEmpty);
+    plan.add_step(mutate);
+
+    let workers = WorkerRegistry::new();
+    workers.register(std::sync::Arc::new(FixedOutputWorker("target ok")));
+    workers.register(std::sync::Arc::new(MutateWorkspaceWorker(source)));
+    let mut runner = GoalRunner::new(goal, plan, RunnerConfig::default());
+    runner.attach_workspace_verification_root(root.clone());
+
+    assert_eq!(runner.run(&workers).await.unwrap(), GoalStatus::Failed);
+    let stale = runner.state.records["step-workspace"]
+        .validation_receipts
+        .iter()
+        .find(|receipt| receipt.requirement_id == "step-workspace:file-ready")
+        .unwrap();
+    assert_eq!(stale.verdict, crate::plan::ValidationVerdictV1::Stale);
+    assert!(runner.state.goal.error.as_deref().is_some_and(|error| {
+        error.contains("偏离通过验证的快照")
+    }));
+    assert_eq!(
+        runner.state.completion_record.as_ref().unwrap().status,
+        owo_agent_protocol::CompletionStatusV1::Blocked
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 struct FeedbackAwareWorker;
 
 #[async_trait::async_trait]
@@ -489,6 +555,24 @@ async fn goal_workspace_validation_binds_receipt_to_real_file_hash() {
     );
     assert!(receipt.changeset_sha256.is_some());
     assert!(receipt.environment_id.starts_with("goal-workspace-v1:"));
+    let record = runner.state.completion_record.as_ref().unwrap();
+    let step_record = &runner.state.records["step"];
+    let expected_candidate = crate::completion::hash_candidate_version(&serde_json::json!({
+        "accepted_step_outputs": [{
+            "step_id": "step",
+            "attempt_id": step_record.attempt_id,
+            "output_sha256": crate::cas_store::CasStore::hash_of(b"candidate"),
+        }],
+        "workspace_paths": std::collections::BTreeMap::from([(
+            "src/lib.rs",
+            crate::cas_store::CasStore::hash_of(b"pub fn ready() {}\n"),
+        )]),
+    }))
+    .unwrap();
+    assert_eq!(
+        record.candidate_version_sha256.as_deref(),
+        Some(expected_candidate.as_str())
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
