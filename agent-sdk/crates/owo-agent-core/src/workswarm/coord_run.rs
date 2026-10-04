@@ -1,7 +1,37 @@
 use super::*;
+
+fn validate_team_budget_config(budget: &serde_json::Value) -> Result<(), String> {
+    let Some(fields) = budget.as_object() else {
+        return if budget.is_null() {
+            Ok(())
+        } else {
+            Err("budget 必须是 JSON 对象或 null".to_string())
+        };
+    };
+
+    if let Some(value) = fields.get("max_model_calls").filter(|value| !value.is_null()) {
+        if value.as_u64().is_none() {
+            return Err("budget.max_model_calls 必须是非负整数".to_string());
+        }
+    }
+    if let Some(value) = fields.get("max_cost_usd").filter(|value| !value.is_null()) {
+        match value.as_f64() {
+            Some(limit) if limit.is_finite() && limit >= 0.0 => {}
+            _ => return Err("budget.max_cost_usd 必须是有限的非负数字".to_string()),
+        }
+    }
+    if let Some(value) = fields.get("max_wall_secs").filter(|value| !value.is_null()) {
+        if value.as_u64().is_none() {
+            return Err("budget.max_wall_secs 必须是非负整数".to_string());
+        }
+    }
+    Ok(())
+}
+
 impl TeamCoordinator {
     /// 创建团队运行：成员/角色/assignee 绑定 + 任务图 + ProjectSpace + TeamRun。
     pub async fn create_team_run(&self, req: &CreateTeamRequest) -> WorkSwarmResult<TeamRun> {
+        validate_team_budget_config(&req.budget).map_err(WorkSwarmError::Validation)?;
         let objective = req.objective.trim();
         if objective.is_empty() {
             return Err(WorkSwarmError::Validation("objective 不能为空".to_string()));
@@ -3500,5 +3530,39 @@ mod parallel_assignment_validation_tests {
         ];
         let error = validate_parallel_subtasks(&roles(), &overlapping, false).unwrap_err();
         assert!(error.contains("overlap"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod team_budget_validation_tests {
+    use super::validate_team_budget_config;
+    use serde_json::json;
+
+    #[test]
+    fn validates_known_budget_fields_and_preserves_unknown_extensions() {
+        assert!(validate_team_budget_config(&json!({
+            "max_model_calls": 100,
+            "max_cost_usd": 1.25,
+            "max_wall_secs": 60,
+            "future_budget_field": {"opaque": true}
+        }))
+        .is_ok());
+        assert!(validate_team_budget_config(&serde_json::Value::Null).is_ok());
+        assert!(validate_team_budget_config(&json!({
+            "max_model_calls": 2.5
+        }))
+        .unwrap_err()
+        .contains("max_model_calls"));
+        assert!(validate_team_budget_config(&json!({
+            "max_cost_usd": -0.01
+        }))
+        .unwrap_err()
+        .contains("max_cost_usd"));
+        assert!(validate_team_budget_config(&json!({
+            "max_wall_secs": "60"
+        }))
+        .unwrap_err()
+        .contains("max_wall_secs"));
+        assert!(validate_team_budget_config(&json!(false)).is_err());
     }
 }

@@ -689,3 +689,26 @@ fn invalid_team_request_budget_is_reported_as_unknown() {
         .contains("nonnegative integer"));
     assert_eq!(payload["budget"]["exceeded"], false);
 }
+
+#[test]
+fn malformed_legacy_budget_stops_scheduling_instead_of_disabling_the_limit() {
+    let reason = budget_exhaustion_reason(
+        &json!({"max_cost_usd": "unknown"}),
+        &[],
+        0,
+    )
+    .expect("malformed cost limit must fail closed");
+    assert!(reason.contains("max_cost_usd"));
+    assert_eq!(
+        budget_state(&json!({"max_cost_usd": "unknown"}), &[], 0)["max_cost_usd"],
+        "unknown"
+    );
+
+    let wall_reason = budget_exhaustion_reason(
+        &json!({"max_wall_secs": -1}),
+        &[],
+        0,
+    )
+    .expect("malformed wall limit must fail closed");
+    assert!(wall_reason.contains("max_wall_secs"));
+}

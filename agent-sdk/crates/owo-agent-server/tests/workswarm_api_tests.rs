@@ -824,6 +824,20 @@ fn inject_cost_span(temp: &std::path::Path, team_id: &str, cost_usd: f64) {
 }
 
 #[tokio::test]
+async fn create_team_rejects_malformed_budget_limits() {
+    let (state, _temp) = test_state().await;
+    let app = build_router(Arc::clone(&state));
+    let create = json!({
+        "objective": "拒绝错误预算",
+        "roles": echo_relay_roles(),
+        "budget": {"max_cost_usd": -0.01}
+    });
+    let (status, body) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.to_string().contains("max_cost_usd"));
+}
+
+#[tokio::test]
 async fn team_metrics_report_role_spans_after_relay() {
     let (state, temp) = test_state().await;
     let app = build_router(Arc::clone(&state));

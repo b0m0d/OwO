@@ -1144,10 +1144,10 @@ pub fn budget_state(budget: &Value, records: &[WorkerSpanRecord], now_ms: u64) -
         .iter()
         .all(|record| record.model_calls == 0 || record.cost_known);
     json!({
-        "max_cost_usd": budget.get("max_cost_usd").and_then(Value::as_f64),
+        "max_cost_usd": budget.get("max_cost_usd").and_then(Value::as_f64).map(Value::from).or_else(|| budget.get("max_cost_usd").cloned()).unwrap_or(Value::Null),
         "spent_usd": spent,
         "spent_known": cost_known,
-        "max_wall_secs": budget.get("max_wall_secs").and_then(Value::as_u64),
+        "max_wall_secs": budget.get("max_wall_secs").and_then(Value::as_u64).map(Value::from).or_else(|| budget.get("max_wall_secs").cloned()).unwrap_or(Value::Null),
         "wall_window_ms": window,
         "exceeded": reason.is_some(),
         "reason": reason,
@@ -1188,6 +1188,31 @@ pub fn budget_exhaustion_reason(
     records: &[WorkerSpanRecord],
     now_ms: u64,
 ) -> Option<String> {
+    if let Some(value) = budget.get("max_model_calls").filter(|value| !value.is_null()) {
+        if value.as_u64().is_none() {
+            return Some(
+                "预算配置无效：max_model_calls 必须是非负整数，已停止调度下一阶段".to_string(),
+            );
+        }
+    }
+    if let Some(value) = budget.get("max_cost_usd").filter(|value| !value.is_null()) {
+        match value.as_f64() {
+            Some(limit) if limit.is_finite() && limit >= 0.0 => {}
+            _ => {
+                return Some(
+                    "预算配置无效：max_cost_usd 必须是有限的非负数字，已停止调度下一阶段"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    if let Some(value) = budget.get("max_wall_secs").filter(|value| !value.is_null()) {
+        if value.as_u64().is_none() {
+            return Some(
+                "预算配置无效：max_wall_secs 必须是非负整数，已停止调度下一阶段".to_string(),
+            );
+        }
+    }
     if let Some(record) = latest_task_budget_spans(records)
         .into_values()
         .find(|record| {
