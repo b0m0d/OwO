@@ -18,6 +18,41 @@ fn shared_completion_record_survives_goal_run_persistence() {
 }
 
 #[test]
+fn failed_goal_completion_retains_observed_candidate_version() {
+    let goal = Goal::new("g-failed-candidate", "failed candidate identity");
+    let mut plan = Plan::new("p-failed-candidate", "g-failed-candidate");
+    plan.add_step(crate::plan::StepSpec::new("step-candidate", "worker"));
+    let mut runner = GoalRunner::new(goal, plan, RunnerConfig::default());
+    let record = runner.state.records.get_mut("step-candidate").unwrap();
+    record.status = StepStatus::Succeeded;
+    record.attempt_id = Some("attempt-candidate".to_string());
+    record.output = Some("candidate output".to_string());
+
+    runner
+        .fail_goal_with_status(
+            "required verification failed".to_string(),
+            owo_agent_protocol::CompletionStatusV1::Unverified,
+        )
+        .unwrap();
+
+    let expected = crate::completion::hash_candidate_version(&serde_json::json!({
+        "accepted_step_outputs": [{
+            "step_id": "step-candidate",
+            "attempt_id": "attempt-candidate",
+            "output_sha256": crate::cas_store::CasStore::hash_of(b"candidate output"),
+        }],
+        "workspace_paths": std::collections::BTreeMap::<String, String>::new(),
+    }))
+    .unwrap();
+    let completion = runner.state.completion_record.as_ref().unwrap();
+    assert_eq!(
+        completion.status,
+        owo_agent_protocol::CompletionStatusV1::Unverified
+    );
+    assert_eq!(completion.candidate_version_sha256.as_deref(), Some(expected.as_str()));
+}
+
+#[test]
 fn goal_status_machine_transitions() {
     let mut goal = Goal::new("g1", "测试目标");
     assert_eq!(goal.status, GoalStatus::Pending);

@@ -1176,53 +1176,10 @@ impl GoalRunner {
             .map(|receipt| receipt.receipt_id.clone())
             .collect::<Vec<_>>();
         let candidate_version_sha256 = if has_candidate_changes {
-            let accepted_outputs = self
-                .state
-                .plan
-                .steps
-                .iter()
-                .filter_map(|step| {
-                    let record = self.state.records.get(&step.id)?;
-                    (record.status == StepStatus::Succeeded).then(|| {
-                        serde_json::json!({
-                            "step_id": step.id,
-                            "attempt_id": record.attempt_id,
-                            "output_sha256": record.output.as_deref().map(|output| {
-                                crate::cas_store::CasStore::hash_of(output.as_bytes())
-                            }),
-                        })
-                    })
-                })
-                .collect::<Vec<_>>();
-            let mut workspace_paths = std::collections::BTreeMap::new();
-            let mut conflicting_path = None;
-            for receipt in receipts.iter().filter(|receipt| {
-                receipt.verdict == crate::plan::ValidationVerdictV1::Passed
-            }) {
-                for (subject, hash) in &receipt.subject_sha256 {
-                    if let Some(relative) = subject.strip_prefix("workspace-path:") {
-                        if workspace_paths
-                            .insert(relative.to_string(), hash.clone())
-                            .is_some_and(|previous| previous != *hash)
-                        {
-                            conflicting_path = Some(relative.to_string());
-                        }
-                    }
-                }
+            match self.candidate_version_sha256(false, true) {
+                Ok(candidate_version_sha256) => candidate_version_sha256,
+                Err(error) => return self.fail_goal(error),
             }
-            if let Some(relative) = conflicting_path {
-                drop(receipts);
-                return self.fail_goal(format!(
-                    "目标最终工作区快照中同一路径存在冲突验证摘要：{relative}"
-                ));
-            }
-            let candidate_snapshot = serde_json::json!({
-                "accepted_step_outputs": accepted_outputs,
-                "workspace_paths": workspace_paths,
-            });
-            Some(crate::completion::hash_candidate_version(&candidate_snapshot).map_err(
-                |error| format!("目标候选版本摘要生成失败：{error}"),
-            )?)
         } else {
             None
         };
@@ -1349,6 +1306,74 @@ impl GoalRunner {
         .then_some(status)
     }
 
+    fn candidate_version_sha256(
+        &self,
+        include_unpassed_receipts: bool,
+        force_snapshot: bool,
+    ) -> Result<Option<String>, String> {
+        let accepted_outputs = self
+            .state
+            .plan
+            .steps
+            .iter()
+            .filter_map(|step| {
+                let record = self.state.records.get(&step.id)?;
+                (record.status == StepStatus::Succeeded).then(|| {
+                    serde_json::json!({
+                        "step_id": step.id,
+                        "attempt_id": record.attempt_id,
+                        "output_sha256": record.output.as_deref().map(|output| {
+                            crate::cas_store::CasStore::hash_of(output.as_bytes())
+                        }),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut workspace_paths = std::collections::BTreeMap::new();
+        let receipts = self
+            .state
+            .validation_receipts
+            .iter()
+            .chain(
+                self.state
+                    .records
+                    .values()
+                    .flat_map(|record| record.validation_receipts.iter()),
+            );
+        for receipt in receipts.filter(|receipt| {
+            receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+                || (include_unpassed_receipts
+                    && !matches!(
+                        receipt.verdict,
+                        crate::plan::ValidationVerdictV1::Stale
+                            | crate::plan::ValidationVerdictV1::Unsupported
+                    ))
+        }) {
+            for (subject, hash) in &receipt.subject_sha256 {
+                if let Some(relative) = subject.strip_prefix("workspace-path:") {
+                    if workspace_paths
+                        .insert(relative.to_string(), hash.clone())
+                        .is_some_and(|previous| previous != *hash)
+                    {
+                        return Err(format!(
+                            "目标候选快照中同一路径存在冲突验证摘要：{relative}"
+                        ));
+                    }
+                }
+            }
+        }
+        if !force_snapshot && accepted_outputs.is_empty() && workspace_paths.is_empty() {
+            return Ok(None);
+        }
+        let candidate_snapshot = serde_json::json!({
+            "accepted_step_outputs": accepted_outputs,
+            "workspace_paths": workspace_paths,
+        });
+        crate::completion::hash_candidate_version(&candidate_snapshot)
+            .map(Some)
+            .map_err(|error| format!("目标候选版本摘要生成失败：{error}"))
+    }
+
     fn fail_goal(&mut self, reason: String) -> Result<GoalStatus, String> {
         self.fail_goal_with_status(reason, owo_agent_protocol::CompletionStatusV1::Blocked)
     }
@@ -1370,12 +1395,16 @@ impl GoalRunner {
             )
             .map(|receipt| receipt.receipt_id.clone())
             .collect::<Vec<_>>();
+        let candidate_version_sha256 = self
+            .candidate_version_sha256(true, false)
+            .ok()
+            .flatten();
         self.state.completion_record = Some(crate::completion::build_completion_record(
             &self.state.goal.id,
             &self.state.run_id,
             completion_status,
             evidence_receipt_ids,
-            None,
+            candidate_version_sha256,
         ));
         self.state.goal.error = Some(reason.clone());
         self.state.goal.transition(GoalStatus::Failed);
