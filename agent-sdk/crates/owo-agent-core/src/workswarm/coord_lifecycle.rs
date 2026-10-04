@@ -18,6 +18,12 @@ fn failed_run_completion_status(
         .unwrap_or(owo_agent_protocol::CompletionStatusV1::Blocked)
 }
 
+fn failed_run_candidate_version_sha256(
+    previous: Option<&owo_agent_protocol::TaskCompletionRecordV1>,
+) -> Option<String> {
+    previous.and_then(|record| record.candidate_version_sha256.clone())
+}
+
 impl TeamCoordinator {
     /// 失败收尾（team → Failed；产物保留；成员 Degraded）。
     pub(crate) async fn fail_run_internal(
@@ -47,15 +53,18 @@ impl TeamCoordinator {
             )
             .map(|receipt| receipt.receipt_id.clone())
             .collect::<Vec<_>>();
+        let previous_completion_record = state.completion_record.as_ref();
         let completion_status = failed_run_completion_status(
-            state.completion_record.as_ref().map(|record| record.status),
+            previous_completion_record.map(|record| record.status),
         );
+        let candidate_version_sha256 =
+            failed_run_candidate_version_sha256(previous_completion_record);
         state.completion_record = Some(crate::completion::build_completion_record(
             team_id,
             &state.run_id,
             completion_status,
             evidence_receipt_ids,
-            None,
+            candidate_version_sha256,
         ));
         self.persist_state(state)?;
         let failed_members: Vec<String> = state
@@ -1823,8 +1832,25 @@ mod validation_receipt_identity_tests {
 
 #[cfg(test)]
 mod completion_status_tests {
-    use super::failed_run_completion_status;
+    use super::{failed_run_candidate_version_sha256, failed_run_completion_status};
     use owo_agent_protocol::CompletionStatusV1;
+
+    #[test]
+    fn failed_team_run_preserves_candidate_version_identity() {
+        let record = owo_agent_protocol::TaskCompletionRecordV1 {
+            candidate_version_sha256: Some("candidate-sha256".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            failed_run_candidate_version_sha256(Some(&record)).as_deref(),
+            Some("candidate-sha256")
+        );
+        let record_without_candidate = owo_agent_protocol::TaskCompletionRecordV1::default();
+        assert_eq!(
+            failed_run_candidate_version_sha256(Some(&record_without_candidate)),
+            None
+        );
+    }
 
     #[test]
     fn failed_team_run_preserves_candidate_and_unverified_states_only() {
