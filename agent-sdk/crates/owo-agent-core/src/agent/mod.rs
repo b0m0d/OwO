@@ -2088,17 +2088,18 @@ fn assess_single_turn_completion(
     if missing_write_hash {
         return decide(true, false, true, 1, 0, 0, true);
     }
-    if pending_hashes.is_empty() {
+    if pending_hashes.is_empty() && plan.is_none() {
         return decide(true, false, false, 0, 0, 0, stale_candidate);
     }
     if root.is_none() {
-        return decide(true, false, true, 1, 0, 0, true);
+        let has_candidate = !pending_hashes.is_empty() || plan.is_some();
+        return decide(true, false, has_candidate, 1, 0, 0, true);
     }
     let root = root.expect("checked above");
     let Some(plan) = plan else {
         // A generic successful command is not enough to claim that a task's declared
         // requirements were covered. The model must register a host-resolvable plan.
-        return decide(true, false, true, 0, 0, 0, false);
+        return decide(true, false, !pending_hashes.is_empty(), 0, 0, 0, false);
     };
     execute_single_verification_plan(
         session,
@@ -2732,6 +2733,65 @@ mod single_verification_plan_tests {
         );
         assert_eq!(status, owo_agent_protocol::CompletionStatusV1::Candidate);
         assert!(session.validation_receipts.is_empty());
+    }
+
+    #[test]
+    fn request_bound_plan_runs_for_a_verification_only_turn() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("src").join("lib.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "pub fn ready() -> bool { true }\n").unwrap();
+        let hash = crate::CasStore::hash_of(&std::fs::read(&source).unwrap());
+        let prompt = "运行验证 req-user-visible";
+        let turn_id = "verification-only-turn";
+        let command = "cargo test -p owo-agent-core";
+        let mut session = Session::new(workspace.path(), "mock", None);
+        session.single_verification_plan = Some(plan(
+            "workspace-command-success-v1",
+            "src/lib.rs",
+            serde_json::json!({"command":command}),
+        ));
+        session.single_verification_plan_input_sha256 =
+            Some(crate::CasStore::hash_of(prompt.as_bytes()));
+        session.single_verification_plan_turn_id = Some(turn_id.to_string());
+        let events = vec![TurnEvent::ToolResult {
+            id: "test-command".to_string(),
+            tool: "run_command".to_string(),
+            ok: true,
+            error: None,
+            preview: None,
+            command_receipt: Some(CommandExecutionReceipt {
+                command_sha256: crate::CasStore::hash_of(command.trim().as_bytes()),
+                exit_code: 0,
+                result_sha256: "result-hash".to_string(),
+                duration_ms: Some(100),
+                workspace_hashes_complete: true,
+                validator_id: Some("workspace-command-success-v1".to_string()),
+                validator_version: Some("1".to_string()),
+                workspace_hashes: std::collections::BTreeMap::from([(
+                    "src/lib.rs".to_string(),
+                    Some(hash),
+                )]),
+            }),
+        }];
+
+        let status = assess_single_turn_completion(
+            &mut session,
+            prompt,
+            turn_id,
+            &events,
+            false,
+            Some("验证命令通过。"),
+        );
+        assert_eq!(status, owo_agent_protocol::CompletionStatusV1::Accepted);
+        assert!(session.validation_receipts.iter().any(|receipt| {
+            receipt.requirement_id == "req-user-visible"
+                && receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+        }));
+        assert!(session.validation_receipts.iter().any(|receipt| {
+            receipt.requirement_id == "host-change-scope-coverage"
+                && receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+        }));
     }
 
     #[test]
