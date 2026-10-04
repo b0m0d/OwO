@@ -561,18 +561,27 @@ impl GoalRunner {
             }
 
             if !failed.is_empty() {
+                let completion_status = self
+                    .failed_step_verification_status(&failed)
+                    .unwrap_or(owo_agent_protocol::CompletionStatusV1::Blocked);
                 if !self.config.allow_replan {
-                    return self.fail_goal(format!(
-                        "步骤失败且 replan 未启用：{:?}",
-                        failed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>()
-                    ));
+                    return self.fail_goal_with_status(
+                        format!(
+                            "步骤失败且 replan 未启用：{:?}",
+                            failed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>()
+                        ),
+                        completion_status,
+                    );
                 }
                 if self.state.replan_count >= budget.max_replans {
-                    return self.fail_goal(format!(
-                        "步骤失败且 replan 次数超限（{}）：{:?}",
-                        budget.max_replans,
-                        failed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>()
-                    ));
+                    return self.fail_goal_with_status(
+                        format!(
+                            "步骤失败且 replan 次数超限（{}）：{:?}",
+                            budget.max_replans,
+                            failed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>()
+                        ),
+                        completion_status,
+                    );
                 }
                 self.replan(&failed);
             }
@@ -1090,21 +1099,42 @@ impl GoalRunner {
                         _ => {}
                     }
                     if verdict != crate::plan::ValidationVerdictV1::Passed {
-                        return self.fail_goal(format!(
-                            "目标验收要求 {} 未通过或未验证：{}",
-                            requirement.requirement_id,
-                            detail.as_deref().unwrap_or("验证器未返回通过")
-                        ));
+                        let completion_status =
+                            crate::completion::decide_completion(crate::completion::CompletionEvidence {
+                                response_finished: true,
+                                has_candidate_changes: true,
+                                required_validation_count: 1,
+                                passed_required_validation_count: usize::from(
+                                    verdict == crate::plan::ValidationVerdictV1::Passed,
+                                ),
+                                failed_required_validation_count: usize::from(
+                                    verdict == crate::plan::ValidationVerdictV1::Failed,
+                                ),
+                                stale_evidence: verdict
+                                    == crate::plan::ValidationVerdictV1::Stale,
+                                ..crate::completion::CompletionEvidence::default()
+                            });
+                        return self.fail_goal_with_status(
+                            format!(
+                                "目标验收要求 {} 未通过或未验证：{}",
+                                requirement.requirement_id,
+                                detail.as_deref().unwrap_or("验证器未返回通过")
+                            ),
+                            completion_status,
+                        );
                     }
                 }
             }
         }
         let stale_workspace_receipts = self.invalidate_stale_workspace_receipts();
         if !stale_workspace_receipts.is_empty() {
-            return self.fail_goal(format!(
-                "目标最终验收发现工作区文件已偏离通过验证的快照：{}",
-                stale_workspace_receipts.join(", ")
-            ));
+            return self.fail_goal_with_status(
+                format!(
+                    "目标最终验收发现工作区文件已偏离通过验证的快照：{}",
+                    stale_workspace_receipts.join(", ")
+                ),
+                owo_agent_protocol::CompletionStatusV1::Unverified,
+            );
         }
 
         let completion_status = crate::completion::decide_completion(
@@ -1122,9 +1152,12 @@ impl GoalRunner {
             owo_agent_protocol::CompletionStatusV1::ResponseComplete
                 | owo_agent_protocol::CompletionStatusV1::Accepted
         ) {
-            return self.fail_goal(format!(
-                "目标候选结果未达到共享完成条件：{completion_status:?}；需要宿主验证计划或人工验收"
-            ));
+            return self.fail_goal_with_status(
+                format!(
+                    "目标候选结果未达到共享完成条件：{completion_status:?}；需要宿主验证计划或人工验收"
+                ),
+                completion_status,
+            );
         }
         let step_receipts = self
             .state
@@ -1196,10 +1229,13 @@ impl GoalRunner {
         drop(receipts);
         let final_stale_workspace_receipts = self.invalidate_stale_workspace_receipts();
         if !final_stale_workspace_receipts.is_empty() {
-            return self.fail_goal(format!(
-                "目标候选摘要生成后工作区再次变化，验证快照已失效：{}",
-                final_stale_workspace_receipts.join(", ")
-            ));
+            return self.fail_goal_with_status(
+                format!(
+                    "目标候选摘要生成后工作区再次变化，验证快照已失效：{}",
+                    final_stale_workspace_receipts.join(", ")
+                ),
+                owo_agent_protocol::CompletionStatusV1::Unverified,
+            );
         }
         self.state.completion_record = Some(crate::completion::build_completion_record(
             &self.state.goal.id,
@@ -1214,7 +1250,114 @@ impl GoalRunner {
         Ok(GoalStatus::Succeeded)
     }
 
+    fn failed_step_verification_status(
+        &self,
+        failed_steps: &[StepSpec],
+    ) -> Option<owo_agent_protocol::CompletionStatusV1> {
+        use crate::plan::ValidationVerdictV1;
+
+        let mut required = 0usize;
+        let mut passed = 0usize;
+        let mut failed = 0usize;
+        let mut stale = false;
+        let mut observed_current_receipt = false;
+        let mut non_validation_failure = false;
+
+        for step in failed_steps {
+            let plan = step.verification_plan.clone().or_else(|| {
+                step.verify.as_ref().map(|spec| {
+                    crate::verification::plan_for_specs(
+                        &format!("verify-step-{}", step.id),
+                        std::slice::from_ref(spec),
+                    )
+                })
+            });
+            let Some(plan) = plan else {
+                non_validation_failure = true;
+                continue;
+            };
+            let Some(record) = self.state.records.get(&step.id) else {
+                non_validation_failure = true;
+                continue;
+            };
+            let Some(attempt_id) = record.attempt_id.as_deref() else {
+                non_validation_failure = true;
+                continue;
+            };
+            let Some(epoch) = record.phase_epoch else {
+                non_validation_failure = true;
+                continue;
+            };
+            let mut step_observed_receipt = false;
+
+            for requirement in plan.requirements.iter().filter(|item| item.required) {
+                required = required.saturating_add(1);
+                let arguments_sha256 = crate::cas_store::CasStore::hash_of(
+                    &serde_json::to_vec(&requirement.arguments).unwrap_or_default(),
+                );
+                let receipt = record.validation_receipts.iter().rev().find(|receipt| {
+                    receipt.task_id == step.id
+                        && receipt.attempt_id == attempt_id
+                        && receipt.epoch == epoch
+                        && receipt.requirement_id == requirement.requirement_id
+                        && receipt.validator_id == requirement.validator_id
+                        && receipt.validator_version
+                            == requirement
+                                .validator_version
+                                .as_deref()
+                                .unwrap_or("unknown")
+                        && receipt.arguments_sha256 == arguments_sha256
+                });
+                let Some(receipt) = receipt else {
+                    continue;
+                };
+                observed_current_receipt = true;
+                step_observed_receipt = true;
+                match receipt.verdict {
+                    ValidationVerdictV1::Passed => passed = passed.saturating_add(1),
+                    ValidationVerdictV1::Failed => failed = failed.saturating_add(1),
+                    ValidationVerdictV1::Stale => stale = true,
+                    ValidationVerdictV1::Unsupported
+                    | ValidationVerdictV1::Unverified
+                    | ValidationVerdictV1::ManualAccepted => {}
+                }
+            }
+            if !step_observed_receipt {
+                non_validation_failure = true;
+            }
+        }
+
+        if non_validation_failure || !observed_current_receipt || required == 0 {
+            return None;
+        }
+        let status = crate::completion::decide_completion(
+            crate::completion::CompletionEvidence {
+                response_finished: true,
+                has_candidate_changes: true,
+                required_validation_count: required,
+                passed_required_validation_count: passed,
+                failed_required_validation_count: failed,
+                stale_evidence: stale,
+                ..crate::completion::CompletionEvidence::default()
+            },
+        );
+        (!matches!(
+            status,
+            owo_agent_protocol::CompletionStatusV1::Accepted
+                | owo_agent_protocol::CompletionStatusV1::ResponseComplete
+        ))
+        .then_some(status)
+    }
+
     fn fail_goal(&mut self, reason: String) -> Result<GoalStatus, String> {
+        self.fail_goal_with_status(reason, owo_agent_protocol::CompletionStatusV1::Blocked)
+    }
+
+    fn fail_goal_with_status(
+        &mut self,
+        reason: String,
+        completion_status: owo_agent_protocol::CompletionStatusV1,
+    ) -> Result<GoalStatus, String> {
         let evidence_receipt_ids = self
             .state
             .validation_receipts
@@ -1230,7 +1373,7 @@ impl GoalRunner {
         self.state.completion_record = Some(crate::completion::build_completion_record(
             &self.state.goal.id,
             &self.state.run_id,
-            owo_agent_protocol::CompletionStatusV1::Blocked,
+            completion_status,
             evidence_receipt_ids,
             None,
         ));

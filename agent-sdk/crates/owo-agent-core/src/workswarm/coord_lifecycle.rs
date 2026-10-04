@@ -4,6 +4,20 @@ use super::delivery_gate_evidence::{
 };
 use super::*;
 
+fn failed_run_completion_status(
+    previous: Option<owo_agent_protocol::CompletionStatusV1>,
+) -> owo_agent_protocol::CompletionStatusV1 {
+    previous
+        .filter(|status| {
+            matches!(
+                status,
+                owo_agent_protocol::CompletionStatusV1::Candidate
+                    | owo_agent_protocol::CompletionStatusV1::Unverified
+            )
+        })
+        .unwrap_or(owo_agent_protocol::CompletionStatusV1::Blocked)
+}
+
 impl TeamCoordinator {
     /// 失败收尾（team → Failed；产物保留；成员 Degraded）。
     pub(crate) async fn fail_run_internal(
@@ -33,10 +47,13 @@ impl TeamCoordinator {
             )
             .map(|receipt| receipt.receipt_id.clone())
             .collect::<Vec<_>>();
+        let completion_status = failed_run_completion_status(
+            state.completion_record.as_ref().map(|record| record.status),
+        );
         state.completion_record = Some(crate::completion::build_completion_record(
             team_id,
             &state.run_id,
-            owo_agent_protocol::CompletionStatusV1::Blocked,
+            completion_status,
             evidence_receipt_ids,
             None,
         ));
@@ -1801,5 +1818,35 @@ mod validation_receipt_identity_tests {
         let mut other_scope = input();
         other_scope.scope = &MANUAL_SCOPE;
         assert_ne!(base_id, make_validation_receipt(other_scope).receipt_id);
+    }
+}
+
+#[cfg(test)]
+mod completion_status_tests {
+    use super::failed_run_completion_status;
+    use owo_agent_protocol::CompletionStatusV1;
+
+    #[test]
+    fn failed_team_run_preserves_candidate_and_unverified_states_only() {
+        assert_eq!(
+            failed_run_completion_status(Some(CompletionStatusV1::Candidate)),
+            CompletionStatusV1::Candidate
+        );
+        assert_eq!(
+            failed_run_completion_status(Some(CompletionStatusV1::Unverified)),
+            CompletionStatusV1::Unverified
+        );
+        assert_eq!(
+            failed_run_completion_status(Some(CompletionStatusV1::Accepted)),
+            CompletionStatusV1::Blocked
+        );
+        assert_eq!(
+            failed_run_completion_status(Some(CompletionStatusV1::Blocked)),
+            CompletionStatusV1::Blocked
+        );
+        assert_eq!(
+            failed_run_completion_status(None),
+            CompletionStatusV1::Blocked
+        );
     }
 }

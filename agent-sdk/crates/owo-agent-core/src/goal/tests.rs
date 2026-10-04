@@ -171,7 +171,7 @@ fn prior_attempt_receipt_cannot_satisfy_the_current_step_requirement() {
     assert_eq!(runner.verify_goal().unwrap(), GoalStatus::Failed);
     assert_eq!(
         runner.state.completion_record.unwrap().status,
-        owo_agent_protocol::CompletionStatusV1::Blocked
+        owo_agent_protocol::CompletionStatusV1::Unverified
     );
 }
 
@@ -213,6 +213,10 @@ fn unsupported_goal_verifier_is_recorded_and_cannot_succeed() {
         runner.state.validation_receipts[0].verdict,
         crate::plan::ValidationVerdictV1::Unsupported
     );
+    assert_eq!(
+        runner.state.completion_record.as_ref().unwrap().status,
+        owo_agent_protocol::CompletionStatusV1::Unverified
+    );
 }
 
 #[test]
@@ -244,6 +248,10 @@ fn goal_with_executed_steps_and_no_validation_plan_is_not_accepted() {
         .error
         .as_deref()
         .is_some_and(|error| error.contains("共享完成条件")));
+    assert_eq!(
+        runner.state.completion_record.as_ref().unwrap().status,
+        owo_agent_protocol::CompletionStatusV1::Candidate
+    );
 }
 
 struct FixedOutputWorker(&'static str);
@@ -461,6 +469,10 @@ async fn malformed_passed_host_command_receipt_cannot_succeed_a_goal_step() {
     assert_eq!(runner.run(&workers).await.unwrap(), GoalStatus::Failed);
     let receipt = &runner.state.records["step-command"].validation_receipts[0];
     assert_eq!(receipt.verdict, crate::plan::ValidationVerdictV1::Unverified);
+    assert_eq!(
+        runner.state.completion_record.as_ref().unwrap().status,
+        owo_agent_protocol::CompletionStatusV1::Unverified
+    );
     assert!(receipt.evidence_refs.iter().all(|reference| {
         !reference.starts_with("command-result:")
     }));
@@ -500,6 +512,10 @@ async fn workspace_command_requirement_stays_unsupported_without_host_receipt_re
     assert_eq!(
         runner.state.records["step-command"].validation_receipts[0].verdict,
         crate::plan::ValidationVerdictV1::Unsupported
+    );
+    assert_eq!(
+        runner.state.completion_record.as_ref().unwrap().status,
+        owo_agent_protocol::CompletionStatusV1::Unverified
     );
 }
 
@@ -564,7 +580,7 @@ async fn goal_cannot_accept_a_workspace_receipt_after_a_later_step_mutates_its_f
     }));
     assert_eq!(
         runner.state.completion_record.as_ref().unwrap().status,
-        owo_agent_protocol::CompletionStatusV1::Blocked
+        owo_agent_protocol::CompletionStatusV1::Unverified
     );
     std::fs::remove_dir_all(root).unwrap();
 }
