@@ -34,6 +34,21 @@ mod tests;
 pub use types::*;
 
 type StepSkipper = Arc<dyn Fn(&StepSpec) -> Option<String> + Send + Sync>;
+type WorkspaceCommandVerifier = Arc<
+    dyn Fn(&str, &str, &crate::plan::VerificationRequirementV1) -> HostCommandValidationV1
+        + Send
+        + Sync,
+>;
+
+/// Host-collected result for a registered workspace command check.
+/// The callback must only return evidence issued by the trusted tool host.
+#[derive(Debug, Clone)]
+pub struct HostCommandValidationV1 {
+    pub verdict: crate::plan::ValidationVerdictV1,
+    pub detail: Option<String>,
+    pub subject_sha256: std::collections::BTreeMap<String, String>,
+    pub evidence_ref: Option<String>,
+}
 
 /// Goal/Plan 调度器：wave 拓扑 + 并行限流 + 重试 + 验证 + replan + 恢复 + 审计。
 ///
@@ -58,6 +73,7 @@ pub struct GoalRunner {
     /// 可选动态 ready 节点跳过判定（用于运行期质量策略）。
     step_skipper: Option<StepSkipper>,
     workspace_verification_root: Option<std::path::PathBuf>,
+    workspace_command_verifier: Option<WorkspaceCommandVerifier>,
 }
 
 impl GoalRunner {
@@ -73,6 +89,7 @@ impl GoalRunner {
             step_progress: None,
             step_skipper: None,
             workspace_verification_root: None,
+            workspace_command_verifier: None,
         }
     }
 
@@ -97,6 +114,7 @@ impl GoalRunner {
             step_progress: None,
             step_skipper: None,
             workspace_verification_root: None,
+            workspace_command_verifier: None,
         }
     }
 
@@ -112,6 +130,23 @@ impl GoalRunner {
     /// 没有绑定时验证结果保持 Unverified，必需要求会阻止下游依赖解锁。
     pub fn attach_workspace_verification_root(&mut self, root: impl Into<std::path::PathBuf>) {
         self.workspace_verification_root = Some(root.into());
+    }
+
+    /// Attach a host-owned receipt resolver for registered workspace behavior commands.
+    /// GoalRunner never runs the command itself; without this trusted resolver, the
+    /// command requirement remains Unsupported and cannot unlock dependent steps.
+    pub fn attach_workspace_command_verifier<F>(&mut self, verifier: F)
+    where
+        F: Fn(
+                &str,
+                &str,
+                &crate::plan::VerificationRequirementV1,
+            ) -> HostCommandValidationV1
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.workspace_command_verifier = Some(Arc::new(verifier));
     }
 
     /// 对刚就绪步骤执行确定性跳过判定；返回原因时该节点以成功跳过方式收敛。
@@ -327,6 +362,7 @@ impl GoalRunner {
             run_id: self.state.run_id.clone(),
             cancels: DispatchCancelRegistry::default(),
             workspace_verification_root: self.workspace_verification_root.clone(),
+            workspace_command_verifier: self.workspace_command_verifier.clone(),
         };
 
         loop {
@@ -1286,6 +1322,7 @@ struct StepRuntime {
     /// 在飞远端派发任务登记表（abort 收尾统一 cancel）。
     cancels: DispatchCancelRegistry,
     workspace_verification_root: Option<std::path::PathBuf>,
+    workspace_command_verifier: Option<WorkspaceCommandVerifier>,
 }
 
 /// 显式绑定解析结果（A2 定向派发与旧解析链的分界）。
@@ -1882,12 +1919,55 @@ fn verify_step_output(
     let mut failures = Vec::new();
     for requirement in &plan.requirements {
         let started_at = chrono::Utc::now().to_rfc3339();
-        let (verdict, detail, workspace_subjects) =
-            crate::verification::execute_registered_requirement(
-                requirement,
-                output,
-                rt.workspace_verification_root.as_deref(),
-            );
+        let (verdict, detail, workspace_subjects, command_evidence_ref) =
+            if requirement.validator_id == "workspace-command-success-v1" {
+                let resources = &requirement.resources;
+                let supported = requirement.validator_version.as_deref() == Some("1")
+                    && matches!(
+                        &requirement.scope,
+                        crate::plan::VerificationScopeV1::WorkspacePaths { .. }
+                    )
+                    && crate::verification::workspace_validator_arguments_supported(
+                        &requirement.validator_id,
+                        &requirement.arguments,
+                    )
+                    && resources.cpu_slots == 1
+                    && (8..=128).contains(&resources.memory_mb)
+                    && !resources.exclusive_workspace
+                    && (1..=30_000).contains(&resources.timeout_ms);
+                if !supported {
+                    (
+                        crate::plan::ValidationVerdictV1::Unsupported,
+                        Some("workspace-command-success-v1 不符合宿主注册契约".to_string()),
+                        std::collections::BTreeMap::new(),
+                        None,
+                    )
+                } else if let Some(verifier) = &rt.workspace_command_verifier {
+                    let host_result = verifier(&step.id, attempt_id, requirement);
+                    (
+                        host_result.verdict,
+                        host_result.detail,
+                        host_result.subject_sha256,
+                        host_result.evidence_ref,
+                    )
+                } else {
+                    let (verdict, detail, subjects) =
+                        crate::verification::execute_registered_requirement(
+                            requirement,
+                            output,
+                            rt.workspace_verification_root.as_deref(),
+                        );
+                    (verdict, detail, subjects, None)
+                }
+            } else {
+                let (verdict, detail, subjects) =
+                    crate::verification::execute_registered_requirement(
+                        requirement,
+                        output,
+                        rt.workspace_verification_root.as_deref(),
+                    );
+                (verdict, detail, subjects, None)
+            };
         let arguments = serde_json::to_vec(&requirement.arguments).unwrap_or_default();
         let validator_version = requirement
             .validator_version
@@ -1933,10 +2013,16 @@ fn verify_step_output(
                 subjects
             },
             verdict,
-            evidence_refs: vec![format!(
-                "goal-step://{}/{}/{}",
-                rt.run_id, step.id, attempt_id
-            )],
+            evidence_refs: {
+                let mut refs = vec![format!(
+                    "goal-step://{}/{}/{}",
+                    rt.run_id, step.id, attempt_id
+                )];
+                if let Some(reference) = command_evidence_ref {
+                    refs.push(reference);
+                }
+                refs
+            },
             started_at,
             completed_at: chrono::Utc::now().to_rfc3339(),
         });

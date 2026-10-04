@@ -302,6 +302,108 @@ async fn typed_step_plan_executes_and_persists_attempt_bound_receipt() {
     );
 }
 
+#[tokio::test]
+async fn host_command_verifier_receipt_is_consumed_by_goal_step_and_bound_to_attempt() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("src")).unwrap();
+    let source = root.path().join("src/lib.rs");
+    std::fs::write(&source, "pub fn ready() {}\n").unwrap();
+    let workspace_hash = crate::cas_store::CasStore::hash_of(&std::fs::read(&source).unwrap());
+
+    let goal = Goal::new("g-command-receipt", "consume host behavior receipt");
+    let mut plan = Plan::new("p-command-receipt", "g-command-receipt");
+    let mut step = crate::plan::StepSpec::new("step-command", "fixed-output");
+    step.verification_plan = Some(crate::plan::VerificationPlanV1 {
+        plan_id: "command-plan".to_string(),
+        requirements: vec![crate::plan::VerificationRequirementV1 {
+            requirement_id: "behavior".to_string(),
+            covers_requirement_ids: Vec::new(),
+            validator_id: "workspace-command-success-v1".to_string(),
+            validator_version: Some("1".to_string()),
+            scope: crate::plan::VerificationScopeV1::WorkspacePaths {
+                relative_paths: vec!["src/lib.rs".to_string()],
+            },
+            arguments: serde_json::json!({"command":"cargo test -p owo-agent-core"}),
+            required: true,
+            resources: crate::plan::VerificationResourcesV1 {
+                cpu_slots: 1,
+                memory_mb: 16,
+                exclusive_workspace: false,
+                timeout_ms: 10_000,
+            },
+        }],
+    });
+    plan.add_step(step);
+    let workers = WorkerRegistry::new();
+    workers.register(std::sync::Arc::new(FixedOutputWorker("candidate")));
+    let mut runner = GoalRunner::new(goal, plan, RunnerConfig::default());
+    runner.attach_workspace_verification_root(root.path().to_path_buf());
+    runner.attach_workspace_command_verifier(move |step_id, attempt_id, requirement| {
+        assert_eq!(step_id, "step-command");
+        assert_eq!(requirement.requirement_id, "behavior");
+        crate::goal::HostCommandValidationV1 {
+            verdict: crate::plan::ValidationVerdictV1::Passed,
+            detail: None,
+            subject_sha256: std::collections::BTreeMap::from([(
+                "workspace-path:src/lib.rs".to_string(),
+                workspace_hash.clone(),
+            )]),
+            evidence_ref: Some(format!("command-result:host:{attempt_id}")),
+        }
+    });
+
+    assert_eq!(runner.run(&workers).await.unwrap(), GoalStatus::Succeeded);
+    let record = runner.state.records.get("step-command").unwrap();
+    let receipt = record.validation_receipts.first().unwrap();
+    assert_eq!(receipt.attempt_id, record.attempt_id.as_deref().unwrap());
+    assert_eq!(receipt.verdict, crate::plan::ValidationVerdictV1::Passed);
+    assert_eq!(
+        receipt.subject_sha256.get("workspace-path:src/lib.rs"),
+        Some(&workspace_hash)
+    );
+    assert!(receipt
+        .evidence_refs
+        .iter()
+        .any(|reference| reference == &format!("command-result:host:{}", receipt.attempt_id)));
+}
+
+#[tokio::test]
+async fn workspace_command_requirement_stays_unsupported_without_host_receipt_resolver() {
+    let goal = Goal::new("g-command-no-host", "require trusted command evidence");
+    let mut plan = Plan::new("p-command-no-host", "g-command-no-host");
+    let mut step = crate::plan::StepSpec::new("step-command", "fixed-output");
+    step.verification_plan = Some(crate::plan::VerificationPlanV1 {
+        plan_id: "command-plan".to_string(),
+        requirements: vec![crate::plan::VerificationRequirementV1 {
+            requirement_id: "behavior".to_string(),
+            covers_requirement_ids: Vec::new(),
+            validator_id: "workspace-command-success-v1".to_string(),
+            validator_version: Some("1".to_string()),
+            scope: crate::plan::VerificationScopeV1::WorkspacePaths {
+                relative_paths: vec!["src/lib.rs".to_string()],
+            },
+            arguments: serde_json::json!({"command":"cargo test -p owo-agent-core"}),
+            required: true,
+            resources: crate::plan::VerificationResourcesV1 {
+                cpu_slots: 1,
+                memory_mb: 16,
+                exclusive_workspace: false,
+                timeout_ms: 10_000,
+            },
+        }],
+    });
+    plan.add_step(step);
+    let workers = WorkerRegistry::new();
+    workers.register(std::sync::Arc::new(FixedOutputWorker("candidate")));
+    let mut runner = GoalRunner::new(goal, plan, RunnerConfig::default());
+
+    assert_eq!(runner.run(&workers).await.unwrap(), GoalStatus::Failed);
+    assert_eq!(
+        runner.state.records["step-command"].validation_receipts[0].verdict,
+        crate::plan::ValidationVerdictV1::Unsupported
+    );
+}
+
 struct MutateWorkspaceWorker(std::path::PathBuf);
 
 #[async_trait::async_trait]

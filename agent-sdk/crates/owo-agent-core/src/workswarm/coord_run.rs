@@ -1011,6 +1011,41 @@ impl TeamCoordinator {
         if let Some(root) = self.verification_workspace(team_id) {
             runner.attach_workspace_verification_root(root);
         }
+        let verifier_coordinator = self.clone();
+        let verifier_team_id = team_id.to_string();
+        let verifier_run_dir = self.run_dir.clone();
+        runner.attach_workspace_command_verifier(move |step_id, attempt_id, requirement| {
+            let command_events = verifier_coordinator
+                .runtime_event_details(&verifier_team_id, "team.command.executed");
+            let change_sets = match crate::change_set_store::ChangeSetStore::new(&verifier_run_dir)
+                .list_for_team(&verifier_team_id)
+            {
+                Ok(change_sets) => change_sets,
+                Err(error) => {
+                    return crate::goal::HostCommandValidationV1 {
+                        verdict: crate::plan::ValidationVerdictV1::Unverified,
+                        detail: Some(format!("读取宿主 ChangeSet 失败：{error}")),
+                        subject_sha256: std::collections::BTreeMap::new(),
+                        evidence_ref: None,
+                    };
+                }
+            };
+            let (verdict, detail, subject_sha256, evidence_ref) =
+                super::delivery_gate_evidence::evaluate_workspace_command_receipt(
+                    &verifier_team_id,
+                    requirement,
+                    &command_events,
+                    step_id,
+                    attempt_id,
+                    &change_sets,
+                );
+            crate::goal::HostCommandValidationV1 {
+                verdict,
+                detail,
+                subject_sha256,
+                evidence_ref,
+            }
+        });
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         runner.attach_step_progress(progress_tx);
         if is_code_change_template || parallel_leader_uses_host_manifest {
