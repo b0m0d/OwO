@@ -1594,9 +1594,12 @@ impl TeamCoordinator {
             }
         }
         if let Some((owner_step_id, instruction, review_id, attempt, issue_id)) = repair_request {
-            if attempt >= 2 {
+            let max_retries_per_step = state.goal.budget.max_retries_per_step;
+            if review_rework_budget_exhausted(attempt, max_retries_per_step) {
                 self.set_run_active(team_id, false);
-                let reason = format!("评审问题在两次局部返修后仍未关闭：{}", review_id);
+                let reason = format!(
+                    "评审问题在最多 {max_retries_per_step} 次局部返修后仍未关闭：{review_id}"
+                );
                 self.fail_run_internal(team_id, &mut team, &mut state, &reason)
                     .await?;
                 return Ok(PhaseOutcome::Failed);
@@ -1917,6 +1920,10 @@ impl TeamCoordinator {
 
         Ok(())
     }
+}
+
+fn review_rework_budget_exhausted(attempt: u64, max_retries_per_step: u32) -> bool {
+    attempt >= u64::from(max_retries_per_step)
 }
 
 /// Stable for replay of one review result, distinct when the source review or
@@ -3564,5 +3571,20 @@ mod team_budget_validation_tests {
         .unwrap_err()
         .contains("max_wall_secs"));
         assert!(validate_team_budget_config(&json!(false)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod review_rework_budget_tests {
+    use super::review_rework_budget_exhausted;
+
+    #[test]
+    fn review_rework_uses_the_configured_per_step_retry_budget() {
+        assert!(!review_rework_budget_exhausted(0, 2));
+        assert!(!review_rework_budget_exhausted(1, 2));
+        assert!(review_rework_budget_exhausted(2, 2));
+        assert!(!review_rework_budget_exhausted(2, 4));
+        assert!(review_rework_budget_exhausted(0, 0));
+        assert!(review_rework_budget_exhausted(u64::MAX, u32::MAX));
     }
 }
