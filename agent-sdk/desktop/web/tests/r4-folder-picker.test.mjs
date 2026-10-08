@@ -22,6 +22,7 @@ const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pickerSource = readFileSync(join(WEB, "core", "folder-picker.js"), "utf8");
 const indexHtml = readFileSync(join(WEB, "index.html"), "utf8");
 const appSource = readFileSync(join(WEB, "app.js"), "utf8");
+const appDomainSource = readFileSync(join(WEB, "app-domain.js"), "utf8");
 const setupSource = readFileSync(join(WEB, "views", "setup-guide.view.js"), "utf8");
 const cssSource = readFileSync(join(WEB, "style.css"), "utf8");
 
@@ -187,33 +188,30 @@ test("normalize：代际/attempt 数字归一，缺失归 null（不得用 0 冒
   assert.equal(ledger.normalize({ ok: true }).error, "设置工作区失败", "壳说成功却没回路径 → 判失败，不得凭空认为已设置");
 });
 
-test("接线：侧栏工作区字段与引导页都挂原生选择器，手输提示只在非桌面分支", () => {
-  // index.html：字段 + 按钮同一行，且有可读的口径说明。
-  assert.match(indexHtml, /<div class="owo-field-row">\s*<input id="workspace"/, "工作区输入框必须与选择按钮同组");
-  assert.match(indexHtml, /<button id="chooseWorkspace"[^>]*type="button"/, "侧栏要有显式选择目录按钮");
-  assert.match(indexHtml, /<script src="core\/folder-picker\.js"><\/script>/, "模块必须被引入");
-  const pickerAt = indexHtml.indexOf("core/folder-picker.js");
-  assert.ok(pickerAt > 0 && pickerAt < indexHtml.indexOf("views/setup-guide.view.js"), "引导页在模块之后加载");
-  assert.ok(pickerAt < indexHtml.indexOf("<script src=\"app.js\""), "app.js 必须在模块之后加载");
+test("接线：工具页的工作区选择与引导页均走原生选择器，所选路径进入新会话", () => {
+  assert.match(indexHtml, /<div class="tool-actions">\s*<input id="workspace"[^>]*>[\s\S]*?<button type="button" id="workspaceBrowseBtn"/,
+    "工作区输入与选择按钮必须同组");
+  assert.match(indexHtml, /<script src="core\/folder-picker\.js"><\/script>/, "共享选择器必须被引入");
+  assert.match(appSource, /async function pickDirectory\(\)[\s\S]*api\("\/fs\/pick-directory"/,
+    "工具页通过统一 API 请求宿主原生选择对话框");
+  assert.match(appSource, /\$\("workspaceBrowseBtn"\)\.addEventListener\("click", \(\) => pickDirectory\(\)\)/,
+    "工作区浏览按钮必须有实际动作");
+  assert.match(appSource, /\$\("composerProjectBtn"\)\.addEventListener\("click",[\s\S]*openWorkspaceMenu/,
+    "对话区项目入口打开统一工作区菜单");
+  assert.match(appSource, /data-project-action="switch"[\s\S]*pickDirectory\(\)/,
+    "工作区菜单继续提供原生目录选择入口");
+  assert.match(appDomainSource, /async function newSession\(\)[\s\S]*workspace,/, "新会话必须使用选定的工作区路径");
+  assert.match(appSource, /\$\("workspace"\)\.addEventListener\("change", \(\) => \{[\s\S]*localStorage\.setItem\("owo\.workspace"/,
+    "所选路径需持久为下次会话的默认值");
 
-  // app.js：选定后写状态 + 复位连接（换工作区=壳已重拉核心）+ 重绘状态条。
-  assert.match(appSource, /window\.OwoFolderPicker\.attach\(\$\("workspace"\), \$\("chooseWorkspace"\)/, "侧栏入口必须接上");
-  assert.match(appSource, /function applyWorkspacePicked\(workspace\)/);
-  assert.match(appSource, /state\.workspaceRoot = workspace;/);
-  assert.match(appSource, /OwoApi\.resetCoreConnection\(\)/, "新代际的端口/token 必须作废");
-  assert.match(appSource, /OwoStatusBar\.repaint\(\)/, "状态条要立刻反映新工作区");
-  assert.match(appSource, /onCanceled: \(\) => \{[^}]*取消是合法终态/, "取消不得改状态");
-
-  // 引导页：原生分支存在，且「粘贴完整绝对路径」这句禁止做法只在 else 分支。
-  assert.match(setupSource, /OwoFolderPicker\.isNativeAvailable\(global\)/, "引导页必须判定环境");
-  assert.match(setupSource, /OwoFolderPicker\.attach\(pathInput, browseButton/, "引导页浏览按钮走原生选择器");
+  assert.match(setupSource, /OwoFolderPicker\.isNativeAvailable\(global\)/, "首启引导必须判定原生选择器");
+  assert.match(setupSource, /OwoFolderPicker\.attach\(pathInput, browseButton/, "首启选择走共享原生选择器");
   assert.match(setupSource, /pathHint\.textContent = "由原生目录选择器设定，不需要手输完整路径。"/);
   const nativeBranch = setupSource.indexOf("if (nativePicker)");
   const elseBranch = setupSource.indexOf("picker.addEventListener");
-  assert.ok(nativeBranch > 0 && elseBranch > nativeBranch, "webkitdirectory 手输回退只能在非桌面分支");
-  assert.ok(cssSource.includes(".owo-field-row"), "字段行样式必须存在");
+  assert.ok(nativeBranch > 0 && elseBranch > nativeBranch, "网页目录输入只作为浏览器开发回退");
+  assert.ok(cssSource.includes(".tool-actions"), "工具页表单行样式必须存在");
 });
-
 test("脱敏红线：路径不进 title 之外的展示口径，别名列只显示目录名", () => {
   const sandbox = loadPicker({ native: true });
   assert.equal(sandbox.OwoFolderPicker.aliasFor("T:\\创新创业\\OwO-master\\agent-sdk"), "agent-sdk");

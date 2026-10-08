@@ -1,0 +1,111 @@
+{
+  "date": "2026-10-04",
+  "source_head": "3d2b03ac7f04443984cef20f0c00c3bdf7b5e7eb",
+  "dirty_worktree": true,
+  "scope": "active workbench ProductEval comparison lifecycle",
+  "source_sha256": {
+    "desktop/web/panels/product-comparison.panel.js": "8fb7b629a7ed213af52c0b7959f7ec8cad70266c5f7304684c3b60e097930e8e",
+    "desktop/web/tests/product-comparison.test.mjs": "bf56dfbb4784d36cf0714640b0c8bcd731b38b6eda084bad35d5dcc66458f980",
+    "desktop/web/app.js": "b6254228edc817ae1c5cb549f027e72ca9235e6ccf950f3606ab9233dac338ac",
+    "desktop/web/index.html": "d1a39e093b47c370e9a429706d32feaae0329b82964a45315b48f4ad58cca215",
+    "desktop/web/style.css": "664e0f806ae13a155bec7f6ea8a1aab9fcaa912d072ac73bd3c780e51c6ad978"
+  },
+  "host_contract": {
+    "routes": [
+      "POST /product-eval/runs",
+      "GET /product-eval/runs",
+      "GET /product-eval/runs/{id}",
+      "POST /product-eval/runs/{id}/cancel"
+    ],
+    "suite": "v1",
+    "execution": [
+      "reference",
+      "live"
+    ],
+    "modes": [
+      "single",
+      "workswarm"
+    ],
+    "repetitions": "1..20",
+    "model_selection": "host current configuration, no invented per-request model override"
+  },
+  "targeted_tests": {
+    "passed": 72,
+    "failed": 0,
+    "exit_code": 0,
+    "comparison_behavior_cases": 13
+  },
+  "full_web_tests": {
+    "exit_code": 1,
+    "summary": [
+      "# tests 425",
+      "# pass 389",
+      "# fail 36",
+      "# skipped 0"
+    ],
+    "failures": [
+      "not ok 17 - 接线守卫：index.html 脚本 + PANEL_ORDER 唯一来源 app-domain.js + style.css 第 21 节在场",
+      "not ok 33 - 路由切换在清空页面前保留设置节点，自动恢复会启动周期刷新",
+      "not ok 80 - §12-14 首屏收敛：健康检查先行 + 4 个无兜底水合，总请求 ≤5",
+      "not ok 81 - 后台刷新：防重入 + 页面隐藏暂停 + 路由可见性标注",
+      "not ok 82 - §3.1 事件流 Bearer 认证 + 域失效事件驱动 + 低频兜底 + 单一连接",
+      "not ok 83 - 单飞恢复：定时驱动与手动重试共用同一控制器",
+      "not ok 84 - §8.2 桌面后台态：守卫不得只看 document.visibilityState",
+      "not ok 10 - tests\\\\product-eval.panel.test.mjs",
+      "not ok 186 - PANEL_ORDER 注册 project-history（唯一来源 app-domain.js）",
+      "not ok 187 - style.css 提供面板样式节（.owo-ac-* 复用 + ph 专属类）",
+      "not ok 213 - style.css 第 20 节守卫：Launcher 布局/预览/目录/工作区/徽标/窄栏在场",
+      "not ok 225 - 契约2：renderSetupGuide 必须有异常兜底，不允许主区留空",
+      "not ok 226 - 契约3：壳连接快照缺失时仍走引导判定（provider 分流不被跳过）",
+      "not ok 229 - needsSetup 必须把 provider/not_configured 认成引导页（不是错误卡）",
+      "not ok 239 - 接线：index.html 引脚本 + 容器就位，app.js 只在设置路由按需加载（不进首屏清单）",
+      "not ok 249 - 接线：侧栏工作区字段与引导页都挂原生选择器，手输提示只在非桌面分支",
+      "not ok 287 - 接线：ROUTE_META/rail/脚本顺序/状态条降级分支改指权限中心",
+      "not ok 288 - 既有审批条字面量未被触碰（ui-ia-fixes 锁定的 scope 一个字都没改）",
+      "not ok 19 - tests\\\\r4-setup-gate.test.mjs",
+      "not ok 303 - 接线：容器与脚本就位、boot 早期挂载、导航事件有接收方",
+      "not ok 328 - §8.2 UI 文案 lint：普通界面不得泄漏 API 路径、HTTP 方法与内部字段名",
+      "not ok 331 - §5.1.6 断连态统一：所有路由复用同一 ServiceUnavailable 卡片",
+      "not ok 332 - §5.1.8 OpenAPI 链接由 API base 构造绝对地址",
+      "not ok 333 - §4.6/§4.8 首次配置引导：NoWorkspace 分流 + 提供商选择",
+      "not ok 334 - §5.1.2 最小窗口（900×600）rail 不再越界",
+      "not ok 336 - §5.5 审批卡：脱敏展示 + 原始 JSON 收进开发者详情 + scope 选项",
+      "not ok 337 - §12-13 自由文本改约束控件：自动化三态 / MCP 传输切换 / CSV chips / 白名单候选",
+      "not ok 338 - 模块边界守卫：app.js 与 app-domain.js 函数定义零交集",
+      "not ok 339 - §12-12 工具与高级系统移入路由化设置页 + 开发者模式门控",
+      "not ok 340 - R10 侧栏瘦身：工具/开发者分区不再挤在侧栏常显位置",
+      "not ok 341 - R12 会话卡片：低频操作收进 ⋯ 弹层，卡片上不再堆按钮",
+      "not ok 342 - R13 模型参数全部文件驱动：地址/模型名/上下文/输出/温度/超时 都不写死",
+      "not ok 343 - R10 模型配置：一级入口 + 自定义地址/模型名默认可见 + 会话级切换",
+      "not ok 366 - style.css 第 16 节守卫：inline 换行/中断徽标/重试按钮/表格包裹/窄栏断点/焦点环",
+      "not ok 377 - 四期样式守卫：style.css 第 18 节进度区/评审闭环/统计判读/徽标/窄栏守卫在场",
+      "not ok 394 - 五期样式守卫：style.css 第 19 节策略/指标/时间线/差异/交付物样式在场"
+    ]
+  },
+  "rendered_qa": {
+    "passed": true,
+    "environment": "Edge headless, actual workbench entry, fixture API, production boot disabled only in served copy",
+    "fallback": "Browser plugin not available",
+    "posts": 2,
+    "cancels": 1,
+    "tokenRequests": 1,
+    "bounds": {
+      "client": 833,
+      "scroll": 833
+    },
+    "pageErrors": []
+  },
+  "rendering_limit": "first 50 samples, progressive disclosure, summary over all attempts",
+  "limits": [
+    "UI/API controlled fixture only; no production Daemon/model run",
+    "original engineering eval panel retained; its older ProductEval test still incompatible",
+    "36 existing whole frontend failures remain",
+    "global tools shell sticky/header and route cleanup still needed",
+    "Rust verification not run; observed free RAM about 4.3GiB below 6GiB threshold",
+    "current host cannot take caller-selected model/budget via this frozen request",
+    "scheduled live comparison not installed and Team combined advantage unproven"
+  ],
+  "cloud_model_calls": 0,
+  "goal_complete": false,
+  "artifacts": "C:\\Users\\23843\\Documents\\Codex\\Artifacts\\product-comparison-20261004"
+}

@@ -10,7 +10,7 @@
 
     nav: function () {
       return (
-        '<section data-panel="team" class="owo-team-panel">' +
+        '<section data-panel="team" data-layout="custom" class="owo-team-panel">' +
         '<div class="owo-team-tools">' +
         "<h3>导出</h3>" +
         '<div class="inline"><input class="owo-team-export-id" placeholder="技能包 id（本地 store）"><button class="owo-team-exportbtn">导出</button></div>' +
@@ -35,7 +35,7 @@
         '<div class="owo-team-audit sub">—</div>' +
         "</div>" +
         "<style>" +
-        ".owo-team-panel { display: flex; flex-direction: column; gap: 10px; }" +
+        ".owo-team-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; }" +
         ".owo-team-tools { border: 1px solid var(--border, #333); border-radius: 6px; padding: 8px; }" +
         ".owo-team-tools h3 { margin: 0 0 6px; font-size: 13px; }" +
         ".owo-team-findings { max-height: 260px; overflow: auto; }" +
@@ -66,12 +66,16 @@
         ".owo-team-audit-line{display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px dashed var(--border,#333);font-size:12px}" +
         ".owo-team-audit-line time{flex:none;color:var(--text-3,#768390);font-size:11px}" +
         ".owo-team-audit-line span{flex:1;min-width:0;word-break:break-word;color:var(--text-2,#adbac7)}" +
+        "@media (max-width: 760px) { .owo-team-panel { grid-template-columns: minmax(0, 1fr); } }" +
         "</style>" +
         "</section>"
       );
     },
 
     mount: function (root, helpers) {
+      this.dispose();
+      this.lifecycleGeneration = (this.lifecycleGeneration || 0) + 1;
+      this.root = root;
       var self = this;
       this.helpers = helpers || {};
       this.baseUrl =
@@ -100,8 +104,18 @@
       $(".owo-team-versionsbtn").addEventListener("click", function () {
         self.doVersions($(".owo-team-versions-id").value);
       });
+      var importButton = $(".owo-team-importbtn");
+      if (this.importBusy) {
+        importButton.disabled = true;
+        importButton.textContent = "正在导入…";
+      }
 
       this.refreshAudit();
+    },
+
+    dispose: function () {
+      this.lifecycleGeneration = (this.lifecycleGeneration || 0) + 1;
+      this.root = null;
     },
 
     refresh: function () {
@@ -110,10 +124,14 @@
 
     doExport: function (id) {
       var self = this;
+      var generation = this.lifecycleGeneration;
+      var root = this.root;
+      var request = this.exportGeneration = (this.exportGeneration || 0) + 1;
       if (!id) return this._findings("请填写技能包 id");
       this.post("/team/export", { type: "flow", id: id })
         .then(function (data) {
-          var el = self._root().querySelector(".owo-team-export-result");
+          if (!self._isCurrent(generation, root) || request !== self.exportGeneration) return;
+          var el = root.querySelector(".owo-team-export-result");
           if (el) {
             var m = data.manifest || {};
             el.innerHTML =
@@ -124,27 +142,51 @@
           self.refreshAudit();
         })
         .catch(function (error) {
+          if (!self._isCurrent(generation, root) || request !== self.exportGeneration) return;
           self._findings("导出失败：" + self.friendlyError(error));
         });
     },
 
     doReview: function (b64) {
       var self = this;
+      var generation = this.lifecycleGeneration;
+      var root = this.root;
+      var request = this.reviewGeneration = (this.reviewGeneration || 0) + 1;
       if (!b64) return this._findings("请填写 package_b64");
       this.post("/team/review", { package_b64: b64 })
         .then(function (data) {
+          if (!self._isCurrent(generation, root) || request !== self.reviewGeneration) return;
           self.renderFindings(data);
         })
         .catch(function (error) {
+          if (!self._isCurrent(generation, root) || request !== self.reviewGeneration) return;
           self._findings("评审失败：" + self.friendlyError(error));
         });
     },
 
     doImport: function (b64) {
       var self = this;
+      var generation = this.lifecycleGeneration;
+      var root = this.root;
       if (!b64) return this._findings("请填写 package_b64");
+      if (this.importBusy) return;
+      this.importBusy = true;
+      var importButton = root && root.querySelector(".owo-team-importbtn");
+      if (importButton) {
+        importButton.disabled = true;
+        importButton.textContent = "正在导入…";
+      }
       this.post("/team/import", { package_b64: b64 })
         .then(function (data) {
+          if (!self._isCurrent(generation, root)) {
+            if (self.root) {
+              self._findings(data.blocked
+                ? "后台评审已完成并阻止导入；请重新查看当前结果。"
+                : "导入已在后台完成；可查询版本历史确认。");
+              self.refreshAudit();
+            }
+            return;
+          }
           if (data.blocked) {
             self.renderFindings(data);
             return;
@@ -158,7 +200,19 @@
           self.refreshAudit();
         })
         .catch(function (error) {
+          if (!self._isCurrent(generation, root)) return;
           self._findings("导入失败：" + self.friendlyError(error));
+        })
+        .finally(function () {
+          self.importBusy = false;
+          var activeRoot = self.root;
+          if (activeRoot && (typeof activeRoot.isConnected !== "boolean" || activeRoot.isConnected)) {
+            var button = activeRoot.querySelector(".owo-team-importbtn");
+            if (button) {
+              button.disabled = false;
+              button.textContent = "导入（评审通过才落盘）";
+            }
+          }
         });
     },
 
@@ -204,10 +258,14 @@
 
     doVersions: function (id) {
       var self = this;
+      var generation = this.lifecycleGeneration;
+      var root = this.root;
+      var request = this.versionsGeneration = (this.versionsGeneration || 0) + 1;
       if (!id) return this._findings("请填写技能包 id");
       this.get("/team/versions?id=" + encodeURIComponent(id))
         .then(function (data) {
-          var el = self._root().querySelector(".owo-team-versions");
+          if (!self._isCurrent(generation, root) || request !== self.versionsGeneration) return;
+          var el = root.querySelector(".owo-team-versions");
           if (!el) return;
           var versions = data.versions || [];
           if (!versions.length) {
@@ -229,15 +287,20 @@
               .join("");
         })
         .catch(function (error) {
+          if (!self._isCurrent(generation, root) || request !== self.versionsGeneration) return;
           self._findings("版本查询失败：" + self.friendlyError(error));
         });
     },
 
     refreshAudit: function () {
       var self = this;
+      var generation = this.lifecycleGeneration;
+      var root = this.root;
+      var request = this.auditGeneration = (this.auditGeneration || 0) + 1;
       this.get("/team/audit")
         .then(function (data) {
-          var el = self._root().querySelector(".owo-team-audit");
+          if (!self._isCurrent(generation, root) || request !== self.auditGeneration) return;
+          var el = root.querySelector(".owo-team-audit");
           if (!el) return;
           var entries = data.entries || [];
           el.innerHTML = entries.length
@@ -268,13 +331,18 @@
     },
 
     _root: function () {
-      return this.helpers.root || document;
+      return this.root || this.helpers.root || document;
+    },
+
+    _isCurrent: function (generation, root) {
+      return generation === this.lifecycleGeneration && root === this.root && !!root &&
+        (typeof root.isConnected !== "boolean" || root.isConnected);
     },
 
     // ---- helpers 缺省实现 ----
 
     _get: function (path) {
-      return fetch(this.baseUrl + path).then(function (response) {
+      return window.OwoApi.stream(path).then(function (response) {
         if (!response.ok) {
           return response.text().then(function (body) {
             throw new Error(response.status + ": " + body);
@@ -285,7 +353,7 @@
     },
 
     _post: function (path, body) {
-      return fetch(this.baseUrl + path, {
+      return window.OwoApi.stream(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),

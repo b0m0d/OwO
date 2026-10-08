@@ -55,7 +55,7 @@ test("契约1：顶层脚本不得引用裸 global（ReferenceError 会清空白
   );
 });
 
-test("契约2：renderSetupGuide 必须有异常兜底，不允许主区留空", () => {
+test("契约2：renderSetupGuide 在组件缺失或抛错时显示可操作的本地兜底", () => {
   const app = readFileSync(join(WEB_ROOT, "app.js"), "utf8");
   const body = /function renderSetupGuide\(\)\s*\{([\s\S]*?)\n\}/.exec(app);
   assert.ok(body, "app.js 必须定义 renderSetupGuide()");
@@ -63,8 +63,10 @@ test("契约2：renderSetupGuide 必须有异常兜底，不允许主区留空",
   assert.doesNotMatch(code, /\bglobal\./, "引导渲染里不得出现裸 global（历史缺陷）");
   assert.match(code, /try\s*\{/, "引导页渲染必须包在 try 里");
   assert.match(code, /catch\s*\(/, "必须有 catch：引导抛错不能变成白屏");
-  assert.match(code, /renderOwoServiceError/, "catch 必须回落错误卡，给出可操作出口");
-  assert.match(code, /if \(!window\.renderOwoSetupGuide\)/, "视图未加载时也必须回落，不得静默返回");
+  assert.match(code, /showFallback\("配置页面组件未加载/, "组件未加载时显示错误说明");
+  assert.match(code, /showFallback\("配置页面组件启动失败/, "组件抛错时显示错误说明");
+  assert.match(code, /addEventListener\("click",\s*\(\)\s*=>\s*window\.location\.reload\(\)\)/,
+    "兜底卡必须提供重新加载出口");
 });
 
 test("契约3：壳连接快照缺失时仍走引导判定（provider 分流不被跳过）", () => {

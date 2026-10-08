@@ -1,0 +1,146 @@
+{
+  "created_at": "2026-10-04T20:01:13.567389+00:00",
+  "source_head": "3d2b03ac7f04443984cef20f0c00c3bdf7b5e7eb",
+  "source_worktree_dirty": true,
+  "scope": "Team artifact pagination, streaming preview, background cooperative cancellation and post-I/O identity checks",
+  "validation": {
+    "rustfmt_stdin_only": true,
+    "rust_files_checked": 9,
+    "static_module_api_identity_checks": "passed",
+    "git_diff_check_exit_code": 0,
+    "cargo_check": "not_run_user_requested_no_compilation",
+    "cargo_build": "not_run",
+    "cargo_test": "not_run",
+    "clippy": "not_run",
+    "live_model_evaluation": "not_run"
+  },
+  "source_files": [
+    {
+      "path": "agent-sdk/crates/owo-agent-kernel/src/cas_store.rs",
+      "sha256": "3b6e70b54879990bdda57a5e5e58f904661e31af850b32a9556027441686aa43",
+      "lines": 196,
+      "rustfmt_stdin_parse_and_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-kernel/src/cas_text.rs",
+      "sha256": "43c7f309e73c9120219183cb621dd6523fb27c449506ed329cbe119e2bc6305e",
+      "lines": 321,
+      "rustfmt_stdin_parse_and_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/artifact_read.rs",
+      "sha256": "945ea4b11204c372bbbb23ab59f705ec0f14dc82514cdd4df9c99c570c3c41c6",
+      "lines": 277,
+      "rustfmt_stdin_parse_and_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/artifact_catalog.rs",
+      "sha256": "36e89c0299ad59b737e89a7712055adaec0b1b5de2aac16a79b7a27036f3817d",
+      "lines": 417,
+      "rustfmt_stdin_parse_and_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_context_slice.rs",
+      "sha256": "628024a99f43bd6949f95863d7e710185c063a249f775648dbc69bbda44c0d12",
+      "lines": 214,
+      "rustfmt_stdin_parse_and_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/mod.rs",
+      "sha256": "4e38bd00d4ddbce93cc5baf88d0d364ec72e5b25170b9989ff37d43c3a8fca79",
+      "lines": 167,
+      "rustfmt_stdin_parse_and_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/tests/workswarm_tests.rs",
+      "sha256": "c8b1261dac3424c72cb1fc2ce5ba90c1f07768ea228b932bf02801e2fbdc6b1c",
+      "lines": 3722,
+      "rustfmt_stdin_parse_and_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-server/src/workswarm_api/workers.rs",
+      "sha256": "1e05a58088d07f10605219b275fc4bbe3515d155e1e28edb83437a493b7e95f3",
+      "lines": 1573,
+      "rustfmt_stdin_parse_and_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-server/src/workswarm_api/worker_artifact_tool.rs",
+      "sha256": "d588bb7b78cd7529329ba433778618fc0abbe976ea5d90c828d2a6f321f01793",
+      "lines": 143,
+      "rustfmt_stdin_parse_and_format_match": true
+    }
+  ],
+  "new_tests": [
+    {
+      "path": "agent-sdk/crates/owo-agent-kernel/src/cas_text.rs",
+      "name": "pages_reconstruct_unicode_object_across_hash_buffer_boundaries",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-kernel/src/cas_text.rs",
+      "name": "offset_boundary_empty_object_eof_and_verify_only_are_explicit",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-kernel/src/cas_text.rs",
+      "name": "corruption_outside_requested_page_is_detected_before_returning_content",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-kernel/src/cas_text.rs",
+      "name": "invalid_utf8_after_page_and_incomplete_tail_are_rejected",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-kernel/src/cas_text.rs",
+      "name": "callback_cancels_before_io_or_between_bounded_blocks",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-kernel/src/cas_text.rs",
+      "name": "hash_path_escape_and_oversized_page_are_rejected",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/artifact_read.rs",
+      "name": "tiny_preview_remains_verified_and_bounded_without_losing_unicode_identity",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/tests/workswarm_tests.rs",
+      "name": "artifact_pages_reach_tail_and_pin_current_task_attempt_and_hash",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-server/src/workswarm_api/worker_artifact_tool.rs",
+      "name": "legacy_read_defaults_to_first_page_and_original_budget",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-server/src/workswarm_api/worker_artifact_tool.rs",
+      "name": "cursor_requires_explicit_hash_and_rejects_malformed_parameters",
+      "status": "source_declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-server/src/workswarm_api/worker_artifact_tool.rs",
+      "name": "valid_cursor_and_hash_are_passed_to_core_without_clamping",
+      "status": "source_declared_not_executed"
+    }
+  ],
+  "limits": {
+    "page_bytes": 65536,
+    "read_buffer_bytes": 65540,
+    "context_per_artifact_body_bytes": 2400,
+    "context_total_upstream_body_bytes": 8000,
+    "preview_cache_retained_body_bytes": 33554432
+  },
+  "known_boundaries": [
+    "Every page scans the entire object to verify the full hash; P pages of an S-byte object cost approximately P*S bytes of I/O.",
+    "Metadata directory query is operation-local; post-I/O state reload is additional, and changed publication IDs cause a directory reload.",
+    "Cancellation is cooperative between blocks; an already blocked operating-system read cannot be interrupted by the callback.",
+    "Read-time scope checks are not a cross-store transaction or a global blocking queue capacity bound.",
+    "Review and DeliveryGate full-text cache and legacy source/shared-fact CAS reads remain outside this streaming-preview change.",
+    "Rustfmt syntax parsing and static assertions do not establish Rust type/lifetime correctness or runtime success.",
+    "No measured speed/token/tool-call improvement or Team advantage; overall goal remains active."
+  ]
+}

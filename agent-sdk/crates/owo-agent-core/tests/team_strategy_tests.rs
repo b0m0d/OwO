@@ -177,15 +177,16 @@ fn force_single_overrides_all_signals() {
 }
 
 #[test]
-fn force_team_keeps_full_pipeline() {
+fn force_team_keeps_review_without_inventing_integrator() {
     let plan = engine().decide(TeamSelectionMode::ForceTeam, &simple_document());
     assert_eq!(plan.mode, "team");
     let roles: Vec<&str> = plan.roles.iter().map(|r| r.role.as_str()).collect();
     assert_eq!(
         roles,
-        vec!["writer", "critic", "leader"],
-        "显式 team = 完整流水线"
+        vec!["writer", "critic"],
+        "简单单产物任务保留独立评审，不额外创建串行 integrator"
     );
+    assert_eq!(plan.budget_calls_total, 6);
     assert!(plan.reasons.iter().any(|r| r.contains("强制 team")));
 }
 

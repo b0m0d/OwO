@@ -1,0 +1,32 @@
+{
+  "evidence_id": "product-eval-tool-call-metrics-20261005",
+  "scope": "source-only",
+  "claim": "ProductEval now carries observed Single and Team tool-call counts through run records, aggregate and per-case metrics, desktop comparison reporting, server OpenAPI and the TypeScript client contract. Missing legacy or incomplete observations remain null.",
+  "limits": [
+    "No Rust compilation, Rust tests, server route test, TypeScript typecheck, or live model evaluation was run.",
+    "Node comparison-workbench tests validate UI behavior but do not prove Rust serialization or counter accuracy.",
+    "No latency, model-call, token, or delivery-quality improvement is claimed; metrics visibility is a prerequisite for a later paired evaluation."
+  ],
+  "verification": [
+    "rustfmt --check --edition 2021 --config skip_children=true passed for the three ProductEval Rust files and two server Rust files.",
+    "node --test tests/product-comparison.test.mjs passed: 14 tests, 0 failures.",
+    "Python static assertions passed for nullable JSON fields, required lists, TypeScript declarations and served-schema regression source.",
+    "git diff --check exited 0; it emitted pre-existing line-ending normalization warnings for unrelated dirty files."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-server/src/openapi.rs": "70ec985d2176bf5a7b4bac858c72a47bf64878edafe245da224c512e6b3604fd",
+    "crates/owo-agent-server/tests/route_contract_tests.rs": "f355829de4d572af9d642fffe1edd5878d84bcc0b277eb4c19f7bff379dedac2",
+    "clients/ts/openapi.json": "4cff6d63a1e7f06f71a881ae192e9c60964f2dbf821dea4bc35628db0b28eb6f",
+    "clients/ts/src/schema.d.ts": "38e1af702895d6677949aa9862298c136034936cb31f684b5a11a7918393dca2",
+    "clients/ts/tests/client.unit.test.ts": "dab0b99ef33d3cdd31850475deb4ddd929a7162a22e9e993df73c95f07492f7d",
+    "devtools/product-eval/src/product_eval.rs": "88984e2c45e92e8e57cc15b3530a792f81fcb389f4a599206efad72fff6b5ba4",
+    "devtools/product-eval/src/product_eval/single_agent.rs": "4893dc1de17ff6d79f48e17285f9b70859c5d3c158ade27dbb2b009996d6da44",
+    "devtools/product-eval/src/product_eval/workswarm_executor.rs": "1f7d4676409ddd8216d1e31d4d199dc832b0b6b720edc5f8f6ad0e77497cd4aa",
+    "devtools/product-eval/tests/product_eval_statistics_tests.rs": "1f09753681d2db16a8eee82304b0c06078f0a14b9791631f4dba572c5958e198",
+    "devtools/product-eval/tests/product_eval_tests.rs": "07bad503887c421522062a8e567f950eb84d6714293d6530d9656d3a758aa483",
+    "desktop/web/panels/product-comparison.panel.js": "a1f1d7d7f361ca3d1ce749d884aea524360eaf1b29bcea90d61ef373cf8c04f6",
+    "desktop/web/tests/product-comparison.test.mjs": "a3dfad8c6802e4d6bcccee207144d5471487098447794995cf38847f670b1a8c",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "fd489e6ded7a88d520922afbd114ce67fe2f10c25b642b6da359712da412d27e"
+  }
+}

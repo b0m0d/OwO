@@ -35,6 +35,7 @@ const LEGACY_KEY_ENV = "DASHSCOPE_API_KEY";
 const SHELL_COMMANDS = [
   "choose_data_directory",
   "choose_project_directory",
+  "create_project_workspace",
   "desktop_pairing",
   "get_core_connection",
   "get_core_state",
@@ -49,6 +50,22 @@ const SHELL_COMMANDS = [
   "set_workspace",
 ];
 
+function validateProjectFolderName(raw) {
+  const name = String(raw == null ? "" : raw).trim();
+  if (!name) return { ok: false, error: "项目文件夹名称不能为空" };
+  if (name === "." || name === ".." || /[<>:"|?*]/.test(name) ||
+      name.includes("/") || name.includes("\\") || /[\x00-\x1f]/.test(name) ||
+      /[. ]$/.test(name)) {
+    return { ok: false, error: "项目名称不能包含路径分隔符、Windows 保留字符，且不能以点或空格结尾" };
+  }
+  const stem = name.split(".")[0].toLowerCase();
+  if (["con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
+       "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+       "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"].includes(stem)) {
+    return { ok: false, error: "该名称是 Windows 保留设备名，请换一个名称" };
+  }
+  return { ok: true, name };
+}
 function canonicalProvider(model) {
   const raw = model && typeof model.provider === "string" ? model.provider : "";
   return supervision.normalizeProvider(raw) || "unset";
@@ -122,7 +139,8 @@ function providerStatusValue(model, options = {}) {
     configPath: options.configPath || "",
     models: Array.isArray(source.models) ? source.models : [],
     contextWindow: numOrNull(source.context_window),
-    maxOutputTokens: numOrNull(source.max_output_tokens),
+    maxOutputTokens: numOrNull(source.max_output_tokens) || 32000,
+    modelOutputTokens: normalizeModelOutputTokens(source.model_output_tokens || {}),
     temperature: numOrNull(source.temperature),
     timeoutSecs: numOrNull(source.timeout_secs),
     keepRecent: numOrNull(source.keep_recent),
@@ -134,6 +152,32 @@ function numOrNull(value) {
   if (value === null || value === undefined || value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeModelOutputTokens(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const normalized = {};
+  for (const [rawName, rawLimit] of Object.entries(value)) {
+    const name = String(rawName).trim();
+    const limit = Number(rawLimit);
+    if (name && Number.isInteger(limit) && limit >= 1 && limit <= 32000) normalized[name] = limit;
+  }
+  return normalized;
+}
+
+function applyModelOutputEnv(env, model) {
+  const target = env && typeof env === "object" ? env : {};
+  const source = model && typeof model === "object" ? model : {};
+  delete target.OWO_MODEL_MAX_OUTPUT_TOKENS;
+  delete target.OWO_MODEL_OUTPUT_TOKENS_BY_MODEL;
+  const configuredDefault = Number(source.max_output_tokens);
+  target.OWO_MODEL_MAX_OUTPUT_TOKENS = String(
+    Number.isInteger(configuredDefault) && configuredDefault >= 1 && configuredDefault <= 32000
+      ? configuredDefault
+      : 32000,
+  );
+  target.OWO_MODEL_OUTPUT_TOKENS_BY_MODEL = JSON.stringify(normalizeModelOutputTokens(source.model_output_tokens));
+  return target;
 }
 
 // ---- 数值/布尔字段解析（空串、0、非法值 = 清除，回到核心默认） ----
@@ -217,6 +261,22 @@ function applyModelConfigPatch(config, args) {
   if (input.compaction !== undefined) {
     model.compaction = parseCompaction(input.compaction).value;
   }
+  if (input.model_output_tokens !== undefined) {
+    if (!input.model_output_tokens || typeof input.model_output_tokens !== "object" || Array.isArray(input.model_output_tokens)) {
+      return { ok: false, error: "model_output_tokens 必须是模型名到 token 上限的对象" };
+    }
+    const normalized = {};
+    for (const [rawName, rawLimit] of Object.entries(input.model_output_tokens)) {
+      const name = String(rawName).trim();
+      if (!name || rawLimit === null || rawLimit === "") continue;
+      const limit = Number(rawLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 32000) {
+        return { ok: false, error: `模型 ${name} 的输出上限必须是 1–32000 的整数` };
+      }
+      normalized[name] = limit;
+    }
+    model.model_output_tokens = normalized;
+  }
   const list = parseModelList(input.models);
   if (list.present) model.models = list.value;
 
@@ -230,6 +290,7 @@ module.exports = {
   PROVIDER_DEFAULTS,
   DEFAULT_KEY_ENV,
   SHELL_COMMANDS,
+  validateProjectFolderName,
   canonicalProvider,
   effectiveBaseUrl,
   effectiveModel,
@@ -237,6 +298,7 @@ module.exports = {
   maskKey,
   resolveApiKey,
   providerStatusValue,
+  applyModelOutputEnv,
   applyModelConfigPatch,
   parsePositive,
   parseTemperature,

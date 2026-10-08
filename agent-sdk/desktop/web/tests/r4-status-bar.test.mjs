@@ -174,6 +174,23 @@ test("后台四态可辨识：可用 / 正在启动 / 降级 / 失败（§4.3 �
   assert.equal(bar.backendFromDiagnostics({ state: "restarting", errorCode: "core/exited" }, null).text, "重启中");
 });
 
+test("浏览器预览与桌面诊断故障不再永久显示为检查中", () => {
+  const browser = makeSandbox();
+  const preview = browser.OwoStatusBar.backendFromDiagnostics(null, null);
+  assert.equal(preview.text, "浏览器预览");
+  assert.equal(preview.tone, "muted");
+  assert.match(preview.detail, /没有 Electron 桌面诊断连接/);
+
+  const desktop = makeSandbox({ __TAURI_INTERNALS__: { invoke() {} } });
+  assert.equal(desktop.OwoStatusBar.backendFromDiagnostics(null, null).text, "诊断重试中");
+  const failed = desktop.OwoStatusBar.backendFromDiagnostics(
+    { state: "unknown", message: "IPC 暂不可用" }, null
+  );
+  assert.equal(failed.text, "诊断重试中");
+  assert.equal(failed.tone, "warn");
+  assert.match(failed.detail, /IPC 暂不可用/);
+});
+
 test("工作区段给名称 + 路径摘要，绝不回显完整本地绝对路径", () => {
   const privateRoot = "C:\\Users\\ovo\\Documents\\客户A\\项目X";
   const sandbox = makeSandbox();
@@ -222,6 +239,36 @@ async function flush() {
   // 壳 IPC 是跨 realm 的 thenable，微任务要过好几跳；用宏任务冲刷，别靠猜跳数。
   for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
 }
+
+test("模型状态兼容对象形设置值，不显示 [object Object]", () => {
+  const sandbox = makeSandbox({ __owoCoreDiagnostics: { state: "ready" } });
+  sandbox.OwoStatusBar.reportModel({
+    provider: { provider: "bigmodel" },
+    model: { name: "glm-5.3-flash" },
+  });
+  const model = sandbox.OwoStatusBar.computeFacts({}, null)[2];
+  assert.equal(model.text, "bigmodel · glm-5.3-flash");
+  assert.doesNotMatch(model.text, /\[object Object\]/);
+  sandbox.OwoStatusBar.reportModel({ provider: "[object Object]", model: "glm-5.3-flash" });
+  assert.equal(sandbox.OwoStatusBar.computeFacts({}, null)[2].text, "glm-5.3-flash");
+});
+
+test("壳提供商状态含对象时仍显示可读模型名", async () => {
+  const sandbox = makeSandbox({
+    __owoCoreDiagnostics: { state: "ready" },
+    __TAURI_INTERNALS__: {
+      invoke: (command) => Promise.resolve(command === "get_provider_status"
+        ? { provider: { id: "bigmodel" }, model: { name: "glm-5.3-flash" }, ready: true }
+        : { workspace: "" }),
+    },
+  });
+  sandbox.OwoWorkspaceDisplay = { alias: (root) => root, masked: (root) => root };
+  sandbox.OwoStatusBar.mount(sandbox.__host, { getFacts: () => ({}) });
+  await flush();
+  const model = sandbox.OwoStatusBar.computeFacts({}, null)[2];
+  assert.equal(model.text, "bigmodel · glm-5.3-flash");
+  assert.doesNotMatch(model.text, /\[object Object\]/);
+});
 
 test("模型段两份真相不混着说：壳侧报未配置但 core 已就绪时不得标红下结论", async () => {
   // 真机截图抓到的现场：密钥经 sidecar 注入，壳的 get_provider_status 报
@@ -316,7 +363,7 @@ test("工作区段壳侧回灌：localStorage 为空时也必须显示已选工�
     __TAURI_INTERNALS__: {
       invoke(command) {
         invoked.push(command);
-        if (command === "get_workspace") return Promise.resolve({ workspace: "D:\\work\\客户甲\\订单系统", state: "ready" });
+        if (command === "get_workspace") return Promise.resolve({ workspace: "D:\\work\\客户甲\\订单系统", configured: true, state: "ready" });
         return Promise.resolve({ ready: true, model: "glm-5.3-flash" });
       },
     },
@@ -339,7 +386,7 @@ test("工作区段壳侧回灌：localStorage 为空时也必须显示已选工�
   const sandbox2 = makeSandbox({
     __TAURI_INTERNALS__: {
       invoke(command) {
-        if (command === "get_workspace") return Promise.resolve({ workspace: null, state: "no_workspace" });
+        if (command === "get_workspace") return Promise.resolve({ workspace: "C:\\Users\\23843", configured: false, state: "ready" });
         return Promise.resolve({ ready: false });
       },
     },

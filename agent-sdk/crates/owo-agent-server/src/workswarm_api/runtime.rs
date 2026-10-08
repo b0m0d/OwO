@@ -1,12 +1,8 @@
-use super::workers::*;
-use super::write_lease::{manager_for_workspace, WriteLease, WriteScope};
-use super::{project_workspace, workspace_change_tracker, workswarm_metrics};
-use owo_agent_core::goal::{Worker, WorkerRegistry};
-use owo_agent_core::worker_profile::{intersect_paths, WorkerProfile};
-use owo_agent_core::workswarm::{RoleWorker, SteerCommand, TeamCoordinator};
+use super::registry_builder::build_run_registry;
+use super::{project_workspace, workswarm_metrics};
+use owo_agent_core::workswarm::{SteerCommand, TeamCoordinator};
 use owo_agent_server::AppState;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,294 +38,6 @@ async fn fail_pending_rework_tasks(coordinator: &TeamCoordinator, team_id: &str,
         }
     }
 }
-
-/// 声明写范围与团队绑定无交集时的不可达写白名单哨兵（工具/审批层据此拒绝一切写入）。
-const NO_WRITE_SCOPE_MARKER: &str = ".owo-no-write-scope";
-
-/// 按角色 worker 名解析内层 worker（"agent"/缺省 = 模型驱动）。
-///
-/// 五期（第三路）：agent 角色接收 `model_calls` 计数器（MeasuredProvider 注入；
-/// 仅指标用途，不影响执行行为）。
-/// 六期（第二路）：`scope` 为团队工作区绑定（None = 全局工作区，行为不变）。
-/// 七期（第二路）：agent 角色带角色画像（工具面/只读/回合上限）+ critic 代理 +
-/// 团队取消桥标志 + 「角色 ∩ 绑定」写白名单交集（内置 echo/sleep/fail 不受影响）。
-#[allow(clippy::too_many_arguments)]
-pub(super) fn inner_worker_for(
-    state: &AppState,
-    worker_name: Option<&str>,
-    model_calls: Option<&Arc<AtomicU64>>,
-    request_usage: Option<&Arc<workswarm_metrics::RequestUsageCollector>>,
-    team_request_budget: Option<&Arc<workswarm_metrics::TeamModelRequestBudget>>,
-    scope: Option<&project_workspace::WorkspaceScope>,
-    profile: &WorkerProfile,
-    is_critic: bool,
-    cancel_flag: &Arc<AtomicBool>,
-    write_allowed: Vec<PathBuf>,
-    coordinator: &Arc<TeamCoordinator>,
-    team_id: &str,
-    parent_session_id: Option<&str>,
-    role: &str,
-) -> Option<Arc<dyn Worker>> {
-    match worker_name.map(str::trim).filter(|w| !w.is_empty()) {
-        Some("echo") => Some(Arc::new(EchoWorker)),
-        Some("sleep") => Some(Arc::new(SleepWorker)),
-        Some("fail") => Some(Arc::new(FailWorker)),
-        _ => {
-            // 绑定后：Worker 实际运行目录 = 项目绑定目录。
-            let workspace = scope
-                .map(|s| s.root.clone())
-                .unwrap_or_else(|| state.workspace.clone());
-            let workspace_scope = scope.cloned();
-            Some(Arc::new(AgentSubagentWorker {
-                agent: Arc::clone(&state.agent),
-                workspace,
-                model_calls: model_calls.cloned(),
-                request_usage: request_usage.cloned(),
-                team_request_budget: team_request_budget.cloned(),
-                workspace_scope,
-                profile: Some(profile.clone()),
-                is_critic,
-                cancel_flag: Some(Arc::clone(cancel_flag)),
-                write_allowed,
-                coordinator: Arc::clone(coordinator),
-                session_store: Arc::clone(&state.store),
-                parent_session_id: parent_session_id.map(str::to_string),
-                team_id: team_id.to_string(),
-                role: role.to_string(),
-            }))
-        }
-    }
-}
-
-fn worker_kind_uses_agent_provider(worker_kind: &str) -> bool {
-    !matches!(worker_kind, "echo" | "sleep" | "fail")
-}
-
-/// 构建团队运行 worker 注册表（成员名 → MeasuredRoleWorker(RoleWorker(Tracked(inner)))）。
-///
-/// 五期（第三路）：每个角色 worker 外层包一层 [`workswarm_metrics::MeasuredRoleWorker`]——
-/// span 级起止/墙钟/终态/失败原因/尝试序数/输出 Artifact + model_calls/token/费用，
-/// 指标 JSONL 落盘 TeamRun 数据目录（`<run_dir>/<team_id>-metrics.jsonl`，重启可读）。
-/// 包装在 RoleWorker 之外：span 覆盖「上下文切片组装 → 执行 → 产物登记」全窗口。
-/// 失败返回 None（运行任务记录后退出）。
-///
-/// 七期（第二路）：
-/// - 角色画像：模板 `budget_calls_per_role` → 真实 `max_turns`；`WorkerProfile::for_role`
-///   决定每个角色实际可见工具面（注册表面即权限边界，不靠审批事后拒绝）；
-/// - 范围写租约 + 变更追踪：写角色包 `TrackedRoleWorker`（未声明写范围 = 工作区级
-///   全局互斥；声明 `write_paths` 且互不重叠 = 并发落盘；执行前后 git 快照 →
-///   变更摘要/diff ref 落盘 → 白名单越界 `scope_violation`）；
-/// - 取消桥：`cancel_flag` 由 run_team_loop 的令牌监听任务置位，Worker 协作中断。
-pub(super) async fn build_run_registry(
-    coordinator: &Arc<TeamCoordinator>,
-    state: &AppState,
-    team_id: &str,
-    cancel_flag: &Arc<AtomicBool>,
-) -> Option<WorkerRegistry> {
-    let meta = coordinator.load_run_meta(team_id).ok()?;
-    // 六期（第二路）：团队工作区绑定（cancel/retry/resume 后循环按迭代重读——
-    // 绑定生命周期独立于运行状态，恢复后继续生效）。
-    let scope = project_workspace::load_binding(coordinator.run_dir(), team_id).map(|b| b.scope());
-    // 七期（第二路）：模板角色预算 → 真实 max_turns（无模板 / 未知角色 → 缺省 12）。
-    let team_run = coordinator.get_team_run(team_id).await.ok();
-    let parent_session_id = team_run.as_ref().and_then(|run| {
-        run.shared_context_refs.iter().find_map(|reference| {
-            let hash = reference.strip_prefix("cas://sha256:")?;
-            let snapshot = coordinator.cas().get_text(hash)?;
-            serde_json::from_str::<serde_json::Value>(&snapshot)
-                .ok()?
-                .get("source_session_id")?
-                .as_str()
-                .map(str::to_string)
-        })
-    });
-    let budgets: Vec<owo_agent_core::builtin_team_templates::RoleBudget> = team_run
-        .as_ref()
-        .and_then(|run| {
-            run.template_id
-                .as_deref()
-                .and_then(owo_agent_core::builtin_team_templates::descriptor)
-        })
-        .map(|descriptor| descriptor.budget_calls_per_role)
-        .unwrap_or_default();
-    let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), team_id);
-    let team_request_budget = match team_run
-        .as_ref()
-        .and_then(|run| run.budget.get("max_model_calls"))
-    {
-        Some(value) => {
-            let limit = value.as_u64()?;
-            Some(Arc::new(
-                workswarm_metrics::TeamModelRequestBudget::new(
-                    limit,
-                    workswarm_metrics::RequestReservationJournal::for_team(
-                        coordinator.run_dir(),
-                        team_id,
-                    ),
-                )
-                .ok()?,
-            ))
-        }
-        None => None,
-    };
-    // 范围写租约按实际工作区共享：跨调度阶段和不同 TeamRun 仍能互斥重叠写面。
-    // 未声明范围的写角色全局互斥；声明写范围且互不重叠的写角色可并发落盘。
-    let tracking_root = scope
-        .as_ref()
-        .map(|s| s.root.as_path())
-        .unwrap_or(state.workspace.as_path());
-    let write_lease_manager = manager_for_workspace(tracking_root);
-    let usage_tracker = Arc::new(workswarm_metrics::UsageAttributionTracker::default());
-    let registry = WorkerRegistry::new();
-    for r in &meta.roles {
-        let member_id = format!("m-{}", r.role);
-        let worker_kind = r
-            .worker
-            .as_deref()
-            .map(str::trim)
-            .filter(|w| !w.is_empty())
-            .unwrap_or("agent")
-            .to_string();
-        let model_calls = worker_kind_uses_agent_provider(&worker_kind)
-            .then(|| Arc::new(AtomicU64::new(0)));
-        let request_usage = worker_kind_uses_agent_provider(&worker_kind)
-            .then(|| Arc::new(workswarm_metrics::RequestUsageCollector::default()));
-        // 角色画像：显式 write_paths 是写能力声明；并行 TaskGraph writer 槽位
-        // 以可写工具面启动，再由每个任务的 host-validated capability scope 收窄。
-        let budget_calls = budgets
-            .iter()
-            .find(|budget| budget.role == r.role)
-            .map(|budget| budget.budget_calls)
-            .unwrap_or(0);
-        let profile = WorkerProfile::for_team_role(
-            &r.role,
-            &r.capabilities,
-            budget_calls,
-            !r.write_paths.is_empty(),
-            meta.parallel && owo_agent_core::worker_profile::is_parallel_writer_name(&r.role),
-        );
-        let profile = if meta.template_id.as_deref()
-            == Some(owo_agent_core::builtin_team_templates::FULLSTACK_WEB_V1)
-            && matches!(r.role.as_str(), "w1" | "w2")
-        {
-            profile.without_commands()
-        } else {
-            profile
-        };
-        let is_critic = r.is_reviewer();
-        let is_writer = profile.is_writer();
-        // 最终写面 = 角色白名单 ∩ 团队绑定白名单（角色白名单空 = 交由绑定决定；
-        // 两侧都空 = 工作区内可写，仍受审批约束）。
-        let tracking_root = scope
-            .as_ref()
-            .map(|s| s.root.clone())
-            .unwrap_or_else(|| state.workspace.clone());
-        let scope_allowed: Vec<PathBuf> = scope
-            .as_ref()
-            .map(|s| s.allowed.clone())
-            .unwrap_or_default();
-        // 十一期（二路）：角色级写范围优先（RoleSpec.write_paths，相对工作区根）；
-        // 未声明沿用画像白名单（当前内置画像恒为空 = 工作区级）。
-        let role_allowed: Vec<PathBuf> = if r.write_paths.is_empty() {
-            profile
-                .write_allowed_paths
-                .iter()
-                .map(|relative| tracking_root.join(relative))
-                .collect()
-        } else {
-            r.write_paths
-                .iter()
-                .map(|relative| tracking_root.join(relative))
-                .collect()
-        };
-        // 角色 ∩ 绑定：两侧都非空且无交集 = 该角色在此绑定下不可写任何文件
-        // （哨兵路径保证工具/审批/租约三层一致拒绝；空白的「未约束」语义不被复用）。
-        let write_allowed = if role_allowed.is_empty() {
-            scope_allowed.clone()
-        } else if scope_allowed.is_empty() {
-            role_allowed
-        } else {
-            let intersection = intersect_paths(&role_allowed, &scope_allowed);
-            if intersection.is_empty() {
-                vec![tracking_root.join(NO_WRITE_SCOPE_MARKER)]
-            } else {
-                intersection
-            }
-        };
-        let lease_waits =
-            is_writer.then(|| Arc::new(workswarm_metrics::LeaseWaitTracker::default()));
-        let lease = is_writer.then(|| {
-            // 空写面 = 工作区级（全局互斥）；声明写面 = 范围租约（不重叠可并发）。
-            let scope = if write_allowed.is_empty() {
-                WriteScope::global()
-            } else {
-                WriteScope::from_paths(&write_allowed)
-            };
-            WriteLease::new(Arc::clone(&write_lease_manager), scope)
-        });
-        let inner = inner_worker_for(
-            state,
-            r.worker.as_deref(),
-            model_calls.as_ref(),
-            request_usage.as_ref(),
-            team_request_budget.as_ref(),
-            scope.as_ref(),
-            &profile,
-            is_critic,
-            cancel_flag,
-            write_allowed.clone(),
-            coordinator,
-            team_id,
-            parent_session_id.as_deref(),
-            &r.role,
-        )?;
-        // 追踪 + 租约只作用于写角色（读角色没有写工具不会改文件；并行读角色的
-        // 快照窗口会误捕写角色的变更）。
-        let tracking = is_writer.then(|| workspace_change_tracker::Tracker {
-            root: tracking_root,
-            run_dir: coordinator.run_dir().to_path_buf(),
-            team_id: team_id.to_string(),
-            role: r.role.clone(),
-            allowed: write_allowed.clone(),
-            // 八期（二路）：ChangeSet 基线快照进团队 CAS + 生成留痕审计。
-            cas: coordinator.cas().clone(),
-            audit: coordinator.audit_log(),
-        });
-        let inner: Arc<dyn Worker> = Arc::new(TrackedRoleWorker {
-            inner,
-            lease,
-            lease_waits: lease_waits.clone(),
-            tracking,
-        });
-        let role_worker = Arc::new(RoleWorker::new_with_capabilities(
-            Arc::clone(coordinator),
-            team_id.to_string(),
-            member_id.clone(),
-            r.role.clone(),
-            r.capabilities.clone(),
-            inner,
-        ));
-        let provider = worker_kind_uses_agent_provider(&worker_kind).then(|| state.agent.provider());
-        registry.register(Arc::new(
-            workswarm_metrics::MeasuredRoleWorker::new_with_usage_tracker(
-                role_worker,
-                Arc::clone(coordinator),
-                journal.clone(),
-                team_id.to_string(),
-                member_id,
-                r.role.clone(),
-                worker_kind,
-                provider,
-                model_calls,
-                Arc::clone(&usage_tracker),
-                request_usage,
-                lease_waits,
-            ),
-        ));
-    }
-    Some(registry)
-}
-
 // ---------------------------------------------------------------------------
 // 后台运行循环（阶段驱动 + 人节点门闩）
 // ---------------------------------------------------------------------------
@@ -359,50 +67,136 @@ impl Drop for LoopAliveGuard {
     }
 }
 
-/// 五期（第三路）：指标预算门——累计指标超过任务预算（TeamRun.budget additive
-/// `max_cost_usd` / `max_wall_secs`；此前未知键被忽略，与 GoalBudget 步数/重试
-/// 熔断正交互补）即停止调度下一阶段：审计 `team.budget_exhausted`（含明确原因），
-/// 团队显式转 Cancelled（不静默挂起，也不伪装成用户取消——原因可在
-/// `/teams/{id}/metrics` 的 `budget.reason` 与审计尾迹复查）。
-/// 检查失败按「继续调度」处理（可用性优先；run_phase 自身会显式失败）。
-/// 返回 true 表示已停止（调用方应立即退出运行循环）。
+/// Team 指标预算门的纯判定。无法读取预算属于未知状态，必须按 fail-closed 停止派发。
+#[derive(Debug, PartialEq, Eq)]
+enum BudgetGuardDecision {
+    Continue,
+    Exhausted(String),
+    Unavailable(String),
+}
+
+fn budget_guard_decision(check: Result<Option<String>, String>) -> BudgetGuardDecision {
+    match check {
+        Ok(Some(reason)) => BudgetGuardDecision::Exhausted(reason),
+        Ok(None) => BudgetGuardDecision::Continue,
+        Err(error) => BudgetGuardDecision::Unavailable(error),
+    }
+}
+
+fn next_guard_retry_delay(current: Duration) -> Duration {
+    (current * 2).min(Duration::from_secs(5))
+}
+
+async fn stop_team_for_guard(
+    coordinator: &Arc<TeamCoordinator>,
+    team_id: &str,
+    event: &str,
+    audit_reason: &str,
+    rework_reason: &str,
+) {
+    tracing::warn!(team_id = %team_id, %audit_reason, "workswarm 运行保护门停止后续调度");
+    if let Some(log) = coordinator.audit_log() {
+        if let Ok(mut audit) = log.lock() {
+            audit.record(
+                team_id,
+                event,
+                Some(format!("workswarm/{team_id}")),
+                Some(false),
+                audit_reason.to_string(),
+            );
+        }
+    }
+    let mut retry_delay = Duration::from_millis(100);
+    loop {
+        match coordinator
+            .apply_steer(team_id, &SteerCommand::Cancel)
+            .await
+        {
+            Ok(_) => break,
+            Err(owo_agent_core::workswarm::WorkSwarmError::NotFound(_)) => {
+                tracing::warn!(team_id = %team_id, "停止保护门时 TeamRun 已不存在");
+                break;
+            }
+            Err(error) => {
+                tracing::error!(
+                    team_id = %team_id,
+                    %error,
+                    retry_in_ms = retry_delay.as_millis() as u64,
+                    "Team 取消状态尚未持久化；保护门保持关闭并重试",
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = next_guard_retry_delay(retry_delay);
+            }
+        }
+    }
+    fail_pending_rework_tasks(coordinator, team_id, rework_reason).await;
+}
+
+/// 指标预算门：累计成本、墙钟或模型调用超过上限时停止下一阶段。
+/// 如果预算状态无法核验，也停止调度并审计 team.budget_check_failed；不能把未知状态
+/// 当作有预算继续消耗。返回 true 表示运行循环必须立即退出。
 pub(super) async fn stop_if_budget_exhausted(
     coordinator: &Arc<TeamCoordinator>,
     team_id: &str,
 ) -> bool {
-    match workswarm_metrics::team_budget_exhaustion(coordinator, team_id).await {
-        Ok(Some(reason)) => {
-            tracing::warn!(team_id = %team_id, %reason, "workswarm 指标超预算，停止调度下一阶段");
-            if let Some(log) = coordinator.audit_log() {
-                if let Ok(mut audit) = log.lock() {
-                    audit.record(
-                        team_id,
-                        "team.budget_exhausted",
-                        Some(format!("workswarm/{team_id}")),
-                        Some(false),
-                        reason,
-                    );
-                }
-            }
-            if let Err(e) = coordinator
-                .apply_steer(team_id, &SteerCommand::Cancel)
-                .await
-            {
-                tracing::error!(team_id = %team_id, %e, "预算停止：团队取消收尾失败");
-            }
-            fail_pending_rework_tasks(
+    let check = workswarm_metrics::team_budget_exhaustion(coordinator, team_id)
+        .await
+        .map_err(|error| error.to_string());
+    match budget_guard_decision(check) {
+        BudgetGuardDecision::Continue => false,
+        BudgetGuardDecision::Exhausted(reason) => {
+            stop_team_for_guard(
                 coordinator,
                 team_id,
+                "team.budget_exhausted",
+                &reason,
                 "团队预算耗尽，返工未产出新版本",
             )
             .await;
             true
         }
-        Ok(None) => false,
-        Err(e) => {
-            tracing::warn!(team_id = %team_id, %e, "指标预算门检查失败（忽略并继续调度）");
-            false
+        BudgetGuardDecision::Unavailable(error) => {
+            tracing::error!(team_id = %team_id, %error, "指标预算门无法读取当前预算，fail-closed 停止调度");
+            stop_team_for_guard(
+                coordinator,
+                team_id,
+                "team.budget_check_failed",
+                "指标预算无法核验，已停止调度并请求取消以保护预算上限",
+                "指标预算无法核验，团队已停止调度",
+            )
+            .await;
+            true
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_guard_tests {
+    use super::{budget_guard_decision, BudgetGuardDecision};
+    use std::time::Duration;
+
+    #[test]
+    fn budget_guard_distinguishes_continue_exhausted_and_unavailable() {
+        assert_eq!(
+            budget_guard_decision(Ok(None)),
+            BudgetGuardDecision::Continue
+        );
+        assert_eq!(
+            budget_guard_decision(Ok(Some("超出成本上限".to_string()))),
+            BudgetGuardDecision::Exhausted("超出成本上限".to_string())
+        );
+        assert_eq!(
+            budget_guard_decision(Err("指标读取失败".to_string())),
+            BudgetGuardDecision::Unavailable("指标读取失败".to_string())
+        );
+        assert_eq!(
+            super::next_guard_retry_delay(Duration::from_millis(100)),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            super::next_guard_retry_delay(Duration::from_secs(4)),
+            Duration::from_secs(5)
+        );
     }
 }
 
@@ -430,25 +224,74 @@ pub(crate) async fn run_team_loop(
             }
         });
     }
-    let verification_root = project_workspace::load_binding(coordinator.run_dir(), &team_id)
-        .map(|binding| binding.scope().root)
-        .unwrap_or_else(|| state.workspace.clone());
+    let verification_root =
+        match project_workspace::load_binding_checked(coordinator.run_dir(), &team_id) {
+            Ok(Some(binding)) => binding.scope().root,
+            Ok(None) => state.workspace.clone(),
+            Err(error) => {
+                tracing::error!(team_id = %team_id, %error, "Team 工作区绑定无法校验，拒绝启动");
+                stop_team_for_guard(
+                    &coordinator,
+                    &team_id,
+                    "team.workspace_binding_invalid",
+                    "工作区绑定无法校验，团队未执行任何任务",
+                    "工作区绑定无法校验，返工未产出新版本",
+                )
+                .await;
+                return;
+            }
+        };
     if let Err(error) = coordinator.bind_verification_workspace(&team_id, &verification_root) {
         tracing::warn!(team_id = %team_id, %error, "workswarm 验证工作区未绑定；WorkspacePaths 要求将在 DeliveryGate 中失败关闭");
     }
+    let lifecycle_journal =
+        workswarm_metrics::TeamLifecycleMetricsJournal::for_team(coordinator.run_dir(), &team_id);
+    let mut lifecycle_sequence = 0u64;
     let mut backoff = Duration::from_secs(1);
     loop {
+        lifecycle_sequence = lifecycle_sequence.saturating_add(1);
+        let phase_sequence = lifecycle_sequence;
         // 五期（第三路）：指标预算门（外层调度点；门闩内调度点见下方 latch 循环）。
         if stop_if_budget_exhausted(&coordinator, &team_id).await {
             return;
         }
+        let registry_timer =
+            workswarm_metrics::TeamLifecycleTimer::start(phase_sequence, "registry_build");
         let Some(registry) = build_run_registry(&coordinator, &state, &team_id, &cancel_flag).await
         else {
-            tracing::error!(team_id = %team_id, "workswarm 运行循环：worker 注册表构建失败，运行终止");
-            fail_pending_rework_tasks(&coordinator, &team_id, "团队运行器初始化失败，返工未产出新版本").await;
+            registry_timer.finish(&lifecycle_journal, &team_id, "failed");
+            tracing::error!(team_id = %team_id, "workswarm 运行循环：worker 注册表构建失败，取消本次运行");
+            stop_team_for_guard(
+                &coordinator,
+                &team_id,
+                "team.registry_build_failed",
+                "Worker 注册表无法安全构建，团队未继续派发任务",
+                "团队运行器初始化失败，返工未产出新版本",
+            )
+            .await;
             return;
         };
-        match coordinator.run_phase(&team_id, &registry).await {
+        registry_timer.finish(&lifecycle_journal, &team_id, "succeeded");
+        let phase_timer =
+            workswarm_metrics::TeamLifecycleTimer::start(phase_sequence, "phase_orchestration");
+        let phase_result = coordinator.run_phase(&team_id, &registry).await;
+        let phase_epoch = coordinator.current_execution_epoch(&team_id);
+        let phase_outcome = match &phase_result {
+            Err(_) => "failed",
+            Ok(owo_agent_core::PhaseOutcome::MoreReady) => "more_ready",
+            Ok(owo_agent_core::PhaseOutcome::Done) => "done",
+            Ok(owo_agent_core::PhaseOutcome::AwaitingHuman { .. }) => "awaiting_human",
+            Ok(owo_agent_core::PhaseOutcome::Failed) => "failed",
+            Ok(owo_agent_core::PhaseOutcome::Aborted) => "aborted",
+            Ok(owo_agent_core::PhaseOutcome::Finished) => "finished",
+        };
+        phase_timer.finish_with_phase_epoch(
+            &lifecycle_journal,
+            &team_id,
+            phase_outcome,
+            Some(phase_epoch),
+        );
+        match phase_result {
             Err(e) => {
                 // 存储/IO 异常：退避重试，避免热循环打爆磁盘。
                 tracing::warn!(team_id = %team_id, %e, "run_phase 失败，退避重试");
@@ -461,9 +304,23 @@ pub(crate) async fn run_team_loop(
                     continue;
                 }
                 owo_agent_core::PhaseOutcome::Done => {
+                    let delivery_timer = workswarm_metrics::TeamLifecycleTimer::start(
+                        phase_sequence,
+                        "delivery_finalize",
+                    );
                     let _delivery_lease =
                         super::acquire_workspace_delivery_lease(&verification_root).await;
-                    if let Err(e) = coordinator.finalize_success(&team_id).await {
+                    let result = coordinator.finalize_success(&team_id).await;
+                    delivery_timer.finish(
+                        &lifecycle_journal,
+                        &team_id,
+                        if result.is_ok() {
+                            "succeeded"
+                        } else {
+                            "failed"
+                        },
+                    );
+                    if let Err(e) = result {
                         tracing::error!(team_id = %team_id, %e, "workswarm 收尾失败");
                     }
                     return;
@@ -480,12 +337,13 @@ pub(crate) async fn run_team_loop(
                     return;
                 }
                 owo_agent_core::PhaseOutcome::AwaitingHuman { waits } => {
-                    tracing::info!(team_id = %team_id, ?waits, "团队等待人节点，进入门闩等待");
-                    // 门闩：人结果录入（落盘）→ 下一次 run_phase 自动唤醒；
-                    // cancel → 立即取消收尾。200ms 轮询（S0 无推送通道，保持最小实现）。
+                    tracing::info!(team_id = %team_id, ?waits, "团队等待人节点，进入事件门闩");
+                    // 订阅状态变化后重查一次阶段，关闭“人结果恰好在进入门闩时提交”的竞态。
+                    // 后续只有进度、取消或 1s 预算心跳会唤醒；等待期间不重复运行调度器。
+                    let mut progress_rx = coordinator.subscribe_progress(&team_id);
                     let cancel = coordinator.cancel_token(&team_id);
-                    loop {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    let mut cancel_rx = cancel.rx();
+                    'latch: loop {
                         if cancel.is_cancelled() {
                             if let Err(e) = coordinator
                                 .apply_steer(&team_id, &SteerCommand::Cancel)
@@ -501,28 +359,96 @@ pub(crate) async fn run_team_loop(
                             .await;
                             return;
                         }
-                        // 五期（第三路）：门闩内调度点同样过指标预算门（人结果落盘
-                        // 唤醒的下一阶段在此受控，否则会绕过外层门直接执行）。
+                        // 人节点等待期间仍守住墙钟预算；其余时候完全由状态事件唤醒。
                         if stop_if_budget_exhausted(&coordinator, &team_id).await {
                             return;
                         }
-                        match coordinator.run_phase(&team_id, &registry).await {
-                            Ok(owo_agent_core::PhaseOutcome::AwaitingHuman { .. }) => continue,
+                        let observed_progress = *progress_rx.borrow_and_update();
+                        lifecycle_sequence = lifecycle_sequence.saturating_add(1);
+                        let latch_sequence = lifecycle_sequence;
+                        let phase_timer = workswarm_metrics::TeamLifecycleTimer::start(
+                            latch_sequence,
+                            "phase_orchestration",
+                        );
+                        let phase_result = coordinator.run_phase(&team_id, &registry).await;
+                        let phase_epoch = coordinator.current_execution_epoch(&team_id);
+                        let phase_outcome = match &phase_result {
+                            Err(_) => "failed",
+                            Ok(owo_agent_core::PhaseOutcome::MoreReady) => "more_ready",
+                            Ok(owo_agent_core::PhaseOutcome::Done) => "done",
+                            Ok(owo_agent_core::PhaseOutcome::AwaitingHuman { .. }) => {
+                                "awaiting_human"
+                            }
+                            Ok(owo_agent_core::PhaseOutcome::Failed) => "failed",
+                            Ok(owo_agent_core::PhaseOutcome::Aborted) => "aborted",
+                            Ok(owo_agent_core::PhaseOutcome::Finished) => "finished",
+                        };
+                        phase_timer.finish_with_phase_epoch(
+                            &lifecycle_journal,
+                            &team_id,
+                            phase_outcome,
+                            Some(phase_epoch),
+                        );
+                        match phase_result {
+                            Ok(owo_agent_core::PhaseOutcome::AwaitingHuman { .. }) => loop {
+                                tokio::select! {
+                                    changed = progress_rx.changed() => {
+                                        if changed.is_err() || *progress_rx.borrow_and_update() != observed_progress {
+                                            continue 'latch;
+                                        }
+                                    }
+                                    changed = cancel_rx.changed() => {
+                                        if changed.is_err() || *cancel_rx.borrow() {
+                                            if let Err(e) = coordinator
+                                                .apply_steer(&team_id, &SteerCommand::Cancel)
+                                                .await
+                                            {
+                                                tracing::error!(team_id = %team_id, %e, "取消收尾失败");
+                                            }
+                                            fail_pending_rework_tasks(
+                                                &coordinator,
+                                                &team_id,
+                                                "团队已取消，返工未产出新版本",
+                                            )
+                                            .await;
+                                            return;
+                                        }
+                                    }
+                                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                        if stop_if_budget_exhausted(&coordinator, &team_id).await {
+                                            return;
+                                        }
+                                    }
+                                }
+                            },
                             Ok(owo_agent_core::PhaseOutcome::Done) => {
+                                let delivery_timer = workswarm_metrics::TeamLifecycleTimer::start(
+                                    latch_sequence,
+                                    "delivery_finalize",
+                                );
                                 let _delivery_lease =
                                     super::acquire_workspace_delivery_lease(&verification_root)
                                         .await;
-                                let _ = coordinator.finalize_success(&team_id).await;
+                                let result = coordinator.finalize_success(&team_id).await;
+                                delivery_timer.finish(
+                                    &lifecycle_journal,
+                                    &team_id,
+                                    if result.is_ok() {
+                                        "succeeded"
+                                    } else {
+                                        "failed"
+                                    },
+                                );
                                 return;
                             }
                             Ok(owo_agent_core::PhaseOutcome::MoreReady) => break, // 外层循环重建注册表继续
                             Ok(_) => {
                                 fail_pending_rework_tasks(
-                        &coordinator,
-                        &team_id,
-                        "团队执行在返工产出新版本前终止",
-                    )
-                    .await;
+                                    &coordinator,
+                                    &team_id,
+                                    "团队执行在返工产出新版本前终止",
+                                )
+                                .await;
                                 return;
                             } // 终态
                             Err(e) => {
@@ -534,23 +460,5 @@ pub(crate) async fn run_team_loop(
                 }
             },
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 请求模型
-
-
-#[cfg(test)]
-mod worker_kind_budget_tests {
-    use super::worker_kind_uses_agent_provider;
-
-    #[test]
-    fn every_fallback_agent_worker_is_metered_and_budgeted() {
-        assert!(worker_kind_uses_agent_provider("agent"));
-        assert!(worker_kind_uses_agent_provider("custom-agent"));
-        assert!(!worker_kind_uses_agent_provider("echo"));
-        assert!(!worker_kind_uses_agent_provider("sleep"));
-        assert!(!worker_kind_uses_agent_provider("fail"));
     }
 }

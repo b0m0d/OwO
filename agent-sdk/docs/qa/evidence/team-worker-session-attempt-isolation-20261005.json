@@ -1,0 +1,31 @@
+{
+  "evidence_id": "team-worker-session-attempt-isolation-20261005",
+  "scope": "source-only",
+  "claim": "Internal Team Worker sessions are keyed by team, task, and host attempt; the same attempt can reuse its session while a new attempt starts without prior-attempt message history. Current scheduler source also performs bounded incremental DAG dispatch after each completion.",
+  "verification": [
+    "Python source assertions verified attempt-keyed session construction and regression source for stable identity plus task/team/attempt isolation.",
+    "Python source assertions verified GoalRunner completion merge and Coordinator phase subplan wiring.",
+    "rustfmt --edition 2021 --check --config skip_children=true passed for workers.rs, goal/mod.rs, and coord_run.rs.",
+    "git diff --check passed."
+  ],
+  "limits": [
+    "No Rust compilation or tests were run per user instruction.",
+    "Old attempt sessions remain stored; this change isolates future prompts but does not garbage-collect historical sessions.",
+    "Token savings and quality impact are unmeasured; no real retry/rework run was performed.",
+    "Incremental dispatch is established from source only; critical-path timings and runtime traces remain missing."
+  ],
+  "source_assertions": {
+    "worker_session_identity_contains_host_attempt": true,
+    "same_attempt_is_stable_and_new_attempt_isolated": true,
+    "goal_runner_merges_and_refills_after_completion": true,
+    "coordinator_phase_subplan_feeds_dynamic_dag": true,
+    "engineering_and_problem_reports_updated": true
+  },
+  "files_sha256": {
+    "crates/owo-agent-server/src/workswarm_api/workers.rs": "38a20aa1bdeeb01e9335e58f3d15801e3debfe50da51a2d2182e8564ecea5d99",
+    "crates/owo-agent-core/src/goal/mod.rs": "a12a22b31e3ef51a9eb29865c37f0ac28df74e4d4556d22b1157bedd665c464e",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs": "8c823740261f265a50a8e6927ade1e622c544a1706d3ae2597392e2c9c0c34bf",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "1935e918bdb49eb768990cfc7ef0501fe9e109fb773697bf14a3dd992368c254"
+  }
+}

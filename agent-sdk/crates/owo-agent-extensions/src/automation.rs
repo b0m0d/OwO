@@ -1,6 +1,6 @@
 //! 自动化（v0.4 P1）：定时任务/提醒/监控，全部经审计；桌面端常驻时生效。
 //!
-//! v1 动作类型为提醒（Reminder）；定时触发后写入审计，桌面端轮询提醒列表。
+//! 支持提醒（Reminder）和只读 Agent 提示词（RunPrompt）；到期后写入运行台账并经审计。
 //! 持久化：`<data>/automations.json`。
 
 use chrono::{DateTime, NaiveTime, Utc};
@@ -36,7 +36,7 @@ pub struct AutomationRun {
     pub task_id: String,
     pub task_name: String,
     pub at: String,
-    /// `ok` / `failed`
+    /// `ok` / `failed` / `skipped`（并发上限触发时）
     pub status: String,
     #[serde(default)]
     pub output: Option<String>,

@@ -211,6 +211,7 @@ async fn grants_revoke_and_audit() {
     assert_eq!(list_body["grant_count"], serde_json::json!(1));
     let listed = &list_body["grants"][0];
     assert_eq!(listed["grant_id"], serde_json::json!(grant_id));
+    assert_eq!(listed["effective"], serde_json::json!(true));
     // 脱敏：不暴露参数原文。
     let serialized = serde_json::to_string(&list_body).unwrap();
     assert!(
@@ -260,37 +261,30 @@ async fn grants_revoke_and_audit() {
 }
 
 #[tokio::test]
-async fn grant_hit_skips_approval_for_same_fingerprint() {
-    // 端到端：policy 注入 shared grant → 命中后 decision 为 Allow（无需审批）。
+async fn destructive_grant_scope_is_rejected_and_request_stays_ask() {
     let (state, _temp) = test_state().await;
-
-    // Agent 的 Policy 已由 AppState::new 注入 state.grants（共享引用）。
     let request = owo_agent_core::permissions::PermissionRequest::new(
         "run_command",
         serde_json::json!({ "command": "ls -la" }),
         owo_agent_core::permissions::Level::Execute,
         "执行命令：ls -la",
     );
-    // 无 grant → Ask（被测工具不在工作区写自动放行范围）。
-    let policy = Policy::new(std::env::temp_dir());
-    let _ = policy.decision(&request);
-
-    // 注入 grant 后：同参命中 → Allow。
-    let first = state
+    let workspace = state.workspace.clone();
+    let policy = Policy::new(&workspace).with_grants(Arc::clone(&state.grants));
+    assert_eq!(
+        policy.decision(&request),
+        owo_agent_core::permissions::Decision::Ask
+    );
+    assert!(state
         .grants
         .grant_from_scope(
             &request,
             &state.workspace_id(),
             owo_agent_core::grant_store::GrantScope::Session,
         )
-        .expect("session 生成 grant");
-    state.grants.insert(first);
-    let workspace = state.workspace.clone();
-    let injected = Policy::new(&workspace).with_grants(Arc::clone(&state.grants));
-    let decision = injected.decision(&request);
+        .is_none());
     assert_eq!(
-        decision,
-        owo_agent_core::permissions::Decision::Allow,
-        "同参（同指纹）grant 命中应直接放行"
+        policy.decision(&request),
+        owo_agent_core::permissions::Decision::Ask
     );
 }

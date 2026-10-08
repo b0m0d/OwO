@@ -1,0 +1,28 @@
+{
+  "evidence_id": "team-request-budget-async-reservation-20261005",
+  "scope": "source-only",
+  "claim": "Team model request reservations retain write-ahead hard-budget behavior but execute synchronous journal append/fsync in Tokio blocking pool; Provider calls await a durable reservation.",
+  "verification": [
+    "Python source assertions checked async blocking-pool reservation, request-before-provider ordering, blocking-pool regression-test source, and existing budget exhaustion coverage.",
+    "rustfmt --edition 2021 --check passed for both modified Rust files.",
+    "git diff --check and UTF-8/trailing-whitespace checks passed."
+  ],
+  "limits": [
+    "No compilation or tests were run per user instruction.",
+    "No runtime latency measurement was collected; fsync frequency and reservation mutex serialization remain.",
+    "This is an async runtime responsiveness improvement, not evidence that Team is now faster than Single."
+  ],
+  "source_assertions": {
+    "durable_reservation_awaits_blocking_pool": true,
+    "provider_call_follows_reservation": true,
+    "provider_never_called_on_budget_failure": true,
+    "blocking_pool_regression_source": true,
+    "existing_budget_exhaustion_contract_retained": true
+  },
+  "files_sha256": {
+    "crates/owo-agent-server/src/workswarm_metrics/metrics.rs": "2a83ed1d7f52483b07ef6f54f5661942d8049c3437c0308e3ac3162af0244879",
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs": "983609ef2213dab4acf450ed1a7e52b83b2df0def194dca9327ef9f45101e835",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "05f0a47471c630f37e7a8db24e6085fa608df178f8e1a39ac0a737f6ca278298"
+  }
+}

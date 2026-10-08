@@ -13,13 +13,13 @@ window.OwoPanels.eval = (function () {
   function defaultHelpers() {
     var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
     function get(path) {
-      return fetch(baseUrl + path).then(function (r) {
+      return window.OwoApi.stream(path).then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
       });
     }
     function post(path, body) {
-      return fetch(baseUrl + path, {
+      return window.OwoApi.stream(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),
@@ -47,6 +47,9 @@ window.OwoPanels.eval = (function () {
 
   var H = defaultHelpers();
   var state = { reports: [], current: null, currentFile: "", running: false };
+  var lifecycleGeneration = 0;
+  var historyGeneration = 0;
+  var detailGeneration = 0;
 
   function nav() {
     return (
@@ -54,6 +57,7 @@ window.OwoPanels.eval = (function () {
       '<style>' +
       '.owo-eval-row{display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--border)}' +
       '.owo-eval-item{cursor:pointer}' +
+      '.owo-eval-item{width:100%;text-align:left;color:inherit;background:transparent;border:0;font:inherit}' +
       '.owo-eval-item:hover{background:var(--surface-2)}' +
       '.owo-eval-badge{display:inline-block;padding:1px 6px;border-radius:8px;font-size:11px;color:var(--accent-ink)}' +
       '.owo-eval-badge.ok{background:var(--green)}.owo-eval-badge.bad{background:var(--red)}' +
@@ -84,16 +88,25 @@ window.OwoPanels.eval = (function () {
   }
 
   function mount(root, helpers) {
+    lifecycleGeneration += 1;
+    historyGeneration += 1;
+    detailGeneration += 1;
     if (helpers) H = helpers;
     root.innerHTML = nav();
     sectionEl = root.querySelector(".owo-eval-panel");
-    sectionEl.querySelector("#owo-eval-run").addEventListener("click", run);
+    var runButton = sectionEl.querySelector("#owo-eval-run");
+    runButton.disabled = state.running;
+    runButton.addEventListener("click", run);
+    if (state.running) $("#owo-eval-status").textContent = "评测仍在运行…";
     refresh();
   }
 
   // 面板可能已被切换/卸载（异步返回时），此时静默跳过渲染
   function alive() {
     return sectionEl && document.contains(sectionEl);
+  }
+  function current(generation) {
+    return generation === lifecycleGeneration && alive();
   }
   function $(sel) {
     return alive() ? sectionEl.querySelector(sel) : null;
@@ -110,11 +123,14 @@ window.OwoPanels.eval = (function () {
     if (state.running) return;
     var suite = $("#owo-eval-suite").value.trim();
     var btn = $("#owo-eval-run");
+    if (!btn) return;
+    var generation = lifecycleGeneration;
     btn.disabled = true;
     state.running = true;
+    $("#owo-eval-status").textContent = "正在运行评测…";
     H.post("/eval/gate/run", suite ? { suite: suite } : {})
       .then(function (data) {
-        if (!alive()) return;
+        if (!current(generation)) return;
         var status = $("#owo-eval-status");
         if (data.skipped) {
           status.textContent = "已跳过：" + (data.reason || "无凭据");
@@ -132,25 +148,34 @@ window.OwoPanels.eval = (function () {
         return refresh();
       })
       .catch(function (e) {
-        if (!alive()) return;
+        if (!current(generation)) return;
         var status = $("#owo-eval-status");
         status.textContent = H.friendlyError(e);
         status.className = "owo-eval-badge bad";
       })
       .finally(function () {
-        if (!alive()) return;
-        $("#owo-eval-run").disabled = false;
         state.running = false;
+        if (alive()) {
+          $("#owo-eval-run").disabled = false;
+          if (generation !== lifecycleGeneration) {
+            $("#owo-eval-status").textContent = "评测已结束；历史报告已刷新";
+            refresh();
+          }
+        }
       });
   }
 
   function refresh() {
+    var generation = lifecycleGeneration;
+    var request = ++historyGeneration;
     return H.get("/eval/gate/reports")
       .then(function (data) {
+        if (!current(generation) || request !== historyGeneration) return;
         state.reports = (data && data.reports) || [];
         renderList();
       })
       .catch(function (e) {
+        if (!current(generation) || request !== historyGeneration) return;
         var el = $("#owo-eval-list");
         if (el) el.innerHTML = '<div class="owo-eval-badge bad">' + H.esc(H.friendlyError(e)) + "</div>";
       });
@@ -167,26 +192,31 @@ window.OwoPanels.eval = (function () {
       .map(function (r) {
         var badge = (r.pass_rate || 0) >= 0.8 ? "ok" : (r.pass_rate || 0) > 0 ? "warn" : "bad";
         return (
-          '<div class="owo-eval-row owo-eval-item" data-file="' + H.esc(r.file) + '">' +
+          '<button type="button" class="owo-eval-row owo-eval-item" data-file="' + H.esc(r.file) + '">' +
           '<span class="owo-eval-badge ' + badge + '">' + Math.round((r.pass_rate || 0) * 100) + "%</span> " +
           "<strong>" + H.esc(r.suite || "?") + "</strong>" +
           '<span class="sub">' + (r.passed || 0) + "/" + (r.total || 0) + " ｜ " +
           H.esc(prettyTs((r.timestamp || "").slice(0, 19))) + " ｜ " + H.esc(r.model || "") + "</span>" +
-          "</div>"
+          "</button>"
         );
       })
       .join("");
     var buttons = el.querySelectorAll(".owo-eval-item");
     for (var i = 0; i < buttons.length; i++) {
       buttons[i].addEventListener("click", function () {
-        H.get("/eval/gate/report")
+        var file = this.getAttribute("data-file") || "";
+        if (!file) return;
+        var generation = lifecycleGeneration;
+        var request = ++detailGeneration;
+        H.get("/eval/gate/report?file=" + encodeURIComponent(file))
           .then(function (data) {
-            if (!alive()) return;
+            if (!current(generation) || request !== detailGeneration) return;
             state.current = data.report || null;
             state.currentFile = data.file || "";
             renderDetail();
           })
           .catch(function (e) {
+            if (!current(generation) || request !== detailGeneration) return;
             var el = $("#owo-eval-detail");
             if (el) el.innerHTML = '<div class="owo-eval-badge bad">' + H.esc(H.friendlyError(e)) + "</div>";
           });
@@ -241,5 +271,11 @@ window.OwoPanels.eval = (function () {
     nav: nav,
     mount: mount,
     refresh: refresh,
+    dispose: function () {
+      lifecycleGeneration += 1;
+      historyGeneration += 1;
+      detailGeneration += 1;
+      sectionEl = null;
+    },
   };
 })();

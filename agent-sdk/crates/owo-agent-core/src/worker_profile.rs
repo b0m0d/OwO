@@ -12,13 +12,10 @@
 //!   两者均把已解析的策略/工具/预算注入 core `WorkerRuntime`。Runtime 统一 Agent 回合、
 //!   任务会话、取消、WorkerOutputV1 修复和逐请求用量，不推断角色或授予工具权限。
 
-use crate::agent::{AgentConfig, TurnEvent};
-use crate::gateway::ModelProvider;
-use crate::permissions::{Approver, Policy};
+use crate::agent::TurnEvent;
 use crate::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// 可选 Worker 回合事件回调；事件使用方应只记录安全元数据。
@@ -91,6 +88,63 @@ impl WorkerProfile {
         } else {
             Self::for_role_with_capabilities(role, capabilities, budget_calls)
         }
+    }
+
+    /// Resolve the base profile for a persisted Team role in one shared location.
+    pub fn for_team_role_spec(
+        spec: &crate::workswarm::RoleSpec,
+        budget_calls: usize,
+        parallel: bool,
+        template_id: Option<&str>,
+    ) -> Self {
+        let mut profile = Self::for_team_role(
+            &spec.role,
+            &spec.capabilities,
+            budget_calls,
+            !spec.write_paths.is_empty(),
+            parallel && is_parallel_writer_name(&spec.role),
+        );
+        if template_id == Some(crate::builtin_team_templates::FULLSTACK_WEB_V1)
+            && matches!(spec.role.as_str(), "w1" | "w2")
+        {
+            profile = profile.without_commands();
+        }
+        profile.write_allowed_paths = spec
+            .write_paths
+            .iter()
+            .map(|path| path.trim().replace('\\', "/"))
+            .collect();
+        profile
+    }
+
+    /// Materialize validated role paths for this workspace. Writers without an explicit
+    /// role path inherit the workspace root; reviewers and read-only roles get no write path.
+    pub fn team_role_write_allowed_paths(
+        spec: &crate::workswarm::RoleSpec,
+        workspace_root: &Path,
+        is_writer: bool,
+    ) -> Result<Vec<PathBuf>, String> {
+        crate::workswarm::validate_role_write_paths_with_capabilities(
+            &spec.role,
+            &spec.capabilities,
+            &spec.write_paths,
+        )?;
+        if spec.write_paths.is_empty() && !is_writer {
+            return Ok(Vec::new());
+        }
+        let workspace_root = canonicalize_scope_path(workspace_root)?;
+        let mut paths = Vec::with_capacity(spec.write_paths.len());
+        for raw in &spec.write_paths {
+            let path = canonicalize_scope_path(&workspace_root.join(Path::new(raw.trim())))?;
+            if !path.starts_with(&workspace_root) {
+                return Err(format!("角色 {} 的写路径越出工作区：{raw}", spec.role));
+            }
+            paths.push(path);
+        }
+        if paths.is_empty() && is_writer {
+            paths.push(workspace_root);
+        }
+        Ok(paths)
     }
 
     /// 内置角色 → 画像。`budget_calls` = 模板每角色调用预算（0 = 未声明 → 缺省 12）。
@@ -235,20 +289,193 @@ impl WorkerProfile {
 
     /// Limit a TaskGraph attempt to its host-assigned total request budget. The final
     /// request remains available to the single WorkerOutputV1 correction path.
-    pub fn with_task_model_call_budget(
-        mut self,
-        total_calls: usize,
-    ) -> Result<Self, String> {
+    pub fn with_task_model_call_budget(mut self, total_calls: usize) -> Result<Self, String> {
         self.max_turns = self.max_turns.min(Self::task_agent_turn_cap(total_calls)?);
         Ok(self)
     }
 
-    /// 移除受控命令能力，但保留白名单文件读写；用于源码实现角色，避免模型
-    /// 看到与任务无关的 shell 工具后重复运行测试或探测命令。
+    /// Remove command execution while preserving the profile's file capabilities.
     pub fn without_commands(mut self) -> Self {
         self.can_run_command = false;
         self.visible_tools.retain(|tool| tool != "run_command");
         self
+    }
+
+    /// Apply a workspace/host read-only ceiling to the role and task profile.
+    /// Keep explicitly allowed read tools only; an empty capability set remains empty.
+    pub fn restricted_to_read_only(mut self) -> Self {
+        self.read_only = true;
+        self.can_run_command = false;
+        self.write_allowed_paths.clear();
+        self.visible_tools.retain(|tool| {
+            matches!(
+                tool.as_str(),
+                "read_file"
+                    | "list_dir"
+                    | "search_files"
+                    | "browser_search"
+                    | "browser_navigate"
+                    | "browser_snapshot"
+                    | "__owo_no_task_tool__"
+            )
+        });
+        if self.visible_tools.is_empty() {
+            self.visible_tools.push("__owo_no_task_tool__".to_string());
+        }
+        self
+    }
+
+    /// Narrow a role profile to the host-resolved capabilities of one TaskGraph assignment.
+    pub fn apply_task_capability_scope(
+        &mut self,
+        task: &crate::task_context::ResolvedTaskContext,
+        task_has_no_write_scope: bool,
+    ) {
+        let Some(capabilities) = task.required_capabilities.as_deref() else {
+            self.read_only = true;
+            self.can_run_command = false;
+            self.visible_tools
+                .retain(|tool| matches!(tool.as_str(), "read_file" | "list_dir" | "search_files"));
+            if self.visible_tools.is_empty() {
+                self.visible_tools.push("__owo_no_task_tool__".to_string());
+            }
+            return;
+        };
+        let required = capabilities
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        self.verification_timeout_ms = task
+            .verification
+            .as_ref()
+            .and_then(|plan| plan.get("requirements"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|requirement| {
+                requirement
+                    .get("validator_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("workspace-command-success-v1")
+            })
+            .filter_map(|requirement| {
+                requirement
+                    .pointer("/resources/timeout_ms")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .min();
+        let can_write_files = !task_has_no_write_scope
+            && (required.contains("write_file") || required.contains("apply_patch"));
+        self.can_run_command =
+            self.can_run_command && can_write_files && required.contains("run_command");
+        self.visible_tools.retain(|tool| {
+            required.contains(tool.as_str()) && (tool != "run_command" || self.can_run_command)
+        });
+        if !can_write_files {
+            self.read_only = true;
+            self.visible_tools
+                .retain(|tool| !matches!(tool.as_str(), "write_file" | "apply_patch"));
+        }
+        if self.visible_tools.is_empty() {
+            self.visible_tools.push("__owo_no_task_tool__".to_string());
+        }
+    }
+
+    /// Resolve a task-local write allowlist, intersecting it with the role/workspace scope.
+    /// None means the task supplied no additional path constraint; Some([]) denies all writes.
+    pub fn resolve_task_write_allowlist(
+        task: &crate::task_context::ResolvedTaskContext,
+        workspace_root: &Path,
+        role_allowed: &[PathBuf],
+    ) -> Result<Option<Vec<PathBuf>>, String> {
+        let Some(paths) = task.write_paths.as_ref() else {
+            return Ok(None);
+        };
+        let workspace_root = canonicalize_scope_path(workspace_root)
+            .map_err(|error| format!("工作区写范围根目录无法解析：{error}"))?;
+        let role_allowed = role_allowed
+            .iter()
+            .map(|base| canonicalize_scope_path(base))
+            .collect::<Result<Vec<_>, _>>()?;
+        if role_allowed
+            .iter()
+            .any(|base| !base.starts_with(&workspace_root))
+        {
+            return Err("角色写范围包含工作区之外的路径".to_string());
+        }
+        let mut resolved = Vec::with_capacity(paths.len());
+        for raw in paths {
+            let relative = Path::new(raw);
+            if raw.trim().is_empty()
+                || relative.is_absolute()
+                || !relative
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::Normal(_)))
+                || relative.components().any(|part| {
+                    !matches!(
+                        part,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err(format!("任务写范围路径无效：{raw}"));
+            }
+            let candidate = canonicalize_scope_path(&workspace_root.join(relative))?;
+            if !candidate.starts_with(&workspace_root) {
+                return Err(format!("任务写范围越出工作区：{raw}"));
+            }
+            if role_allowed.is_empty() {
+                resolved.push(candidate);
+                continue;
+            }
+            let before = resolved.len();
+            for base in &role_allowed {
+                if candidate.starts_with(base) {
+                    resolved.push(candidate.clone());
+                } else if base.starts_with(&candidate) {
+                    resolved.push(base.clone());
+                }
+            }
+            if resolved.len() == before {
+                return Err(format!("任务写范围超出角色/团队范围：{raw}"));
+            }
+        }
+        resolved.sort();
+        resolved.dedup();
+        Ok(Some(resolved))
+    }
+
+    /// Render authorized paths relative to the workspace without exposing outside paths.
+    pub fn workspace_relative_write_paths(workspace_root: &Path, paths: &[PathBuf]) -> Vec<String> {
+        let Ok(root) = canonicalize_scope_path(workspace_root) else {
+            return vec!["<outside-workspace-denied>".to_string(); paths.len()];
+        };
+        paths
+            .iter()
+            .map(|path| {
+                let Ok(normalized) = canonicalize_scope_path(path) else {
+                    return "<outside-workspace-denied>".to_string();
+                };
+                if normalized == root {
+                    return ".".to_string();
+                }
+                normalized
+                    .strip_prefix(&root)
+                    .ok()
+                    .map(|relative| {
+                        relative
+                            .components()
+                            .filter_map(|component| match component {
+                                std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    })
+                    .filter(|relative| !relative.is_empty())
+                    .unwrap_or_else(|| "<outside-workspace-denied>".to_string())
+            })
+            .collect()
     }
 
     /// 按画像装配工具注册表：注册表面即权限边界。
@@ -277,7 +504,7 @@ impl WorkerProfile {
     }
 
     /// 角色 Prompt 的「禁止执行/边界」行（八期 · 一路）：按族与工具面派生，
-    /// 供 [`crate::team_prompt::compile_prompt`] 使用——Prompt 声称的能力边界与
+    /// 供 [`crate::team_prompt::compile_prompt_with_profile`] 使用——Prompt 声称的能力边界与
     /// `build_registry` 装配的真实工具面一致（注册表面即权限边界的 Prompt 侧投影）。
     pub fn prompt_guard_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
@@ -301,6 +528,12 @@ impl WorkerProfile {
                  禁止把变更只留在说明里而不落盘。"
                     .to_string(),
             );
+            if !self.write_allowed_paths.is_empty() {
+                lines.push(format!(
+                    "本次最终写入路径白名单（相对工作区根）：{}。",
+                    self.write_allowed_paths.join(" / ")
+                ));
+            }
         }
         if !self.can_run_command {
             lines.push("禁止执行命令（run_command 不在你的工具面）。".to_string());
@@ -310,6 +543,53 @@ impl WorkerProfile {
         }
         lines
     }
+}
+
+fn canonicalize_scope_path(path: &Path) -> Result<PathBuf, String> {
+    let mut current = path.to_path_buf();
+    let mut suffix = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(&current) {
+            Ok(_) => {
+                let canonical = current
+                    .canonicalize()
+                    .map_err(|error| format!("{}：{error}", current.display()))?;
+                let mut canonical = normalize_canonical_path(canonical);
+                for part in suffix.iter().rev() {
+                    canonical.push(part);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = current.file_name().map(std::ffi::OsString::from) else {
+                    return Err(format!("{}：没有可解析的父路径", path.display()));
+                };
+                suffix.push(name);
+                if !current.pop() {
+                    return Err(format!("{}：没有可解析的父路径", path.display()));
+                }
+            }
+            Err(error) => return Err(format!("{}：{error}", current.display())),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn normalize_canonical_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    let Some(without_prefix) = text.strip_prefix(r"\\?\") else {
+        return path;
+    };
+    if let Some(unc) = without_prefix.strip_prefix("UNC\\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else {
+        PathBuf::from(without_prefix)
+    }
+}
+
+#[cfg(not(windows))]
+fn normalize_canonical_path(path: PathBuf) -> PathBuf {
+    path
 }
 
 /// 路径白名单交集（七期 · 二路）：角色写白名单 ∩ 团队绑定写白名单。
@@ -357,183 +637,9 @@ pub fn compile_worker_system_prompt(
     )
 }
 
-/// 画像驱动子代理执行器（七期 · 二路）：与一路 `ContractSubagentRunner` 同口径
-/// （完整回合循环 + `WorkerOutputV1` 输出契约执行 + 至多一次定向修复），区别仅在：
-///
-/// - 工具注册表由 [`WorkerProfile::build_registry`] 按角色装配（注册表面即权限边界）；
-/// - 回合上限取画像值（模板预算，硬上限 16）；
-/// - 写面为「角色 ∩ 绑定」交集白名单工具（越界写入在工具层被拒）；
-/// - `is_critic` 由服务端按角色名判定（`role == "critic"`；引擎注入的 `read_only`
-///   只覆盖 critic，其余内置角色都是 producer，画像另管只读面）。
-pub struct ProfileSubagentRunner<'a> {
-    pub provider: Arc<dyn ModelProvider>,
-    pub approver: &'a dyn Approver,
-    /// 中断标志：团队取消桥共享置位，`run_turn` 协作式检查。
-    pub abort: &'a AtomicBool,
-    pub depth: usize,
-    pub model: String,
-    /// critic 角色代理（true = 只读探索口径，禁带 artifact；false = producer）。
-    pub is_critic: bool,
-    /// 最终写白名单（角色 ∩ 绑定交集；空 = 工作区内可写）。
-    pub write_allowed: Vec<PathBuf>,
-    pub profile: WorkerProfile,
-    /// Optional runtime limits supplied by a controlled harness; execution still uses this runner.
-    pub agent_config: Option<AgentConfig>,
-    /// Optional caller-specific budget wording; role contract/tool assembly stay shared.
-    pub budget_note_override: Option<String>,
-    /// Team 宿主提供的额外受控工具（仍由 ToolHost 执行）。
-    pub extra_tools: Vec<Arc<dyn crate::tools::Tool>>,
-    /// 可选的 Team 共享上下文使用说明。
-    pub extra_system_prompt: Option<String>,
-    /// 可选的脱敏回合事件出口；调用方只应记录安全元数据，不记录参数/结果正文。
-    pub event_sink: Option<TurnEventSink>,
-    /// Daemon session store, used to resume this team/task history on local rework.
-    pub session_store: Option<Arc<dyn crate::session::SessionStore>>,
-    pub worker_session_id: Option<String>,
-    /// Source user session retained as the worker session parent.
-    pub parent_session_id: Option<String>,
-}
-
-/// Measured result from the shared Team worker runtime.
-#[derive(Debug, Clone)]
-pub struct ProfileSubagentRunReport {
-    pub output: String,
-    pub duration_ms: u64,
-    pub steps: usize,
-    pub model_calls: u32,
-    pub usage: crate::gateway::TokenUsage,
-    /// False whenever any request, including contract repair, lacks attributable usage.
-    pub usage_known: bool,
-    pub output_repairs: u32,
-}
-
-/// Failure telemetry is retained so eval and production diagnostics do not hide
-/// the cost of a rejected worker submission or its contract-repair request.
-#[derive(Debug, Clone)]
-pub struct ProfileSubagentRunError {
-    pub message: String,
-    pub duration_ms: u64,
-    pub steps: usize,
-    pub model_calls: u32,
-    pub usage: crate::gateway::TokenUsage,
-    pub usage_known: bool,
-    pub output_repairs: u32,
-}
-
-impl From<String> for ProfileSubagentRunError {
-    fn from(message: String) -> Self {
-        Self {
-            message,
-            duration_ms: 0,
-            steps: 0,
-            model_calls: 0,
-            usage: crate::gateway::TokenUsage::default(),
-            usage_known: false,
-            output_repairs: 0,
-        }
-    }
-}
-
-impl ProfileSubagentRunner<'_> {
-    /// Compatibility entry point for production call sites.
-    pub async fn run(&self, workspace: &Path, prompt: &str) -> Result<String, String> {
-        self.run_report(workspace, prompt)
-            .await
-            .map(|report| report.output)
-            .map_err(|error| error.message)
-    }
-
-    /// Resolve the capability profile here, then delegate all worker execution to WorkerRuntime.
-    pub async fn run_report(
-        &self,
-        workspace: &Path,
-        prompt: &str,
-    ) -> Result<ProfileSubagentRunReport, ProfileSubagentRunError> {
-        let policy = if self.profile.read_only {
-            Policy::read_only(workspace.to_path_buf())
-        } else {
-            Policy::new(workspace.to_path_buf())
-        };
-        let mut registry = self.profile.build_registry(self.write_allowed.clone());
-        for tool in &self.extra_tools {
-            registry.register_arc(Arc::clone(tool));
-        }
-        let mut config = self.agent_config.clone().unwrap_or_else(|| AgentConfig {
-            max_turns: self.profile.max_turns.min(PROFILE_MAX_TURNS_CAP),
-            max_tool_calls_per_turn: crate::agent::DEFAULT_BOUNDED_TOOL_CALL_CAP,
-            subagent_depth: self.depth + 1,
-            ..Default::default()
-        });
-        let profile_turn_cap = self.profile.max_turns.min(PROFILE_MAX_TURNS_CAP);
-        config.max_turns = if config.max_turns == 0 {
-            profile_turn_cap
-        } else {
-            config.max_turns.min(profile_turn_cap)
-        };
-        if config.max_tool_calls_per_turn == 0 {
-            config.max_tool_calls_per_turn = crate::agent::DEFAULT_BOUNDED_TOOL_CALL_CAP;
-        }
-        if let Some(task_timeout_ms) = self.profile.verification_timeout_ms {
-            config.max_command_timeout_ms = Some(
-                config
-                    .max_command_timeout_ms
-                    .map_or(task_timeout_ms, |configured| configured.min(task_timeout_ms)),
-            );
-        }
-        config.subagent_depth = self.depth + 1;
-        let budget_note = self.budget_note_override.clone().unwrap_or_else(|| {
-            format!(
-                "你的回合预算为 {} 回合：前 {} 回合完成必要的读取、写入和任务要求的定向验证；最后一个回合必须直接输出最终 JSON（不要再调用任何工具）。尽量少花回合。\n",
-                self.profile.max_turns,
-                self.profile.max_turns.saturating_sub(1)
-            )
-        });
-        let system_prompt = compile_worker_system_prompt(
-            &self.profile,
-            self.is_critic,
-            &budget_note,
-            self.extra_system_prompt.as_deref(),
-        );
-        let runtime = crate::worker_runtime::WorkerRuntime {
-            provider: Arc::clone(&self.provider),
-            approver: self.approver,
-            abort: self.abort,
-            depth: self.depth,
-            model: self.model.clone(),
-            workspace: workspace.to_path_buf(),
-            registry,
-            policy,
-            config,
-            system_prompt: Some(system_prompt),
-            is_critic: self.is_critic,
-            event_sink: self.event_sink.clone(),
-            session_store: self.session_store.clone(),
-            worker_session_id: self.worker_session_id.clone(),
-            parent_session_id: self.parent_session_id.clone(),
-        };
-        runtime
-            .run_report(prompt)
-            .await
-            .map(|report| ProfileSubagentRunReport {
-                output: report.output,
-                duration_ms: report.duration_ms,
-                steps: report.steps,
-                model_calls: report.model_calls,
-                usage: report.usage,
-                usage_known: report.usage_known,
-                output_repairs: report.output_repairs,
-            })
-            .map_err(|error| ProfileSubagentRunError {
-                message: error.message,
-                duration_ms: error.duration_ms,
-                steps: error.steps,
-                model_calls: error.model_calls,
-                usage: error.usage,
-                usage_known: error.usage_known,
-                output_repairs: error.output_repairs,
-            })
-    }
-}
+#[path = "worker_profile/runner.rs"]
+mod runner;
+pub use runner::{ProfileSubagentRunError, ProfileSubagentRunReport, ProfileSubagentRunner};
 
 #[cfg(test)]
 mod tests {
@@ -569,6 +675,55 @@ mod tests {
             );
         }
         assert_eq!(names.len(), 6, "implementer 不应有多余工具：{names:?}");
+    }
+
+    #[test]
+    fn team_role_spec_builder_is_shared_for_writer_review_and_template_rules() {
+        let ordinary_slot = crate::workswarm::RoleSpec::agent("w1");
+        assert!(WorkerProfile::for_team_role_spec(&ordinary_slot, 4, false, None).read_only);
+        assert!(!WorkerProfile::for_team_role_spec(&ordinary_slot, 4, true, None).read_only);
+        let readonly_role = crate::workswarm::RoleSpec::agent("content_reviewer");
+        assert!(WorkerProfile::team_role_write_allowed_paths(
+            &readonly_role,
+            Path::new("nonexistent-eval-workspace"),
+            false
+        )
+        .unwrap()
+        .is_empty());
+
+        let mut scoped = crate::workswarm::RoleSpec::agent("frontend_engineer");
+        scoped.write_paths = vec!["apps/web".to_string()];
+        let profile = WorkerProfile::for_team_role_spec(&scoped, 6, false, None);
+        assert!(profile.is_writer());
+        assert_eq!(profile.write_allowed_paths, vec!["apps/web"]);
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("apps/web")).unwrap();
+        let expected = super::canonicalize_scope_path(&workspace.path().join("apps/web")).unwrap();
+        assert_eq!(
+            WorkerProfile::team_role_write_allowed_paths(&scoped, workspace.path(), true).unwrap(),
+            vec![expected]
+        );
+
+        let fullstack_worker = WorkerProfile::for_team_role_spec(
+            &crate::workswarm::RoleSpec {
+                role: "w1".to_string(),
+                write_paths: vec!["apps/web".to_string()],
+                ..Default::default()
+            },
+            4,
+            false,
+            Some(crate::builtin_team_templates::FULLSTACK_WEB_V1),
+        );
+        assert!(!fullstack_worker.can_run_command);
+
+        let mut reviewer = crate::workswarm::RoleSpec::agent("reviewer");
+        reviewer.write_paths = vec!["src".to_string()];
+        assert!(WorkerProfile::team_role_write_allowed_paths(
+            &reviewer,
+            Path::new("workspace"),
+            false
+        )
+        .is_err());
     }
 
     #[test]
@@ -641,6 +796,118 @@ mod tests {
             .iter()
             .any(|tool| tool == "apply_patch"));
         assert!(profile.is_writer());
+    }
+
+    #[test]
+    fn prompt_guard_shows_the_final_workspace_write_allowlist() {
+        let mut profile = WorkerProfile::explicit_writer(4);
+        profile.write_allowed_paths = vec!["apps/api".to_string(), "src/lib.rs".to_string()];
+        let prompt = profile.prompt_guard_lines().join("\n");
+        assert!(prompt.contains("本次最终写入路径白名单（相对工作区根）：apps/api / src/lib.rs"));
+    }
+
+    #[test]
+    fn workspace_read_only_ceiling_removes_write_and_command_tools() {
+        let mut profile = WorkerProfile::explicit_writer(5);
+        profile.visible_tools.extend([
+            "browser_search".to_string(),
+            "browser_navigate".to_string(),
+            "browser_snapshot".to_string(),
+        ]);
+        profile.write_allowed_paths = vec!["src".to_string()];
+        let profile = profile.restricted_to_read_only();
+        assert!(profile.read_only);
+        assert!(!profile.can_run_command);
+        assert!(profile.write_allowed_paths.is_empty());
+        assert!(profile.visible_tools.iter().any(|tool| tool == "read_file"));
+        assert!(profile
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "browser_search"));
+        assert!(!profile
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "write_file"));
+        assert!(!profile
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "apply_patch"));
+        assert!(!profile
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "run_command"));
+        let mut empty = WorkerProfile::explicit_writer(1);
+        empty.visible_tools.clear();
+        let empty = empty.restricted_to_read_only();
+        assert_eq!(empty.visible_tools, vec!["__owo_no_task_tool__"]);
+    }
+
+    #[test]
+    fn task_graph_capability_resolution_is_fail_closed_and_runtime_ready() {
+        let mut writer = WorkerProfile::explicit_writer(6);
+        let read_only_task = crate::task_context::ResolvedTaskContext {
+            origin: crate::task_context::TaskContextOrigin::TaskGraph,
+            required_capabilities: Some(vec![
+                "read_file".into(),
+                "search_files".into(),
+                "run_command".into(),
+            ]),
+            ..Default::default()
+        };
+        writer.apply_task_capability_scope(&read_only_task, true);
+        assert!(writer.read_only);
+        assert!(!writer.can_run_command);
+        assert!(writer.visible_tools.iter().any(|tool| tool == "read_file"));
+        assert!(!writer
+            .visible_tools
+            .iter()
+            .any(|tool| tool == "run_command"));
+        assert!(!writer.visible_tools.iter().any(|tool| tool == "write_file"));
+
+        let mut empty = WorkerProfile::explicit_writer(3);
+        let empty_task = crate::task_context::ResolvedTaskContext {
+            origin: crate::task_context::TaskContextOrigin::TaskGraph,
+            required_capabilities: Some(Vec::new()),
+            ..Default::default()
+        };
+        empty.apply_task_capability_scope(&empty_task, true);
+        assert_eq!(empty.visible_tools, vec!["__owo_no_task_tool__"]);
+        assert!(!empty.can_run_command);
+    }
+
+    #[test]
+    fn task_write_scope_intersects_parent_and_child_role_paths() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("src/api")).unwrap();
+        std::fs::write(workspace.path().join("src/api/main.rs"), "fn main() {} ").unwrap();
+        let task = crate::task_context::ResolvedTaskContext {
+            origin: crate::task_context::TaskContextOrigin::TaskGraph,
+            write_paths: Some(vec!["src".into()]),
+            ..Default::default()
+        };
+        let role_scope = vec![workspace.path().join("src/api/main.rs")];
+        let resolved =
+            WorkerProfile::resolve_task_write_allowlist(&task, workspace.path(), &role_scope)
+                .unwrap()
+                .unwrap();
+        assert_eq!(resolved, role_scope);
+        assert_eq!(
+            WorkerProfile::workspace_relative_write_paths(workspace.path(), &resolved),
+            vec!["src/api/main.rs"]
+        );
+
+        let escaped = crate::task_context::ResolvedTaskContext {
+            write_paths: Some(vec!["../outside".into()]),
+            ..task.clone()
+        };
+        assert!(
+            WorkerProfile::resolve_task_write_allowlist(&escaped, workspace.path(), &[]).is_err()
+        );
+        let disjoint = vec![workspace.path().join("docs")];
+        assert!(
+            WorkerProfile::resolve_task_write_allowlist(&task, workspace.path(), &disjoint)
+                .is_err()
+        );
     }
 
     #[test]

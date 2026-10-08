@@ -38,6 +38,14 @@
     // ---------- helpers（优先 app.js 注入，缺失时自建回退，与 workswarm 面板同款） ----------
     var H = {};
     var rootEl = null;
+    var lifecycleGeneration = 0;
+    var treeGeneration = 0;
+    var catalogGeneration = 0;
+
+    function isCurrent(generation) {
+      return generation === lifecycleGeneration && !!rootEl;
+    }
+
     function defaultGet(path) {
       return window.OwoApi.get(path);
     }
@@ -68,8 +76,14 @@
     }
 
     function stateBox(kind, text) {
-      var cls = kind === "failed" ? "owo-pl-failed" : kind === "empty" ? "hint" : "hint";
-      return '<div class="' + cls + '">' + esc(text) + "</div>";
+      if (kind === "failed") {
+        return '<div class="owo-pl-failed owo-pl-load-error" role="alert"><span>' +
+          esc(text) +
+          '</span><button type="button" class="owo-ws-mini" data-pl-catalog-retry>重试</button></div>';
+      }
+      var cls = kind === "empty" ? "hint" : "hint";
+      var role = kind === "loading" ? ' role="status"' : "";
+      return '<div class="' + cls + '"' + role + ">" + esc(text) + "</div>";
     }
 
     var esc = defaultEsc;
@@ -85,6 +99,7 @@
       treePickerOpen: false,
       treeBusy: false,
       treeError: "",
+      treeLoadFailed: false,
       treeEntries: null, // 最近一次 /workspace/tree 预览的 entries
       treeRoot: "", // 预览对应的规范化 root 回显
       treeDepthUsed: 0, // 预览实际使用的深度
@@ -93,6 +108,7 @@
       strategy: "auto",
       catalog: [],
       catalogLoaded: false,
+      catalogError: "",
       selectedTemplate: "",
       installBusy: {},
       creating: false,
@@ -542,19 +558,28 @@
     /// 拉取预绑定目录树并展开选择器（root 取 ② 输入；depth 取当前深度）。
     function loadTree() {
       syncStateFromDom();
+      var lifecycle = lifecycleGeneration;
+      var request = ++treeGeneration;
       var root = String(state.root || "").trim();
       var box = el("#pl-treebox");
       if (!root) {
+        state.treeLoadFailed = false;
         state.treeError = "请先在 ② 填写项目目录（需真实存在的绝对路径）";
-        if (box) box.innerHTML = '<div class="owo-pl-failed">' + esc(state.treeError) + "</div>";
-        return;
+        if (box) box.innerHTML = '<div class="owo-pl-failed" role="alert">' + esc(state.treeError) + "</div>";
+        return Promise.resolve();
       }
       state.treeBusy = true;
       state.treeError = "";
-      if (box) box.innerHTML = '<div class="hint">正在读取目录树…（不跟随符号链接）</div>';
-      H.get("/workspace/tree?root=" + encodeURIComponent(root) + "&depth=" + encodeURIComponent(String(Number(state.treeDepth) || 2)))
+      state.treeLoadFailed = false;
+      if (box) box.innerHTML = '<div class="hint" role="status">正在读取目录树…（不跟随符号链接）</div>';
+      return Promise.resolve()
+        .then(function () {
+          return H.get("/workspace/tree?root=" + encodeURIComponent(root) + "&depth=" + encodeURIComponent(String(Number(state.treeDepth) || 2)));
+        })
         .then(function (d) {
+          if (!isCurrent(lifecycle) || request !== treeGeneration || String(state.root || "").trim() !== root) return;
           state.treeBusy = false;
+          state.treeLoadFailed = false;
           state.treeEntries = (d && Array.isArray(d.entries)) ? d.entries : [];
           state.treeRoot = String((d && d.root) || root);
           state.treeDepthUsed = Number((d && d.depth) || state.treeDepth) || 2;
@@ -562,9 +587,14 @@
           repaintTreePicker();
         })
         .catch(function (e) {
+          if (!isCurrent(lifecycle) || request !== treeGeneration || String(state.root || "").trim() !== root) return;
           state.treeBusy = false;
           state.treeError = friendly(e);
-          if (box) box.innerHTML = '<div class="owo-pl-failed">目录树读取失败：' + esc(state.treeError) + "</div>";
+          state.treeLoadFailed = true;
+          if (box) box.innerHTML =
+            '<div class="owo-pl-failed owo-pl-load-error" role="alert"><span>目录树读取失败：' +
+            esc(state.treeError) +
+            '</span><button type="button" class="owo-ws-mini" data-pl-tree-reload>重试</button></div>';
         });
     }
 
@@ -606,18 +636,28 @@
     }
 
     function loadCatalog() {
+      var lifecycle = lifecycleGeneration;
+      var request = ++catalogGeneration;
       var box = el("#pl-catalog");
+      state.catalogError = "";
+      state.catalogLoaded = false;
       if (box) box.innerHTML = stateBox("loading", "正在加载内置模板目录…");
-      return H.get("/teams/templates/catalog").then(function (d) {
+      return Promise.resolve()
+        .then(function () { return H.get("/teams/templates/catalog"); })
+        .then(function (d) {
+        if (!isCurrent(lifecycle) || request !== catalogGeneration) return;
         state.catalog = (d && d.catalog) || [];
         state.catalogLoaded = true;
+        state.catalogError = "";
         if (box) box.innerHTML = catalogHtml(state.catalog, state.installBusy);
         var sel = el("#pl-template");
         if (sel) sel.innerHTML = templateOptionsHtml(state.catalog, state.selectedTemplate);
-      }).catch(function (e) {
+        }).catch(function (e) {
+        if (!isCurrent(lifecycle) || request !== catalogGeneration) return;
         state.catalog = [];
         state.catalogLoaded = true;
-        if (box) box.innerHTML = stateBox("failed", "模板目录加载失败：" + friendly(e) + "（目录路由未接线时不影响手动建队）");
+        state.catalogError = friendly(e);
+        if (box) box.innerHTML = stateBox("failed", "模板目录加载失败：" + state.catalogError + "（目录不可用时仍可按组队模式手动创建）");
       });
     }
 
@@ -627,6 +667,7 @@
 
     function installTemplate(id) {
       if (!id || state.installBusy[id]) return Promise.resolve();
+      var lifecycle = lifecycleGeneration;
       state.installBusy[id] = true;
       var box = el("#pl-catalog");
       if (box) {
@@ -636,23 +677,37 @@
           btn.textContent = "安装中…";
         }
       }
-      return H.post("/teams/templates/catalog/" + encodeURIComponent(id) + "/install", {}).then(function (d) {
-        // 幂等语义双形状：{installed:true}(首次) / {already_installed:true}(重放，不覆盖)
-        var already = !!(d && (d.replayed || d.already_installed));
-        var installed = !!(d && (d.installed || d.already_installed));
-        if (!installed) throw new Error("安装未生效（服务端返回 installed=false）");
-        state.selectedTemplate = id;
-        return loadCatalog().then(function () {
-          var sel = el("#pl-template");
-          if (sel) sel.value = id;
+      return Promise.resolve()
+        .then(function () { return H.post("/teams/templates/catalog/" + encodeURIComponent(id) + "/install", {}); })
+        .then(function (d) {
+          if (!isCurrent(lifecycle)) return;
+          var already = !!(d && (d.replayed || d.already_installed));
+          var installed = !!(d && (d.installed || d.already_installed));
+          if (!installed) throw new Error("安装未生效（服务端返回 installed=false）");
+          state.selectedTemplate = id;
+          return loadCatalog().then(function () {
+            if (!isCurrent(lifecycle)) return;
+            var sel = el("#pl-template");
+            if (sel) sel.value = id;
+            var msg = el("#pl-errors");
+            if (msg) msg.innerHTML = '<div class="hint">' + (already ? "该模板已安装过（幂等重放，未覆盖）。" : "安装成功。") + "已自动选用。</div>";
+            repaintPreview();
+          });
+        })
+        .catch(function (e) {
+          if (!isCurrent(lifecycle)) return;
           var msg = el("#pl-errors");
-          if (msg) msg.innerHTML = '<div class="hint">' + (already ? "该模板已安装过（幂等重放，未覆盖）。" : "安装成功。") + "已自动选用。</div>";
-          repaintPreview();
+          if (msg) msg.innerHTML = '<div class="owo-pl-failed">安装失败：' + esc(friendly(e)) + "</div>";
+        })
+        .then(function () {
+          delete state.installBusy[id];
+          var currentBox = el("#pl-catalog");
+          if (currentBox) {
+            currentBox.innerHTML = state.catalogError
+              ? stateBox("failed", "模板目录加载失败：" + state.catalogError + "（目录不可用时仍可按组队模式手动创建）")
+              : catalogHtml(state.catalog, state.installBusy);
+          }
         });
-      }).catch(function (e) {
-        var msg = el("#pl-errors");
-        if (msg) msg.innerHTML = '<div class="owo-pl-failed">安装失败：' + esc(friendly(e)) + "</div>";
-      });
     }
 
     function doCreate() {
@@ -664,6 +719,7 @@
         if (errBox) errBox.innerHTML = errs.map(function (x) { return '<div class="owo-pl-failed">· ' + esc(x) + "</div>"; }).join("");
         return;
       }
+      var lifecycle = lifecycleGeneration;
       state.creating = true;
       var btn = el("#pl-create");
       if (btn) {
@@ -671,26 +727,35 @@
         btn.textContent = "创建中…";
       }
       var body = buildCreateBody(state);
-      H.post("/teams", body).then(function (d) {
-        state.result = d || {};
-        state.error = "";
-        var res = el("#pl-result");
-        if (res) res.innerHTML = resultHtml(state.result);
-        var go = el("#pl-goto-team");
-        if (go)
-          go.onclick = function () {
-            gotoTeam(String(state.result.team_id));
-          };
-      }).catch(function (e) {
-        state.error = friendly(e);
-        if (errBox) errBox.innerHTML = '<div class="owo-pl-failed">创建失败：' + esc(state.error) + "</div>";
-      }).then(function () {
-        state.creating = false;
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "创建团队并开始执行";
-        }
-      });
+      Promise.resolve()
+        .then(function () { return H.post("/teams", body); })
+        .then(function (d) {
+          state.result = d || {};
+          state.error = "";
+          if (isCurrent(lifecycle)) {
+            var res = el("#pl-result");
+            if (res) res.innerHTML = resultHtml(state.result);
+            var go = el("#pl-goto-team");
+            if (go)
+              go.onclick = function () {
+                gotoTeam(String(state.result.team_id));
+              };
+          }
+        }).catch(function (e) {
+          state.error = friendly(e);
+          if (isCurrent(lifecycle)) {
+            var currentErrors = el("#pl-errors");
+            if (currentErrors) currentErrors.innerHTML = '<div class="owo-pl-failed">创建失败：' + esc(state.error) + "</div>";
+          }
+        }).then(function () {
+          state.creating = false;
+          // 创建锁属于共享面板状态；释放时可解锁当前挂载的按钮，但不能把旧请求结果写入新页面。
+          var currentButton = el("#pl-create");
+          if (currentButton) {
+            currentButton.disabled = false;
+            currentButton.textContent = "创建团队并开始执行";
+          }
+        });
     }
 
     function gotoTeam(teamId) {
@@ -729,7 +794,14 @@
         '<textarea id="pl-writepaths" rows="2" placeholder="例如：src/，tests/">' + esc(state.writePathsRaw) + "</textarea>" +
         '<div class="owo-ws-inline"><button type="button" class="owo-ws-mini" data-pl-tree-load>从目录树勾选允许路径（推荐）</button>' +
         '<span class="hint">读取 ② 目录的目录树（不跟随符号链接），勾选目录/文件即并入上方允许路径</span></div>' +
-        '<div id="pl-treebox" class="owo-pl-treebox">' + (state.treePickerOpen ? treePickerHtml(state) : "") + "</div>" +
+        '<div id="pl-treebox" class="owo-pl-treebox">' +
+          (state.treeLoadFailed
+            ? '<div class="owo-pl-failed owo-pl-load-error" role="alert"><span>目录树读取失败：' + esc(state.treeError) +
+              '</span><button type="button" class="owo-ws-mini" data-pl-tree-reload>重试</button></div>'
+            : state.treePickerOpen
+              ? treePickerHtml(state)
+              : "") +
+          "</div>" +
         "</div>" +
         '<div class="owo-ws-inline" id="pl-depth-group" role="group" aria-label="目录树深度（扫描范围）">' +
         '<button type="button" class="owo-ws-mini' + (Number(state.treeDepth) <= 2 ? " primary" : "") + '" data-pl-depth="2">快速 · 2 层</button>' +
@@ -745,7 +817,13 @@
         "</select></div>" +
         '<div class="owo-pl-step"><label class="owo-pl-label">⑤ 模板 <span class="hint">仅已安装模板可选；候选需先安装（幂等）</span></label>' +
         '<select id="pl-template">' + templateOptionsHtml(state.catalog, state.selectedTemplate) + "</select>" +
-        '<div id="pl-catalog" class="owo-pl-cats">' + (state.catalogLoaded ? catalogHtml(state.catalog, state.installBusy) : stateBox("loading", "正在加载内置模板目录…")) + "</div></div>" +
+        '<div id="pl-catalog" class="owo-pl-cats">' +
+        (state.catalogError
+          ? stateBox("failed", "模板目录加载失败：" + state.catalogError + "（目录不可用时仍可按组队模式手动创建）")
+          : state.catalogLoaded
+            ? catalogHtml(state.catalog, state.installBusy)
+            : stateBox("loading", "正在加载内置模板目录…")) +
+        "</div></div>" +
         '<div class="owo-pl-step"><label class="owo-pl-label">⑥ 预览（角色 / 预算 / 权限）</label>' +
         '<div id="pl-preview">' + previewHtml(buildPreview(state, state.catalog), state) + "</div></div>" +
         '<div class="owo-pl-step"><label class="owo-pl-label">⑦ 创建</label>' +
@@ -765,6 +843,8 @@
       if (obj) obj.addEventListener("input", repaintPreview);
       var rootI = el("#pl-root");
       if (rootI) rootI.addEventListener("input", function () {
+        treeGeneration++;
+        state.treeBusy = false;
         if (/[\\/]|^[A-Za-z]:/.test(rootI.value.trim())) rootI.dataset.workspaceRoot = rootI.value.trim();
         repaintPreview();
       });
@@ -841,6 +921,10 @@
             installTemplate(inst);
             return;
           }
+          if (t && t.hasAttribute && t.hasAttribute("data-pl-catalog-retry")) {
+            loadCatalog();
+            return;
+          }
           var pick = t && t.getAttribute && t.getAttribute("data-pl-select");
           if (pick) {
             state.selectedTemplate = pick;
@@ -859,6 +943,8 @@
     }
 
     function mount(root, helpers) {
+      dispose();
+      lifecycleGeneration++;
       rootEl = root;
       H = helpers || {};
       if (!state.root && typeof localStorage !== "undefined") state.root = localStorage.getItem("owo.workspace") || "";
@@ -868,6 +954,14 @@
       esc = H.esc;
       render();
       loadCatalog();
+    }
+
+    function dispose() {
+      lifecycleGeneration++;
+      treeGeneration++;
+      catalogGeneration++;
+      rootEl = null;
+      state.treeBusy = false;
     }
 
     // ---------- 测试挂钩 ----------
@@ -880,6 +974,7 @@
       mergePickedIntoRaw: mergePickedIntoRaw,
       treePickerHtml: treePickerHtml,
       loadTree: loadTree,
+      loadCatalog: loadCatalog,
       repaintTreePicker: repaintTreePicker,
       treeCheckChange: treeCheckChange,
       unpickPath: unpickPath,
@@ -913,12 +1008,14 @@
         rootEl = r;
       },
       render: render,
+      dispose: dispose,
     };
 
     return {
       id: ID,
       title: "新建项目任务",
       mount: mount,
+      dispose: dispose,
       _test: TEST_API,
     };
   })();

@@ -1,0 +1,109 @@
+{
+  "date": "2026-10-05",
+  "scope": "Agent SDK Server library, WorkSwarm API, Server route contracts, and CLI package tests",
+  "toolchain": {
+    "ort_resolution": "scripts/resolve-ort.ps1::Resolve-OwoOrtEnv",
+    "cargo_gate": "scripts/ci-shared.ps1::Invoke-CiCargo",
+    "normal_limits": {
+      "jobs": 2,
+      "test_threads_max": 2
+    },
+    "parallel_cargo_invocations": 0
+  },
+  "server": {
+    "target": "owo-agent-server --test route_contract_tests",
+    "result": {
+      "passed": 39,
+      "failed": 0,
+      "ignored": 0
+    },
+    "exit_code": 0,
+    "first_attempt": {
+      "passed": 37,
+      "failed": 2,
+      "details": [
+        "slow HTTP backpressure case timed out in the first concurrent test batch; isolated rerun passed and the complete route suite passed on rerun",
+        "replay fixture appended Final without durable TurnStats but expected completed; assertion corrected to interrupted"
+      ]
+    },
+    "library": {
+      "target": "owo-agent-server --lib",
+      "result": {
+        "passed": 137,
+        "failed": 0,
+        "ignored": 0
+      },
+      "exit_code": 0,
+      "notes": [
+        "Corrected rolling-window expectation: retaining 100 of 205 epochs starts at epoch 105.",
+        "Made test-only budget journal access pub(super), removed unused exports/imports, and marked test helpers cfg(test)."
+      ]
+    },
+    "workswarm_api": {
+      "target": "owo-agent-server --test workswarm_api_tests",
+      "result": {
+        "passed": 17,
+        "failed": 0,
+        "ignored": 0
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 12,
+      "notes": [
+        "Fixtures that require actual team execution now explicitly select strategy=team; production auto fallback remains unchanged.",
+        "Echo relay uses a non-reviewer summarizer role; human approval fixture includes the required host verification plan."
+      ]
+    },
+    "workswarm_recovery_and_team_api": {
+      "targets": [
+        "owo-agent-server --test workswarm_recovery_api_tests",
+        "owo-agent-server --test team_api_tests"
+      ],
+      "result": "not_run_resource_limited",
+      "attempt": {
+        "gate": "scripts/ci-shared.ps1::Invoke-CiCargo",
+        "exit_code": null,
+        "reason": "gate rejected before cargo start: free physical memory 6.13 GB, used 80.6%; policy requires free >=6 GB and used <80%",
+        "cargo_started": false
+      }
+    }
+  },
+  "cli": {
+    "target": "owo-agent-cli package tests",
+    "result": {
+      "unit_tests": {
+        "passed": 62,
+        "failed": 0
+      },
+      "turn_path_guard_tests": {
+        "passed": 3,
+        "failed": 0
+      },
+      "worker_child_tests": {
+        "passed": 7,
+        "failed": 0
+      },
+      "total_passed": 72,
+      "total_failed": 0
+    },
+    "exit_code": 0,
+    "guard_change": "replaced blanket owo_agent_core ban with explicit Agent/session/SQLite/gateway/MCP runtime bans; pure role helpers are not a second runtime",
+    "warning_cleanup": "removed unreachable duplicate UserQuestion match arm in tui.rs"
+  },
+  "checks": {
+    "rustfmt": "passed for all 9 affected Rust files with edition 2021",
+    "git_diff_check": "passed; Git printed existing CRLF-to-LF normalization notices",
+    "remaining_compile_warnings": [
+      "Core unused items: 4",
+      "ProductEval unused_mut: 1",
+      "Server compile warnings observed in test build; no warning-free claim"
+    ]
+  },
+  "not_run": [
+    "owo-agent-server --test workswarm_recovery_api_tests (resource gate refused before Cargo)",
+    "owo-agent-server --test team_api_tests (resource gate refused before Cargo)",
+    "full Agent SDK workspace test suite",
+    "Tauri package tests and visible desktop GUI acceptance",
+    "real-model paired Single/Team benchmark"
+  ],
+  "interpretation": "Server library, WorkSwarm HTTP execution, route/SSE, and CLI targeted Rust tests pass. Recovery and Team API tests remain unverified due the mandatory memory gate; these results do not prove full workspace correctness or Team speed/token/delivery advantage."
+}

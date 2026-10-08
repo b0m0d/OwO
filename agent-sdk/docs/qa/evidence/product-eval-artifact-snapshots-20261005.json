@@ -1,0 +1,34 @@
+{
+  "evidence_id": "product-eval-artifact-snapshots-20261005",
+  "scope": "source-only",
+  "claim": "Successful ProductEval runs retain bounded snapshots of registered deliverables with SHA-256 manifests; report summaries link to those snapshots. Failed snapshots are not reported as passed and retain the complete failure sandbox.",
+  "verification": [
+    "Python source assertions checked snapshot wiring, bounded storage/read, failure status, legacy serde default, report discoverability and regression test sources.",
+    "rustfmt --edition 2021 --check passed for the touched ProductEval Rust source and test files.",
+    "git diff --check passed for the touched ProductEval Rust source and test files.",
+    "UTF-8 and trailing-whitespace checks passed for the source, test and report files."
+  ],
+  "limits": [
+    "No Cargo compilation or Rust tests were run per current user instruction.",
+    "Atomic rename, file-system path behavior and end-to-end journal recovery remain unverified at runtime.",
+    "This improves auditability of Single/Team results; it provides no new speed, success-rate, token or cost measurements."
+  ],
+  "source_assertions": {
+    "success_runs_publish_registered_snapshot": true,
+    "snapshot_failure_is_error_and_preserves_failure_sandbox": true,
+    "bounded_files_paths_and_bytes": true,
+    "bounded_read_and_sha256_manifest": true,
+    "snapshot_rejects_escape_and_windows_dot_space_segments": true,
+    "legacy_journal_field_is_optional": true,
+    "summary_exposes_snapshot_reference": true,
+    "regression_sources_cover_snapshot_limits_and_legacy": true,
+    "unique_snapshot_id_keeps_resume_from_collision": true
+  },
+  "files_sha256": {
+    "devtools/product-eval/src/product_eval.rs": "a476b905ce528897f56a3898db7d410a04f7f6e37dee79c2169ed790b011bb2d",
+    "devtools/product-eval/tests/product_eval_tests.rs": "b16c2fa804bff09d337e4bd19a225ef828d6bc3c269ee00afe06482aad2caac0",
+    "devtools/product-eval/tests/product_eval_statistics_tests.rs": "a6a0b75451cdee7a59ab063419a8eb638f2d4a2ca8fc013cda7d3d50acf4273e",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "378f92deab91e3913124aa0c1d3718d840985a90e26aeea2766a1a360de18ae3"
+  }
+}

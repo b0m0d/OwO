@@ -28,11 +28,32 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod paired_report;
+pub use paired_report::{
+    build_paired_report_json, split_paired_mode_reports, PairedReportOptions,
+    PAIRED_REPORT_SCHEMA_VERSION,
+};
+#[cfg(test)]
+use paired_report::{paired_cell_deltas_json, paired_snapshot_json};
+
+mod freeze;
+pub use freeze::{
+    build_freeze_json, parse_freeze, permissions_hash, verify_freeze, FREEZE_SCHEMA_VERSION,
+};
+
+mod matrix_runner;
+pub use matrix_runner::{filter_cases, MatrixRunner, RunOptions};
+
 /// 当前产品评测任务 schema 版本。
 pub const PRODUCT_EVAL_SCHEMA_VERSION: u32 = 1;
 
 /// 单文件草稿/评审提示词的最大保留字符数（防止超长上下文）。
 const PROMPT_TEXT_CAP: usize = 1600;
+/// Successful runs retain only registered artifacts, with fixed disk bounds.
+const ARTIFACT_SNAPSHOT_MAX_FILES: usize = 128;
+const ARTIFACT_SNAPSHOT_MAX_PATH_BYTES: usize = 4096;
+const ARTIFACT_SNAPSHOT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const ARTIFACT_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // 任务定义类型（suite.json / tasks/*.json 的 schema）
@@ -529,6 +550,9 @@ pub struct ProductEvalRun {
     #[serde(default)]
     pub delivery_gate_wall_ms: u64,
     pub model_calls: u32,
+    /// Exact tool invocation count when reported by the executor; absent for legacy/unknown runs.
+    #[serde(default)]
+    pub tool_calls: Option<u32>,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -547,9 +571,12 @@ pub struct ProductEvalRun {
     pub checker_passed: u32,
     #[serde(default)]
     pub checker_total: u32,
-    /// 沙盒/失败留档目录相对 out 根的位置（成功运行会即时清理，故为 None）。
+    /// 沙盒/失败留档目录相对 out 根的位置（成功运行清理原沙盒，故为 None）。
     #[serde(default)]
     pub sandbox_rel: Option<String>,
+    /// 成功运行的登记产物快照目录（相对 out 根）；旧记录缺省为空。
+    #[serde(default)]
+    pub artifact_snapshot_rel: Option<String>,
     pub model: Option<String>,
     pub started_at: String,
     pub finished_at: String,
@@ -575,6 +602,9 @@ pub struct ProductEvalMetrics {
     #[serde(default)]
     pub mean_delivery_gate_wall_ms: f64,
     pub total_model_calls: u64,
+    /// None unless every included run has an exact tool-call count.
+    #[serde(default)]
+    pub total_tool_calls: Option<u64>,
     pub total_tokens: Option<u64>,
     pub estimated_cost_usd: Option<f64>,
 }
@@ -590,6 +620,9 @@ pub struct CaseModeMetrics {
     pub success_rate: f64,
     pub mean_wall_ms: f64,
     pub mean_model_calls: f64,
+    /// None when any run in the group has unknown tool-call telemetry.
+    #[serde(default)]
+    pub mean_tool_calls: Option<f64>,
     pub total_tokens: Option<u64>,
     /// 检查器通过率均值（质量代理；无检查器计数的旧记录缺省为 None）。
     #[serde(default)]
@@ -626,6 +659,9 @@ pub struct ProductEvalReport {
     pub pending: Vec<MatrixKey>,
     pub metrics: ProductEvalMetrics,
     pub per_case: Vec<CaseModeMetrics>,
+    /// Shared automatic Team enablement verdict; older reports may omit it.
+    #[serde(default)]
+    pub comparison: Option<ModeComparison>,
 }
 
 /// out 目录元信息（续跑兼容性校验）。
@@ -1524,6 +1560,162 @@ impl ExecProgress {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ArtifactSnapshotEntry {
+    path: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ArtifactSnapshotManifest {
+    schema_version: u32,
+    run_key: String,
+    files: Vec<ArtifactSnapshotEntry>,
+}
+
+fn sanitize_artifact_snapshot_path(raw: &str) -> Result<String, String> {
+    if raw.len() > ARTIFACT_SNAPSHOT_MAX_PATH_BYTES {
+        return Err("登记产物路径超过快照上限".to_string());
+    }
+    let rel = sanitize_rel_path(raw)?;
+    // Windows trims trailing dots/spaces from path components. Reject those forms
+    // when they would turn into a traversal segment on the snapshot destination.
+    if rel
+        .split('/')
+        .any(|segment| segment.contains('.') && segment.chars().all(|ch| ch == '.' || ch == ' '))
+    {
+        return Err("登记产物路径包含 Windows 规范化后的越界段".to_string());
+    }
+    Ok(rel)
+}
+
+/// Preserve only explicitly registered deliverables from a successful sandbox.
+/// The snapshot is published with a same-volume rename and refuses path escapes,
+/// symlink escapes, oversized files, and destination collisions.
+fn preserve_artifact_snapshot(
+    sandbox: &Path,
+    out_dir: &Path,
+    key: &MatrixKey,
+    artifact_refs: &[String],
+) -> Result<Option<String>, String> {
+    if artifact_refs.is_empty() {
+        return Ok(None);
+    }
+    if artifact_refs.len() > ARTIFACT_SNAPSHOT_MAX_FILES {
+        return Err(format!(
+            "登记产物数量 {} 超出快照上限 {}",
+            artifact_refs.len(),
+            ARTIFACT_SNAPSHOT_MAX_FILES
+        ));
+    }
+
+    let sandbox_root =
+        std::fs::canonicalize(sandbox).map_err(|error| format!("解析运行沙盒失败：{error}"))?;
+    let out_root =
+        std::fs::canonicalize(out_dir).map_err(|error| format!("解析评测输出目录失败：{error}"))?;
+    let artifacts_root = out_dir.join("artifacts");
+    match std::fs::symlink_metadata(&artifacts_root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("产物快照根目录不是普通目录".to_string());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&artifacts_root)
+                .map_err(|create_error| format!("创建产物快照目录失败：{create_error}"))?;
+        }
+        Err(error) => return Err(format!("检查产物快照目录失败：{error}")),
+    }
+    let artifacts_root = std::fs::canonicalize(&artifacts_root)
+        .map_err(|error| format!("解析产物快照目录失败：{error}"))?;
+    if !artifacts_root.starts_with(&out_root) {
+        return Err("产物快照目录逃逸评测输出根目录".to_string());
+    }
+
+    let key_sha = format!("{:x}", Sha256::digest(key.slug().as_bytes()));
+    // A unique path means a crash after publishing but before journaling cannot
+    // block a retry of this still-incomplete matrix cell.
+    let snapshot_id = format!("{key_sha}-{}", uuid::Uuid::new_v4().simple());
+    let destination = artifacts_root.join(&snapshot_id);
+    let staging = artifacts_root.join(format!(".{snapshot_id}-{}.tmp", std::process::id()));
+    std::fs::create_dir(&staging).map_err(|error| format!("创建产物快照暂存目录失败：{error}"))?;
+
+    let result = (|| {
+        let mut entries = Vec::with_capacity(artifact_refs.len());
+        let mut total_bytes = 0u64;
+        let mut seen = std::collections::BTreeSet::new();
+        for raw in artifact_refs {
+            let rel = sanitize_artifact_snapshot_path(raw)?;
+            if !seen.insert(rel.clone()) {
+                continue;
+            }
+            let source = sandbox_root.join(&rel);
+            let canonical_source = std::fs::canonicalize(&source)
+                .map_err(|error| format!("登记产物 {rel} 不可读取：{error}"))?;
+            if !canonical_source.starts_with(&sandbox_root) {
+                return Err(format!("登记产物 {rel} 通过链接逃逸运行沙盒"));
+            }
+            let metadata = std::fs::metadata(&canonical_source)
+                .map_err(|error| format!("读取登记产物 {rel} 元数据失败：{error}"))?;
+            if !metadata.is_file() {
+                return Err(format!("登记产物 {rel} 不是普通文件"));
+            }
+            let size_bytes = metadata.len();
+            if size_bytes > ARTIFACT_SNAPSHOT_MAX_FILE_BYTES {
+                return Err(format!("登记产物 {rel} 超出单文件快照上限"));
+            }
+            total_bytes = total_bytes
+                .checked_add(size_bytes)
+                .ok_or_else(|| "产物快照总字节数溢出".to_string())?;
+            if total_bytes > ARTIFACT_SNAPSHOT_MAX_TOTAL_BYTES {
+                return Err("登记产物超出单次运行快照总字节上限".to_string());
+            }
+            let mut file = std::fs::File::open(&canonical_source)
+                .map_err(|error| format!("打开登记产物 {rel} 失败：{error}"))?;
+            let mut bytes = Vec::with_capacity(size_bytes as usize);
+            file.take(ARTIFACT_SNAPSHOT_MAX_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("读取登记产物 {rel} 失败：{error}"))?;
+            if bytes.len() as u64 > ARTIFACT_SNAPSHOT_MAX_FILE_BYTES {
+                return Err(format!("登记产物 {rel} 在快照期间超过单文件上限"));
+            }
+            if bytes.len() as u64 != size_bytes {
+                return Err(format!("登记产物 {rel} 在快照期间发生变化"));
+            }
+            let target_rel = sanitize_artifact_snapshot_path(&rel)?;
+            let target = staging.join(&target_rel);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("创建快照子目录失败：{error}"))?;
+            }
+            std::fs::write(&target, &bytes)
+                .map_err(|error| format!("写入产物快照 {rel} 失败：{error}"))?;
+            entries.push(ArtifactSnapshotEntry {
+                path: rel,
+                size_bytes,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+            });
+        }
+        let manifest = ArtifactSnapshotManifest {
+            schema_version: 1,
+            run_key: key.slug(),
+            files: entries,
+        };
+        let manifest_text = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("序列化产物快照清单失败：{error}"))?;
+        std::fs::write(staging.join("manifest.json"), manifest_text)
+            .map_err(|error| format!("写入产物快照清单失败：{error}"))?;
+        std::fs::rename(&staging, &destination)
+            .map_err(|error| format!("发布产物快照失败：{error}"))?;
+        Ok(format!("artifacts/{snapshot_id}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result.map(Some)
+}
+
 /// 执行器可见的单次运行上下文。写入统一走 [`ExecContext::write_file`]，
 /// 强制 allow_write 范围（权限默认 deny），并自动登记 Artifact 引用与失败步骤。
 pub struct ExecContext<'ctx> {
@@ -1621,6 +1813,8 @@ pub struct RawExecOutcome {
     /// 执行器层面的错误（None = 执行流程完成，成败交由检查器裁决）。
     pub error: Option<String>,
     pub model_calls: u32,
+    /// Exact tool calls; None means the executor could not observe them.
+    pub tool_calls: Option<u32>,
     pub usage: TokenUsage,
     /// Provider 是否回报了可用用量（否则 token 字段落盘为 null）。
     pub usage_known: bool,
@@ -1652,7 +1846,10 @@ pub struct ReferenceDryExecutor;
 #[async_trait]
 impl CaseExecutor for ReferenceDryExecutor {
     async fn execute<'ctx>(&self, ctx: &mut ExecContext<'ctx>) -> RawExecOutcome {
-        let mut outcome = RawExecOutcome::default();
+        let mut outcome = RawExecOutcome {
+            tool_calls: Some(0),
+            ..RawExecOutcome::default()
+        };
         // 回放**全部**参考输出（不只预期产物）：代码任务的"修复后源文件"也在其中，
         // 行为 command_check 才能对参考状态真正执行（dry = 完整 harness 自检）。
         for (path, content) in &ctx.case.reference_outputs {
@@ -1920,6 +2117,7 @@ impl CaseExecutor for GenerativeExecutor {
         if ctx.cancelled() {
             return RawExecOutcome {
                 aborted: true,
+                tool_calls: Some(0),
                 ..RawExecOutcome::default()
             };
         }
@@ -2012,6 +2210,7 @@ impl CaseExecutor for GenerativeExecutor {
                 aborted: false,
                 error: None,
                 model_calls: state.model_calls,
+                tool_calls: Some(0),
                 usage: state.session_usage,
                 usage_known: state.session_usage.total_tokens > 0,
                 validation_wall_ms: 0,
@@ -2023,6 +2222,7 @@ impl CaseExecutor for GenerativeExecutor {
                 aborted: true,
                 error: None,
                 model_calls: state.model_calls,
+                tool_calls: Some(0),
                 usage: state.session_usage,
                 usage_known: state.session_usage.total_tokens > 0,
                 validation_wall_ms: 0,
@@ -2034,6 +2234,7 @@ impl CaseExecutor for GenerativeExecutor {
                 aborted: false,
                 error: Some(error),
                 model_calls: state.model_calls,
+                tool_calls: Some(0),
                 usage: state.session_usage,
                 usage_known: state.session_usage.total_tokens > 0,
                 validation_wall_ms: 0,
@@ -2047,630 +2248,6 @@ impl CaseExecutor for GenerativeExecutor {
 
 // ---------------------------------------------------------------------------
 // 矩阵执行器（journal + 续跑 + 报告）
-// ---------------------------------------------------------------------------
-
-/// 矩阵运行选项。
-#[derive(Debug, Clone)]
-pub struct RunOptions {
-    /// 参与对照的拓扑（默认 single+multi）。
-    pub modes: Vec<AgentMode>,
-    /// CLI 级重复次数覆盖。
-    pub reps_override: Option<u32>,
-    /// 只跑 id 包含该子串的任务。
-    pub only: Option<String>,
-    /// 只跑指定分类。
-    pub category: Option<EvalCategory>,
-    /// 清空 out 目录重跑（唯一允许"重算"的入口；journal 归零）。
-    pub fresh: bool,
-    /// 批次标签（写入 meta/报告；同目录批次不一致拒绝续跑）。
-    pub batch_label: Option<String>,
-    /// Hash of the configured model provider endpoint; never stores the URL.
-    pub provider_endpoint_sha256: Option<String>,
-    /// 附加标签（溯源用）。
-    pub tags: Vec<String>,
-}
-
-impl Default for RunOptions {
-    fn default() -> Self {
-        Self {
-            modes: AgentMode::all().to_vec(),
-            reps_override: None,
-            only: None,
-            category: None,
-            fresh: false,
-            batch_label: None,
-            provider_endpoint_sha256: None,
-            tags: Vec::new(),
-        }
-    }
-}
-
-/// 过滤后的任务列表。
-pub fn filter_cases(bundle: &SuiteBundle, opts: &RunOptions) -> Vec<ProductEvalCase> {
-    bundle
-        .cases
-        .iter()
-        .filter(|case| {
-            if let Some(only) = &opts.only {
-                if !case.id.contains(only.as_str()) {
-                    return false;
-                }
-            }
-            if let Some(category) = &opts.category {
-                if case.category != *category {
-                    return false;
-                }
-            }
-            true
-        })
-        .cloned()
-        .collect()
-}
-
-/// 产品评测矩阵执行器：顺序执行 (case × mode × repetition)，
-/// journal 追加落盘 + 断点续跑 + 全量报告（含失败）。
-pub struct MatrixRunner {
-    pub bundle: SuiteBundle,
-    pub out_dir: PathBuf,
-}
-
-impl MatrixRunner {
-    pub fn new(bundle: SuiteBundle, out_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            bundle,
-            out_dir: out_dir.into(),
-        }
-    }
-
-    fn journal_path(&self) -> PathBuf {
-        self.out_dir.join("state.jsonl")
-    }
-
-    fn meta_path(&self) -> PathBuf {
-        self.out_dir.join("meta.json")
-    }
-
-    fn failures_dir(&self) -> PathBuf {
-        self.out_dir.join("failures")
-    }
-
-    fn planned_matrix(&self, cases: &[ProductEvalCase], opts: &RunOptions) -> Vec<MatrixKey> {
-        let mut keys = Vec::new();
-        for case in cases {
-            let reps = case.effective_repetitions(&self.bundle.suite.defaults, opts.reps_override);
-            if opts.modes.is_empty() {
-                continue;
-            }
-            for repetition in 0..reps {
-                // For a Single/Multi pair, hash the batch, task, and two-repetition
-                // block to choose AB or BA, then reverse it in the partner repetition.
-                // This is reproducible, randomized block order with exact balance per
-                // complete two-repetition block.
-                let paired_modes = opts.modes.len() == 2
-                    && opts.modes.contains(&AgentMode::Single)
-                    && opts.modes.contains(&AgentMode::Multi);
-                if paired_modes {
-                    let block = repetition / 2;
-                    let batch = opts.batch_label.as_deref().unwrap_or_default();
-                    let seed_material = format!("{batch}\\0{}\\0{block}", case.id);
-                    let digest = Sha256::digest(seed_material.as_bytes());
-                    let block_first = (digest[0] & 1) as usize;
-                    let first_index = block_first ^ ((repetition % 2) as usize);
-                    let first = AgentMode::all()[first_index];
-                    let second = AgentMode::all()[1 - first_index];
-                    keys.push(MatrixKey::new(case.id.clone(), first, repetition));
-                    keys.push(MatrixKey::new(case.id.clone(), second, repetition));
-                } else {
-                    let offset = (repetition as usize) % opts.modes.len();
-                    for index in 0..opts.modes.len() {
-                        let mode = opts.modes[(offset + index) % opts.modes.len()];
-                        keys.push(MatrixKey::new(case.id.clone(), mode, repetition));
-                    }
-                }
-            }
-        }
-        keys
-    }
-
-    fn run_contract_sha256(&self, cases: &[ProductEvalCase], opts: &RunOptions) -> String {
-        let effective_tasks = cases
-            .iter()
-            .map(|case| {
-                serde_json::json!({
-                    "case_id": case.id,
-                    "category": case.category.as_str(),
-                    "repetitions": case.effective_repetitions(
-                        &self.bundle.suite.defaults,
-                        opts.reps_override,
-                    ),
-                    "timeout_secs": case.effective_timeout_secs(&self.bundle.suite.defaults),
-                    "max_model_calls": case.effective_max_model_calls(&self.bundle.suite.defaults),
-                    "permissions_sha256": permissions_hash(case),
-                })
-            })
-            .collect::<Vec<_>>();
-        let contract = serde_json::json!({
-            "suite_hash": suite_hash(&self.bundle),
-            "suite_defaults": self.bundle.suite.defaults,
-            "effective_tasks": effective_tasks,
-        });
-        let bytes = serde_json::to_vec(&contract).unwrap_or_default();
-        format!("{:x}", Sha256::digest(bytes))
-    }
-
-    fn init_or_verify_out_dir(
-        &self,
-        model: Option<&str>,
-        execution: &str,
-        opts: &RunOptions,
-        run_contract_sha256: &str,
-        evaluator_binary_sha256: &str,
-        provider_endpoint_sha256: Option<&str>,
-    ) -> Result<(), ProductEvalError> {
-        let hash = suite_hash(&self.bundle);
-        let fresh = opts.fresh;
-        if fresh && self.out_dir.exists() {
-            std::fs::remove_dir_all(&self.out_dir).map_err(|e| {
-                ProductEvalError(format!("清空 {} 失败：{e}", self.out_dir.display()))
-            })?;
-        }
-        std::fs::create_dir_all(&self.out_dir)
-            .map_err(|e| ProductEvalError(format!("创建 {} 失败：{e}", self.out_dir.display())))?;
-        std::fs::create_dir_all(self.failures_dir()).map_err(|e| {
-            ProductEvalError(format!("创建 {} 失败：{e}", self.failures_dir().display()))
-        })?;
-        let meta_path = self.meta_path();
-        if meta_path.exists() {
-            let text = std::fs::read_to_string(&meta_path)
-                .map_err(|e| ProductEvalError(format!("读取 meta.json 失败：{e}")))?;
-            let meta: RunDirMeta = serde_json::from_str(&text)
-                .map_err(|e| ProductEvalError(format!("解析 meta.json 失败：{e}")))?;
-            if meta.suite_hash != hash || meta.schema_version != PRODUCT_EVAL_SCHEMA_VERSION {
-                return err(format!(
-                    "out 目录属于另一套件/版本（suite_hash 不一致）：换 --out 或加 --fresh。目录：{}",
-                    self.out_dir.display()
-                ));
-            }
-            if meta.model.as_deref() != model {
-                return err(format!(
-                    "out 目录模型与本次运行不一致：换 --out 或加 --fresh。目录：{}",
-                    self.out_dir.display()
-                ));
-            }
-            if meta.execution.as_deref() != Some(execution) {
-                return err(format!(
-                    "out 目录执行器与本次运行不一致或元数据缺失：换 --out 或加 --fresh。目录：{}",
-                    self.out_dir.display()
-                ));
-            }
-            if meta.batch_label != opts.batch_label {
-                return err(format!(
-                    "out 目录批次标签与本次运行不一致或元数据缺失：换 --out 或加 --fresh。目录：{}",
-                    self.out_dir.display()
-                ));
-            }
-            if meta.run_contract_sha256.as_deref() != Some(run_contract_sha256) {
-                return err(format!(
-                    "out 目录的生效任务/权限/预算指纹缺失或不一致：换 --out 或加 --fresh。目录：{}",
-                    self.out_dir.display()
-                ));
-            }
-            if meta.evaluator_binary_sha256.as_deref() != Some(evaluator_binary_sha256) {
-                return err(format!(
-                    "out 目录评测器二进制身份缺失或不一致：换 --out 或加 --fresh。目录：{}",
-                    self.out_dir.display()
-                ));
-            }
-            if meta.provider_endpoint_sha256.as_deref() != provider_endpoint_sha256 {
-                return err(format!(
-                    "out 目录模型服务端点身份与本次运行不一致：换 --out 或加 --fresh。目录：{}",
-                    self.out_dir.display()
-                ));
-            }
-        } else {
-            if self.journal_path().exists() {
-                return err(format!(
-                    "out 目录存在 state.jsonl 但缺少 meta.json（来源不明，拒绝续跑）：换 --out 或 --fresh。目录：{}",
-                    self.out_dir.display()
-                ));
-            }
-            let meta = RunDirMeta {
-                schema_version: PRODUCT_EVAL_SCHEMA_VERSION,
-                suite_name: self.bundle.suite.name.clone(),
-                suite_hash: hash,
-                model: model.map(str::to_string),
-                execution: Some(execution.to_string()),
-                batch_label: opts.batch_label.clone(),
-                tags: opts.tags.clone(),
-                run_contract_sha256: Some(run_contract_sha256.to_string()),
-                evaluator_binary_sha256: Some(evaluator_binary_sha256.to_string()),
-                provider_endpoint_sha256: provider_endpoint_sha256.map(str::to_string),
-                created_at: now_rfc3339(),
-            };
-            let text = serde_json::to_string_pretty(&meta)
-                .map_err(|e| ProductEvalError(format!("序列化 meta.json 失败：{e}")))?;
-            std::fs::write(&meta_path, text)
-                .map_err(|e| ProductEvalError(format!("写入 meta.json 失败：{e}")))?;
-        }
-        Ok(())
-    }
-
-    fn load_runs(&self) -> Result<Vec<ProductEvalRun>, ProductEvalError> {
-        let path = self.journal_path();
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| ProductEvalError(format!("读取 {} 失败：{e}", path.display())))?;
-        let mut runs = Vec::new();
-        let lines: Vec<&str> = text
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect();
-        let total = lines.len();
-        for (index, line) in lines.iter().enumerate() {
-            match serde_json::from_str::<ProductEvalRun>(line) {
-                Ok(run) => runs.push(run),
-                Err(parse_error) => {
-                    let is_torn_tail = index + 1 == total;
-                    if is_torn_tail {
-                        // 进程中断造成的半行：容忍并忽略（该单元格视为未完成）。
-                        tracing::warn!(line = %line, error = %parse_error, "journal 尾行损坏，忽略（对应单元格将重跑）");
-                    } else {
-                        return err(format!(
-                            "state.jsonl 第 {} 行损坏：{parse_error}（拒绝静默丢弃历史记录；如确要重跑请 --fresh）",
-                            index + 1
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(runs)
-    }
-
-    fn append_run(&self, run: &ProductEvalRun) -> Result<(), ProductEvalError> {
-        let line = serde_json::to_string(run)
-            .map_err(|e| ProductEvalError(format!("序列化运行记录失败：{e}")))?;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.journal_path())
-            .map_err(|e| ProductEvalError(format!("打开 journal 失败：{e}")))?;
-        writeln!(file, "{line}")
-            .map_err(|e| ProductEvalError(format!("追加 journal 失败：{e}")))?;
-        file.flush()
-            .map_err(|e| ProductEvalError(format!("刷新 journal 失败：{e}")))?;
-        Ok(())
-    }
-
-    /// 执行矩阵（断点续跑）。返回聚合了全部历史记录（含失败）的报告。
-    pub async fn run(
-        &self,
-        executor: Arc<dyn CaseExecutor>,
-        execution: &str,
-        model: Option<String>,
-        opts: &RunOptions,
-        cancel: Arc<AtomicBool>,
-    ) -> Result<ProductEvalReport, ProductEvalError> {
-        let cases = filter_cases(&self.bundle, opts);
-        if cases.is_empty() {
-            return err("过滤条件下没有可执行的任务");
-        }
-        if opts.modes.is_empty() {
-            return err("运行模式列表不能为空");
-        }
-        if opts.modes.iter().enumerate().any(|(index, mode)| opts.modes[..index].contains(mode)) {
-            return err("运行模式列表不能包含重复模式");
-        }
-        let run_contract_sha256 = self.run_contract_sha256(&cases, opts);
-        let evaluator_binary_sha256 = current_executable_sha256().ok_or_else(|| {
-            ProductEvalError("无法读取当前评测器二进制，拒绝生成无来源绑定的运行报告".to_string())
-        })?;
-        self.init_or_verify_out_dir(
-            model.as_deref(),
-            execution,
-            opts,
-            &run_contract_sha256,
-            &evaluator_binary_sha256,
-            opts.provider_endpoint_sha256.as_deref(),
-        )?;
-        let mut runs = self.load_runs()?;
-        let completed: std::collections::BTreeSet<MatrixKey> =
-            runs.iter().map(|run| run.key.clone()).collect();
-        let planned = self.planned_matrix(&cases, opts);
-        let pending: Vec<MatrixKey> = planned
-            .iter()
-            .filter(|key| !completed.contains(key))
-            .cloned()
-            .collect();
-
-        let defaults = self.bundle.suite.defaults.clone();
-        let total_planned = planned.len();
-        tracing::info!(
-            suite = %self.bundle.suite.name,
-            planned = total_planned,
-            done = runs.len(),
-            todo = pending.len(),
-            execution = execution,
-            "product-eval 矩阵开始"
-        );
-
-        for key in &pending {
-            if cancel.load(Ordering::Relaxed) {
-                tracing::info!("收到取消信号，停止调度后续单元格（已完成记录保留）");
-                break;
-            }
-            let case = cases
-                .iter()
-                .find(|case| case.id == key.case_id)
-                .ok_or_else(|| ProductEvalError(format!("矩阵键引用未知任务 {}", key.case_id)))?;
-            let timeout_secs = case.effective_timeout_secs(&defaults);
-            let max_model_calls = case.effective_max_model_calls(&defaults);
-
-            // 沙盒：输入 fixture 预写。
-            let sandbox = self.out_dir.join("sandboxes").join(format!(
-                "{}-{}",
-                key.slug().replace('#', "__"),
-                uuid::Uuid::new_v4().simple()
-            ));
-            std::fs::create_dir_all(&sandbox)
-                .map_err(|e| ProductEvalError(format!("创建沙盒失败：{e}")))?;
-            let mut setup_error = None;
-            for input in &case.inputs {
-                let target = sandbox.join(sanitize_rel_path(&input.path).unwrap_or_default());
-                if let Some(parent) = target.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = std::fs::write(&target, &input.content) {
-                    setup_error = Some(format!("写输入 fixture {} 失败：{e}", input.path));
-                    break;
-                }
-            }
-
-            let started_at = now_rfc3339();
-            let cell_started = Instant::now();
-            let mut execution_wall_ms = None;
-            let mut executor_wall_ms = 0_u64;
-            let (status, failed_steps, artifact_refs, outcome, checker_passed, checker_total) =
-                if let Some(setup_error) = setup_error {
-                    (
-                        RunStatus::Error,
-                        vec![format!("setup:{setup_error}")],
-                        Vec::new(),
-                        RawExecOutcome::default(),
-                        0,
-                        0,
-                    )
-                } else {
-                    let mut ctx = ExecContext::new(
-                        case,
-                        &sandbox,
-                        key.agent_mode,
-                        timeout_secs,
-                        max_model_calls,
-                        Arc::clone(&cancel),
-                    );
-                    let execution_started = Instant::now();
-                    let future = executor.execute(&mut ctx);
-                    match tokio::time::timeout(Duration::from_secs(timeout_secs), future).await {
-                        Ok(mut outcome) => {
-                            executor_wall_ms = execution_started.elapsed().as_millis() as u64;
-                            let (artifacts, mut steps) = ctx.take_records();
-                            if outcome.aborted {
-                                steps.push("cancelled:收到取消信号".to_string());
-                            }
-                            let (status, checker_steps, checker_passed, checker_total) =
-                                if outcome.aborted {
-                                    (RunStatus::Cancelled, Vec::new(), 0, 0)
-                                } else if let Some(error) = &outcome.error {
-                                    steps.push(format!("executor:{error}"));
-                                    (RunStatus::Error, Vec::new(), 0, 0)
-                                } else {
-                                    // Team 全栈路径在 finalize_success 前已对同一工作区执行
-                                    // 宿主检查器，复用通过结果，避免重复运行 command_check。
-                                    let checks = ctx.progress().prevalidated_checkers();
-                                    let (passed, total, failed) = match checks {
-                                        Some((passed, total)) => (passed, total, Vec::new()),
-                                        None => {
-                                            let validation_started = Instant::now();
-                                            let result =
-                                                evaluate_all_on_dir(&case.checkers, &sandbox).await;
-                                            outcome.validation_wall_ms =
-                                                outcome.validation_wall_ms.saturating_add(
-                                                    validation_started.elapsed().as_millis() as u64,
-                                                );
-                                            result
-                                        }
-                                    };
-                                    if failed.is_empty() {
-                                        (RunStatus::Passed, Vec::new(), passed, total)
-                                    } else {
-                                        (RunStatus::Failed, failed, passed, total)
-                                    }
-                                };
-                            steps.extend(checker_steps);
-                            (
-                                status,
-                                steps,
-                                artifacts,
-                                outcome,
-                                checker_passed,
-                                checker_total,
-                            )
-                        }
-                        Err(_) => {
-                            executor_wall_ms = execution_started.elapsed().as_millis() as u64;
-                            execution_wall_ms = Some(cell_started.elapsed().as_millis() as u64);
-                            let (mut artifacts, mut steps) = ctx.take_records();
-                            steps.push(format!("timeout:超过 {timeout_secs}s 上限"));
-                            if unbounded_benchmark_calls() {
-                                // Freeze the Team workspace into the eval sandbox at the exact cutoff.
-                                // Preserve live telemetry even though the executor future is cancelled.
-                                match ctx.progress.copy_expected_artifacts(case, &sandbox) {
-                                    Ok(partial_artifacts) => {
-                                        for artifact in partial_artifacts {
-                                            if !artifacts.contains(&artifact) {
-                                                artifacts.push(artifact);
-                                            }
-                                        }
-                                    }
-                                    Err(error) => steps.push(format!("partial_snapshot:{error}")),
-                                }
-                                let mut partial_outcome = ctx.progress.snapshot();
-                                let validation_started = Instant::now();
-                                let (passed, total, failed) =
-                                    evaluate_all_on_dir(&case.checkers, &sandbox).await;
-                                partial_outcome.validation_wall_ms =
-                                    partial_outcome.validation_wall_ms.saturating_add(
-                                        validation_started.elapsed().as_millis() as u64,
-                                    );
-                                steps.extend(
-                                    failed
-                                        .into_iter()
-                                        .map(|failure| format!("partial_completion:{failure}")),
-                                );
-                                (
-                                    RunStatus::Timeout,
-                                    steps,
-                                    artifacts,
-                                    partial_outcome,
-                                    passed,
-                                    total,
-                                )
-                            } else {
-                                (
-                                    RunStatus::Timeout,
-                                    steps,
-                                    artifacts,
-                                    RawExecOutcome::default(),
-                                    0,
-                                    0,
-                                )
-                            }
-                        }
-                    }
-                };
-            let wall_ms =
-                execution_wall_ms.unwrap_or_else(|| cell_started.elapsed().as_millis() as u64);
-
-            // 失败沙盒留档（供事后排查，路径随记录落盘）；成功沙盒即时清理。
-            let sandbox_rel = if matches!(status, RunStatus::Passed) {
-                let _ = std::fs::remove_dir_all(&sandbox);
-                None
-            } else {
-                let keep = self.failures_dir().join(key.slug().replace('#', "__"));
-                let _ = std::fs::remove_dir_all(&keep);
-                let _ = std::fs::rename(&sandbox, &keep);
-                Some(
-                    keep.strip_prefix(&self.out_dir)
-                        .unwrap_or(&keep)
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                )
-            };
-
-            let cost_usd = if outcome.usage_known {
-                estimate_cost_from_env(&outcome.usage)
-            } else {
-                None
-            };
-            let run = ProductEvalRun {
-                key: key.clone(),
-                category: case.category,
-                status,
-                wall_ms,
-                executor_wall_ms,
-                validation_wall_ms: outcome.validation_wall_ms,
-                delivery_gate_wall_ms: outcome.delivery_gate_wall_ms,
-                model_calls: outcome.model_calls,
-                prompt_tokens: outcome.usage_known.then_some(outcome.usage.prompt_tokens),
-                completion_tokens: outcome
-                    .usage_known
-                    .then_some(outcome.usage.completion_tokens),
-                total_tokens: outcome.usage_known.then_some(outcome.usage.total_tokens),
-                cost_usd,
-                failed_steps,
-                retries: outcome.retries,
-                cancellations: if outcome.aborted { 1 } else { 0 },
-                artifact_refs,
-                tool_log: outcome.tool_log,
-                checker_passed,
-                checker_total,
-                sandbox_rel,
-                model: model.clone(),
-                started_at,
-                finished_at: now_rfc3339(),
-                error: outcome.error,
-            };
-            self.append_run(&run)?;
-            runs.push(run);
-            let report = self.build_report(
-                &runs,
-                &cases,
-                opts,
-                execution,
-                &model,
-                &evaluator_binary_sha256,
-                opts.provider_endpoint_sha256.as_deref(),
-            )?;
-            write_report(&self.out_dir, &report)?;
-            tracing::info!(
-                cell = %runs.last().map(|r| r.key.slug()).unwrap_or_default(),
-                status = ?runs.last().map(|r| r.status),
-                wall_ms,
-                "product-eval 单元格完成"
-            );
-        }
-
-        self.build_report(
-            &runs,
-            &cases,
-            opts,
-            execution,
-            &model,
-            &evaluator_binary_sha256,
-            opts.provider_endpoint_sha256.as_deref(),
-        )
-    }
-
-    fn build_report(
-        &self,
-        runs: &[ProductEvalRun],
-        cases: &[ProductEvalCase],
-        opts: &RunOptions,
-        execution: &str,
-        model: &Option<String>,
-        evaluator_binary_sha256: &str,
-        provider_endpoint_sha256: Option<&str>,
-    ) -> Result<ProductEvalReport, ProductEvalError> {
-        let completed: std::collections::BTreeSet<MatrixKey> =
-            runs.iter().map(|run| run.key.clone()).collect();
-        let planned = self.planned_matrix(cases, opts);
-        let pending: Vec<MatrixKey> = planned
-            .iter()
-            .filter(|key| !completed.contains(key))
-            .cloned()
-            .collect();
-        Ok(ProductEvalReport {
-            schema_version: PRODUCT_EVAL_SCHEMA_VERSION,
-            suite_name: self.bundle.suite.name.clone(),
-            suite_hash: suite_hash(&self.bundle),
-            execution: execution.to_string(),
-            model: model.clone(),
-            batch_label: opts.batch_label.clone(),
-            tags: opts.tags.clone(),
-            run_contract_sha256: Some(self.run_contract_sha256(cases, opts)),
-            evaluator_binary_sha256: Some(evaluator_binary_sha256.to_string()),
-            provider_endpoint_sha256: provider_endpoint_sha256.map(str::to_string),
-            generated_at: now_rfc3339(),
-            runs: runs.to_vec(),
-            pending,
-            metrics: aggregate_metrics(runs),
-            per_case: aggregate_per_case(runs),
-        })
-    }
-}
-
 /// 真实单 Agent 执行器（第一路）：经既有 Agent/工具/权限/Session 全链路执行任务。
 pub mod single_agent;
 // M1：原 core 用 `#[path = "product_eval/workswarm_executor.rs"]` 把它挂在 crate 根
@@ -2714,6 +2291,33 @@ pub fn quality_of(runs: &[ProductEvalRun]) -> Option<f64> {
     }
 }
 
+fn complete_optional_u64_sum(values: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
+    let mut count = 0usize;
+    let mut total = 0u64;
+    for value in values {
+        total = total.checked_add(value?)?;
+        count += 1;
+    }
+    (count > 0).then_some(total)
+}
+
+fn complete_optional_cost_sum(values: impl IntoIterator<Item = Option<f64>>) -> Option<f64> {
+    let mut count = 0usize;
+    let mut total = 0.0f64;
+    for value in values {
+        let value = value?;
+        if !value.is_finite() || value < 0.0 {
+            return None;
+        }
+        total += value;
+        if !total.is_finite() {
+            return None;
+        }
+        count += 1;
+    }
+    (count > 0).then_some(total)
+}
+
 /// 聚合指标：全部已尝试运行一律计入分母。
 pub fn aggregate_metrics(runs: &[ProductEvalRun]) -> ProductEvalMetrics {
     let total = runs.len();
@@ -2739,18 +2343,15 @@ pub fn aggregate_metrics(runs: &[ProductEvalRun]) -> ProductEvalMetrics {
     let validation_wall_sum: u64 = runs.iter().map(|r| r.validation_wall_ms).sum();
     let delivery_gate_wall_sum: u64 = runs.iter().map(|r| r.delivery_gate_wall_ms).sum();
     let model_calls: u64 = runs.iter().map(|r| r.model_calls as u64).sum();
-    let tokens_known = runs.iter().any(|r| r.total_tokens.is_some());
-    let total_tokens = if tokens_known {
-        Some(runs.iter().filter_map(|r| r.total_tokens).sum())
-    } else {
-        None
-    };
-    let cost_known = runs.iter().any(|r| r.cost_usd.is_some());
-    let estimated_cost_usd = if cost_known {
-        Some(runs.iter().filter_map(|r| r.cost_usd).sum())
-    } else {
-        None
-    };
+    let tool_calls_known = total > 0 && runs.iter().all(|r| r.tool_calls.is_some());
+    let total_tool_calls = tool_calls_known.then(|| {
+        runs.iter()
+            .filter_map(|r| r.tool_calls)
+            .map(u64::from)
+            .sum()
+    });
+    let total_tokens = complete_optional_u64_sum(runs.iter().map(|run| run.total_tokens));
+    let estimated_cost_usd = complete_optional_cost_sum(runs.iter().map(|run| run.cost_usd));
     ProductEvalMetrics {
         runs_total: total,
         passed,
@@ -2784,6 +2385,7 @@ pub fn aggregate_metrics(runs: &[ProductEvalRun]) -> ProductEvalMetrics {
             delivery_gate_wall_sum as f64 / total as f64
         },
         total_model_calls: model_calls,
+        total_tool_calls,
         total_tokens,
         estimated_cost_usd,
     }
@@ -2808,6 +2410,19 @@ pub fn aggregate_per_case(runs: &[ProductEvalRun]) -> Vec<CaseModeMetrics> {
             } else {
                 group.iter().map(|r| r.model_calls as f64).sum::<f64>() / group.len() as f64
             };
+            let mean_tool_calls =
+                if !group.is_empty() && group.iter().all(|run| run.tool_calls.is_some()) {
+                    Some(
+                        group
+                            .iter()
+                            .filter_map(|run| run.tool_calls)
+                            .map(f64::from)
+                            .sum::<f64>()
+                            / group.len() as f64,
+                    )
+                } else {
+                    None
+                };
             CaseModeMetrics {
                 case_id,
                 category: group
@@ -2820,6 +2435,7 @@ pub fn aggregate_per_case(runs: &[ProductEvalRun]) -> Vec<CaseModeMetrics> {
                 success_rate: metrics.success_rate,
                 mean_wall_ms: metrics.mean_wall_ms,
                 mean_model_calls: mean_calls,
+                mean_tool_calls,
                 total_tokens: metrics.total_tokens,
                 quality: quality_of(&owned),
             }
@@ -2870,9 +2486,18 @@ pub fn format_report_summary(report: &ProductEvalReport) -> String {
         m.success_rate * 100.0
     ));
     out.push_str(&format!(
-        "平均墙钟 {:.0}ms；模型调用 {} 次；tokens {:?}；成本 {:?}\n",
-        m.mean_wall_ms, m.total_model_calls, m.total_tokens, m.estimated_cost_usd
+        "平均墙钟 {:.0}ms；模型调用 {} 次；工具调用 {:?} 次；tokens {:?}；成本 {:?}\n",
+        m.mean_wall_ms,
+        m.total_model_calls,
+        m.total_tool_calls,
+        m.total_tokens,
+        m.estimated_cost_usd
     ));
+    for run in &report.runs {
+        if let Some(snapshot_rel) = &run.artifact_snapshot_rel {
+            out.push_str(&format!("  成功产物快照 {}：{}\n", run.key, snapshot_rel));
+        }
+    }
     if !report.pending.is_empty() {
         out.push_str(&format!(
             "未完成单元格 {} 个（重跑同一命令即可续跑，不重复已完成 case）\n",
@@ -2881,7 +2506,7 @@ pub fn format_report_summary(report: &ProductEvalReport) -> String {
     }
     for row in &report.per_case {
         out.push_str(&format!(
-            "  {:<34} {:<7} {:>2}/{}（{:.0}%）mean_wall={:.0}ms mean_calls={:.1} quality={}\n",
+            "  {:<34} {:<7} {:>2}/{}（{:.0}%）mean_wall={:.0}ms mean_calls={:.1} mean_tools={:?} quality={}\n",
             row.case_id,
             row.agent_mode.as_str(),
             row.passed,
@@ -2889,6 +2514,7 @@ pub fn format_report_summary(report: &ProductEvalReport) -> String {
             row.success_rate * 100.0,
             row.mean_wall_ms,
             row.mean_model_calls,
+            row.mean_tool_calls,
             row.quality
                 .map(|q| format!("{:.2}", q))
                 .unwrap_or_else(|| "-".to_string())
@@ -3108,6 +2734,8 @@ pub struct ModeStats {
     #[serde(default)]
     pub mean_delivery_gate_wall_ms: f64,
     pub mean_model_calls: f64,
+    #[serde(default)]
+    pub mean_tool_calls: Option<f64>,
     pub total_tokens: Option<u64>,
     pub total_cost_usd: Option<f64>,
     /// 检查器通过率均值（质量代理；无检查器计数的旧记录缺省为 None）。
@@ -3140,6 +2768,18 @@ pub fn mode_statistics(runs: &[ProductEvalRun], mode: AgentMode) -> ModeStats {
     } else {
         group.iter().map(|run| run.model_calls as f64).sum::<f64>() / total as f64
     };
+    let mean_tool_calls = if total > 0 && group.iter().all(|run| run.tool_calls.is_some()) {
+        Some(
+            group
+                .iter()
+                .filter_map(|run| run.tool_calls)
+                .map(f64::from)
+                .sum::<f64>()
+                / total as f64,
+        )
+    } else {
+        None
+    };
     let mean_executor_wall = if total == 0 {
         0.0
     } else {
@@ -3167,18 +2807,8 @@ pub fn mode_statistics(runs: &[ProductEvalRun], mode: AgentMode) -> ModeStats {
             .sum::<f64>()
             / total as f64
     };
-    let tokens_known = group.iter().any(|run| run.total_tokens.is_some());
-    let tokens = if tokens_known {
-        Some(group.iter().filter_map(|run| run.total_tokens).sum())
-    } else {
-        None
-    };
-    let cost_known = group.iter().any(|run| run.cost_usd.is_some());
-    let cost = if cost_known {
-        Some(group.iter().filter_map(|run| run.cost_usd).sum())
-    } else {
-        None
-    };
+    let tokens = complete_optional_u64_sum(group.iter().map(|run| run.total_tokens));
+    let cost = complete_optional_cost_sum(group.iter().map(|run| run.cost_usd));
     let owned: Vec<ProductEvalRun> = group.iter().map(|run| (*run).clone()).collect();
     let quality = quality_of(&owned);
     ModeStats {
@@ -3199,6 +2829,7 @@ pub fn mode_statistics(runs: &[ProductEvalRun], mode: AgentMode) -> ModeStats {
         mean_validation_wall_ms: mean_validation_wall,
         mean_delivery_gate_wall_ms: mean_delivery_gate_wall,
         mean_model_calls: mean_calls,
+        mean_tool_calls,
         total_tokens: tokens,
         total_cost_usd: cost,
         quality,
@@ -3206,7 +2837,7 @@ pub fn mode_statistics(runs: &[ProductEvalRun], mode: AgentMode) -> ModeStats {
     }
 }
 
-/// 一条启用条件判定（多 Agent 启用门槛：任一满足即建议启用）。
+/// 一条主收益候选或质量/资源护栏判定。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnablementRule {
     pub name: String,
@@ -3220,10 +2851,18 @@ pub struct ModeComparison {
     pub multi_success_rate_diff: f64,
     pub multi_wall_rel_change: Option<f64>,
     pub multi_calls_rel_change: Option<f64>,
+    #[serde(default)]
+    pub multi_tool_calls_rel_change: Option<f64>,
     pub multi_tokens_rel_change: Option<f64>,
     pub multi_cost_rel_change: Option<f64>,
     pub rules: Vec<EnablementRule>,
-    /// 任一启用条件满足 → true。
+    #[serde(default)]
+    pub resource_guardrails: Vec<EnablementRule>,
+    #[serde(default)]
+    pub quality_guardrails: Vec<EnablementRule>,
+    #[serde(default)]
+    pub alignment_guardrails: Vec<EnablementRule>,
+    /// 资源护栏、质量、样本量与至少一项收益同时满足才启用.
     pub enabled: bool,
     /// 样本量是否足以支撑对照结论（两组都 ≥ 30 才算充分）。
     pub sample_sufficient: bool,
@@ -3237,13 +2876,17 @@ fn rel_change(baseline: f64, candidate: f64) -> Option<f64> {
     }
 }
 
-/// 对照判定（multi 相对 single）。质量是硬门槛：multi 成功率不得低于 single；
-/// 质量不退化后，启用条件任一满足即可：成功率差 ≥ +5 个百分点、成功率相对提升 ≥ +10%
-///（质量代理：检查器为二元判定，暂无独立质量指标），或平均耗时 −30%。
+/// 对照判定（multi 相对 single）。通过条件分两层：交付成功率不低于 Single，
+/// Single/Team 每任务 token、模型调用、工具调用都完整可测且未突破共享上限；在此
+/// 基础上，成功率、检查器质量、耗时三种主收益至少命中一项。成本有双侧价格时也受限。
 pub fn compare_mode_statistics(single: &ModeStats, multi: &ModeStats) -> ModeComparison {
     let diff = multi.success_rate - single.success_rate;
     let wall_rel = rel_change(single.mean_wall_ms, multi.mean_wall_ms);
     let calls_rel = rel_change(single.mean_model_calls, multi.mean_model_calls);
+    let tool_calls_rel = match (single.mean_tool_calls, multi.mean_tool_calls) {
+        (Some(a), Some(b)) => rel_change(a, b),
+        _ => None,
+    };
     let tokens_rel = match (single.total_tokens, multi.total_tokens) {
         (Some(a), Some(b)) => rel_change(a as f64, b as f64),
         _ => None,
@@ -3253,19 +2896,97 @@ pub fn compare_mode_statistics(single: &ModeStats, multi: &ModeStats) -> ModeCom
         _ => None,
     };
     let rate_rel = rel_change(single.success_rate, multi.success_rate);
+    let per_run = |total: Option<u64>, runs: usize| {
+        if runs == 0 {
+            None
+        } else {
+            total.map(|value| value as f64 / runs as f64)
+        }
+    };
+    let per_run_cost = |total: Option<f64>, runs: usize| {
+        if runs == 0 {
+            None
+        } else {
+            total.map(|value| value / runs as f64)
+        }
+    };
+    let policy_thresholds = owo_agent_workswarm::team_benefit::BenefitThresholds::default();
+    let resource_checks = owo_agent_workswarm::team_benefit::compare_resource_envelopes(
+        &owo_agent_workswarm::team_benefit::ResourceEnvelope {
+            mean_model_calls: Some(single.mean_model_calls),
+            mean_tool_calls: single.mean_tool_calls,
+            mean_tokens: per_run(single.total_tokens, single.runs_total),
+            mean_cost_usd: per_run_cost(single.total_cost_usd, single.runs_total),
+        },
+        &owo_agent_workswarm::team_benefit::ResourceEnvelope {
+            mean_model_calls: Some(multi.mean_model_calls),
+            mean_tool_calls: multi.mean_tool_calls,
+            mean_tokens: per_run(multi.total_tokens, multi.runs_total),
+            mean_cost_usd: per_run_cost(multi.total_cost_usd, multi.runs_total),
+        },
+        &policy_thresholds,
+    )
+    .into_iter()
+    .map(|rule| EnablementRule {
+        name: rule.name,
+        satisfied: rule.satisfied,
+        detail: rule.detail,
+    })
+    .collect::<Vec<_>>();
     let mut rules = vec![EnablementRule {
         name: "成功率 +5%".to_string(),
         satisfied: diff >= 0.05,
         detail: format!("multi−single = {:+.1}pp（门槛 ≥ +5.0pp）", diff * 100.0),
     }];
+    let (quality_gain, quality_detail) = match (single.quality, multi.quality) {
+        (Some(base), Some(candidate)) if base > 0.0 => {
+            let relative = candidate / base - 1.0;
+            (
+                relative >= 0.10,
+                format!(
+                    "检查器通过率相对变化 {:+.1}%（门槛 ≥ +10%）",
+                    relative * 100.0
+                ),
+            )
+        }
+        (Some(0.0), Some(_)) => (
+            false,
+            "Single 检查器质量基线为 0，无法计算相对质量收益".to_string(),
+        ),
+        (None, None) => (
+            rate_rel.is_some_and(|value| value >= 0.10),
+            format!(
+                "双方无独立检查器质量值，以成功率作代理：相对变化 {:+.1}%（门槛 ≥ +10%）",
+                rate_rel.map(|value| value * 100.0).unwrap_or(f64::NAN)
+            ),
+        ),
+        _ => (
+            false,
+            "Single/Team 独立检查器质量覆盖不完整，质量收益不可比".to_string(),
+        ),
+    };
     rules.push(EnablementRule {
         name: "质量 +10%".to_string(),
-        satisfied: rate_rel.is_some_and(|value| value >= 0.10),
-        detail: format!(
-            "质量代理 = 成功率相对提升 {:+.1}%（门槛 ≥ +10%；检查器为二元判定，暂无独立质量指标）",
-            rate_rel.map(|value| value * 100.0).unwrap_or(f64::NAN)
-        ),
+        satisfied: quality_gain,
+        detail: quality_detail,
     });
+    let quality_guardrails = match (single.quality, multi.quality) {
+        (Some(base), Some(candidate)) => vec![EnablementRule {
+            name: "检查器质量不退化".to_string(),
+            satisfied: base.is_finite() && candidate.is_finite() && candidate >= base,
+            detail: format!("Single={base:.3}，Team={candidate:.3}"),
+        }],
+        (None, None) => vec![EnablementRule {
+            name: "检查器质量不退化".to_string(),
+            satisfied: true,
+            detail: "双方均无独立检查器质量；交付成功率仍需不退化".to_string(),
+        }],
+        _ => vec![EnablementRule {
+            name: "检查器质量不退化".to_string(),
+            satisfied: false,
+            detail: "Single/Team 独立检查器质量覆盖不对称，默认不自动放行".to_string(),
+        }],
+    };
     rules.push(EnablementRule {
         name: "耗时 -30%".to_string(),
         satisfied: wall_rel.is_some_and(|value| value <= -0.30),
@@ -3278,14 +2999,71 @@ pub fn compare_mode_statistics(single: &ModeStats, multi: &ModeStats) -> ModeCom
         multi_success_rate_diff: diff,
         multi_wall_rel_change: wall_rel,
         multi_calls_rel_change: calls_rel,
+        multi_tool_calls_rel_change: tool_calls_rel,
         multi_tokens_rel_change: tokens_rel,
         multi_cost_rel_change: cost_rel,
         enabled: single.sample_sufficient
             && multi.sample_sufficient
             && diff >= 0.0
+            && quality_guardrails.iter().all(|rule| rule.satisfied)
+            && resource_checks.iter().all(|rule| rule.satisfied)
             && rules.iter().any(|rule| rule.satisfied),
         rules,
+        quality_guardrails,
+        resource_guardrails: resource_checks,
+        alignment_guardrails: Vec::new(),
         sample_sufficient: single.sample_sufficient && multi.sample_sufficient,
+    }
+}
+
+/// 报告级对照判定：除统计收益外，必须完整配对每个任务/重复轮次，且没有待执行矩阵项。
+pub fn compare_report_statistics(runs: &[ProductEvalRun], pending: &[MatrixKey]) -> ModeComparison {
+    let mut comparison = compare_mode_statistics(
+        &mode_statistics(runs, AgentMode::Single),
+        &mode_statistics(runs, AgentMode::Multi),
+    );
+    let alignment = report_pairing_guardrail(runs, pending);
+    comparison.enabled &= alignment.satisfied;
+    comparison.alignment_guardrails = vec![alignment];
+    comparison
+}
+
+/// 保证每个 (case_id, repetition) 恰好有一条 Single 与一条 Team 运行记录。
+pub fn report_pairing_guardrail(runs: &[ProductEvalRun], pending: &[MatrixKey]) -> EnablementRule {
+    use std::collections::BTreeMap;
+    let mut cells: BTreeMap<(String, u32), (usize, usize)> = BTreeMap::new();
+    for run in runs {
+        let counts = cells
+            .entry((run.key.case_id.clone(), run.key.repetition))
+            .or_default();
+        match run.key.agent_mode {
+            AgentMode::Single => counts.0 += 1,
+            AgentMode::Multi => counts.1 += 1,
+        }
+    }
+    let malformed = cells
+        .values()
+        .any(|(single, team)| *single != 1 || *team != 1);
+    let satisfied = !runs.is_empty() && pending.is_empty() && !malformed;
+    let detail = if pending.is_empty() && !malformed && !runs.is_empty() {
+        format!(
+            "{} 个任务/重复单元均有且仅有 Single 与 Team 记录",
+            cells.len()
+        )
+    } else if !pending.is_empty() {
+        format!(
+            "仍有 {} 个待执行矩阵单元，不能作自动启用判定",
+            pending.len()
+        )
+    } else if runs.is_empty() {
+        "没有可配对的运行记录".to_string()
+    } else {
+        "任务或重复轮次缺少一侧，或存在重复记录".to_string()
+    };
+    EnablementRule {
+        name: "任务配对完整".to_string(),
+        satisfied,
+        detail,
     }
 }
 
@@ -3293,7 +3071,7 @@ pub fn compare_mode_statistics(single: &ModeStats, multi: &ModeStats) -> ModeCom
 pub fn report_statistics(runs: &[ProductEvalRun]) -> serde_json::Value {
     let single = mode_statistics(runs, AgentMode::Single);
     let multi = mode_statistics(runs, AgentMode::Multi);
-    let comparison = compare_mode_statistics(&single, &multi);
+    let comparison = compare_report_statistics(runs, &[]);
     serde_json::json!({
         "modes": [serde_json::to_value(&single).unwrap_or_default(),
                   serde_json::to_value(&multi).unwrap_or_default()],
@@ -3311,7 +3089,7 @@ pub fn format_mode_statistics(runs: &[ProductEvalRun]) -> String {
             continue;
         }
         out.push_str(&format!(
-            "  {:<7} 成功率 {:.1}% CI95 [{:.1}%, {:.1}%]（{}/{}） p50={:.0}ms p95={:.0}ms executor={:.0}ms validate={:.0}ms gate={:.0}ms mean_calls={:.1} tokens={:?} cost={:?}{}\n",
+            "  {:<7} 成功率 {:.1}% CI95 [{:.1}%, {:.1}%]（{}/{}） p50={:.0}ms p95={:.0}ms executor={:.0}ms validate={:.0}ms gate={:.0}ms mean_calls={:.1} tools={:?} tokens={:?} cost={:?}{}\n",
             stats.mode,
             stats.success_rate * 100.0,
             stats.ci95_low * 100.0,
@@ -3324,6 +3102,7 @@ pub fn format_mode_statistics(runs: &[ProductEvalRun]) -> String {
             stats.mean_validation_wall_ms,
             stats.mean_delivery_gate_wall_ms,
             stats.mean_model_calls,
+            stats.mean_tool_calls,
             stats.total_tokens,
             stats.total_cost_usd,
             if stats.sample_sufficient { "" } else { "（样本不足 n<30，区间仅供参考）" },
@@ -3333,7 +3112,7 @@ pub fn format_mode_statistics(runs: &[ProductEvalRun]) -> String {
         out.push_str("  说明：Team 的 validate/gate 计入 executor；Single 的外层检查在 executor 之后计时，这些阶段值不可相加替代总 wall_ms。\n");
     }
     if single.runs_total > 0 && multi.runs_total > 0 {
-        let comparison = compare_mode_statistics(&single, &multi);
+        let comparison = compare_report_statistics(runs, &[]);
         out.push_str(&format_mode_comparison(&comparison));
     }
     out
@@ -3341,25 +3120,72 @@ pub fn format_mode_statistics(runs: &[ProductEvalRun]) -> String {
 
 /// 启用条件判定的人类可读段落。
 pub fn format_mode_comparison(comparison: &ModeComparison) -> String {
-    let mut out = String::from("  —— 多 Agent 启用条件（样本充分与质量不退化为硬门槛）——\n");
+    let mut out = String::from("  —— 多 Agent 启用条件（样本、质量与资源护栏为硬门槛）——\n");
+    for rule in &comparison.alignment_guardrails {
+        let mark = if rule.satisfied { "✅" } else { "⬜" };
+        out.push_str(&format!(
+            "  {} 配对护栏 {}：{}\n",
+            mark, rule.name, rule.detail
+        ));
+    }
+    for rule in &comparison.quality_guardrails {
+        let mark = if rule.satisfied { "✅" } else { "⬜" };
+        out.push_str(&format!(
+            "  {} 质量护栏 {}：{}\n",
+            mark, rule.name, rule.detail
+        ));
+    }
+    for rule in &comparison.resource_guardrails {
+        let mark = if rule.satisfied { "✅" } else { "⬜" };
+        out.push_str(&format!(
+            "  {} 资源护栏 {}：{}\n",
+            mark, rule.name, rule.detail
+        ));
+    }
     for rule in &comparison.rules {
         let mark = if rule.satisfied { "✅" } else { "⬜" };
         out.push_str(&format!("  {} {}：{}\n", mark, rule.name, rule.detail));
+    }
+    if let Some(tool_delta) = comparison.multi_tool_calls_rel_change {
+        out.push_str(&format!(
+            "  工具调用相对变化：{:+.1}%（Team 相对 Single）\n",
+            tool_delta * 100.0
+        ));
     }
     if comparison.multi_success_rate_diff < 0.0 {
         out.push_str(&format!(
             "  质量守卫：未通过，multi 成功率低于 single {:.1}pp；速度收益不抵消质量退化\n",
             comparison.multi_success_rate_diff.abs() * 100.0
         ));
+    } else if comparison
+        .quality_guardrails
+        .iter()
+        .any(|rule| !rule.satisfied)
+    {
+        out.push_str(
+            "  质量守卫：未通过，检查器质量证据退化或覆盖不完整；速度收益不抵消质量退化\n",
+        );
     } else {
         out.push_str("  质量守卫：通过，multi 成功率不低于 single\n");
     }
     if comparison.enabled {
         out.push_str("  结论：建议启用多 Agent（样本充分、质量守卫通过且至少一条优势条件满足）\n");
+    } else if comparison
+        .alignment_guardrails
+        .iter()
+        .any(|rule| !rule.satisfied)
+    {
+        out.push_str("  结论：暂不建议启用多 Agent（任务未完整配对或仍有待执行单元）\n");
     } else if !comparison.sample_sufficient {
         out.push_str("  结论：暂不建议启用多 Agent（single 与 multi 均需至少 30 个样本）\n");
     } else if comparison.multi_success_rate_diff < 0.0 {
         out.push_str("  结论：暂不建议启用多 Agent（质量守卫未通过）\n");
+    } else if comparison
+        .resource_guardrails
+        .iter()
+        .any(|rule| !rule.satisfied)
+    {
+        out.push_str("  结论：暂不建议启用多 Agent（关键用量缺失或资源增幅超过上限）\n");
     } else {
         out.push_str("  结论：暂不建议启用多 Agent（未达到任何优势条件）\n");
     }
@@ -3369,792 +3195,82 @@ pub fn format_mode_comparison(comparison: &ModeComparison) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
-// 配对对照报告（第二路交付第三路：PairedStats 兼容 JSON）
-// ---------------------------------------------------------------------------
-
-/// 配对对照报告 schema 版本（对齐 team_benefit 的读取契约）。
-pub const PAIRED_REPORT_SCHEMA_VERSION: u32 = 1;
-
-/// 配对报告绑定参数：四元组（model/template/task_set/strategy_version）。
-/// strategy_version 由三路冻结；本路负责如实记录。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PairedReportOptions {
-    pub model: Option<String>,
-    pub template: Option<String>,
-    pub task_set: Option<String>,
-    pub strategy_version: String,
-}
-
-/// 单侧快照 JSON（字段对齐 `team_benefit::ModeStatSnapshot` + quality）。
-fn paired_snapshot_json(mode: AgentMode, runs: &[&ProductEvalRun]) -> serde_json::Value {
-    let total = runs.len();
-    let passed = runs
-        .iter()
-        .filter(|run| run.status == RunStatus::Passed)
-        .count();
-    let (low, high) = wilson_interval(passed, total, CI95_Z);
-    let walls: Vec<u64> = runs.iter().map(|run| run.wall_ms).collect();
-    let mean_wall = if total == 0 {
-        0.0
-    } else {
-        walls.iter().sum::<u64>() as f64 / total as f64
-    };
-    let mean_calls = if total == 0 {
-        0.0
-    } else {
-        runs.iter().map(|r| r.model_calls as f64).sum::<f64>() / total as f64
-    };
-    let tokens_known = runs.iter().any(|r| r.total_tokens.is_some());
-    let tokens = if tokens_known {
-        Some(runs.iter().filter_map(|r| r.total_tokens).sum::<u64>())
-    } else {
-        None
-    };
-    let cost_known = runs.iter().any(|r| r.cost_usd.is_some());
-    let cost = if cost_known {
-        Some(runs.iter().filter_map(|r| r.cost_usd).sum::<f64>())
-    } else {
-        None
-    };
-    let owned: Vec<ProductEvalRun> = runs.iter().map(|r| (*r).clone()).collect();
-    serde_json::json!({
-        "mode": mode.as_str(),
-        "runs_total": total,
-        "passed": passed,
-        "success_rate": if total == 0 { 0.0 } else { passed as f64 / total as f64 },
-        "ci95_low": low,
-        "ci95_high": high,
-        "mean_wall_ms": mean_wall,
-        "mean_model_calls": mean_calls,
-        "total_tokens": tokens,
-        "total_cost_usd": cost,
-        "quality": quality_of(&owned),
-        "sample_sufficient": total >= SUFFICIENT_SAMPLE_SIZE,
-    })
-}
-
-/// Case-cluster percentile bootstrap. Repetitions for one task remain in the same
-/// cluster so repeated runs are not treated as independent task samples.
-fn paired_case_cluster_bootstrap_ci(
-    task_means: &[f64],
-    pairing_is_complete: bool,
-    configuration_aligned: bool,
-) -> serde_json::Value {
-    const RESAMPLES: usize = 5_000;
-    if !pairing_is_complete || !configuration_aligned {
-        return serde_json::json!({
-            "available": false,
-            "reason": if !pairing_is_complete {
-                "incomplete_or_duplicate_pairing"
-            } else {
-                "configuration_mismatch"
-            },
-            "independent_case_clusters": task_means.len(),
-        });
-    }
-    if task_means.len() < 3 {
-        return serde_json::json!({
-            "available": false,
-            "reason": "requires_at_least_3_independent_cases",
-            "independent_case_clusters": task_means.len(),
-        });
-    }
-
-    let mut seed = 0xcbf29ce484222325_u64;
-    for value in task_means {
-        seed ^= value.to_bits();
-        seed = seed.wrapping_mul(0x100000001b3);
-    }
-    if seed == 0 {
-        seed = 0x9e3779b97f4a7c15;
-    }
-    let mut draws = Vec::with_capacity(RESAMPLES);
-    for _ in 0..RESAMPLES {
-        let mut total = 0.0;
-        for _ in 0..task_means.len() {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            total += task_means[(seed % task_means.len() as u64) as usize];
-        }
-        draws.push(total / task_means.len() as f64);
-    }
-    draws.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let percentile = |p: f64| {
-        let rank = p * (draws.len() - 1) as f64;
-        let lower = rank.floor() as usize;
-        let upper = rank.ceil() as usize;
-        let fraction = rank - lower as f64;
-        draws[lower] * (1.0 - fraction) + draws[upper] * fraction
-    };
-    serde_json::json!({
-        "available": true,
-        "method": "deterministic case-cluster percentile bootstrap",
-        "confidence_level": 0.95,
-        "resamples": RESAMPLES,
-        "independent_case_clusters": task_means.len(),
-        "lower": percentile(0.025),
-        "upper": percentile(0.975),
-    })
-}
-
-/// Matched per-cell statistics; positive wall deltas mean Team took longer.
-fn paired_cell_deltas_json(
-    single_runs: &[&ProductEvalRun],
-    multi_runs: &[&ProductEvalRun],
-    include_cell_details: bool,
-    configuration_aligned: bool,
-) -> serde_json::Value {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    let by_key = |runs: &[&ProductEvalRun], mode| {
-        let mut rows = BTreeMap::new();
-        let mut duplicates = false;
-        for run in runs.iter().filter(|run| run.key.agent_mode == mode) {
-            let key = (run.key.case_id.clone(), run.key.repetition);
-            if rows.insert(key, *run).is_some() {
-                duplicates = true;
-            }
-        }
-        (rows, duplicates)
-    };
-    let (single, single_duplicates) = by_key(single_runs, AgentMode::Single);
-    let (multi, multi_duplicates) = by_key(multi_runs, AgentMode::Multi);
-    let single_keys = single.keys().cloned().collect::<BTreeSet<_>>();
-    let multi_keys = multi.keys().cloned().collect::<BTreeSet<_>>();
-    let keys_equal = !single_keys.is_empty() && single_keys == multi_keys;
-    let duplicate_cells = single_duplicates || multi_duplicates;
-    let mut wall_deltas = Vec::<f64>::new();
-    let mut both_passed_wall_deltas = Vec::<f64>::new();
-    let mut call_deltas = Vec::<f64>::new();
-    let mut token_deltas = Vec::<f64>::new();
-    let mut cost_deltas = Vec::<f64>::new();
-    let mut quality_deltas = Vec::<f64>::new();
-    let mut single_only_pass = 0usize;
-    let mut team_only_pass = 0usize;
-    let mut both_pass = 0usize;
-    let mut neither_pass = 0usize;
-    let mut success_deltas_by_case = BTreeMap::<String, Vec<f64>>::new();
-    let mut wall_deltas_by_case = BTreeMap::<String, Vec<f64>>::new();
-    let mut cells = Vec::new();
-    let mut paired_cells = 0usize;
-
-    for key in single_keys.intersection(&multi_keys) {
-        paired_cells += 1;
-        let left = single[key];
-        let right = multi[key];
-        let wall_delta = right.wall_ms as f64 - left.wall_ms as f64;
-        let success_delta = (if right.status == RunStatus::Passed { 1.0 } else { 0.0 })
-            - (if left.status == RunStatus::Passed { 1.0 } else { 0.0 });
-        success_deltas_by_case.entry(key.0.clone()).or_default().push(success_delta);
-        wall_deltas_by_case.entry(key.0.clone()).or_default().push(wall_delta);
-        let call_delta = right.model_calls as f64 - left.model_calls as f64;
-        wall_deltas.push(wall_delta);
-        call_deltas.push(call_delta);
-        if let (Some(single_tokens), Some(team_tokens)) = (left.total_tokens, right.total_tokens) {
-            token_deltas.push(team_tokens as f64 - single_tokens as f64);
-        }
-        if let (Some(single_cost), Some(team_cost)) = (left.cost_usd, right.cost_usd) {
-            cost_deltas.push(team_cost - single_cost);
-        }
-        if left.checker_total > 0 && right.checker_total > 0 {
-            let single_quality = left.checker_passed as f64 / left.checker_total as f64;
-            let team_quality = right.checker_passed as f64 / right.checker_total as f64;
-            quality_deltas.push(team_quality - single_quality);
-        }
-        match (left.status == RunStatus::Passed, right.status == RunStatus::Passed) {
-            (true, true) => {
-                both_pass += 1;
-                both_passed_wall_deltas.push(wall_delta);
-            }
-            (true, false) => single_only_pass += 1,
-            (false, true) => team_only_pass += 1,
-            (false, false) => neither_pass += 1,
-        }
-        if include_cell_details {
-            cells.push(serde_json::json!({
-            "case_id": key.0.clone(),
-            "repetition": key.1,
-            "single_status": left.status,
-            "team_status": right.status,
-            "team_minus_single_wall_ms": wall_delta,
-            "team_minus_single_model_calls": call_delta,
-            "single_total_tokens": left.total_tokens,
-            "team_total_tokens": right.total_tokens,
-            "team_minus_single_total_tokens": match (left.total_tokens, right.total_tokens) {
-                (Some(single_tokens), Some(team_tokens)) => Some(team_tokens as f64 - single_tokens as f64),
-                _ => None,
-            },
-            "single_cost_usd": left.cost_usd,
-            "team_cost_usd": right.cost_usd,
-            "team_minus_single_cost_usd": match (left.cost_usd, right.cost_usd) {
-                (Some(single_cost), Some(team_cost)) => Some(team_cost - single_cost),
-                _ => None,
-            },
-            "single_checker_quality": if left.checker_total > 0 {
-                Some(left.checker_passed as f64 / left.checker_total as f64)
-            } else {
-                None
-            },
-            "team_checker_quality": if right.checker_total > 0 {
-                Some(right.checker_passed as f64 / right.checker_total as f64)
-            } else {
-                None
-            },
-            }));
-        }
-    }
-
-    let task_means = |by_case: &BTreeMap<String, Vec<f64>>| {
-        by_case
-            .values()
-            .map(|values| values.iter().sum::<f64>() / values.len() as f64)
-            .collect::<Vec<_>>()
-    };
-    let task_success_deltas = task_means(&success_deltas_by_case);
-    let task_wall_deltas = task_means(&wall_deltas_by_case);
-    let task_mean_value = |values: &[f64]| {
-        if values.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::json!(values.iter().sum::<f64>() / values.len() as f64)
-        }
-    };
-    let complete_pairing = keys_equal && !duplicate_cells;
-    let quantiles = |values: &[f64]| {
-        if values.is_empty() {
-            return serde_json::json!({"mean": null, "median": null, "p95": null});
-        }
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let mut sorted = values.to_vec();
-        sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-        let percentile = |p: f64| {
-            if sorted.len() == 1 {
-                return sorted[0];
-            }
-            let rank = p * (sorted.len() - 1) as f64;
-            let lo = rank.floor() as usize;
-            let hi = rank.ceil() as usize;
-            let fraction = rank - lo as f64;
-            sorted[lo] * (1.0 - fraction) + sorted[hi] * fraction
-        };
-        serde_json::json!({
-            "mean": mean,
-            "median": percentile(0.5),
-            "p95": percentile(0.95),
-        })
-    };
-    serde_json::json!({
-        "paired_cells": paired_cells,
-        "keys_equal": keys_equal,
-        "duplicate_cells": duplicate_cells,
-        "valid_complete_pairing": complete_pairing,
-        "single_only_pass": single_only_pass,
-        "team_only_pass": team_only_pass,
-        "both_pass": both_pass,
-        "neither_pass": neither_pass,
-        "net_success_rate_delta": if paired_cells == 0 {
-            serde_json::Value::Null
-        } else {
-            serde_json::json!((team_only_pass as f64 - single_only_pass as f64) / paired_cells as f64)
-        },
-        "team_minus_single_wall_ms_all": quantiles(&wall_deltas),
-        "team_minus_single_wall_ms_both_passed": quantiles(&both_passed_wall_deltas),
-        "team_minus_single_model_calls": quantiles(&call_deltas),
-        "team_minus_single_total_tokens": quantiles(&token_deltas),
-        "team_minus_single_cost_usd": quantiles(&cost_deltas),
-        "team_minus_single_checker_quality": quantiles(&quality_deltas),
-        "uncertainty": {
-            "estimand": "equal-weight mean of per-case paired differences",
-            "configuration_aligned": configuration_aligned,
-            "success_rate_delta_task_balanced_mean": task_mean_value(&task_success_deltas),
-            "wall_ms_delta_task_balanced_mean": task_mean_value(&task_wall_deltas),
-            "success_rate_delta_case_cluster_bootstrap_95_ci": paired_case_cluster_bootstrap_ci(
-                &task_success_deltas,
-                complete_pairing,
-                configuration_aligned,
-            ),
-            "wall_ms_delta_case_cluster_bootstrap_95_ci": paired_case_cluster_bootstrap_ci(
-                &task_wall_deltas,
-                complete_pairing,
-                configuration_aligned,
-            ),
-            "warning": "Repeated runs are clustered by case_id; intervals describe between-case sampling uncertainty and do not establish causal advantage."
-        },
-        "cell_deltas": if include_cell_details {
-            serde_json::Value::Array(cells)
-        } else {
-            serde_json::Value::Null
-        },
-    })
-}
-
-/// Check the two report sides before presenting aggregate numbers as a matched pair.
-/// This validates report/suite/model/batch and (case_id, repetition) alignment; the
-/// evaluator binary revision still needs an external freeze binding.
-fn paired_run_alignment(
-    single: &ProductEvalReport,
-    multi: &ProductEvalReport,
-    opts: &PairedReportOptions,
-) -> serde_json::Value {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    let mut reasons = Vec::new();
-    if single.suite_hash.trim().is_empty() || single.suite_hash != multi.suite_hash {
-        reasons.push("single/multi suite_hash 缺失或不一致".to_string());
-    }
-    if single.run_contract_sha256.as_deref().is_none_or(str::is_empty)
-        || single.run_contract_sha256 != multi.run_contract_sha256
-    {
-        reasons.push("single/multi 生效任务、权限、检查器或预算指纹缺失/不一致".to_string());
-    }
-    if single.execution != "live-agent" || multi.execution != "live-workswarm" {
-        reasons.push(format!(
-            "执行器不匹配：要求 Single=live-agent、Team=live-workswarm，实际为 Single={}、Team={}",
-            single.execution, multi.execution
-        ));
-    }
-    if single.evaluator_binary_sha256.as_deref().is_none_or(str::is_empty)
-        || single.evaluator_binary_sha256 != multi.evaluator_binary_sha256
-    {
-        reasons.push("Single/Team 评测器二进制身份缺失或不一致".to_string());
-    }
-    if single.provider_endpoint_sha256.as_deref().is_none_or(str::is_empty)
-        || single.provider_endpoint_sha256 != multi.provider_endpoint_sha256
-    {
-        reasons.push("Single/Team 模型服务端点身份缺失或不一致".to_string());
-    }
-    if single.model.as_deref().is_none_or(str::is_empty)
-        || single.model != multi.model
-        || single.model != opts.model
-    {
-        reasons.push("single/multi/绑定项 model 缺失或不一致".to_string());
-    }
-    if single.batch_label.as_deref().is_none_or(str::is_empty)
-        || single.batch_label != multi.batch_label
-    {
-        reasons.push("single/multi batch_label 缺失或不一致".to_string());
-    }
-
-    let single_rows = single
-        .runs
-        .iter()
-        .filter(|run| run.key.agent_mode == AgentMode::Single)
-        .collect::<Vec<_>>();
-    let multi_rows = multi
-        .runs
-        .iter()
-        .filter(|run| run.key.agent_mode == AgentMode::Multi)
-        .collect::<Vec<_>>();
-    if single_rows.len() != single.runs.len() || multi_rows.len() != multi.runs.len() {
-        reasons.push("报告包含不属于该侧的 agent_mode 记录".to_string());
-    }
-    if single_rows.iter().any(|run| run.key.case_id.trim().is_empty())
-        || multi_rows.iter().any(|run| run.key.case_id.trim().is_empty())
-    {
-        reasons.push("配对矩阵包含空白 case_id".to_string());
-    }
-    let single_keys = single_rows
-        .iter()
-        .map(|run| ((run.key.case_id.clone(), run.key.repetition), *run))
-        .collect::<Vec<_>>();
-    let multi_keys = multi_rows
-        .iter()
-        .map(|run| ((run.key.case_id.clone(), run.key.repetition), *run))
-        .collect::<Vec<_>>();
-    let single_set = single_keys.iter().map(|(key, _)| key.clone()).collect::<BTreeSet<_>>();
-    let multi_set = multi_keys.iter().map(|(key, _)| key.clone()).collect::<BTreeSet<_>>();
-    let duplicates_exist = single_set.len() != single_keys.len() || multi_set.len() != multi_keys.len();
-    if duplicates_exist {
-        reasons.push("存在重复的 (case_id, repetition) 矩阵单元".to_string());
-    }
-    if single_set.is_empty() || single_set != multi_set {
-        reasons.push("single/multi 任务与重复编号集合不一致或为空".to_string());
-    }
-
-    let single_by_key = single_keys.into_iter().collect::<BTreeMap<_, _>>();
-    let multi_by_key = multi_keys.into_iter().collect::<BTreeMap<_, _>>();
-    let mut paired_keys = 0usize;
-    let mut run_models_match = true;
-    for key in single_set.intersection(&multi_set) {
-        paired_keys += 1;
-        let left = single_by_key.get(key).and_then(|run| run.model.as_deref());
-        let right = multi_by_key.get(key).and_then(|run| run.model.as_deref());
-        if left.is_none() || left != right || left != opts.model.as_deref() {
-            run_models_match = false;
-        }
-    }
-    if !run_models_match {
-        reasons.push("配对运行的有效模型缺失或不一致".to_string());
-    }
-    let pending_side_mismatch = single
-        .pending
-        .iter()
-        .any(|key| key.agent_mode != AgentMode::Single)
-        || multi
-            .pending
-            .iter()
-            .any(|key| key.agent_mode != AgentMode::Multi);
-    if pending_side_mismatch {
-        reasons.push("pending 列表包含不属于该报告侧的 agent_mode".to_string());
-    }
-    if !single.pending.is_empty() || !multi.pending.is_empty() {
-        reasons.push("配对矩阵仍有未执行单元".to_string());
-    }
-    serde_json::json!({
-        "configuration_aligned": reasons.is_empty(),
-        "reasons": reasons,
-        "paired_cells": paired_keys,
-        "single_cells": single_rows.len(),
-        "multi_cells": multi_rows.len(),
-        "evaluator_revision_binding": "not present in ProductEvalReport; verify from freeze/git metadata",
-    })
-}
-
-/// Split a matrix report containing exactly the Single and Multi sides into aligned
-/// reports that can be consumed by the paired-report builder.
-pub fn split_paired_mode_reports(
-    report: &ProductEvalReport,
-) -> Result<(ProductEvalReport, ProductEvalReport), ProductEvalError> {
-    let split = |mode: AgentMode, execution: &str| {
-        let mut side = report.clone();
-        side.execution = execution.to_string();
-        side.runs.retain(|run| run.key.agent_mode == mode);
-        side.pending.retain(|key| key.agent_mode == mode);
-        side.metrics = aggregate_metrics(&side.runs);
-        side.per_case = aggregate_per_case(&side.runs);
-        side
-    };
-    let single = split(AgentMode::Single, "live-agent");
-    let multi = split(AgentMode::Multi, "live-workswarm");
-    if single.runs.is_empty() || multi.runs.is_empty() {
-        return err("配对拆分要求 Single 与 Multi 都至少有一个运行单元");
-    }
-    Ok((single, multi))
-}
-
-/// 生成三路可直接读取的配对对照报告 JSON（一个包里含全部任务组）。
-///
-/// 分组：`overall` / 分类 `code|research|document` / 每 `case_id`；
-/// 每组含 single/multi 快照（样本数、成功率、质量、耗时）与绑定四元组，
-/// 同时保留两侧报告摘要（suite_hash/批次/生成时间）供三路追溯。
-pub fn build_paired_report_json(
-    single: &ProductEvalReport,
-    multi: &ProductEvalReport,
-    opts: &PairedReportOptions,
-    generated_at: Option<&str>,
-) -> serde_json::Value {
-    use std::collections::BTreeSet;
-
-    let generated_at = generated_at.unwrap_or(&now_rfc3339()).to_string();
-    let bindings = serde_json::json!({
-        "model": opts.model.clone(),
-        "template": opts.template.clone(),
-        "task_set": opts.task_set.clone(),
-        "strategy_version": opts.strategy_version,
-    });
-    let run_alignment = paired_run_alignment(single, multi, opts);
-    let configuration_aligned = run_alignment
-        .get("configuration_aligned")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let mut pairs: Vec<serde_json::Value> = Vec::new();
-
-    let mut categories: BTreeSet<String> = BTreeSet::new();
-    let mut case_ids: BTreeSet<String> = BTreeSet::new();
-    for run in single.runs.iter().chain(multi.runs.iter()) {
-        categories.insert(run.category.as_str().to_string());
-        case_ids.insert(run.key.case_id.clone());
-    }
-
-    let mut push_group = |label: &str, filter: &dyn Fn(&ProductEvalRun) -> bool| {
-        let single_runs: Vec<&ProductEvalRun> = single
-            .runs
-            .iter()
-            .filter(|r| r.key.agent_mode == AgentMode::Single && filter(r))
-            .collect();
-        let multi_runs: Vec<&ProductEvalRun> = multi
-            .runs
-            .iter()
-            .filter(|r| r.key.agent_mode == AgentMode::Multi && filter(r))
-            .collect();
-        if single_runs.is_empty() && multi_runs.is_empty() {
-            return;
-        }
-        pairs.push(serde_json::json!({
-            "task_group": label,
-            "single": paired_snapshot_json(AgentMode::Single, &single_runs),
-            "multi": paired_snapshot_json(AgentMode::Multi, &multi_runs),
-            "matched_comparison": paired_cell_deltas_json(
-                &single_runs,
-                &multi_runs,
-                label == "overall",
-                configuration_aligned,
-            ),
-            "bindings": bindings.clone(),
-            "generated_at": generated_at,
-        }));
-    };
-
-    push_group("overall", &|_| true);
-    for category in &categories {
-        let wanted = category.clone();
-        push_group(category, &move |r| r.category.as_str() == wanted);
-    }
-    for case_id in &case_ids {
-        let wanted = case_id.clone();
-        push_group(case_id, &move |r| r.key.case_id == wanted);
-    }
-
-    serde_json::json!({
-        "schema_version": PAIRED_REPORT_SCHEMA_VERSION,
-        "generated_at": generated_at,
-        "bindings": bindings,
-        "run_alignment": run_alignment,
-        "single_report": {
-            "suite_name": single.suite_name,
-            "suite_hash": single.suite_hash,
-            "execution": single.execution,
-            "run_contract_sha256": single.run_contract_sha256,
-            "evaluator_binary_sha256": single.evaluator_binary_sha256,
-            "provider_endpoint_sha256": single.provider_endpoint_sha256,
-            "batch_label": single.batch_label,
-            "generated_at": single.generated_at,
-            "metrics": single.metrics,
-        },
-        "multi_report": {
-            "suite_name": multi.suite_name,
-            "suite_hash": multi.suite_hash,
-            "execution": multi.execution,
-            "run_contract_sha256": multi.run_contract_sha256,
-            "evaluator_binary_sha256": multi.evaluator_binary_sha256,
-            "provider_endpoint_sha256": multi.provider_endpoint_sha256,
-            "batch_label": multi.batch_label,
-            "generated_at": multi.generated_at,
-            "metrics": multi.metrics,
-        },
-        "pairs": pairs,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// freeze.json：任务输入 / 检查器 / 权限 / 预算 / 模型配置 / 版本哈希冻结
-// ---------------------------------------------------------------------------
-
-/// freeze.json schema 版本。
-pub const FREEZE_SCHEMA_VERSION: u32 = 1;
-
-/// 计算单任务权限哈希：allow_read/allow_write/allow_commands 的规范序列化摘要。
-pub fn permissions_hash(case: &ProductEvalCase) -> String {
-    let mut hasher = Sha256::new();
-    let payload = serde_json::json!({
-        "allow_read": case.allow_read,
-        "allow_write": case.allow_write,
-        "allow_commands": case.allow_commands,
-    });
-    if let Ok(text) = serde_json::to_vec(&payload) {
-        hasher.update(&text);
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-/// 生成 freeze.json 内容（任务文件级 sha256 + 生效预算 + 权限哈希 + 模型/版本）。
-/// `task_rel_paths` 为 suite.tasks 的相对路径（与 tasks 文件一一对应）。
-pub fn build_freeze_json(
-    bundle: &SuiteBundle,
-    model: Option<&str>,
-    base_url: Option<&str>,
-    git_commit: Option<&str>,
-    git_dirty: Option<bool>,
-    frozen_at: Option<&str>,
-) -> Result<serde_json::Value, ProductEvalError> {
-    let defaults = &bundle.suite.defaults;
-    let mut tasks = Vec::new();
-    for (case, rel) in bundle.cases.iter().zip(bundle.suite.tasks.iter()) {
-        let file_path = bundle.dir.join(rel);
-        let text = std::fs::read_to_string(&file_path)
-            .map_err(|e| ProductEvalError(format!("读取任务 {rel} 失败：{e}")))?;
-        let mut hasher = Sha256::new();
-        hasher.update(text.as_bytes());
-        let file_sha = format!("{:x}", hasher.finalize());
-        tasks.push(serde_json::json!({
-            "id": case.id,
-            "file": rel,
-            "sha256": file_sha,
-            "category": case.category.as_str(),
-            "repetitions": case.effective_repetitions(defaults, None),
-            "timeout_secs": case.effective_timeout_secs(defaults),
-            "max_model_calls": case.effective_max_model_calls(defaults),
-            "permissions_sha256": permissions_hash(case),
-        }));
-    }
-    let total_cells = tasks
-        .iter()
-        .filter_map(|t| t.get("repetitions").and_then(serde_json::Value::as_u64))
-        .sum::<u64>() as usize;
-    Ok(serde_json::json!({
-        "schema_version": FREEZE_SCHEMA_VERSION,
-        "suite": {
-            "name": bundle.suite.name,
-            "revision_sha256": suite_hash(bundle),
-        },
-        "defaults": {
-            "repetitions": defaults.repetitions,
-            "timeout_secs": defaults.timeout_secs,
-            "max_model_calls": defaults.max_model_calls,
-        },
-        "tasks": tasks,
-        "permissions": { "policy": "default deny; allow_read/allow_write/allow_commands 逐调用强制，见 tasks[*].permissions_sha256" },
-        "budget": {
-            "single_cells": total_cells,
-            "multi_cells": total_cells,
-            "shared": "单/多 Agent 同任务同输入同权限同预算同检查器",
-        },
-        "model": {
-            "id": model,
-            "base_url": base_url,
-        },
-        "version": {
-            "git_commit": git_commit,
-            "git_dirty": git_dirty,
-        },
-        "frozen_at": frozen_at.unwrap_or(&now_rfc3339()),
-        "frozen_by": "lane2-product-eval",
-    }))
-}
-
-/// 校验当前套件是否与 freeze.json 一致（输入/检查器/权限/预算/版本哈希）。
-/// 返回问题清单；空 = 冻结未被破坏。
-pub fn verify_freeze(
-    bundle: &SuiteBundle,
-    freeze: &serde_json::Value,
-    current_model: Option<&str>,
-) -> Vec<String> {
-    let mut issues = Vec::new();
-    let Some(schema) = freeze
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-    else {
-        issues.push("freeze.json 缺少 schema_version".to_string());
-        return issues;
-    };
-    if schema != FREEZE_SCHEMA_VERSION as u64 {
-        issues.push(format!(
-            "freeze.json schema_version={schema} 不兼容（期望 {FREEZE_SCHEMA_VERSION}）"
-        ));
-        return issues;
-    }
-    let freeze_suite = freeze.get("suite");
-    let freeze_name = freeze_suite
-        .and_then(|s| s.get("name"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if freeze_name != bundle.suite.name {
-        issues.push(format!(
-            "freeze 套件名「{freeze_name}」与当前「{}」不一致",
-            bundle.suite.name
-        ));
-    }
-    let freeze_revision = freeze_suite
-        .and_then(|s| s.get("revision_sha256"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let current_revision = suite_hash(bundle);
-    if freeze_revision != current_revision {
-        issues.push(format!(
-            "套件修订哈希不一致：freeze={freeze_revision} 当前={current_revision}（任务输入/检查器/权限/预算已漂移；须重新生成 freeze.json 后建立新批次）"
-        ));
-    }
-    // 任务级文件哈希核对（防同修订下的文件级漂移；正常应被 revision 覆盖）。
-    let freeze_tasks = freeze
-        .get("tasks")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let task_by_rel: std::collections::BTreeMap<String, &ProductEvalCase> = bundle
-        .cases
-        .iter()
-        .zip(bundle.suite.tasks.iter())
-        .map(|(case, rel)| (rel.clone(), case))
-        .collect();
-    for entry in &freeze_tasks {
-        let Some(rel) = entry.get("file").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let file_path = bundle.dir.join(rel);
-        let current_sha = std::fs::read_to_string(&file_path).ok().map(|text| {
-            let mut hasher = Sha256::new();
-            hasher.update(text.as_bytes());
-            format!("{:x}", hasher.finalize())
-        });
-        let freeze_sha = entry.get("sha256").and_then(serde_json::Value::as_str);
-        if let (Some(freeze_sha), Some(current_sha)) = (freeze_sha, &current_sha) {
-            if freeze_sha != current_sha {
-                issues.push(format!(
-                    "任务文件 {rel} 哈希漂移：freeze={freeze_sha} 当前={current_sha}"
-                ));
-            }
-        } else {
-            issues.push(format!("freeze 中任务 {rel} 缺少 sha256 或文件缺失"));
-        }
-        // 权限哈希。
-        if let Some(case) = task_by_rel.get(rel) {
-            if let (Some(frozen_perm), Some(id)) = (
-                entry
-                    .get("permissions_sha256")
-                    .and_then(serde_json::Value::as_str),
-                entry.get("id").and_then(serde_json::Value::as_str),
-            ) {
-                let current_perm = permissions_hash(case);
-                if frozen_perm != current_perm {
-                    issues.push(format!(
-                        "任务 {id}（{rel}）权限哈希漂移：freeze={frozen_perm} 当前={current_perm}（allow_read/allow_write/allow_commands 已变更）"
-                    ));
-                }
-            }
-        }
-    }
-    // 数量核对。
-    if freeze_tasks.len() != bundle.cases.len() {
-        issues.push(format!(
-            "freeze 任务数 {} 与当前套件 {} 不一致",
-            freeze_tasks.len(),
-            bundle.cases.len()
-        ));
-    }
-    // 模型配置冻结核对（环境变量为当前配置来源）。
-    if let Some(model_id) = freeze
-        .get("model")
-        .and_then(|m| m.get("id"))
-        .and_then(serde_json::Value::as_str)
-    {
-        match current_model {
-            Some(current) if current != model_id => {
-                issues.push(format!(
-                    "模型配置已漂移：freeze={model_id} 当前={current}（成绩只对冻结模型有效）"
-                ));
-            }
-            Some(_) => {}
-            None => issues.push(format!(
-                "freeze 冻结模型 {model_id}，但当前未解析出模型（环境配置缺失）"
-            )),
-        }
-    }
-    issues
-}
-
-/// 从 freeze.json 文本解析（校验 schema 版本）。
-pub fn parse_freeze(text: &str) -> Result<serde_json::Value, ProductEvalError> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|e| ProductEvalError(format!("freeze.json 解析失败：{e}")))?;
-    Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn successful_artifact_snapshot_is_bounded_and_hash_manifest_is_durable() {
+        let root = std::env::temp_dir().join(format!(
+            "product-eval-artifact-snapshot-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let sandbox = root.join("sandbox");
+        let out = root.join("out");
+        std::fs::create_dir_all(sandbox.join("out")).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let content = b"deliverable body";
+        std::fs::write(sandbox.join("out/report.md"), content).unwrap();
+
+        let key = MatrixKey::new("snapshot-case", AgentMode::Single, 0);
+        let snapshot_rel =
+            preserve_artifact_snapshot(&sandbox, &out, &key, &["out/report.md".to_string()])
+                .unwrap()
+                .unwrap();
+        let snapshot = out.join(&snapshot_rel);
+        assert_eq!(
+            std::fs::read(snapshot.join("out/report.md")).unwrap(),
+            content
+        );
+        let manifest: ArtifactSnapshotManifest =
+            serde_json::from_slice(&std::fs::read(snapshot.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest.run_key, key.slug());
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].path, "out/report.md");
+        assert_eq!(manifest.files[0].size_bytes, content.len() as u64);
+        assert_eq!(
+            manifest.files[0].sha256,
+            format!("{:x}", Sha256::digest(content))
+        );
+
+        let too_many = vec!["out/report.md".to_string(); ARTIFACT_SNAPSHOT_MAX_FILES + 1];
+        assert!(preserve_artifact_snapshot(&sandbox, &out, &key, &too_many).is_err());
+        let large = std::fs::File::create(sandbox.join("out/large.bin")).unwrap();
+        large.set_len(ARTIFACT_SNAPSHOT_MAX_FILE_BYTES + 1).unwrap();
+        drop(large);
+        let large_key = MatrixKey::new("large-snapshot-case", AgentMode::Single, 0);
+        assert!(preserve_artifact_snapshot(
+            &sandbox,
+            &out,
+            &large_key,
+            &["out/large.bin".to_string()]
+        )
+        .is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn successful_artifact_snapshot_rejects_missing_and_escaping_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "product-eval-artifact-path-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let sandbox = root.join("sandbox");
+        let out = root.join("out");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let key = MatrixKey::new("snapshot-path-case", AgentMode::Single, 0);
+        assert!(preserve_artifact_snapshot(&sandbox, &out, &key, &["missing.md".into()]).is_err());
+        assert!(
+            preserve_artifact_snapshot(&sandbox, &out, &key, &["../outside.md".into()]).is_err()
+        );
+        assert!(
+            preserve_artifact_snapshot(&sandbox, &out, &key, &[".. /outside.md".into()]).is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn execution_progress_accumulates_validation_and_delivery_gate_time() {
@@ -4229,13 +3345,16 @@ mod tests {
 
 #[cfg(test)]
 mod paired_case_cluster_bootstrap_tests {
-    use super::paired_case_cluster_bootstrap_ci;
+    use super::paired_report::paired_case_cluster_bootstrap_ci;
 
     #[test]
     fn bootstrap_is_reproducible_and_requires_three_independent_cases() {
         let insufficient = paired_case_cluster_bootstrap_ci(&[0.2, 0.4], true, true);
         assert_eq!(insufficient["available"], false);
-        assert_eq!(insufficient["reason"], "requires_at_least_3_independent_cases");
+        assert_eq!(
+            insufficient["reason"],
+            "requires_at_least_3_independent_cases"
+        );
 
         let values = [-0.1, 0.2, 0.4, 0.0];
         let first = paired_case_cluster_bootstrap_ci(&values, true, true);
@@ -4258,5 +3377,100 @@ mod paired_case_cluster_bootstrap_tests {
         let result = paired_case_cluster_bootstrap_ci(&[0.1, 0.2, 0.3], false, true);
         assert_eq!(result["available"], false);
         assert_eq!(result["reason"], "incomplete_or_duplicate_pairing");
+    }
+}
+
+#[cfg(test)]
+mod telemetry_completeness_tests {
+    use super::*;
+
+    fn run(case: &str, mode: AgentMode, repetition: u32) -> ProductEvalRun {
+        ProductEvalRun {
+            key: MatrixKey::new(case, mode, repetition),
+            category: EvalCategory::Code,
+            status: RunStatus::Passed,
+            wall_ms: 100,
+            executor_wall_ms: 90,
+            validation_wall_ms: 10,
+            delivery_gate_wall_ms: 0,
+            model_calls: 1,
+            tool_calls: Some(1),
+            prompt_tokens: Some(0),
+            completion_tokens: Some(0),
+            total_tokens: Some(0),
+            cost_usd: Some(0.0),
+            failed_steps: Vec::new(),
+            retries: 0,
+            cancellations: 0,
+            artifact_refs: Vec::new(),
+            tool_log: Vec::new(),
+            checker_passed: 1,
+            checker_total: 1,
+            sandbox_rel: None,
+            artifact_snapshot_rel: None,
+            model: Some("test-model".to_string()),
+            started_at: "2026-10-05T00:00:00Z".to_string(),
+            finished_at: "2026-10-05T00:00:01Z".to_string(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn aggregate_token_and_cost_totals_require_complete_usage_coverage() {
+        let mut known = run("case", AgentMode::Single, 0);
+        known.total_tokens = Some(120);
+        known.cost_usd = Some(0.12);
+        let mut unknown = run("case", AgentMode::Single, 1);
+        unknown.total_tokens = None;
+        unknown.cost_usd = None;
+        let runs = vec![known.clone(), unknown.clone()];
+
+        let aggregate = aggregate_metrics(&runs);
+        assert_eq!(aggregate.total_tokens, None);
+        assert_eq!(aggregate.estimated_cost_usd, None);
+        assert_eq!(aggregate_per_case(&runs)[0].total_tokens, None);
+        let mode = mode_statistics(&runs, AgentMode::Single);
+        assert_eq!(mode.total_tokens, None);
+        assert_eq!(mode.total_cost_usd, None);
+
+        let complete = vec![known, run("case", AgentMode::Single, 1)];
+        assert_eq!(aggregate_metrics(&complete).total_tokens, Some(120));
+        assert_eq!(aggregate_metrics(&complete).estimated_cost_usd, Some(0.12));
+    }
+
+    #[test]
+    fn paired_snapshots_and_deltas_withhold_partial_token_and_cost_summaries() {
+        let mut single_known = run("case-a", AgentMode::Single, 0);
+        single_known.total_tokens = Some(100);
+        single_known.cost_usd = Some(0.1);
+        let mut team_known = run("case-a", AgentMode::Multi, 0);
+        team_known.total_tokens = Some(150);
+        team_known.cost_usd = Some(0.15);
+        let mut single_missing = run("case-b", AgentMode::Single, 0);
+        single_missing.total_tokens = None;
+        single_missing.cost_usd = None;
+        let mut team_missing = run("case-b", AgentMode::Multi, 0);
+        team_missing.total_tokens = None;
+        team_missing.cost_usd = None;
+
+        let single_refs = [&single_known, &single_missing];
+        let team_refs = [&team_known, &team_missing];
+        let snapshot = paired_snapshot_json(AgentMode::Single, &single_refs);
+        assert_eq!(snapshot["total_tokens"], serde_json::Value::Null);
+        assert_eq!(snapshot["total_cost_usd"], serde_json::Value::Null);
+
+        let paired = paired_cell_deltas_json(&single_refs, &team_refs, true, true);
+        assert_eq!(paired["token_usage_coverage"]["known_pairs"], 1);
+        assert_eq!(paired["token_usage_coverage"]["paired_cells"], 2);
+        assert_eq!(paired["token_usage_coverage"]["complete"], false);
+        assert_eq!(paired["cost_coverage"]["complete"], false);
+        assert_eq!(
+            paired["team_minus_single_total_tokens"]["mean"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            paired["team_minus_single_cost_usd"]["mean"],
+            serde_json::Value::Null
+        );
     }
 }

@@ -76,7 +76,8 @@ mod settings_api;
 pub mod shutdown;
 mod skills_api;
 mod slo;
-mod sse;
+#[doc(hidden)]
+pub mod sse;
 mod subagent_api;
 mod team_api;
 mod team_template_catalog_api;
@@ -174,6 +175,11 @@ pub struct AppState {
     /// 云端执行队列（/cloud/* 路由；懒初始化，传输由环境变量决定）。
     /// tokio Mutex：异步 handler 内跨 await 持锁（std MutexGuard 非 Send）。
     pub cloud_queue: Arc<tokio::sync::Mutex<Option<owo_agent_core::cloud_exec::CloudTaskQueue>>>,
+    /// 短时提交事务锁：分配顺序 task_id 并持久化记录，不与 transport 执行锁竞争。
+    pub cloud_submit_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 云端执行期间可绕过队列锁发送取消请求。
+    pub cloud_cancel_signals:
+        Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
     /// 本地 API bearer token（X03：启动生成/复用 + 用户级 ACL 文件）。
     pub auth_token: Arc<auth_token::AuthToken>,
     /// 全局/每会话/敏感端点 双令牌桶限流（X03）。
@@ -316,6 +322,8 @@ impl AppState {
             scene: Arc::new(Mutex::new(owo_agent_core::scene::SceneGraph::new())),
             computer_tasks: Arc::new(owo_agent_core::ComputerTaskRegistry::new()),
             cloud_queue: Arc::new(tokio::sync::Mutex::new(None)),
+            cloud_submit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            cloud_cancel_signals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             // R13 WorkSwarm：数据目录 data_root/workswarm（协调器首次使用懒初始化）。
             workswarm: Arc::new(workswarm_api::WorkSwarmState::new(
                 data_root.join("workswarm"),
@@ -1138,13 +1146,30 @@ pub async fn start_usage_persistence_loop(state: Arc<AppState>) {
 }
 
 /// 自动化常驻循环：每秒检查到期任务——提醒走提醒列表，「跑任务」交给 Agent 执行。
+const MAX_CONCURRENT_AUTOMATION_PROMPTS: usize = 2;
+
+fn reserve_automation_prompt_slot(
+    slots: &Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::TryAcquireError> {
+    Arc::clone(slots).try_acquire_owned()
+}
+
+/// 自动化常驻循环：到期提醒即时入列；无人值守 Agent 任务最多并发 2 个。
 pub async fn start_automation_loop(state: Arc<AppState>) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let prompt_slots = Arc::new(tokio::sync::Semaphore::new(
+        MAX_CONCURRENT_AUTOMATION_PROMPTS,
+    ));
     loop {
         interval.tick().await;
-        // 到期的「跑任务」不能在这里 await：本循环每秒都要跑，而一次子代理执行可能
-        // 几十秒。先收集，释放锁之后再丢给后台（同时避免后台任务在这里等锁）。
-        let mut pending_prompts: Vec<(String, String, String, String)> = Vec::new();
+        // Agent 执行始终在锁外；每个运行任务持有一个 permit，完成后自动释放。
+        let mut pending_prompts: Vec<(
+            String,
+            String,
+            String,
+            String,
+            tokio::sync::OwnedSemaphorePermit,
+        )> = Vec::new();
         let fired = {
             let mut automations = state
                 .automations
@@ -1158,15 +1183,41 @@ pub async fn start_automation_loop(state: Arc<AppState>) {
                     None => continue,
                 };
                 let at = now.to_rfc3339();
-                match automations.fire(&id, now) {
-                    Ok(payload) => match action {
-                        AutomationAction::RunPrompt { prompt } => {
-                            pending_prompts.push((id.clone(), task_name, at, prompt));
+                match action {
+                    AutomationAction::RunPrompt { prompt } => {
+                        let slot = reserve_automation_prompt_slot(&prompt_slots);
+                        match automations.fire(&id, now) {
+                            Ok(_) => match slot {
+                                Ok(permit) => {
+                                    pending_prompts.push((id, task_name, at, prompt, permit))
+                                }
+                                Err(_) => {
+                                    let _ = automations.record_run(AutomationRun {
+                                        task_id: id,
+                                        task_name,
+                                        at,
+                                        status: "skipped".to_string(),
+                                        output: Some(format!(
+                                            "已跳过本次触发：自动化 Agent 并发上限为 {MAX_CONCURRENT_AUTOMATION_PROMPTS}，当前已满"
+                                        )),
+                                    });
+                                }
+                            },
+                            Err(error) => {
+                                let _ = automations.record_run(AutomationRun {
+                                    task_id: id,
+                                    task_name,
+                                    at,
+                                    status: "failed".to_string(),
+                                    output: Some(error),
+                                });
+                            }
                         }
-                        AutomationAction::Reminder { .. } => {
-                            // A8-1：执行记录落盘（/automations/runs 可查）。
+                    }
+                    AutomationAction::Reminder { .. } => match automations.fire(&id, now) {
+                        Ok(payload) => {
                             let _ = automations.record_run(AutomationRun {
-                                task_id: id.clone(),
+                                task_id: id,
                                 task_name,
                                 at,
                                 status: "ok".to_string(),
@@ -1174,36 +1225,55 @@ pub async fn start_automation_loop(state: Arc<AppState>) {
                             });
                             fired.push(payload);
                         }
+                        Err(error) => {
+                            let _ = automations.record_run(AutomationRun {
+                                task_id: id,
+                                task_name,
+                                at,
+                                status: "failed".to_string(),
+                                output: Some(error),
+                            });
+                        }
                     },
-                    Err(error) => {
-                        let _ = automations.record_run(AutomationRun {
-                            task_id: id.clone(),
-                            task_name,
-                            at,
-                            status: "failed".to_string(),
-                            output: Some(error),
-                        });
-                    }
                 }
             }
             fired
         };
-        for (task_id, task_name, at, prompt) in pending_prompts {
+        for (task_id, task_name, at, prompt, permit) in pending_prompts {
             tokio::spawn(run_automation_prompt(
                 state.clone(),
                 task_id,
                 task_name,
                 at,
                 prompt,
+                permit,
             ));
         }
         if !fired.is_empty() {
             if let Ok(mut audit) = state.agent.audit_log().lock() {
                 audit.record("automation", "fire", None, Some(true), fired.join(" | "));
             }
-            // §13 批次八：审计可观测面日志（detail 经 safe_field 强制脱敏）。
             logging::audit_event("automation_fire", None, &fired.join(" | "));
         }
+    }
+}
+
+#[cfg(test)]
+mod automation_scheduler_tests {
+    use super::{reserve_automation_prompt_slot, MAX_CONCURRENT_AUTOMATION_PROMPTS};
+    use std::sync::Arc;
+
+    #[test]
+    fn automation_prompt_slots_are_bounded_and_released() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(
+            MAX_CONCURRENT_AUTOMATION_PROMPTS,
+        ));
+        let held = (0..MAX_CONCURRENT_AUTOMATION_PROMPTS)
+            .map(|_| reserve_automation_prompt_slot(&slots).expect("slot available"))
+            .collect::<Vec<_>>();
+        assert!(reserve_automation_prompt_slot(&slots).is_err());
+        drop(held);
+        assert!(reserve_automation_prompt_slot(&slots).is_ok());
     }
 }
 
@@ -1221,7 +1291,9 @@ async fn run_automation_prompt(
     task_name: String,
     at: String,
     prompt: String,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
+    // `_permit` 的生命周期覆盖整个 Agent 执行，完成/异常退出后自动归还并发槽。
     // `agent_worker` 声明在 `goal_api` 之下（goal_api/mod.rs: `pub mod agent_worker;`），
     // 根作用域里没有这个名字，必须写全路径。
     let worker =

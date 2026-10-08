@@ -323,6 +323,9 @@ fn grant_rows(store: &owo_agent_core::grant_store::GrantStore) -> Vec<Value> {
                 "expires_at": grant.expires_at.map(|at| at.to_rfc3339()),
                 "remaining_uses": grant.remaining_uses,
                 "long_lived": grant.expires_at.is_none() && grant.remaining_uses.is_none(),
+                // 旧版本曾给非只读工具生成 Grant；列表标出失效项，用户仍可撤销。
+                "effective": owo_agent_core::tool_effects::effect_class_for(&grant.tool_id)
+                    == owo_agent_core::tool_effects::EffectClass::Read,
             })
         })
         .collect()

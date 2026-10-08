@@ -46,6 +46,16 @@
     // ---------- helpers（优先 app.js 注入，缺失时自建回退，与 workswarm/launcher 同款） ----------
     var H = {};
     var rootEl = null;
+    var lifecycleGeneration = 0;
+    var loadGeneration = 0;
+    var inboxGeneration = 0;
+
+    function isCurrentRequest(lifecycle, loadId, inboxId) {
+      if (lifecycle !== lifecycleGeneration) return false;
+      if (loadId != null && loadId !== loadGeneration) return false;
+      if (inboxId != null && inboxId !== inboxGeneration) return false;
+      return true;
+    }
     function defaultGet(path) {
       return window.OwoApi.get(path);
     }
@@ -519,6 +529,7 @@
       var isResolve = act !== "claim" && act !== "release";
       var key = id + ":" + act;
       if (state.inboxBusy[key]) return Promise.resolve();
+      var lifecycle = lifecycleGeneration;
       var body = {};
       if (isResolve) {
         body = buildResolveBody(it.kind, it.kind === "step_retry" ? "resolve" : act, extra);
@@ -536,8 +547,10 @@
       } else {
         body = { user: currentUser() }; // claim/release：ActorRequest {user}
       }
-      return H.post(path, body)
+      return Promise.resolve()
+        .then(function () { return H.post(path, body); })
         .then(function (resp) {
+          if (!isCurrentRequest(lifecycle)) return;
           var replayed = !!(resp && resp.replayed);
           state.inboxResults[id] = {
             ok: true,
@@ -551,9 +564,11 @@
           };
         })
         .catch(function (e) {
+          if (!isCurrentRequest(lifecycle)) return;
           state.inboxResults[id] = { ok: false, text: "操作失败：" + friendly(e) };
         })
         .then(function () {
+          if (!isCurrentRequest(lifecycle)) return;
           state.inboxBusy[key] = false;
           if (state.inboxSource === "inbox") return refreshInbox();
           render();
@@ -563,18 +578,25 @@
     // Inbox 重取（动作后刷新列表口径；九期：仅 404 回退 legacy，失败只记错误、
     // 保持当前 Inbox 口径，空列表也不再切换数据源）。
     function refreshInbox() {
-      return H.get("/human/inbox")
+      var lifecycle = lifecycleGeneration;
+      var request = ++inboxGeneration;
+      loadGeneration++;
+      state.loading = false;
+      return Promise.resolve()
+        .then(function () { return H.get("/human/inbox"); })
         .then(function (d) {
+          if (!isCurrentRequest(lifecycle, null, request)) return;
           state.inbox = inboxItemsOf(d);
           state.inboxSource = "inbox"; // 在线即以 Inbox 为准（空列表也是真实状态）
           state.lastLoadedAt = new Date().toLocaleTimeString();
           render();
         })
         .catch(function (e) {
+          if (!isCurrentRequest(lifecycle, null, request)) return;
           if (isNotFound(e)) {
             // Inbox 未部署（404）→ 回退七期客户端聚合（面板永远可用）。
             state.inboxSource = "legacy";
-            return legacyLoad();
+            return legacyLoad(lifecycle, null, request);
           }
           state.errors.push("Inbox 刷新失败（保持正式 Inbox 口径）：" + friendly(e));
           render();
@@ -780,6 +802,7 @@
     function submitRetry(teamId, stepId) {
       var key = String(teamId) + "/" + String(stepId);
       if (state.retryBusy[key]) return Promise.resolve();
+      var lifecycle = lifecycleGeneration;
       state.retryBusy[key] = true;
       delete state.retryResults[key];
       paintRetry(key);
@@ -788,14 +811,18 @@
         btn.disabled = true;
         btn.textContent = "重试中…";
       }
-      return H.post("/teams/" + encodeURIComponent(teamId) + "/steer", buildRetryBody(stepId))
+      return Promise.resolve()
+        .then(function () { return H.post("/teams/" + encodeURIComponent(teamId) + "/steer", buildRetryBody(stepId)); })
         .then(function () {
+          if (!isCurrentRequest(lifecycle)) return;
           state.retryResults[key] = { ok: true, text: "重试指令已发送（command=retry），等待步骤重新调度。" };
         })
         .catch(function (e) {
+          if (!isCurrentRequest(lifecycle)) return;
           state.retryResults[key] = { ok: false, text: "重试失败：" + friendly(e) };
         })
         .then(function () {
+          if (!isCurrentRequest(lifecycle)) return;
           delete state.retryBusy[key];
           paintRetry(key);
           // 成功后重载聚合：失败步骤应随团队状态推进而消失。
@@ -831,11 +858,15 @@
     // 在线为空保持 Inbox 口径，其余失败展示错误行不切数据源。
     function load() {
       if (state.loading) return Promise.resolve();
+      var lifecycle = lifecycleGeneration;
+      var request = ++loadGeneration;
+      inboxGeneration++;
       state.loading = true;
       state.errors = [];
       paintMeta("加载中…");
       return H.get("/human/inbox")
         .then(function (d) {
+          if (!isCurrentRequest(lifecycle, request)) return;
           state.inbox = inboxItemsOf(d);
           state.inboxSource = "inbox"; // 空列表也是 Inbox 的真实状态
           state.loading = false;
@@ -844,6 +875,7 @@
           render();
         })
         .catch(function (e) {
+          if (!isCurrentRequest(lifecycle, request)) return;
           if (!isNotFound(e)) {
             // 非 404 失败：保持 Inbox 口径 + 错误行，不偷偷切换数据源。
             state.inboxSource = "inbox";
@@ -855,15 +887,17 @@
           }
           // 404 = Inbox 尚未上线 → 回退七期客户端聚合。
           state.inboxSource = "legacy";
-          return legacyLoad();
+          return legacyLoad(lifecycle, request, null);
         });
     }
 
     // 七期客户端聚合路径（Inbox 不可用/为空时的回退；原 load() 本体）。
-    function legacyLoad() {
+    function legacyLoad(lifecycle, loadId, inboxId) {
+      if (!isCurrentRequest(lifecycle, loadId, inboxId)) return Promise.resolve();
       state.inboxSource = "legacy";
       return H.get("/teams")
         .then(function (d) {
+          if (!isCurrentRequest(lifecycle, loadId, inboxId)) return;
           state.teams = (d && d.teams) || [];
           var details = {};
           var detailErrors = {};
@@ -879,6 +913,7 @@
               );
             })
           ).then(function () {
+            if (!isCurrentRequest(lifecycle, loadId, inboxId)) return;
             state.details = details;
             state.detailErrors = detailErrors;
             var artifacts = {};
@@ -897,18 +932,21 @@
                 );
               })
             ).then(function () {
+              if (!isCurrentRequest(lifecycle, loadId, inboxId)) return;
               state.artifacts = artifacts;
-              finishLoad();
+              finishLoad(lifecycle, loadId, inboxId);
             });
           });
         })
         .catch(function (e) {
+          if (!isCurrentRequest(lifecycle, loadId, inboxId)) return;
           state.errors.push("团队列表加载失败：" + friendly(e));
-          finishLoad();
+          finishLoad(lifecycle, loadId, inboxId);
         });
     }
 
-    function finishLoad() {
+    function finishLoad(lifecycle, loadId, inboxId) {
+      if (!isCurrentRequest(lifecycle, loadId, inboxId)) return;
       state.loading = false;
       state.loadedOnce = true;
       state.items = aggregate(state);
@@ -947,6 +985,12 @@
     }
 
     function mount(root, helpers) {
+      lifecycleGeneration++;
+      loadGeneration++;
+      inboxGeneration++;
+      state.loading = false;
+      state.retryBusy = {};
+      state.inboxBusy = {};
       rootEl = root;
       H = helpers || {};
       H.baseUrl = H.baseUrl || (win.OwoPanels && win.OwoPanels.baseUrl) || "";
@@ -961,6 +1005,16 @@
       var refresh = el("#ac-refresh");
       if (refresh) refresh.onclick = function () { load(); };
       load();
+    }
+
+    function dispose() {
+      lifecycleGeneration++;
+      loadGeneration++;
+      inboxGeneration++;
+      rootEl = null;
+      state.loading = false;
+      state.retryBusy = {};
+      state.inboxBusy = {};
     }
 
     // ---------- 测试挂钩 ----------
@@ -996,6 +1050,7 @@
       inboxItemHtml: inboxItemHtml,
       startInboxAction: startInboxAction,
       refreshInbox: refreshInbox,
+      dispose: dispose,
       getTransport: function () {
         return { get: H.get, post: H.post };
       },
@@ -1012,6 +1067,7 @@
       id: ID,
       title: "待我处理",
       mount: mount,
+      dispose: dispose,
       // 九期：公开刷新入口——WorkSwarm 面板 ChangeSet accept/reject 后跨面板刷新
       // 待办（未挂载时安全跳过）。
       refreshInbox: function () { return refreshInbox(); },

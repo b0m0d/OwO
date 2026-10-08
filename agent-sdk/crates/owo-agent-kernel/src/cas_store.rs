@@ -16,6 +16,10 @@ use std::sync::{Arc, Mutex};
 /// 引用表文件名（崩溃恢复时读取）。
 const REFS_FILE: &str = "refs.json";
 
+#[path = "cas_text.rs"]
+mod text;
+pub use text::{CasTextPage, MAX_FULL_TEXT_BYTES};
+
 /// 内容寻址存储（Clone 共享同一目录与引用表）。
 #[derive(Clone, Debug)]
 pub struct CasStore {

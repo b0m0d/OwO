@@ -1,0 +1,23 @@
+{
+  "evidence_id": "team-cancel-shared-abort-signal-20261006",
+  "scope": "static-source-review-and-rust-format-check",
+  "claim": "Team cancellation sets the same abort flag observed by GoalRunner before waking the phase select loop; a Worker awaiting durable admission checks that flag immediately before invoking its Worker.",
+  "verification": [
+    "CancelToken regression source asserts cancel() sets the shared atomic abort flag.",
+    "GoalRunner regression source asserts its exposed abort signal is the host-provided shared flag.",
+    "run_phase binds the token-owned signal before GoalRunner execution; StepRuntime checks abort after admission and before Worker invocation.",
+    "rustfmt --edition 2021 --check and scoped git diff --check passed; Cargo compilation and Rust tests were not run.",
+    "Combined async regression holds durable admission acknowledgement, sets the shared abort signal, then releases admission and asserts the Worker is never invoked."
+  ],
+  "limits": [
+    "This prevents new Worker invocations after cancellation becomes visible; already-running Workers still use cooperative cancellation and bounded cleanup.",
+    "No Cargo type check, Rust test execution, or timing benchmark ran because the current free memory is below the repository build gate."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/roles.rs": "4bfd77c38a7d7f35a6f56daed18d86573c445652dbc1db7d8aa8e6f335cfac00",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs": "77f75a41726dbc83bba2e5124531023aab612fab698ad98274bf4ba3f76c3951",
+    "crates/owo-agent-core/src/goal/mod.rs": "b03be7e71a60dc7fbd738fc26a5341bb342471440152e5d6517385c3f323d31d",
+    "crates/owo-agent-core/src/goal/tests.rs": "337dfe0a0803142784f702982948c7d7bdcbb8be35c88437a7d4aea885439053",
+    "crates/owo-agent-core/src/goal/execution.rs": "17ca890746d6aef525dd3bca80033126259c0612f7fcdb7c2a50cc0464069b3c"
+  }
+}

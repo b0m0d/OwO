@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Agent/Core 默认路径不需要本地语音识别；Server 显式启用 STT，评测与 Core-only 构建跳过 Sherpa。
+default = []
+stt = ["owo-agent-perception/stt"]
+
 [dependencies]
 owo-agent-protocol.workspace = true
 # 微内核（M0）：error/platform/capability/audit/credentials/cas_store/
@@ -45,12 +50,13 @@ owo-agent-memory.workspace = true
 # subagent / autoreview / settings 与 server 的权限中心继续经 lib.rs 的同名别名模块使用
 # 既有路径；工具命名契约 sanitize_tool_name 随之迁走，tools.rs 用 pub(crate) use 反向引用。
 owo-agent-policy.workspace = true
-# 感知内核（M14，ADR-002）：accessibility / ocr / onnx_ocr / paddle_ocr / stt / vision /
-# scene / locate / element_registry / window_template 已下沉到 owo-agent-perception。
+# 感知内核（M14，ADR-002）：accessibility / ocr / onnx_ocr / paddle_ocr / vision /
+# scene / locate / element_registry / window_template 已下沉到 owo-agent-perception；
+# Core 默认关闭 Sherpa STT，仅 server 显式启用 `stt` feature。
 # core 的 executor / action_program / assert / computer_use 与 server 的 perception_api /
 # locate_api / desktop_api 继续经 lib.rs 的同名别名模块使用既有路径。
 # SttSettings 亦随域搬入，settings.rs 用 pub use 转出。
-# 本 crate 因此不再依赖 ort / sherpa-onnx / ndarray / windows-sys / png。
+# 默认构建不启用 Sherpa STT；选择 core 的 `stt` feature 才联入 sherpa-onnx。
 owo-agent-perception.workspace = true
 # UI 执行内核（M15）：executor 已下沉；core 的 action_program / computer_use 经别名使用。
 owo-agent-executor.workspace = true
@@ -91,6 +97,7 @@ regex = "1"
 # （core 的集成测试要构造 transition/world_model 数据集）不会成环，也不会进入应用构建。
 [dev-dependencies]
 owo-agent-eval-facade.workspace = true
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 # M14（ADR-002）把感知群组（UIA / OCR / STT / 视觉 / 场景 / 定位）整体迁到

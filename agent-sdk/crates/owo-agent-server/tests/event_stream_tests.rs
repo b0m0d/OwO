@@ -4,6 +4,7 @@
 //! 覆盖：单调 seq、历史有界、断线续传零丢失、心跳可合并、溢出丢可合并保关键、
 //! 慢消费者断开不拖垮发布方、连接计数、全局统计、SSE 端点形态。
 
+use http_body_util::BodyExt;
 use owo_agent_server::AppState;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,14 +51,14 @@ async fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
 }
 
 /// 订阅后把历史重放 + 队列内实时事件一起取出（顺序 = replay 后接 recv）。
-fn drain(
+async fn drain(
     subscription: &Arc<event_stream::Subscription>,
-    replay: &[StreamEvent],
+    replay: &[Arc<StreamEvent>],
     mut extra: usize,
 ) -> Vec<u64> {
     let mut seqs: Vec<u64> = replay.iter().map(|e| e.seq).collect();
     while extra > 0 {
-        if let Some(event) = subscription.recv_blocking(Duration::from_millis(500)) {
+        if let Some(event) = subscription.recv_async().await {
             seqs.push(event.seq);
         }
         extra -= 1;
@@ -100,7 +101,7 @@ async fn subscribe_after_last_event_id_resumes_without_loss() {
     // 断线前收到 seq=2；重连按 Last-Event-ID=2 续传。
     let (subscription, replay) = hub.subscribe_after(2);
     hub.publish_progress("e6");
-    let seqs = drain(&subscription, &replay, 1);
+    let seqs = drain(&subscription, &replay, 1).await;
     assert_eq!(seqs, vec![3, 4, 5, 6]);
 }
 
@@ -113,11 +114,36 @@ async fn subscribe_after_last_seq_receives_only_live_events() {
     let (subscription, replay) = hub.subscribe_after(2);
     assert!(replay.is_empty(), "无新历史");
     hub.publish_progress("live");
-    let event = subscription
-        .recv_blocking(Duration::from_millis(500))
-        .unwrap();
+    let event = subscription.recv_async().await.unwrap();
     assert_eq!(event.seq, 3);
     assert_eq!(event.data, "live");
+}
+
+#[tokio::test]
+async fn async_subscription_wakes_on_publish_and_close() {
+    let _guard = METRICS_TEST_LOCK.lock().await;
+    let hub = Arc::new(EventStreamHub::new());
+    let (subscription, replay) = hub.subscribe_live_only();
+    assert!(replay.is_empty());
+    let publisher = Arc::clone(&hub);
+    let publish_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        publisher.publish_progress("async-live");
+    });
+
+    let event = tokio::time::timeout(Duration::from_millis(500), subscription.recv_async())
+        .await
+        .expect("async receiver must wake when a live event is published")
+        .expect("published event must be delivered");
+    assert_eq!(event.data, "async-live");
+    let (_, history) = hub.subscribe_after(0);
+    assert!(
+        Arc::ptr_eq(&event, &history[0]),
+        "history replay and live delivery must share one immutable event allocation"
+    );
+    hub.close(&subscription);
+    assert!(subscription.recv_async().await.is_none());
+    publish_task.await.unwrap();
 }
 
 #[tokio::test]
@@ -148,9 +174,7 @@ async fn overflow_drops_mergeable_but_keeps_critical() {
     let (mergeable_dropped, critical_dropped) = subscription.dropped();
     assert_eq!((mergeable_dropped, critical_dropped), (3, 0));
     // 队内保留的是关键事件，按序消费验证。
-    let first = subscription
-        .recv_blocking(Duration::from_millis(500))
-        .unwrap();
+    let first = subscription.recv_async().await.unwrap();
     assert_eq!(first.kind, event_stream::KIND_APPROVAL);
     assert!(first.critical);
 }
@@ -202,10 +226,10 @@ async fn queue_depth_sums_across_subscribers() {
     // a=3, b=2（b 已满，第三条对 b 丢弃）。
     hub.publish_progress("e3");
     assert_eq!(hub.total_queue_depth(), 5);
-    let event_a = sub_a.recv_blocking(Duration::from_millis(500)).unwrap();
+    let event_a = sub_a.recv_async().await.unwrap();
     assert_eq!(event_a.seq, 1);
     assert_eq!(hub.total_queue_depth(), 4);
-    let _ = sub_b.try_recv();
+    let _ = sub_b.recv_async().await;
     assert_eq!(hub.total_queue_depth(), 3);
 }
 
@@ -247,6 +271,19 @@ async fn events_endpoint_returns_event_stream_content_type() {
         event_stream::sse_response_ok(&response),
         "Content-Type 应为 text/event-stream"
     );
+    let frame = tokio::time::timeout(Duration::from_secs(1), response.into_body().frame())
+        .await
+        .expect("async SSE frame pump must forward replay without a blocking thread")
+        .expect("SSE response must contain the replayed frame")
+        .expect("SSE frame must be valid")
+        .into_data()
+        .expect("SSE body frame must be data");
+    let frame_text = String::from_utf8_lossy(&frame);
+    assert!(
+        frame_text.contains("event: progress"),
+        "frame: {frame_text}"
+    );
+    assert!(frame_text.contains("step"), "frame: {frame_text}");
 }
 
 #[tokio::test]
@@ -343,13 +380,13 @@ async fn invalidate_versions_increment_per_domain() {
 }
 
 /// §3.2：枚举契约字符串全矩阵——每个领域的 as_str() 与前端 `INVALIDATE_HANDLERS`
-/// 的键一一对应；`ALL` 完整覆盖 10 个领域，防止新增领域漏登记。
+/// 的键一一对应；`ALL` 完整覆盖 14 个领域，防止新增领域漏登记。
 #[test]
 fn invalidate_domain_enum_covers_all_domains_with_contract_strings() {
     use event_stream::InvalidateDomain;
     assert_eq!(
         InvalidateDomain::ALL.len(),
-        10,
+        14,
         "领域数量变化时必须同步前端 INVALIDATE_HANDLERS 与矩阵测试"
     );
     let expected: &[(&InvalidateDomain, &str)] = &[
@@ -363,6 +400,10 @@ fn invalidate_domain_enum_covers_all_domains_with_contract_strings() {
         (&InvalidateDomain::Computer, "computer"),
         (&InvalidateDomain::Traces, "traces"),
         (&InvalidateDomain::Projects, "projects"),
+        (&InvalidateDomain::Memory, "memory"),
+        (&InvalidateDomain::Skills, "skills"),
+        (&InvalidateDomain::Sessions, "sessions"),
+        (&InvalidateDomain::Usage, "usage"),
     ];
     for (domain, text) in expected {
         assert_eq!(domain.as_str(), *text, "契约字符串漂移：{text}");
@@ -371,7 +412,7 @@ fn invalidate_domain_enum_covers_all_domains_with_contract_strings() {
     let mut seen: Vec<&str> = InvalidateDomain::ALL.iter().map(|d| d.as_str()).collect();
     seen.sort();
     seen.dedup();
-    assert_eq!(seen.len(), 10, "ALL 存在重复领域");
+    assert_eq!(seen.len(), 14, "ALL 存在重复领域");
 }
 
 #[tokio::test]

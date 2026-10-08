@@ -125,17 +125,17 @@ async fn poll_team_status(
     }
 }
 
-/// echo 接力 4 角色（planner→builder→critic→leader，全进程内回显，不碰模型）。
+/// echo 接力 4 角色（planner→builder→summarizer→leader，全进程内回显，不碰模型）。
 fn echo_relay_roles() -> Value {
     json!([
         { "role": "planner", "assignee": "agent", "worker": "echo",
           "handoff_contract": "产出方案大纲", "verify": "non_empty" },
         { "role": "builder", "assignee": "agent", "worker": "echo",
           "depends_on": ["planner"], "handoff_contract": "产出草稿", "verify": "non_empty" },
-        { "role": "critic", "assignee": "agent", "worker": "echo",
-          "depends_on": ["builder"], "handoff_contract": "只读评审", "verify": "non_empty" },
+        { "role": "summarizer", "assignee": "agent", "worker": "echo",
+          "depends_on": ["builder"], "handoff_contract": "整理中间结果", "verify": "non_empty" },
         { "role": "leader", "assignee": "agent", "worker": "echo",
-          "depends_on": ["critic"], "handoff_contract": "最终裁决", "verify": "non_empty" }
+          "depends_on": ["summarizer"], "handoff_contract": "最终裁决", "verify": "non_empty" }
     ])
 }
 
@@ -146,6 +146,7 @@ async fn create_team_relay_via_http_completes_with_artifacts() {
 
     // POST /teams：echo 接力 4 角色。
     let body = json!({
+        "strategy": "team",
         "objective": "写一份 API 设计说明",
         "mode": "team",
         "roles": echo_relay_roles(),
@@ -233,10 +234,12 @@ async fn human_node_waits_then_result_wakes_downstream() {
     let app = build_router(Arc::clone(&state));
 
     let body = json!({
+        "strategy": "team",
         "objective": "方案评审流程",
         "roles": [
             { "role": "planner", "assignee": "agent", "worker": "echo", "verify": "non_empty" },
-            { "role": "approver", "assignee": "human", "worker": "u-1", "depends_on": ["planner"] }
+            { "role": "approver", "assignee": "human", "worker": "u-1",
+              "depends_on": ["planner"], "verify": "non_empty" }
         ]
     });
     let (status, created) = call(&state, &app, "POST", "/teams", Some(&body.to_string())).await;
@@ -289,6 +292,7 @@ async fn steer_during_active_run_conflicts_then_cancel() {
 
     // sleep 4s 的长步骤：打开「运行中」窗口。
     let body = json!({
+        "strategy": "team",
         "objective": "长任务",
         "roles": [
             { "role": "runner", "assignee": "agent", "worker": "sleep",
@@ -346,7 +350,8 @@ async fn template_proposal_adopt_then_template_run() {
     let app = build_router(Arc::clone(&state));
 
     // 先跑一次 echo 接力 → 成功收尾产生 TeamTemplateProposal（只提案，不自动启用）。
-    let body = json!({ "objective": "模板来源运行", "roles": echo_relay_roles() });
+    let body = json!({
+        "strategy": "team", "objective": "模板来源运行", "roles": echo_relay_roles() });
     let (status, created) = call(&state, &app, "POST", "/teams", Some(&body.to_string())).await;
     assert_eq!(status, 202, "{created}");
     let team_id = created["team_id"].as_str().unwrap().to_string();
@@ -387,7 +392,7 @@ async fn template_proposal_adopt_then_template_run() {
     assert_eq!(tpls["templates"].as_array().unwrap().len(), 1);
 
     // 模板驱动的新一轮（角色来自模板；echo worker 不碰模型）。
-    let body = json!({ "objective": "模板复用的运行", "mode": "team", "template_id": template_id });
+    let body = json!({ "objective": "模板复用的运行", "mode": "team", "strategy": "team", "template_id": template_id });
     let (status, created2) = call(&state, &app, "POST", "/teams", Some(&body.to_string())).await;
     assert_eq!(status, 202, "模板建队应 202：{created2}");
     assert_eq!(created2["template_id"], template_id);
@@ -446,6 +451,7 @@ async fn list_teams_shows_active_flag_across_lifecycle() {
 
     // sleep 3s 长步骤：打开「活动」窗口。
     let create = json!({
+        "strategy": "team",
         "objective": "活动标记",
         "roles": [
             { "role": "runner", "assignee": "agent", "worker": "sleep",
@@ -509,7 +515,8 @@ async fn team_events_json_snapshot_unknown_and_terminal() {
     assert_eq!(status, 404, "未知团队事件快照应 404：{body}");
 
     // echo 接力 → 成功；快照含状态（Debug/PascalCase）与审计尾迹。
-    let create = json!({ "objective": "事件快照", "roles": echo_relay_roles() });
+    let create = json!({
+        "strategy": "team", "objective": "事件快照", "roles": echo_relay_roles() });
     let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
     assert_eq!(status, 202, "{created}");
     let team_id = created["team_id"].as_str().unwrap().to_string();
@@ -553,6 +560,7 @@ async fn team_events_sse_stream_replays_audit_and_closes_at_terminal() {
     let app = build_router(Arc::clone(&state));
 
     let create = json!({
+        "strategy": "team",
         "objective": "SSE 事件流",
         "roles": [
             { "role": "runner", "assignee": "agent", "worker": "sleep",
@@ -619,7 +627,8 @@ async fn template_proposal_reject_lifecycle() {
     assert_eq!(status, 404, "未知提案拒绝应 404：{body}");
 
     // 运行 1：产生提案 P1（proposed）→ 拒绝 → 列表保留 rejected 记录。
-    let create = json!({ "objective": "提案来源一", "roles": echo_relay_roles() });
+    let create = json!({
+        "strategy": "team", "objective": "提案来源一", "roles": echo_relay_roles() });
     let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
     assert_eq!(status, 202, "{created}");
     let team_id = created["team_id"].as_str().unwrap().to_string();
@@ -828,6 +837,7 @@ async fn create_team_rejects_malformed_budget_limits() {
     let (state, _temp) = test_state().await;
     let app = build_router(Arc::clone(&state));
     let create = json!({
+        "strategy": "team",
         "objective": "拒绝错误预算",
         "roles": echo_relay_roles(),
         "budget": {"max_cost_usd": -0.01}
@@ -843,6 +853,7 @@ async fn team_metrics_report_role_spans_after_relay() {
     let app = build_router(Arc::clone(&state));
 
     let create = json!({
+        "strategy": "team",
         "objective": "指标接力",
         "roles": echo_relay_roles(),
         "budget": { "max_model_calls": 3 }
@@ -899,10 +910,22 @@ async fn team_metrics_report_role_spans_after_relay() {
     assert_eq!(m["budget"]["remaining_model_calls"], 3);
     assert_eq!(m["budget"]["request_budget_known"], true);
     assert_eq!(m["budget"]["request_limit_reached"], false);
-    assert_eq!(m["budget"]["exceeded"], false, "未配置美元预算 → 不超限：{m}");
+    assert_eq!(
+        m["budget"]["exceeded"], false,
+        "未配置美元预算 → 不超限：{m}"
+    );
     assert_eq!(m["budget"]["spent_known"], true);
     assert_eq!(m["budget"]["reason"], Value::Null);
     assert!(m["metrics_file"].as_str().unwrap().contains(&team_id));
+    assert_eq!(
+        m["context_assembly"]["sample_count"], 4,
+        "每个 Worker 的上下文耗时都应进入摘要：{m}"
+    );
+    assert_eq!(
+        m["context_assembly"]["by_role"].as_array().unwrap().len(),
+        4
+    );
+    assert_eq!(m["context_assembly"]["by_epoch"][0]["sample_count"], 4);
 
     let roles = m["roles"].as_array().unwrap();
     assert_eq!(roles.len(), 4);
@@ -944,7 +967,8 @@ async fn team_metrics_survive_restart_via_jsonl() {
     let (state, temp) = test_state().await;
     let app = build_router(Arc::clone(&state));
 
-    let create = json!({ "objective": "重启可读", "roles": echo_relay_roles() });
+    let create = json!({
+        "strategy": "team", "objective": "重启可读", "roles": echo_relay_roles() });
     let (status, created) = call(&state, &app, "POST", "/teams", Some(&create.to_string())).await;
     assert_eq!(status, 202, "{created}");
     let team_id = created["team_id"].as_str().unwrap().to_string();
@@ -1008,6 +1032,7 @@ async fn team_metrics_record_failures_and_rework() {
 
     // fail worker：步骤失败（GoalRunner 默认每步重试 → 产生多个失败 span）。
     let create = json!({
+        "strategy": "team",
         "objective": "失败指标",
         "roles": [
             { "role": "builder", "assignee": "agent", "worker": "fail",
@@ -1067,6 +1092,7 @@ async fn metrics_budget_gate_stops_scheduling_with_reason() {
     let app = build_router(Arc::clone(&state));
 
     let create = json!({
+        "strategy": "team",
         "objective": "预算门",
         "budget": { "max_cost_usd": 100.0 },
         "roles": [
@@ -1170,6 +1196,7 @@ async fn events_json_snapshot_includes_progress() {
     let app = build_router(Arc::clone(&state));
 
     let create = json!({
+        "strategy": "team",
         "objective": "进度快照",
         "roles": [
             { "role": "runner", "assignee": "agent", "worker": "sleep",
@@ -1230,6 +1257,7 @@ async fn diagnostic_export_is_sanitized_and_complete() {
     let secret_text =
         "机要段落 password: hunter2 api_key=sk-abcdef123456 token: gl-1234567890abcdef";
     let create = json!({
+        "strategy": "team",
         "objective": "诊断脱敏",
         "roles": [
             { "role": "planner", "assignee": "agent", "worker": "echo",
@@ -1306,6 +1334,14 @@ async fn diagnostic_export_is_sanitized_and_complete() {
         "交接记录应在场：{diag}"
     );
     assert_eq!(diag["metrics"]["summary"]["span_count"], 2);
+    assert_eq!(diag["metrics"]["context_assembly"]["sample_count"], 2);
+    assert_eq!(
+        diag["metrics"]["context_assembly"]["by_role"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(
         diag["audit_tail"]
             .as_array()

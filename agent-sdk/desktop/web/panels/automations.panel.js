@@ -1,7 +1,7 @@
 /* 自动化面板：新建任务（间隔/每天/单次 × 提醒/跑任务）+ 任务列表（启停/执行记录/删除）+ 提醒。
  * 由工具视图的静态卡片迁移而来（此前 index.html 手写表单 + app.js 零散函数，
  * 与扩展面板体系割裂）；迁入后走统一网格排版与分区目录。
- * 纯脚本 IIFE，注册 window.OwoPanels.automations；helpers 缺失时自建 fetch（防御性降级）。
+ * 纯脚本 IIFE，注册 window.OwoPanels.automations；helpers 缺失时复用统一 ApiClient。
  */
 window.OwoPanels = window.OwoPanels || {};
 window.OwoPanels.automations = (function () {
@@ -12,7 +12,7 @@ window.OwoPanels.automations = (function () {
   function defaultHelpers() {
     var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || "";
     function get(path) {
-      return fetch(baseUrl + path).then(function (r) {
+      return window.OwoApi.stream(path).then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
       });
@@ -31,7 +31,7 @@ window.OwoPanels.automations = (function () {
       baseUrl: baseUrl,
       get: get,
       post: function (path, body) {
-        return fetch(baseUrl + path, {
+        return window.OwoApi.stream(path, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body || {}),
@@ -41,16 +41,22 @@ window.OwoPanels.automations = (function () {
         });
       },
       call: function (path, options) {
-        return fetch(baseUrl + path, options || {}).then(function (r) {
+        return window.OwoApi.stream(path, options || {}).then(function (r) {
           if (!r.ok) throw new Error("HTTP " + r.status);
           return r.status === 204 ? null : r.json().catch(function () { return null; });
         });
       },
       del: function (path) {
-        return fetch(baseUrl + path, { method: "DELETE" }).then(function (r) {
+        return window.OwoApi.stream(path, { method: "DELETE" }).then(function (r) {
           if (!r.ok) throw new Error("HTTP " + r.status);
           return null;
         });
+      },
+      confirm: function (options) {
+        return Promise.resolve(window.confirm(options.message || ""));
+      },
+      notify: function (message) {
+        window.alert(message);
       },
       esc: esc,
       friendlyError: friendlyError,
@@ -58,8 +64,14 @@ window.OwoPanels.automations = (function () {
   }
 
   var H = defaultHelpers();
-  // 轮询定时器：仅面板挂载期间运行（元素被卸载即自停，重新挂载时重启）。
-  var pollTimer = null;
+  var panelGeneration = 0;
+  var taskRefreshGeneration = 0;
+  var reminderRefreshGeneration = 0;
+  var creatingTask = false;
+  var taskSubmissionGeneration = 0;
+  var clearingReminders = false;
+  var taskToggleBusy = Object.create(null);
+  var panelMounted = false;
 
   function el(domId) {
     return document.getElementById(domId);
@@ -72,6 +84,25 @@ window.OwoPanels.automations = (function () {
     status.style.color = isError ? "var(--red)" : "var(--text-3)";
   }
 
+  function setButtonBusy(button, busy, idleText, busyText) {
+    if (!button) return;
+    button.disabled = !!busy;
+    if (busy) {
+      button.setAttribute("aria-busy", "true");
+      button.textContent = busyText || idleText;
+    } else {
+      button.removeAttribute("aria-busy");
+      button.textContent = idleText;
+    }
+  }
+
+  function explainActionError(action, error) {
+    var detail = H.friendlyError ? H.friendlyError(error) : (error && error.message) || String(error);
+    var message = action + "失败：" + detail;
+    setStatus(message, true);
+    if (H.notify) H.notify(message, "error");
+  }
+
   function nav() {
     return (
       '<section data-panel="' +
@@ -81,6 +112,10 @@ window.OwoPanels.automations = (function () {
       "#owo-aut-status{min-height:16px;font-size:12px;color:var(--text-3)}" +
       ".owo-aut-task{display:flex;flex-direction:column;gap:4px}" +
       ".owo-aut-task-actions{display:flex;gap:8px;flex-wrap:wrap}" +
+      ".owo-aut-load-error{display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;border:1px solid var(--red-soft);border-radius:8px;padding:10px 12px;background:var(--red-soft);color:var(--red)}" +
+      ".owo-aut-retry{flex:none;border:1px solid currentColor;border-radius:6px;padding:5px 10px;background:var(--surface);color:inherit;cursor:pointer}" +
+      ".owo-aut-runs-error{display:flex;align-items:center;justify-content:space-between;gap:8px;list-style:none;border:1px solid var(--red-soft);border-radius:8px;padding:8px 10px;background:var(--red-soft);color:var(--red)}" +
+      ".owo-aut-runs-error button{flex:none;border:1px solid currentColor;border-radius:6px;padding:4px 9px;background:var(--surface);color:inherit;cursor:pointer}" +
       "</style>" +
       '<div class="stack">' +
       '<div class="sub">新建任务</div>' +
@@ -92,23 +127,81 @@ window.OwoPanels.automations = (function () {
       '<option value="daily">每天（HH:MM）</option>' +
       '<option value="oneshot">单次（RFC3339）</option>' +
       "</select></div>" +
-      '<div class="tool-field"><label for="owo-aut-value">触发值</label><input id="owo-aut-value" placeholder="60 / 09:00 / 2026-08-12T12:00:00Z" required></div>' +
+      '<div class="tool-field" data-schedule-group="interval"><label for="owo-aut-interval">间隔秒数</label><input id="owo-aut-interval" type="number" min="1" step="1" inputmode="numeric" required></div>' +
+      '<div class="tool-field" data-schedule-group="daily" hidden><label for="owo-aut-daily">每天时间</label><input id="owo-aut-daily" type="time" step="60" disabled></div>' +
+      '<div class="tool-field" data-schedule-group="oneshot" hidden><label for="owo-aut-oneshot">执行时间（本地）</label><input id="owo-aut-oneshot" type="datetime-local" step="60" disabled></div>' +
       '<div class="tool-field"><label for="owo-aut-action">动作</label><select id="owo-aut-action">' +
-      // 「跑任务」（run_prompt）需引擎执行器支持，上游 08f6d82 暂未回移——先只提供提醒。
       '<option value="reminder">提醒（到点推送一条话）</option>' +
+      '<option value="run_prompt">跑只读 Agent 任务</option>' +
       "</select></div>" +
-      '<div class="tool-field tool-field-full"><label for="owo-aut-content">内容</label><input id="owo-aut-content" placeholder="提醒文案 / 任务指令（如：检查 git 状态并总结）" required></div>' +
+      '<div class="tool-field tool-field-full"><label id="owo-aut-content-label" for="owo-aut-content">提醒内容</label><input id="owo-aut-content" placeholder="到点显示的提醒文案" required><div id="owo-aut-action-hint" class="sub">提醒只会推送到工作台，不会调用模型。</div></div>' +
       '<div class="tool-actions tool-actions-end tool-field-full"><button type="submit" class="primary">创建任务</button></div>' +
       "</form>" +
       '<div id="owo-aut-status"></div>' +
       '<div class="sub">任务列表</div>' +
-      '<ul id="owo-aut-list" class="list"><li class="sub">加载中…</li></ul>' +
+      '<ul id="owo-aut-list" class="list"><li class="sub" role="status">加载中…</li></ul>' +
       '<div class="sub">提醒</div>' +
       '<div class="tool-actions"><button id="owo-aut-clear">清除提醒</button></div>' +
-      '<ul id="owo-aut-reminders" class="list"><li class="sub">加载中…</li></ul>' +
+      '<ul id="owo-aut-reminders" class="list"><li class="sub" role="status">加载中…</li></ul>' +
       "</div>" +
       "</section>"
     );
+  }
+
+  function syncScheduleFields() {
+    var kindControl = el("owo-aut-kind");
+    var selected = kindControl ? kindControl.value : "interval";
+    ["interval", "daily", "oneshot"].forEach(function (kind) {
+      var group = document.querySelector('[data-schedule-group="' + kind + '"]');
+      var input = el(kind === "interval" ? "owo-aut-interval" : kind === "daily" ? "owo-aut-daily" : "owo-aut-oneshot");
+      var active = kind === selected;
+      if (group) group.hidden = !active;
+      if (input) {
+        input.disabled = !active;
+        input.required = active;
+      }
+    });
+  }
+
+  function formatOffset(offsetMinutes) {
+    if (!Number.isInteger(offsetMinutes) || Math.abs(offsetMinutes) > 14 * 60) {
+      throw new Error("本地时区偏移无效");
+    }
+    var sign = offsetMinutes <= 0 ? "+" : "-";
+    var absolute = Math.abs(offsetMinutes);
+    return sign + String(Math.floor(absolute / 60)).padStart(2, "0") + ":" +
+      String(absolute % 60).padStart(2, "0");
+  }
+
+  function buildSchedule(kind, value, offsetMinutes) {
+    var rawValue = String(value == null ? "" : value).trim();
+    if (kind === "interval") {
+      if (!/^\d+$/.test(rawValue)) throw new Error("间隔需为正整数（秒）");
+      var seconds = Number(rawValue);
+      if (!Number.isSafeInteger(seconds) || seconds <= 0) throw new Error("间隔需为正整数（秒）");
+      return { kind: "interval", every_secs: seconds };
+    }
+    if (kind === "daily") {
+      if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(rawValue)) throw new Error("每天时间需使用 HH:MM 格式");
+      return { kind: "daily", time: rawValue };
+    }
+    if (kind === "oneshot") {
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(rawValue)) {
+        throw new Error("请选择有效的本地日期和时间");
+      }
+      var localDate = new Date(rawValue);
+      if (!Number.isFinite(localDate.getTime()) ||
+          localDate.getFullYear() !== Number(rawValue.slice(0, 4)) ||
+          localDate.getMonth() + 1 !== Number(rawValue.slice(5, 7)) ||
+          localDate.getDate() !== Number(rawValue.slice(8, 10)) ||
+          localDate.getHours() !== Number(rawValue.slice(11, 13)) ||
+          localDate.getMinutes() !== Number(rawValue.slice(14, 16))) {
+        throw new Error("请选择有效的本地日期和时间");
+      }
+      var offset = offsetMinutes == null ? localDate.getTimezoneOffset() : offsetMinutes;
+      return { kind: "one_shot", at: rawValue + ":00" + formatOffset(offset) };
+    }
+    throw new Error("未知的触发方式");
   }
 
   /// 触发方式可读化。
@@ -122,31 +215,99 @@ window.OwoPanels.automations = (function () {
     return JSON.stringify(schedule);
   }
 
-  /// 动作类型可读化（提醒 / 跑任务）。
+  /// 动作类型可读化（提醒 / 跑只读任务）。
   function describeAction(action) {
     if (!action || typeof action !== "object") return "提醒";
-    if (action.kind === "run_prompt") return "跑任务";
+    if (action.kind === "run_prompt") return "跑只读 Agent 任务";
     if (action.kind === "reminder") return "提醒";
     return String(action.kind || "");
   }
 
-  function refresh() {
-    H.get("/automations")
+  function buildAction(kind, value) {
+    var content = String(value == null ? "" : value).trim();
+    if (!content) throw new Error("内容不能为空");
+    if (kind === "reminder") return { kind: "reminder", text: content };
+    if (kind === "run_prompt") return { kind: "run_prompt", prompt: content };
+    throw new Error("未知的自动化动作");
+  }
+
+  function syncActionFields() {
+    var action = el("owo-aut-action");
+    var label = el("owo-aut-content-label");
+    var content = el("owo-aut-content");
+    var hint = el("owo-aut-action-hint");
+    if (!action || !content) return;
+    var runPrompt = action.value === "run_prompt";
+    if (label) label.textContent = runPrompt ? "Agent 提示词（只读）" : "提醒内容";
+    content.placeholder = runPrompt
+      ? "描述要查询、巡检或总结的内容"
+      : "到点显示的提醒文案";
+    if (hint) hint.textContent = runPrompt
+      ? "到点后调用 Agent；定时任务无人值守，只读模式，不会修改文件或执行命令。"
+      : "提醒只会推送到工作台，不会调用模型。";
+  }
+
+  function renderListLoadError(list, error, retryKind) {
+    if (!list) return;
+    var detail = H.friendlyError ? H.friendlyError(error) : (error && error.message) || String(error);
+    var message = retryKind === "tasks" ? "自动化任务加载失败：" : "提醒加载失败：";
+    list.innerHTML =
+      '<li class="owo-aut-load-error" role="alert"><span>' +
+      H.esc(message + detail) +
+      '</span><button type="button" class="owo-aut-retry" data-aut-retry="' +
+      retryKind +
+      '">重试</button></li>';
+  }
+
+  function refreshTasks() {
+    var request = ++taskRefreshGeneration;
+    var owner = panelGeneration;
+    var list = el("owo-aut-list");
+    if (list) list.innerHTML = '<li class="sub" role="status">正在加载自动化任务…</li>';
+    return H.get("/automations")
       .then(function (tasks) {
+        if (request !== taskRefreshGeneration || owner !== panelGeneration) return;
         renderTasks(Array.isArray(tasks) ? tasks : []);
       })
       .catch(function (error) {
-        var list = el("owo-aut-list");
-        if (list) list.innerHTML = '<li class="sub">' + H.esc(H.friendlyError(error)) + "</li>";
+        if (request !== taskRefreshGeneration || owner !== panelGeneration) return;
+        renderListLoadError(el("owo-aut-list"), error, "tasks");
       });
-    H.get("/automations/reminders")
+  }
+
+  function refreshReminders() {
+    var request = ++reminderRefreshGeneration;
+    var owner = panelGeneration;
+    var list = el("owo-aut-reminders");
+    if (list) list.innerHTML = '<li class="sub" role="status">正在加载提醒…</li>';
+    return H.get("/automations/reminders")
       .then(function (reminders) {
+        if (request !== reminderRefreshGeneration || owner !== panelGeneration) return;
         renderReminders(Array.isArray(reminders) ? reminders : []);
       })
       .catch(function (error) {
-        var list = el("owo-aut-reminders");
-        if (list) list.innerHTML = '<li class="sub">' + H.esc(H.friendlyError(error)) + "</li>";
+        if (request !== reminderRefreshGeneration || owner !== panelGeneration) return;
+        renderListLoadError(el("owo-aut-reminders"), error, "reminders");
       });
+  }
+
+  function refresh() {
+    refreshTasks();
+    refreshReminders();
+  }
+
+  function bindListRetry(listId, retryKind) {
+    var list = el(listId);
+    if (!list) return;
+    list.addEventListener("click", function (event) {
+      var button = event.target && event.target.closest
+        ? event.target.closest('[data-aut-retry="' + retryKind + '"]')
+        : null;
+      if (!button) return;
+      event.preventDefault();
+      if (retryKind === "tasks") refreshTasks();
+      else refreshReminders();
+    });
   }
 
   function renderTasks(tasks) {
@@ -165,33 +326,43 @@ window.OwoPanels.automations = (function () {
         " ｜ " + H.esc(describeAction(task.action)) + " ｜ " + (task.enabled ? "启用" : "停用") + "</span>";
 
       var toggleBtn = document.createElement("button");
-      toggleBtn.textContent = task.enabled ? "停用" : "启用";
+      var toggleKey = String(task.id);
+      var idleText = task.enabled ? "停用" : "启用";
+      setButtonBusy(toggleBtn, !!taskToggleBusy[toggleKey], idleText, "处理中…");
       toggleBtn.addEventListener("click", async function (event) {
         event.stopPropagation();
-        await H.call("/automations/" + task.id + "/toggle", { method: "POST" }).catch(function () {});
-        refresh();
+        if (taskToggleBusy[toggleKey]) return;
+        taskToggleBusy[toggleKey] = true;
+        var owner = panelGeneration;
+        setButtonBusy(toggleBtn, true, idleText, "处理中…");
+        try {
+          await H.call("/automations/" + encodeURIComponent(task.id) + "/toggle", { method: "POST" });
+          if (owner === panelGeneration) setStatus((task.enabled ? "已停用：" : "已启用：") + task.name, false);
+        } catch (error) {
+          if (owner === panelGeneration) explainActionError("自动化启停", error);
+        } finally {
+          delete taskToggleBusy[toggleKey];
+          setButtonBusy(toggleBtn, false, idleText);
+          // 重新挂载时列表可能在请求期间显示了忙碌按钮；用服务端状态刷新当前页。
+          if (panelMounted) refresh();
+        }
       });
 
       // A8-1：展开执行记录（次日可查「跑没跑、结果如何」）。
       var runsBtn = document.createElement("button");
       runsBtn.textContent = "记录";
-      runsBtn.addEventListener("click", async function (event) {
-        event.stopPropagation();
-        var existing = li.querySelector(".automation-runs");
-        if (existing) {
-          existing.remove();
-          runsBtn.textContent = "记录";
-          return;
-        }
-        var box = document.createElement("ul");
-        box.className = "list automation-runs";
-        box.innerHTML = '<li class="sub">加载中…</li>';
-        li.appendChild(box);
-        runsBtn.textContent = "收起";
+      var runsGeneration = 0;
+      var activeRunsBox = null;
+      async function loadRuns(box) {
+        var request = ++runsGeneration;
+        var owner = panelGeneration;
+        activeRunsBox = box;
+        box.innerHTML = '<li class="sub" role="status">正在加载执行记录…</li>';
         try {
           var runs = await H.get(
             "/automations/runs?task_id=" + encodeURIComponent(task.id) + "&limit=10"
           );
+          if (request !== runsGeneration || activeRunsBox !== box || owner !== panelGeneration) return;
           box.innerHTML = "";
           if (!Array.isArray(runs) || !runs.length) {
             box.innerHTML = '<li class="sub">尚无执行记录（到点触发后可见）</li>';
@@ -200,23 +371,69 @@ window.OwoPanels.automations = (function () {
           runs.forEach(function (run) {
             var item = document.createElement("li");
             var when = String(run.at || "").replace("T", " ").slice(0, 16);
-            var verdict = run.status === "ok" ? "✓ 成功" : "✗ 失败";
+            var verdict = run.status === "ok" ? "✓ 成功" : run.status === "skipped" ? "↷ 已跳过" : "✗ 失败";
             item.innerHTML =
               "<strong>" + H.esc(verdict) + " · " + H.esc(when) + '</strong><span class="sub">' +
               H.esc(String(run.output || "（无输出）").slice(0, 400)) + "</span>";
             box.appendChild(item);
           });
         } catch (error) {
-          box.innerHTML = '<li class="sub">' + H.esc(H.friendlyError(error)) + "</li>";
+          if (request !== runsGeneration || activeRunsBox !== box || owner !== panelGeneration) return;
+          box.innerHTML = "";
+          var errorItem = document.createElement("li");
+          errorItem.className = "owo-aut-runs-error";
+          errorItem.setAttribute("role", "alert");
+          var errorText = document.createElement("span");
+          errorText.textContent = "读取执行记录失败：" + (H.friendlyError ? H.friendlyError(error) : error.message || String(error));
+          var retry = document.createElement("button");
+          retry.type = "button";
+          retry.textContent = "重试";
+          retry.setAttribute("aria-label", "重新加载执行记录");
+          retry.addEventListener("click", function () { loadRuns(box); });
+          errorItem.appendChild(errorText);
+          errorItem.appendChild(retry);
+          box.appendChild(errorItem);
         }
+      }
+      runsBtn.addEventListener("click", function (event) {
+        event.stopPropagation();
+        var existing = li.querySelector(".automation-runs");
+        if (existing) {
+          runsGeneration++;
+          activeRunsBox = null;
+          existing.remove();
+          runsBtn.textContent = "记录";
+          return;
+        }
+        var box = document.createElement("ul");
+        box.className = "list automation-runs";
+        li.appendChild(box);
+        runsBtn.textContent = "收起";
+        loadRuns(box);
       });
 
       var deleteBtn = document.createElement("button");
       deleteBtn.textContent = "删除";
       deleteBtn.addEventListener("click", async function (event) {
         event.stopPropagation();
-        await H.del("/automations/" + task.id).catch(function () {});
-        refresh();
+        setButtonBusy(deleteBtn, true, "删除", "等待确认…");
+        try {
+          var confirmed = await H.confirm({
+            title: "删除自动化任务",
+            message: "确定删除“" + task.name + "”？此操作无法撤销。",
+            confirmText: "删除任务",
+            kind: "danger",
+          });
+          if (!confirmed) return;
+          deleteBtn.textContent = "删除中…";
+          await H.del("/automations/" + encodeURIComponent(task.id));
+          setStatus("已删除：" + task.name, false);
+          refresh();
+        } catch (error) {
+          explainActionError("删除自动化", error);
+        } finally {
+          setButtonBusy(deleteBtn, false, "删除");
+        }
       });
 
       var actions = document.createElement("div");
@@ -246,71 +463,99 @@ window.OwoPanels.automations = (function () {
 
   async function createTask(event) {
     event.preventDefault();
-    var name = (el("owo-aut-name").value || "").trim();
-    var kind = el("owo-aut-kind").value;
-    var value = (el("owo-aut-value").value || "").trim();
-    var actionKind = el("owo-aut-action").value;
-    var content = (el("owo-aut-content").value || "").trim();
-    if (!name || !value || !content) return;
-    var schedule;
-    if (kind === "interval") {
-      var everySecs = parseInt(value, 10);
-      if (!Number.isFinite(everySecs) || everySecs <= 0) {
-        setStatus("间隔需为正整数（秒）", true);
+    if (creatingTask) return;
+    creatingTask = true;
+    var submission = ++taskSubmissionGeneration;
+    var owner = panelGeneration;
+    var form = el("owo-aut-form");
+    var submitButton = event.submitter || (form && form.querySelector('button[type="submit"]'));
+    setButtonBusy(submitButton, true, "创建任务", "正在创建…");
+    try {
+      var name = (el("owo-aut-name").value || "").trim();
+      var kind = el("owo-aut-kind").value;
+      var valueId = kind === "interval" ? "owo-aut-interval" : kind === "daily" ? "owo-aut-daily" : "owo-aut-oneshot";
+      var value = (el(valueId).value || "").trim();
+      var actionKind = el("owo-aut-action").value;
+      var content = (el("owo-aut-content").value || "").trim();
+      if (!name || !content) return;
+      var schedule;
+      try {
+        schedule = buildSchedule(kind, value);
+      } catch (error) {
+        setStatus(error.message, true);
+        el(valueId).focus();
         return;
       }
-      schedule = { kind: "interval", every_secs: everySecs };
-    } else if (kind === "daily") {
-      schedule = { kind: "daily", time: value };
-    } else {
-      // 后端 OneShot 的 serde tag 是 `one_shot`（此前发的 `oneshot` 会反序列化失败）。
-      schedule = { kind: "one_shot", at: value };
+      var action;
+      try {
+        action = buildAction(actionKind, content);
+      } catch (error) {
+        setStatus(error.message, true);
+        el("owo-aut-content").focus();
+        return;
+      }
+      try {
+        await H.post("/automations", { name: name, schedule: schedule, action: action });
+        if (owner !== panelGeneration) return;
+        el("owo-aut-name").value = "";
+        el(valueId).value = "";
+        el("owo-aut-content").value = "";
+        setStatus("已创建：" + name, false);
+        refresh();
+      } catch (error) {
+        if (owner === panelGeneration) setStatus("创建自动化失败：" + (error && error.message ? error.message : error), true);
+      }
+    } finally {
+      if (submission === taskSubmissionGeneration) {
+        creatingTask = false;
+        setButtonBusy(submitButton, false, "创建任务");
+      }
     }
-    var action =
-      actionKind === "prompt"
-        ? { kind: "reminder", text: content }
-        : { kind: "reminder", text: content };
-    try {
-      await H.post("/automations", { name: name, schedule: schedule, action: action });
-      el("owo-aut-name").value = "";
-      el("owo-aut-value").value = "";
-      el("owo-aut-content").value = "";
-      setStatus("已创建：" + name, false);
-      refresh();
-    } catch (error) {
-      setStatus("创建自动化失败：" + (error && error.message ? error.message : error), true);
-    }
+  }
+
+  function dispose() {
+    panelMounted = false;
+    panelGeneration += 1;
+    taskRefreshGeneration += 1;
+    reminderRefreshGeneration += 1;
+    taskSubmissionGeneration += 1;
+    creatingTask = false;
+    clearingReminders = false;
   }
 
   function mount(root, helpers) {
+    dispose();
     if (helpers) H = helpers;
+    panelMounted = true;
     root.innerHTML = nav();
     el("owo-aut-form").addEventListener("submit", createTask);
+    bindListRetry("owo-aut-list", "tasks");
+    bindListRetry("owo-aut-reminders", "reminders");
+    el("owo-aut-kind").addEventListener("change", syncScheduleFields);
+    el("owo-aut-action").addEventListener("change", syncActionFields);
+    syncScheduleFields();
+    syncActionFields();
     el("owo-aut-clear").addEventListener("click", async function () {
+      var button = el("owo-aut-clear");
+      if (clearingReminders) return;
+      clearingReminders = true;
+      var owner = panelGeneration;
+      setButtonBusy(button, true, "清除提醒", "正在清除…");
       try {
         await H.call("/automations/reminders/clear", { method: "POST" });
+        if (owner !== panelGeneration) return;
         setStatus("已清除提醒", false);
         refresh();
       } catch (error) {
-        setStatus("清除提醒失败：" + (error && error.message ? error.message : error), true);
+        if (owner === panelGeneration) explainActionError("清除提醒", error);
+      } finally {
+        if (owner === panelGeneration) {
+          clearingReminders = false;
+          setButtonBusy(button, false, "清除提醒");
+        }
       }
     });
     refresh();
-    startPolling();
-  }
-
-  function startPolling() {
-    if (pollTimer) return;
-    // 提醒到点由服务端推送进列表，这里轮询刷新保持可见（原全局 5s/10s 轮询迁入面板，
-    // 仅挂载期间运行——面板被替换后元素消失即自停）。
-    pollTimer = setInterval(function () {
-      if (!el("owo-aut-list")) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-        return;
-      }
-      refresh();
-    }, 5000);
   }
 
   return {
@@ -319,5 +564,7 @@ window.OwoPanels.automations = (function () {
     nav: nav,
     mount: mount,
     refresh: refresh,
+    dispose: dispose,
+    _test: { buildSchedule: buildSchedule, buildAction: buildAction, createTask: createTask },
   };
 })();

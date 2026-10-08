@@ -1,0 +1,74 @@
+{
+  "schema": "owo-agent-qa-evidence-v1",
+  "date": "2026-10-08",
+  "change": "Centralize Team phase execution, prepared rework and validated retry state transitions in a pure reducer.",
+  "scope": [
+    "attempt admission",
+    "coalesced step-progress merge",
+    "phase record projection",
+    "validated rework batch reset",
+    "validated retry reset"
+  ],
+  "invariants": [
+    "only attempt admission advances durable run-wide counters",
+    "progress snapshot counters are ignored",
+    "progress updates are fenced by epoch and attempt",
+    "phase projection preserves durable attempts and succeeded records",
+    "rework owner validation and retry status/activity gates remain before reducer entry",
+    "rework/retry invalidate stale validation receipts while retaining unaffected successful siblings",
+    "steer/replace/cancel remain outside this reducer"
+  ],
+  "validation": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p owo-agent-core --lib --locked -j 2 -- --test-threads=2",
+      "exit_code": 0,
+      "passed": 552,
+      "failed": 0,
+      "ignored": 3
+    },
+    {
+      "command": "cargo test -p owo-agent-core rework --locked -j 2 -- --test-threads=2",
+      "exit_code": 0,
+      "passed": 9,
+      "failed": 0,
+      "details": "8 core unit tests and 1 integration test"
+    },
+    {
+      "command": "cargo test -p owo-agent-core retry --locked -j 2 -- --test-threads=2",
+      "exit_code": 0,
+      "passed": 5,
+      "failed": 0,
+      "details": "recovery integration tests"
+    },
+    {
+      "command": "cargo test -p owo-agent-core --test workswarm_tests --locked -j 2 -- --test-threads=2",
+      "exit_code": 0,
+      "passed": 50,
+      "failed": 0
+    },
+    {
+      "command": "cargo build -p owo-agent-cli --locked -j 1",
+      "exit_code": 0,
+      "policy": "strict"
+    },
+    {
+      "command": "cargo check -p owo-agent-core --locked -j 2",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p owo-agent-core --test workswarm_recovery_tests retry_failed_step_resets_only_target_closure --locked -j 2 -- --test-threads=2",
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0
+    }
+  ],
+  "limits": [
+    "Team phase runner state is still projected into durable state.",
+    "Steer/replace/cancel are not yet routed through one scheduler authority.",
+    "No real-model Single-versus-Team paired evaluation was run."
+  ]
+}

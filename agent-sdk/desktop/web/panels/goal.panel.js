@@ -11,13 +11,13 @@ window.OwoPanels.goal = (function () {
   function defaultHelpers() {
     var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
     function get(path) {
-      return fetch(baseUrl + path).then(function (r) {
+      return window.OwoApi.stream(path).then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
       });
     }
     function post(path, body) {
-      return fetch(baseUrl + path, {
+      return window.OwoApi.stream(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),
@@ -47,6 +47,16 @@ window.OwoPanels.goal = (function () {
   }
 
   var H = defaultHelpers();
+  function notify(message, kind) {
+    if (H.notify) H.notify(message, kind || "error");
+    else if (window.OwoToast) window.OwoToast(message);
+    else window.alert(message);
+  }
+  var panelGeneration = 0;
+  var listGeneration = 0;
+  var detailGeneration = 0;
+  var statusGeneration = 0;
+  var auditGeneration = 0;
   var state = {
     goals: [],
     current: null,
@@ -78,14 +88,17 @@ window.OwoPanels.goal = (function () {
       '<div id="owo-goal-detail"></div>' +
       '<hr>' +
       '<div class="sub">云端进度（SSE 订阅）</div>' +
-      '<div class="owo-goal-row"><input id="owo-goal-cloud-task" placeholder="cloud task id（如 cloud-0001）" style="flex:1">' +
+      '<div class="owo-goal-row"><input id="owo-goal-cloud-task" placeholder="云端任务编号（如 cloud-0001）" style="flex:1">' +
       '<button id="owo-goal-cloud-sub">订阅</button><button id="owo-goal-cloud-close">断开</button></div>' +
-      '<div class="owo-goal-cloudlog" id="owo-goal-cloudlog">（输入 task id 订阅 /cloud/tasks/{id}/events）</div>' +
+      '<div class="owo-goal-cloudlog" id="owo-goal-cloudlog">（输入云端任务编号以查看实时进度）</div>' +
       '</div>'
     );
   }
 
   function mount(root, helpers) {
+    dispose();
+    state.cloudLog = [];
+    cloudReconnectNoticeShown = false;
     if (helpers) H = helpers;
     root.innerHTML = nav();
     root.querySelector("#owo-goal-create").addEventListener("click", createGoal);
@@ -95,15 +108,20 @@ window.OwoPanels.goal = (function () {
   }
 
   function refresh() {
-    H.get("/goal")
+    var request = ++listGeneration;
+    var owner = panelGeneration;
+    var selectedAtRequest = state.current;
+    return H.get("/goal")
       .then(function (data) {
+        if (request !== listGeneration || owner !== panelGeneration) return;
         state.goals = (data && data.goals) || [];
         renderList();
-        if (state.current) loadGoal(state.current);
+        if (state.current && state.current === selectedAtRequest) loadGoal(state.current);
       })
       .catch(function (e) {
-        var el = document.getElementById("owo-goal-list");
-        if (el) el.innerHTML = '<div class="owo-goal-badge bad">' + H.esc(H.friendlyError(e)) + "</div>";
+        if (request !== listGeneration || owner !== panelGeneration) return;
+        var list = document.getElementById("owo-goal-list");
+        if (list) list.innerHTML = '<div class="owo-goal-badge bad">' + H.esc(H.friendlyError(e)) + "</div>";
       });
   }
 
@@ -156,24 +174,32 @@ window.OwoPanels.goal = (function () {
         refresh();
       })
       .catch(function (e) {
-        alert(H.friendlyError(e));
+        notify(H.friendlyError(e), "error");
       });
   }
 
   function loadGoal(goalId) {
-    H.get("/goal/" + encodeURIComponent(goalId))
+    state.current = goalId;
+    var request = ++detailGeneration;
+    var owner = panelGeneration;
+    function isCurrent() {
+      return request === detailGeneration && owner === panelGeneration && state.current === goalId;
+    }
+    return H.get("/goal/" + encodeURIComponent(goalId))
       .then(function (goal) {
-        H.get("/goal/" + encodeURIComponent(goalId) + "/plan")
+        if (!isCurrent()) return;
+        return H.get("/goal/" + encodeURIComponent(goalId) + "/plan")
           .then(function (planData) {
-            renderDetail(goal, planData);
+            if (isCurrent()) renderDetail(goal, planData);
           })
           .catch(function () {
-            renderDetail(goal, null);
+            if (isCurrent()) renderDetail(goal, null);
           });
       })
       .catch(function (e) {
-        var el = document.getElementById("owo-goal-detail");
-        if (el) el.innerHTML = '<div class="owo-goal-badge bad">' + H.esc(H.friendlyError(e)) + "</div>";
+        if (!isCurrent()) return;
+        var detail = document.getElementById("owo-goal-detail");
+        if (detail) detail.innerHTML = '<div class="owo-goal-badge bad">' + H.esc(H.friendlyError(e)) + "</div>";
       });
   }
 
@@ -231,7 +257,7 @@ window.OwoPanels.goal = (function () {
     try {
       steps = JSON.parse(textarea.value);
     } catch (e) {
-      alert("steps JSON 非法：" + e.message);
+      notify("steps JSON 非法：" + e.message, "error");
       return;
     }
     var normalized = (steps || []).map(function (s) {
@@ -254,7 +280,7 @@ window.OwoPanels.goal = (function () {
         loadGoal(goalId);
       })
       .catch(function (e) {
-        alert(H.friendlyError(e));
+        notify(H.friendlyError(e), "error");
       });
   }
 
@@ -264,7 +290,7 @@ window.OwoPanels.goal = (function () {
         pollStatus(goalId);
       })
       .catch(function (e) {
-        alert(H.friendlyError(e));
+        notify(H.friendlyError(e), "error");
       });
   }
 
@@ -274,13 +300,16 @@ window.OwoPanels.goal = (function () {
         pollStatus(goalId);
       })
       .catch(function (e) {
-        alert(H.friendlyError(e));
+        notify(H.friendlyError(e), "error");
       });
   }
 
   function pollStatus(goalId) {
-    H.get("/goal/" + encodeURIComponent(goalId) + "/status")
+    var request = ++statusGeneration;
+    var owner = panelGeneration;
+    return H.get("/goal/" + encodeURIComponent(goalId) + "/status")
       .then(function (status) {
+        if (request !== statusGeneration || owner !== panelGeneration || state.current !== goalId) return;
         state.status = status;
         var table = document.getElementById("owo-goal-status");
         if (!table) return;
@@ -320,12 +349,25 @@ window.OwoPanels.goal = (function () {
         table.innerHTML = "<tr><th>步骤</th><th>状态</th><th>worker/模型</th><th>输出</th></tr>" + rows +
           '<tr><td colspan="4">goal: ' + H.esc(goalStatus) + " · steps_taken: " + H.esc(status.steps_taken) + " · replan: " + H.esc(status.replan_count) + "</td></tr>";
       })
-      .catch(function () {});
+      .catch(function (error) {
+        if (request !== statusGeneration || owner !== panelGeneration || state.current !== goalId) return;
+        var table = document.getElementById("owo-goal-status");
+        if (!table) return;
+        table.innerHTML = "<tr><th>步骤</th><th>状态</th><th>尝试</th><th>输出</th></tr>" +
+          '<tr><td colspan="4" class="owo-goal-badge bad">状态读取失败：' +
+          H.esc(H.friendlyError(error)) + "（可点“刷新状态”重试）</td></tr>";
+      });
   }
 
   function showAudit(goalId) {
-    H.get("/goal/" + encodeURIComponent(goalId) + "/audit")
+    var request = ++auditGeneration;
+    var owner = panelGeneration;
+    function isCurrent() {
+      return request === auditGeneration && owner === panelGeneration && state.current === goalId;
+    }
+    return H.get("/goal/" + encodeURIComponent(goalId) + "/audit")
       .then(function (data) {
+        if (!isCurrent()) return;
         var box = document.getElementById("owo-goal-audit-box");
         if (!box) return;
         box.innerHTML = (data.audit || [])
@@ -336,12 +378,15 @@ window.OwoPanels.goal = (function () {
           .join("");
       })
       .catch(function (e) {
+        if (!isCurrent()) return;
         var box = document.getElementById("owo-goal-audit-box");
         if (box) box.innerHTML = H.esc(H.friendlyError(e));
       });
   }
 
   var cloudSource = null;
+  var cloudGeneration = 0;
+  var cloudReconnectNoticeShown = false;
 
   function subscribeCloud() {
     var input = document.getElementById("owo-goal-cloud-task");
@@ -351,24 +396,74 @@ window.OwoPanels.goal = (function () {
     var base = H.baseUrl || window.location.origin;
     var log = document.getElementById("owo-goal-cloudlog");
     if (log) log.textContent = "订阅 " + taskId + " ...";
+    cloudReconnectNoticeShown = false;
+    var generation = cloudGeneration;
     cloudSource = new EventSource(base + "/cloud/tasks/" + encodeURIComponent(taskId) + "/events");
-    cloudSource.onmessage = function (ev) {
-      appendCloudLog(ev.data);
+    cloudSource.onopen = function () {
+      if (generation !== cloudGeneration) return;
+      cloudReconnectNoticeShown = false;
     };
+    cloudSource.onmessage = function (event) {
+      if (generation === cloudGeneration) onCloudProgress(event);
+    };
+    // The server names cloud progress frames `progress`; EventSource.onmessage only
+    // receives unnamed `message` events, so subscribe to both wire forms.
+    cloudSource.addEventListener("progress", function (event) {
+      if (generation === cloudGeneration) onCloudProgress(event);
+    });
     cloudSource.onerror = function () {
-      appendCloudLog("（连接错误/关闭）");
-      if (cloudSource) {
-        cloudSource.close();
-        cloudSource = null;
+      if (generation !== cloudGeneration) return;
+      // EventSource tracks Last-Event-ID and retries transient disconnects itself.
+      // Only explicit user action or a terminal/not-found frame closes this source.
+      if (!cloudReconnectNoticeShown) {
+        appendCloudLog("（连接暂时中断，正在自动续传进度）");
+        cloudReconnectNoticeShown = true;
       }
     };
   }
 
-  function closeCloud() {
-    if (cloudSource) {
-      cloudSource.close();
-      cloudSource = null;
+  function onCloudProgress(ev) {
+    var raw = ev && ev.data != null ? String(ev.data) : "";
+    try {
+      var payload = JSON.parse(raw);
+      if (payload && payload.kind === "stream_gap") {
+        appendCloudLog(payload.message || "实时进度出现丢帧，正在续传保留的历史。");
+        return;
+      }
+      if (payload && ["task_not_found", "stream_complete"].includes(payload.kind)) {
+        appendCloudLog(payload.message || "任务已结束或没有找到该任务。");
+        closeCloudSilently();
+        return;
+      }
+      if (payload && ["succeeded", "failed", "canceled"].includes(payload.kind || payload.event)) {
+        appendCloudLog(raw);
+        closeCloudSilently();
+        return;
+      }
+    } catch (_) {
+      // Non-JSON compatibility messages remain visible as received.
     }
+    appendCloudLog(raw);
+  }
+
+  function closeCloudSilently() {
+    cloudGeneration += 1;
+    var source = cloudSource;
+    cloudSource = null;
+    if (source) source.close();
+  }
+
+  function dispose() {
+    panelGeneration += 1;
+    listGeneration += 1;
+    detailGeneration += 1;
+    statusGeneration += 1;
+    auditGeneration += 1;
+    closeCloudSilently();
+  }
+
+  function closeCloud() {
+    closeCloudSilently();
     appendCloudLog("（已断开）");
   }
 
@@ -387,5 +482,7 @@ window.OwoPanels.goal = (function () {
     nav: nav,
     mount: mount,
     refresh: refresh,
+    dispose: dispose,
+    _test: { loadGoal: loadGoal, pollStatus: pollStatus, showAudit: showAudit },
   };
 })();

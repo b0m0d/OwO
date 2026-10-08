@@ -1,12 +1,15 @@
+use super::request_budget::{
+    request_scope_key, task_budget_metadata, LeaseWaitTracker, RequestUsageCollector,
+};
 use super::sanitize::*;
 use super::util::*;
 use async_trait::async_trait;
-use owo_agent_core::gateway::{ModelCallMetadata, ModelProvider, StreamChunk, TokenUsage};
+use owo_agent_core::gateway::{ModelProvider, TokenUsage};
 use owo_agent_core::goal::Worker;
 use owo_agent_core::workswarm::{TeamCoordinator, WorkSwarmError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -28,6 +31,9 @@ pub struct WorkerSpanRecord {
     /// Host-issued attempt identity; absent in legacy metric records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
+    /// Host-issued coordinator generation shared by worker spans in one execution wave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_epoch: Option<u64>,
     /// Host-assigned total request ceiling for this attempt, including output repair.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_call_budget: Option<u64>,
@@ -38,8 +44,14 @@ pub struct WorkerSpanRecord {
     #[serde(default)]
     pub ended_at_ms: u64,
     pub wall_ms: u64,
+    /// Time spent constructing this task's bounded Team context slice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_assembly_ms: Option<u64>,
     #[serde(default)]
     pub provider_wait_ms: u64,
+    /// Durable Team request-budget reservation wait, excluding provider latency.
+    #[serde(default)]
+    pub budget_reservation_wait_ms: u64,
     #[serde(default)]
     pub lease_wait_ms: u64,
     /// succeeded | failed
@@ -149,425 +161,6 @@ impl MetricsJournal {
 }
 
 // ---------------------------------------------------------------------------
-// 模型调用计数装饰器（per-span 精确 model_calls）
-// ---------------------------------------------------------------------------
-
-/// ModelProvider 计数装饰器：complete/complete_stream 各计一次（每次模型调用
-/// 恰好经过其一），usage_snapshot 透传内层（token 快照差值归因不受影响）。
-///
-/// Durable write-ahead slots for a TeamRun-wide model request ceiling.
-#[derive(Clone)]
-pub(crate) struct RequestReservationJournal {
-    path: Arc<PathBuf>,
-    write_lock: Arc<Mutex<()>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct RequestReservationRecord {
-    schema_version: u32,
-    reservation_id: String,
-    scope_key: String,
-    reserved_at: String,
-}
-
-impl RequestReservationJournal {
-    pub(crate) fn for_team(run_dir: &Path, team_id: &str) -> Self {
-        Self {
-            path: Arc::new(run_dir.join(format!("{team_id}-request-reservations.jsonl"))),
-            write_lock: Arc::new(Mutex::new(())),
-        }
-    }
-
-    pub(crate) fn reservation_count(&self) -> Result<u64, String> {
-        let text = match std::fs::read_to_string(&*self.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(format!("模型请求预算账本读取失败：{error}")),
-        };
-        let mut count = 0u64;
-        for (line_number, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let record: RequestReservationRecord = serde_json::from_str(line).map_err(|error| {
-                format!(
-                    "模型请求预算账本第 {} 行损坏：{error}",
-                    line_number.saturating_add(1)
-                )
-            })?;
-            if record.schema_version != 1
-                || record.reservation_id.trim().is_empty()
-                || record.scope_key.trim().is_empty()
-                || record.reserved_at.trim().is_empty()
-            {
-                return Err(format!(
-                    "模型请求预算账本第 {} 行字段无效",
-                    line_number.saturating_add(1)
-                ));
-            }
-            count = count.saturating_add(1);
-        }
-        Ok(count)
-    }
-
-    fn append_reservation(&self, scope_key: &str) -> Result<(), String> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("模型请求预算账本目录创建失败：{error}"))?;
-        }
-        let record = RequestReservationRecord {
-            schema_version: 1,
-            reservation_id: uuid::Uuid::new_v4().to_string(),
-            scope_key: scope_key.to_string(),
-            reserved_at: rfc3339(),
-        };
-        let mut line = serde_json::to_vec(&record)
-            .map_err(|error| format!("模型请求预算记录序列化失败：{error}"))?;
-        line.push(b'\n');
-        let _guard = self.write_lock.lock().unwrap_or_else(|error| error.into_inner());
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&*self.path)
-            .map_err(|error| format!("模型请求预算账本打开失败：{error}"))?;
-        file.write_all(&line)
-            .map_err(|error| format!("模型请求预算记录写入失败：{error}"))?;
-        file.sync_data()
-            .map_err(|error| format!("模型请求预算记录持久化失败：{error}"))
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct TeamModelRequestBudget {
-    state: Arc<Mutex<TeamModelRequestBudgetState>>,
-}
-
-struct TeamModelRequestBudgetState {
-    limit: u64,
-    used: u64,
-    journal: RequestReservationJournal,
-}
-
-impl TeamModelRequestBudget {
-    pub(crate) fn new(
-        limit: u64,
-        journal: RequestReservationJournal,
-    ) -> Result<Self, String> {
-        let used = journal.reservation_count()?;
-        Ok(Self {
-            state: Arc::new(Mutex::new(TeamModelRequestBudgetState {
-                limit,
-                used,
-                journal,
-            })),
-        })
-    }
-
-    /// Write-ahead reservation: a request can reach the provider only after its slot
-    /// is durably counted. A crash between reservation and send conservatively spends it.
-    pub(crate) fn reserve(&self, scope_key: &str) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.used >= state.limit {
-            return Err(format!(
-                "team_model_call_budget_exhausted:已预留 {} 次模型请求，TeamRun 上限为 {}",
-                state.used, state.limit
-            ));
-        }
-        state.journal.append_reservation(scope_key)?;
-        state.used = state.used.saturating_add(1);
-        Ok(())
-    }
-
-    pub(crate) fn used(&self) -> u64 {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .used
-    }
-
-}
-
-pub(crate) struct RequestUsageCollector {
-    by_step: Mutex<HashMap<String, Vec<(ModelCallMetadata, bool)>>>,
-}
-
-impl Default for RequestUsageCollector {
-    fn default() -> Self {
-        Self {
-            by_step: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-fn task_budget_metadata(input: &Value) -> (Option<String>, Option<String>, Option<u64>) {
-    let task_id = input
-        .get("assigned_task_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let workswarm = input.get("_workswarm");
-    let attempt_id = workswarm
-        .and_then(|metadata| metadata.get("attempt_id"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let model_call_budget = input
-        .get("assigned_model_calls_per_attempt")
-        .and_then(Value::as_u64);
-    (task_id, attempt_id, model_call_budget)
-}
-
-pub(crate) fn request_scope_key(step_id: &str, phase_epoch: Option<u64>) -> String {
-    format!("{}#{}", step_id, phase_epoch.unwrap_or(0))
-}
-
-impl RequestUsageCollector {
-    pub(crate) fn clear(&self, step_id: &str) {
-        self.by_step
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(step_id);
-    }
-
-    pub(crate) fn record(&self, step_id: &str, metadata: ModelCallMetadata, succeeded: bool) {
-        self.by_step
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(step_id.to_string())
-            .or_default()
-            .push((metadata, succeeded));
-    }
-
-    pub(crate) fn take(&self, step_id: &str) -> Vec<(ModelCallMetadata, bool)> {
-        self.by_step
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(step_id)
-            .unwrap_or_default()
-    }
-}
-
-pub(crate) struct LeaseWaitTracker {
-    by_step: Mutex<HashMap<String, u64>>,
-}
-
-impl Default for LeaseWaitTracker {
-    fn default() -> Self {
-        Self {
-            by_step: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl LeaseWaitTracker {
-    pub(crate) fn record(&self, step_id: &str, wait_ms: u64) {
-        self.by_step
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(step_id.to_string(), wait_ms);
-    }
-
-    pub(crate) fn take(&self, step_id: &str) -> u64 {
-        self.by_step
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(step_id)
-            .unwrap_or(0)
-    }
-}
-
-pub struct MeasuredProvider {
-    inner: Arc<dyn ModelProvider>,
-    calls: Arc<AtomicU64>,
-    request_usage: Option<Arc<RequestUsageCollector>>,
-    step_id: Option<String>,
-    team_request_budget: Option<Arc<TeamModelRequestBudget>>,
-}
-
-impl MeasuredProvider {
-    pub fn new(inner: Arc<dyn ModelProvider>, calls: Arc<AtomicU64>) -> Self {
-        Self {
-            inner,
-            calls,
-            request_usage: None,
-            step_id: None,
-            team_request_budget: None,
-        }
-    }
-
-    pub(crate) fn new_with_request_usage(
-        inner: Arc<dyn ModelProvider>,
-        calls: Arc<AtomicU64>,
-        request_usage: Arc<RequestUsageCollector>,
-        step_id: String,
-    ) -> Self {
-        Self {
-            inner,
-            calls,
-            request_usage: Some(request_usage),
-            step_id: Some(step_id),
-            team_request_budget: None,
-        }
-    }
-
-    pub(crate) fn new_with_request_budget(
-        inner: Arc<dyn ModelProvider>,
-        calls: Arc<AtomicU64>,
-        request_usage: Arc<RequestUsageCollector>,
-        scope_key: String,
-        team_request_budget: Option<Arc<TeamModelRequestBudget>>,
-    ) -> Self {
-        Self {
-            inner,
-            calls,
-            request_usage: Some(request_usage),
-            step_id: Some(scope_key),
-            team_request_budget,
-        }
-    }
-
-    fn reserve_request(&self) -> Result<(), String> {
-        if let Some(budget) = &self.team_request_budget {
-            let scope_key = self.step_id.as_deref().unwrap_or("unknown");
-            budget.reserve(scope_key)?;
-        }
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
-    fn record_unknown_request(&self, latency_ms: u64, succeeded: bool) {
-        if let (Some(collector), Some(step_id)) = (&self.request_usage, &self.step_id) {
-            collector.record(
-                step_id,
-                ModelCallMetadata {
-                    latency_ms: Some(latency_ms),
-                    ..ModelCallMetadata::default()
-                },
-                succeeded,
-            );
-        }
-    }
-}
-
-#[async_trait]
-impl ModelProvider for MeasuredProvider {
-    async fn complete(
-        &self,
-        messages: &[owo_agent_core::ChatMessage],
-        tools: &[owo_agent_core::tools::ToolSpec],
-    ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.reserve_request()?;
-        let started = Instant::now();
-        let result = self.inner.complete(messages, tools).await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
-        result
-    }
-
-    async fn complete_stream(
-        &self,
-        messages: &[owo_agent_core::ChatMessage],
-        tools: &[owo_agent_core::tools::ToolSpec],
-        on_delta: &mut (dyn FnMut(String) + Send),
-    ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.reserve_request()?;
-        let started = Instant::now();
-        let result = self.inner.complete_stream(messages, tools, on_delta).await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
-        result
-    }
-
-    async fn complete_with_model(
-        &self,
-        model: Option<&str>,
-        messages: &[owo_agent_core::ChatMessage],
-        tools: &[owo_agent_core::tools::ToolSpec],
-    ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.reserve_request()?;
-        let started = Instant::now();
-        let result = self.inner.complete_with_model(model, messages, tools).await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
-        result
-    }
-
-    async fn complete_stream_with_model(
-        &self,
-        model: Option<&str>,
-        messages: &[owo_agent_core::ChatMessage],
-        tools: &[owo_agent_core::tools::ToolSpec],
-        on_delta: &mut (dyn FnMut(String) + Send),
-    ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.reserve_request()?;
-        let started = Instant::now();
-        let result = self
-            .inner
-            .complete_stream_with_model(model, messages, tools, on_delta)
-            .await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
-        result
-    }
-
-    async fn complete_stream_with_reasoning(
-        &self,
-        messages: &[owo_agent_core::ChatMessage],
-        tools: &[owo_agent_core::tools::ToolSpec],
-        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
-    ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.reserve_request()?;
-        let started = Instant::now();
-        let result = self
-            .inner
-            .complete_stream_with_reasoning(messages, tools, on_chunk)
-            .await;
-        self.record_unknown_request(started.elapsed().as_millis() as u64, result.is_ok());
-        result
-    }
-
-    async fn complete_stream_with_reasoning_and_model(
-        &self,
-        model: Option<&str>,
-        messages: &[owo_agent_core::ChatMessage],
-        tools: &[owo_agent_core::tools::ToolSpec],
-        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
-    ) -> Result<owo_agent_core::ModelOutput, String> {
-        self.complete_stream_with_reasoning_and_model_observed(model, messages, tools, on_chunk)
-            .await
-            .map(|observed| observed.output)
-    }
-
-    async fn complete_stream_with_reasoning_and_model_observed(
-        &self,
-        model: Option<&str>,
-        messages: &[owo_agent_core::ChatMessage],
-        tools: &[owo_agent_core::tools::ToolSpec],
-        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
-    ) -> Result<owo_agent_core::gateway::ObservedModelOutput, String> {
-        self.reserve_request()?;
-        let started = Instant::now();
-        match self
-            .inner
-            .complete_stream_with_reasoning_and_model_observed(model, messages, tools, on_chunk)
-            .await
-        {
-            Ok(mut observed) => {
-                observed.metadata.latency_ms = Some(started.elapsed().as_millis() as u64);
-                if let (Some(collector), Some(step_id)) = (&self.request_usage, &self.step_id) {
-                    collector.record(step_id, observed.metadata.clone(), true);
-                }
-                Ok(observed)
-            }
-            Err(error) => {
-                self.record_unknown_request(started.elapsed().as_millis() as u64, false);
-                Err(error)
-            }
-        }
-    }
-
-    fn usage_snapshot(&self) -> TokenUsage {
-        self.inner.usage_snapshot()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // MeasuredRoleWorker（角色 worker 指标包装层）
 // ---------------------------------------------------------------------------
 
@@ -621,6 +214,25 @@ pub struct MeasuredRoleWorker {
     usage_tracker: Arc<UsageAttributionTracker>,
     request_usage: Option<Arc<RequestUsageCollector>>,
     lease_waits: Option<Arc<LeaseWaitTracker>>,
+}
+
+fn take_context_assembly_duration_ms(
+    coordinator: &TeamCoordinator,
+    team_id: &str,
+    role: &str,
+    step_id: &str,
+    task_id: Option<&str>,
+    attempt_id: Option<&str>,
+    phase_epoch: Option<u64>,
+) -> Option<u64> {
+    coordinator.take_context_assembly_timing(
+        team_id,
+        role,
+        step_id,
+        task_id,
+        attempt_id,
+        phase_epoch,
+    )
 }
 
 impl MeasuredRoleWorker {
@@ -716,12 +328,10 @@ impl Worker for MeasuredRoleWorker {
             .unwrap_or("");
         let step_id = raw_step_id.to_string();
         let (task_id, attempt_id, model_call_budget) = task_budget_metadata(input);
-        let scope_key = request_scope_key(
-            &step_id,
-            workswarm
-                .and_then(|w| w.get("phase_epoch"))
-                .and_then(Value::as_u64),
-        );
+        let phase_epoch = workswarm
+            .and_then(|w| w.get("phase_epoch"))
+            .and_then(Value::as_u64);
+        let scope_key = request_scope_key(&step_id, phase_epoch);
         let attempt = self.journal.count_step_spans(&step_id).saturating_add(1);
         self.coordinator
             .mark_phase_step_running(&self.team_id, &step_id);
@@ -750,6 +360,15 @@ impl Worker for MeasuredRoleWorker {
         let started = Instant::now();
 
         let result = self.inner.run(input).await;
+        let context_assembly_ms = take_context_assembly_duration_ms(
+            &self.coordinator,
+            &self.team_id,
+            &self.role,
+            &step_id,
+            task_id.as_deref(),
+            attempt_id.as_deref(),
+            phase_epoch,
+        );
 
         let wall_ms = started.elapsed().as_millis() as u64;
         let ended_at_ms = now_ms();
@@ -771,6 +390,11 @@ impl Worker for MeasuredRoleWorker {
             .as_ref()
             .map(|collector| collector.take(&scope_key))
             .unwrap_or_default();
+        let budget_reservation_wait_ms = self
+            .request_usage
+            .as_ref()
+            .map(|collector| collector.take_budget_reservation_wait(&scope_key))
+            .unwrap_or(0);
         let model_calls = if self.request_usage.is_some() {
             request_observations.len() as u64
         } else {
@@ -778,7 +402,9 @@ impl Worker for MeasuredRoleWorker {
         };
         let request_usage = if model_calls > 0
             && request_observations.len() as u64 == model_calls
-            && request_observations.iter().all(|(request, _)| request.usage.is_some())
+            && request_observations
+                .iter()
+                .all(|(request, _)| request.usage.is_some())
         {
             let mut total = TokenUsage::default();
             for (request, _) in &request_observations {
@@ -792,17 +418,21 @@ impl Worker for MeasuredRoleWorker {
         };
         let requests = request_observations
             .iter()
-            .map(|(request, succeeded)| owo_agent_protocol::ModelRequestMetricV1 {
-                request_id: request.request_id.clone(),
-                model: request.model.clone(),
-                usage: request.usage.map(|usage| owo_agent_protocol::ModelTokenUsageV1 {
-                    prompt_tokens: usage.prompt_tokens,
-                    completion_tokens: usage.completion_tokens,
-                    total_tokens: usage.total_tokens,
-                }),
-                latency_ms: request.latency_ms,
-                succeeded: *succeeded,
-            })
+            .map(
+                |(request, succeeded)| owo_agent_protocol::ModelRequestMetricV1 {
+                    request_id: request.request_id.clone(),
+                    model: request.model.clone(),
+                    usage: request
+                        .usage
+                        .map(|usage| owo_agent_protocol::ModelTokenUsageV1 {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                            total_tokens: usage.total_tokens,
+                        }),
+                    latency_ms: request.latency_ms,
+                    succeeded: *succeeded,
+                },
+            )
             .collect::<Vec<_>>();
         let usage_delta = request_usage.or_else(|| match (&usage_before, &usage_after) {
             (Some(before), Some(after)) if !overlapped => {
@@ -815,7 +445,9 @@ impl Worker for MeasuredRoleWorker {
         });
         let request_usage_complete = model_calls > 0
             && requests.len() as u64 == model_calls
-            && request_observations.iter().all(|(request, _)| request.usage.is_some());
+            && request_observations
+                .iter()
+                .all(|(request, _)| request.usage.is_some());
         let usage_attribution = if self.provider.is_none() {
             "not_applicable"
         } else if request_usage_complete {
@@ -867,13 +499,18 @@ impl Worker for MeasuredRoleWorker {
             step_id,
             task_id,
             attempt_id,
+            phase_epoch: workswarm
+                .and_then(|value| value.get("phase_epoch"))
+                .and_then(Value::as_u64),
             model_call_budget,
             started_at,
             ended_at,
             started_at_ms,
             ended_at_ms,
             wall_ms,
+            context_assembly_ms,
             provider_wait_ms,
+            budget_reservation_wait_ms,
             lease_wait_ms,
             outcome: outcome.to_string(),
             error,
@@ -961,6 +598,8 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
         .count() as u64;
     let worker_wall_ms_sum: u64 = spans.iter().map(|r| r.wall_ms).sum();
     let provider_wait_ms_sum: u64 = spans.iter().map(|r| r.provider_wait_ms).sum();
+    let budget_reservation_wait_ms_sum: u64 =
+        spans.iter().map(|r| r.budget_reservation_wait_ms).sum();
     let lease_wait_ms_sum: u64 = spans.iter().map(|r| r.lease_wait_ms).sum();
     let wall_window_ms = match spans.first() {
         Some(first) => now.saturating_sub(first.started_at_ms),
@@ -1000,6 +639,7 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
         rework: u64,
         wall_ms_sum: u64,
         provider_wait_ms_sum: u64,
+        budget_reservation_wait_ms_sum: u64,
         lease_wait_ms_sum: u64,
         model_calls: u64,
         prompt_tokens: Option<u64>,
@@ -1022,6 +662,7 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
         }
         agg.wall_ms_sum += r.wall_ms;
         agg.provider_wait_ms_sum += r.provider_wait_ms;
+        agg.budget_reservation_wait_ms_sum += r.budget_reservation_wait_ms;
         agg.lease_wait_ms_sum += r.lease_wait_ms;
         agg.model_calls += r.model_calls;
         agg.prompt_tokens = add_opt(agg.prompt_tokens, r.prompt_tokens);
@@ -1043,6 +684,7 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
                 "rework": agg.rework,
                 "wall_ms_sum": agg.wall_ms_sum,
                 "provider_wait_ms_sum": agg.provider_wait_ms_sum,
+                "budget_reservation_wait_ms_sum": agg.budget_reservation_wait_ms_sum,
                 "lease_wait_ms_sum": agg.lease_wait_ms_sum,
                 "model_calls": agg.model_calls,
                 "prompt_tokens": agg.prompt_tokens,
@@ -1073,6 +715,7 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
             "wall_window_ms": wall_window_ms,
             "worker_wall_ms_sum": worker_wall_ms_sum,
             "provider_wait_ms_sum": provider_wait_ms_sum,
+            "budget_reservation_wait_ms_sum": budget_reservation_wait_ms_sum,
             "lease_wait_ms_sum": lease_wait_ms_sum,
             "model_calls": model_calls,
             "prompt_tokens": prompt_tokens,
@@ -1085,6 +728,8 @@ pub fn aggregate_metrics(team_id: &str, records: &[WorkerSpanRecord], budget: &V
         },
         "roles": roles_json,
         "workers": workers_json,
+        "context_assembly": super::lifecycle::aggregate_context_assembly_metrics(records),
+        "execution_epochs": super::execution_epochs::aggregate_execution_epochs(records),
         "budget": budget_state(budget, records, now),
     })
 }
@@ -1154,9 +799,7 @@ pub fn budget_state(budget: &Value, records: &[WorkerSpanRecord], now_ms: u64) -
     })
 }
 
-fn latest_task_budget_spans(
-    records: &[WorkerSpanRecord],
-) -> BTreeMap<String, &WorkerSpanRecord> {
+fn latest_task_budget_spans(records: &[WorkerSpanRecord]) -> BTreeMap<String, &WorkerSpanRecord> {
     let mut latest = BTreeMap::new();
     for record in records
         .iter()
@@ -1188,7 +831,10 @@ pub fn budget_exhaustion_reason(
     records: &[WorkerSpanRecord],
     now_ms: u64,
 ) -> Option<String> {
-    if let Some(value) = budget.get("max_model_calls").filter(|value| !value.is_null()) {
+    if let Some(value) = budget
+        .get("max_model_calls")
+        .filter(|value| !value.is_null())
+    {
         if value.as_u64().is_none() {
             return Some(
                 "预算配置无效：max_model_calls 必须是非负整数，已停止调度下一阶段".to_string(),
@@ -1234,7 +880,9 @@ pub fn budget_exhaustion_reason(
                 && (!record.cost_known
                     || !matches!(
                         record.usage_attribution.as_str(),
-                        "shared_snapshot_serial" | "request_id_scoped" | "request_scoped_without_id"
+                        "shared_snapshot_serial"
+                            | "request_id_scoped"
+                            | "request_scoped_without_id"
                     ))
         });
         if usage_unknown {
@@ -1281,7 +929,7 @@ pub async fn team_budget_exhaustion(
 
 #[cfg(test)]
 mod measured_provider_tests {
-    use super::MeasuredProvider;
+    use super::super::request_budget::MeasuredProvider;
     use async_trait::async_trait;
     use owo_agent_core::gateway::{ModelProvider, StreamChunk};
     use owo_agent_core::tools::ToolSpec;

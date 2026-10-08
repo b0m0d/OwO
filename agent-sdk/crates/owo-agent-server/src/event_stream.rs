@@ -34,9 +34,9 @@ use serde_json::json;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// 订阅队列默认容量（事件数）。
@@ -112,6 +112,10 @@ impl InvalidateDomain {
         Self::Computer,
         Self::Traces,
         Self::Projects,
+        Self::Memory,
+        Self::Skills,
+        Self::Sessions,
+        Self::Usage,
     ];
 }
 
@@ -144,47 +148,35 @@ impl StreamEvent {
 
 /// 订阅端：有界队列 + 状态标记（lagged=慢消费者被断开，closed=已释放）。
 pub struct Subscription {
-    queue: Arc<(Mutex<VecDeque<StreamEvent>>, Condvar)>,
-    last_delivered: Arc<AtomicU64>,
-    dropped_mergeable: Arc<AtomicU64>,
-    dropped_critical: Arc<AtomicU64>,
-    lagged: Arc<AtomicBool>,
-    closed: Arc<AtomicBool>,
+    queue: Mutex<VecDeque<Arc<StreamEvent>>>,
+    wake: Notify,
+    last_delivered: AtomicU64,
+    dropped_mergeable: AtomicU64,
+    dropped_critical: AtomicU64,
+    lagged: AtomicBool,
+    closed: AtomicBool,
     capacity: usize,
 }
 
 impl Subscription {
-    /// 阻塞读取（带超时；超时返回 None，调用方可发心跳）。
-    pub fn recv_blocking(&self, timeout: Duration) -> Option<StreamEvent> {
-        let (lock, condvar) = &*self.queue;
-        let mut queue = lock.lock().unwrap_or_else(|e| e.into_inner());
+    /// 异步读取事件；HTTP SSE 转发使用该路径，不为每个连接占用阻塞线程。
+    pub async fn recv_async(&self) -> Option<Arc<StreamEvent>> {
         loop {
-            if let Some(event) = queue.pop_front() {
-                self.last_delivered.store(event.seq, Ordering::Relaxed);
-                return Some(event);
+            let notified = self.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(event) = queue.pop_front() {
+                    self.last_delivered.store(event.seq, Ordering::Relaxed);
+                    return Some(event);
+                }
+                if self.closed.load(Ordering::Relaxed) || self.lagged.load(Ordering::Relaxed) {
+                    return None;
+                }
             }
-            if self.closed.load(Ordering::Relaxed) {
-                return None;
-            }
-            let (guard, wait_result) = condvar
-                .wait_timeout(queue, timeout)
-                .unwrap_or_else(|e| e.into_inner());
-            queue = guard;
-            if wait_result.timed_out() {
-                return None;
-            }
+            notified.await;
         }
-    }
-
-    /// 非阻塞读取。
-    pub fn try_recv(&self) -> Option<StreamEvent> {
-        let (lock, _condvar) = &*self.queue;
-        let mut queue = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let event = queue.pop_front();
-        if let Some(event) = &event {
-            self.last_delivered.store(event.seq, Ordering::Relaxed);
-        }
-        event
     }
 
     /// 已交付的最新 seq（Last-Event-ID 续传依据）。
@@ -274,7 +266,7 @@ pub fn reset_metrics_observer_for_test() {
 /// 事件流集线器：历史（有界）+ 订阅者集合（每订阅者有界队列）。
 pub struct EventStreamHub {
     next_seq: AtomicU64,
-    history: Mutex<VecDeque<StreamEvent>>,
+    history: Mutex<VecDeque<Arc<StreamEvent>>>,
     subscribers: Mutex<Vec<Arc<Subscription>>>,
     published_total: AtomicU64,
     dropped_mergeable_total: AtomicU64,
@@ -328,9 +320,10 @@ impl EventStreamHub {
     ) -> u64 {
         let mut event = StreamEvent::new(kind, critical, data.into(), trace_id);
         event.seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let event = Arc::new(event);
         {
             let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
-            history.push_back(event.clone());
+            history.push_back(Arc::clone(&event));
             while history.len() > HISTORY_CAPACITY {
                 history.pop_front();
             }
@@ -404,12 +397,15 @@ impl EventStreamHub {
     }
 
     /// 订阅：返回订阅端 + 订阅时刻之前已发布事件的快照（供初始重放）。
-    pub fn subscribe(&self) -> (Arc<Subscription>, Vec<StreamEvent>) {
+    pub fn subscribe(&self) -> (Arc<Subscription>, Vec<Arc<StreamEvent>>) {
         self.subscribe_after(0)
     }
 
     /// 按 `Last-Event-ID` 续传：重放 `seq > last_event_id` 的历史事件后进入实时流。
-    pub fn subscribe_after(&self, last_event_id: u64) -> (Arc<Subscription>, Vec<StreamEvent>) {
+    pub fn subscribe_after(
+        &self,
+        last_event_id: u64,
+    ) -> (Arc<Subscription>, Vec<Arc<StreamEvent>>) {
         self.subscribe_with_capacity(DEFAULT_QUEUE_CAPACITY, last_event_id)
     }
 
@@ -420,14 +416,15 @@ impl EventStreamHub {
         &self,
         capacity: usize,
         last_event_id: u64,
-    ) -> (Arc<Subscription>, Vec<StreamEvent>) {
+    ) -> (Arc<Subscription>, Vec<Arc<StreamEvent>>) {
         let subscription = Arc::new(Subscription {
-            queue: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
-            last_delivered: Arc::new(AtomicU64::new(last_event_id)),
-            dropped_mergeable: Arc::new(AtomicU64::new(0)),
-            dropped_critical: Arc::new(AtomicU64::new(0)),
-            lagged: Arc::new(AtomicBool::new(false)),
-            closed: Arc::new(AtomicBool::new(false)),
+            queue: Mutex::new(VecDeque::new()),
+            wake: Notify::new(),
+            last_delivered: AtomicU64::new(last_event_id),
+            dropped_mergeable: AtomicU64::new(0),
+            dropped_critical: AtomicU64::new(0),
+            lagged: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             capacity,
         });
         let replay = {
@@ -457,14 +454,15 @@ impl EventStreamHub {
     /// 属于"历史"（桌面 WebView 先水合再连流，本就不需要重放），登记后发布的
     /// 事件必然进入本队列。旧语义「缺省从头重放」会让整环历史一次性下发，
     /// 每个领域各刷一次——真实桌面冷启动实测首屏业务请求 19 条（超 §8.2 预算）。
-    pub fn subscribe_live_only(&self) -> (Arc<Subscription>, Vec<StreamEvent>) {
+    pub fn subscribe_live_only(&self) -> (Arc<Subscription>, Vec<Arc<StreamEvent>>) {
         let subscription = Arc::new(Subscription {
-            queue: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
-            last_delivered: Arc::new(AtomicU64::new(0)),
-            dropped_mergeable: Arc::new(AtomicU64::new(0)),
-            dropped_critical: Arc::new(AtomicU64::new(0)),
-            lagged: Arc::new(AtomicBool::new(false)),
-            closed: Arc::new(AtomicBool::new(false)),
+            queue: Mutex::new(VecDeque::new()),
+            wake: Notify::new(),
+            last_delivered: AtomicU64::new(0),
+            dropped_mergeable: AtomicU64::new(0),
+            dropped_critical: AtomicU64::new(0),
+            lagged: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             capacity: DEFAULT_QUEUE_CAPACITY,
         });
         let head = {
@@ -499,10 +497,7 @@ impl EventStreamHub {
         let subscribers = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
         subscribers
             .iter()
-            .map(|s| {
-                let (queue, _) = &*s.queue;
-                queue.lock().unwrap_or_else(|e| e.into_inner()).len()
-            })
+            .map(|s| s.queue.lock().unwrap_or_else(|e| e.into_inner()).len())
             .sum()
     }
 
@@ -542,7 +537,7 @@ impl EventStreamHub {
     /// 投递事件到每个订阅者（背压策略，不阻塞）。
     /// 指标样本在全部锁释放后统一发出（避免在持有 queue/subscribers 锁时
     /// 再进入 sample() 造成非重入 Mutex 死锁）。
-    fn deliver(&self, event: &StreamEvent) {
+    fn deliver(&self, event: &Arc<StreamEvent>) {
         let (subscribers, mut prune) = {
             let subscribers = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
             (subscribers.clone(), Vec::new())
@@ -572,11 +567,10 @@ impl EventStreamHub {
                 }
                 continue;
             }
-            let (queue, condvar) = &*subscription.queue;
-            let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+            let mut queue = subscription.queue.lock().unwrap_or_else(|e| e.into_inner());
             if queue.len() < subscription.capacity {
-                queue.push_back(event.clone());
-                condvar.notify_one();
+                queue.push_back(Arc::clone(event));
+                subscription.wake.notify_one();
                 continue;
             }
             // 队列已满：可合并事件直接丢弃；关键事件挤掉队内最旧可合并事件。
@@ -600,12 +594,13 @@ impl EventStreamHub {
                     .fetch_add(evicted as u64, Ordering::Relaxed);
                 self.dropped_mergeable_total
                     .fetch_add(evicted as u64, Ordering::Relaxed);
-                queue.push_back(event.clone());
-                condvar.notify_one();
+                queue.push_back(Arc::clone(event));
+                subscription.wake.notify_one();
                 dropped_mergeable_now += evicted as u64;
             } else {
                 // 关键事件也放不下 → 慢消费者断开（防拖垮调度器）。
                 subscription.lagged.store(true, Ordering::Relaxed);
+                subscription.wake.notify_one();
                 self.lagged_total.fetch_add(1, Ordering::Relaxed);
                 subscription
                     .dropped_critical
@@ -634,8 +629,7 @@ impl EventStreamHub {
         if subscription.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let (_, condvar) = &*subscription.queue;
-        condvar.notify_all();
+        subscription.wake.notify_waiters();
         {
             let mut subscribers = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
             subscribers.retain(|s| !s.closed.load(Ordering::Relaxed));
@@ -728,10 +722,8 @@ async fn events_stream(
     };
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_FORWARD_QUEUE_CAPACITY);
 
-    // 帧泵运行在专用 std 线程：recv_blocking 是 std Condvar 阻塞等待，
-    // 之前放在 tokio::spawn 里会占死 worker 线程（§16.1"移除阻塞接收器"——
-    // 运行时冒烟发现：live /events/stream 连心跳都收不到、订阅者永不关闭、
-    // 路由级续传测试挂起，同一根因）。blocking_send 仅在此专用 std 线程调用。
+    // Async frame pump: wait for queue notifications without blocking a Tokio worker or
+    // allocating one operating-system thread per connected SSE client.
     let disconnect_subscription = Arc::clone(&subscription);
     let disconnect_signal = tx.clone();
     tokio::spawn(async move {
@@ -739,23 +731,30 @@ async fn events_stream(
         hub().close(&disconnect_subscription);
     });
 
-    std::thread::spawn(move || {
+    tokio::spawn(async move {
         for event in replay {
-            if send_frame(&tx, &event).is_err() {
+            if send_frame(&tx, &event).await.is_err() {
                 hub().close(&subscription);
                 return;
             }
         }
         loop {
-            match subscription.recv_blocking(Duration::from_millis(HEARTBEAT_INTERVAL_MS)) {
-                Some(event) => {
-                    if send_frame(&tx, &event).is_err() {
+            match tokio::time::timeout(
+                Duration::from_millis(HEARTBEAT_INTERVAL_MS),
+                subscription.recv_async(),
+            )
+            .await
+            {
+                Ok(Some(event)) => {
+                    if send_frame(&tx, &event).await.is_err() {
                         break;
                     }
                 }
-                None => {
+                Ok(None) => break,
+                Err(_) => {
                     if tx
-                        .blocking_send(Ok(Event::default().comment("keep-alive")))
+                        .send(Ok(Event::default().comment("keep-alive")))
+                        .await
                         .is_err()
                     {
                         break;
@@ -763,7 +762,7 @@ async fn events_stream(
                 }
             }
             if subscription.is_lagged() {
-                // 慢消费者：断开而非拖垮发布方。
+                // Slow consumer: disconnect instead of blocking publishers.
                 break;
             }
         }
@@ -773,11 +772,15 @@ async fn events_stream(
     Sse::new(ReceiverStream::new(rx))
 }
 
-fn send_frame(tx: &mpsc::Sender<Result<Event, Infallible>>, event: &StreamEvent) -> Result<(), ()> {
-    tx.blocking_send(Ok(Event::default()
+async fn send_frame(
+    tx: &mpsc::Sender<Result<Event, Infallible>>,
+    event: &StreamEvent,
+) -> Result<(), ()> {
+    tx.send(Ok(Event::default()
         .event(&event.kind)
         .id(event.seq.to_string())
         .data(event_json(event))))
+        .await
         .map_err(|_| ())
 }
 

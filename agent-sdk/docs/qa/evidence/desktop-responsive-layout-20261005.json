@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-05",
+  "scope": "desktop responsive layout at minimum desktop width and mobile navigation",
+  "change": "Reduced the global desktop minimum width from 960px to 900px so the existing 900x600 breakpoint contract can be used without horizontal overflow; retained fluid mobile rules below 860px.",
+  "browser_validation": {
+    "browser": "Microsoft Edge via bundled Playwright",
+    "page": "static desktop/web HTTP server; Core/Daemon not running",
+    "viewports": [
+      {
+        "viewport": "1365x900",
+        "document_width": 1365,
+        "status_buttons_visible": 5,
+        "page_errors": 0
+      },
+      {
+        "viewport": "900x600",
+        "document_width": 900,
+        "status_buttons_visible": 5,
+        "page_errors": 0
+      },
+      {
+        "viewport": "390x844",
+        "document_width": 390,
+        "status_buttons_visible": 5,
+        "page_errors": 0,
+        "mobile_menu_visible": true
+      }
+    ],
+    "mobile_sidebar": {
+      "after_open_transition": {
+        "aria_expanded": "true",
+        "sidebar_left": 0,
+        "sidebar_right": 292,
+        "backdrop_visible": true
+      },
+      "after_backdrop_click": {
+        "aria_expanded": "false",
+        "mobile_sidebar_open": false
+      }
+    }
+  },
+  "node_validation": {
+    "focused_status_and_boot_tests": {
+      "passed": 20,
+      "failed": 0
+    },
+    "full_web_tests": {
+      "total": 446,
+      "passed": 431,
+      "failed": 15
+    },
+    "syntax_checks": "app.js, app-domain.js and status-bar.view.js pass node --check"
+  },
+  "rust_validation": "No Rust changes in this increment. Cargo remains unrun while system memory is below the workspace gate.",
+  "remaining": [
+    "The full web test suite still has 15 failures in test harness, legacy source contracts, and current settings/approval contracts; they are not all classified.",
+    "Static HTTP does not verify live Daemon behavior.",
+    "The cloud task HTTP handlers still hold the queue lock while awaiting remote execution; queue actor refactor remains outstanding."
+  ]
+}

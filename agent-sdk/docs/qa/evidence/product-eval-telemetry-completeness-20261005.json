@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-05",
+  "scope": "devtools/product-eval independent Cargo workspace",
+  "changes": [
+    "Token and cost totals now require complete valid telemetry coverage.",
+    "Paired token/cost deltas are withheld unless every paired cell has both values; coverage is emitted explicitly.",
+    "Scripted Team reviewers copy host-bound reviewed_requirement_ids from the current manifest.",
+    "Stale role topology, template acceptance, and workspace-scope assertions were aligned with current source contracts."
+  ],
+  "verification": {
+    "command": "Invoke-CiCargo test --manifest-path devtools/product-eval/Cargo.toml --locked -j 2 -- --test-threads=2",
+    "exit_code": 0,
+    "passed": 101,
+    "failed": 0,
+    "ignored": 2,
+    "ignored_reason": "Live Single/Team paired suites require explicit configuration and a live model provider.",
+    "rustfmt_check": "passed for changed ProductEval Rust files",
+    "git_diff_check": "passed"
+  },
+  "warnings": [
+    "Four existing owo-agent-core dead_code warnings.",
+    "One ProductEval unused_mut warning."
+  ],
+  "not_verified": [
+    "Full agent-sdk workspace tests.",
+    "Server, CLI, and Tauri package tests.",
+    "Live Single versus Team paired model benchmark.",
+    "Desktop GUI acceptance."
+  ],
+  "conclusion": "ProductEval tests and telemetry semantics pass; no live performance or quality advantage is established."
+}

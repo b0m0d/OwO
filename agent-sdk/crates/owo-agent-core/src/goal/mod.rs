@@ -4,7 +4,7 @@
 //! - [`Goal`]：目标对象（objective / 状态机 / 预算 / 验收条件）。
 //! - [`Worker`] + [`WorkerRegistry`]：步骤执行抽象（测试注入 MockWorker；
 //!   真实接入 `Agent::run_subagent` 由主控后续做，本模块只读引用 agent 语义）。
-//! - [`GoalRunner`]：拓扑 wave 调度 + 并行度上限 + 步内重试 + 验证断言 +
+//! - [`GoalRunner`]：依赖感知关键路径优先调度 + 并行度上限 + 步内重试 + 验证断言 +
 //!   replan（只重建未完成子图）+ 预算熔断 + abort + 持久化恢复（已完成步骤不重跑）+ 全程审计。
 //! - A2 统一调度适配层：步骤可经显式绑定定向到
 //!   `in_process` / `local_process` / `fleet_node`（接口见 [`crate::execution_target`]）；
@@ -13,25 +13,28 @@
 
 use crate::audit::AuditLog;
 use crate::blackboard::Blackboard;
-use crate::capability::{CapabilityWorkerRegistry, RouteDecision, WorkerRequirement};
-use crate::critic::{review_loop, CriticConfig};
-use crate::execution_target::{
-    dispatch_disposition, select_binding, DispatchCancelRegistry, DispatchChannel,
-    DispatchDisposition, FleetDispatchWorker, FleetProbe, LocalProcessProbe, TargetAvailability,
-    WorkerBinding,
-};
+use crate::critic::CriticConfig;
+use crate::execution_target::{select_binding, DispatchCancelRegistry};
 use crate::experience_store::{Attribution, ExperienceStore, Outcome};
 use crate::plan::{Plan, StepSpec, StepStatus};
-use crate::worker_pool::{PoolWorker, WorkerPool};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
+mod acceptance;
+mod execution;
+mod persistence;
+mod scheduler;
 mod types;
 
 #[cfg(test)]
 mod tests;
 
 pub use types::*;
+
+use execution::{
+    run_step_attempts, run_worker_cancellable, step_validation_receipt_matches,
+    validate_host_command_validation, verify_step_output, ExecutionBudget, StepOutcome, StepResult,
+    StepRuntime, StepStop,
+};
 
 type StepSkipper = Arc<dyn Fn(&StepSpec) -> Option<String> + Send + Sync>;
 type WorkspaceCommandVerifier = Arc<
@@ -68,12 +71,16 @@ pub struct GoalRunner {
     blackboard: Option<Blackboard>,
     /// 可选经验库（worker/Goal 结果幂等写入；空闲期由主控调 `aggregate` 蒸馏技能元数据）。
     experience: Option<ExperienceStore>,
-    /// 可选单步完成流（上层可在 DAG 继续执行时同步持久化结果）。
-    step_progress: Option<tokio::sync::mpsc::UnboundedSender<StepProgressUpdate>>,
+    /// 可选步骤进度快照流（按步骤合并，供上层在 DAG 继续时持久化最新状态）。
+    step_progress: Option<StepProgressSender>,
+    attempt_admission: Option<AttemptAdmissionSender>,
     /// 可选动态 ready 节点跳过判定（用于运行期质量策略）。
     step_skipper: Option<StepSkipper>,
     workspace_verification_root: Option<std::path::PathBuf>,
     workspace_command_verifier: Option<WorkspaceCommandVerifier>,
+    defer_goal_acceptance_to_delivery_gate: bool,
+    execution_budget_usage: Option<(u32, u32)>,
+    persistence_error: Option<String>,
 }
 
 impl GoalRunner {
@@ -87,9 +94,13 @@ impl GoalRunner {
             blackboard: None,
             experience: None,
             step_progress: None,
+            attempt_admission: None,
             step_skipper: None,
             workspace_verification_root: None,
             workspace_command_verifier: None,
+            defer_goal_acceptance_to_delivery_gate: false,
+            execution_budget_usage: None,
+            persistence_error: None,
         }
     }
 
@@ -112,18 +123,44 @@ impl GoalRunner {
             blackboard: None,
             experience: None,
             step_progress: None,
+            attempt_admission: None,
             step_skipper: None,
             workspace_verification_root: None,
             workspace_command_verifier: None,
+            defer_goal_acceptance_to_delivery_gate: false,
+            execution_budget_usage: None,
+            persistence_error: None,
         }
     }
 
+    /// Defer aggregate goal acceptance to the outer Team DeliveryGate.
+    ///
+    /// Team runs execute partial DAG phases here. A successful phase only means its
+    /// claimed steps completed; it must not create a delivery completion record.
+    pub(crate) fn defer_goal_acceptance_to_delivery_gate(&mut self) {
+        self.defer_goal_acceptance_to_delivery_gate = true;
+    }
+
+    /// Seed a phase-local runner with usage committed by prior Team phases.
+    pub(crate) fn seed_execution_budget_usage(&mut self, steps_taken: u32, total_retries: u32) {
+        self.execution_budget_usage = Some((steps_taken, total_retries));
+    }
+
     /// 把每步终态推送给上层；WorkSwarm 用它逐任务写入完整运行状态。
-    pub fn attach_step_progress(
-        &mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<StepProgressUpdate>,
-    ) {
+    pub fn attach_step_progress(&mut self, sender: StepProgressSender) {
         self.step_progress = Some(sender);
+    }
+
+    /// Bind host cancellation directly to every in-flight step and admission wait.
+    pub(crate) fn attach_abort_signal(&mut self, abort_signal: Arc<std::sync::atomic::AtomicBool>) {
+        if self.aborted_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            abort_signal.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.aborted_flag = abort_signal;
+    }
+
+    pub(crate) fn attach_attempt_admission(&mut self, sender: AttemptAdmissionSender) {
+        self.attempt_admission = Some(sender);
     }
 
     /// 为显式 WorkspacePaths 计划绑定宿主提供的验证根目录。
@@ -137,11 +174,7 @@ impl GoalRunner {
     /// command requirement remains Unsupported and cannot unlock dependent steps.
     pub fn attach_workspace_command_verifier<F>(&mut self, verifier: F)
     where
-        F: Fn(
-                &str,
-                &str,
-                &crate::plan::VerificationRequirementV1,
-            ) -> HostCommandValidationV1
+        F: Fn(&str, &str, &crate::plan::VerificationRequirementV1) -> HostCommandValidationV1
             + Send
             + Sync
             + 'static,
@@ -251,6 +284,7 @@ impl GoalRunner {
             )
             .map(|receipt| receipt.receipt_id.clone())
             .collect::<Vec<_>>();
+        let candidate_version_sha256 = self.candidate_version_sha256(true, false).ok().flatten();
         self.state.completion_record = Some(crate::completion::build_completion_record(
             &self.state.goal.id,
             &self.state.run_id,
@@ -259,7 +293,7 @@ impl GoalRunner {
                 ..crate::completion::CompletionEvidence::default()
             }),
             evidence_receipt_ids,
-            None,
+            candidate_version_sha256,
         ));
     }
 
@@ -297,7 +331,18 @@ impl GoalRunner {
     /// 执行计划（恢复时已完成步骤自动跳过）。返回目标终态。
     /// 结束后把 Goal 结果幂等写入经验库（若有）。
     pub async fn run(&mut self, workers: &WorkerRegistry) -> Result<GoalStatus, String> {
-        let status = self.run_inner(workers).await?;
+        if self.persistence_error.is_some() {
+            self.persist_if_needed();
+        }
+        let run_result = self.run_inner(workers).await;
+        let status = match (run_result, self.persistence_error.clone()) {
+            (Ok(status), None) => status,
+            (Err(run_error), Some(persist_error)) => {
+                return Err(format!("{run_error}; {persist_error}"));
+            }
+            (_, Some(persist_error)) => return Err(persist_error),
+            (Err(run_error), None) => return Err(run_error),
+        };
         if let Some(exp) = &self.experience {
             let outcome = match status {
                 GoalStatus::Succeeded => Outcome::Success,
@@ -339,6 +384,10 @@ impl GoalRunner {
         let started = std::time::Instant::now();
         let budget = self.state.goal.budget;
         let max_parallel = self.config.max_parallel.max(1);
+        let (used_steps, used_retries) = self
+            .execution_budget_usage
+            .unwrap_or((self.state.steps_taken, self.state.total_retries));
+        let execution_budget = Arc::new(ExecutionBudget::new(used_steps, used_retries, budget));
         let abort_flag = Arc::clone(&self.aborted_flag);
         let workers = workers.clone();
         let bb_writer = if let Some(bb) = &self.blackboard {
@@ -347,7 +396,7 @@ impl GoalRunner {
             None
         };
         let rt = StepRuntime {
-            budget,
+            execution_budget: Arc::clone(&execution_budget),
             aborted: abort_flag,
             critic: self.critic.clone(),
             blackboard: self.blackboard.clone(),
@@ -363,6 +412,7 @@ impl GoalRunner {
             cancels: DispatchCancelRegistry::default(),
             workspace_verification_root: self.workspace_verification_root.clone(),
             workspace_command_verifier: self.workspace_command_verifier.clone(),
+            attempt_admission: self.attempt_admission.clone(),
         };
 
         loop {
@@ -382,34 +432,12 @@ impl GoalRunner {
                     budget.max_duration_secs
                 ));
             }
-            // 步骤数预算熔断。
-            if self.state.steps_taken >= budget.max_steps {
-                return self.fail_goal(format!(
-                    "预算熔断：步骤数超过 {}（steps_taken={}）",
-                    budget.max_steps, self.state.steps_taken
-                ));
-            }
-            // 全局重试预算熔断。
-            if self.state.total_retries >= budget.max_total_retries {
-                return self.fail_goal(format!(
-                    "预算熔断：全局重试次数超过 {}（total_retries={}）",
-                    budget.max_total_retries, self.state.total_retries
-                ));
-            }
-
             // 计算当前就绪步骤：依赖全部 Succeeded 且自身未完成。
-            let ready: Vec<StepSpec> = self
-                .state
-                .plan
-                .steps
-                .iter()
-                .filter(|step| {
-                    let record = &self.state.records[&step.id];
-                    record.status.can_resume() && self.deps_succeeded(step)
-                })
-                .cloned()
-                .collect();
-            if ready.is_empty() {
+            let mut frontier = scheduler::ReadyFrontier::new(&self.state.plan.steps);
+            frontier.enqueue_ready_steps(&self.state.plan.steps, |step| {
+                self.state.records[&step.id].status.can_resume() && self.deps_succeeded(step)
+            });
+            if frontier.is_empty() {
                 // 检查是否全部成功 → 目标验收。
                 if self
                     .state
@@ -418,6 +446,16 @@ impl GoalRunner {
                     .iter()
                     .all(|s| self.state.records[&s.id].status == StepStatus::Succeeded)
                 {
+                    if self.defer_goal_acceptance_to_delivery_gate {
+                        self.state.goal.transition(GoalStatus::Succeeded);
+                        self.state.goal.error = None;
+                        self.log(
+                            "goal.phase_succeeded",
+                            "阶段步骤完成，目标验收交由外层 Team DeliveryGate",
+                        );
+                        self.persist_if_needed();
+                        return Ok(GoalStatus::Succeeded);
+                    }
                     return self.verify_goal();
                 }
                 if self.state.replan_count >= budget.max_replans {
@@ -426,35 +464,17 @@ impl GoalRunner {
                 return self.fail_goal("死锁：存在未完成步骤但无就绪步骤".to_string());
             }
 
-            // 就绪即派发（JoinSet + max_parallel 限流）：任一步骤返回后立即合并，
-            // 重算 DAG 并填充空出的 Worker 槽位，不等待同一批次里的慢步骤结束。
+            // 就绪即派发：关键路径优先队列在完成事件到达时只接纳直接解锁的后继，
+            // 关键链可越过无关积压，且不等待同一批次里的慢步骤结束。
             let mut set = tokio::task::JoinSet::new();
-            let mut pending: std::collections::VecDeque<StepSpec> = ready.into_iter().collect();
-            let mut scheduled = std::collections::HashSet::new();
             let mut failed: Vec<StepSpec> = Vec::new();
             let mut stop_error: Option<StepStop> = None;
             loop {
                 while set.len() < max_parallel && stop_error.is_none() {
-                    if pending.is_empty() {
-                        pending.extend(
-                            self.state
-                                .plan
-                                .steps
-                                .iter()
-                                .filter(|step| {
-                                    !scheduled.contains(&step.id)
-                                        && self.state.records[&step.id].status.can_resume()
-                                        && self.deps_succeeded(step)
-                                })
-                                .cloned(),
-                        );
-                    }
-                    let Some(step) = pending.pop_front() else {
+                    let Some(step_index) = frontier.pop() else {
                         break;
                     };
-                    if !scheduled.insert(step.id.clone()) {
-                        continue;
-                    }
+                    let step = self.state.plan.steps[step_index].clone();
                     if let Some(reason) = self
                         .step_skipper
                         .as_ref()
@@ -473,6 +493,14 @@ impl GoalRunner {
                         );
                         self.persist_if_needed();
                         self.notify_step_progress_with_skip(&step.id, Some(reason));
+                        frontier.enqueue_ready_successors(
+                            &step.id,
+                            &self.state.plan.steps,
+                            |candidate| {
+                                self.state.records[&candidate.id].status.can_resume()
+                                    && self.deps_succeeded(candidate)
+                            },
+                        );
                         continue;
                     }
                     let target_note = select_binding(&self.config.bindings, &step.id, &step.worker)
@@ -517,8 +545,22 @@ impl GoalRunner {
                 if set.is_empty() || stop_error.is_some() {
                     break;
                 }
-                if let Err(stop) = self.merge_step_outcome(set.join_next().await, &mut failed) {
+                let joined = set.join_next().await;
+                let completed_step_id = joined
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|outcome| outcome.step_id.clone());
+                if let Err(stop) = self.merge_step_outcome(joined, &mut failed) {
                     stop_error = Some(stop);
+                } else if let Some(completed_step_id) = completed_step_id {
+                    frontier.enqueue_ready_successors(
+                        &completed_step_id,
+                        &self.state.plan.steps,
+                        |candidate| {
+                            self.state.records[&candidate.id].status.can_resume()
+                                && self.deps_succeeded(candidate)
+                        },
+                    );
                 }
             }
             // 早退路径（abort/预算熔断/目标拒绝）：先置位 abort 标志（通知在飞
@@ -602,7 +644,12 @@ impl GoalRunner {
             None => return Err(StepStop::Budget("步骤任务丢失".to_string())),
         };
         self.state.steps_taken = self.state.steps_taken.saturating_add(outcome.attempts);
-        self.state.total_retries = self.state.total_retries.saturating_add(outcome.attempts);
+        // The first execution is a step attempt, not a retry; later worker/critic
+        // executions consume the global retry budget.
+        self.state.total_retries = self
+            .state
+            .total_retries
+            .saturating_add(outcome.attempts.saturating_sub(1));
         match outcome.result {
             StepResult::Ok {
                 ref output,
@@ -865,1554 +912,5 @@ impl GoalRunner {
                 .map(|r| r.status == StepStatus::Succeeded)
                 .unwrap_or(false)
         })
-    }
-
-    /// Invalidate Passed receipts if their workspace snapshot no longer matches the final tree.
-    fn invalidate_stale_workspace_receipts(&mut self) -> Vec<String> {
-        fn invalidate(
-            receipts: &mut [crate::plan::ValidationReceiptV1],
-            workspace_root: Option<&std::path::Path>,
-            stale_ids: &mut Vec<String>,
-        ) {
-            for receipt in receipts {
-                if receipt.verdict != crate::plan::ValidationVerdictV1::Passed
-                    || !receipt
-                        .subject_sha256
-                        .keys()
-                        .any(|subject| subject.starts_with("workspace-path:"))
-                {
-                    continue;
-                }
-                let matches = workspace_root.is_some_and(|root| {
-                    crate::verification::workspace_subjects_match_current(
-                        root,
-                        &receipt.subject_sha256,
-                    )
-                });
-                if !matches {
-                    receipt.verdict = crate::plan::ValidationVerdictV1::Stale;
-                    receipt.detail = Some(
-                        "Goal 最终交付时工作区文件已偏离该验证回执绑定的快照".to_string(),
-                    );
-                    receipt.completed_at = chrono::Utc::now().to_rfc3339();
-                    stale_ids.push(receipt.receipt_id.clone());
-                }
-            }
-        }
-
-        let workspace_root = self.workspace_verification_root.clone();
-        let mut stale_ids = Vec::new();
-        for record in self.state.records.values_mut() {
-            invalidate(
-                &mut record.validation_receipts,
-                workspace_root.as_deref(),
-                &mut stale_ids,
-            );
-        }
-        invalidate(
-            &mut self.state.validation_receipts,
-            workspace_root.as_deref(),
-            &mut stale_ids,
-        );
-        stale_ids
-    }
-
-    /// Goal completion is backed by host receipts over the accepted aggregate output.
-    fn verify_goal(&mut self) -> Result<GoalStatus, String> {
-        self.state.goal.transition(GoalStatus::Verifying);
-        self.log("goal.verifying", "全部步骤成功，进入目标验收");
-        let plan = if let Some(plan) = self.state.goal.verification_plan.clone() {
-            Some(plan)
-        } else if self.state.goal.acceptance.is_empty() {
-            None
-        } else {
-            Some(crate::verification::plan_for_specs(
-                &format!("verify-goal-{}", self.state.goal.id),
-                &self.state.goal.acceptance,
-            ))
-        };
-        let has_candidate_changes = self.state.plan.steps.iter().any(|step| {
-            self.state
-                .records
-                .get(&step.id)
-                .is_some_and(|record| record.status == StepStatus::Succeeded)
-        });
-        let mut required_validation_count = 0usize;
-        let mut passed_required_validation_count = 0usize;
-        let mut failed_required_validation_count = 0usize;
-        let mut completion_evidence_receipt_ids = Vec::new();
-        for step in &self.state.plan.steps {
-            let Some(step_plan) = &step.verification_plan else {
-                continue;
-            };
-            let record = self.state.records.get(&step.id);
-            let receipts = record
-                .map(|record| record.validation_receipts.as_slice())
-                .unwrap_or_default();
-            let active_attempt_id = record.and_then(|record| record.attempt_id.as_deref());
-            let active_epoch = record.and_then(|record| record.phase_epoch);
-            let output_sha256 = record
-                .and_then(|record| record.output.as_deref())
-                .map(|output| crate::cas_store::CasStore::hash_of(output.as_bytes()));
-            for requirement in step_plan.requirements.iter().filter(|item| item.required) {
-                required_validation_count += 1;
-                let receipt = active_attempt_id
-                    .zip(active_epoch)
-                    .zip(output_sha256.as_deref())
-                    .and_then(|((attempt_id, epoch), output_sha256)| {
-                        receipts.iter().rev().find(|receipt| {
-                            step_validation_receipt_matches(
-                                &step.id,
-                                attempt_id,
-                                epoch,
-                                output_sha256,
-                                requirement,
-                                receipt,
-                            )
-                        })
-                    });
-                match receipt.map(|receipt| receipt.verdict) {
-                    Some(crate::plan::ValidationVerdictV1::Passed) => {
-                        passed_required_validation_count += 1;
-                        if let Some(receipt) = receipt {
-                            completion_evidence_receipt_ids.push(receipt.receipt_id.clone());
-                        }
-                    }
-                    Some(crate::plan::ValidationVerdictV1::Failed) => {
-                        failed_required_validation_count += 1;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if let Some(plan) = plan {
-            if let Err(reason) = plan.validate() {
-                return self.fail_goal(format!("目标 VerificationPlan 非法：{reason}"));
-            }
-            let accepted_steps = self
-                .state
-                .records
-                .values()
-                .filter(|record| record.status == StepStatus::Succeeded)
-                .filter_map(|record| record.output.as_ref().map(|output| (record, output)))
-                .collect::<Vec<_>>();
-            let summary = accepted_steps
-                .iter()
-                .map(|(_, output)| output.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let input_sha256 = crate::cas_store::CasStore::hash_of(summary.as_bytes());
-            let verification_root = self.workspace_verification_root.clone();
-            let environment_id = verification_root
-                .as_deref()
-                .and_then(|root| root.canonicalize().ok())
-                .map(|root| {
-                    format!(
-                        "goal-workspace-v1:{}",
-                        crate::cas_store::CasStore::hash_of(root.to_string_lossy().as_bytes())
-                    )
-                })
-                .unwrap_or_else(|| "goal-aggregate-output-v1".to_string());
-            let evidence_refs = accepted_steps
-                .iter()
-                .map(|(record, _)| {
-                    format!(
-                        "goal-step:{}:attempt:{}",
-                        record.step_id,
-                        record.attempt_id.as_deref().unwrap_or("legacy")
-                    )
-                })
-                .collect::<Vec<_>>();
-            for requirement in &plan.requirements {
-                let (verdict, detail, workspace_subjects) =
-                    crate::verification::execute_registered_requirement(
-                        requirement,
-                        &summary,
-                        verification_root.as_deref(),
-                    );
-                let mut receipt_subjects = std::collections::HashMap::from([(
-                    "goal-aggregate-output".to_string(),
-                    input_sha256.clone(),
-                )]);
-                receipt_subjects.extend(workspace_subjects.clone());
-                let workspace_subjects_sha256 =
-                    serde_json::to_vec(&workspace_subjects).unwrap_or_default();
-                let changeset_sha256 = (!workspace_subjects.is_empty()).then(|| {
-                    crate::cas_store::CasStore::hash_of(&workspace_subjects_sha256)
-                });
-                let timestamp = chrono::Utc::now().to_rfc3339();
-                let arguments = serde_json::to_string(&requirement.arguments)
-                    .unwrap_or_else(|_| "null".to_string());
-                let attempt_id = format!("{}:goal-verification", self.state.run_id);
-                let arguments_sha256 = crate::cas_store::CasStore::hash_of(arguments.as_bytes());
-                let validator_version = requirement
-                    .validator_version
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string());
-                let verdict_label =
-                    serde_json::to_string(&verdict).unwrap_or_else(|_| "unknown".to_string());
-                let identity = format!(
-                    "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-                    self.state.goal.id,
-                    attempt_id,
-                    self.state.replan_count,
-                    requirement.requirement_id,
-                    requirement.validator_id,
-                    validator_version,
-                    arguments_sha256,
-                    input_sha256,
-                    crate::cas_store::CasStore::hash_of(&workspace_subjects_sha256),
-                    verdict_label
-                );
-                let receipt = crate::plan::ValidationReceiptV1 {
-                    receipt_id: crate::cas_store::CasStore::hash_of(identity.as_bytes()),
-                    task_id: self.state.goal.id.clone(),
-                    attempt_id,
-                    epoch: self.state.replan_count as u64,
-                    requirement_id: requirement.requirement_id.clone(),
-                    validator_id: requirement.validator_id.clone(),
-                    validator_version,
-                    arguments_sha256,
-                    input_sha256: input_sha256.clone(),
-                    environment_id: environment_id.clone(),
-                    changeset_sha256,
-                    detail: detail.clone(),
-                    subject_sha256: receipt_subjects,
-                    verdict,
-                    evidence_refs: evidence_refs.clone(),
-                    review_result: None,
-                    started_at: timestamp.clone(),
-                    completed_at: timestamp,
-                };
-                if requirement.required && verdict == crate::plan::ValidationVerdictV1::Passed {
-                    completion_evidence_receipt_ids.push(receipt.receipt_id.clone());
-                }
-                if !self
-                    .state
-                    .validation_receipts
-                    .iter()
-                    .any(|stored| stored.receipt_id == receipt.receipt_id)
-                {
-                    self.state.validation_receipts.push(receipt);
-                }
-                if requirement.required {
-                    required_validation_count += 1;
-                    match verdict {
-                        crate::plan::ValidationVerdictV1::Passed => {
-                            passed_required_validation_count += 1;
-                        }
-                        crate::plan::ValidationVerdictV1::Failed => {
-                            failed_required_validation_count += 1;
-                        }
-                        _ => {}
-                    }
-                    if verdict != crate::plan::ValidationVerdictV1::Passed {
-                        let completion_status =
-                            crate::completion::decide_completion(crate::completion::CompletionEvidence {
-                                response_finished: true,
-                                has_candidate_changes: true,
-                                required_validation_count: 1,
-                                passed_required_validation_count: usize::from(
-                                    verdict == crate::plan::ValidationVerdictV1::Passed,
-                                ),
-                                failed_required_validation_count: usize::from(
-                                    verdict == crate::plan::ValidationVerdictV1::Failed,
-                                ),
-                                stale_evidence: verdict
-                                    == crate::plan::ValidationVerdictV1::Stale,
-                                ..crate::completion::CompletionEvidence::default()
-                            });
-                        return self.fail_goal_with_status(
-                            format!(
-                                "目标验收要求 {} 未通过或未验证：{}",
-                                requirement.requirement_id,
-                                detail.as_deref().unwrap_or("验证器未返回通过")
-                            ),
-                            completion_status,
-                        );
-                    }
-                }
-            }
-        }
-        let stale_workspace_receipts = self.invalidate_stale_workspace_receipts();
-        if !stale_workspace_receipts.is_empty() {
-            return self.fail_goal_with_status(
-                format!(
-                    "目标最终验收发现工作区文件已偏离通过验证的快照：{}",
-                    stale_workspace_receipts.join(", ")
-                ),
-                owo_agent_protocol::CompletionStatusV1::Unverified,
-            );
-        }
-
-        let completion_status = crate::completion::decide_completion(
-            crate::completion::CompletionEvidence {
-                response_finished: true,
-                has_candidate_changes,
-                required_validation_count,
-                passed_required_validation_count,
-                failed_required_validation_count,
-                ..crate::completion::CompletionEvidence::default()
-            },
-        );
-        if !matches!(
-            completion_status,
-            owo_agent_protocol::CompletionStatusV1::ResponseComplete
-                | owo_agent_protocol::CompletionStatusV1::Accepted
-        ) {
-            return self.fail_goal_with_status(
-                format!(
-                    "目标候选结果未达到共享完成条件：{completion_status:?}；需要宿主验证计划或人工验收"
-                ),
-                completion_status,
-            );
-        }
-        let evidence_receipt_ids = completion_evidence_receipt_ids;
-        let candidate_version_sha256 = if has_candidate_changes {
-            match self.candidate_version_sha256(false, true) {
-                Ok(candidate_version_sha256) => candidate_version_sha256,
-                Err(error) => return self.fail_goal(error),
-            }
-        } else {
-            None
-        };
-        let final_stale_workspace_receipts = self.invalidate_stale_workspace_receipts();
-        if !final_stale_workspace_receipts.is_empty() {
-            return self.fail_goal_with_status(
-                format!(
-                    "目标候选摘要生成后工作区再次变化，验证快照已失效：{}",
-                    final_stale_workspace_receipts.join(", ")
-                ),
-                owo_agent_protocol::CompletionStatusV1::Unverified,
-            );
-        }
-        self.state.completion_record = Some(crate::completion::build_completion_record(
-            &self.state.goal.id,
-            &self.state.run_id,
-            completion_status,
-            evidence_receipt_ids,
-            candidate_version_sha256,
-        ));
-        self.state.goal.transition(GoalStatus::Succeeded);
-        self.log("goal.succeeded", "目标验收通过");
-        self.persist_if_needed();
-        Ok(GoalStatus::Succeeded)
-    }
-
-    fn failed_step_verification_status(
-        &self,
-        failed_steps: &[StepSpec],
-    ) -> Option<owo_agent_protocol::CompletionStatusV1> {
-        use crate::plan::ValidationVerdictV1;
-
-        let mut required = 0usize;
-        let mut passed = 0usize;
-        let mut failed = 0usize;
-        let mut stale = false;
-        let mut observed_current_receipt = false;
-        let mut non_validation_failure = false;
-
-        for step in failed_steps {
-            let plan = step.verification_plan.clone().or_else(|| {
-                step.verify.as_ref().map(|spec| {
-                    crate::verification::plan_for_specs(
-                        &format!("verify-step-{}", step.id),
-                        std::slice::from_ref(spec),
-                    )
-                })
-            });
-            let Some(plan) = plan else {
-                non_validation_failure = true;
-                continue;
-            };
-            let Some(record) = self.state.records.get(&step.id) else {
-                non_validation_failure = true;
-                continue;
-            };
-            let Some(attempt_id) = record.attempt_id.as_deref() else {
-                non_validation_failure = true;
-                continue;
-            };
-            let Some(epoch) = record.phase_epoch else {
-                non_validation_failure = true;
-                continue;
-            };
-            let mut step_observed_receipt = false;
-
-            for requirement in plan.requirements.iter().filter(|item| item.required) {
-                required = required.saturating_add(1);
-                let arguments_sha256 = crate::cas_store::CasStore::hash_of(
-                    &serde_json::to_vec(&requirement.arguments).unwrap_or_default(),
-                );
-                let receipt = record.validation_receipts.iter().rev().find(|receipt| {
-                    receipt.task_id == step.id
-                        && receipt.attempt_id == attempt_id
-                        && receipt.epoch == epoch
-                        && receipt.requirement_id == requirement.requirement_id
-                        && receipt.validator_id == requirement.validator_id
-                        && receipt.validator_version
-                            == requirement
-                                .validator_version
-                                .as_deref()
-                                .unwrap_or("unknown")
-                        && receipt.arguments_sha256 == arguments_sha256
-                });
-                let Some(receipt) = receipt else {
-                    continue;
-                };
-                observed_current_receipt = true;
-                step_observed_receipt = true;
-                match receipt.verdict {
-                    ValidationVerdictV1::Passed => passed = passed.saturating_add(1),
-                    ValidationVerdictV1::Failed => failed = failed.saturating_add(1),
-                    ValidationVerdictV1::Stale => stale = true,
-                    ValidationVerdictV1::Unsupported
-                    | ValidationVerdictV1::Unverified
-                    | ValidationVerdictV1::ManualAccepted => {}
-                }
-            }
-            if !step_observed_receipt {
-                non_validation_failure = true;
-            }
-        }
-
-        if non_validation_failure || !observed_current_receipt || required == 0 {
-            return None;
-        }
-        let status = crate::completion::decide_completion(
-            crate::completion::CompletionEvidence {
-                response_finished: true,
-                has_candidate_changes: true,
-                required_validation_count: required,
-                passed_required_validation_count: passed,
-                failed_required_validation_count: failed,
-                stale_evidence: stale,
-                ..crate::completion::CompletionEvidence::default()
-            },
-        );
-        (!matches!(
-            status,
-            owo_agent_protocol::CompletionStatusV1::Accepted
-                | owo_agent_protocol::CompletionStatusV1::ResponseComplete
-        ))
-        .then_some(status)
-    }
-
-    fn candidate_version_sha256(
-        &self,
-        include_unpassed_receipts: bool,
-        force_snapshot: bool,
-    ) -> Result<Option<String>, String> {
-        let accepted_outputs = self
-            .state
-            .plan
-            .steps
-            .iter()
-            .filter_map(|step| {
-                let record = self.state.records.get(&step.id)?;
-                (record.status == StepStatus::Succeeded).then(|| {
-                    serde_json::json!({
-                        "step_id": step.id,
-                        "attempt_id": record.attempt_id,
-                        "output_sha256": record.output.as_deref().map(|output| {
-                            crate::cas_store::CasStore::hash_of(output.as_bytes())
-                        }),
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut workspace_paths = std::collections::BTreeMap::new();
-        let receipts = self
-            .state
-            .validation_receipts
-            .iter()
-            .chain(
-                self.state
-                    .records
-                    .values()
-                    .flat_map(|record| record.validation_receipts.iter()),
-            );
-        for receipt in receipts.filter(|receipt| {
-            receipt.verdict == crate::plan::ValidationVerdictV1::Passed
-                || (include_unpassed_receipts
-                    && !matches!(
-                        receipt.verdict,
-                        crate::plan::ValidationVerdictV1::Stale
-                            | crate::plan::ValidationVerdictV1::Unsupported
-                    ))
-        }) {
-            for (subject, hash) in &receipt.subject_sha256 {
-                if let Some(relative) = subject.strip_prefix("workspace-path:") {
-                    if workspace_paths
-                        .insert(relative.to_string(), hash.clone())
-                        .is_some_and(|previous| previous != *hash)
-                    {
-                        return Err(format!(
-                            "目标候选快照中同一路径存在冲突验证摘要：{relative}"
-                        ));
-                    }
-                }
-            }
-        }
-        if !force_snapshot && accepted_outputs.is_empty() && workspace_paths.is_empty() {
-            return Ok(None);
-        }
-        let candidate_snapshot = serde_json::json!({
-            "accepted_step_outputs": accepted_outputs,
-            "workspace_paths": workspace_paths,
-        });
-        crate::completion::hash_candidate_version(&candidate_snapshot)
-            .map(Some)
-            .map_err(|error| format!("目标候选版本摘要生成失败：{error}"))
-    }
-
-    fn fail_goal(&mut self, reason: String) -> Result<GoalStatus, String> {
-        self.fail_goal_with_status(reason, owo_agent_protocol::CompletionStatusV1::Blocked)
-    }
-
-    fn fail_goal_with_status(
-        &mut self,
-        reason: String,
-        completion_status: owo_agent_protocol::CompletionStatusV1,
-    ) -> Result<GoalStatus, String> {
-        let evidence_receipt_ids = self
-            .state
-            .validation_receipts
-            .iter()
-            .chain(
-                self.state
-                    .records
-                    .values()
-                    .flat_map(|record| record.validation_receipts.iter()),
-            )
-            .map(|receipt| receipt.receipt_id.clone())
-            .collect::<Vec<_>>();
-        let candidate_version_sha256 = self
-            .candidate_version_sha256(true, false)
-            .ok()
-            .flatten();
-        self.state.completion_record = Some(crate::completion::build_completion_record(
-            &self.state.goal.id,
-            &self.state.run_id,
-            completion_status,
-            evidence_receipt_ids,
-            candidate_version_sha256,
-        ));
-        self.state.goal.error = Some(reason.clone());
-        self.state.goal.transition(GoalStatus::Failed);
-        self.log("goal.failed", reason);
-        self.persist_if_needed();
-        Ok(GoalStatus::Failed)
-    }
-
-    fn mark_remaining(&mut self, status: StepStatus) {
-        for record in self.state.records.values_mut() {
-            if !record.status.is_terminal() {
-                record.status = status;
-            }
-        }
-    }
-
-    fn persist_if_needed(&mut self) {
-        if let Some(dir) = &self.config.persist_dir {
-            let _ = self.state.persist(dir);
-        }
-    }
-}
-
-// ---------- 并发执行辅助 ----------
-
-/// 步骤执行结果。
-enum StepResult {
-    Ok {
-        output: String,
-        attempt_id: String,
-        validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
-        epoch: u64,
-    },
-    FailedWithReceipts {
-        error: String,
-        attempt_id: String,
-        validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
-        epoch: u64,
-    },
-    Retried {
-        error: String,
-    },
-    Budget {
-        reason: String,
-    },
-    /// 确定性失败：不重试、不参与 replan，原因直达目标终态。
-    /// A2 语义：显式目标被拒绝（Reject）或需用户确认（AskUser）——
-    /// 绝不允许静默改派，故直接以原因终止而非消耗重试预算。
-    Fatal {
-        reason: String,
-    },
-}
-
-/// wave 内提前终止原因：Budget 沿用既有「预算熔断」终态表述；
-/// Fatal 直接以原因作为目标终态错误。
-enum StepStop {
-    Budget(String),
-    Fatal(String),
-}
-
-/// 单个步骤的并发执行产出（含尝试次数，供预算合并）。
-struct StepOutcome {
-    step_id: String,
-    attempts: u32,
-    result: StepResult,
-}
-
-/// 单步运行环境（预算 / abort / 可选 critic / 黑板 / worker pool / 能力路由 / 传输 / 租约，随步骤任务克隆）。
-/// A2：另携带显式执行绑定（定向派发）与在飞远端任务取消登记表。
-#[derive(Clone)]
-struct StepRuntime {
-    budget: GoalBudget,
-    aborted: Arc<std::sync::atomic::AtomicBool>,
-    critic: Option<CriticConfig>,
-    blackboard: Option<Blackboard>,
-    bb_writer: Option<String>,
-    use_worker_pool: bool,
-    worker_pool: Option<WorkerPool>,
-    capabilities: Option<CapabilityWorkerRegistry>,
-    capability_requirement: Option<WorkerRequirement>,
-    transport: Option<std::sync::Arc<dyn crate::fleet_transport::FleetTransport>>,
-    leases: Option<crate::lease::LeaseManager>,
-    /// 显式执行绑定（空 = 未配置，走旧解析链）。
-    bindings: Vec<WorkerBinding>,
-    /// 运行 id（默认 correlation 兜底 `{run_id}:{step_id}`）。
-    run_id: String,
-    /// 在飞远端派发任务登记表（abort 收尾统一 cancel）。
-    cancels: DispatchCancelRegistry,
-    workspace_verification_root: Option<std::path::PathBuf>,
-    workspace_command_verifier: Option<WorkspaceCommandVerifier>,
-}
-
-/// 显式绑定解析结果（A2 定向派发与旧解析链的分界）。
-enum WorkerResolution {
-    /// 命中显式绑定并装配完成（含生效绑定视图，供 `_dispatch` 注入与预算封顶）。
-    Directed(Arc<dyn Worker>, WorkerBinding),
-    /// 未配置绑定时走旧解析链命中（行为完全兼容）。
-    Legacy(Arc<dyn Worker>),
-    /// 绑定命中但目标不可用：等待 / 询问 / 拒绝（绝不改派其他目标）。
-    Disposition(DispatchDisposition),
-    /// 旧解析链未命中（保持既有可重试错误语义与文案）。
-    Unresolved(String),
-}
-
-/// A2 统一派发解析：
-/// 1) 先解析显式绑定（step id 匹配 > worker 名匹配）；命中即严格定向，
-///    目标探测不足时产出 Wait/AskUser/Reject 裁定，不进入任何回退路径；
-/// 2) 未配置绑定时保持旧行为兼容（registry → 池 → 能力路由 → transport）。
-async fn resolve_execution(
-    workers: &WorkerRegistry,
-    step: &StepSpec,
-    rt: &StepRuntime,
-) -> WorkerResolution {
-    if let Some(mut binding_view) = select_binding(&rt.bindings, &step.id, &step.worker).cloned() {
-        // 按 step id 命中的绑定：执行者引用取 plan 步骤声明的 worker 名，
-        // target/能力/权限/预算/关联信息仍来自绑定本身。
-        if binding_view.worker == step.id {
-            binding_view.worker = step.worker.clone();
-        }
-        let availability = probe_target_availability(workers, step, rt).await;
-        return match dispatch_disposition(&binding_view, &availability) {
-            ready @ DispatchDisposition::Ready(_) => WorkerResolution::Directed(
-                build_channel_worker(workers, rt, step, ready, &binding_view),
-                binding_view,
-            ),
-            disposition => WorkerResolution::Disposition(disposition),
-        };
-    }
-    match legacy_resolve_worker(workers, step, rt).await {
-        Ok(Some(worker)) => WorkerResolution::Legacy(worker),
-        Ok(None) => WorkerResolution::Unresolved(format!("worker 未注册：{}", step.worker)),
-        Err(reason) => WorkerResolution::Unresolved(reason),
-    }
-}
-
-/// 三类目标的可用性探测（无远程接口细节；远端仅判断是否配置了传输）。
-async fn probe_target_availability(
-    workers: &WorkerRegistry,
-    step: &StepSpec,
-    rt: &StepRuntime,
-) -> TargetAvailability {
-    TargetAvailability {
-        in_process_ready: workers.get(&step.worker).is_some(),
-        local_process: match (&rt.use_worker_pool, &rt.worker_pool) {
-            (false, _) => LocalProcessProbe::NotConfigured,
-            (true, None) => LocalProcessProbe::NotConfigured,
-            (true, Some(pool)) => {
-                if pool.contains(&step.worker).await {
-                    LocalProcessProbe::Ready
-                } else {
-                    LocalProcessProbe::WorkerMissing
-                }
-            }
-        },
-        fleet: match &rt.transport {
-            None => FleetProbe::NotConfigured,
-            Some(_) => FleetProbe::Ready,
-        },
-    }
-}
-
-/// 把 Ready 裁定装配为可执行的通道 worker。
-fn build_channel_worker(
-    workers: &WorkerRegistry,
-    rt: &StepRuntime,
-    step: &StepSpec,
-    ready: DispatchDisposition,
-    binding: &WorkerBinding,
-) -> Arc<dyn Worker> {
-    let resolved = match ready {
-        DispatchDisposition::Ready(resolved) => resolved,
-        other => unreachable!("非 Ready 裁定不应装配通道：{other:?}"),
-    };
-    let correlation_fallback = format!("{}:{}", rt.run_id, step.id);
-    match resolved.channel {
-        DispatchChannel::Registry(name) => {
-            // 探测已确认命中；unwrap_or_else 仅防御编程错误。
-            workers
-                .get(&name)
-                .unwrap_or_else(|| panic!("定向派发内部错误：registry 探测通过但未找到 {name}"))
-        }
-        DispatchChannel::Pool(id) => {
-            let pool = rt
-                .worker_pool
-                .as_ref()
-                .unwrap_or_else(|| panic!("定向派发内部错误：池探测通过但 WorkerPool 缺失"));
-            Arc::new(PoolWorker::new(pool.clone(), id))
-        }
-        DispatchChannel::Fleet { node_id, .. } => {
-            let transport =
-                rt.transport.as_ref().map(Arc::clone).unwrap_or_else(|| {
-                    panic!("定向派发内部错误：传输探测通过但 FleetTransport 缺失")
-                });
-            Arc::new(FleetDispatchWorker::from_binding(
-                resolved.binding.worker.clone(),
-                node_id,
-                binding,
-                resolved
-                    .binding
-                    .effective_correlation_id(&correlation_fallback),
-                transport,
-                rt.cancels.clone(),
-            ))
-        }
-    }
-}
-
-/// 旧解析链（保留原文案与顺序）：registry 优先（进程内语义）；feature flag 开启时
-/// 回退到 worker pool 子进程；未命中且配置传输时经 transport 提交（跨机铺路）；
-/// 步骤显式声明 `_cap` 时按能力路由选 worker。仅在**未配置**显式绑定时启用。
-async fn legacy_resolve_worker(
-    workers: &WorkerRegistry,
-    step: &StepSpec,
-    rt: &StepRuntime,
-) -> Result<Option<Arc<dyn Worker>>, String> {
-    let name = &step.worker;
-    if let Some(worker) = workers.get(name) {
-        return Ok(Some(worker));
-    }
-    if rt.use_worker_pool {
-        if let Some(pool) = &rt.worker_pool {
-            if pool.contains(name).await {
-                return Ok(Some(Arc::new(PoolWorker::new(
-                    pool.clone(),
-                    name.to_string(),
-                ))));
-            }
-        }
-    }
-    // 能力路由（仅当步骤显式声明能力需求 `_cap`，或 runner 配置了全局需求基线时启用；
-    // 此时 worker 名仅为提示，按能力匹配选择执行者）。
-    let requirement = step_requirement(step, rt);
-    if let Some(req) = requirement {
-        if let Some(reg) = &rt.capabilities {
-            match reg.route(&req) {
-                RouteDecision::Pick(id) => {
-                    if let Some(pool) = &rt.worker_pool {
-                        if pool.contains(&id).await {
-                            return Ok(Some(Arc::new(PoolWorker::new(pool.clone(), id))));
-                        }
-                    }
-                    if let Some(transport) = &rt.transport {
-                        return Ok(Some(Arc::new(
-                            crate::fleet_transport::TransportWorker::new(transport.clone(), id),
-                        )));
-                    }
-                    return Err(format!("能力路由选中 worker {id}，但池/传输均未注册"));
-                }
-                RouteDecision::Degrade { worker, missing } => {
-                    tracing::warn!(
-                        worker = %worker,
-                        missing = ?missing,
-                        "能力路由降级：缺失 {}",
-                        missing.join(", ")
-                    );
-                    if let Some(pool) = &rt.worker_pool {
-                        if pool.contains(&worker).await {
-                            return Ok(Some(Arc::new(PoolWorker::new(pool.clone(), worker))));
-                        }
-                    }
-                    if let Some(transport) = &rt.transport {
-                        return Ok(Some(Arc::new(
-                            crate::fleet_transport::TransportWorker::new(transport.clone(), worker),
-                        )));
-                    }
-                    return Err(format!(
-                        "能力路由降级选中 worker {worker}，但池/传输均未注册（缺失：{}）",
-                        missing.join(", ")
-                    ));
-                }
-                RouteDecision::Reject { reasons } => {
-                    return Err(format!("能力不满足，无可用 worker：{}", reasons.join("；")));
-                }
-            }
-        }
-    }
-    // 未注册 worker 名且配置了传输：经 transport 提交（失败/恢复沿用总线持久化）。
-    if let Some(transport) = &rt.transport {
-        return Ok(Some(Arc::new(
-            crate::fleet_transport::TransportWorker::new(transport.clone(), name.to_string()),
-        )));
-    }
-    Ok(None)
-}
-
-/// 步骤能力需求：步骤 `_cap` 显式声明优先；否则用 runner 全局基线；默认空需求视为未启用。
-fn step_requirement(step: &StepSpec, rt: &StepRuntime) -> Option<WorkerRequirement> {
-    if let Some(cap) = step.input.get("_cap") {
-        if let Ok(req) = serde_json::from_value::<WorkerRequirement>(cap.clone()) {
-            return Some(req);
-        }
-    }
-    rt.capability_requirement
-        .clone()
-        .filter(|r| *r != WorkerRequirement::default())
-}
-
-/// 步骤租约 RAII：步骤结束（成功/失败/预算/abort/取消）自动释放租约，
-/// 防 `goal:<step_id>` 租约表泄漏（孤儿持有者）。token 匹配才释放。
-struct StepLeaseGuard {
-    leases: Option<crate::lease::LeaseManager>,
-    holder: String,
-    token: Option<String>,
-}
-
-impl Drop for StepLeaseGuard {
-    fn drop(&mut self) {
-        if let (Some(leases), Some(token)) = (&self.leases, &self.token) {
-            let _ = leases.release(&self.holder, token);
-        }
-    }
-}
-
-/// 定向裁定 → 统一步骤结果映射：
-/// Wait 按可重试错误参与既有重试/失败语义；AskUser 与 Reject 为确定性失败
-/// （不消耗重试预算、不参与 replan，原因直达目标终态）。
-fn disposition_outcome(step: &StepSpec, disposition: DispatchDisposition) -> StepOutcome {
-    let result = match disposition {
-        DispatchDisposition::Ready(_) => unreachable!("Ready 裁定不会进入失败映射"),
-        DispatchDisposition::Wait { reason } => StepResult::Retried {
-            error: format!("目标暂不可用（wait）：{reason}"),
-        },
-        DispatchDisposition::AskUser { prompt } => StepResult::Fatal {
-            reason: format!("需用户确认：{prompt}"),
-        },
-        DispatchDisposition::Reject { reason } => StepResult::Fatal {
-            reason: format!("目标拒绝：{reason}"),
-        },
-    };
-    StepOutcome {
-        step_id: step.id.clone(),
-        attempts: 0,
-        result,
-    }
-}
-
-/// 独立执行一个步骤的尝试循环（worker 调用 + 验证断言 + 可选 critic/黑板；不触碰 runner 状态）。
-/// 预算在任务内按 `budget.max_steps` 粗略封顶，全局熔断由 run() 合并后校验。
-///
-/// 步骤 input 可选约定（多 Agent P0 编排原语，`_` 前缀键）：
-/// - `"_critic": { "rounds": N }`：输出经只读 critic 评审，意见回流 worker 重跑，最多 N 轮。
-/// - `"_bb": { "read": ["key"], "write": "key" }`：读取黑板中间结果（`{{bb:key}}` 占位符替换）与写回。
-async fn run_step_attempts(
-    workers: WorkerRegistry,
-    step: StepSpec,
-    rt: StepRuntime,
-    attempt_id: String,
-    epoch: u64,
-) -> StepOutcome {
-    // A2：显式绑定优先（严格定向），未配置时走旧解析链。
-    let mut directed_binding: Option<WorkerBinding> = None;
-    let worker = match resolve_execution(&workers, &step, &rt).await {
-        WorkerResolution::Directed(worker, binding) => {
-            directed_binding = Some(binding);
-            worker
-        }
-        WorkerResolution::Legacy(worker) => worker,
-        WorkerResolution::Unresolved(error) => {
-            return StepOutcome {
-                step_id: step.id.clone(),
-                attempts: 0,
-                result: StepResult::Retried { error },
-            }
-        }
-        WorkerResolution::Disposition(disposition) => {
-            return disposition_outcome(&step, disposition);
-        }
-    };
-    let prepared_input = match prepare_step_input(&step.input, &rt.blackboard).await {
-        Ok(input) => input,
-        Err(e) => {
-            return StepOutcome {
-                step_id: step.id.clone(),
-                attempts: 0,
-                result: StepResult::Retried { error: e },
-            }
-        }
-    };
-    // 定向绑定把派发上下文注入 `_dispatch`（correlation / CAS 引用 / node 对下游可见）。
-    let input = match &directed_binding {
-        Some(binding) => {
-            let correlation =
-                binding.effective_correlation_id(&format!("{}:{}", rt.run_id, step.id));
-            let mut injected = prepared_input;
-            binding.inject_dispatch_context(&mut injected, &correlation);
-            injected
-        }
-        None => prepared_input,
-    };
-    // 租约：步骤任务持有（fencing 语义；写结果前校验 epoch/token，防分区双写）。
-    // RAII guard：任何返回路径自动 release（防租约表孤儿持有者泄漏）。
-    let step_lease = match &rt.leases {
-        Some(leases) => {
-            let holder = format!("goal:{}", step.id);
-            match leases.acquire(&holder) {
-                Ok(lease) => Some(lease),
-                Err(e) => {
-                    return StepOutcome {
-                        step_id: step.id.clone(),
-                        attempts: 0,
-                        result: StepResult::Retried {
-                            error: format!("步骤租约获取失败：{e}"),
-                        },
-                    }
-                }
-            }
-        }
-        None => None,
-    };
-    let _step_lease_guard = step_lease.as_ref().map(|lease| StepLeaseGuard {
-        leases: rt.leases.clone(),
-        holder: lease.holder.clone(),
-        token: Some(lease.token.clone()),
-    });
-    let critic_rounds = step
-        .input
-        .get("_critic")
-        .and_then(|v| v.get("rounds"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-    // 尝试上限：绑定预算 > 0 时对 plan 声明的 retries+1 取 min；时长预算 0 = 不限。
-    let base_max_attempts = step.retries.saturating_add(1);
-    let max_attempts = directed_binding
-        .as_ref()
-        .map(|b| b.cap_attempts(base_max_attempts))
-        .unwrap_or(base_max_attempts);
-    let duration_cap_secs = directed_binding
-        .as_ref()
-        .map(|b| b.budget.max_duration_secs)
-        .unwrap_or(0);
-    let started_at = std::time::Instant::now();
-    let mut attempts = 0u32;
-    let mut validation_receipts = Vec::new();
-    while attempts < max_attempts {
-        if rt.aborted.load(std::sync::atomic::Ordering::SeqCst) {
-            return StepOutcome {
-                step_id: step.id.clone(),
-                attempts,
-                result: StepResult::Retried {
-                    error: "调度器已 abort".to_string(),
-                },
-            };
-        }
-        // 绑定级时长预算（三类目标统一语义；超限按可重试错误退出）。
-        if duration_cap_secs > 0 && started_at.elapsed().as_secs() >= duration_cap_secs {
-            return StepOutcome {
-                step_id: step.id.clone(),
-                attempts,
-                result: StepResult::Retried {
-                    error: format!("绑定预算耗尽：时长超过 {duration_cap_secs}s"),
-                },
-            };
-        }
-        if attempts >= rt.budget.max_steps {
-            return StepOutcome {
-                step_id: step.id.clone(),
-                attempts,
-                result: StepResult::Budget {
-                    reason: format!("步骤数超过 {}", rt.budget.max_steps),
-                },
-            };
-        }
-        attempts += 1;
-        // 取消传播：在飞步骤任务随 abort 标志即时终止（池路径经 cancel_all 传播到子进程）。
-        match run_worker_cancellable(&worker, &input, &rt).await {
-            Ok(output) => {
-                // fencing 写校验：租约失效（过期/重连/分区）时拒绝写入结果，
-                // 按血缘重算（replan 重置）而非重复写。
-                if let (Some(leases), Some(lease)) = (&rt.leases, &step_lease) {
-                    if let Err(e) = leases.verify_write(&lease.holder, &lease.token, lease.epoch) {
-                        return StepOutcome {
-                            step_id: step.id.clone(),
-                            attempts,
-                            result: StepResult::Retried {
-                                error: format!("fencing 拒绝写入：{e}"),
-                            },
-                        };
-                    }
-                }
-                // 可选 critic 评审：先得到最终候选，再对最终字节执行验收。
-                let candidate = if critic_rounds > 0 {
-                    match run_step_critic(
-                        &worker,
-                        &input,
-                        &output,
-                        &step,
-                        &rt,
-                        critic_rounds,
-                        &mut attempts,
-                    )
-                    .await
-                    {
-                        Ok(out) => out,
-                        Err(e) => {
-                            return StepOutcome {
-                                step_id: step.id.clone(),
-                                attempts,
-                                result: if validation_receipts.is_empty() {
-                                    StepResult::Retried { error: e }
-                                } else {
-                                    StepResult::FailedWithReceipts {
-                                        error: e,
-                                        attempt_id,
-                                        validation_receipts,
-                                        epoch,
-                                    }
-                                },
-                            }
-                        }
-                    }
-                } else {
-                    output
-                };
-                if attempts > rt.budget.max_steps {
-                    return StepOutcome {
-                        step_id: step.id.clone(),
-                        attempts,
-                        result: StepResult::Budget {
-                            reason: format!("critic 评审后步骤数超过 {}", rt.budget.max_steps),
-                        },
-                    };
-                }
-                let (receipts, validation_error) =
-                    verify_step_output(&step, &rt, &input, &attempt_id, epoch, &candidate);
-                validation_receipts.extend(receipts);
-                if let Some(error) = validation_error {
-                    if attempts >= max_attempts {
-                        return StepOutcome {
-                            step_id: step.id.clone(),
-                            attempts,
-                            result: StepResult::FailedWithReceipts {
-                                error,
-                                attempt_id,
-                                validation_receipts,
-                                epoch,
-                            },
-                        };
-                    }
-                    continue;
-                }
-                return finish_step(
-                    &step,
-                    &rt,
-                    candidate,
-                    attempts,
-                    attempt_id,
-                    validation_receipts,
-                    epoch,
-                )
-                .await;
-            }
-            Err(e) => {
-                if attempts >= max_attempts {
-                    return StepOutcome {
-                        step_id: step.id.clone(),
-                        attempts,
-                        result: if validation_receipts.is_empty() {
-                            StepResult::Retried { error: e }
-                        } else {
-                            StepResult::FailedWithReceipts {
-                                error: e,
-                                attempt_id,
-                                validation_receipts,
-                                epoch,
-                            }
-                        },
-                    };
-                }
-            }
-        }
-    }
-    StepOutcome {
-        step_id: step.id.clone(),
-        attempts,
-        result: StepResult::Retried {
-            error: "未知错误".to_string(),
-        },
-    }
-}
-
-/// 执行 worker 且响应 abort 传播：abort 标志置位时**先通知停止，再做有界清理**，
-/// 不直接丢弃 worker Future 而跳过其变更收尾（十期·四路 R2）：
-///
-/// 1. 池路径经 `cancel_all` 把取消传播到子进程（submit 以 Cancelled 立即可见）；
-/// 2. 远端派发统一 cancel（防 transport 残留 pending）；
-/// 3. 协作式 worker（`TrackedRoleWorker` 等）在回合边界检查取消后快速返回——
-///    其 Future 内部已完成 后快照/变更登记/ChangeSet 收尾；
-/// 4. 超过 [`CANCELLATION_CLEANUP_GRACE`] 仍未返回的任务才被强制终止（本函数
-///    返回 Err 丢弃 Future；进程树由沙箱 Job kill-on-close / 子进程终止兜底）。
-async fn run_worker_cancellable(
-    worker: &Arc<dyn Worker>,
-    input: &serde_json::Value,
-    rt: &StepRuntime,
-) -> Result<String, String> {
-    let aborted = Arc::clone(&rt.aborted);
-    let run = worker.run(input);
-    tokio::pin!(run);
-    tokio::select! {
-        out = &mut run => out,
-        _ = wait_aborted(aborted) => {
-            if let Some(pool) = &rt.worker_pool {
-                let _ = pool.cancel_all().await;
-            }
-            // A2：abort 即时取消在飞的远端派发任务（防残留 pending）。
-            rt.cancels.cancel_all().await;
-            tracing::debug!(rt.run_id, "调度器已 abort：等待 worker 有界清理（含变更收尾）");
-            match tokio::time::timeout(CANCELLATION_CLEANUP_GRACE, &mut run).await {
-                Ok(out) => out,
-                Err(_) => {
-                    tracing::warn!(
-                        rt.run_id,
-                        "worker 清理超时（{}s），强制终止（进程树由沙箱终止）",
-                        CANCELLATION_CLEANUP_GRACE.as_secs()
-                    );
-                    Err("调度器已 abort（清理超时，强制终止）".to_string())
-                }
-            }
-        }
-    }
-}
-
-/// 轮询 abort 标志（20ms 粒度；预算/取消响应的最低时延）。
-async fn wait_aborted(flag: Arc<std::sync::atomic::AtomicBool>) {
-    loop {
-        if flag.load(std::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-/// A step receipt only satisfies the active requirement when every identity field
-/// still matches the accepted attempt, output, validator version, and arguments.
-fn step_validation_receipt_matches(
-    step_id: &str,
-    attempt_id: &str,
-    epoch: u64,
-    output_sha256: &str,
-    requirement: &crate::plan::VerificationRequirementV1,
-    receipt: &crate::plan::ValidationReceiptV1,
-) -> bool {
-    let arguments_sha256 = crate::cas_store::CasStore::hash_of(
-        &serde_json::to_vec(&requirement.arguments).unwrap_or_default(),
-    );
-    receipt.task_id == step_id
-        && receipt.attempt_id == attempt_id
-        && receipt.epoch == epoch
-        && receipt.requirement_id == requirement.requirement_id
-        && receipt.validator_id == requirement.validator_id
-        && receipt.validator_version
-            == requirement
-                .validator_version
-                .as_deref()
-                .unwrap_or("unknown")
-        && receipt.arguments_sha256 == arguments_sha256
-        && receipt.subject_sha256.get("step-output").map(String::as_str)
-            == Some(output_sha256)
-}
-
-fn validate_host_command_validation(
-    requirement: &crate::plan::VerificationRequirementV1,
-    result: &HostCommandValidationV1,
-) -> Result<(), &'static str> {
-    let crate::plan::VerificationScopeV1::WorkspacePaths { relative_paths } =
-        &requirement.scope
-    else {
-        return Err("宿主命令回执范围不是 WorkspacePaths");
-    };
-    let expected_subjects = relative_paths
-        .iter()
-        .map(|path| format!("workspace-path:{path}"))
-        .collect::<std::collections::BTreeSet<_>>();
-    if expected_subjects.len() != relative_paths.len()
-        || result.subject_sha256.len() != expected_subjects.len()
-        || result.subject_sha256.keys().any(|key| !expected_subjects.contains(key))
-    {
-        return Err("宿主命令回执的源码路径证据与声明范围不一致");
-    }
-    if result.subject_sha256.values().any(|hash| {
-        hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-    }) {
-        return Err("宿主命令回执包含非法源码 SHA-256");
-    }
-    let Some(evidence_ref) = result.evidence_ref.as_deref() else {
-        return Err("宿主命令回执缺少命令结果证据引用");
-    };
-    let Some(command_hash) = evidence_ref.strip_prefix("command-result:sha256:") else {
-        return Err("宿主命令回执证据引用格式无效");
-    };
-    if command_hash.len() != 64 || !command_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("宿主命令回执证据引用缺少有效 SHA-256");
-    }
-    Ok(())
-}
-
-/// 步骤成功收尾：可选黑板写回 + 组装成功结果。
-fn verify_step_output(
-    step: &StepSpec,
-    rt: &StepRuntime,
-    input: &serde_json::Value,
-    attempt_id: &str,
-    epoch: u64,
-    output: &str,
-) -> (Vec<crate::plan::ValidationReceiptV1>, Option<String>) {
-    let plan = step.verification_plan.clone().or_else(|| {
-        step.verify.as_ref().map(|spec| {
-            crate::verification::plan_for_specs(
-                &format!("verify-step-{}", step.id),
-                std::slice::from_ref(spec),
-            )
-        })
-    });
-    let Some(plan) = plan else {
-        return (Vec::new(), None);
-    };
-    let input_bytes = serde_json::to_vec(input).unwrap_or_default();
-    let input_sha256 = crate::cas_store::CasStore::hash_of(&input_bytes);
-    let output_sha256 = crate::cas_store::CasStore::hash_of(output.as_bytes());
-    let mut receipts = Vec::with_capacity(plan.requirements.len());
-    let mut failures = Vec::new();
-    for requirement in &plan.requirements {
-        let started_at = chrono::Utc::now().to_rfc3339();
-        let (verdict, detail, workspace_subjects, command_evidence_ref) =
-            if requirement.validator_id == "workspace-command-success-v1" {
-                let resources = &requirement.resources;
-                let supported = requirement.validator_version.as_deref() == Some("1")
-                    && matches!(
-                        &requirement.scope,
-                        crate::plan::VerificationScopeV1::WorkspacePaths { .. }
-                    )
-                    && crate::verification::workspace_validator_arguments_supported(
-                        &requirement.validator_id,
-                        &requirement.arguments,
-                    )
-                    && resources.cpu_slots == 1
-                    && (8..=128).contains(&resources.memory_mb)
-                    && !resources.exclusive_workspace
-                    && (1..=30_000).contains(&resources.timeout_ms);
-                if !supported {
-                    (
-                        crate::plan::ValidationVerdictV1::Unsupported,
-                        Some("workspace-command-success-v1 不符合宿主注册契约".to_string()),
-                        std::collections::BTreeMap::new(),
-                        None,
-                    )
-                } else if let Some(verifier) = &rt.workspace_command_verifier {
-                    let mut host_result = verifier(&step.id, attempt_id, requirement);
-                    if host_result.verdict == crate::plan::ValidationVerdictV1::Passed {
-                        if let Err(reason) =
-                            validate_host_command_validation(requirement, &host_result)
-                        {
-                            host_result.verdict = crate::plan::ValidationVerdictV1::Unverified;
-                            host_result.detail = Some(reason.to_string());
-                            host_result.subject_sha256.clear();
-                            host_result.evidence_ref = None;
-                        }
-                    }
-                    (
-                        host_result.verdict,
-                        host_result.detail,
-                        host_result.subject_sha256,
-                        host_result.evidence_ref,
-                    )
-                } else {
-                    let (verdict, detail, subjects) =
-                        crate::verification::execute_registered_requirement(
-                            requirement,
-                            output,
-                            rt.workspace_verification_root.as_deref(),
-                        );
-                    (verdict, detail, subjects, None)
-                }
-            } else {
-                let (verdict, detail, subjects) =
-                    crate::verification::execute_registered_requirement(
-                        requirement,
-                        output,
-                        rt.workspace_verification_root.as_deref(),
-                    );
-                (verdict, detail, subjects, None)
-            };
-        let arguments = serde_json::to_vec(&requirement.arguments).unwrap_or_default();
-        let validator_version = requirement
-            .validator_version
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        let arguments_sha256 = crate::cas_store::CasStore::hash_of(&arguments);
-        let receipt_id_seed = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-            rt.run_id,
-            step.id,
-            attempt_id,
-            epoch,
-            requirement.requirement_id,
-            requirement.validator_id,
-            validator_version,
-            arguments_sha256,
-            output_sha256,
-            workspace_subjects
-                .iter()
-                .map(|(path, hash)| format!("{path}:{hash}"))
-                .collect::<Vec<_>>()
-                .join("|")
-        );
-        receipts.push(crate::plan::ValidationReceiptV1 {
-            receipt_id: crate::cas_store::CasStore::hash_of(receipt_id_seed.as_bytes()),
-            task_id: step.id.clone(),
-            attempt_id: attempt_id.to_string(),
-            epoch,
-            requirement_id: requirement.requirement_id.clone(),
-            validator_id: requirement.validator_id.clone(),
-            validator_version,
-            arguments_sha256,
-            input_sha256: input_sha256.clone(),
-            environment_id: format!("owo-agent-core/{}", env!("CARGO_PKG_VERSION")),
-            changeset_sha256: None,
-            detail: detail.clone(),
-            subject_sha256: {
-                let mut subjects = std::collections::HashMap::from([(
-                    "step-output".to_string(),
-                    output_sha256.clone(),
-                )]);
-                subjects.extend(workspace_subjects);
-                subjects
-            },
-            verdict,
-            evidence_refs: {
-                let mut refs = vec![format!(
-                    "goal-step://{}/{}/{}",
-                    rt.run_id, step.id, attempt_id
-                )];
-                if let Some(reference) = command_evidence_ref {
-                    refs.push(reference);
-                }
-                refs
-            },
-            started_at,
-            completed_at: chrono::Utc::now().to_rfc3339(),
-        });
-        if requirement.required && verdict != crate::plan::ValidationVerdictV1::Passed {
-            failures.push(format!(
-                "{}: {}",
-                requirement.requirement_id,
-                detail.as_deref().unwrap_or("验证器未返回通过")
-            ));
-        }
-    }
-    (
-        receipts,
-        (!failures.is_empty()).then(|| failures.join("；")),
-    )
-}
-
-/// 步骤成功收尾：可选黑板写回 + 组装成功结果。
-async fn finish_step(
-    step: &StepSpec,
-    rt: &StepRuntime,
-    output: String,
-    attempts: u32,
-    attempt_id: String,
-    validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
-    epoch: u64,
-) -> StepOutcome {
-    if let (Some(bb), Some(writer)) = (&rt.blackboard, &rt.bb_writer) {
-        if let Some(key) = step
-            .input
-            .get("_bb")
-            .and_then(|v| v.get("write"))
-            .and_then(|v| v.as_str())
-        {
-            if let Err(e) = bb
-                .write(writer, key, serde_json::Value::String(output.clone()))
-                .await
-            {
-                return StepOutcome {
-                    step_id: step.id.clone(),
-                    attempts,
-                    result: StepResult::FailedWithReceipts {
-                        error: format!("blackboard 写入失败：{e}"),
-                        attempt_id,
-                        validation_receipts,
-                        epoch,
-                    },
-                };
-            }
-        }
-    }
-    StepOutcome {
-        step_id: step.id.clone(),
-        attempts,
-        result: StepResult::Ok {
-            output,
-            attempt_id,
-            validation_receipts,
-            epoch,
-        },
-    }
-}
-
-/// 步骤内 critic 评审循环：输出经只读门禁评审，意见回流 worker 重跑。
-/// 通过或轮数耗尽返回最终草稿；未通过返回 Err（视为步骤失败）。
-async fn run_step_critic(
-    worker: &Arc<dyn Worker>,
-    input: &serde_json::Value,
-    initial_output: &str,
-    step: &StepSpec,
-    rt: &StepRuntime,
-    max_rounds: u32,
-    attempts: &mut u32,
-) -> Result<String, String> {
-    let config = rt
-        .critic
-        .as_ref()
-        .ok_or_else(|| "步骤声明 _critic 但 runner 未 attach critic".to_string())?;
-    let context = serde_json::json!({
-        "step": step.id,
-        "worker": step.worker,
-        "correlation_id": step.id,
-    });
-    let author = {
-        let worker = Arc::clone(worker);
-        let input = input.clone();
-        let rt = rt.clone();
-        move |_draft: String, feedback: Vec<String>| {
-            let worker = Arc::clone(&worker);
-            let input = inject_feedback(&input, &feedback);
-            let rt = rt.clone();
-            async move {
-                if rt.aborted.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Err("调度器已 abort".to_string());
-                }
-                worker.run(&input).await
-            }
-        }
-    };
-    let outcome = review_loop(config, &context, initial_output.to_string(), author).await?;
-    *attempts = attempts.saturating_add(outcome.revisions);
-    if outcome.approved {
-        Ok(outcome.final_draft)
-    } else {
-        Err(format!(
-            "critic 评审未通过（{max_rounds} 轮）：score={}",
-            outcome.history.last().map(|r| r.verdict.score).unwrap_or(0)
-        ))
-    }
-}
-
-/// 把评审意见注入 input 的 `_critic_feedback` 键（worker 可读取并据此修订）。
-fn inject_feedback(input: &serde_json::Value, feedback: &[String]) -> serde_json::Value {
-    let mut cloned = input.clone();
-    if let Some(obj) = cloned.as_object_mut() {
-        obj.insert(
-            "_critic_feedback".to_string(),
-            serde_json::Value::Array(
-                feedback
-                    .iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
-        );
-    }
-    cloned
-}
-
-/// 步骤 input 预处理：`_bb.read` 声明的黑板键读取并替换 `{{bb:key}}` 占位符。
-async fn prepare_step_input(
-    input: &serde_json::Value,
-    blackboard: &Option<Blackboard>,
-) -> Result<serde_json::Value, String> {
-    let Some(read_keys) = input
-        .get("_bb")
-        .and_then(|v| v.get("read"))
-        .and_then(|v| v.as_array())
-    else {
-        return Ok(input.clone());
-    };
-    let bb = blackboard
-        .as_ref()
-        .ok_or_else(|| "步骤声明 _bb.read 但 runner 未 attach blackboard".to_string())?;
-    let mut values: Vec<(String, String)> = Vec::new();
-    for key in read_keys {
-        let key = key
-            .as_str()
-            .ok_or_else(|| "步骤声明 _bb.read 必须为字符串键数组".to_string())?;
-        let value = bb
-            .read(key)
-            .await
-            .map_err(|e| format!("blackboard 读取失败：{e}"))?;
-        let text = match value {
-            serde_json::Value::String(s) => s,
-            other => serde_json::to_string(&other).map_err(|e| format!("黑板值序列化失败：{e}"))?,
-        };
-        values.push((key.to_string(), text));
-    }
-    Ok(replace_tokens(input, &values))
-}
-
-/// 递归替换字符串叶子中的 `{{bb:key}}` 占位符。
-fn replace_tokens(value: &serde_json::Value, values: &[(String, String)]) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(s) => {
-            let mut out = s.clone();
-            for (key, text) in values {
-                out = out.replace(&format!("{{{{bb:{key}}}}}"), text);
-            }
-            serde_json::Value::String(out)
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(|v| replace_tokens(v, values)).collect())
-        }
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), replace_tokens(v, values)))
-                .collect(),
-        ),
-        other => other.clone(),
     }
 }

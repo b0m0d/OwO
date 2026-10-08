@@ -18,6 +18,7 @@ const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
 const viewSource = readFileSync(join(WEB, "views", "diagnostics-ledger.view.js"), "utf8");
 const indexHtml = readFileSync(join(WEB, "index.html"), "utf8");
 const appSource = readFileSync(join(WEB, "app.js"), "utf8");
+const appDomainSource = readFileSync(join(WEB, "app-domain.js"), "utf8");
 
 // ---- 假 DOM：只实现本视图用到的面（innerHTML / querySelector / addEventListener）----
 function makeRoot() {
@@ -315,17 +316,22 @@ test("生成/复制/下载三个出口分工明确：一键生成不得写用户
   assert.equal(bundle.ledger.buckets.events, 1);
 });
 
-test("接线：index.html 引脚本 + 容器就位，app.js 只在设置路由按需加载（不进首屏清单）", () => {
-  assert.match(indexHtml, /<script src="views\/diagnostics-ledger\.view\.js"><\/script>/, "视图必须被 index.html 引入");
-  assert.match(indexHtml, /<div id="diagnosticsLedger"/, "设置页必须有台账容器");
-  assert.match(appSource, /function refreshDiagnosticsLedger\(/, "app.js 必须有加载入口");
-  assert.match(appSource, /refreshServerStatus\(\);\s*\n\s*refreshDiagnosticsLedger\(\);/, "台账随「设置」路由加载，与其余设置刷新同批");
-  const boot = /const BOOT_LAZY_TASKS = \[([\s\S]*?)\];/.exec(appSource);
+test("接线：诊断台账是懒加载面板，首屏不读取诊断数据", () => {
+  assert.match(indexHtml, /<script src="views\/diagnostics-ledger\.view\.js"><\/script>/,
+    "诊断台账模块必须在应用装配前引入");
+  assert.match(indexHtml, /<div id="panelRoot"><\/div>/, "工具面板必须复用统一挂载根节点");
+  assert.match(appDomainSource, /"diagnostics-ledger"/, "诊断台账必须进入统一面板目录");
+  assert.match(appDomainSource, /function mountPanel\(id, writeHash = true\)/, "面板必须复用统一挂载生命周期");
+  assert.match(appDomainSource, /button\.addEventListener\("click", \(\) => mountPanel\(id\)\)/,
+    "诊断请求须由用户显式打开面板触发");
+  assert.match(viewSource, /mount\(root\)[\s\S]*load\(root, \{ force: true \}\)/,
+    "进入面板时才发起诊断读取");
   const hydrate = /const BOOT_HYDRATE_TASKS = \[([\s\S]*?)\];/.exec(appSource);
-  assert.ok(boot && hydrate, "首屏任务清单应存在");
-  assert.ok(!/DiagnosticsLedger/.test(boot[1] + hydrate[1]), "§8.2 首屏 ≤5 请求：台账不得进首屏清单");
+  assert.ok(hydrate, "首屏水合任务清单应存在");
+  assert.ok(!/DiagnosticsLedger|diagnostics\/requests|metrics\/overview/.test(hydrate[1]),
+    "诊断数据不得进入首屏水合链路");
+  assert.match(viewSource, /loadSequence !== sequence/, "切换或重载后迟到响应不得覆盖当前面板");
 });
-
 test("§4.6 重启口径：壳上报 generation/attempt 时用权威计数，不再拿引导次数近似", () => {
   const sandbox = makeSandbox({
     __owoCoreDiagnostics: {

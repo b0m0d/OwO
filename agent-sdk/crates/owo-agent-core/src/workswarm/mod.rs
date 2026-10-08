@@ -54,6 +54,7 @@ use crate::workswarm_output::WorkerOutputV1;
 mod error;
 mod registry;
 mod roles;
+mod run_state;
 mod types;
 mod util;
 
@@ -66,17 +67,38 @@ pub use roles::*;
 pub use types::*;
 use util::*;
 
+mod artifact_catalog;
+mod artifact_read;
+pub use artifact_read::DependencyArtifactRead;
+mod context_snapshot;
+mod context_timing;
 mod coord_accessors;
+mod coord_admission;
 mod coord_artifacts;
+mod coord_assignment;
 mod coord_context;
+mod coord_context_slice;
+mod coord_create;
+mod coord_delivery_gate;
+mod coord_finalize;
 mod coord_handoff;
 mod coord_human;
+mod coord_identity;
 mod coord_lifecycle;
 mod coord_load;
+mod coord_progress;
+mod coord_review;
+mod coord_rework;
 mod coord_run;
 mod coord_steer;
+mod coord_strategy;
 mod delivery_gate_evidence;
+mod phase_subplan;
+mod review_evidence;
 mod role_worker;
+mod task_graph;
+mod task_graph_policy;
+mod task_profile;
 
 pub use role_worker::*;
 pub use util::{is_review_role, is_review_role_name};
@@ -116,8 +138,16 @@ pub struct TeamCoordinator {
     pub(crate) phase_claims: Arc<Mutex<HashMap<String, PhaseClaim>>>,
     /// per-team 进度事件序号（进程内单调；状态转移时 +1）。
     pub(crate) progress_seqs: Arc<Mutex<HashMap<String, u64>>>,
+    /// Per-team watch channel for event-driven runtime waits (human handoff, progress).
+    pub(crate) progress_watchers: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<u64>>>>,
     /// Host-bound workspace roots used only by the registered read-only Validator lane.
     pub(crate) verification_workspaces: Arc<Mutex<HashMap<String, PathBuf>>>,
+    /// Bounded one-shot index for matching context assembly timings to Worker spans.
+    context_assembly_timings: Arc<Mutex<context_timing::ContextAssemblyTimingStore>>,
+    /// Cross-Worker bounded cache of immutable, hash-verified CAS artifact previews.
+    artifact_preview_cache: Arc<Mutex<artifact_read::SharedArtifactPreviewCache>>,
+    /// Bounded immutable inputs shared by Workers in the active Team phase.
+    phase_context_snapshots: Arc<Mutex<context_snapshot::PhaseContextSnapshotCache>>,
 }
 
 /// 产物登记载荷（七期 · 第三路：legacy 纯文本 / 契约 V1 两条路径的统一内部形状）。

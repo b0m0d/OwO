@@ -118,8 +118,23 @@ function Test-CiBinaryIdentity {
 }
 
 function New-CiFailureState {
-    if ($null -eq $script:ciFailures) { $script:ciFailures = @() }
-    if ($null -eq $script:ciSteps) { $script:ciSteps = @() }
+    # Scripts using Set-StrictMode -Version Latest cannot read an undeclared
+    # script-scoped variable, even in a null comparison. Initialize state by
+    # checking the variable table instead of dereferencing an unset variable.
+    $defaults = [ordered]@{
+        ciFailures = @()
+        ciSteps = @()
+        ciResourceApplied = @()
+        ciResourceEvents = @()
+        ciStepFilter = ''
+        ciInterrupted = $false
+        ciLastCommandResourceLimited = $false
+    }
+    foreach ($entry in $defaults.GetEnumerator()) {
+        if (-not (Get-Variable -Name $entry.Key -Scope Script -ErrorAction SilentlyContinue)) {
+            $null = Set-Variable -Name $entry.Key -Scope Script -Value $entry.Value
+        }
+    }
 }
 
 function Add-CiFailure {

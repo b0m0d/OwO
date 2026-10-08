@@ -15,14 +15,22 @@ fn team_benefit_model_binding_requires_one_effective_agent_model() {
     writer.model = Some("writer-model".to_string());
     writer.extra_input = serde_json::json!({ "model": "input-model" });
     assert_eq!(
-        resolve_team_model_binding(std::slice::from_ref(&writer), Some("team-model"), provider_model)
-            .as_deref(),
+        resolve_team_model_binding(
+            std::slice::from_ref(&writer),
+            Some("team-model"),
+            provider_model
+        )
+        .as_deref(),
         Some("input-model")
     );
     writer.extra_input = Value::Null;
     assert_eq!(
-        resolve_team_model_binding(std::slice::from_ref(&writer), Some("team-model"), provider_model)
-            .as_deref(),
+        resolve_team_model_binding(
+            std::slice::from_ref(&writer),
+            Some("team-model"),
+            provider_model
+        )
+        .as_deref(),
         Some("writer-model")
     );
 
@@ -179,12 +187,15 @@ fn existing_agent_prompt_receives_the_host_resolved_task_contract() {
     });
     let input = json!({ "prompt": "已存在的角色提示", "_workswarm": {} });
     let enriched = TeamCoordinator::build_enriched_input(&ctx, &input, "agent");
-    let prompt = enriched["prompt"].as_str().unwrap();
-    assert!(prompt.contains("已存在的角色提示"));
-    assert!(prompt.contains("实现 posts API 分页"));
-    assert!(prompt.contains("覆盖默认值和上限"));
-    assert!(prompt.contains("apps/api"));
+    assert!(enriched["prompt"].is_null());
+    let prompt_context = &enriched["team_prompt_context"];
+    let handoff = prompt_context["handoff_contract"].as_str().unwrap();
+    assert!(handoff.contains("已存在的角色提示"));
+    assert!(handoff.contains("实现 posts API 分页"));
+    assert!(handoff.contains("覆盖默认值和上限"));
+    assert!(handoff.contains("apps/api"));
     assert_eq!(enriched["resolved_task_context"]["task_id"], "task-api");
+    assert_eq!(prompt_context["task_scoped"], true);
 }
 
 #[test]
@@ -203,13 +214,40 @@ fn existing_template_reviewer_prompt_keeps_host_review_manifest() {
     });
     let input = json!({"prompt": "已有模板评审提示"});
     let enriched = TeamCoordinator::build_enriched_input(&ctx, &input, "agent");
-    let prompt = enriched["prompt"].as_str().unwrap();
+    let prompt_context = &enriched["team_prompt_context"];
+    let handoff = prompt_context["handoff_contract"].as_str().unwrap();
 
-    assert!(prompt.contains("已有模板评审提示"));
-    assert!(prompt.contains("host review manifest: step-api:behavior"));
-    assert!(prompt.contains("审查已实现的 API"));
-    assert!(prompt.contains("确认错误路径和边界行为"));
+    assert!(handoff.contains("已有模板评审提示"));
+    assert!(handoff.contains("host review manifest: step-api:behavior"));
+    assert!(handoff.contains("审查已实现的 API"));
+    assert!(handoff.contains("确认错误路径和边界行为"));
     assert_eq!(enriched["read_only"], true);
+}
+
+#[test]
+fn final_runtime_profile_controls_team_prompt_permissions_and_budget() {
+    let context = json!({
+        "objective_text": "检查当前实现",
+        "role": "implementer",
+        "handoff_contract": "只读检查并提交发现",
+        "template_id": null,
+        "budget_calls": 12,
+        "upstream": [],
+        "shared_facts": [],
+        "shared_context_revision": 0,
+    });
+    let effective_profile = crate::worker_profile::WorkerProfile::for_role("reviewer", 3);
+    let (prompt, _) =
+        TeamCoordinator::compile_role_prompt_with_profile(&context, &effective_profile);
+    let tool_line = prompt
+        .lines()
+        .find(|line| line.contains("可见工具仅限："))
+        .unwrap();
+    assert!(tool_line.contains("read_file"));
+    assert!(!tool_line.contains("write_file"));
+    assert!(!tool_line.contains("run_command"));
+    assert!(prompt.contains("禁止写入工作区文件"));
+    assert!(prompt.contains("你的回合预算为 3 回合"));
 }
 
 #[test]
@@ -220,12 +258,17 @@ fn enriched_input_agent_and_echo_paths() {
         "shared_facts": [{"key":"contract","value":"FACT","truncated":true}],
         "upstream": [{"role":"builder","artifact_id":"a1","version":1,"content":"BODY"}]
     });
-    // agent：注入 prompt + read_only（critic 只读）。
-    let v = TeamCoordinator::build_enriched_input(&ctx, &json!({"_workswarm": {}}), "agent");
-    assert!(v["prompt"].as_str().unwrap().contains("# 角色：critic"));
+    // Agent 入口只传结构化 Prompt 上下文；Server 收窄出最终 profile 后再生成模型提示。
+    let input = json!({"_workswarm": {}});
+    let v = TeamCoordinator::build_enriched_input(&ctx, &input, "agent");
+    let owned = TeamCoordinator::build_enriched_input_owned(ctx.clone(), &input, "agent");
+    assert_eq!(v, owned);
+    assert!(v["prompt"].is_null());
+    assert_eq!(v["team_prompt_context"]["role"], "critic");
     assert_eq!(v["read_only"], true);
-    assert!(v["prompt"].as_str().unwrap().contains("team_context_read"));
-    let meta = &v["_workswarm"]["prompt_meta"];
+    let (prompt, meta) = TeamCoordinator::compile_role_prompt_with_meta(&v["team_prompt_context"]);
+    assert!(prompt.contains("# 角色：critic"));
+    assert!(prompt.contains("team_context_read"));
     let fact_bytes = ctx["shared_facts"].to_string().len();
     assert_eq!(meta["shared_fact_bytes"].as_u64(), Some(fact_bytes as u64));
     assert_eq!(meta["shared_fact_truncated_count"].as_u64(), Some(1));

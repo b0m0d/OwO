@@ -1,0 +1,167 @@
+{
+  "created_at": "2026-10-04T22:45:03.625873+00:00",
+  "source_head": "3d2b03ac7f04443984cef20f0c00c3bdf7b5e7eb",
+  "source_worktree_dirty": true,
+  "claim": "Static source organization only. Type correctness, runtime, latency and Team advantage remain unverified.",
+  "validation": {
+    "rust_files": 10,
+    "rustfmt_stdin_parse_format_match": "passed",
+    "static_cross_module_wiring": "passed",
+    "git_diff_check_exit_code": 0,
+    "cargo_check": "not_run_user_requested_no_compilation",
+    "cargo_build": "not_run",
+    "cargo_test": "not_run",
+    "clippy": "not_run",
+    "live_model_calls": "not_run",
+    "runtime_file_read_counts": "not_measured",
+    "matched_single_team_benchmark": "not_run"
+  },
+  "current_batch_caps": {
+    "unique_paths": 256,
+    "one_file_bytes": 8388608,
+    "validation_batch_bytes": 33554432,
+    "final_hash_fence_bytes": 33554432
+  },
+  "new_regression_sources": [
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace_tests.rs",
+      "name": "requirements_share_exact_file_bytes_but_fresh_fence_rejects_mutation",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace_tests.rs",
+      "name": "repeated_reads_do_not_consume_aggregate_budget_twice",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace_tests.rs",
+      "name": "invalid_scope_version_resources_and_arguments_cannot_read_files",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace_tests.rs",
+      "name": "oversized_and_aggregate_path_limits_fail_closed",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace_tests.rs",
+      "name": "binary_files_have_valid_identity_without_being_valid_text",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace_tests.rs",
+      "name": "missing_root_is_unverified_and_output_validation_still_works",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace_tests.rs",
+      "name": "absence_and_failure_observations_are_not_silently_refreshed_mid_batch",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace_tests.rs",
+      "name": "behavioral_commands_still_require_host_receipts",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workspace_snapshot.rs",
+      "name": "batch_reuses_aliases_while_a_new_fence_detects_changes",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workspace_snapshot.rs",
+      "name": "batch_absence_is_scoped_and_subject_namespaces_are_independent",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workspace_snapshot.rs",
+      "name": "batch_unique_path_limit_rejects_new_paths_without_breaking_reuse",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/agent/single_completion.rs",
+      "name": "prior_output_identity_is_not_stale_merely_because_it_is_not_a_workspace_path",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/goal/tests.rs",
+      "name": "step_final_fence_rejects_file_mutated_after_cached_static_validation",
+      "status": "declared_not_executed"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_lifecycle.rs",
+      "name": "review_source_snapshot_refuses_oversize_file_identity_and_refreshes_per_operation",
+      "status": "declared_not_executed"
+    }
+  ],
+  "source_files": [
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification.rs",
+      "sha256": "cb8e18711a6b8085e5095b22452ef01938d541a37a7539d5d269c93b97fb52f3",
+      "lines": 495,
+      "rustfmt_stdin_parse_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace.rs",
+      "sha256": "a323986ad8ae25ab70a1cefadc15dd6d1e164f060512973f0b68631363418071",
+      "lines": 382,
+      "rustfmt_stdin_parse_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/verification_workspace_tests.rs",
+      "sha256": "8626e0d976c6ce921e85b1e381bd7b461440e9bec954419d2dc76e0e2f18297a",
+      "lines": 231,
+      "rustfmt_stdin_parse_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workspace_snapshot.rs",
+      "sha256": "05e37524f1289d9eca1578c0ec73e148bd3ccf988e96ffabafa3e6bf0a294b78",
+      "lines": 295,
+      "rustfmt_stdin_parse_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/agent/single_completion.rs",
+      "sha256": "dae1a6f969c91b2ccb1f2fcf41abc555f2b235b79dd950399434d544d58336f3",
+      "lines": 1277,
+      "rustfmt_stdin_parse_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/goal/mod.rs",
+      "sha256": "0dfe89fb24e7bd577d2b20b58579a3a8fca1cc45e3ac575fbae6ae2131933fea",
+      "lines": 2451,
+      "rustfmt_stdin_parse_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/goal/tests.rs",
+      "sha256": "26c81ee032e9273f75b76cc3a4e810ce12f654f8151a690941bdfa02f4b58d92",
+      "lines": 1071,
+      "rustfmt_stdin_parse_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/delivery_gate_evidence.rs",
+      "sha256": "06120e90015cb104d0b49fb4bb0421ec02e8d27d4d09f4206c59ffb872276f5e",
+      "lines": 965,
+      "rustfmt_stdin_parse_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_lifecycle.rs",
+      "sha256": "01e7123d3bca833bdcd2530104ac8a4b6211ace693a3462e9cce525a1598bd9b",
+      "lines": 2132,
+      "rustfmt_stdin_parse_format_match": true
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_context_slice.rs",
+      "sha256": "7115cced815a2f7e2f9f8b9b5fea725cd62b168fb9289016d3e9229e7cb1a648",
+      "lines": 216,
+      "rustfmt_stdin_parse_format_match": true
+    }
+  ],
+  "known_limits": [
+    "A validator batch may retain up to 32 MiB; this is not per-requirement memory_mb enforcement nor a global concurrent queue budget.",
+    "The independent final fence reads each unique path again to reject stale acceptance.",
+    "Review-source, validator-body and final-fence path sets are bounded separately per operation.",
+    "Behavior commands remain backed by trusted ToolHost receipts.",
+    "No runtime measure proves fewer file opens or faster turns.",
+    "No tested evidence proves full project closure or Team outperforming Single. The active goal continues."
+  ]
+}

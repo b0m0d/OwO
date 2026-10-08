@@ -61,7 +61,18 @@
         baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         model: "qwen-plus",
         keyEnv: "OPENAI_API_KEY",
-        models: ["qwen-plus", "qwen-max", "qwen-flash"],
+        // 2026-10 官方 DashScope 文本/兼容模型中常用且支持 OpenAI-compatible 调用的型号。
+        models: [
+          "qwen3.8-max",
+          "qwen3.8-flash",
+          "qwen3.7-max",
+          "qwen3.7-plus",
+          "qwen3.7-flash",
+          "qwen3.6-flash",
+          "qwen-plus",
+          "qwen-max",
+          "qwen-flash",
+        ],
       },
       {
         id: "ollama",

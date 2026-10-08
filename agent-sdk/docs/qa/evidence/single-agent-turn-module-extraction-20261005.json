@@ -1,0 +1,21 @@
+{
+  "evidence_id": "single-agent-turn-module-extraction-20261005",
+  "scope": "source-only",
+  "claim": "Agent::run_turn_inner is now implemented in agent/turn.rs while the public Agent API and lifecycle/configuration stay in agent/mod.rs. Text, image, and question-aware entry points continue to share one turn implementation and its existing budget, ToolHost, verification, and completion-record flow.",
+  "limits": [
+    "No Cargo compilation or Rust tests were run; source-boundary assertions and rustfmt do not establish type correctness.",
+    "No Single turn was run against a configured provider; streaming, persistence, cancellation, and UI delivery are not runtime verified.",
+    "No latency, token, tool-call, or task-quality improvement is claimed; this change reorganizes the existing execution boundary."
+  ],
+  "verification": [
+    "rustfmt --check --edition 2021 --config skip_children=true passed for agent/mod.rs and agent/turn.rs.",
+    "Python source assertions passed for module wiring, both entry-point delegations, unique run_turn_inner ownership, and retained budget/tool/verification/completion flow.",
+    "git diff --check exited 0; unrelated pre-existing line-ending normalization warnings may be present."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/agent/mod.rs": "463d77ec0bbc3b4759eb61253338d04750f430d1f3b2c7a996fe0482881ae4cf",
+    "crates/owo-agent-core/src/agent/turn.rs": "c7e909071d6cc842f6d01e091e60c88f3fa1847a4cb4b9085e07d4f9068a774a",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "f7d0bd516dd6fa40b9b73437b84abfc7ecf255065d740512fc9221946181fcbd"
+  }
+}

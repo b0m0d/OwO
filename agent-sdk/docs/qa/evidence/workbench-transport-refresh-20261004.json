@@ -1,0 +1,98 @@
+{
+  "date": "2026-10-04",
+  "source_head": "3d2b03ac7f04443984cef20f0c00c3bdf7b5e7eb",
+  "dirty_worktree": true,
+  "scope": "active web entry authentication and refresh execution",
+  "changes": [
+    "single API authentication, connection and retry lifecycle for app and 12 panels",
+    "public health resolves shell current port before auth",
+    "resource requests isolate daemon credentials and connection state",
+    "20 boot hydration functions at width 4",
+    "16 refresh plans at width 3, one timer, no per-plan overlap or catch-up queue, hidden page skips work"
+  ],
+  "targeted_tests": {
+    "passed": 35,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "full_web_tests": {
+    "exit_code": 1,
+    "summary": [
+      "# tests 411",
+      "# pass 375",
+      "# fail 36",
+      "# skipped 0"
+    ],
+    "failures": [
+      "not ok 17 - 接线守卫：index.html 脚本 + PANEL_ORDER 唯一来源 app-domain.js + style.css 第 21 节在场",
+      "not ok 33 - 路由切换在清空页面前保留设置节点，自动恢复会启动周期刷新",
+      "not ok 80 - §12-14 首屏收敛：健康检查先行 + 4 个无兜底水合，总请求 ≤5",
+      "not ok 81 - 后台刷新：防重入 + 页面隐藏暂停 + 路由可见性标注",
+      "not ok 82 - §3.1 事件流 Bearer 认证 + 域失效事件驱动 + 低频兜底 + 单一连接",
+      "not ok 83 - 单飞恢复：定时驱动与手动重试共用同一控制器",
+      "not ok 84 - §8.2 桌面后台态：守卫不得只看 document.visibilityState",
+      "not ok 9 - tests\\\\product-eval.panel.test.mjs",
+      "not ok 172 - PANEL_ORDER 注册 project-history（唯一来源 app-domain.js）",
+      "not ok 173 - style.css 提供面板样式节（.owo-ac-* 复用 + ph 专属类）",
+      "not ok 199 - style.css 第 20 节守卫：Launcher 布局/预览/目录/工作区/徽标/窄栏在场",
+      "not ok 211 - 契约2：renderSetupGuide 必须有异常兜底，不允许主区留空",
+      "not ok 212 - 契约3：壳连接快照缺失时仍走引导判定（provider 分流不被跳过）",
+      "not ok 215 - needsSetup 必须把 provider/not_configured 认成引导页（不是错误卡）",
+      "not ok 225 - 接线：index.html 引脚本 + 容器就位，app.js 只在设置路由按需加载（不进首屏清单）",
+      "not ok 235 - 接线：侧栏工作区字段与引导页都挂原生选择器，手输提示只在非桌面分支",
+      "not ok 273 - 接线：ROUTE_META/rail/脚本顺序/状态条降级分支改指权限中心",
+      "not ok 274 - 既有审批条字面量未被触碰（ui-ia-fixes 锁定的 scope 一个字都没改）",
+      "not ok 18 - tests\\\\r4-setup-gate.test.mjs",
+      "not ok 289 - 接线：容器与脚本就位、boot 早期挂载、导航事件有接收方",
+      "not ok 314 - §8.2 UI 文案 lint：普通界面不得泄漏 API 路径、HTTP 方法与内部字段名",
+      "not ok 317 - §5.1.6 断连态统一：所有路由复用同一 ServiceUnavailable 卡片",
+      "not ok 318 - §5.1.8 OpenAPI 链接由 API base 构造绝对地址",
+      "not ok 319 - §4.6/§4.8 首次配置引导：NoWorkspace 分流 + 提供商选择",
+      "not ok 320 - §5.1.2 最小窗口（900×600）rail 不再越界",
+      "not ok 322 - §5.5 审批卡：脱敏展示 + 原始 JSON 收进开发者详情 + scope 选项",
+      "not ok 323 - §12-13 自由文本改约束控件：自动化三态 / MCP 传输切换 / CSV chips / 白名单候选",
+      "not ok 324 - 模块边界守卫：app.js 与 app-domain.js 函数定义零交集",
+      "not ok 325 - §12-12 工具与高级系统移入路由化设置页 + 开发者模式门控",
+      "not ok 326 - R10 侧栏瘦身：工具/开发者分区不再挤在侧栏常显位置",
+      "not ok 327 - R12 会话卡片：低频操作收进 ⋯ 弹层，卡片上不再堆按钮",
+      "not ok 328 - R13 模型参数全部文件驱动：地址/模型名/上下文/输出/温度/超时 都不写死",
+      "not ok 329 - R10 模型配置：一级入口 + 自定义地址/模型名默认可见 + 会话级切换",
+      "not ok 352 - style.css 第 16 节守卫：inline 换行/中断徽标/重试按钮/表格包裹/窄栏断点/焦点环",
+      "not ok 363 - 四期样式守卫：style.css 第 18 节进度区/评审闭环/统计判读/徽标/窄栏守卫在场",
+      "not ok 380 - 五期样式守卫：style.css 第 19 节策略/指标/时间线/差异/交付物样式在场"
+    ]
+  },
+  "syntax_checked": 21,
+  "syntax_errors": 0,
+  "rendered_qa": {
+    "passed": true,
+    "environment": "Edge headless, real desktop entry, controlled HTTP fixture, boot disabled in served copy",
+    "fallback": "Browser plugin not available",
+    "provisional": {
+      "active": true,
+      "summary": 0,
+      "status": "\n        \n        等待宿主验收…\n        0s\n      "
+    },
+    "replayCursor": "1",
+    "pageErrors": [],
+    "tokenRequests": 1,
+    "panelAuthenticated": true
+  },
+  "source_sha256": {
+    "desktop\\web\\app.js": "28bbb07fe97cbee091a1ff745c3dedd5628c75ba724f1e1269191d781fb5f7cf",
+    "desktop\\web\\index.html": "7862e5158f6a09bca0a9b6ef45bb463ec267965ce2f1f646d82b2d154c0d24e9",
+    "desktop\\web\\core\\api-client.js": "7385faf13c63d5c90b30a9044d1526742ef86e07fb7437503074799746eec823",
+    "desktop\\web\\core\\workbench-refresh.js": "1a3b6ba789010ed21293d6be132ef1349c35922a521d9e1696d8a2d59d4026c7"
+  },
+  "limitations": [
+    "controlled HTTP fixtures, not a production Daemon/model acceptance",
+    "existing route/recovery/display integration still incomplete",
+    "boot concurrency applies to declared refresh functions; not a global HTTP cap",
+    "panel own timers and approval loops are outside the consolidated 16 plans",
+    "native background flag must be set by shell to be effective",
+    "no Rust build because available RAM below 6GB",
+    "no paired live Single/Team performance proof"
+  ],
+  "goal_complete": false,
+  "artifacts": "C:\\Users\\23843\\Documents\\Codex\\Artifacts\\workbench-transport-20261004"
+}

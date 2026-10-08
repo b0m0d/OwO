@@ -64,6 +64,7 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
                     "responses": {
                         "202": { "description": "受理", "content": { "application/json": { "schema": { "type": "object", "required": ["run_id", "status"], "properties": { "run_id": { "type": "string", "description": "eval-…" }, "status": { "type": "string", "enum": ["queued"] } } } } } },
                         "400": { "description": "语义校验失败（未知 suite/execution/mode、repetitions 越界、suite 加载失败、过滤后无任务）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+                        "409": { "description": "已有评测矩阵运行或收尾中；为保证 Single/Team 测量隔离而拒绝并发运行", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
                         "422": { "description": "结构校验失败（缺字段/类型错）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
                     }
                 },
@@ -179,10 +180,10 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
             "/computer-use/task/{id}/check/{action}": { "get": { "operationId": "computerTaskCheck", "parameters": [path_param("id"), path_param("action")], "responses": { "200": { "description": "task executable check" } } } },
             "/computer-use/sensitive-check": { "post": { "operationId": "computerSensitiveCheck", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "role": { "type": "string" }, "ocr_text": { "type": "string" } }, "required": ["name"] } } } }, "responses": { "200": { "description": "sensitive ui detection" } } } },
             "/computer-use/task/{id}/run": { "post": { "operationId": "computerTaskRun", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "goals": { "type": "array", "items": { "type": "object", "properties": { "anchor_text": { "type": "string" }, "action": { "type": "string" }, "value": { "type": "string" }, "verify_text": { "type": "string" } } } } } } } } }, "responses": { "200": { "description": "approved task executed (closed loop)" } } } },
-            "/cloud/tasks": { "post": { "operationId": "cloudTaskSubmit", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "workspace_dir": { "type": "string" }, "commands": { "type": "array", "items": { "type": "string" } }, "env_passthrough": { "type": "array", "items": { "type": "string" } }, "timeout_secs": { "type": "integer" } } } } } }, "responses": { "200": { "description": "cloud task submitted and executed" } } } },
+            "/cloud/tasks": { "post": { "operationId": "cloudTaskSubmit", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "workspace_dir": { "type": "string" }, "commands": { "type": "array", "items": { "type": "string" } }, "env_passthrough": { "type": "array", "items": { "type": "string" } }, "timeout_secs": { "type": "integer" } } } } } }, "responses": { "200": { "description": "cloud task durably queued; task_id is returned before background execution" } } } },
             "/cloud/tasks/{id}": { "get": { "operationId": "cloudTaskStatus", "parameters": [path_param("id")], "responses": { "200": { "description": "cloud task status + usage" } } } },
             "/cloud/tasks/{id}/result": { "get": { "operationId": "cloudTaskResult", "parameters": [path_param("id")], "responses": { "200": { "description": "cloud task result + diff summary" } } } },
-            "/cloud/tasks/{id}/cancel": { "post": { "operationId": "cloudTaskCancel", "parameters": [path_param("id")], "responses": { "200": { "description": "cloud task canceled" } } } },
+            "/cloud/tasks/{id}/cancel": { "post": { "operationId": "cloudTaskCancel", "parameters": [path_param("id")], "responses": { "200": { "description": "cancellation accepted; active tasks report cancel_requested until the runner persists Canceled" } } } },
             "/openapi.json": { "get": { "operationId": "openapiSpec", "responses": { "200": { "description": "OpenAPI 3.1 spec" } } } },
             "/perception/elements": { "post": { "operationId": "perceptionElements", "responses": { "200": { "description": "element registry snapshot" } } } },
             "/perception/ocr/bytes": { "post": { "operationId": "perceptionOcrBytes", "responses": { "200": { "description": "OCR text from raw image bytes" } } } },
@@ -393,7 +394,7 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
             "/model-candidates": { "post": { "operationId": "modelCandidateRegister", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "candidate_id": { "type": "string", "description": "缺省自动生成 model_id-model_version-<uuid8>" }, "model_id": { "type": "string" }, "model_version": { "type": "string" }, "source": { "type": "string", "description": "来源说明（缺省：手动注册 shadow 起步）" }, "provider_ref": { "$ref": "#/components/schemas/CandidateProviderRef", "description": "可执行 provider 身份声明（缺省 metadata_only；声明≠接线，还需进程内真实接线才积累影子样本）" } }, "required": ["model_id", "model_version"] } } } }, "responses": { "200": { "description": "candidate registered as shadow (never auto-activated); body = ModelCandidate", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelCandidate" } } } }, "409": { "description": "candidate_id already exists" } } } },
             "/model-candidates/{id}/promote": { "post": { "operationId": "modelCandidatePromote", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "ack": { "type": "boolean" }, "reason": { "type": "string" } }, "required": ["ack", "reason"] } } } }, "responses": { "200": { "description": "candidate promoted to active provider (human ack required); body = { candidate, active, previous_active, samples, gates }", "content": { "application/json": { "schema": { "type": "object", "properties": { "candidate": { "$ref": "#/components/schemas/ModelCandidate" }, "active": { "type": "string" }, "previous_active": { "type": "string", "nullable": true }, "samples": { "type": "integer", "format": "int64", "description": "真实影子样本数" }, "gates": { "type": "object", "description": "晋升门控明细快照（审计口径）", "properties": { "min_shadow_samples": { "type": "integer", "format": "int64" }, "provider_wired": { "type": "object", "properties": { "kind": { "type": "string" }, "locator": { "type": "string" } }, "required": ["kind", "locator"] }, "calibration_summary": { "allOf": [{ "$ref": "#/components/schemas/CalibrationReport" }] }, "regression_check": { "type": "object", "nullable": true, "description": "相对上一任 active 的退化检查（无前任或前任无样本时为 null）", "properties": { "previous_active": { "type": "string" }, "previous_samples": { "type": "integer", "format": "int64" }, "hit_rate_delta": { "type": "number" }, "mean_delta_jaccard_delta": { "type": "number" }, "mean_calibration_error_delta": { "type": "number" }, "max_regression_delta": { "type": "number" }, "passed": { "type": "boolean" } } } }, "required": ["min_shadow_samples", "provider_wired", "calibration_summary"] } }, "required": ["candidate", "active", "previous_active", "samples", "gates"] } } } }, "404": { "description": "candidate not found" }, "400": { "description": "ack=false or empty reason" }, "422": { "description": "governance gate refused（metadata_only / 未接线 / 样本不足 / 相对前任退化超阈值）" } } } },
             "/eval/gate/run": { "post": { "operationId": "evalGateRun", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "suite": { "type": "string" }, "model": { "type": "string" } } } } } }, "responses": { "200": { "description": "eval report or skipped reason" } } } },
-            "/eval/gate/report": { "get": { "operationId": "evalGateReport", "responses": { "200": { "description": "latest eval report" } } } },
+            "/eval/gate/report": { "get": { "operationId": "evalGateReport", "parameters": [{ "name": "file", "in": "query", "required": false, "schema": { "type": "string" }, "description": "报告文件名；省略时返回最新报告" }], "responses": { "200": { "description": "latest or selected eval report" }, "400": { "description": "invalid report file name" }, "404": { "description": "report not found" } } } },
             "/eval/gate/reports": { "get": { "operationId": "evalGateReports", "responses": { "200": { "description": "eval report history" } } } },
             "/schemas": { "get": { "operationId": "schemasList", "responses": { "200": { "description": "JSON Schema 版本化发布索引（plugin-manifest/owskill/owflow）" } } } },
             "/schemas/{kind}/{version}": { "get": { "operationId": "schemaGet", "parameters": [path_param("kind"), path_param("version")], "responses": { "200": { "description": "JSON Schema (draft-07)" } } } },
@@ -565,6 +566,30 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
                     },
                     "required": ["case_id", "agent_mode", "repetition"]
                 },
+                "EnablementRule": {
+                    "type": "object",
+                    "properties": { "name": { "type": "string" }, "satisfied": { "type": "boolean" }, "detail": { "type": "string" } },
+                    "required": ["name", "satisfied", "detail"]
+                },
+                "ModeComparison": {
+                    "type": "object",
+                    "description": "共享 Team 自动启用结论：质量/成功率守卫、样本量、收益与资源护栏",
+                    "properties": {
+                        "multi_success_rate_diff": { "type": "number" },
+                        "multi_wall_rel_change": { "type": ["number", "null"], "nullable": true },
+                        "multi_calls_rel_change": { "type": ["number", "null"], "nullable": true },
+                        "multi_tool_calls_rel_change": { "type": ["number", "null"], "nullable": true },
+                        "multi_tokens_rel_change": { "type": ["number", "null"], "nullable": true },
+                        "multi_cost_rel_change": { "type": ["number", "null"], "nullable": true },
+                        "rules": { "type": "array", "items": { "$ref": "#/components/schemas/EnablementRule" } },
+                        "alignment_guardrails": { "type": "array", "items": { "$ref": "#/components/schemas/EnablementRule" } },
+                        "quality_guardrails": { "type": "array", "items": { "$ref": "#/components/schemas/EnablementRule" } },
+                        "resource_guardrails": { "type": "array", "items": { "$ref": "#/components/schemas/EnablementRule" } },
+                        "enabled": { "type": "boolean" },
+                        "sample_sufficient": { "type": "boolean" }
+                    },
+                    "required": ["multi_success_rate_diff", "multi_wall_rel_change", "multi_calls_rel_change", "multi_tool_calls_rel_change", "multi_tokens_rel_change", "multi_cost_rel_change", "rules", "alignment_guardrails", "quality_guardrails", "resource_guardrails", "enabled", "sample_sufficient"]
+                },
                 "ProductEvalRun": {
                     "type": "object",
                     "description": "一次运行的完整记录（journal 最小单元；失败记录同样保留；Option 字段缺数据时序列化为 null）",
@@ -574,6 +599,7 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
                         "status": { "type": "string", "enum": ["passed", "failed", "error", "timeout", "cancelled"], "description": "单元格级状态（核心 RunStatus 小写词）" },
                         "wall_ms": { "type": "integer", "format": "int64" },
                         "model_calls": { "type": "integer" },
+                        "tool_calls": { "type": ["integer", "null"], "nullable": true, "description": "精确工具调用数；旧记录或执行器无法观测时为 null" },
                         "prompt_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true },
                         "completion_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true },
                         "total_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true },
@@ -588,7 +614,7 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
                         "finished_at": { "type": "string" },
                         "error": { "type": ["string", "null"], "nullable": true }
                     },
-                    "required": ["key", "category", "status", "wall_ms", "model_calls", "prompt_tokens", "completion_tokens", "total_tokens", "cost_usd", "failed_steps", "retries", "cancellations", "artifact_refs", "tool_log", "model", "started_at", "finished_at", "error"]
+                    "required": ["key", "category", "status", "wall_ms", "model_calls", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens", "cost_usd", "failed_steps", "retries", "cancellations", "artifact_refs", "tool_log", "model", "started_at", "finished_at", "error"]
                 },
                 "ProductEvalMetrics": {
                     "type": "object",
@@ -603,10 +629,11 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
                         "success_rate": { "type": "number" },
                         "mean_wall_ms": { "type": "number" },
                         "total_model_calls": { "type": "integer", "format": "int64" },
+                        "total_tool_calls": { "type": ["integer", "null"], "format": "int64", "nullable": true },
                         "total_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true },
                         "estimated_cost_usd": { "type": ["number", "null"], "nullable": true }
                     },
-                    "required": ["runs_total", "passed", "failed", "errors", "timeouts", "cancelled", "success_rate", "mean_wall_ms", "total_model_calls", "total_tokens", "estimated_cost_usd"]
+                    "required": ["runs_total", "passed", "failed", "errors", "timeouts", "cancelled", "success_rate", "mean_wall_ms", "total_model_calls", "total_tool_calls", "total_tokens", "estimated_cost_usd"]
                 },
                 "CaseModeMetrics": {
                     "type": "object",
@@ -620,9 +647,10 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
                         "success_rate": { "type": "number" },
                         "mean_wall_ms": { "type": "number" },
                         "mean_model_calls": { "type": "number" },
+                        "mean_tool_calls": { "type": ["number", "null"], "nullable": true },
                         "total_tokens": { "type": ["integer", "null"], "format": "int64", "nullable": true }
                     },
-                    "required": ["case_id", "category", "agent_mode", "runs_total", "passed", "success_rate", "mean_wall_ms", "mean_model_calls", "total_tokens"]
+                    "required": ["case_id", "category", "agent_mode", "runs_total", "passed", "success_rate", "mean_wall_ms", "mean_model_calls", "mean_tool_calls", "total_tokens"]
                 },
                 "ProductEvalReport": {
                     "type": "object",
@@ -637,7 +665,8 @@ pub(crate) async fn openapi_spec() -> Json<Value> {
                         "runs": { "type": "array", "items": { "$ref": "#/components/schemas/ProductEvalRun" } },
                         "pending": { "type": "array", "items": { "$ref": "#/components/schemas/MatrixKey" } },
                         "metrics": { "$ref": "#/components/schemas/ProductEvalMetrics" },
-                        "per_case": { "type": "array", "items": { "$ref": "#/components/schemas/CaseModeMetrics" } }
+                        "per_case": { "type": "array", "items": { "$ref": "#/components/schemas/CaseModeMetrics" } },
+                        "comparison": { "$ref": "#/components/schemas/ModeComparison", "nullable": true }
                     },
                     "required": ["schema_version", "suite_name", "suite_hash", "execution", "model", "generated_at", "runs", "pending", "metrics", "per_case"]
                 },

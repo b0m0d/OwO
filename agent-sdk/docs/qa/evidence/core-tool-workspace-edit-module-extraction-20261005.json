@@ -1,0 +1,92 @@
+{
+  "date": "2026-10-05",
+  "scope": "Agent Core tool facade and responsibility modules, including Single verification and interaction tools",
+  "source_change": {
+    "from": "crates/owo-agent-core/src/tools.rs",
+    "to": "crates/owo-agent-core/src/tools/workspace_edit.rs",
+    "responsibilities": [
+      "read_file",
+      "write_file",
+      "edit_file",
+      "multi_edit",
+      "apply_patch",
+      "patch parsing/application",
+      "session snapshot and write-conflict checks"
+    ],
+    "lines_before": 3979,
+    "parent_file_lines_after": 1778,
+    "extracted_module_lines": 708,
+    "compatibility": "Tool/ToolSpec/ToolContext/ToolRegistry and registration remain in tools.rs; tools::* paths are re-exported. validate_single_verification_plan remains pub(crate) for agent::single_completion.",
+    "tests": "Existing unit tests remain in tools.rs and continue to reach extracted implementation through parent re-exports",
+    "modules": [
+      {
+        "path": "crates/owo-agent-core/src/tools/tool_host.rs",
+        "lines": 415,
+        "responsibility": "approval grants, expiring capabilities, trusted execution, audit receipts"
+      },
+      {
+        "path": "crates/owo-agent-core/src/tools/workspace_edit.rs",
+        "lines": 821,
+        "responsibility": "file read/write/edit/multi-edit/apply-patch, whitelist enforcement, snapshots and conflict checks"
+      },
+      {
+        "path": "crates/owo-agent-core/src/tools/workspace_read.rs",
+        "lines": 266,
+        "responsibility": "directory listing, file search and grep"
+      },
+      {
+        "path": "crates/owo-agent-core/src/tools/delegation.rs",
+        "lines": 273,
+        "responsibility": "read-only exploration and subagent/fan-out delegation"
+      },
+      {
+        "path": "crates/owo-agent-core/src/tools/image.rs",
+        "lines": 58,
+        "responsibility": "workspace image loading for multimodal turns"
+      },
+      {
+        "path": "crates/owo-agent-core/src/tools/verification_tool.rs",
+        "lines": 233,
+        "responsibility": "Single host-bound verification-plan tool and contract validation"
+      },
+      {
+        "path": "crates/owo-agent-core/src/tools/todo.rs",
+        "lines": 83,
+        "responsibility": "session todo state tool"
+      },
+      {
+        "path": "crates/owo-agent-core/src/tools/interaction.rs",
+        "lines": 118,
+        "responsibility": "user question and enabled-skill tools"
+      }
+    ],
+    "implementation_lines_moved": 2201,
+    "dependency_boundaries": {
+      "tool_modules": "All 11 tools/*.rs modules use explicit imports; no child module imports the entire tools facade with use super::*.",
+      "shared_parameter_helper": "command.rs, mcp_adapters.rs, web.rs and workspace_read.rs import owo_agent_kernel::required_string directly.",
+      "external_tool_provider": "command.rs and workspace_read.rs import crate::external_tools directly; tools.rs keeps only a cfg(test) compatibility import.",
+      "single_verification": "crate::tools::validate_single_verification_plan retains pub(crate) visibility for agent::single_completion."
+    }
+  },
+  "validation": {
+    "rustfmt_check": "passed: tools.rs plus all 11 tools/*.rs modules, edition 2021",
+    "git_diff_check": "passed; Git emitted existing CRLF-to-LF normalization notices",
+    "cargo": "not_run_resource_limited",
+    "resource_snapshot": {
+      "free_physical_memory_gb": 5.19,
+      "used_percent": 83.6,
+      "gate_requires": "free >= 6 GB and used < 80%"
+    },
+    "behavior_claim": "none; this is a responsibility-preserving module extraction pending Rust compilation and tests",
+    "next_required_tests": [
+      "cargo check -p owo-agent-core",
+      "owo-agent-core tools host approval/receipt tests",
+      "workspace edit/whitelist/patch tests",
+      "workspace search and delegation tests",
+      "verification-plan tests",
+      "Core lib tests"
+    ],
+    "static_callsite_review": "confirmed Agent Single completion still reaches validate_single_verification_plan through crate::tools; re-export retains pub(crate) visibility",
+    "static_dependency_check": "passed: no use super::* remains in tools/*.rs; explicit module import ownership confirmed"
+  }
+}

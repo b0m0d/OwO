@@ -28,10 +28,11 @@ fn context_capabilities(ctx: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-const MAX_SHARED_FACT_INLINE_BYTES: usize = 2400;
-const MAX_SHARED_FACT_CONTEXT_BYTES: usize = 8 * 1024;
+pub(super) const MAX_SHARED_FACT_INLINE_BYTES: usize = 2400;
+pub(super) const MAX_SHARED_FACT_CONTEXT_BYTES: usize = 8 * 1024;
+pub(super) const MAX_PARENT_CONTEXT_SNAPSHOT_BYTES: usize = 256 * 1024;
 
-fn truncate_utf8_to_bytes(text: &str, max_bytes: usize) -> (&str, bool) {
+pub(super) fn truncate_utf8_to_bytes(text: &str, max_bytes: usize) -> (&str, bool) {
     if text.len() <= max_bytes {
         return (text, false);
     }
@@ -42,7 +43,7 @@ fn truncate_utf8_to_bytes(text: &str, max_bytes: usize) -> (&str, bool) {
     (&text[..end], true)
 }
 
-fn context_fact_matches_step(
+pub(super) fn context_fact_matches_step(
     fact: &owo_agent_protocol::SharedContextFact,
     step: &crate::plan::StepSpec,
 ) -> bool {
@@ -213,19 +214,27 @@ impl TeamCoordinator {
             let current_upstream = context
                 .get("upstream")
                 .and_then(Value::as_array)
-                .ok_or_else(|| WorkSwarmError::Validation("review context 缺少 upstream".to_string()))?;
+                .ok_or_else(|| {
+                    WorkSwarmError::Validation("review context 缺少 upstream".to_string())
+                })?;
             let mut expected_review_requirement_ids = std::collections::BTreeSet::new();
             for item in current_upstream {
-                if let Some(requirements) = item.get("review_requirements").and_then(Value::as_array) {
+                if let Some(requirements) =
+                    item.get("review_requirements").and_then(Value::as_array)
+                {
                     for requirement in requirements {
-                        if let Some(id) = requirement.get("requirement_id").and_then(Value::as_str) {
+                        if let Some(id) = requirement.get("requirement_id").and_then(Value::as_str)
+                        {
                             expected_review_requirement_ids.insert(id.to_string());
                         }
                     }
                 }
             }
-            super::delivery_gate_evidence::validate_review_requirement_coverage(result, &expected_review_requirement_ids)
-                .map_err(WorkSwarmError::Validation)?;
+            super::delivery_gate_evidence::validate_review_requirement_coverage(
+                result,
+                &expected_review_requirement_ids,
+            )
+            .map_err(WorkSwarmError::Validation)?;
             let reviewed_artifacts = current_upstream
                 .iter()
                 .map(|artifact| {
@@ -407,7 +416,6 @@ impl TeamCoordinator {
 
     /// 产物登记内部实现（legacy / 契约两路径共用）：CAS 落盘、版本链、
     /// Artifact / HandoffRecord 持久化、空间活动流与总线交接消息。
-    /// 格式门控已在契约路径入口完成，此处假定内容已通过（或无需门控）。
     pub(crate) async fn register_step_output_inner(
         &self,
         team_id: &str,
@@ -499,7 +507,8 @@ impl TeamCoordinator {
         let correlation = meta.correlation_id.clone();
 
         let kind = out.kind.clone();
-        let version = self.next_artifact_version(&space, role).await?;
+        let catalog = self.artifact_catalog(team_id, &space).await?;
+        let version = catalog.next_version(member_id)?;
         let hash = self
             .cas
             .put(out.content.as_bytes())
@@ -526,11 +535,8 @@ impl TeamCoordinator {
             let Some(_dep_role) = worker_role(&dep_step.worker) else {
                 continue;
             };
-            if let Some(a) = self
-                .latest_artifact_for_step(&space, &state, &dep_step.id)
-                .await
-            {
-                source_refs.push(a.artifact_id);
+            if let Some(a) = catalog.current_for_step(&state, dep_step)? {
+                source_refs.push(a.artifact_id.clone());
             }
         }
 
@@ -545,7 +551,7 @@ impl TeamCoordinator {
         let mut supersedes_artifact_id: Option<String> = None;
         let mut retire_prev: Option<Artifact> = None;
         if is_rework {
-            if let Some(prev) = self.latest_artifact_for_task(&space, step_id).await {
+            if let Some(prev) = catalog.previous_for_step(step)? {
                 if prev.review_state != ReviewState::Superseded {
                     supersedes_artifact_id = Some(prev.artifact_id.clone());
                     if prev.review_state != ReviewState::Approved {
@@ -711,323 +717,6 @@ impl TeamCoordinator {
             .unwrap_or_else(|| "按角色职责继续".to_string())
     }
 
-    pub(crate) async fn next_artifact_version(
-        &self,
-        space: &ProjectSpace,
-        role: &str,
-    ) -> WorkSwarmResult<u32> {
-        let identity = format!(":{role}:v");
-        let mut max = 0u32;
-        for id in &space.artifacts {
-            if let Ok(artifact) = self.store.get_artifact(id).await {
-                if artifact.artifact_id.contains(&identity) && artifact.version > max {
-                    max = artifact.version;
-                }
-            }
-        }
-        Ok(max + 1)
-    }
-
-    /// 依赖产物必须同时匹配 task_id 与当前宿主 attempt_id；历史/迟到 attempt 不参与读取。
-    pub(crate) async fn latest_artifact_for_step(
-        &self,
-        space: &ProjectSpace,
-        state: &GoalRunState,
-        step_id: &str,
-    ) -> Option<Artifact> {
-        let record = state.records.get(step_id)?;
-        let attempt_id = record.attempt_id.as_deref()?;
-        let mut best: Option<Artifact> = None;
-        for id in &space.artifacts {
-            if let Ok(artifact) = self.store.get_artifact(id).await {
-                if artifact.task_id.as_deref() == Some(step_id)
-                    && artifact.attempt_id.as_deref() == Some(attempt_id)
-                    && best
-                        .as_ref()
-                        .is_none_or(|current| artifact.created_at > current.created_at)
-                {
-                    best = Some(artifact);
-                }
-            }
-        }
-        best
-    }
-
-    /// 返工版本链只从同一 task_id 选择前版，避免同角色的其他任务串链。
-    pub(crate) async fn latest_artifact_for_task(
-        &self,
-        space: &ProjectSpace,
-        step_id: &str,
-    ) -> Option<Artifact> {
-        let mut best: Option<Artifact> = None;
-        for id in &space.artifacts {
-            if let Ok(artifact) = self.store.get_artifact(id).await {
-                if artifact.task_id.as_deref() == Some(step_id)
-                    && best
-                        .as_ref()
-                        .is_none_or(|current| artifact.created_at > current.created_at)
-                {
-                    best = Some(artifact);
-                }
-            }
-        }
-        best
-    }
-
-    // -- 上下文切片（handoff 的运行时视图；A3 结构化 context slice） --
-
-    /// 为 (member, step) 组装结构化上下文切片：
-    /// `{ team_id, objective, role, handoff_contract, upstream: [{role, artifact_id, version, content, review_state}] }`。
-    pub async fn assemble_context_slice(
-        &self,
-        team_id: &str,
-        member_id: &str,
-        step_id: &str,
-    ) -> WorkSwarmResult<Value> {
-        let (team, space, state) = self.load_bundle(team_id).await?;
-        let meta = RunMeta::load(&self.run_dir, team_id)?;
-        let spec = Self::role_spec_of_member(&meta, member_id)?;
-        let step = state
-            .plan
-            .steps
-            .iter()
-            .find(|s| s.id == step_id)
-            .ok_or_else(|| WorkSwarmError::NotFound(format!("步骤 {step_id} 不存在")))?;
-        let mut core_specs = Vec::new();
-        for reference in &team.shared_context_refs {
-            let raw = self.cas_content_text(reference);
-            if let Ok(snapshot) = serde_json::from_str::<Value>(&raw) {
-                if snapshot.get("kind").and_then(Value::as_str) == Some("source_session_context_v1")
-                {
-                    if let Some(spec) = snapshot.get("core_spec") {
-                        core_specs.push(spec.clone());
-                    }
-                }
-            }
-        }
-        let shared_context = self
-            .store
-            .get_team_context(team_id)
-            .await
-            .map_err(|e| WorkSwarmError::Run(e.to_string()))?;
-        let mut shared_facts = Vec::new();
-        let mut latest_fact_keys = HashSet::new();
-        // Keep shared facts within the same scale as upstream artifacts; workers can fetch full CAS content on demand.
-        let mut fact_budget = MAX_SHARED_FACT_CONTEXT_BYTES;
-        for fact in shared_context.facts.iter().rev().take(128) {
-            if !latest_fact_keys.insert(fact.key.as_str()) {
-                continue;
-            }
-            // A file-hash-bound fact must be checked against the bound workspace by
-            // the server before it can enter a model prompt. Workers can request it
-            // through team_context_read, which performs that freshness check.
-            if fact.file_hash.is_some() {
-                continue;
-            }
-            if !context_fact_matches_step(fact, step) {
-                continue;
-            }
-            if fact.status != "candidate" && fact.status != "confirmed" {
-                continue;
-            }
-            if fact_budget == 0 {
-                break;
-            }
-            let full = self.cas_content_text(&fact.value_ref);
-            if full.is_empty() {
-                continue;
-            }
-            let (value, truncated) =
-                truncate_utf8_to_bytes(&full, fact_budget.min(MAX_SHARED_FACT_INLINE_BYTES));
-            let value = value.to_string();
-            fact_budget = fact_budget.saturating_sub(value.len());
-            shared_facts.push(json!({
-                "key": fact.key, "value": value, "value_ref": fact.value_ref,
-                "truncated": truncated,
-                "revision": fact.revision, "producer": fact.producer,
-                "task_id": fact.task_id, "source_refs": fact.source_refs,
-                "file_hash": fact.file_hash, "confidence": fact.confidence,
-                "status": fact.status
-            }));
-        }
-        let review_change_sets = crate::change_set_store::ChangeSetStore::new(&self.run_dir)
-            .list_for_team(team_id)
-            .map_err(|error| WorkSwarmError::Run(format!("Review ChangeSet 读取失败：{error}")))?;
-        let review_workspace = self.verification_workspace(team_id);
-        let mut upstream = Vec::new();
-        for dep in &step.depends_on {
-            let dep_step = match state
-                .plan
-                .steps
-                .iter()
-                .find(|s| s.id.as_str() == dep.as_str())
-            {
-                Some(s) => s,
-                None => continue,
-            };
-            let Some(dep_role) = worker_role(&dep_step.worker) else {
-                continue;
-            };
-            if let Some(a) = self
-                .latest_artifact_for_step(&space, &state, &dep_step.id)
-                .await
-            {
-                let content = self.cas_content_text(&a.content_ref);
-                upstream.push(json!({
-                    "role": dep_role,
-                    "task_id": a.task_id,
-                    "attempt_id": a.attempt_id,
-                    "artifact_id": a.artifact_id,
-                    "kind": a.kind,
-                    "reviewed_source": super::delivery_gate_evidence::review_source_snapshot(
-                        team_id,
-                        &dep_step.id,
-                        a.attempt_id.as_deref().unwrap_or_default(),
-                        &review_change_sets,
-                        review_workspace.as_deref(),
-                    ),
-                    "review_requirements": super::delivery_gate_evidence::review_requirements_for_step(
-                        dep_step,
-                        &state.goal.objective,
-                    ),
-                    "version": a.version,
-                    "content": content,
-                    // 评审绑定实际读取到的 CAS 字节，不信任模型声明或可变角色索引。
-                    "sha256": CasStore::hash_of(content.as_bytes()),
-                    "producer": a.producer,
-                    // 八期一路：CAS ref 随切片透出（大 Artifact 摘要块需带哈希与 ref）。
-                    "cas_ref": a.content_ref,
-                    "review_state": format!("{:?}", a.review_state),
-                }));
-            }
-        }
-        let mut review_handoff_contract = spec.handoff_contract.clone();
-        if super::util::is_review_role(&spec.role, &spec.capabilities) {
-            let source_manifest = upstream
-                .iter()
-                .map(|artifact| {
-                    let source = artifact.get("reviewed_source");
-                    json!({
-                        "artifact_id": artifact.get("artifact_id"),
-                        "task_id": artifact.get("task_id"),
-                        "attempt_id": artifact.get("attempt_id"),
-                        "kind": artifact.get("kind"),
-                        "change_set_ids": source.and_then(|value| value.get("change_set_ids")),
-                        "change_set_sha256": source.and_then(|value| value.get("change_set_sha256")),
-                        "source_hashes": source.and_then(|value| value.get("source_hashes")),
-                        "review_requirements": artifact.get("review_requirements").cloned().unwrap_or_else(|| json!([])),
-                    })
-                })
-                .collect::<Vec<_>>();
-            let manifest = serde_json::to_string(&source_manifest)
-                .map_err(|error| WorkSwarmError::Serialization(error.to_string()))?;
-            if manifest.len() > 64 * 1024 {
-                return Err(WorkSwarmError::Validation(
-                    "Reviewer 源码快照超过 64 KiB 上限，拒绝以不完整清单继续评审".to_string(),
-                ));
-            }
-            if !source_manifest.is_empty() {
-                let base = review_handoff_contract
-                    .as_deref()
-                    .unwrap_or_default()
-                    .trim();
-                review_handoff_contract = Some(format!(
-                    "{base}
-
-宿主绑定的评审清单（只读）：{manifest}。逐项审查每个上游任务的 review_requirements，最终在 review_result.reviewed_requirement_ids 中原样列出全部 requirement_id，且不得重复、遗漏或增加；对 code/source artifact 逐个读取清单中的工作区文件并按源码证据提交 findings。交付门会校验这些哈希及要求在评审期间和交付时未变化。"
-                ));
-            }
-        }
-        Ok(json!({
-            "team_id": team_id,
-            "objective_text": state.goal.objective,
-            "role": spec.role,
-            "capabilities": spec.capabilities,
-            "write_paths": spec.write_paths,
-            "member_id": member_id,
-            "handoff_contract": review_handoff_contract,
-            "core_spec": core_specs,
-            "shared_context_revision": shared_context.revision,
-            "shared_facts": shared_facts,
-            // 八期一路：模板 id + 角色调用预算（角色专属 Prompt 编译输入）。
-            "template_id": meta.template_id,
-            "budget_calls": meta.budgets.get(&spec.role).copied().unwrap_or(0),
-            "retry_note": step.input.get("_workswarm").and_then(|meta| meta.get("retry_note")),
-            "upstream": upstream,
-        }))
-    }
-
-    /// Read a dependency artifact by id with step-level authorization and bounded text output.
-    pub async fn read_dependency_artifact(
-        &self,
-        team_id: &str,
-        member_id: &str,
-        step_id: &str,
-        artifact_id: &str,
-        max_bytes: usize,
-    ) -> WorkSwarmResult<Value> {
-        let (_team, space, state) = self.load_bundle(team_id).await?;
-        let meta = RunMeta::load(&self.run_dir, team_id)?;
-        let _spec = Self::role_spec_of_member(&meta, member_id)?;
-        let step = state
-            .plan
-            .steps
-            .iter()
-            .find(|step| step.id == step_id)
-            .ok_or_else(|| WorkSwarmError::NotFound(format!("步骤 {step_id} 不存在")))?;
-        for dependency in &step.depends_on {
-            let Some(dep_step) = state.plan.steps.iter().find(|item| item.id == *dependency) else {
-                continue;
-            };
-            let Some(_dep_role) = worker_role(&dep_step.worker) else {
-                continue;
-            };
-            let Some(artifact) = self
-                .latest_artifact_for_step(&space, &state, &dep_step.id)
-                .await
-            else {
-                continue;
-            };
-            if artifact.artifact_id != artifact_id || artifact.team_id != team_id {
-                continue;
-            }
-            let full = self.cas_content_text(&artifact.content_ref);
-            if full.is_empty() {
-                return Err(WorkSwarmError::NotFound(format!(
-                    "产物正文不存在：{artifact_id}"
-                )));
-            }
-            let budget = max_bytes.clamp(1, 64 * 1024);
-            let content = full
-                .char_indices()
-                .take_while(|(offset, ch)| offset + ch.len_utf8() <= budget)
-                .map(|(_, ch)| ch)
-                .collect::<String>();
-            return Ok(json!({
-                "artifact_id": artifact.artifact_id,
-                "kind": artifact.kind,
-                "version": artifact.version,
-                "producer": artifact.producer,
-                "task_id": artifact.task_id,
-                "attempt_id": artifact.attempt_id,
-                "review_state": format!("{:?}", artifact.review_state),
-                "content_ref": artifact.content_ref,
-                "content": content,
-                "truncated": content.len() < full.len()
-            }));
-        }
-        Err(WorkSwarmError::Validation(format!(
-            "产物不属于当前步骤的直接依赖：{artifact_id}"
-        )))
-    }
-
-    pub(crate) fn cas_content_text(&self, content_ref: &str) -> String {
-        content_ref
-            .strip_prefix("cas://sha256:")
-            .and_then(|h| self.cas.get_text(h))
-            .unwrap_or_default()
-    }
-
     /// 八期一路：自适应指标追加落盘（best-effort——任何失败都不阻塞运行）。
     ///
     /// 事件写入 `strategy_decision.adaptive.events`（上限 64 条），并按事件种类
@@ -1134,8 +823,14 @@ impl TeamCoordinator {
         workspace_change_status(&path)
     }
 
-    /// 组装内层 worker 输入：agent 角色注入 prompt（critic 只读）；内置 worker 注入 text。
+    /// 组装内层 worker 输入：agent 延迟编译结构化 Prompt 上下文；内置 worker 注入 text。
     pub fn build_enriched_input(ctx: &Value, input: &Value, worker_kind: &str) -> Value {
+        Self::build_enriched_input_owned(ctx.clone(), input, worker_kind)
+    }
+
+    /// Production RoleWorker path: consumes the assembled context so deferring Prompt
+    /// compilation does not require cloning the complete upstream/facts payload.
+    pub fn build_enriched_input_owned(ctx: Value, input: &Value, worker_kind: &str) -> Value {
         let mut out = if input.is_object() {
             input.clone()
         } else {
@@ -1160,67 +855,70 @@ impl TeamCoordinator {
             obj.insert("resolved_task_context".to_string(), resolved.clone());
         }
         if worker_kind == "agent" {
-            let has_prompt = obj
-                .get("prompt")
+            // Prompt 延迟到 Server 完成最终任务/工作区权限与预算收窄后编译。
+            // 保留既有宿主 prompt 为 handoff 补充内容，最终工具边界仍由有效画像覆盖。
+            let role = ctx
+                .get("role")
                 .and_then(Value::as_str)
-                .map(|p| !p.trim().is_empty())
-                .unwrap_or(false);
-            if has_prompt {
-                let task_contract = ctx
-                    .get("_resolved_task_context")
-                    .and_then(|value| {
-                        serde_json::from_value::<crate::task_context::ResolvedTaskContext>(
-                            value.clone(),
-                        )
-                        .ok()
-                    })
-                    .and_then(|task| task.prompt_contract());
-                let role = ctx.get("role").and_then(Value::as_str).unwrap_or("");
-                let is_reviewer = super::util::is_review_role(role, &context_capabilities(ctx));
-                let reviewer_contract = is_reviewer
-                    .then(|| ctx.get("handoff_contract").and_then(Value::as_str))
-                    .flatten()
-                    .map(str::trim)
-                    .filter(|contract| !contract.is_empty())
-                    .map(str::to_string);
-                let host_contract = reviewer_contract.or(task_contract);
-                if let (Some(prompt), Some(host_contract)) = (
-                    obj.get("prompt").and_then(Value::as_str),
-                    host_contract,
-                ) {
-                    if !prompt.contains(&host_contract) {
-                        let section = if is_reviewer {
-                            "宿主解析的评审与任务合同"
-                        } else {
-                            "宿主解析的当前任务与验收范围"
-                        };
-                        let enriched = format!(
-                            "{prompt}\n\n## {section}\n{host_contract}"
-                        );
-                        obj.insert("prompt".to_string(), json!(enriched));
+                .unwrap_or("")
+                .to_string();
+            let is_reviewer = super::util::is_review_role(&role, &context_capabilities(&ctx));
+            let has_resolved_task_context = ctx.get("_resolved_task_context").is_some();
+            let task_contract = ctx
+                .get("_resolved_task_context")
+                .and_then(|value| {
+                    serde_json::from_value::<crate::task_context::ResolvedTaskContext>(
+                        value.clone(),
+                    )
+                    .ok()
+                })
+                .and_then(|task| task.prompt_contract());
+            let mut prompt_context = ctx;
+            if let Some(context) = prompt_context.as_object_mut() {
+                let mut handoff = context
+                    .get("handoff_contract")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if let Some(task) = task_contract {
+                    if !handoff.contains(&task) {
+                        if !handoff.is_empty() {
+                            handoff.push_str("\n\n");
+                        }
+                        handoff.push_str(&task);
                     }
                 }
-            } else {
-                // 八期一路：角色专属 Prompt 由 TeamPromptCompiler 编译（模板段 +
-                // 上下文字节预算 + 截断记录）；prompt 元数据随步骤输入回传，
-                // RoleWorker 转报自适应指标（best-effort，不阻塞执行）。
-                let (mut prompt_text, prompt_meta) = Self::compile_role_prompt_with_meta(ctx);
-                if let Some(rework) = input.get("rework") {
-                    let instruction = rework
-                        .get("instruction")
-                        .and_then(Value::as_str)
-                        .unwrap_or("按评审意见修复指定问题");
-                    prompt_text.push_str(&format!(
-                        "\n\n## 本次评审返修（保持原任务范围与写权限）\n{instruction}\n"
-                    ));
+                if let Some(supplied) = obj
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                {
+                    if !handoff.contains(supplied) {
+                        if !handoff.is_empty() {
+                            handoff.push_str("\n\n");
+                        }
+                        handoff.push_str("宿主提供的任务补充：\n");
+                        handoff.push_str(supplied);
+                    }
                 }
-                obj.insert("prompt".to_string(), json!(prompt_text));
-                if let Some(ws) = obj.get_mut("_workswarm").and_then(Value::as_object_mut) {
-                    ws.insert("prompt_meta".to_string(), prompt_meta);
+                if !handoff.is_empty() {
+                    context.insert("handoff_contract".to_string(), json!(handoff));
+                }
+                if has_resolved_task_context {
+                    context.insert("task_scoped".to_string(), json!(true));
                 }
             }
-            let role = ctx.get("role").and_then(Value::as_str).unwrap_or("");
-            let is_reviewer = super::util::is_review_role(role, &context_capabilities(ctx));
+            obj.remove("prompt");
+            obj.insert("team_prompt_context".to_string(), prompt_context);
+            if let Some(rework) = input.get("rework") {
+                let instruction = rework
+                    .get("instruction")
+                    .and_then(Value::as_str)
+                    .unwrap_or("按评审意见修复指定问题");
+                obj.insert("team_prompt_rework".to_string(), json!(instruction));
+            }
             obj.insert("read_only".to_string(), json!(is_reviewer));
             // 输出契约需要角色身份（producer 类 / critic 类的修复提示不同）。
             obj.insert("role".to_string(), json!(role));
@@ -1234,9 +932,24 @@ impl TeamCoordinator {
     /// 角色 prompt 编译（八期一路）：`TeamPromptCompiler` 按模板 + 角色 + 工具权限
     /// 生成角色专属 Prompt——当前目标 / 输入 Artifact（字节预算：小传正文、大传
     /// 摘要+哈希+ref、超总预算仅引用）/ 必须完成 / 禁止执行 / 输出格式 / 验收条件 /
-    /// 剩余调用预算。返回 (prompt, prompt_meta)；prompt_meta 含 context_bytes 与
-    /// 截断记录（进自适应指标，UI 可展示上下文大小）。
-    pub(crate) fn compile_role_prompt_with_meta(ctx: &Value) -> (String, Value) {
+    /// 剩余调用预算。兼容辅助入口按角色推导画像；生产 Agent 路径须用
+    /// `compile_role_prompt_with_profile` 传入最终 ToolRegistry 画像。
+    pub fn compile_role_prompt_with_meta(ctx: &Value) -> (String, Value) {
+        Self::compile_role_prompt_with_effective_profile(ctx, None)
+    }
+
+    /// Compile after the runtime has resolved the exact profile used by its ToolRegistry.
+    pub fn compile_role_prompt_with_profile(
+        ctx: &Value,
+        profile: &crate::worker_profile::WorkerProfile,
+    ) -> (String, Value) {
+        Self::compile_role_prompt_with_effective_profile(ctx, Some(profile))
+    }
+
+    fn compile_role_prompt_with_effective_profile(
+        ctx: &Value,
+        effective_profile: Option<&crate::worker_profile::WorkerProfile>,
+    ) -> (String, Value) {
         let upstream_items = ctx
             .get("upstream")
             .and_then(Value::as_array)
@@ -1302,7 +1015,10 @@ impl TeamCoordinator {
             is_critic: is_reviewer,
             upstream: &compiled,
         };
-        let prompt = crate::team_prompt::compile_prompt(&pctx);
+        let prompt = match effective_profile {
+            Some(profile) => crate::team_prompt::compile_prompt_with_profile(&pctx, profile),
+            None => crate::team_prompt::compile_prompt(&pctx),
+        };
         let shared_fact_bytes = shared_facts.len();
         let meta = json!({
             "context_bytes": compiled.context_bytes.saturating_add(shared_fact_bytes),

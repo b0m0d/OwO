@@ -1,0 +1,22 @@
+{
+  "evidence_id": "team-review-evidence-boundary-20261005",
+  "scope": "source-only",
+  "claim": "Review issue planning and evidence identity rules are isolated from async Coordinator artifact collection, with the existing regression tests moved alongside the rules.",
+  "verification": [
+    "Source structure check confirmed coord_review only delegates policy rules and review_evidence owns owner/attempt binding, finding validation, issue identity/resolution, and the moved test modules.",
+    "rustfmt --edition 2021 --check --config skip_children=true passed for mod.rs, coord_review.rs, and review_evidence.rs.",
+    "git diff --check passed for the three affected Rust files."
+  ],
+  "limits": [
+    "Rust compilation and tests were not run per user instruction; module visibility/type correctness remains unverified.",
+    "No live Team review/rework execution or Single/Team benchmark was run.",
+    "No delivery quality or speed improvement is claimed."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/mod.rs": "c78435e867e80399c0b075a74ecde0f90d44317c7db291081ec7be4a129cd30c",
+    "crates/owo-agent-core/src/workswarm/coord_review.rs": "fd692841e6175bed309a7112c8a5b704017741a4fa5bf5063c567eebac8db8df",
+    "crates/owo-agent-core/src/workswarm/review_evidence.rs": "8f1615dab551d7ee318e82ec7ba7f85427110ba410ee03e0c957da20395c8ea0",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "977640a106f276a93f6431b023c0d924e4411a10c6bce7b1fb3f1acef70d7a79"
+  }
+}

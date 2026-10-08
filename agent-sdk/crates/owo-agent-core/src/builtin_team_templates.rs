@@ -59,6 +59,13 @@ pub struct BuiltinTemplateDescriptor {
 
 /// 代码变更：代码分析 → 单写者实现 → 只读审查。
 pub const CODE_CHANGE_V1: &str = "code-change-v1";
+/// Compact current code-change topology: one writer followed by independent review.
+pub const CODE_CHANGE_V2: &str = "code-change-v2";
+
+pub fn is_code_change_template(template_id: &str) -> bool {
+    matches!(template_id, CODE_CHANGE_V1 | CODE_CHANGE_V2)
+}
+
 /// Full-stack web development: frontend and backend writers run after shared integration.
 pub const FULLSTACK_WEB_V1: &str = "fullstack-web-v1";
 /// 研究简报：并行研究 → 证据核验 → 汇总交付。
@@ -69,8 +76,9 @@ pub const DOCUMENT_DELIVERY_V1: &str = "document-delivery-v1";
 pub const STRUCTURED_EXTRACT_V1: &str = "structured-extract-v1";
 
 /// 目录固定顺序（UI 展示序）。
-pub const CATALOG_IDS: [&str; 5] = [
+pub const CATALOG_IDS: [&str; 6] = [
     CODE_CHANGE_V1,
+    CODE_CHANGE_V2,
     FULLSTACK_WEB_V1,
     RESEARCH_BRIEF_V1,
     DOCUMENT_DELIVERY_V1,
@@ -166,6 +174,58 @@ fn code_change_v1() -> BuiltinTemplateDescriptor {
         tool_scope: "code_analyzer/reviewer 只读（读文件+搜索）；implementer 需写权限（经审批）"
             .to_string(),
         template,
+    }
+}
+
+/// Code change v2 removes the redundant serial analysis hop while retaining independent review.
+fn code_change_v2() -> BuiltinTemplateDescriptor {
+    let template = TeamTemplate {
+        template_id: CODE_CHANGE_V2.to_string(),
+        name: "代码变更（单写者实现 → 独立审查）".to_string(),
+        mode: TeamMode::Team,
+        roles: vec![
+            role(
+                "implementer",
+                &[],
+                "全队唯一写者：检查相关源码、调用方和测试，完成用户要求的代码改动并真实写入工作区；交付变更摘要与实际验证结果。",
+                "non_empty",
+            ),
+            role(
+                "reviewer",
+                &["implementer"],
+                "只读审查最终候选代码、目标、边界和宿主验证证据；发现问题时提交带证据的 ReviewResult 并退回原实现者；不得修改源文件或覆盖实现交付。",
+                "non_empty",
+            ),
+        ],
+        applicability: "代码 修改 修复 重构 bug 实现 feature patch 变更 函数 接口".to_string(),
+        source_team_id: None,
+        created_at: "2026-10-08T00:00:00+00:00".to_string(),
+    };
+    BuiltinTemplateDescriptor {
+        template,
+        budget_calls_per_role: vec![
+            RoleBudget {
+                role: "implementer".to_string(),
+                budget_calls: 16,
+            },
+            RoleBudget {
+                role: "reviewer".to_string(),
+                budget_calls: 16,
+            },
+        ],
+        budget: json!({
+            "max_steps": 4,
+            "max_retries_per_step": 1,
+            "max_total_retries": 2,
+            "max_replans": 0,
+            "max_wall_secs": 900
+        }),
+        artifact_kinds: vec!["code".to_string(), "review".to_string()],
+        completion_criteria: vec![
+            "implementer 检查相关代码并交付真实工作区改动与验证结果".to_string(),
+            "reviewer 对最终候选版本独立审查；问题由原实现者修复".to_string(),
+        ],
+        tool_scope: "implementer 是唯一写者；reviewer 只读并提交版本绑定评审".to_string(),
     }
 }
 
@@ -494,6 +554,7 @@ fn structured_extract_v1() -> BuiltinTemplateDescriptor {
 pub fn catalog() -> Vec<BuiltinTemplateDescriptor> {
     vec![
         code_change_v1(),
+        code_change_v2(),
         fullstack_web_v1(),
         research_brief_v1(),
         document_delivery_v1(),
@@ -505,6 +566,7 @@ pub fn catalog() -> Vec<BuiltinTemplateDescriptor> {
 pub fn descriptor(template_id: &str) -> Option<BuiltinTemplateDescriptor> {
     match template_id {
         CODE_CHANGE_V1 => Some(code_change_v1()),
+        CODE_CHANGE_V2 => Some(code_change_v2()),
         FULLSTACK_WEB_V1 => Some(fullstack_web_v1()),
         RESEARCH_BRIEF_V1 => Some(research_brief_v1()),
         DOCUMENT_DELIVERY_V1 => Some(document_delivery_v1()),
@@ -570,6 +632,22 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
             acceptance: vec![
                 "影响面覆盖目标代码及其直接调用方。".to_string(),
                 "每项风险均有位置与建议验证方式。".to_string(),
+            ],
+        },
+        (CODE_CHANGE_V2, "implementer") => RolePromptSections {
+            must_do: vec![
+                "先检查目标源码、直接调用方和相关测试，再独立完成实现；不要等待分析角色或要求用户重复提供仓库里已有的信息。".to_string(),
+                "你是全队唯一写者：用 write_file 将完整变更真实落盘，并运行任务允许的验证命令；Artifact 只写简明摘要和真实验证证据。".to_string(),
+                "优先满足明确需求与边界，不新增未要求的功能；如果验证失败，依据真实输出修复后再汇报。".to_string(),
+            ],
+            must_not_do: vec![
+                "不触碰允许写路径之外的文件。".to_string(),
+                "不声称运行过未执行的验证，也不把分析计划当作完成结果。".to_string(),
+            ],
+            output_format: "artifact.kind=code、artifact.format=markdown，content 写变更摘要、影响面和实际验证结果；源文件必须真实落盘。".to_string(),
+            acceptance: vec![
+                "所有要求的代码行为已在工作区真实实现。".to_string(),
+                "保留公开签名和未授权文件；报告的验证结果与宿主证据一致。".to_string(),
             ],
         },
         (CODE_CHANGE_V1, "implementer") => RolePromptSections {
@@ -654,7 +732,7 @@ pub fn prompt_sections_for(template_id: &str, role: &str) -> Option<RolePromptSe
                 "结论逐项区分通过、失败和未验证。".to_string(),
             ],
         },
-        (CODE_CHANGE_V1, "reviewer") => RolePromptSections {
+        (CODE_CHANGE_V1 | CODE_CHANGE_V2, "reviewer") => RolePromptSections {
             must_do: vec![
                 "核对工作区真实变更与目标/上游影响面是否一致。".to_string(),
                 "提交结构化 ReviewResult：approved/changes_requested/rejected 与 blocker/major/minor/note findings，逐条指出证据和建议 owner；同一 owner 涉及多个任务时精确标注 task/artifact 身份。".to_string(),
@@ -836,9 +914,9 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn catalog_has_five_stable_templates() {
+    fn catalog_has_six_stable_templates() {
         let entries = catalog();
-        assert_eq!(entries.len(), 5);
+        assert_eq!(entries.len(), 6);
         let ids: Vec<&str> = entries
             .iter()
             .map(|d| d.template.template_id.as_str())
@@ -968,7 +1046,23 @@ mod tests {
         assert!(contract.contains("JSON"), "{contract}");
         assert!(contract.contains("CSV"), "{contract}");
 
-        // 代码：单写者语义（唯一 implementer 产出改动；审查只读）。
+        // 代码 v2 移除重复的分析阶段，保留唯一写者与独立审查。
+        let compact = descriptor(CODE_CHANGE_V2).unwrap();
+        assert_eq!(compact.template.roles.len(), 2);
+        assert_eq!(compact.template.roles[0].role, "implementer");
+        assert_eq!(compact.template.roles[1].role, "reviewer");
+        assert_eq!(compact.template.roles[1].depends_on, vec!["implementer"]);
+        assert_eq!(
+            compact
+                .budget_calls_per_role
+                .iter()
+                .map(|role| role.budget_calls)
+                .sum::<usize>(),
+            32
+        );
+        assert!(prompt_sections_for(CODE_CHANGE_V2, "implementer").is_some());
+
+        // 代码 v1 保留现有单写者与只读审查语义，已持久化团队不受影响。
         let code = descriptor(CODE_CHANGE_V1).unwrap();
         let reviewer = code
             .template
@@ -1000,7 +1094,7 @@ mod tests {
             registry.save_template(&d.template).unwrap();
         }
         let listed = registry.list_templates();
-        assert_eq!(listed.len(), 5, "安装后注册表应有 5 个模板：{listed:?}");
+        assert_eq!(listed.len(), 6, "安装后注册表应有 6 个模板：{listed:?}");
         for original in catalog() {
             let stored = registry
                 .get_template(&original.template.template_id)
@@ -1084,14 +1178,18 @@ mod tests {
     fn fullstack_producer_issues_are_scoped_to_owned_work() {
         for role in ["w1", "w2", "frontend_engineer", "backend_engineer"] {
             let sections = prompt_sections_for(FULLSTACK_WEB_V1, role).unwrap();
-            assert!(sections
-                .must_do
-                .iter()
-                .any(|line| line.contains("open_issues")));
-            assert!(sections
-                .must_do
-                .iter()
-                .any(|line| line.contains("其他角色负责")));
+            assert!(
+                sections
+                    .must_do
+                    .iter()
+                    .any(|line| line.contains("open_issues"))
+            );
+            assert!(
+                sections
+                    .must_do
+                    .iter()
+                    .any(|line| line.contains("其他角色负责"))
+            );
         }
     }
 
@@ -1116,7 +1214,10 @@ mod tests {
                 .unwrap_or_default();
             for text in [prompt.as_str(), handoff] {
                 assert!(!text.contains("totalPages"), "{role_name} 应按任务定义契约");
-                assert!(!text.contains("title/excerpt/body"), "{role_name} 不应预设搜索字段");
+                assert!(
+                    !text.contains("title/excerpt/body"),
+                    "{role_name} 不应预设搜索字段"
+                );
             }
         }
         let integrator = template
@@ -1136,26 +1237,32 @@ mod tests {
         for (template, role) in [
             (FULLSTACK_WEB_V1, "reviewer"),
             (CODE_CHANGE_V1, "reviewer"),
+            (CODE_CHANGE_V2, "reviewer"),
             (DOCUMENT_DELIVERY_V1, "content_reviewer"),
         ] {
             let reviewer = prompt_sections_for(template, role).unwrap();
             assert!(reviewer.output_format.contains("省略 artifact"));
             assert!(reviewer.output_format.contains("review_result"));
-            assert!(reviewer
-                .must_do
-                .iter()
-                .chain(reviewer.must_not_do.iter())
-                .all(|line| !line.contains("artifact.kind") && !line.contains("artifact.content")));
+            assert!(
+                reviewer
+                    .must_do
+                    .iter()
+                    .chain(reviewer.must_not_do.iter())
+                    .all(|line| !line.contains("artifact.kind")
+                        && !line.contains("artifact.content"))
+            );
         }
     }
 
     #[test]
     fn code_template_sections_keep_single_writer_semantics() {
         let implementer = prompt_sections_for(CODE_CHANGE_V1, "implementer").unwrap();
-        assert!(implementer
-            .must_do
-            .iter()
-            .any(|l| l.contains("单写者") || l.contains("write_file")));
+        assert!(
+            implementer
+                .must_do
+                .iter()
+                .any(|l| l.contains("单写者") || l.contains("write_file"))
+        );
         let reviewer = prompt_sections_for(CODE_CHANGE_V1, "reviewer").unwrap();
         assert!(
             reviewer
@@ -1166,15 +1273,19 @@ mod tests {
         );
         assert!(reviewer.output_format.contains("省略 artifact"));
         assert!(reviewer.output_format.contains("review_result"));
-        assert!(reviewer
-            .must_do
-            .iter()
-            .chain(reviewer.must_not_do.iter())
-            .all(|l| !l.contains("artifact.kind") && !l.contains("artifact.content")));
-        assert!(reviewer
-            .must_do
-            .iter()
-            .chain(reviewer.must_not_do.iter())
-            .all(|l| !l.contains("唯一允许产出代码")));
+        assert!(
+            reviewer
+                .must_do
+                .iter()
+                .chain(reviewer.must_not_do.iter())
+                .all(|l| !l.contains("artifact.kind") && !l.contains("artifact.content"))
+        );
+        assert!(
+            reviewer
+                .must_do
+                .iter()
+                .chain(reviewer.must_not_do.iter())
+                .all(|l| !l.contains("唯一允许产出代码"))
+        );
     }
 }

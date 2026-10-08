@@ -21,7 +21,17 @@ impl TeamCoordinator {
             phase_epochs: Arc::new(Mutex::new(HashMap::new())),
             phase_claims: Arc::new(Mutex::new(HashMap::new())),
             progress_seqs: Arc::new(Mutex::new(HashMap::new())),
+            progress_watchers: Arc::new(Mutex::new(HashMap::new())),
             verification_workspaces: Arc::new(Mutex::new(HashMap::new())),
+            context_assembly_timings: Arc::new(Mutex::new(
+                context_timing::ContextAssemblyTimingStore::default(),
+            )),
+            artifact_preview_cache: Arc::new(Mutex::new(
+                artifact_read::SharedArtifactPreviewCache::default(),
+            )),
+            phase_context_snapshots: Arc::new(Mutex::new(
+                context_snapshot::PhaseContextSnapshotCache::default(),
+            )),
         }
     }
 
@@ -137,24 +147,6 @@ impl TeamCoordinator {
 
     // -- 阶段代次 / 实时进度（长任务响应性支撑） --
 
-    /// 当前阶段代次（未领取过 = 0；cancel/retry/replace 等转向时 +1）。
-    pub(crate) fn phase_epoch(&self, team_id: &str) -> u64 {
-        self.phase_epochs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(team_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// 阶段代次 +1（转向操作接管现场时调用；返回新代次）。
-    pub(crate) fn bump_phase_epoch(&self, team_id: &str) -> u64 {
-        let mut map = self.phase_epochs.lock().unwrap_or_else(|e| e.into_inner());
-        let next = map.entry(team_id.to_string()).or_insert(0);
-        *next = next.wrapping_add(1);
-        *next
-    }
-
     /// 登记阶段领取（claim 后调用；进度视图据此外显 current_steps）。
     pub(crate) fn note_phase_claim(&self, team_id: &str, claim: PhaseClaim) {
         self.phase_claims
@@ -201,10 +193,37 @@ impl TeamCoordinator {
 
     /// 进度序号 +1（每次状态转移调用；返回新序号）。
     pub(crate) fn advance_progress(&self, team_id: &str) -> u64 {
-        let mut map = self.progress_seqs.lock().unwrap_or_else(|e| e.into_inner());
-        let seq = map.entry(team_id.to_string()).or_insert(0);
-        *seq = seq.wrapping_add(1);
-        *seq
+        let seq = {
+            let mut map = self.progress_seqs.lock().unwrap_or_else(|e| e.into_inner());
+            let seq = map.entry(team_id.to_string()).or_insert(0);
+            *seq = seq.wrapping_add(1);
+            *seq
+        };
+        let watchers = self
+            .progress_watchers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(sender) = watchers.get(team_id) {
+            // Concurrent transitions may reach this lock in a different order than their
+            // sequence increments; publish the latest sequence rather than regressing a watch.
+            sender.send_replace(self.progress_seq(team_id));
+        }
+        seq
+    }
+
+    /// 订阅团队状态变化。watch 保留最新序号，订阅前后发生的并发更新不会丢失。
+    pub fn subscribe_progress(&self, team_id: &str) -> tokio::sync::watch::Receiver<u64> {
+        let mut watchers = self
+            .progress_watchers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(sender) = watchers.get(team_id) {
+            return sender.subscribe();
+        }
+        let initial = self.progress_seq(team_id);
+        let (sender, receiver) = tokio::sync::watch::channel(initial);
+        watchers.insert(team_id.to_string(), sender);
+        receiver
     }
 
     /// 当前进度序号（只读；订阅方据此判断是否有新进度）。

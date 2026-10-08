@@ -181,7 +181,7 @@ pub struct ContractEnforcementResult {
 pub struct ContractEnforcementError {
     /// 失败原因；前缀冻结为 `output_contract_invalid:`。
     pub message: String,
-    /// 已消耗的定向修复次数（失败路径恒为 1）。
+    /// 已消耗的定向修复次数；请求前拒绝为 0，发起修复后为 1。
     pub repairs: u32,
     /// Usage attributable to the repair attempt, including invalid repaired output.
     pub usage: Option<crate::gateway::TokenUsage>,
@@ -218,6 +218,22 @@ pub async fn enforce_worker_output_contract_with_model(
     text: &str,
     is_critic: bool,
 ) -> Result<ContractEnforcementResult, ContractEnforcementError> {
+    enforce_worker_output_contract_controlled(provider, model, text, is_critic, None, None, true)
+        .await
+}
+
+/// Runtime-owned repair boundary. The repair shares cancellation, remaining wall-clock
+/// budget and request-count budget with the worker, rather than starting an unbounded
+/// second execution lane after Agent::run_turn has finished.
+pub(crate) async fn enforce_worker_output_contract_controlled(
+    provider: &Arc<dyn ModelProvider>,
+    model: Option<&str>,
+    text: &str,
+    is_critic: bool,
+    abort: Option<&AtomicBool>,
+    timeout: Option<std::time::Duration>,
+    allow_repair: bool,
+) -> Result<ContractEnforcementResult, ContractEnforcementError> {
     let first_violation = match parse_worker_output(text) {
         WorkerOutputParse::Parsed(output) => match validate_by_role(&output, is_critic) {
             Ok(()) => {
@@ -242,10 +258,54 @@ pub async fn enforce_worker_output_contract_with_model(
         tool_call_id: None,
         images: Vec::new(),
     }];
-    let (repaired, repair_usage) = match provider
-        .complete_with_model_observed(model, &messages, &[])
-        .await
-    {
+    let refusal = if abort.is_some_and(|signal| signal.load(std::sync::atomic::Ordering::Relaxed)) {
+        Some("worker_aborted: 输出修复前任务已取消")
+    } else if !allow_repair {
+        Some("worker_turn_budget_exhausted: 没有剩余模型调用预算用于输出修复")
+    } else if timeout.is_some_and(|remaining| remaining.is_zero()) {
+        Some("worker_deadline_exhausted: 没有剩余时间用于输出修复")
+    } else {
+        None
+    };
+    if let Some(message) = refusal {
+        return Err(ContractEnforcementError {
+            message: message.to_string(),
+            repairs: 0,
+            usage: None,
+        });
+    }
+    let wait_for_cancel = async {
+        match abort {
+            Some(signal) => {
+                while !signal.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
+    let request = async {
+        let request = provider.complete_with_model_observed(model, &messages, &[]);
+        match timeout {
+            Some(remaining) => tokio::time::timeout(remaining, request)
+                .await
+                .map_err(|_| "worker_deadline_exhausted: 输出修复超时".to_string())?,
+            None => request.await,
+        }
+    };
+    let observed = tokio::select! {
+        biased;
+        _ = wait_for_cancel => Err("worker_aborted: 输出修复已取消".to_string()),
+        result = request => result,
+    };
+    let (repaired, repair_usage) = match observed {
+        Err(message) => {
+            return Err(ContractEnforcementError {
+                message: format!("output_contract_invalid: {message}"),
+                repairs: 1,
+                usage: None,
+            });
+        }
         Ok(observed) => {
             let text = match observed.output {
                 ModelOutput::Text(text) => strip_code_fences(&text),
@@ -253,7 +313,6 @@ pub async fn enforce_worker_output_contract_with_model(
             };
             (text, observed.metadata.usage)
         }
-        Err(_) => (String::new(), None),
     };
     let violation = match parse_worker_output(&repaired) {
         WorkerOutputParse::Parsed(output) => match validate_by_role(&output, is_critic) {
@@ -317,8 +376,7 @@ impl ContractSubagentRunner<'_> {
         };
         let config = AgentConfig {
             max_turns: if self.max_turns == 0 {
-                adaptive_subagent_turns(prompt, read_only)
-                    .min(crate::subagent::MAX_SUBAGENT_TURNS)
+                adaptive_subagent_turns(prompt, read_only).min(crate::subagent::MAX_SUBAGENT_TURNS)
             } else {
                 adaptive_subagent_turns(prompt, read_only)
                     .min(self.max_turns)
@@ -463,5 +521,139 @@ mod enforcement_usage_tests {
             provider.requested_model.lock().unwrap().as_deref(),
             Some("worker-model")
         );
+    }
+}
+
+#[cfg(test)]
+mod controlled_repair_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    struct HangingRepair {
+        requests: Arc<AtomicUsize>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct RequestGuard(Arc<AtomicBool>);
+    impl Drop for RequestGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for HangingRepair {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[crate::tools::ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            let _guard = RequestGuard(Arc::clone(&self.dropped));
+            std::future::pending().await
+        }
+    }
+
+    fn provider() -> (Arc<dyn ModelProvider>, Arc<AtomicUsize>, Arc<AtomicBool>) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        (
+            Arc::new(HangingRepair {
+                requests: Arc::clone(&requests),
+                dropped: Arc::clone(&dropped),
+            }),
+            requests,
+            dropped,
+        )
+    }
+
+    #[tokio::test]
+    async fn exhausted_or_cancelled_repair_never_calls_provider() {
+        for (cancelled, timeout, allow) in [
+            (true, None, true),
+            (false, Some(Duration::ZERO), true),
+            (false, None, false),
+        ] {
+            let (provider, requests, _) = provider();
+            let abort = AtomicBool::new(cancelled);
+            let result = enforce_worker_output_contract_controlled(
+                &provider,
+                Some("worker"),
+                "invalid",
+                false,
+                Some(&abort),
+                timeout,
+                allow,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(result.repairs, 0);
+            assert_eq!(requests.load(Ordering::SeqCst), 0);
+            assert!(result.usage.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn repair_timeout_drops_inflight_request_and_counts_unknown_usage() {
+        let (provider, requests, dropped) = provider();
+        let error = enforce_worker_output_contract_controlled(
+            &provider,
+            None,
+            "invalid",
+            false,
+            None,
+            Some(Duration::from_millis(20)),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.contains("worker_deadline_exhausted"));
+        assert_eq!(error.repairs, 1);
+        assert!(error.usage.is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelling_repair_drops_inflight_request_without_waiting_for_provider() {
+        let (provider, requests, dropped) = provider();
+        let abort = AtomicBool::new(false);
+        let cancel = async {
+            while requests.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            abort.store(true, Ordering::SeqCst);
+        };
+        let repair = enforce_worker_output_contract_controlled(
+            &provider,
+            None,
+            "invalid",
+            false,
+            Some(&abort),
+            None,
+            true,
+        );
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(repair, cancel)
+        })
+        .await
+        .expect("cancel must not wait on the provider");
+        let error = result.unwrap_err();
+        assert!(error.message.contains("worker_aborted"));
+        assert_eq!(error.repairs, 1);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn valid_contract_needs_no_repair_even_without_remaining_request_budget() {
+        let (provider, requests, _) = provider();
+        let result = enforce_worker_output_contract_controlled(
+            &provider, None,
+            r#"{"status":"done","summary":"fixed","artifact":{"kind":"note","format":"text","content":"accepted"},"evidence":[],"open_issues":[]}"#,
+            false, None, Some(Duration::ZERO), false,
+        ).await.unwrap();
+        assert_eq!(result.repairs, 0);
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
     }
 }

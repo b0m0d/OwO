@@ -820,6 +820,7 @@ impl CaseExecutor for SingleAgentExecutor {
         if ctx.cancelled() {
             return RawExecOutcome {
                 aborted: true,
+                tool_calls: Some(0),
                 ..RawExecOutcome::default()
             };
         }
@@ -845,11 +846,7 @@ impl CaseExecutor for SingleAgentExecutor {
         let defaults = AgentConfig::default();
         let config = AgentConfig {
             max_turns: (max_model_calls as usize).max(1),
-            max_tool_calls_per_turn: if unbounded_calls {
-                0
-            } else {
-                64
-            },
+            max_tool_calls_per_turn: if unbounded_calls { 0 } else { 64 },
             max_repeated_tool_calls: if unbounded_calls {
                 usize::MAX
             } else {
@@ -997,6 +994,7 @@ impl CaseExecutor for SingleAgentExecutor {
             aborted: false,
             error: None,
             model_calls: snapshot_state.model_calls,
+            tool_calls: Some(snapshot_state.tool_calls),
             usage,
             usage_known,
             validation_wall_ms: 0,

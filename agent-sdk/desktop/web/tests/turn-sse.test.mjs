@@ -34,13 +34,19 @@ test("replay records are turn-scoped, strictly after cursor, and ordered", () =>
   assert.deepEqual(turnSse.eventsAfterCursor(page, "turn-1", 10).map((event) => event.seq), [11, 12]);
 });
 
-test("desktop loads replay helpers before the conversation domain uses them", () => {
+test("active desktop entry loads the durable consumer before app.js", () => {
   const index = readFileSync(join(here, "../index.html"), "utf8");
-  const app = readFileSync(join(here, "../app-domain.js"), "utf8");
-  assert.ok(index.indexOf('src="core/turn-sse.js"') < index.indexOf('src="app-domain.js"'));
-  assert.match(app, /x-owo-turn-id/);
-  assert.match(app, /OwoTurnSse\.replayPath/);
-  assert.match(app, /OwoTurnSse\.eventsAfterCursor/);
-  assert.match(app, /page\.state === "interrupted"/);
-  assert.match(app, /turnFailure/);
+  const app = readFileSync(join(here, "../app.js"), "utf8");
+  const domain = readFileSync(join(here, "../app-domain.js"), "utf8");
+  const core = readFileSync(join(here, "../core/turn-sse.js"), "utf8");
+  const streamIndex = index.indexOf('src="core/turn-sse.js"');
+  const domainIndex = index.indexOf('src="app-domain.js"');
+  const appIndex = index.indexOf('src="app.js"');
+  assert.ok(streamIndex >= 0 && streamIndex < domainIndex && domainIndex < appIndex);
+  assert.ok(domain.includes("OwoTurnSse.consumeResponse"));
+  assert.ok(domain.includes("OwoTurnSse.replayPath"));
+  assert.ok(domain.includes("OwoApi.stream"));
+  assert.ok(core.includes("x-owo-turn-id"));
+  assert.ok(domain.includes('case "turn_failed"'));
+  assert.ok(!/async function sendPrompt\(/.test(app), "sendPrompt 的唯一实现应归属 app-domain.js");
 });

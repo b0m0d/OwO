@@ -20,7 +20,7 @@ pub enum TeamSelectionMode {
     /// 强制单 Agent（一个 producer，零评审零裁决）。
     #[serde(rename = "single")]
     ForceSingle,
-    /// 强制多 Agent（完整 producer + critic + leader 流水线）。
+    /// 强制协作：producer + critic；仅在多来源/多产物综合时增加 leader。
     #[serde(rename = "team")]
     ForceTeam,
     /// 系统判定（默认）：按任务画像信号决定 single 或 team。
@@ -70,7 +70,7 @@ pub struct TaskProfile {
     /// 预期 Artifact 数量。
     #[serde(default)]
     pub artifact_count: usize,
-    /// 输入材料数量。
+    /// 已知显式输入源数量；缺失来源信息时不代表任务没有其他输入。
     #[serde(default)]
     pub input_count: usize,
     /// 是否需要独立评审（审批要求/高风险变更/历史检查器频繁失败）。
@@ -337,31 +337,41 @@ impl TeamStrategyEngine {
     }
 
     fn forced_team_plan(&self, selection: TeamSelectionMode, profile: &TaskProfile) -> TeamPlan {
-        // 显式 team：完整流水线（producer + critic + leader）——用户明确要求评审与裁决。
+        // 显式 Team 保证独立评审；只在有真实合并信号时增加最终综合角色。
         let producer = RolePlan {
             role: producer_role_name(profile),
-            duty: "产出主交付物草稿".to_string(),
+            duty: "产出主交付物候选".to_string(),
             budget_calls: self.thresholds.producer_budget,
         };
         let critic = RolePlan {
             role: "critic".to_string(),
-            duty: "只读评审草稿（完整性/一致性/符合度）".to_string(),
+            duty: "只读评审候选与验收证据".to_string(),
             budget_calls: self.thresholds.critic_budget,
         };
-        let leader = RolePlan {
-            role: "leader".to_string(),
-            duty: "综合草稿与评审意见，裁决并产出最终交付物".to_string(),
-            budget_calls: self.thresholds.leader_budget,
-        };
-        let roles = vec![producer, critic, leader];
-        let budget_calls_total = roles.iter().map(|r| r.budget_calls).sum();
-        let reasons = vec![
-            "模式强制 team：按用户要求启用完整 producer → critic → leader 流水线".to_string(),
-            format!(
-                "全队调用预算 {budget_calls_total} 次（producer {} + critic {} + leader {}）",
-                roles[0].budget_calls, roles[1].budget_calls, roles[2].budget_calls
-            ),
+        let mut roles = vec![producer, critic];
+        let merge = self.merge_signal(profile);
+        if merge.is_some() {
+            roles.push(RolePlan {
+                role: "leader".to_string(),
+                duty: "综合多个来源或产物，并发布最终交付物".to_string(),
+                budget_calls: self.thresholds.leader_budget,
+            });
+        }
+        let budget_calls_total = roles.iter().map(|role| role.budget_calls).sum();
+        let role_budgets = roles
+            .iter()
+            .map(|role| format!("{} {}", role.role, role.budget_calls))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let mut reasons = vec![
+            "模式强制 team：保留独立 producer + critic 评审，不因收益 gate 降级".to_string(),
+            format!("全队调用预算 {budget_calls_total} 次（{role_budgets}）"),
         ];
+        if let Some(signal) = merge {
+            reasons.push(format!("需要跨来源/多产物综合，追加 leader：{signal}"));
+        } else {
+            reasons.push("单一交付路径不追加串行 leader；评审问题由原 owner 返修".to_string());
+        }
         TeamPlan {
             mode: "team".to_string(),
             requested: selection.as_str().to_string(),
@@ -447,136 +457,9 @@ fn producer_role_name(profile: &TaskProfile) -> String {
 
 // ---------------------------------------------------------------------------
 // 模板适用性匹配共享谓词（六期 · 第三路）
-// ---------------------------------------------------------------------------
-
-/// 适用条件关键词切分（`TeamTemplateRegistry::find_match` 同一口径：按空白与
-/// 中英标点切段，长度 ≥2）。目录层与策略层共用，保持单一判定语义。
-pub fn applicability_tokens(applicability: &str) -> Vec<String> {
-    applicability
-        .split([' ', '，', ',', '、', '/', '\n', '\t'])
-        .map(str::trim)
-        .filter(|token| !token.is_empty() && token.chars().count() >= 2)
-        .map(str::to_string)
-        .collect()
-}
-
-/// 目标文本是否命中模板适用条件（大小写不敏感子串，与 find_match 一致）。
-///
-/// 目录层（`builtin_team_templates` / server `team_template_catalog_api`）用它
-/// 预览「哪些目标会自动匹配该模板」；安装状态由调用方保证——**未安装模板不得
-/// 参与自动匹配**（注册表只含已安装/已采纳模板，find_match 天然满足）。
-pub fn applicability_matches(applicability: &str, objective: &str) -> bool {
-    let objective_lower = objective.to_lowercase();
-    applicability_tokens(applicability)
-        .iter()
-        .any(|token| objective_lower.contains(&token.to_lowercase()))
-}
-
-// ---------------------------------------------------------------------------
-// 自适应角色策略（八期 · 第一路）：模板级 DAG 的角色裁剪
-// ---------------------------------------------------------------------------
-
-use std::collections::BTreeMap;
-
-/// 跳过角色记录（`skipped_roles` / `skip_reason` 指标来源）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkippedRole {
-    pub role: String,
-    pub reason: String,
-}
-
-/// 自适应角色决策：跳过名单 + 节省的调用预算（`saved_budget_calls`）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AdaptiveRoleDecision {
-    pub skipped: Vec<SkippedRole>,
-    pub saved_budget_calls: usize,
-    /// 可展示的判定理由（进 strategy_decision / 审计 / UI）。
-    pub reasons: Vec<String>,
-}
-
-/// 模板级自适应角色策略（八期一路；纯函数）：
-///
-/// - `code-change-v1` 简单任务 → 跳过 reviewer（analyzer + implementer 足够；
-///   有实际变更或高风险时由运行期跳过判定/人工评审兜底）；
-/// - `research-brief-v1` 简单任务 → 并行研究（researcher_a/b）后只保留一个
-///   汇总角色（跳过 evidence_verifier；来源要求移交 brief_writer 验收段）；
-/// - 高风险 / 明确要求独立评审 → 不裁剪（评审是硬需求）；
-/// - 其余模板与未知模板 → 不裁剪（结构化抽取的 Schema 校验、文档终稿链是
-///   交付语义的一部分）。
-///
-/// 返回值只描述决策；调用方负责从 DAG 中移除角色并**把指向被跳过角色的依赖
-/// 重定向到其上游**（保持 DAG 可拓扑排序）。
-pub fn plan_adaptive_roles(
-    template_id: Option<&str>,
-    role_names: &[String],
-    budgets: &BTreeMap<String, usize>,
-    profile: &TaskProfile,
-) -> AdaptiveRoleDecision {
-    let mut decision = AdaptiveRoleDecision::default();
-    let Some(template_id) = template_id else {
-        return decision;
-    };
-    // 高风险或明确要求独立评审 → 一律保留评审/核验角色。
-    if profile.risk == RiskLevel::High || profile.needs_independent_review {
-        return decision;
-    }
-    let simple = |role: &str| -> Option<SkippedRole> {
-        match template_id {
-            crate::builtin_team_templates::CODE_CHANGE_V1 if role == "reviewer" => {
-                Some(SkippedRole {
-                    role: role.to_string(),
-                    reason: "简单代码任务自适应裁剪：analyzer + implementer 足够；出现实际变更或高风险时由运行期判定/人工评审兜底".to_string(),
-                })
-            }
-            crate::builtin_team_templates::RESEARCH_BRIEF_V1 if role == "evidence_verifier" => {
-                // 并行研究保留（researcher_a/b 都在）才裁核验：汇总前仍有双路证据。
-                let parallel_kept = role_names.iter().any(|r| r == "researcher_a")
-                    && role_names.iter().any(|r| r == "researcher_b");
-                if parallel_kept {
-                    Some(SkippedRole {
-                        role: role.to_string(),
-                        reason: "研究任务并行研究后只保留一个汇总角色：来源要求移交 brief_writer 验收段（每条结论附引用）".to_string(),
-                    })
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    };
-    for role in role_names {
-        if let Some(skip) = simple(role) {
-            decision.saved_budget_calls += budgets.get(role).copied().unwrap_or(0);
-            decision
-                .reasons
-                .push(format!("跳过角色 {}：{}", skip.role, skip.reason));
-            decision.skipped.push(skip);
-        }
-    }
-    decision
-}
-
-/// 运行期 reviewer 跳过判定（八期一路，`code-change-v1` 专用）：
-/// 实现步骤未产生任何实际工作区变更时，只读评审没有可评审对象 → 跳过；
-/// 有实际变更（或非 reviewer 角色）→ None（正常执行）。
-///
-/// 「实际变更」由调用方判定：服务端 Git 变更跟踪文件
-/// （`<run_dir>/<team_id>-workspace-changes.json`，含 `changed_files` 窗口增量）
-/// 或评测执行器的等价信号；无记录视为无变更。
-pub fn review_runtime_skip_reason(is_reviewer: bool, has_actual_changes: bool) -> Option<String> {
-    if !is_reviewer || has_actual_changes {
-        return None;
-    }
-    Some(
-        "上游实现步骤未产生任何实际工作区变更（无可评审对象），按自适应策略跳过；\
-         下游完成条件已满足，DAG 提前结束"
-            .to_string(),
-    )
-}
-
-pub fn reviewer_runtime_skip_reason(role: &str, has_actual_changes: bool) -> Option<String> {
-    review_runtime_skip_reason(role == "reviewer", has_actual_changes)
-}
+// Template matching and runtime role pruning have independent policy ownership.
+mod template_policy;
+pub use template_policy::*;
 
 #[cfg(test)]
 mod applicability_tests {
@@ -611,6 +494,7 @@ mod applicability_tests {
 mod adaptive_role_tests {
     use super::*;
     use crate::builtin_team_templates::{CODE_CHANGE_V1, RESEARCH_BRIEF_V1};
+    use std::collections::BTreeMap;
 
     fn budgets(pairs: &[(&str, usize)]) -> BTreeMap<String, usize> {
         pairs.iter().map(|(r, b)| ((*r).to_string(), *b)).collect()
@@ -625,7 +509,7 @@ mod adaptive_role_tests {
     }
 
     #[test]
-    fn simple_code_task_skips_reviewer() {
+    fn simple_code_task_defers_reviewer_skip_until_host_observes_changes() {
         let b = budgets(&[("code_analyzer", 3), ("implementer", 5), ("reviewer", 3)]);
         let d = plan_adaptive_roles(
             Some(CODE_CHANGE_V1),
@@ -633,11 +517,19 @@ mod adaptive_role_tests {
             &b,
             &TaskProfile::default(),
         );
-        assert_eq!(d.skipped.len(), 1);
-        assert_eq!(d.skipped[0].role, "reviewer");
-        assert_eq!(d.saved_budget_calls, 3, "节省调用预算 = reviewer 预算");
-        assert!(!d.reasons.is_empty());
-        // 普通风险 + 无强制评审是前提（TaskProfile::default 满足）。
+        assert!(
+            d.skipped.is_empty(),
+            "不能在宿主检查候选源码前删除 Reviewer"
+        );
+        assert_eq!(d.saved_budget_calls, 0);
+        assert!(
+            review_runtime_skip_reason(true, false).is_some(),
+            "没有候选变更时由运行期跳过 reviewer"
+        );
+        assert!(
+            review_runtime_skip_reason(true, true).is_none(),
+            "出现候选变更时必须执行独立评审"
+        );
     }
 
     #[test]
@@ -717,6 +609,24 @@ mod adaptive_role_tests {
     }
 
     #[test]
+    fn unknown_change_tracker_state_never_skips_reviewer() {
+        assert!(
+            review_runtime_skip_for_workspace_status(true, false, None).is_none(),
+            "unknown change state must retain review"
+        );
+        assert!(
+            review_runtime_skip_for_workspace_status(true, false, Some(false)).is_some(),
+            "only an authoritative clean tracker may skip review"
+        );
+        assert!(review_runtime_skip_for_workspace_status(true, false, Some(true)).is_none());
+        assert!(review_runtime_skip_for_workspace_status(false, false, Some(false)).is_none());
+        assert!(
+            review_runtime_skip_for_workspace_status(true, true, Some(false)).is_none(),
+            "an unresolved review issue must retain the reviewer even with a clean tracker"
+        );
+    }
+
+    #[test]
     fn reviewer_runtime_skip_only_without_changes() {
         assert!(reviewer_runtime_skip_reason("reviewer", true).is_none());
         assert!(review_runtime_skip_reason(true, true).is_none());
@@ -788,6 +698,36 @@ mod policy_gate_tests {
         let team = engine.decide_with_policy(TeamSelectionMode::ForceTeam, &profile, Some(&deny));
         assert_eq!(team.mode, "team", "显式 team 不得被证据 gate 降级");
         assert!(!team.reasons.iter().any(|r| r.contains("无收益证据")));
+    }
+
+    #[test]
+    fn forced_team_keeps_review_but_only_adds_integrator_for_real_merge_work() {
+        let engine = TeamStrategyEngine::default();
+        let simple = engine.decide(TeamSelectionMode::ForceTeam, &TaskProfile::default());
+        assert_eq!(
+            simple
+                .roles
+                .iter()
+                .map(|role| role.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["producer", "critic"]
+        );
+        assert_eq!(simple.budget_calls_total, 6);
+
+        let multi_source = TaskProfile {
+            input_count: 2,
+            ..TaskProfile::default()
+        };
+        let merged = engine.decide(TeamSelectionMode::ForceTeam, &multi_source);
+        assert_eq!(
+            merged
+                .roles
+                .iter()
+                .map(|role| role.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["producer", "critic", "leader"]
+        );
+        assert_eq!(merged.budget_calls_total, 9);
     }
 
     #[test]

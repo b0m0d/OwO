@@ -64,7 +64,7 @@ pub struct TruncationRecord {
 pub struct CompiledUpstream {
     /// 渲染后的上游块文本（空条目时为「（无上游产物；你是首个执行者）」）。
     pub text: String,
-    /// 上游上下文实际字节数（UTF-8；计入 `context_bytes` 指标）。
+    /// 上游内联正文字节数，不含头部/引用/清单（UTF-8；计入 `context_bytes` 指标）。
     pub context_bytes: usize,
     /// 全文传递条数（小 Artifact）。
     pub full_count: usize,
@@ -104,10 +104,10 @@ fn char_truncate(text: &str, max_chars: usize) -> String {
 pub fn compile_upstream(items: &[Value], budget: PromptBudget) -> CompiledUpstream {
     let mut out = CompiledUpstream::default();
     if items.is_empty() {
-        out.text = "（无上游产物；你是首个执行者）".to_string();
+        out.text = "（无上游产物；你是首个执行者）".into();
         return out;
     }
-    let mut blocks: Vec<String> = Vec::with_capacity(items.len());
+    let mut blocks = Vec::with_capacity(items.len());
     let mut used = 0usize;
     for item in items {
         let role = item.get("role").and_then(Value::as_str).unwrap_or("?");
@@ -122,50 +122,77 @@ pub fn compile_upstream(items: &[Value], budget: PromptBudget) -> CompiledUpstre
             .get("cas_ref")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let total_bytes = content.len();
-        let hash = sha256_of_ref(cas_ref).unwrap_or("");
+        let total_bytes = item
+            .get("content_bytes")
+            .and_then(Value::as_u64)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap_or(content.len())
+            .max(content.len());
+        let externally_truncated = item
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || total_bytes > content.len();
+        let remaining = budget.total_upstream_bytes.saturating_sub(used);
+        let hash = item
+            .get("sha256")
+            .and_then(Value::as_str)
+            .or_else(|| sha256_of_ref(cas_ref))
+            .unwrap_or("");
         let header = format!("### {role} v{version}（{id}）");
-        if total_bytes <= budget.per_artifact_bytes {
-            // 小 Artifact：全文传递。
-            let body = format!("{header}\n{content}");
+        if !externally_truncated
+            && total_bytes <= budget.per_artifact_bytes
+            && content.len() <= remaining
+        {
             used += content.len();
             out.full_count += 1;
-            blocks.push(body);
-        } else if used + budget.summary_chars * 4 <= budget.total_upstream_bytes {
-            // 大 Artifact：摘要 + 哈希 + ref（截断原因明确记录）。
-            let summary = char_truncate(content.trim(), budget.summary_chars);
-            let summary_bytes = summary.len();
-            used += summary_bytes;
+            blocks.push(format!("{header}\n{content}"));
+            continue;
+        }
+        let reason = if total_bytes <= budget.per_artifact_bytes || remaining == 0 {
+            "total_budget"
+        } else {
+            "per_artifact_budget"
+        };
+        let summary = if remaining == 0 || budget.summary_chars == 0 {
+            String::new()
+        } else {
+            let candidate = char_truncate(content, budget.summary_chars);
+            let mut end = candidate.len().min(remaining);
+            while !candidate.is_char_boundary(end) {
+                end -= 1;
+            }
+            candidate[..end].to_string()
+        };
+        if !summary.is_empty() {
+            used += summary.len();
             out.summarized_count += 1;
             out.truncations.push(TruncationRecord {
                 artifact_id: id.clone(),
-                reason: "per_artifact_budget".to_string(),
-                kept_bytes: summary_bytes,
+                reason: reason.into(),
+                kept_bytes: summary.len(),
                 total_bytes,
             });
             blocks.push(format!(
-                "{header}\n{summary}\n（以上为摘要，原文 {total_bytes} 字节超单 Artifact 预算 \
-                 {} 字节，已按截断原因 per_artifact_budget 记录；完整正文按版本化引用 {id} v{version} \
-                 从 Project Space/CAS 获取，sha256={hash}，CAS ref={cas_ref}）",
-                budget.per_artifact_bytes
+                "{header}\n{summary}\n（摘要：{reason}；正文 {total_bytes} 字节，\
+                需要全文时按 artifact_id={id} 自取；sha256={hash}；CAS ref={cas_ref}）"
             ));
         } else {
-            // 累计超总预算：仅引用行（原因明确记录）。
             out.ref_only_count += 1;
             out.truncations.push(TruncationRecord {
                 artifact_id: id.clone(),
-                reason: "total_budget".to_string(),
+                reason: "total_budget".into(),
                 kept_bytes: 0,
                 total_bytes,
             });
             blocks.push(format!(
-                "{header}（仅引用：累计超上游上下文总预算 {} 字节，已按截断原因 total_budget \
-                 记录；正文 {total_bytes} 字节按版本化引用 {id} v{version} 自取，sha256={hash}，\
-                 CAS ref={cas_ref}）",
-                budget.total_upstream_bytes
+                "{header}（仅引用：total_budget；正文 {total_bytes} 字节，\
+                按 artifact_id={id} 自取；sha256={hash}；CAS ref={cas_ref}）"
             ));
         }
     }
+    // This is a body budget. Headers, immutable refs and review manifests are
+    // accounted separately by the final prompt metadata, never silently omitted.
     out.context_bytes = used;
     out.text = blocks.join("\n\n");
     out
@@ -200,10 +227,6 @@ pub struct PromptContext<'a> {
 /// 剩余调用预算。内置模板角色用结构化段（`builtin_team_templates`），动态角色用
 /// 交接契约回退填充；「禁止执行」行与 [`WorkerProfile`] 的真实工具面一致。
 pub fn compile_prompt(ctx: &PromptContext) -> String {
-    let sections = ctx
-        .template_id
-        .and_then(|t| crate::builtin_team_templates::prompt_sections_for(t, ctx.role))
-        .map(|s| (true, s));
     let mut profile = if ctx.explicit_writer {
         WorkerProfile::explicit_writer(ctx.budget_calls)
     } else {
@@ -213,6 +236,16 @@ pub fn compile_prompt(ctx: &PromptContext) -> String {
         profile.can_run_command = false;
         profile.visible_tools.retain(|tool| tool != "run_command");
     }
+    compile_prompt_with_profile(ctx, &profile)
+}
+
+/// Compile a Team prompt from the exact effective profile used to build its runtime tools.
+/// This is the production path; `compile_prompt` remains the role-only compatibility helper.
+pub fn compile_prompt_with_profile(ctx: &PromptContext, profile: &WorkerProfile) -> String {
+    let sections = ctx
+        .template_id
+        .and_then(|t| crate::builtin_team_templates::prompt_sections_for(t, ctx.role))
+        .map(|s| (true, s));
     let max_turns = profile.max_turns;
 
     let template_line = match ctx.template_id {
@@ -525,6 +558,36 @@ mod tests {
     }
 
     #[test]
+    fn effective_profile_overrides_role_only_prompt_permissions_and_budget() {
+        let upstream = compile_upstream(&[], PromptBudget::default());
+        let ctx = PromptContext {
+            core_spec: "",
+            shared_facts: "[]",
+            shared_context_revision: 0,
+            objective: "检查实现",
+            role: "implementer",
+            handoff_contract: "只检查指定变更",
+            template_id: None,
+            budget_calls: 12,
+            explicit_writer: true,
+            task_scoped: false,
+            is_critic: false,
+            upstream: &upstream,
+        };
+        let effective = WorkerProfile::for_role("reviewer", 3);
+        let prompt = compile_prompt_with_profile(&ctx, &effective);
+        let tools = prompt
+            .lines()
+            .find(|line| line.contains("可见工具仅限："))
+            .unwrap();
+        assert!(tools.contains("read_file"));
+        assert!(!tools.contains("write_file"));
+        assert!(!tools.contains("run_command"));
+        assert!(prompt.contains("禁止写入工作区文件"));
+        assert!(prompt.contains("你的回合预算为 3 回合"));
+    }
+
+    #[test]
     fn template_task_prompt_keeps_dynamic_task_and_acceptance() {
         let upstream = compile_upstream(&[], PromptBudget::default());
         let ctx = PromptContext {
@@ -616,5 +679,73 @@ mod tests {
         let prompt = compile_prompt(&ctx);
         assert!(prompt.contains("不得修改或覆盖上游产物"));
         assert!(prompt.contains("approved"));
+    }
+}
+
+#[cfg(test)]
+mod cumulative_budget_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn item(id: &str, content: &str) -> Value {
+        json!({"artifact_id":id,"role":"writer","version":1,"content":content,"cas_ref":"cas://sha256:hash"})
+    }
+    #[test]
+    fn many_small_artifacts_cannot_bypass_total_body_budget() {
+        let items = (0..30)
+            .map(|n| item(&n.to_string(), &"x".repeat(100)))
+            .collect::<Vec<_>>();
+        let compiled = compile_upstream(
+            &items,
+            PromptBudget {
+                per_artifact_bytes: 200,
+                total_upstream_bytes: 250,
+                summary_chars: 700,
+            },
+        );
+        assert_eq!(compiled.context_bytes, 250);
+        assert_eq!(compiled.full_count, 2);
+        assert_eq!(compiled.summarized_count, 1);
+        assert_eq!(compiled.ref_only_count, 27);
+        assert!(compiled.text.contains("artifact_id=29"));
+    }
+    #[test]
+    fn hydrated_preview_is_never_claimed_as_full_and_preserves_original_hash_and_size() {
+        let mut preview = item("large", "preview");
+        preview["truncated"] = json!(true);
+        preview["content_bytes"] = json!(50_000);
+        preview["sha256"] = json!("full-hash");
+        let compiled = compile_upstream(&[preview], PromptBudget::default());
+        assert_eq!(compiled.full_count, 0);
+        assert_eq!(compiled.summarized_count, 1);
+        assert_eq!(compiled.truncations[0].total_bytes, 50_000);
+        assert!(compiled.text.contains("full-hash"));
+    }
+    #[test]
+    fn zero_or_tiny_budget_keeps_refs_without_breaking_utf8() {
+        for remaining in 0..7 {
+            let compiled = compile_upstream(
+                &[item("unicode", "中文中文")],
+                PromptBudget {
+                    per_artifact_bytes: 2,
+                    total_upstream_bytes: remaining,
+                    summary_chars: 700,
+                },
+            );
+            assert!(compiled.context_bytes <= remaining);
+            assert!(compiled.text.contains("sha256=hash"));
+        }
+    }
+    #[test]
+    fn huge_summary_char_setting_cannot_overflow_budget_arithmetic() {
+        let compiled = compile_upstream(
+            &[item("large", "hello")],
+            PromptBudget {
+                per_artifact_bytes: 1,
+                total_upstream_bytes: 4,
+                summary_chars: usize::MAX,
+            },
+        );
+        assert!(compiled.context_bytes <= 4);
     }
 }

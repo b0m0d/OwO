@@ -82,6 +82,12 @@ fn registry_with(workers: Vec<Arc<EchoWorker>>) -> WorkerRegistry {
     registry
 }
 
+fn goal_with_output_acceptance(id: &str, objective: &str) -> Goal {
+    let mut goal = Goal::new(id, objective);
+    goal.acceptance = vec![VerificationSpec::OutputNonEmpty];
+    goal
+}
+
 struct DispatchOrderWorker {
     events: tokio::sync::mpsc::UnboundedSender<&'static str>,
     release_root: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
@@ -276,7 +282,7 @@ async fn newly_ready_child_starts_while_independent_slow_step_is_still_running()
     plan.add_step(child);
 
     let runner = GoalRunner::new(
-        Goal::new("g-ready-dispatch", "ready task dispatch"),
+        goal_with_output_acceptance("g-ready-dispatch", "ready task dispatch"),
         plan,
         RunnerConfig {
             max_parallel: 2,
@@ -465,7 +471,7 @@ async fn pool_steps_execute_when_feature_flag_on() {
     plan.add_step(a);
     plan.add_step(b);
     let mut runner = GoalRunner::new(
-        Goal::new("g-pool", "子进程 worker"),
+        goal_with_output_acceptance("g-pool", "子进程 worker"),
         plan,
         pool_config(&pool),
     );
@@ -528,7 +534,7 @@ async fn capability_route_picks_pool_worker_when_requirement_met() {
     let capabilities = CapabilityWorkerRegistry::new();
     capabilities.register(CapabilityCard::new("w-cap").actions(vec!["shell".to_string()]));
     let mut runner = GoalRunner::new(
-        Goal::new("g-cap-ok", "能力路由选中"),
+        goal_with_output_acceptance("g-cap-ok", "能力路由选中"),
         single_step_plan(
             "g-cap-ok",
             json!({

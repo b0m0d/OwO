@@ -108,7 +108,7 @@ owo-agent-workswarm = { path = "crates/owo-agent-workswarm" }
 owo-agent-mcp = { path = "crates/owo-agent-mcp" }
 owo-agent-memory = { path = "crates/owo-agent-memory" }
 owo-agent-policy = { path = "crates/owo-agent-policy" }
-owo-agent-perception = { path = "crates/owo-agent-perception" }
+owo-agent-perception = { path = "crates/owo-agent-perception", default-features = false }
 owo-agent-executor = { path = "crates/owo-agent-executor" }
 owo-agent-workflow = { path = "crates/owo-agent-workflow" }
 owo-agent-core = { path = "crates/owo-agent-core" }

@@ -36,7 +36,7 @@ param(
     [string]$Only,
     [string]$TeamMode = "auto",
     [string]$Model,
-    [string]$StrategyVersion = "ten-3-default",
+    [string]$StrategyVersion = "ten-5-independent-case-samples",
     [double]$PriceInPerMTok = 0,
     [double]$PriceOutPerMTok = 0,
     [switch]$SkipSingle,

@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-05",
+  "scope": "devtools/product-eval matrix execution and resumable reporting",
+  "parent_module": "devtools/product-eval/src/product_eval.rs",
+  "new_module": "devtools/product-eval/src/product_eval/matrix_runner.rs",
+  "parent_lines_before": 4117,
+  "parent_lines_after": 3470,
+  "new_module_lines": 666,
+  "moved_implementation_lines_approx": 647,
+  "contract": "CaseExecutor remains the shared Single/Team execution interface; MatrixRunner, RunOptions and filter_cases stay available via root re-exports.",
+  "responsibilities": [
+    "paired AB/BA cell planning",
+    "run directory contract and metadata",
+    "append-only journal recovery",
+    "per-cell timeout/cancellation and execution",
+    "failure sandbox and successful artifact snapshot retention",
+    "incremental report and pending-cell persistence"
+  ],
+  "static_validation": {
+    "rustfmt_check": "passed for all 42 changed/new Rust files, including lib.rs and all four ProductEval modules",
+    "public_call_sites": "CLI, core facade, tests continue to reference root re-exports"
+  },
+  "cargo_validation": {
+    "status": "not run",
+    "resource_limited": true,
+    "free_physical_gib": 4.97,
+    "memory_used_percent": 84.3,
+    "gate": "requires at least 6 GiB free and memory use below 80%"
+  },
+  "required_follow_up": [
+    "ProductEval journal/resume/timeout Rust tests",
+    "paired report and freeze Rust tests",
+    "Core and CLI facade consumer checks"
+  ]
+}

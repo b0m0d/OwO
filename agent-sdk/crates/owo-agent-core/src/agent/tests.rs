@@ -2,9 +2,15 @@ use super::*;
 
 #[test]
 fn an_uncapped_parent_still_gives_nested_workers_a_finite_round_budget() {
-    assert_eq!(super::nested_turn_cap(0), crate::subagent::MAX_SUBAGENT_TURNS);
+    assert_eq!(
+        super::nested_turn_cap(0),
+        crate::subagent::MAX_SUBAGENT_TURNS
+    );
     assert_eq!(super::nested_turn_cap(5), 5);
-    assert_eq!(super::nested_turn_cap(usize::MAX), crate::subagent::MAX_SUBAGENT_TURNS);
+    assert_eq!(
+        super::nested_turn_cap(usize::MAX),
+        crate::subagent::MAX_SUBAGENT_TURNS
+    );
 }
 
 #[tokio::test]
@@ -56,12 +62,10 @@ async fn default_user_turn_can_run_more_than_sixty_five_model_tool_rounds() {
 #[tokio::test]
 async fn failed_host_validation_is_fed_back_and_repaired_before_final() {
     let workspace = tempfile::tempdir().unwrap();
-    let call = |id: &str, name: &str, arguments: serde_json::Value| {
-        crate::gateway::ToolCall {
-            id: id.to_string(),
-            name: name.to_string(),
-            arguments,
-        }
+    let call = |id: &str, name: &str, arguments: serde_json::Value| crate::gateway::ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
     };
     let outputs = Mutex::new(VecDeque::from(vec![
         ModelOutput::ToolCalls(vec![call(
@@ -151,14 +155,15 @@ async fn failed_host_validation_is_fed_back_and_repaired_before_final() {
         .validation_receipts
         .iter()
         .any(|receipt| receipt.verdict == crate::plan::ValidationVerdictV1::Failed));
+    let epochs = session
+        .validation_receipts
+        .iter()
+        .map(|receipt| receipt.epoch)
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        session
-            .validation_receipts
-            .iter()
-            .map(|receipt| receipt.epoch)
-            .collect::<Vec<_>>(),
-        vec![1, 2],
-        "每次宿主重验必须推进验证 epoch"
+        epochs,
+        std::collections::BTreeSet::from([1, 2]),
+        "每次宿主重验必须推进验证 epoch，且同一轮的回执共享 epoch"
     );
     assert_eq!(session.execution_receipts[0].status, "stale");
     assert_eq!(session.execution_receipts[1].status, "accepted");
@@ -182,19 +187,21 @@ fn stale_receipts_from_prior_turns_do_not_change_plain_answer_completion() {
         "test-model",
         None,
     );
-    session.execution_receipts.push(crate::session::ExecutionReceipt {
-        receipt_id: "exec-old".to_string(),
-        tool: "write_file".to_string(),
-        turn_id: "prior-turn".to_string(),
-        changed_files: vec!["src/old.rs".to_string()],
-        snapshot_keys: Default::default(),
-        before_hashes: Default::default(),
-        after_hashes: Default::default(),
-        diff_sha256: "old-diff".to_string(),
-        created_at: "2026-10-01T00:00:00Z".to_string(),
-        status: "stale".to_string(),
-        validation_receipt_id: Some("old-validation".to_string()),
-    });
+    session
+        .execution_receipts
+        .push(crate::session::ExecutionReceipt {
+            receipt_id: "exec-old".to_string(),
+            tool: "write_file".to_string(),
+            turn_id: "prior-turn".to_string(),
+            changed_files: vec!["src/old.rs".to_string()],
+            snapshot_keys: Default::default(),
+            before_hashes: Default::default(),
+            after_hashes: Default::default(),
+            diff_sha256: "old-diff".to_string(),
+            created_at: "2026-10-01T00:00:00Z".to_string(),
+            status: "stale".to_string(),
+            validation_receipt_id: Some("old-validation".to_string()),
+        });
 
     let status = super::assess_single_turn_completion(
         &mut session,
@@ -205,7 +212,10 @@ fn stale_receipts_from_prior_turns_do_not_change_plain_answer_completion() {
         Some("这个模块负责会话状态管理。"),
     );
 
-    assert_eq!(status, owo_agent_protocol::CompletionStatusV1::ResponseComplete);
+    assert_eq!(
+        status,
+        owo_agent_protocol::CompletionStatusV1::ResponseComplete
+    );
 }
 
 #[test]
@@ -1503,6 +1513,85 @@ async fn max_turns_exhaustion_runs_wrap_up_and_returns_final_text() {
     );
 }
 
+struct WrapUpHangingProvider {
+    requests: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::gateway::ModelProvider for WrapUpHangingProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        if self
+            .requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            Ok(ModelOutput::ToolCalls(vec![crate::gateway::ToolCall {
+                id: "call-before-wrap-up".to_string(),
+                name: "probe_a".to_string(),
+                arguments: serde_json::json!({}),
+            }]))
+        } else {
+            std::future::pending().await
+        }
+    }
+}
+
+#[tokio::test]
+async fn turn_limit_wrap_up_obeys_deadline_and_records_the_timed_out_request() {
+    let state = ProbeState::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(ProbeTool {
+        label: "probe_a",
+        delay_ms: 0,
+        class: EffectClass::Read,
+        host_verified: true,
+        state,
+    });
+    let provider = Arc::new(WrapUpHangingProvider {
+        requests: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let agent = Agent::new(
+        provider,
+        registry,
+        Policy::new("."),
+        AgentConfig {
+            max_turns: 1,
+            turn_deadline: Some(std::time::Duration::from_millis(100)),
+            ..Default::default()
+        },
+    );
+    let mut session = Session::new(std::env::temp_dir(), "test-model", None);
+    let abort = AtomicBool::new(false);
+    let started = std::time::Instant::now();
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "跑探针后生成总结",
+            &crate::permissions::AutoApprover { allow: true },
+            &abort,
+            &mut |_| {},
+        )
+        .await
+        .expect("收尾请求超时应退回可见摘要，而不是挂住回合");
+
+    assert!(outcome.reached_model_turn_limit);
+    assert_eq!(
+        outcome.completion_status,
+        owo_agent_protocol::CompletionStatusV1::Unverified
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(outcome.model_calls.len(), 2);
+    assert!(!outcome.model_calls[1].succeeded);
+    assert!(outcome
+        .phase_timings
+        .iter()
+        .any(|timing| timing.target == "turn_limit_wrap_up"));
+}
+
 /// 远端 agent.rs 取优：连续空回答走兜底摘要（含本回合工具动作），不静默失败。
 #[tokio::test]
 async fn empty_reply_falls_back_to_tool_action_summary() {
@@ -1635,13 +1724,19 @@ fn single_workspace_receipt_can_bind_a_deleted_file_and_detect_recreation() {
     std::fs::create_dir_all(root.join("src")).expect("create test workspace");
     let relative = "src/deleted.rs";
     let absent = crate::verification::workspace_path_absence_sha256();
-    assert!(super::single_workspace_path_matches(&root, relative, &absent));
+    assert!(super::single_workspace_path_matches(
+        &root, relative, &absent
+    ));
 
     let path = root.join(relative);
     std::fs::write(&path, b"recreated source").expect("recreate changed file");
-    assert!(!super::single_workspace_path_matches(&root, relative, &absent));
+    assert!(!super::single_workspace_path_matches(
+        &root, relative, &absent
+    ));
     let actual = crate::CasStore::hash_of(b"recreated source");
-    assert!(super::single_workspace_path_matches(&root, relative, &actual));
+    assert!(super::single_workspace_path_matches(
+        &root, relative, &actual
+    ));
     std::fs::remove_dir_all(root).expect("remove test workspace");
 }
 
@@ -1657,4 +1752,155 @@ fn successful_progress_resets_other_tool_repeat_counts_but_keeps_current_count()
     assert_eq!(repeats.len(), 1);
     assert_eq!(repeats.get("write_file:{}"), Some(&1));
     assert!(!repeats.contains_key("run_test:{}"));
+}
+
+/// This opt-in test uses the real file/command ToolHost with a deterministic model,
+/// not a cloud-model benchmark. Python and pytest must exist on the host.
+#[tokio::test]
+#[ignore = "requires host Python and pytest; run explicitly for tool-chain acceptance"]
+async fn real_command_receipt_closes_single_write_test_review_chain() {
+    let workspace = tempfile::tempdir().unwrap();
+    let command = "python -m pytest test_check.py -q";
+    let request = "创建并验证测试";
+    let call = |id: &str, name: &str, arguments: serde_json::Value| crate::gateway::ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
+    };
+    let source = ["def test_ready():", "    assert 2 + 2 == 4", ""].join("\n");
+    let outputs = VecDeque::from(vec![
+        ModelOutput::ToolCalls(vec![call(
+            "plan",
+            "verification_plan",
+            serde_json::json!({
+                "plan": {
+                    "plan_id": "real-tool-chain",
+                    "requirements": [{
+                        "requirement_id": "check",
+                        "covers_requirement_ids": ["user-request:创建并验证测试"],
+                        "validator_id": "workspace-command-success-v1",
+                        "validator_version": "1",
+                        "scope": {"kind":"workspace_paths","relative_paths":["test_check.py"]},
+                        "arguments": {"command":command},
+                        "required":true,
+                        "resources": {"cpu_slots":1,"memory_mb":16,"exclusive_workspace":false,"timeout_ms":10000}
+                    }]
+                }
+            }),
+        )]),
+        ModelOutput::ToolCalls(vec![call(
+            "write",
+            "write_file",
+            serde_json::json!({"path":"test_check.py","content":source}),
+        )]),
+        ModelOutput::ToolCalls(vec![call(
+            "test",
+            "run_command",
+            serde_json::json!({"command":command}),
+        )]),
+        ModelOutput::Text("测试通过，提交候选版本。".to_string()),
+        ModelOutput::Text(
+            serde_json::json!({
+                "status":"done","summary":"独立评审通过",
+                "review_result":{
+                    "verdict":"approved",
+                    "reviewed_requirement_ids":["check","user-request:创建并验证测试"],
+                    "findings":[]
+                },
+                "evidence":[{"source":"test_check.py","note":"检查完整源码快照及宿主行为验证证据"}],
+                "open_issues":[]
+            })
+            .to_string(),
+        ),
+    ]);
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider {
+            outputs: Mutex::new(outputs),
+        }),
+        ToolRegistry::new(),
+        Policy::new(workspace.path()),
+        AgentConfig {
+            max_turns: 8,
+            ..Default::default()
+        },
+    );
+    let mut session = Session::new(workspace.path(), "scripted-tool-chain", None);
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            request,
+            &crate::permissions::AutoApprover { allow: true },
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("real tool chain should complete");
+    assert_eq!(
+        outcome.completion_status,
+        owo_agent_protocol::CompletionStatusV1::Accepted
+    );
+    let receipt = outcome
+        .events
+        .iter()
+        .find_map(|event| match event {
+            TurnEvent::ToolResult {
+                tool,
+                command_receipt: Some(receipt),
+                ..
+            } if tool == "run_command" => Some(receipt),
+            _ => None,
+        })
+        .expect("real command must emit a host receipt");
+    assert_eq!(receipt.exit_code, 0);
+    assert!(receipt.workspace_hashes_complete);
+    assert_eq!(receipt.workspace_hashes_before, receipt.workspace_hashes);
+    assert_eq!(
+        receipt.workspace_hashes.get("test_check.py"),
+        Some(&Some(crate::CasStore::hash_of(source.as_bytes())))
+    );
+    assert!(session.validation_receipts.iter().any(|receipt| {
+        receipt.validator_id == "workspace-independent-review-v1"
+            && receipt.verdict == crate::plan::ValidationVerdictV1::Passed
+    }));
+    assert!(session
+        .execution_receipts
+        .iter()
+        .all(|receipt| receipt.status == "accepted"));
+}
+
+#[test]
+fn navigation_command_receipt_preserves_metadata_without_source_test_claim() {
+    let workspace = tempfile::tempdir().unwrap();
+    let session = Session::new(workspace.path(), "test", None);
+    let outcome = Ok(serde_json::json!({
+        "command": "git status", "exit_code": 0, "duration_ms": 12, "stdout": "clean"
+    }));
+    let receipt = command_execution_receipt("run_command", &outcome, &session, None).unwrap();
+    assert_eq!(receipt.exit_code, 0);
+    assert_eq!(receipt.duration_ms, Some(12));
+    assert_eq!(
+        receipt.command_sha256,
+        crate::CasStore::hash_of(b"git status")
+    );
+    assert!(receipt.validator_id.is_none());
+    assert!(!receipt.workspace_hashes_complete);
+    assert!(receipt.workspace_hashes_before.is_empty());
+    assert!(receipt.workspace_hashes.is_empty());
+}
+
+#[test]
+fn behavior_command_without_before_snapshot_cannot_invent_verified_source() {
+    let workspace = tempfile::tempdir().unwrap();
+    let session = Session::new(workspace.path(), "test", None);
+    let outcome = Ok(serde_json::json!({
+        "command": "cargo test", "exit_code": 0, "duration_ms": 12
+    }));
+    let receipt = command_execution_receipt("run_command", &outcome, &session, None).unwrap();
+    assert_eq!(
+        receipt.validator_id.as_deref(),
+        Some("workspace-command-success-v1")
+    );
+    assert!(!receipt.workspace_hashes_complete);
+    assert!(receipt.workspace_hashes_before.is_empty());
+    assert!(receipt.workspace_hashes.is_empty());
 }

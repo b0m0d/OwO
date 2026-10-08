@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-06",
+  "scope": "WorkSwarm team creation strategy boundary extraction",
+  "change": {
+    "from": "crates/owo-agent-core/src/workswarm/coord_create.rs",
+    "to": "crates/owo-agent-core/src/workswarm/coord_strategy.rs",
+    "extracted_chars": 11031,
+    "areas": [
+      "mode resolution and conflicts",
+      "single/team topology trimming",
+      "strategy budget binding",
+      "dynamic role projection and dependency bridging",
+      "automatic reviewer construction",
+      "team budget validation"
+    ],
+    "behavior_contract": "existing create flow and tests call the same pure strategy functions; no selection, permission, reviewer, budget, or persistence semantics intentionally changed"
+  },
+  "verification": {
+    "cargo_fmt_all": "passed",
+    "cargo_fmt_check": "passed",
+    "core_typecheck": "resource_limited: Invoke-CiCargo refused before Cargo startup at 4.16 GB free and 86.8 percent used",
+    "rust_tests": "resource_limited: strategy_topology_policy_tests refused before Cargo startup at 4.37 GB free and 86.2 percent used",
+    "daemon_or_model_run": "not applicable to this extraction"
+  },
+  "limits": "Static module extraction and formatting do not prove Rust visibility/type correctness or Team runtime behavior; run Core targeted check and strategy tests when the repository memory gate permits."
+}

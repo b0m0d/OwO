@@ -952,6 +952,9 @@ pub enum SseEvent {
         message: String,
         #[serde(default)]
         completion_status: CompletionStatusV1,
+        /// Host decision for this failed/aborted attempt when task identity is available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion_record: Option<TaskCompletionRecordV1>,
     },
     /// 回合统计（`run_turn` 结束后补发）：前端回合汇报卡展示耗时/步数/消耗。
     TurnStats {
@@ -968,6 +971,9 @@ pub enum SseEvent {
         /// Completion state shared with Team DeliveryGate; older clients may ignore it.
         #[serde(default)]
         completion_status: CompletionStatusV1,
+        /// Host-produced decision with candidate/version and validation-receipt identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion_record: Option<TaskCompletionRecordV1>,
         /// Request-level provider usage and latency; unknown values remain absent.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         model_calls: Vec<ModelRequestMetricV1>,
@@ -984,8 +990,9 @@ pub struct TurnEventRecord {
     pub payload: SseEvent,
 }
 
-/// Durable replay endpoint state. `interrupted` means the process no longer owns the turn and
-/// no completed/failed terminal event was persisted before it stopped.
+/// Durable replay endpoint state. `active` also means the current bounded page has more
+/// persisted events to fetch; `interrupted` means the process no longer owns the turn and no
+/// completed/failed terminal event was persisted before it stopped.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnReplayState {
@@ -1086,7 +1093,7 @@ mod health_build_tests {
 
 #[cfg(test)]
 mod turn_failed_completion_status_tests {
-    use super::{CompletionStatusV1, SseEvent};
+    use super::{CompletionStatusV1, SseEvent, TaskCompletionRecordV1};
 
     #[test]
     fn turn_failed_status_is_backward_compatible_and_round_trips() {
@@ -1099,11 +1106,29 @@ mod turn_failed_completion_status_tests {
             _ => panic!("expected TurnFailed"),
         }
 
+        let record = TaskCompletionRecordV1 {
+            task_id: "single-turn:turn-1".to_string(),
+            attempt_id: "turn-1".to_string(),
+            status: CompletionStatusV1::Aborted,
+            evidence_receipt_ids: vec!["receipt-1".to_string()],
+            candidate_version_sha256: Some("sha256:candidate".to_string()),
+            decided_at: "2026-10-05T00:00:00Z".to_string(),
+        };
         let current = SseEvent::TurnFailed {
             message: "cancelled".to_string(),
             completion_status: CompletionStatusV1::Aborted,
+            completion_record: Some(record.clone()),
         };
         let json = serde_json::to_value(&current).unwrap();
         assert_eq!(json["completion_status"], "aborted");
+        let restored: SseEvent = serde_json::from_value(json).unwrap();
+        match restored {
+            SseEvent::TurnFailed {
+                completion_record, ..
+            } => {
+                assert_eq!(completion_record.as_ref(), Some(&record));
+            }
+            _ => panic!("expected TurnFailed"),
+        }
     }
 }

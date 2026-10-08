@@ -148,6 +148,13 @@ pub(crate) async fn run_turn(
                     printer.print_sse(&event);
                 }
             }
+            SseEvent::TurnFailed { message, .. } => {
+                emit_event(output, &event);
+                if human {
+                    printer.print_sse(&event);
+                }
+                stream_error = Some(message.clone());
+            }
             _ => {
                 emit_event(output, &event);
                 if human {

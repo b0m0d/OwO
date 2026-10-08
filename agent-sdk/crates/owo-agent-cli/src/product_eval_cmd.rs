@@ -126,7 +126,7 @@ pub enum ProductEvalAction {
         #[arg(long)]
         task_set: Option<String>,
         /// 策略版本（与 team-policy.json 的 strategy_version 一致，由三路冻结）
-        #[arg(long, default_value = "ten-3-default")]
+        #[arg(long, default_value = "ten-5-independent-case-samples")]
         strategy_version: String,
     },
 }
@@ -350,7 +350,13 @@ fn run_paired(
         let reasons = alignment
             .and_then(|value| value.get("reasons"))
             .and_then(serde_json::Value::as_array)
-            .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join("；"))
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("；")
+            })
             .unwrap_or_else(|| "缺少对齐信息".to_string());
         println!("配对对照不可用于收益放行：{reasons}");
     }
@@ -634,8 +640,7 @@ async fn run_matrix_cmd(
         Option<String>,
         Option<String>,
     ) = if exec == "live" {
-        let (provider, resolved_model, endpoint_sha256) =
-            build_live_provider(model.as_deref())?;
+        let (provider, resolved_model, endpoint_sha256) = build_live_provider(model.as_deref())?;
         (
             Arc::new(GenerativeExecutor {
                 provider,
@@ -646,8 +651,7 @@ async fn run_matrix_cmd(
             Some(endpoint_sha256),
         )
     } else if exec == "agent" {
-        let (provider, resolved_model, endpoint_sha256) =
-            build_live_provider(model.as_deref())?;
+        let (provider, resolved_model, endpoint_sha256) = build_live_provider(model.as_deref())?;
         (
             Arc::new(SingleAgentExecutor::new(provider, resolved_model.clone())),
             "live-agent".to_string(),
@@ -655,8 +659,7 @@ async fn run_matrix_cmd(
             Some(endpoint_sha256),
         )
     } else if exec == "workswarm" {
-        let (provider, resolved_model, endpoint_sha256) =
-            build_live_provider(model.as_deref())?;
+        let (provider, resolved_model, endpoint_sha256) = build_live_provider(model.as_deref())?;
         // 每个单元格独立 TeamRun 工作目录（CAS/sqlite/状态互不串扰）。
         let work_root = out_dir.join("workswarm-teams");
         let mut ws_executor = WorkSwarmExecutor::new(provider, resolved_model.clone(), work_root);

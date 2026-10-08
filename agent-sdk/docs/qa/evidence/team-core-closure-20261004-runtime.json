@@ -1,0 +1,69 @@
+{
+  "captured_at": "2026-10-04T11:32:05.579346+00:00",
+  "git_head": "3d2b03ac7f04443984cef20f0c00c3bdf7b5e7eb",
+  "worktree": "dirty; existing modifications and untracked desktop/tauri preserved",
+  "source_sha256": {
+    "crates/owo-agent-core/src/agent/mod.rs": "652ae705a33ad27dc7d178b07e9dcc9de11e43e25978475773b77c9c2255aa0f",
+    "crates/owo-agent-core/src/agent/single_completion.rs": "a303b24a386ea33c703200c59eded6b56b6072aa6a8644ee2133db25fd16cab0",
+    "crates/owo-agent-core/src/agent/single_manual_acceptance.rs": "46f9bffef5da5411cc0f3785540ec3859c150a7f76eaf75ffd35464417979ec7",
+    "crates/owo-agent-core/src/contract_worker.rs": "0e9eff99242c0339561bbb3e12aaed0ae8e134649ada3c372bcfc79ce811a77b",
+    "crates/owo-agent-core/src/worker_runtime.rs": "58a3b4ac1e0d26e87509f0fbc7439f41a247f65bd0b16969a9ab3f6f524efdc6",
+    "crates/owo-agent-core/src/workswarm/coord_lifecycle.rs": "c8f1a9319614e11499ba13df04a70fd09b70a2e14d85596f578b4ffc6d1ae3de",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs": "d0c1372512df1d8047e073426a15142d9109d515c8d1a8ba5f5457cb4703a710",
+    "crates/owo-agent-server/src/workswarm_api/workers.rs": "e4f70397ffb885574715d526ba31413cd72325c4b957fe29c7c437944e582d12",
+    "crates/owo-agent-cli/src/ui_output.rs": "bace812d5850e1710d207042ef8bfcc4b94430f90e6d27c9ae5db6d191e507b9"
+  },
+  "changes": [
+    "Separate Single host acceptance, request-bound verification and existing tests from Agent loop",
+    "Transfer typed artifact and workspace acceptance evidence together through Team finalization",
+    "Control Worker contract repair cancellation, remaining deadline and reserved request budget",
+    "Only auto-create model reviewers for model-backed writers; preserve readonly/custom-worker topology",
+    "Use resolved task context for tracked ChangeSet step/attempt identity",
+    "Update CLI ToolResult event rendering pattern for command receipt field"
+  ],
+  "verification": {
+    "cargo_check_core_server_cli": {
+      "exit_code": 0
+    },
+    "core_unit_tests": {
+      "passed": 429,
+      "ignored": 2,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "latest_team_integration": {
+      "passed": 36,
+      "failed": 8,
+      "exit_code": 101,
+      "scope_note": "Before same-semantics helper extraction and added unit tests; no full Team green claim"
+    },
+    "clippy_core_server_cli": {
+      "exit_code": 0,
+      "warnings_present": true
+    },
+    "targeted_rustfmt_consistency": {
+      "passed": 9,
+      "checked": 9,
+      "failed_files": [],
+      "note": "Final touched-source consistency check"
+    },
+    "cargo_fmt_check_core_server_cli": {
+      "exit_code": 1,
+      "note": "Many remaining formatting differences in other files"
+    },
+    "cloud_model_calls": 0,
+    "desktop_acceptance": false,
+    "matched_live_comparison": false
+  },
+  "remaining_team_tests": [
+    "finalize_success_checks_assertion_against_artifact_not_worker_report",
+    "finalize_success_rechecks_workspace_after_a_previously_passed_receipt",
+    "finalize_success_records_workspace_validation_bound_to_file_hash",
+    "finalize_success_rejects_non_review_runtime_skip",
+    "parallel_assignment_respects_preexisting_write_scope",
+    "parallel_independent_tasks_skip_leader_and_publish_host_manifest",
+    "parallel_lead_assignment_applies_writer_scopes_and_tasks",
+    "strategy_auto_trims_default_relay_to_single_and_exposes_decision"
+  ],
+  "goal_status": "active; full product closure and Team benefit remain unproven"
+}

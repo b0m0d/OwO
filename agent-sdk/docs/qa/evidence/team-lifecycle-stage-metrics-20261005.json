@@ -1,0 +1,56 @@
+{
+  "evidence_id": "team-lifecycle-stage-metrics-20261005",
+  "scope": "source-only",
+  "claim": "Team lifecycle and Worker spans carry coordinator epoch and identity; bounded phase and epoch summaries are exposed through diagnostics and the WorkSwarm panel.",
+  "verification": [
+    "Python source assertions verified coordinator epoch getter, phase-end capture, Worker JSONL epoch capture and legacy defaults, bounded lifecycle/epoch aggregation, API wiring, and panel identity/epoch rendering.",
+    "rustfmt --edition 2021 --check --config skip_children=true passed for all nine affected WorkSwarm Rust modules.",
+    "node --check passed for the modified WorkSwarm formatter, renderer, and panel test source.",
+    "node --test agent-sdk/desktop/web/tests/workswarm.panel.test.mjs passed: 69 tests, 0 failures.",
+    "git diff --check passed."
+  ],
+  "limits": [
+    "No Rust compilation or tests were run per user instruction; regression cases are source only.",
+    "No live Team run was performed, so no observed stage timings or performance improvement is claimed.",
+    "phase_orchestration encloses parallel worker/review activity; lifecycle durations overlap and must not be summed.",
+    "phase_epoch enables grouping worker spans with orchestration spans, but no DAG critical-path calculation or full timeline UI exists yet."
+  ],
+  "source_assertions": {
+    "crates/owo-agent-core/src/workswarm/coord_identity.rs::pub fn current_execution_epoch": true,
+    "crates/owo-agent-core/src/workswarm/coord_identity.rs::self.phase_epoch(team_id)": true,
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs::current_execution_epoch(&team_id)": true,
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs::finish_with_phase_epoch": true,
+    "crates/owo-agent-server/src/workswarm_metrics/lifecycle.rs::pub phase_epoch: Option<u64>": true,
+    "crates/owo-agent-server/src/workswarm_metrics/lifecycle.rs::finish_with_phase_epoch": true,
+    "crates/owo-agent-server/src/workswarm_metrics/metrics.rs::pub phase_epoch: Option<u64>": true,
+    "crates/owo-agent-server/src/workswarm_metrics/metrics.rs::get(\"phase_epoch\")": true,
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs::record.phase_epoch = Some(3)": true,
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs::decoded_legacy.phase_epoch, None": true,
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs::payload[\"spans\"][0][\"phase_epoch\"]": true,
+    "crates/owo-agent-server/src/workswarm_api/handlers.rs::lifecycle_metrics_file": true,
+    "crates/owo-agent-server/src/workswarm_api/handlers.rs::aggregate_lifecycle_metrics": true,
+    "desktop/web/panels/workswarm/format.js::phaseEpoch: pickNum(w, [\"phase_epoch\", \"phaseEpoch\"])": true,
+    "desktop/web/panels/workswarm/render.js::\" · task \" + esc(w.taskId)": true,
+    "desktop/web/panels/workswarm/render.js::\" · attempt \" + esc(w.attemptId)": true,
+    "desktop/web/panels/workswarm/render.js::\" · epoch \" + esc(w.phaseEpoch)": true,
+    "desktop/web/tests/workswarm.panel.test.mjs::std.workers[0].phaseEpoch, 9": true,
+    "desktop/web/tests/workswarm.panel.test.mjs::task task-7 · attempt attempt-2 · epoch 9": true,
+    "docs/工程代码结构说明.md::阶段 span 与 Worker span 都带 Coordinator 的 `phase_epoch`": true,
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md::## 50. Worker 指标与生命周期 span 按 Coordinator epoch 关联": true
+  },
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/coord_identity.rs": "5d614d2cdb79efe8a37e31b30e87b08d79bee561b711bb689438763b087fbd0b",
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs": "f72935c2539f9e45127c77bb9387b575b1d2ad063e15e7b42cf4d7b123241dd7",
+    "crates/owo-agent-server/src/workswarm_api/registry_builder.rs": "b3604e22342f5f2124e328f368b2f9ff76d4dd692918494defd9c3b0aec961d6",
+    "crates/owo-agent-server/src/workswarm_api/handlers.rs": "b9d06053d0cdce21684d9addfdff69d34f2791e69576d0ea3534db54506cf799",
+    "crates/owo-agent-server/src/workswarm_metrics/lifecycle.rs": "b26ff33dff04f7b8667c298307e53d61b16dfa69fc2c6d873a24b1b9d14c1540",
+    "crates/owo-agent-server/src/workswarm_metrics/metrics.rs": "25a57cac9b1abce822ee389308f4b16bcc2331342884fcdff0d3bff226948660",
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs": "9cb01f131d0bd486debf84a7004041b8ac4beb097bd14821143dd0ec6f5774b2",
+    "desktop/web/panels/workswarm/format.js": "fe4f97281f27d913dc4142b228cf8f1d70731a553636e5e05f2c7ded06d77ec9",
+    "desktop/web/panels/workswarm/render.js": "d70278f4568edb4d507b436d30e73a27a198eb72ba21f549baaafb3a8f1df891",
+    "desktop/web/tests/workswarm.panel.test.mjs": "e8c133a9da4b3892e1d44b0d2f4cddad8a6c7f6669fa7ab01c41759b4860bb14",
+    "desktop/web/style.css": "227f8280fe992f07cdfdddcc7bfa871e48d39d96ac8d9775bf4379b6f05dcb8c",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "6cdb56e96b2985df27fc40dd7ebece4dd0f6fc9c4d981aca144d5f0e81621bc8"
+  }
+}

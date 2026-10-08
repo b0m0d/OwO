@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-05",
+  "claim": "TaskGraph input validation and topology/integration policy now have separate module ownership while existing call paths remain stable.",
+  "scope": [
+    "crates/owo-agent-core/src/workswarm/task_graph.rs",
+    "crates/owo-agent-core/src/workswarm/task_graph_policy.rs",
+    "crates/owo-agent-core/src/workswarm/coord_assignment.rs",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs"
+  ],
+  "changes": [
+    "Extracted reviewer classification, host-manifest skip policy, follow-up dependency binding, and integration-required classification into task_graph_policy.rs.",
+    "Kept TaskGraph parsing, validation, task budgets, path constraints, and parse compatibility in task_graph.rs.",
+    "Preserved existing task_graph module lookup for coordinator and contract-test call sites through narrow re-exports."
+  ],
+  "static_validation": {
+    "rustfmt_check": "passed",
+    "git_diff_check": "passed",
+    "cargo_check": "not_run_resource_limited",
+    "rust_tests": "not_run_resource_limited",
+    "free_memory_gib": 4.66,
+    "memory_used_percent": 85.3,
+    "required_free_memory_gib": 6.0,
+    "required_memory_used_percent_below": 80
+  },
+  "risk": "Module visibility/type integration has not been verified by cargo; no execution semantics were intentionally changed."
+}

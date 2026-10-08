@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-06",
+  "change": "Team auto-admission sample sufficiency now uses independent case clusters rather than raw run count.",
+  "paired_snapshot_fields": {
+    "runs_total": "All recorded repetitions, retained for rates and resource aggregation.",
+    "independent_case_clusters": "Count of distinct ProductEval case_id values in the mode snapshot.",
+    "sample_sufficient": "True only when independent_case_clusters reaches SUFFICIENT_SAMPLE_SIZE."
+  },
+  "gate_behavior": {
+    "evaluate_uses": "single.independent_case_clusters and multi.independent_case_clusters",
+    "gate_auto_recomputes": true,
+    "legacy_snapshot_missing_case_count": "Defaults to zero and denies auto-Team admission.",
+    "strategy_version": "ten-5-independent-case-samples"
+  },
+  "regression_tests_added": [
+    "ProductEval: 30 repetitions of one case count as one independent cluster; 30 distinct cases count as 30.",
+    "WorkSwarm: directionally eligible gain with 30 repetitions but only 1/2 independent cases remains blocked by gate_auto."
+  ],
+  "verification": {
+    "source_edits": "written",
+    "rustfmt": "passed for touched Rust source and test files",
+    "cargo_check": "not_run_resource_gate_pending",
+    "rust_tests": "not_run_resource_gate_pending",
+    "live_single_team_benchmark": "not_run"
+  },
+  "strategy_defaults_updated": [
+    "TeamPolicy embedded default",
+    "ProductEval CLI",
+    "run-v1-acceptance.ps1",
+    "evals/v1/team-policy.json"
+  ]
+}

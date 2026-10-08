@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "id": "code-chunk-final-tail",
+  "category": "code",
+  "title": "修复分块函数丢弃最后一个不完整分块的问题",
+  "instruction": "请只修改 src/solution.py 完成“修复分块函数丢弃最后一个不完整分块的问题”，保持函数签名和调用方输入不变。不要修改 tests/check.py。实现后运行白名单命令 python tests/check.py，并创建 out/change-report.md，写明具体根因、修改方案、边界条件和真实测试结果。验收规则：保留末尾不足 size 的分块，并验证 size。",
+  "inputs": [
+    {
+      "path": "src/solution.py",
+      "content": "def chunks(values, size):\n    return [values[i:i + size] for i in range(0, len(values) - size + 1, size)]\n"
+    },
+    {
+      "path": "tests/check.py",
+      "content": "from pathlib import Path\nimport sys\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / \"src\"))\nfrom solution import chunks\n\nassert chunks([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]\nprint(\"PASS-20\")\n"
+    }
+  ],
+  "allow_read": [
+    "src/**",
+    "tests/**"
+  ],
+  "allow_write": [
+    "src/**",
+    "out/**"
+  ],
+  "allow_commands": [
+    "python tests/check.py"
+  ],
+  "expected_artifacts": [
+    "out/change-report.md"
+  ],
+  "checkers": [
+    {
+      "type": "command_check",
+      "command": "python tests/check.py",
+      "cwd": null,
+      "expect_exit": 0,
+      "stdout_contains": [
+        "PASS-20"
+      ],
+      "stdout_not_contains": [],
+      "timeout_secs": 30
+    },
+    {
+      "type": "contains",
+      "path": "out/change-report.md",
+      "text": "## 根因"
+    },
+    {
+      "type": "contains",
+      "path": "out/change-report.md",
+      "text": "## 修复方案"
+    },
+    {
+      "type": "contains",
+      "path": "out/change-report.md",
+      "text": "## 边界条件"
+    },
+    {
+      "type": "contains",
+      "path": "out/change-report.md",
+      "text": "## 测试结果"
+    },
+    {
+      "type": "not_contains",
+      "path": "out/change-report.md",
+      "text": "TODO"
+    },
+    {
+      "type": "regex",
+      "path": "out/change-report.md",
+      "pattern": "^# "
+    },
+    {
+      "type": "line_count_min",
+      "path": "out/change-report.md",
+      "min_lines": 9
+    }
+  ],
+  "timeout_secs": 900,
+  "max_model_calls": 64,
+  "reference_outputs": {
+    "out/change-report.md": "# 修复报告：修复分块函数丢弃最后一个不完整分块的问题\n\n## 根因\n\n根据源代码与失败用例说明实际缺陷及其触发条件。\n\n## 修复方案\n\n说明具体实现以及保持不变的公开接口。\n\n## 边界条件\n\n保留末尾不足 size 的分块，并验证 size。\n\n## 测试结果\n\n运行 python tests/check.py，实际输出 PASS-20。\n",
+    "src/solution.py": "def chunks(values, size):\n    if size <= 0:\n        raise ValueError(\"size must be positive\")\n    return [values[index:index + size] for index in range(0, len(values), size)]\n"
+  }
+}

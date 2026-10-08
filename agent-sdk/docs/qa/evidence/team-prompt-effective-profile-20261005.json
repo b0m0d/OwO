@@ -1,0 +1,25 @@
+{
+  "evidence_id": "team-prompt-effective-profile-20261005",
+  "scope": "source-only",
+  "claim": "Team Agent prompt generation is deferred from Core until Server resolves the task-local WorkerProfile. The effective profile is passed to the prompt compiler and the same resolved value configures ProfileSubagentRunner, so visible-tool, read-only ceiling, relative write-path, command, and turn-budget guardrails derive from the runtime profile. Core transfers assembled structured context by ownership on the production RoleWorker path to avoid cloning the full upstream/facts payload solely for deferred compilation.",
+  "limits": [
+    "No Cargo compilation or Rust tests were run; added regressions are source only.",
+    "Static call-site alignment does not prove runtime serialization, actual model-visible tool schemas, or reduction in failed calls/latency.",
+    "The profile-free defensive SubagentRunner branch uses the legacy role-derived prompt helper and is not the normal server construction path."
+  ],
+  "verification": [
+    "rustfmt --check --edition 2021 --config skip_children=true passed for WorkerProfile, TeamPrompt, Core WorkSwarm context/RoleWorker/tests, and Server worker modules.",
+    "Python source assertions passed for structured context handoff, read-only narrowing before prompt compilation, final profile reuse by ProfileSubagentRunner, single relative write allowlist rendering, and regression source.",
+    "git diff --check exited 0; it reported line-ending normalization warnings for unrelated existing dirty files."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/worker_profile.rs": "5fc40b1f08733ad04adf094b4e09b17da46f0b7972fdd519eab612281bed3a65",
+    "crates/owo-agent-core/src/team_prompt.rs": "8cd24ff78d6c849cde878b970aa70b4da32a2f534717b4b395a0c623955b851f",
+    "crates/owo-agent-core/src/workswarm/coord_artifacts.rs": "4c9d96cce3fc4f989aaa43c71e46715f45abad336ef776a5be38254f828424bb",
+    "crates/owo-agent-core/src/workswarm/role_worker.rs": "b3ab19d616711789bc674f2cc8c9872dad156f143ba91b152b83e882554facea",
+    "crates/owo-agent-core/src/workswarm/tests.rs": "b3aa6431c932e772e626018c652acd77ef61fc0448d76c71e4546ae749a93591",
+    "crates/owo-agent-server/src/workswarm_api/workers.rs": "33739ae072b2edb68f0ee101c588231bc89da6259fc5b995c664dfe11da7888b",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "fd489e6ded7a88d520922afbd114ce67fe2f10c25b642b6da359712da412d27e"
+  }
+}

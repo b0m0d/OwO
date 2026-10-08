@@ -16,7 +16,6 @@ use owo_agent_core::Agent;
 use owo_agent_server::build_router;
 use owo_agent_server::shutdown::{ForceKillRecovery, PidFile, DEFAULT_MAX_CONCURRENT_TURNS};
 use std::sync::Arc;
-use std::time::Duration;
 use tower::ServiceExt;
 
 #[path = "../src/event_stream.rs"]
@@ -244,7 +243,7 @@ async fn sse_last_event_id_resume_replays_without_loss() {
     let (subscription, replay) = hub.subscribe_after(2);
     let _ = hub.publish_progress("e6");
     let mut seqs: Vec<u64> = replay.iter().map(|event| event.seq).collect();
-    if let Some(event) = subscription.recv_blocking(Duration::from_millis(500)) {
+    if let Some(event) = subscription.recv_async().await {
         seqs.push(event.seq);
     }
     assert_eq!(seqs, vec![3, 4, 5, 6]);
@@ -253,9 +252,7 @@ async fn sse_last_event_id_resume_replays_without_loss() {
     let (subscription, replay) = hub.subscribe_after(6);
     assert!(replay.is_empty(), "无新历史不应重放");
     let _ = hub.publish_progress("live");
-    let event = subscription
-        .recv_blocking(Duration::from_millis(500))
-        .unwrap();
+    let event = subscription.recv_async().await.unwrap();
     assert_eq!(event.seq, 7);
 }
 

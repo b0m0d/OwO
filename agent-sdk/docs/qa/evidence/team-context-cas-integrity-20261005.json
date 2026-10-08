@@ -1,0 +1,29 @@
+{
+  "evidence_id": "team-context-cas-integrity-20261005",
+  "scope": "source-only",
+  "claim": "Team parent context is schema and size checked before creation; parent snapshots and eligible shared facts use cancellation-aware hash-verified CAS reads on blocking workers. Missing, corrupted, malformed, or oversized context fails closed. Parent snapshots are retained as a bounded prefix from one full-file hash scan; shared-fact inline content remains byte bounded.",
+  "limits": [
+    "No Cargo compilation or Rust tests were run.",
+    "Parent snapshots are capped at 256 KiB; shared facts inline at 2.4 KiB each and 8 KiB total.",
+    "Parent snapshot content is retained as one bounded prefix while the full file is hash-verified in a single scan; no runtime latency, disk-read, or token measurements were collected."
+  ],
+  "files": {
+    "crates/owo-agent-core/src/workswarm/artifact_read.rs": "958bafd26925ee0de03a70b1fff41d66cd236362b50cc77ba06111f019184e21",
+    "crates/owo-agent-core/src/workswarm/coord_context_slice.rs": "d97083cae1fa451a4e4630be32457cfbe67002e1fe2de7625e7a349330c160c7",
+    "crates/owo-agent-core/src/workswarm/coord_artifacts.rs": "d8812729195f1a0f661a4752edeac59a434b89b6b6551781aa19c9c83311b5e8",
+    "crates/owo-agent-core/src/workswarm/coord_create.rs": "0f736379fa3edfca5a16d494136cb66b807938355e38a50ba617b5f7705d5a60",
+    "crates/owo-agent-core/tests/workswarm_tests.rs": "be15d3333c8cb19fabf720f4091839cc1598a82201aa913b8168b0bdde11451a",
+    "crates/owo-agent-kernel/src/cas_text.rs": "b39c074b76f9f6e965e5d7658f99752c8613e6e7887606792dd499d863d89c0f"
+  },
+  "regression_source": [
+    "Corrupted parent snapshot blocks worker context assembly.",
+    "Corrupted eligible shared fact blocks worker context assembly.",
+    "A valid parent snapshot over 64 KiB is reconstructed through the single-pass bounded prefix reader.",
+    "A parent snapshot over 256 KiB is rejected before team creation."
+  ],
+  "verification": [
+    "Static source inspection.",
+    "rustfmt source parser accepted affected Rust files; no Cargo command was run.",
+    "git diff --check passed for the affected source files."
+  ]
+}

@@ -93,7 +93,8 @@ async fn hub_publish_replays_history_then_streams() {
     // 订阅先重放历史。
     let (mut receiver, history) = hub.subscribe("task-hist");
     assert_eq!(history.len(), 2);
-    assert_eq!(history[0], "{\"event\":\"submitted\"}");
+    assert_eq!(history[0].payload, "{\"event\":\"submitted\"}");
+    assert_eq!((history[0].sequence, history[1].sequence), (1, 2));
 
     // 再实时收到后续帧。
     hub.publish("task-hist", "{\"event\":\"succeeded\"}".to_string());
@@ -101,7 +102,8 @@ async fn hub_publish_replays_history_then_streams() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(frame, "{\"event\":\"succeeded\"}");
+    assert_eq!(frame.payload, "{\"event\":\"succeeded\"}");
+    assert_eq!(frame.sequence, 3);
     assert_eq!(hub.history("task-hist").len(), 3);
 }
 
@@ -287,4 +289,339 @@ async fn hub_history_isolated_by_task_id() {
     // 订阅/发布同一 task 前后一致。
     let (_, history) = sse::hub().subscribe(&task_a);
     assert_eq!(history.len(), 1);
+}
+
+#[test]
+fn subscribe_and_publish_share_one_history_live_boundary() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    for iteration in 0..300 {
+        let hub = Arc::new(sse::CloudSseHub::new());
+        let gate = Arc::new(Barrier::new(2));
+        let task_id = format!("handoff-{iteration}");
+        let payload = format!("frame-{iteration}");
+        hub.prepare_task(task_id.clone());
+
+        let publish_hub = Arc::clone(&hub);
+        let publish_gate = Arc::clone(&gate);
+        let publish_task = task_id.clone();
+        let publish_payload = payload.clone();
+        let publisher = thread::spawn(move || {
+            publish_gate.wait();
+            publish_hub.publish(&publish_task, publish_payload);
+        });
+
+        let subscribe_hub = Arc::clone(&hub);
+        let subscribe_gate = Arc::clone(&gate);
+        let subscribe_task = task_id.clone();
+        let subscriber = thread::spawn(move || {
+            subscribe_gate.wait();
+            subscribe_hub.subscribe(&subscribe_task)
+        });
+
+        publisher.join().unwrap();
+        let (mut receiver, history) = subscriber.join().unwrap();
+        let in_history = history
+            .iter()
+            .filter(|frame| frame.payload.as_str() == payload.as_str())
+            .count();
+        let in_live_stream = usize::from(
+            receiver
+                .try_recv()
+                .ok()
+                .is_some_and(|frame| frame.payload == payload),
+        );
+        assert_eq!(
+            in_history + in_live_stream,
+            1,
+            "a frame must be delivered exactly once across replay/live handoff"
+        );
+    }
+}
+
+#[test]
+fn completed_task_cache_and_progress_history_are_bounded() {
+    let hub = sse::CloudSseHub::new();
+    for index in 0..(sse::COMPLETED_TASK_CACHE_CAPACITY + 8) {
+        let task_id = format!("completed-{index}");
+        hub.publish(
+            &task_id,
+            json!({ "event": "succeeded", "kind": "succeeded", "task_id": task_id }).to_string(),
+        );
+    }
+    assert!(
+        hub.history("completed-0").is_empty(),
+        "oldest completed task must be evicted"
+    );
+    assert_eq!(
+        hub.history("completed-8").len(),
+        1,
+        "recent replay remains available"
+    );
+
+    let history_hub = sse::CloudSseHub::new();
+    let payload = format!("\"{}\"", "x".repeat(60_000));
+    for _ in 0..5 {
+        history_hub.publish("large-history", payload.clone());
+    }
+    let history = history_hub.history("large-history");
+    assert!(
+        history.len() <= 4,
+        "byte cap evicts older frames even below event-count cap"
+    );
+    assert!(history.iter().map(String::len).sum::<usize>() <= 256 * 1024);
+    assert_eq!(history_hub.publish("oversized", "x".repeat(70 * 1024)), 0);
+    assert!(history_hub.history("oversized").is_empty());
+}
+
+#[test]
+fn reopening_a_completed_task_starts_a_fresh_replay_epoch_without_resetting_ids() {
+    let hub = sse::CloudSseHub::new();
+    hub.publish(
+        "retryable-task",
+        json!({"kind":"succeeded","event":"succeeded"}).to_string(),
+    );
+    hub.prepare_task("retryable-task");
+    hub.publish(
+        "retryable-task",
+        json!({"kind":"submitting","event":"submitting"}).to_string(),
+    );
+    let subscription = hub.subscribe_after("retryable-task", None);
+    assert!(subscription.known_task);
+    assert_eq!(subscription.history.len(), 1);
+    assert_eq!(subscription.history[0].sequence, 2);
+    assert!(subscription.history[0].payload.contains("submitting"));
+    assert!(!subscription.history[0].payload.contains("succeeded"));
+    assert!(!subscription.completed);
+}
+
+#[test]
+fn replay_reports_events_evicted_from_the_bounded_history() {
+    let hub = sse::CloudSseHub::new();
+    for index in 0..520 {
+        hub.publish("history-gap", json!({"index":index}).to_string());
+    }
+    let subscription = hub.subscribe_after("history-gap", None);
+    assert!(subscription.known_task);
+    assert_eq!(subscription.missing_history_events, 8);
+    assert!(!subscription.completed);
+    assert_eq!(subscription.history.len(), 512);
+    assert_eq!(subscription.history.first().unwrap().sequence, 9);
+}
+
+#[tokio::test]
+async fn prepared_task_accepts_subscription_before_first_progress_event() {
+    sse::reset_hub_for_test();
+    let task_id = format!("task-prepared-{}", uuid::Uuid::new_v4());
+    sse::hub().prepare_task(task_id.clone());
+    let (state, _temp) = test_state().await;
+    let response = sse::router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/cloud/tasks/{task_id}/events"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The subscriber is already attached while the task is queued; publishing starts later.
+    sse::hub().publish(
+        &task_id,
+        json!({"kind":"submitting","event":"submitting","task_id":task_id}).to_string(),
+    );
+    sse::hub().publish(
+        &task_id,
+        json!({"kind":"succeeded","event":"succeeded","task_id":task_id}).to_string(),
+    );
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        axum::body::to_bytes(response.into_body(), 64 * 1024),
+    )
+    .await
+    .expect("prepared task stream receives later progress and terminates")
+    .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("submitting"));
+    assert!(body.contains("succeeded"));
+    assert!(!body.contains("task_not_found"));
+}
+
+#[tokio::test]
+async fn unknown_task_stream_emits_a_terminal_not_found_notice() {
+    let (state, _temp) = test_state().await;
+    let response = sse::router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/cloud/tasks/missing-{}/events",
+                    uuid::Uuid::new_v4()
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        axum::body::to_bytes(response.into_body(), 64 * 1024),
+    )
+    .await
+    .expect("unknown-task notice closes the stream")
+    .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("task_not_found"));
+    assert!(body.contains("任务编号"));
+}
+
+#[tokio::test]
+async fn cloud_sse_last_event_id_replays_only_later_frames_with_ids() {
+    sse::reset_hub_for_test();
+    let task_id = format!("task-cursor-{}", uuid::Uuid::new_v4());
+    for kind in ["submitting", "executing", "succeeded"] {
+        sse::hub().publish(
+            &task_id,
+            json!({"kind":kind,"event":kind,"task_id":task_id}).to_string(),
+        );
+    }
+    let (state, _temp) = test_state().await;
+    let response = sse::router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/cloud/tasks/{task_id}/events"))
+                .header("last-event-id", "1")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        axum::body::to_bytes(response.into_body(), 64 * 1024),
+    )
+    .await
+    .expect("terminal cursor replay must close the stream")
+    .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        !body.contains("submitting"),
+        "cursor 1 must exclude seq 1: {body}"
+    );
+    assert!(body.contains("id: 2"));
+    assert!(body.contains("executing"));
+    assert!(body.contains("id: 3"));
+    assert!(body.contains("succeeded"));
+
+    let (terminal_state, _terminal_temp) = test_state().await;
+    let terminal_response = sse::router(terminal_state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/cloud/tasks/{task_id}/events"))
+                .header("last-event-id", "3")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let terminal_body = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        axum::body::to_bytes(terminal_response.into_body(), 64 * 1024),
+    )
+    .await
+    .expect("a cursor after the terminal frame must still close deterministically")
+    .unwrap();
+    assert!(String::from_utf8_lossy(&terminal_body).contains("stream_complete"));
+}
+
+#[tokio::test]
+async fn terminal_progress_closes_live_receivers_and_late_replay_streams() {
+    sse::reset_hub_for_test();
+    let task_id = "terminal-close-http";
+    sse::hub().prepare_task(task_id);
+    let mut receiver = sse::hub().subscribe(task_id).0;
+    sse::hub().publish(
+        task_id,
+        json!({ "event": "succeeded", "kind": "succeeded", "task_id": task_id }).to_string(),
+    );
+    let frame = receiver.recv().await.unwrap();
+    assert!(frame.payload.contains("succeeded"));
+    assert!(
+        receiver.recv().await.is_err(),
+        "terminal event releases the live channel"
+    );
+
+    let (state, _temp) = test_state().await;
+    let response = sse::router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/cloud/tasks/{task_id}/events"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        axum::body::to_bytes(response.into_body(), 64 * 1024),
+    )
+    .await
+    .expect("late terminal replay must close instead of holding a connection")
+    .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("succeeded"));
+}
+
+#[tokio::test]
+async fn slow_cloud_sse_consumer_gets_visible_gap_notice_and_stream_closes() {
+    sse::reset_hub_for_test();
+    let task_id = format!("task-lag-{}", uuid::Uuid::new_v4());
+    sse::hub().prepare_task(task_id.clone());
+    let (state, _temp) = test_state().await;
+    let response = sse::router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/cloud/tasks/{task_id}/events"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Do not yield to the forwarding task while publishing: the 256-slot broadcast
+    // ring overruns before the HTTP consumer starts draining its bounded channel.
+    for index in 0..300 {
+        sse::hub().publish(
+            &task_id,
+            json!({"kind":"executing","task_id":task_id,"index":index}).to_string(),
+        );
+    }
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        axum::body::to_bytes(response.into_body(), 64 * 1024),
+    )
+    .await
+    .expect("lag notice must not hold the stream open")
+    .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("event: progress"));
+    assert!(body.contains("stream_gap"), "gap must be explicit: {body}");
+    assert!(body.contains("skipped_events"));
+    assert!(body.contains("续传"));
+}
+
+#[test]
+fn unknown_task_subscription_is_closed_without_a_retained_sender() {
+    let hub = sse::CloudSseHub::new();
+    let (mut receiver, history) = hub.subscribe("untrusted-unknown-task-id");
+    assert!(history.is_empty());
+    assert!(
+        receiver.try_recv().is_err(),
+        "unknown task stream must be closed immediately"
+    );
 }

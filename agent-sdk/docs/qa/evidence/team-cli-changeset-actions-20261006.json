@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-06",
+  "scope": "CLI WorkSwarm ChangeSet accept/reject/revert interaction closure",
+  "finding": "The server exposed ChangeSet decisions but the daemon CLI only printed the HTTP routes, leaving review and rollback outside the CLI workflow.",
+  "change": {
+    "source": "crates/owo-agent-cli/src/commands/repl_daemon.rs",
+    "commands": [
+      "accept <id> [note]",
+      "reject <id> [note]",
+      "revert <id> [note]"
+    ],
+    "preflight": "ChangeSet must be listed under the selected team and its team_id must match",
+    "idempotency": "stable key derived from team_id, ChangeSet ID, and action",
+    "response_gate": "must return matching ChangeSet/team identity and a status before CLI reports success",
+    "server_semantics_reused": [
+      "approval state",
+      "conflict-safe file restoration",
+      "audit",
+      "delivery-gate retry"
+    ]
+  },
+  "regression_tests_added": [
+    "decision parser validates actions and safe path-segment IDs, and preserves optional notes",
+    "stable idempotency key is repeatable for retries and scoped by action"
+  ],
+  "verification": {
+    "cargo_fmt_all_check": "passed",
+    "cli_rust_test": "not run; Invoke-CiCargo rejected startup with resource_limited at 4.53 GB free and 85.7 percent used",
+    "daemon_interaction": "not run",
+    "memory_at_last_check": {
+      "free_gb": 4.53,
+      "used_percent": 85.7,
+      "required_free_gb": 6.0,
+      "required_used_percent_exclusive": 80.0
+    }
+  },
+  "limits": "The server routes already have their own contract tests; those do not prove the new CLI command compiles or completes a real Daemon interaction."
+}

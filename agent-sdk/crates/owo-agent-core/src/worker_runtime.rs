@@ -5,7 +5,7 @@
 //! output-contract repair, and request accounting; it never grants capabilities itself.
 
 use crate::agent::{Agent, AgentConfig, TurnEvent};
-use crate::contract_worker::enforce_worker_output_contract_with_model;
+use crate::contract_worker::enforce_worker_output_contract_controlled;
 use crate::gateway::{ModelProvider, TokenUsage};
 use crate::permissions::{Approver, Policy};
 use crate::session::{Session, SessionStore};
@@ -77,6 +77,11 @@ impl WorkerRuntime<'_> {
             return Err(format!("子代理深度超限（最多 {MAX_SUBAGENT_DEPTH} 层）").into());
         }
         let configured_turn_cap = self.config.max_turns;
+        let turn_deadline = self.config.turn_deadline;
+        let request_timeout = self
+            .config
+            .request_timeout_secs
+            .map(|seconds| std::time::Duration::from_secs(seconds as u64));
         let agent = Agent::new(
             Arc::clone(&self.provider),
             self.registry,
@@ -96,7 +101,9 @@ impl WorkerRuntime<'_> {
         }
         session.parent_id = self.parent_session_id.clone();
         if let (Some(store), Some(_)) = (&self.session_store, &self.worker_session_id) {
-            store.save(&session).map_err(|error| format!("Worker 会话初始化保存失败：{error}"))?;
+            store
+                .save(&session)
+                .map_err(|error| format!("Worker 会话初始化保存失败：{error}"))?;
         }
         let event_sink = self.event_sink.clone();
         let observed_steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -110,18 +117,23 @@ impl WorkerRuntime<'_> {
             }
         };
         let outcome = agent
-            .run_turn(&mut session, prompt, self.approver, self.abort, &mut on_event)
+            .run_turn(
+                &mut session,
+                prompt,
+                self.approver,
+                self.abort,
+                &mut on_event,
+            )
             .await;
-        let session_save_error = if let (Some(store), Some(_)) =
-            (&self.session_store, &self.worker_session_id)
-        {
-            store
-                .save(&session)
-                .err()
-                .map(|error| format!("Worker 会话执行后保存失败：{error}"))
-        } else {
-            None
-        };
+        let session_save_error =
+            if let (Some(store), Some(_)) = (&self.session_store, &self.worker_session_id) {
+                store
+                    .save(&session)
+                    .err()
+                    .map(|error| format!("Worker 会话执行后保存失败：{error}"))
+            } else {
+                None
+            };
         let outcome = match outcome {
             Err(error) => {
                 let mut message = format!("子代理执行失败：{error}");
@@ -165,11 +177,25 @@ impl WorkerRuntime<'_> {
         let text = outcome
             .final_text
             .unwrap_or_else(|| format!("（子代理无最终文本，共 {} 步）", outcome.steps));
-        let enforced = match enforce_worker_output_contract_with_model(
+        let remaining = turn_deadline.map(|budget| budget.saturating_sub(started.elapsed()));
+        let repair_timeout = match (remaining, request_timeout) {
+            (Some(left), Some(per_request)) => Some(left.min(per_request)),
+            (Some(left), None) => Some(left),
+            (None, per_request) => per_request,
+        };
+        // max_turns limits Agent loop rounds, not the separately reserved format
+        // correction. Production MeasuredProvider enforces the TaskGraph attempt ceiling
+        // across Agent, turn-limit wrap-up, and this correction request.
+        let allow_repair = configured_turn_cap == 0
+            || outcome.model_calls.len() < configured_turn_cap.saturating_add(1);
+        let enforced = match enforce_worker_output_contract_controlled(
             &self.provider,
             Some(&self.model),
             &text,
             self.is_critic,
+            Some(self.abort),
+            repair_timeout,
+            allow_repair,
         )
         .await
         {
@@ -238,7 +264,11 @@ fn summarize_model_calls(calls: &[crate::agent::ModelCallRecord]) -> (u32, Token
         }
     }
     let usage_known = !calls.is_empty() && calls.iter().all(|call| call.metadata.usage.is_some());
-    (u32::try_from(calls.len()).unwrap_or(u32::MAX), usage, usage_known)
+    (
+        u32::try_from(calls.len()).unwrap_or(u32::MAX),
+        usage,
+        usage_known,
+    )
 }
 
 fn load_worker_session(
@@ -250,7 +280,10 @@ fn load_worker_session(
     parent_session_id: &Option<String>,
 ) -> Result<Session, WorkerRuntimeError> {
     let mut session = if let (Some(store), Some(session_id)) = (session_store, worker_session_id) {
-        if store.exists(session_id).map_err(|error| format!("Worker 会话索引查询失败：{error}"))? {
+        if store
+            .exists(session_id)
+            .map_err(|error| format!("Worker 会话索引查询失败：{error}"))?
+        {
             let loaded = store
                 .load(session_id)
                 .map_err(|error| format!("Worker 会话 {session_id} 恢复失败：{error}"))?;
@@ -373,7 +406,10 @@ mod tests {
             parent_session_id: None,
         };
 
-        let error = runtime.run_report("execute a tool then continue").await.unwrap_err();
+        let error = runtime
+            .run_report("execute a tool then continue")
+            .await
+            .unwrap_err();
 
         assert!(error.message.contains("provider unavailable after tool"));
         assert_eq!(error.steps, 1);

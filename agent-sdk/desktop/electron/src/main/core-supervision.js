@@ -160,7 +160,7 @@ function isLocalProvider(value) {
 
 const NUMERIC_RULES = {
   context_window: [1, 10000000],
-  max_output_tokens: [1, 1000000],
+  max_output_tokens: [1, 32000],
   timeout_secs: [1, 3600],
   keep_recent: [1, 100000],
 };
@@ -252,6 +252,27 @@ function safeLogWrite(write) {
   };
 }
 
+// Writable streams report broken pipes asynchronously through an error event;
+// safeLogWrite only catches synchronous throws, so stdout needs a listener too.
+function safeStreamLogWrite(stream) {
+  let available = Boolean(stream && typeof stream.write === "function");
+  if (stream && typeof stream.on === "function") {
+    stream.on("error", () => {
+      available = false;
+    });
+  }
+  return function safeStreamWrite(text) {
+    if (!available) return false;
+    try {
+      stream.write(text);
+      return true;
+    } catch (_) {
+      available = false;
+      return false;
+    }
+  };
+}
+
 module.exports = {
   CORE_API_VERSION,
   HEALTH_POLL_MS,
@@ -260,6 +281,7 @@ module.exports = {
   // 否则注入实例身份的核心会认为"不是同一个桌面实例"→ 403 instance_mismatch。
   DESKTOP_INSTANCE_HEADER,
   safeLogWrite,
+  safeStreamLogWrite,
   parseReadyLine,
   parseFatalLine,
   evaluateHealth,

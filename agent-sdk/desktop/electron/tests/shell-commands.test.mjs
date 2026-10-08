@@ -7,9 +7,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const here = new URL(".", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const here = dirname(fileURLToPath(import.meta.url));
 const commands = (await import(new URL("../src/main/shell-commands.js", import.meta.url))).default;
 
 const {
@@ -22,7 +23,9 @@ const {
   maskKey,
   resolveApiKey,
   providerStatusValue,
+  applyModelOutputEnv,
   applyModelConfigPatch,
+  validateProjectFolderName,
 } = commands;
 
 const webRoot = join(here, "..", "..", "web");
@@ -53,10 +56,17 @@ test("命令面与 web 实际调用完全对账（不缺不漏）", () => {
     assert.ok(SHELL_COMMANDS.includes(name), `web 调用了壳命令「${name}」，但桥未实现`);
   }
   // 反向：桥实现但 web 已不再调用的命令只提示不失败（diagnostics 类命令可能滞后）。
-  // 14 = 旧 Tauri 的 13 个 commands.rs 命令 + main.rs 里的 desktop_pairing。
-  assert.equal(SHELL_COMMANDS.length, 14, "命令面应与旧 Tauri 的 14 个命令一一对应");
+  // Electron 增加了本机新建项目文件夹能力。
+  assert.equal(SHELL_COMMANDS.length, 15, "命令面包含兼容命令与项目目录命令");
   // desktop_pairing 由 api-client 的 desktopPairingProof 调用，缺失会退化 token 引导强度。
   assert.ok(SHELL_COMMANDS.includes("desktop_pairing"));
+});
+
+test("project folder names reject traversal, invalid characters and reserved device names", () => {
+  assert.deepEqual(validateProjectFolderName("我的新项目"), { ok: true, name: "我的新项目" });
+  for (const name of ["", ".", "..", "a/b", "a\\b", "bad:name", "name.", "CON", "NUL.txt"]) {
+    assert.equal(validateProjectFolderName(name).ok, false, name);
+  }
 });
 
 test("provider 默认值与旧 Tauri provider.rs 逐字一致", () => {
@@ -100,11 +110,13 @@ test("get_provider_status 形状：字段齐全、密钥只给掩码与布尔", 
   for (const field of [
     "provider", "baseUrl", "model", "keyConfigured", "keySource", "keyMasked",
     "keyEnv", "ready", "configPath", "models", "contextWindow", "maxOutputTokens",
-    "temperature", "timeoutSecs", "keepRecent", "compaction",
+    "temperature", "timeoutSecs", "keepRecent", "compaction", "modelOutputTokens",
   ]) {
     assert.ok(Object.prototype.hasOwnProperty.call(status, field), `缺字段 ${field}`);
   }
   assert.equal(status.keyConfigured, true);
+  assert.equal(status.maxOutputTokens, 32000);
+  assert.deepEqual(status.modelOutputTokens, {});
   assert.equal(status.keySource, "config_file");
   assert.ok(status.keyMasked.includes("…"));
   assert.ok(!JSON.stringify(status).includes("sk-secret-key-9999"), "明文密钥绝不能出现在状态里");
@@ -147,12 +159,46 @@ test("set_model_config：未知 provider 拒绝；越界数值按旧壳语义「
   assert.equal(patched.config.model.temperature, null);
 });
 
+test("model output env clears inherited limits, sets 32k default and forwards per-model overrides", () => {
+  const env = {
+    OWO_MODEL_MAX_OUTPUT_TOKENS: "4096",
+    OWO_MODEL_OUTPUT_TOKENS_BY_MODEL: "stale",
+  };
+  applyModelOutputEnv(env, { model_output_tokens: { "glm-5.3-flash": 24000, bad: 50000 } });
+  assert.equal(env.OWO_MODEL_MAX_OUTPUT_TOKENS, "32000");
+  assert.deepEqual(JSON.parse(env.OWO_MODEL_OUTPUT_TOKENS_BY_MODEL), { "glm-5.3-flash": 24000 });
+  applyModelOutputEnv(env, { max_output_tokens: 16000, model_output_tokens: {} });
+  assert.equal(env.OWO_MODEL_MAX_OUTPUT_TOKENS, "16000");
+  assert.deepEqual(JSON.parse(env.OWO_MODEL_OUTPUT_TOKENS_BY_MODEL), {});
+});
+
+test("get_provider_status：每模型输出预算只回传合法整数，不暴露其他配置", () => {
+  const status = providerStatusValue({
+    provider: "bigmodel",
+    model_output_tokens: { "glm-5.3-flash": 24000, bad: 40000, "": 1200, other: "8192" },
+  });
+  assert.deepEqual(status.modelOutputTokens, { "glm-5.3-flash": 24000, other: 8192 });
+});
+
+test("set_model_config：按模型输出上限可保存、校验并清除", () => {
+  const patched = applyModelConfigPatch(
+    { model: { provider: "bigmodel", max_output_tokens: 32000, model_output_tokens: { "glm-5.3-flash": 4096 } } },
+    { model_output_tokens: { " glm-5.3-flash ": 24000, "qwen3.8-max": 32000 } },
+  );
+  assert.equal(patched.ok, true);
+  assert.deepEqual(patched.config.model.model_output_tokens, { "glm-5.3-flash": 24000, "qwen3.8-max": 32000 });
+  assert.equal(applyModelConfigPatch({ model: {} }, { model_output_tokens: { x: 32001 } }).ok, false);
+  const cleared = applyModelConfigPatch({ model: {} }, { model_output_tokens: {} });
+  assert.deepEqual(cleared.config.model.model_output_tokens, {});
+});
+
 test("set_model_config：可调参数与模型清单按契约落位", () => {
   const patched = applyModelConfigPatch(
     { model: { provider: "custom" } },
     {
       context_window: "128000",
       max_output_tokens: "8192",
+      model_output_tokens: { "model-a": "16000" },
       temperature: "0.3",
       timeout_secs: "90",
       keep_recent: "40",
@@ -163,6 +209,7 @@ test("set_model_config：可调参数与模型清单按契约落位", () => {
   assert.equal(patched.ok, true);
   assert.equal(patched.config.model.context_window, 128000);
   assert.equal(patched.config.model.max_output_tokens, 8192);
+  assert.deepEqual(patched.config.model.model_output_tokens, { "model-a": 16000 });
   assert.equal(patched.config.model.temperature, 0.3);
   assert.equal(patched.config.model.timeout_secs, 90);
   assert.equal(patched.config.model.keep_recent, 40);

@@ -777,7 +777,10 @@ async fn rework_full_loop_produces_v2_and_switches_head_on_approval() {
     assert_eq!(status, 200, "{completed_replay}");
     assert_eq!(completed_replay["replayed"], json!(true));
     assert_eq!(completed_replay["rework"]["status"], json!("completed"));
-    assert_eq!(completed_replay["rework"]["reworked_artifact_id"], json!(v2_id));
+    assert_eq!(
+        completed_replay["rework"]["reworked_artifact_id"],
+        json!(v2_id)
+    );
 
     // approve v2：head 切换到 v2；v1 进入 Superseded（历史保留）。
     let (status, approve_resp) = call(

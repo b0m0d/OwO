@@ -1,0 +1,59 @@
+{
+  "date": "2026-10-05",
+  "scope": "workbench refresh lifecycle and responsive mobile navigation validation",
+  "changes": {
+    "mobile_sidebar": "At <=700px the chat sidebar becomes an off-canvas drawer with menu toggle, backdrop dismissal, and close-after-navigation; <=860px chat becomes a single full-width grid column.",
+    "composer": "At narrow viewport hide secondary model chip and compact selection labels to keep send controls inside viewport.",
+    "refresh_lifecycle": "Four essential hydration tasks after health probe; authenticated SSE invalidation for 14 server domains; bounded demand scheduler; panel mounting on demand; hidden-window suspension and degraded low-frequency fallback.",
+    "mobile_tools_view": "Group-focused tool pages now override the 420px desktop minimum grid column at <=860px and stay within the viewport."
+  },
+  "web_tests": {
+    "targeted_command": "node --test --test-reporter=spec desktop/web/tests/boot-hydrate.test.mjs desktop/web/tests/workbench-refresh.test.mjs desktop/web/tests/events.test.mjs",
+    "targeted_passed": 28,
+    "targeted_failed": 0,
+    "full_suite_command": "node --test --test-reporter=spec <all desktop/web/tests/*.test.mjs>",
+    "full_total": 442,
+    "full_passed": 423,
+    "full_failed": 19,
+    "comparison": "Failure count unchanged from full-suite run before the responsive patch; remaining failures were not all individually classified in this pass."
+  },
+  "browser": {
+    "browser_plugin": "unavailable; used Playwright Chromium fallback per frontend-testing-debugging skill",
+    "url": "http://127.0.0.1:4173/index.html",
+    "core_daemon": "not running; static server API/token bootstrap returns HTTP 404, so no API/model end-to-end claim",
+    "mobile_viewport": "390x844",
+    "mobile_metrics": {
+      "document_scroll_width": 390,
+      "viewport_width": 390,
+      "chat_main_width": 390,
+      "composer_width": 374
+    },
+    "interaction": "mobile menu opened drawer (aria-expanded=true); backdrop closed drawer and reset aria-expanded=false; opening the Workspace tool group from the drawer closes the drawer and renders the tools page at 390px without horizontal overflow.",
+    "desktop_viewport": "1365x900",
+    "desktop_document_scroll_width": 1365,
+    "page_errors": [],
+    "screenshots": [
+      "C:/Users/23843/AppData/Local/Temp/owo-web-smoke-mobile-after.png",
+      "C:/Users/23843/AppData/Local/Temp/owo-web-smoke-desktop-after.png",
+      "C:/Users/23843/AppData/Local/Temp/owo-web-smoke-mobile-drawer-open.png",
+      "C:/Users/23843/AppData/Local/Temp/owo-web-smoke-mobile-tools.png"
+    ],
+    "mobile_tool_viewport_metrics": {
+      "viewport_width": 390,
+      "document_scroll_width": 390,
+      "sidebar_width": 390,
+      "prior_reproduced_overflow_width": 889
+    },
+    "console_errors": {
+      "count": 6,
+      "classification": "Static-only host has no Core/Daemon, so token and API resources return HTTP 404; no page JavaScript exceptions."
+    }
+  },
+  "static_checks": {
+    "node_check": "passed for desktop/web/app.js and desktop/web/app-domain.js",
+    "rustfmt": "passed for 121 modified/new Rust source files",
+    "git_diff_check": "passed",
+    "cargo": "not run: 4.41 GB free physical memory and 86.1% in use, below repository gate of >=6 GB free and <80% use; user selected static checks; status resource_limited"
+  },
+  "remaining": "Full Web suite still has 19 failures; Rust cargo check and tests have not run on current worktree; real Core/Daemon/browser path and paired Team-vs-Single performance are unverified."
+}

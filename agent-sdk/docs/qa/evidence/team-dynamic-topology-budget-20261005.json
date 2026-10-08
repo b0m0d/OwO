@@ -1,0 +1,33 @@
+{
+  "evidence_id": "team-dynamic-topology-budget-20261005",
+  "scope": "source-only",
+  "claim": "The generated dynamic Team topology is projected onto the explicit strategy plan. Single-deliverable forced Team keeps producer+critic; leader is added only for multi-source or multiple actual deliverables. Removed roles are rewired out of the DAG and their declared/default turn ceilings are counted as saved budget.",
+  "static_budget_example": {
+    "previous_role_ceiling": 22,
+    "planned_role_ceiling": 6,
+    "difference": 16,
+    "basis": "producer 4 + critic 2 + planner 4 + unplanned leader default 12; configured ceilings, not measured calls"
+  },
+  "limitations": [
+    "No Cargo compilation, tests, or live Team execution was run.",
+    "The 22-to-6 comparison is a configured turn-ceiling calculation, not observed usage or latency.",
+    "Only generated dynamic Team roles are projected; versioned templates and user-authored roles keep their declared topology.",
+    "A live task must confirm that review findings reliably reopen the original producer and final delivery remains complete."
+  ],
+  "files": {
+    "crates/owo-agent-core/src/team_strategy.rs": "7cd361d295c2f3a09b575839696e42474f4454543bf64fc689f86d6b1486d188",
+    "crates/owo-agent-core/src/workswarm/coord_create.rs": "9ca5132fd612837b9b5ef2fc9c82f5e6b758b8c88525e39e437a53e47759e9c2",
+    "crates/owo-agent-core/src/workswarm/roles.rs": "a828589eab80a2c01828eb2e07041ffdddd50a832f640f260fbc3a95d0a4eeec"
+  },
+  "regression_source": [
+    "simple forced Team role projection and budget ceiling",
+    "dependency bridge across a removed review role",
+    "integrator excluded from deliverable count",
+    "generated reviewer excluded from mandatory-review signal"
+  ],
+  "verification": [
+    "Static source assertions passed",
+    "rustfmt parser accepted both changed Rust files",
+    "No Cargo compilation, test, clippy, or live task was run"
+  ]
+}

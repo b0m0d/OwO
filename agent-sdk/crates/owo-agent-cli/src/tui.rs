@@ -102,6 +102,12 @@ struct ApprovalInfo {
     level: String,
 }
 
+struct QuestionInfo {
+    question_id: String,
+    question: String,
+    options: Vec<String>,
+}
+
 /// 回合结束摘要。
 struct TurnSummary {
     steps: usize,
@@ -115,6 +121,11 @@ enum TuiMsg {
         info: ApprovalInfo,
         responder: tokio::sync::oneshot::Sender<PermissionResponse>,
     },
+    Question {
+        info: QuestionInfo,
+        responder: tokio::sync::oneshot::Sender<String>,
+    },
+    QuestionResponseFailed(String),
     Finished(Result<TurnSummary, String>),
 }
 
@@ -129,6 +140,7 @@ struct TuiApp {
         ApprovalInfo,
         tokio::sync::oneshot::Sender<PermissionResponse>,
     )>,
+    question: Option<(QuestionInfo, tokio::sync::oneshot::Sender<String>)>,
     event_rx: Option<Receiver<TuiMsg>>,
     input: String,
     transcript: Vec<(String, Style)>,
@@ -162,6 +174,7 @@ impl TuiApp {
             no_approval,
             session_id: None,
             approval: None,
+            question: None,
             event_rx: None,
             input: String::new(),
             transcript: vec![(
@@ -304,9 +317,12 @@ impl TuiApp {
         } else {
             "build"
         };
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" 输入（{mode_hint}） "));
+        let input_title = if self.question.is_some() {
+            " 回答 Agent 的问题 ".to_string()
+        } else {
+            format!(" 输入（{mode_hint}） ")
+        };
+        let input_block = Block::default().borders(Borders::ALL).title(input_title);
         frame.render_widget(
             Paragraph::new(self.input.as_str())
                 .block(input_block)
@@ -319,6 +335,8 @@ impl TuiApp {
                 "审批：{}（{}）{}——y 仅本次 / t 本任务 / w 工作区长期 / n 拒绝",
                 info.tool, info.level, info.reason
             )
+        } else if self.question.is_some() {
+            "回答 Agent 的问题：输入序号或补充说明，Enter 提交；Ctrl+C 中止".to_string()
         } else {
             self.status.clone()
         };
@@ -373,6 +391,8 @@ impl TuiApp {
                     let _ = runtime.block_on(self.client.cancel_turn(&id));
                 }
                 self.push_system("正在中止当前回合…".to_string(), yellow());
+            } else if self.question.is_some() {
+                self.handle_question_key(key);
             }
             return Ok(false);
         }
@@ -412,6 +432,40 @@ impl TuiApp {
             self.show_diff_panel = !self.show_diff_panel;
         }
         Ok(self.should_exit)
+    }
+
+    fn handle_question_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                let options = self
+                    .question
+                    .as_ref()
+                    .map(|(info, _)| info.options.clone())
+                    .unwrap_or_default();
+                if let Some(answer) =
+                    crate::ui_output::resolve_question_answer(&self.input, &options)
+                {
+                    self.input.clear();
+                    self.respond_question(answer);
+                } else {
+                    self.status = "回答不能为空；Agent 仍在等待。".to_string();
+                }
+            }
+            KeyCode::Char(c) => self.input.push(c),
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Esc => self.input.clear(),
+            _ => {}
+        }
+    }
+
+    fn respond_question(&mut self, answer: String) {
+        if let Some((info, responder)) = self.question.take() {
+            let _ = responder.send(answer.clone());
+            self.push_system(format!("已提交回答：{answer}"), green());
+            self.status = format!("等待 Agent 继续（问题 {}）…", info.question_id);
+        }
     }
 
     fn matches(&self, action: &str, key: &KeyEvent) -> bool {
@@ -843,10 +897,26 @@ impl TuiApp {
                     self.status = format!("审批：{}", info.tool);
                     self.approval = Some((info, responder));
                 }
+                Some(TuiMsg::Question { info, responder }) => {
+                    self.flush_streaming();
+                    self.push_line(format!("? Agent 需要补充信息：{}", info.question), yellow());
+                    for (index, option) in info.options.iter().enumerate() {
+                        self.push_line(format!("  {}. {option}", index + 1), dim());
+                    }
+                    self.status = "输入选项序号或补充说明，按 Enter 提交".to_string();
+                    self.question = Some((info, responder));
+                }
+                Some(TuiMsg::QuestionResponseFailed(error)) => {
+                    self.question = None;
+                    self.input.clear();
+                    self.push_system(format!("回答未送达，已请求停止回合：{error}"), red());
+                }
                 Some(TuiMsg::Finished(result)) => {
                     self.running = false;
                     self.event_rx = None;
                     self.approval = None;
+                    self.question = None;
+                    self.input.clear();
                     match result {
                         Ok(summary) => {
                             self.flush_streaming();
@@ -920,10 +990,25 @@ impl TuiApp {
             }
             SseEvent::PermissionRequest { .. } => {}
             SseEvent::PermissionResolved { .. } => {}
+            SseEvent::UserQuestion { .. } => {}
+            SseEvent::UserAnswered {
+                question_id,
+                source,
+                ..
+            } => {
+                self.question = None;
+                self.input.clear();
+                if source == "user" {
+                    self.push_line(format!("✓ Agent 已收到回答（{question_id}）"), green());
+                } else {
+                    self.push_line(format!("? 提问 {question_id} 以 {source} 结束"), yellow());
+                }
+            }
             // 回合失败终态（取优合并自远端 engine）。
             SseEvent::TurnFailed {
                 message,
                 completion_status,
+                completion_record,
             } => {
                 let status = match completion_status {
                     owo_agent_protocol::CompletionStatusV1::ResponseComplete => "",
@@ -934,6 +1019,11 @@ impl TuiApp {
                     owo_agent_protocol::CompletionStatusV1::Aborted => " · 已取消",
                 };
                 self.push_line(format!("  ✘ 回合失败：{message}{status}"), red());
+                if let Some(summary) =
+                    crate::ui_output::completion_record_summary(completion_record.as_ref())
+                {
+                    self.push_line(format!("    {summary}"), dim());
+                }
             }
             // 思考通道（取优合并自远端 engine）：TUI 折叠（不打断回答流）。
             SseEvent::ReasoningDelta { .. } => {}
@@ -949,6 +1039,7 @@ impl TuiApp {
                 duration_ms,
                 total_tokens,
                 completion_status,
+                completion_record,
                 model_calls,
                 ..
             } => {
@@ -967,9 +1058,12 @@ impl TuiApp {
                     ),
                     cyan(),
                 );
+                if let Some(summary) =
+                    crate::ui_output::completion_record_summary(completion_record.as_ref())
+                {
+                    self.push_line(format!("    {summary}"), dim());
+                }
             }
-            // 提问卡（ask_user）：TUI 暂未接线，忽略（由 daemon 行式 REPL/前端处理）。
-            SseEvent::UserQuestion { .. } | SseEvent::UserAnswered { .. } => {}
         }
     }
 }
@@ -1032,6 +1126,37 @@ async fn run_turn_task(
             SseEvent::ToolResult { .. } => {
                 steps += 1;
                 let _ = tx.send(TuiMsg::Event(event.clone()));
+            }
+            SseEvent::UserQuestion {
+                question_id,
+                question,
+                options,
+            } => {
+                let (responder, receiver) = tokio::sync::oneshot::channel();
+                let info = QuestionInfo {
+                    question_id: question_id.clone(),
+                    question: question.clone(),
+                    options: options.clone(),
+                };
+                tx.send(TuiMsg::Question { info, responder })
+                    .map_err(|_| "TUI 提问界面已关闭".to_string())?;
+                let answer_client = client.clone();
+                let answer_session = session_id.clone();
+                let answer_question_id = question_id.clone();
+                let answer_tx = tx.clone();
+                tokio::spawn(async move {
+                    let Ok(answer) = receiver.await else {
+                        return;
+                    };
+                    if let Err(error) = answer_client
+                        .answer_question(&answer_session, &answer_question_id, &answer)
+                        .await
+                    {
+                        let message = error.to_string();
+                        let _ = answer_client.cancel_turn(&answer_session).await;
+                        let _ = answer_tx.send(TuiMsg::QuestionResponseFailed(message));
+                    }
+                });
             }
             _ => {
                 let _ = tx.send(TuiMsg::Event(event.clone()));
@@ -1237,6 +1362,49 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn timeout_event_closes_question_input_and_reports_terminal_source() {
+        let mut app = test_app();
+        let (responder, _receiver) = tokio::sync::oneshot::channel();
+        app.question = Some((
+            QuestionInfo {
+                question_id: "q-timeout".to_string(),
+                question: "补充信息？".to_string(),
+                options: Vec::new(),
+            },
+            responder,
+        ));
+        app.input = "尚未提交".to_string();
+        app.push_event(SseEvent::UserAnswered {
+            question_id: "q-timeout".to_string(),
+            answer: String::new(),
+            source: "timeout".to_string(),
+        });
+        assert!(app.question.is_none());
+        assert!(app.input.is_empty());
+        assert!(app
+            .transcript
+            .iter()
+            .any(|(line, _)| line.contains("以 timeout 结束")));
+    }
+
+    #[test]
+    fn question_responder_receives_selected_option() {
+        let mut app = test_app();
+        let (responder, mut receiver) = tokio::sync::oneshot::channel();
+        app.question = Some((
+            QuestionInfo {
+                question_id: "q-1".to_string(),
+                question: "继续还是停止？".to_string(),
+                options: vec!["继续".to_string(), "停止".to_string()],
+            },
+            responder,
+        ));
+        app.respond_question("停止".to_string());
+        assert!(app.question.is_none());
+        assert_eq!(receiver.try_recv().expect("answer delivered"), "停止");
     }
 
     #[test]

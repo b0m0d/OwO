@@ -81,12 +81,34 @@
       detailErrors: {},    // team_id -> 错误
       deliverables: {},    // pid -> { approved, pending, error }（404 → 空且 error=""）
       workspaces: {},      // pid -> 绑定 payload（404 → null）
+      detailRequests: {},
+      deliverableRequests: {},
+      workspaceRequests: {},
+      filterEnrichTimer: null,
       filters: { status: "", template: "", project: "", q: "" },
       rerunBusy: {},       // team_id -> true
       rerunResults: {},    // team_id -> { ok, text, new_team_id? }
       errors: [],
       lastLoadedAt: "",
     };
+
+    var enrichmentGeneration = 0;
+    var loadGeneration = 0;
+
+    function invalidateEnrichment() {
+      enrichmentGeneration += 1;
+      state.details = {};
+      state.detailErrors = {};
+      state.deliverables = {};
+      state.workspaces = {};
+      state.detailRequests = {};
+      state.deliverableRequests = {};
+      state.workspaceRequests = {};
+    }
+
+    function owns(obj, key) {
+      return Object.prototype.hasOwnProperty.call(obj || {}, key);
+    }
 
     // ---------- 纯逻辑层（Node 测试挂钩覆盖） ----------
     // 团队状态归一：列表是 snake_case（serde），创建响应/SSE 是 Debug 形式——统一小写
@@ -432,8 +454,88 @@
       return String(s == null ? "" : s).replace(/"/g, '\\"');
     }
 
-    // 详情 + 交付物 + 工作区（可见行的补充信息；全部容错降级）。
+    // 详情 + 交付物 + 工作区（可见行的补充信息；按 key 缓存并合并并发请求）。
+    function requestDetail(teamId, generation) {
+      if (owns(state.details, teamId) || owns(state.detailErrors, teamId)) return Promise.resolve();
+      if (state.detailRequests[teamId]) return state.detailRequests[teamId];
+      var request = Promise.resolve()
+        .then(function () { return H.get("/teams/" + encodeURIComponent(teamId)); })
+        .then(
+          function (d) {
+            if (generation !== enrichmentGeneration) return;
+            state.details[teamId] = d;
+            delete state.detailErrors[teamId];
+          },
+          function (e) {
+            if (generation === enrichmentGeneration) state.detailErrors[teamId] = friendly(e);
+          }
+        )
+        .then(function () {
+          if (generation === enrichmentGeneration && state.detailRequests[teamId] === request) {
+            delete state.detailRequests[teamId];
+          }
+        });
+      state.detailRequests[teamId] = request;
+      return request;
+    }
+
+    function requestDeliverables(pid, generation) {
+      if (owns(state.deliverables, pid)) return Promise.resolve();
+      if (state.deliverableRequests[pid]) return state.deliverableRequests[pid];
+      var request = Promise.resolve()
+        .then(function () {
+          return H.get("/projects/" + encodeURIComponent(pid) + "/deliverables");
+        })
+        .then(
+          function (d) {
+            if (generation !== enrichmentGeneration) return;
+            state.deliverables[pid] = {
+              approved: (d.approved || []).length,
+              pending: (d.pending_review || []).length,
+            };
+          },
+          function (e) {
+            if (generation !== enrichmentGeneration) return;
+            var is404 = /^404/.test(String((e && e.message) || e || ""));
+            state.deliverables[pid] = { approved: 0, pending: 0, error: is404 ? "" : friendly(e) };
+          }
+        )
+        .then(function () {
+          if (generation === enrichmentGeneration && state.deliverableRequests[pid] === request) {
+            delete state.deliverableRequests[pid];
+          }
+        });
+      state.deliverableRequests[pid] = request;
+      return request;
+    }
+
+    function requestWorkspace(pid, generation) {
+      if (owns(state.workspaces, pid)) return Promise.resolve();
+      if (state.workspaceRequests[pid]) return state.workspaceRequests[pid];
+      var request = Promise.resolve()
+        .then(function () {
+          return H.get("/projects/" + encodeURIComponent(pid) + "/workspace");
+        })
+        .then(
+          function (w) {
+            if (generation === enrichmentGeneration) state.workspaces[pid] = w;
+          },
+          function () {
+            // 未绑定或暂不可读时均降级为未绑定；刷新历史会重新读取。
+            if (generation === enrichmentGeneration) state.workspaces[pid] = null;
+          }
+        )
+        .then(function () {
+          if (generation === enrichmentGeneration && state.workspaceRequests[pid] === request) {
+            delete state.workspaceRequests[pid];
+          }
+        });
+      state.workspaceRequests[pid] = request;
+      return request;
+    }
+
     function enrichVisible(rows) {
+      var generation = enrichmentGeneration;
       var detailTargets = rows.slice(0, MAX_DETAIL);
       var projects = (function () {
         var seen = {};
@@ -442,54 +544,37 @@
           var pid = projectKeyOf(rows[i]);
           if (pid && !seen[pid]) {
             seen[pid] = true;
-            out.push({ pid: pid, team_id: rows[i].team_id });
+            out.push(pid);
           }
         }
         return out;
       })();
 
-      var detailJobs = detailTargets.map(function (t) {
-        return Promise.resolve()
-          .then(function () { return H.get("/teams/" + encodeURIComponent(t.team_id)); })
-          .then(function (d) { state.details[t.team_id] = d; })
-          .catch(function (e) {
-            state.detailErrors[t.team_id] = friendly(e);
-          });
+      var jobs = detailTargets.map(function (t) {
+        return requestDetail(t.team_id, generation);
       });
-
-      var projectJobs = projects.map(function (p) {
-        var dlv = H.get("/projects/" + encodeURIComponent(p.pid) + "/deliverables")
-          .then(function (d) {
-            state.deliverables[p.pid] = {
-              approved: (d.approved || []).length,
-              pending: (d.pending_review || []).length,
-            };
-          })
-          .catch(function (e) {
-            var is404 = /^404/.test(String((e && e.message) || e || ""));
-            state.deliverables[p.pid] = { approved: 0, pending: 0, error: is404 ? "" : friendly(e) };
-          });
-        var ws = H.get("/projects/" + encodeURIComponent(p.pid) + "/workspace")
-          .then(function (w) { state.workspaces[p.pid] = w; })
-          .catch(function (e) {
-            // 404 = 未绑定工作区 → null（复跑不带目录）；其余错误也降级为 null 但不阻塞。
-            state.workspaces[p.pid] = null;
-            void e;
-          });
-        return Promise.all([dlv, ws]);
+      projects.forEach(function (pid) {
+        jobs.push(requestDeliverables(pid, generation));
+        jobs.push(requestWorkspace(pid, generation));
       });
-
-      return Promise.all(detailJobs.concat(projectJobs));
+      return Promise.all(jobs);
     }
 
     function load() {
       if (state.loading) return Promise.resolve();
+      var requestGeneration = ++loadGeneration;
+      if (state.filterEnrichTimer) {
+        clearTimeout(state.filterEnrichTimer);
+        state.filterEnrichTimer = null;
+      }
       state.loading = true;
       state.errors = [];
       render();
       return Promise.resolve()
         .then(function () { return H.get("/teams"); })
         .then(function (d) {
+          if (requestGeneration !== loadGeneration) return;
+          invalidateEnrichment();
           state.teams = (d && d.teams) || [];
           state.loading = false;
           state.loadedOnce = true;
@@ -498,11 +583,13 @@
           render();
           var rows = visibleTeams(state.teams, state.filters, MAX_ROWS);
           return enrichVisible(rows).then(function () {
+            if (requestGeneration !== loadGeneration) return;
             state.lastLoadedAt = new Date().toLocaleTimeString();
             render();
           });
         })
         .catch(function (e) {
+          if (requestGeneration !== loadGeneration) return;
           state.errors.push("团队列表加载失败：" + friendly(e));
           state.loading = false;
           state.loadedOnce = true;
@@ -606,8 +693,28 @@
       else if (t.id === "ph-f-q") state.filters.q = t.value;
       else return;
       render();
-      var rows = visibleTeams(state.teams, state.filters, MAX_ROWS);
-      enrichVisible(rows).then(render);
+      if (state.filterEnrichTimer) {
+        clearTimeout(state.filterEnrichTimer);
+        state.filterEnrichTimer = null;
+      }
+      if (t.id === "ph-f-q") {
+        // 搜索命中本地已加载列表；等待短暂停顿再补充行详情，避免每个按键都打 API。
+        state.filterEnrichTimer = setTimeout(function () {
+          state.filterEnrichTimer = null;
+          enrichVisible(visibleTeams(state.teams, state.filters, MAX_ROWS)).then(render);
+        }, 180);
+        return;
+      }
+      enrichVisible(visibleTeams(state.teams, state.filters, MAX_ROWS)).then(render);
+    }
+
+    function dispose() {
+      loadGeneration += 1;
+      state.loading = false;
+      if (state.filterEnrichTimer) clearTimeout(state.filterEnrichTimer);
+      state.filterEnrichTimer = null;
+      invalidateEnrichment();
+      rootEl = null;
     }
 
     function mount(root, helpers) {
@@ -649,6 +756,9 @@
       shellHtml: shellHtml,
       render: render,
       load: load,
+      enrichVisible: enrichVisible,
+      onFilterChange: onFilterChange,
+      invalidateEnrichment: invalidateEnrichment,
       startRerun: startRerun,
       gotoWorkswarm: gotoWorkswarm,
       getTransport: function () {
@@ -667,6 +777,7 @@
       id: ID,
       title: "项目与运行历史",
       mount: mount,
+      dispose: dispose,
       _test: TEST_API,
     };
   })();

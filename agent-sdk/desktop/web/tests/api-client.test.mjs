@@ -22,46 +22,14 @@ test("业务脚本不绕过统一 API 客户端", () => {
   assert.deepEqual(offenders, [], "只有 core/api-client.js 可以直接访问网络");
 });
 
-test("路由切换在清空页面前保留设置节点，自动恢复会启动周期刷新", () => {
+test("工作台三态视图由单一控制器管理并在启动前加载", () => {
   const app = readFileSync(join(here, "../app.js"), "utf8");
   const index = readFileSync(join(here, "../index.html"), "utf8");
-  // R10/R11（2026-09-22）：设置节点是**可搬动的**（侧栏 ↔ 路由内容区），因此
-  // 顺序是硬约束：先把节点搬回侧栏脱离内容区 → 清空内容区 → 再按需搬进来。
-  // 直接把节点搬进内容区再 replaceChildren()，会把刚搬进去的 #settingsSection
-  // 一起删掉，整段 DOM 从文档消失，现象是"模型页/设置页完全空白"，并且后续
-  // refreshUsage 在对 null 赋 textContent（真机栈证据）。
-  assert.match(
-    app,
-    /setSettingsLocation\(false\);\s*content\.replaceChildren\(\);\s*setSettingsLocation\(route === "settings"\);/,
-    "必须先让设置节点脱离内容区、再清空、最后按需搬入"
-  );
-  // R10：模型页借用同一份 #settingsSection（同一份 DOM，防止两套表单状态漂移），
-  // 但不接管 #toolsPanel —— 否则模型页立刻又变成"一堆参数"，正是用户投诉的形态。
-  assert.match(
-    app,
-    /const toolsTarget = withTools && inRoute \? target : sidebar;/,
-    "工具面板只允许在设置路由搬进内容区（模型页不得接管）"
-  );
-  // 意图断言，不锁字面相邻行：上一版把 `hydrateShell(); serviceReady = true;` 逐字
-  // 钉死，结果 §3.4 要求的"ready 之后复查提供商"一进来就误判成回归。现在分别断言
-  // ①恢复完成后确实启用后台刷新；②每条 ready 路径都先过引导门（提供商未配置时
-  // 停在引导页，而不是放进一个请求必挂的主界面）。
-  assert.match(
-    app,
-    /hydrateShell\(\);[\s\S]{0,600}?serviceReady = true;[\s\S]{0,200}?startRefreshTimers\(\);/,
-    "自动恢复完成后必须启用后台刷新"
-  );
-  // 引导门只允许存在于"终态尚未确定"的两个入口：boot() 开头与 recover() 开头。
-  // ready 之后再复查会出事：壳的 provider 配置面与 core 的实际可用性是两套视图，
-  // 密钥注入到 sidecar 的健康启动里壳仍可报 ready=false，于是引导页顶掉健康主界面，
-  // 并把 §8.2 的首屏请求/SSE 计数全打乱（实测 business 4→16、events 1→4）。
-  const setupGates = (app.match(/if \(await needsSetup\(\)\)/g) || []).length;
-  assert.equal(setupGates, 2,
-    `needsSetup 门必须恰好 2 处（boot/recover 各一次），不得在 hydrateShell 之后复查（当前 ${setupGates}）`);
-  assert.ok(!/hydrateShell\(\);[\s\S]{0,200}?if \(await needsSetup\(\)\)/.test(app),
-    "hydrateShell 之后不得再出现 needsSetup 分流（终态判据只能是核心上报的稳定码）");
-  assert.match(index, /var localCore = "http:\/\/127\.0\.0\.1:4096"/);
-  assert.match(index, /window\.OWO_API_BASE = window\.OWO_API_BASE/);
+  assert.match(index, /core\/workbench-view\.js/);
+  assert.ok(index.indexOf('<script src="core/workbench-view.js"></script>') < index.indexOf('<script src="app.js"></script>'));
+  assert.match(app, /window\.OwoWorkbenchView\.create\(/);
+  assert.match(app, /workbenchView\.showTools\(visible\)/);
+  assert.match(app, /workbenchView\.showSettings\(visible\)/);
 });
 
 test("请求自动带 token，401 只刷新并重试一次", async () => {
@@ -86,6 +54,46 @@ test("请求自动带 token，401 只刷新并重试一次", async () => {
     assert.equal(calls.filter((call) => call.url.endsWith("/sessions")).length, 2);
     assert.equal(calls[1].options.headers.get("Authorization"), "Bearer token-a");
     assert.equal(calls[3].options.headers.get("Authorization"), "Bearer token-b");
+  } finally {
+    global.fetch = original;
+  }
+});
+
+test("公开健康检查不触发 bearer token 引导", async () => {
+  const original = global.fetch;
+  const calls = [];
+  global.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return new Response(JSON.stringify({ healthy: true, version: "0.7" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const client = new ApiClient("http://127.0.0.1:8529");
+    assert.deepEqual(await client.get("/health", { public: true }), { healthy: true, version: "0.7" });
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.endsWith("/health"));
+    assert.equal(calls[0].options.headers.get("Authorization"), null);
+  } finally {
+    global.fetch = original;
+  }
+});
+
+test("桌面配对门拒绝普通浏览器时显示可操作的原因", async () => {
+  const original = global.fetch;
+  global.fetch = async () => new Response(
+    JSON.stringify({ error: "desktop pairing required", code: "auth/pairing_required/not_retryable" }),
+    { status: 403, headers: { "content-type": "application/json" } }
+  );
+  try {
+    const client = new ApiClient("http://127.0.0.1:8529");
+    await assert.rejects(client.get("/sessions"), (error) => {
+      assert.equal(error.status, 403);
+      assert.equal(error.code, "auth/pairing_required/not_retryable");
+      assert.match(error.message, /Electron 工作台/);
+      return true;
+    });
   } finally {
     global.fetch = original;
   }
@@ -649,6 +657,13 @@ test("index.html 不再按 __TAURI_INTERNALS__ 把 baseUrl 钉死到硬编码端
   assert.match(index, /window\.OWO_API_BASE\s*=\s*window\.OWO_API_BASE\s*\|\|\s*"";/);
 });
 
+test("工具面板把公开 /health 请求作为公开请求发送", () => {
+  const domain = readFileSync(join(here, "../app-domain.js"), "utf8");
+  const helpers = /function panelHelpers\(\) \{([\s\S]*?)\n\}/.exec(domain);
+  assert.ok(helpers);
+  assert.match(helpers[1], /get\(path, options\)[\s\S]*?path === "\/health"[\s\S]*?requestOptions\.public = true[\s\S]*?return api\(path, requestOptions\)/);
+});
+
 test("app.js 的 token 引导复用 ApiClient，不自带实例/配对实现", () => {
   const app = readFileSync(join(here, "../app.js"), "utf8");
   // 认证头只在 core/api-client.js 实现；app.js 通过 OwoApi.ensureCoreConnection 复用。
@@ -663,25 +678,28 @@ test("app.js 的 token 引导复用 ApiClient，不自带实例/配对实现", (
 });
 
 test("发送时无会话会自动新建，而不是提示后放弃", () => {
-  const app = readFileSync(join(here, "../app.js"), "utf8");
+  const domain = readFileSync(join(here, "../app-domain.js"), "utf8");
   // 用户按回车的意图是"把这句话说出去"，不该要求他先点一次「新建对话」。
   assert.doesNotMatch(
-    app,
+    domain,
     /async function sendPrompt\(\)\s*\{\s*if \(!state\.sessionId\)\s*\{\s*addMessage\("system",\s*"请先新建或选择一个会话"\)/,
     "sendPrompt 不应在无会话时只提示而不新建"
   );
-  assert.match(app, /async function sendPrompt\(\)[\s\S]{0,400}await newSession\(\)/);
+  const sendBody = /async function sendPrompt\(\)\s*\{([\s\S]*?)\n\}/.exec(domain);
+  assert.ok(sendBody, "app-domain.js 必须提供唯一 sendPrompt 实现");
+  assert.match(sendBody[1], /if \(!state\.sessionId\)\s*\{[\s\S]{0,1000}await promptSessionStart\.run\(\(\) => newSession\(\)\)/);
 });
 
 test("侧栏项目分组可折叠且折叠态持久化", () => {
   const app = readFileSync(join(here, "../app.js"), "utf8");
+  const domain = readFileSync(join(here, "../app-domain.js"), "utf8");
   const css = readFileSync(join(here, "../style.css"), "utf8");
   assert.match(app, /collapsedGroups/, "折叠状态集合");
-  assert.match(app, /owo\.collapsedGroups/, "折叠状态持久化到 localStorage");
-  assert.match(app, /codex-group-caret/, "折叠箭头");
+  assert.match(domain, /owo\.collapsedGroups/, "折叠状态持久化到 localStorage");
+  assert.match(domain, /codex-group-caret/, "折叠箭头");
   assert.match(css, /\.codex-group-caret/, "折叠箭头样式");
   // 折叠只在「非搜索」期间生效，搜索应临时展开全部。
-  assert.match(app, /if \(query\)[\s\S]{0,400}classList\.toggle\("hidden",\s*!li\.textContent/);
+  assert.match(domain, /if \(query\) li\.classList\.toggle\("hidden", !li\.textContent\.toLowerCase\(\)\.includes\(query\)\)/);
 });
 
 // ---------- 首启门回归（真实故障：配好模型仍发不出） ----------

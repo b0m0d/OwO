@@ -733,7 +733,9 @@ async fn turn_event_replay_filters_by_turn_and_resumes_after_session_seq() {
     assert_eq!(body["events"][0]["turn_id"], "turn-one");
     assert_eq!(body["events"][0]["payload"]["type"], "final");
     assert_eq!(body["active"], false);
-    assert_eq!(body["state"], "completed");
+    // A streamed Final frame is not a durable completion marker by itself.
+    // The host writes TurnStats only after successful session persistence.
+    assert_eq!(body["state"], "interrupted");
     assert_eq!(body["next_after_seq"], 2);
 
     state
@@ -1643,6 +1645,13 @@ async fn openapi_json_covers_snapshot_and_registered_routes() {
         .await
         .unwrap();
     let served: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_str(CONTRACT_SNAPSHOT).unwrap();
+    for schema in ["ProductEvalRun", "ProductEvalMetrics", "CaseModeMetrics"] {
+        assert_eq!(
+            served["components"]["schemas"][schema], snapshot["components"]["schemas"][schema],
+            "ProductEval schema {schema} 与 TypeScript OpenAPI 快照漂移"
+        );
+    }
     let served_paths: Vec<&str> = served["paths"]
         .as_object()
         .unwrap()

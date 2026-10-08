@@ -1,0 +1,35 @@
+{
+  "evidence_id": "single-team-completion-record-20261005",
+  "scope": "source-only",
+  "claim": "Single completion evidence has one canonical host builder shared by normal TurnOutcome finalization and Trace. Successful and failed/aborted server turns persist the same task/attempt-bound record in Session and expose it in TurnStats/TurnFailed.",
+  "limitations": [
+    "No Cargo compilation, Rust tests, TypeScript tests, clippy, or runtime migration was run.",
+    "Session stores only the latest Single completion record.",
+    "Single and Team candidate-version schemas and lifecycle scopes remain distinct.",
+    "CLI/TUI and desktop currently render completion status but not receipt details."
+  ],
+  "files": {
+    "crates/owo-agent-core/src/agent/mod.rs": "6e62739b96d68c45193a75ee6d8b86e336e856c126458a10d560dbf52b73c273",
+    "crates/owo-agent-core/src/session/model.rs": "5e73dd73f9d01e55fbf039a70d5b9a5cc28db12dfb1d6f370faded934827b65c",
+    "crates/owo-agent-core/src/sqlite_store.rs": "01a4ace6a2fea07336bfc3b43eb1d726d843be95ddc7def8d97249a071f75099",
+    "crates/owo-agent-core/src/trace.rs": "13351083f2e17a5485027fd2c14a9bd23b4b9a9489332b6b2678be5a455db8d5",
+    "crates/owo-agent-protocol/src/lib.rs": "929c9b97674f0fec40a3ccf034e3a06e90cebac82fff0c896ff9c721cfa2a7ac",
+    "crates/owo-agent-server/src/turn_api/handlers.rs": "f0a6b12a165a151494c4cfbaee30c62ab5e034ff81e66caa80fd4f20e9e671ff",
+    "crates/owo-agent-server/src/turn_api/tests.rs": "2ae3151ec7354011fa30421819ffbb30579735757f934772717145fa7f8a23f7",
+    "crates/owo-agent-cli/src/tui.rs": "bfd4ad4cbf8a01c75d563383a0f69f8242bca82c1b6ead1b71739b8e96c2a99f",
+    "crates/owo-agent-cli/src/ui_output.rs": "99a6ca9963140930da7945b4ae1f09aba8c3b9f04cf4d12bc20597157a307ab2",
+    "clients/ts/tests/client.unit.test.ts": "4b512851841ae2df7ef776ce1c4a016d4cf72e9b3c149428884811b396f72d90",
+    "clients/ts/tests/turn-completion.test.ts": "aaad1f7feafbed1b25fbe6426e1a2798f3c0574e87b0c27f3c95b57ee0c904cc"
+  },
+  "regression_source": [
+    "Trace builder filters Accepted evidence and includes accepted prior writes for this attempt",
+    "SQLite completion record round-trip and fork isolation",
+    "protocol TurnFailed legacy default and completion-record round-trip",
+    "CLI/TUI tolerate optional TurnFailed completion record",
+    "TypeScript failed terminal event preserves completion record"
+  ],
+  "verification": [
+    "Static source inspection only",
+    "Rust syntax parser accepted affected Rust files; no cargo command was run"
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-05",
+  "scope": "desktop/web global status strip integration and regression check",
+  "changes": [
+    "Mounted the existing status-bar view in the real desktop entry with a persistent global host and script ordering",
+    "Connected workspace, reading, pending approvals, model/permission settings and last-turn outcome facts to the status view",
+    "Connected status buttons to the existing settings, workspace, permissions and chat routes",
+    "Added responsive status-strip layout rules and mapped the new status strip into the page grid"
+  ],
+  "validation": {
+    "focused_node_tests": {
+      "passed": 20,
+      "failed": 0,
+      "scope": [
+        "r4-status-bar",
+        "boot-hydrate"
+      ]
+    },
+    "full_web_tests": {
+      "total": 446,
+      "passed": 431,
+      "failed": 15,
+      "previous": {
+        "passed": 430,
+        "failed": 16
+      },
+      "status": "improved by one passing test; not fully passing",
+      "failures": [
+        "product-eval.panel.test.mjs: Node harness loads a browser-only panel without window",
+        "r4-diagnostics-ledger: relocated view script/route contract",
+        "r4-folder-picker: workspace field and chooser grouping contract",
+        "r4-permissions: route metadata/permissions contract",
+        "r4-permissions: approval button literal contract",
+        "ui-ia-fixes: unified service unavailable card contract",
+        "ui-ia-fixes: absolute OpenAPI URL contract",
+        "ui-ia-fixes: 900x600 rail width contract",
+        "ui-ia-fixes: approval summary contract",
+        "ui-ia-fixes: automation controls contract",
+        "ui-ia-fixes: routed settings container contract",
+        "ui-ia-fixes: sidebar tools/developer placement contract",
+        "ui-ia-fixes: session card overflow actions contract",
+        "ui-ia-fixes: model parameter fields contract",
+        "ui-ia-fixes: model entry and session switching contract"
+      ],
+      "classification": "These are unresolved test failures; this evidence does not classify them all as stale or as product defects."
+    },
+    "browser": {
+      "browser": "Microsoft Edge via bundled Playwright; Browser plugin unavailable",
+      "url": "http://127.0.0.1:8765/",
+      "viewport": "1365x900",
+      "page_identity": "OwO Agent 工作台",
+      "visible_status_segments": [
+        "backend",
+        "workspace",
+        "model",
+        "permission",
+        "task"
+      ],
+      "interaction": "Clicking the model status button opens settings and selects the models tab",
+      "visible_error_overlays": 0,
+      "page_errors": 0
+    },
+    "narrow_viewport_observation": "At 900x600, the existing html/body min-width of 960px causes 60px horizontal overflow; not changed in this patch.",
+    "rust_cargo": "not run: current resource snapshot is approximately 4.31 GB free RAM and 86.4% used, below the repository Cargo gate of at least 6 GB free and under 80% used.",
+    "rust_source": "No Rust source changed in this increment; Cargo compilation and Rust tests remain outstanding for the existing Rust changes."
+  },
+  "limitations": [
+    "The browser used a static HTTP server, not a live Daemon; backend/model/workspace values therefore show disconnected or empty-state facts.",
+    "The 900x600 horizontal overflow remains an existing layout defect.",
+    "Full web tests are not green and Rust code has not been compiled or tested in this resource window.",
+    "No live Single-versus-Team task comparison was run; this does not demonstrate a speed or delivery-quality advantage."
+  ]
+}

@@ -62,6 +62,9 @@ function detail(teamId, tasks, auditTail, extra) {
 }
 
 function resetState() {
+  if (T.state.filterEnrichTimer) clearTimeout(T.state.filterEnrichTimer);
+  T.invalidateEnrichment();
+  T.state.filterEnrichTimer = null;
   T.state.loading = false;
   T.state.loadedOnce = false;
   T.state.teams = [];
@@ -336,6 +339,154 @@ test("load()：列表 + 详情/交付物/工作区富化；404 静默降级", as
   assert.ok(!log.some((x) => x.startsWith("POST ")));
 });
 
+test("enrichVisible：相同团队/项目合并并发请求，完成后复用缓存", async () => {
+  resetState();
+  const rows = [
+    team("team-1", "Succeeded", { project_space_id: "project-shared" }),
+    team("team-2", "Failed", { project_space_id: "project-shared" }),
+  ];
+  T.state.teams = rows;
+  const pending = {};
+  const calls = [];
+  T.setTransport({
+    get(path) {
+      calls.push(path);
+      return new Promise((resolve) => { pending[path] = resolve; });
+    },
+  });
+
+  const first = T.enrichVisible(rows);
+  const second = T.enrichVisible(rows);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(calls.slice().sort(), [
+    "/teams/team-1",
+    "/teams/team-2",
+    "/projects/project-shared/deliverables",
+    "/projects/project-shared/workspace",
+  ].sort());
+
+  pending["/teams/team-1"]({ team: { team_id: "team-1" } });
+  pending["/teams/team-2"]({ team: { team_id: "team-2" } });
+  pending["/projects/project-shared/deliverables"]({ approved: [{}], pending_review: [] });
+  pending["/projects/project-shared/workspace"]({ root: "T:/shared" });
+  await Promise.all([first, second]);
+  await T.enrichVisible(rows);
+
+  assert.equal(calls.length, 4);
+  assert.ok(T.state.details["team-1"]);
+  assert.ok(T.state.details["team-2"]);
+  assert.deepEqual(T.state.deliverables["project-shared"], { approved: 1, pending: 0 });
+});
+
+test("项目历史搜索输入防抖：只为最终命中行补充详情", async () => {
+  resetState();
+  T.state.teams = [
+    team("team-1", "Succeeded", { project_space_id: "project-1" }),
+    team("team-2", "Failed", { project_space_id: "project-2" }),
+  ];
+  const elements = {
+    "#ph-list": { innerHTML: "" },
+    "#ph-errors": { innerHTML: "" },
+    "#ph-meta": { textContent: "" },
+  };
+  T.setRoot({ querySelector(selector) { return elements[selector] || null; } });
+  const calls = [];
+  T.setTransport({
+    get(path) {
+      calls.push(path);
+      if (path.startsWith("/teams/")) return Promise.resolve(detail(path.slice("/teams/".length)));
+      if (path.endsWith("/deliverables")) return Promise.resolve({ approved: [], pending_review: [] });
+      if (path.endsWith("/workspace")) return Promise.resolve({ root: "T:/project" });
+      return Promise.reject(new Error("unexpected GET " + path));
+    },
+  });
+
+  ["t", "team-", "team-2"].forEach((value) => {
+    T.onFilterChange({ target: { id: "ph-f-q", value } });
+  });
+  assert.deepEqual(calls, [], "本地过滤即时更新，输入过程中不应请求补充数据");
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.deepEqual(calls.sort(), [
+    "/teams/team-2",
+    "/projects/project-2/deliverables",
+    "/projects/project-2/workspace",
+  ].sort());
+  assert.match(elements["#ph-list"].innerHTML, /data-ph-row="team-2"/);
+  assert.doesNotMatch(elements["#ph-list"].innerHTML, /data-ph-row="team-1"/);
+});
+
+test("dispose：切页时取消待处理的搜索补充", async () => {
+  resetState();
+  T.state.teams = [team("team-1", "Succeeded", { project_space_id: "project-1" })];
+  const elements = {
+    "#ph-list": { innerHTML: "" },
+    "#ph-errors": { innerHTML: "" },
+    "#ph-meta": { textContent: "" },
+  };
+  T.setRoot({ querySelector(selector) { return elements[selector] || null; } });
+  const calls = [];
+  T.setTransport({ get(path) { calls.push(path); return Promise.resolve({}); } });
+
+  T.onFilterChange({ target: { id: "ph-f-q", value: "team-1" } });
+  assert.notEqual(T.state.filterEnrichTimer, null);
+  panel.dispose();
+  await new Promise((resolve) => setTimeout(resolve, 220));
+
+  assert.deepEqual(calls, []);
+  assert.equal(T.state.filterEnrichTimer, null);
+  assert.equal(T.state.loading, false);
+});
+
+test("dispose：忽略卸载前发出的迟到团队列表响应", async () => {
+  resetState();
+  let resolveTeams;
+  const calls = [];
+  T.setTransport({
+    get(path) {
+      calls.push(path);
+      return new Promise((resolve) => { resolveTeams = resolve; });
+    },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+
+  const pendingLoad = T.load();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(calls, ["/teams"]);
+  panel.dispose();
+  resolveTeams({ teams: [team("late-team", "Succeeded")] });
+  await pendingLoad;
+
+  assert.deepEqual(T.state.teams, []);
+  assert.equal(T.state.loading, false);
+  assert.deepEqual(calls, ["/teams"]);
+});
+
+test("load() 刷新成功后失效旧富化缓存并重新读取", async () => {
+  resetState();
+  const calls = [];
+  let revision = 1;
+  T.setTransport({
+    get(path) {
+      calls.push(path);
+      if (path === "/teams") return Promise.resolve({ teams: [team("team-r", "Succeeded", { project_space_id: "project-r" })] });
+      if (path === "/teams/team-r") return Promise.resolve({ team: { team_id: "team-r", objective: "rev-" + revision } });
+      if (path.endsWith("/deliverables")) return Promise.resolve({ approved: [], pending_review: [] });
+      if (path.endsWith("/workspace")) return Promise.resolve({ root: "T:/revision-" + revision });
+      return Promise.reject(new Error("unexpected GET " + path));
+    },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+
+  await T.load();
+  assert.equal(T.state.details["team-r"].team.objective, "rev-1");
+  revision = 2;
+  await T.load();
+  assert.equal(T.state.details["team-r"].team.objective, "rev-2");
+  assert.equal(calls.filter((path) => path === "/teams/team-r").length, 2);
+});
+
 test("startRerun()：成功路径（请求体含模板与工作区）+ 提交锁双击只发一次", async () => {
   resetState();
   const log = [];
@@ -396,7 +547,8 @@ test("index.html 引入 project-history 面板脚本", () => {
 
 test("PANEL_ORDER 注册 project-history（唯一来源 app-domain.js）", () => {
   assert.ok(!/const\s+PANEL_ORDER\s*=/.test(appJs), "PANEL_ORDER 不得回归 app.js 定义");
-  assert.match(appDomainJs, /const PANEL_ORDER = \[[\s\S]*?"project-history",\s*\]/, "app-domain.js PANEL_ORDER 未注册 project-history");
+  const panelOrder = /const PANEL_ORDER = \[([\s\S]*?)\]/.exec(appDomainJs);
+  assert.ok(panelOrder && panelOrder[1].includes("\"project-history\""), "app-domain.js PANEL_ORDER 未注册 project-history");
 });
 
 test("style.css 提供面板样式节（.owo-ac-* 复用 + ph 专属类）", () => {

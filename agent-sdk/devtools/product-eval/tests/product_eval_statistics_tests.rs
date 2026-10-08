@@ -3,9 +3,9 @@
 //! 单/多对照启用条件（成功率 +5% / 质量 +10% / 耗时 −30%）与 JSON 契约形状。
 
 use owo_agent_product_eval::product_eval::{
-    aggregate_metrics, compare_mode_statistics, format_mode_comparison, format_mode_statistics,
-    mode_statistics, percentile, report_statistics, wilson_interval, CI95_Z,
-    SUFFICIENT_SAMPLE_SIZE,
+    aggregate_metrics, compare_mode_statistics, compare_report_statistics, format_mode_comparison,
+    format_mode_statistics, mode_statistics, percentile, report_pairing_guardrail,
+    report_statistics, wilson_interval, CI95_Z, SUFFICIENT_SAMPLE_SIZE,
 };
 use owo_agent_product_eval::product_eval::{
     AgentMode, EvalCategory, MatrixKey, ProductEvalRun, RunStatus,
@@ -21,6 +21,7 @@ fn dummy_run(case_id: &str, mode: AgentMode, status: RunStatus, wall_ms: u64) ->
         validation_wall_ms: 0,
         delivery_gate_wall_ms: 0,
         model_calls: 2,
+        tool_calls: Some(4),
         prompt_tokens: None,
         completion_tokens: None,
         total_tokens: Some(100),
@@ -33,6 +34,7 @@ fn dummy_run(case_id: &str, mode: AgentMode, status: RunStatus, wall_ms: u64) ->
         checker_passed: 0,
         checker_total: 0,
         sandbox_rel: None,
+        artifact_snapshot_rel: None,
         model: None,
         started_at: "2026-01-01T00:00:00Z".to_string(),
         finished_at: "2026-01-01T00:00:01Z".to_string(),
@@ -144,6 +146,8 @@ fn mode_statistics_all_success_and_all_failure() {
     assert_eq!(stats.p50_wall_ms, Some(1000.0));
     assert_eq!(stats.p95_wall_ms, Some(1000.0));
     assert_eq!(stats.total_tokens, Some(3000));
+    assert_eq!(stats.mean_tool_calls, Some(4.0));
+    assert_eq!(aggregate_metrics(&all_pass).total_tool_calls, Some(120));
     assert!(stats.sample_sufficient, "n=30 应达到充分样本阈值");
 
     let all_fail: Vec<ProductEvalRun> = (0..30)
@@ -171,6 +175,40 @@ fn mode_statistics_small_sample_is_flagged_insufficient() {
     let single = mode_statistics(&mixed, AgentMode::Single);
     assert_eq!(single.runs_total, 5);
     assert_eq!(single.success_rate, 1.0);
+}
+
+#[test]
+fn tool_call_statistics_preserve_unknown_legacy_values() {
+    let mut runs = vec![
+        dummy_run("c", AgentMode::Single, RunStatus::Passed, 100),
+        dummy_run("c", AgentMode::Single, RunStatus::Passed, 100),
+    ];
+    runs[1].tool_calls = None;
+    assert_eq!(aggregate_metrics(&runs).total_tool_calls, None);
+    assert_eq!(
+        mode_statistics(&runs, AgentMode::Single).mean_tool_calls,
+        None
+    );
+}
+
+#[test]
+fn tool_call_comparison_is_reported_but_does_not_override_quality_and_speed_gates() {
+    let single = mode_statistics(
+        &(0..SUFFICIENT_SAMPLE_SIZE)
+            .map(|_| dummy_run("c", AgentMode::Single, RunStatus::Passed, 1000))
+            .collect::<Vec<_>>(),
+        AgentMode::Single,
+    );
+    let mut team_runs: Vec<ProductEvalRun> = (0..SUFFICIENT_SAMPLE_SIZE)
+        .map(|_| dummy_run("c", AgentMode::Multi, RunStatus::Passed, 1000))
+        .collect();
+    for run in &mut team_runs {
+        run.tool_calls = Some(2);
+    }
+    let team = mode_statistics(&team_runs, AgentMode::Multi);
+    let comparison = compare_mode_statistics(&single, &team);
+    assert_eq!(comparison.multi_tool_calls_rel_change, Some(-0.5));
+    assert!(!comparison.enabled);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +346,79 @@ fn quality_regression_blocks_speed_only_enablement() {
 }
 
 #[test]
+fn resource_overhead_blocks_speed_only_enablement() {
+    let single_runs: Vec<ProductEvalRun> = (0..30)
+        .map(|_| {
+            dummy_run(
+                "resource-budget",
+                AgentMode::Single,
+                RunStatus::Passed,
+                1000,
+            )
+        })
+        .collect();
+    let mut team_runs: Vec<ProductEvalRun> = (0..30)
+        .map(|_| dummy_run("resource-budget", AgentMode::Multi, RunStatus::Passed, 500))
+        .collect();
+    for run in &mut team_runs {
+        run.total_tokens = Some(300); // 3x token cost despite a 50% wall-clock win.
+        run.model_calls = 4; // 2x model requests.
+        run.tool_calls = Some(12); // 3x tool operations.
+    }
+    let comparison = compare_mode_statistics(
+        &mode_statistics(&single_runs, AgentMode::Single),
+        &mode_statistics(&team_runs, AgentMode::Multi),
+    );
+    assert!(comparison.rules[2].satisfied, "speed gain is present");
+    assert!(
+        !comparison.enabled,
+        "resource overhead must block the speed-only win"
+    );
+    assert!(comparison
+        .resource_guardrails
+        .iter()
+        .any(|rule| rule.name == "token_overhead" && !rule.satisfied));
+    assert!(comparison
+        .resource_guardrails
+        .iter()
+        .any(|rule| rule.name == "model_call_overhead" && !rule.satisfied));
+    assert!(comparison
+        .resource_guardrails
+        .iter()
+        .any(|rule| rule.name == "tool_call_overhead" && !rule.satisfied));
+}
+
+#[test]
+fn missing_usage_telemetry_blocks_automatic_team_enablement() {
+    let single_runs: Vec<ProductEvalRun> = (0..30)
+        .map(|_| dummy_run("unknown-usage", AgentMode::Single, RunStatus::Passed, 1000))
+        .collect();
+    let mut team_runs: Vec<ProductEvalRun> = (0..30)
+        .map(|_| dummy_run("unknown-usage", AgentMode::Multi, RunStatus::Passed, 500))
+        .collect();
+    for run in &mut team_runs {
+        run.total_tokens = None;
+        run.tool_calls = None;
+    }
+    let comparison = compare_mode_statistics(
+        &mode_statistics(&single_runs, AgentMode::Single),
+        &mode_statistics(&team_runs, AgentMode::Multi),
+    );
+    assert!(
+        !comparison.enabled,
+        "unknown resource cost is not equivalent to zero"
+    );
+    assert!(comparison
+        .resource_guardrails
+        .iter()
+        .any(|rule| rule.name == "token_overhead" && !rule.satisfied));
+    assert!(comparison
+        .resource_guardrails
+        .iter()
+        .any(|rule| rule.name == "tool_call_overhead" && !rule.satisfied));
+}
+
+#[test]
 fn enablement_insufficient_samples_flagged() {
     let small: Vec<ProductEvalRun> = (0..3)
         .map(|_| dummy_run("c", AgentMode::Single, RunStatus::Passed, 1000))
@@ -412,4 +523,69 @@ fn statistics_render_and_json_contract_shapes() {
     let empty = report_statistics(&[]);
     assert_eq!(empty["modes"][0]["runs_total"], 0);
     assert!(empty["modes"][0]["p50_wall_ms"].is_null());
+}
+
+#[test]
+fn checker_quality_regression_blocks_speed_based_auto_team_enablement() {
+    let mut single_runs: Vec<ProductEvalRun> = (0..SUFFICIENT_SAMPLE_SIZE)
+        .map(|_| dummy_run("c", AgentMode::Single, RunStatus::Passed, 1000))
+        .collect();
+    let mut team_runs: Vec<ProductEvalRun> = (0..SUFFICIENT_SAMPLE_SIZE)
+        .map(|_| dummy_run("c", AgentMode::Multi, RunStatus::Passed, 600))
+        .collect();
+    for run in &mut single_runs {
+        run.checker_passed = 8;
+        run.checker_total = 10;
+    }
+    for run in &mut team_runs {
+        run.checker_passed = 7;
+        run.checker_total = 10;
+    }
+    let single = mode_statistics(&single_runs, AgentMode::Single);
+    let team = mode_statistics(&team_runs, AgentMode::Multi);
+    let comparison = compare_mode_statistics(&single, &team);
+    assert!(comparison
+        .rules
+        .iter()
+        .any(|rule| rule.name == "耗时 -30%" && rule.satisfied));
+    assert!(!comparison.enabled, "质量下降时不得因提速自动启用 Team");
+    assert!(comparison
+        .quality_guardrails
+        .iter()
+        .any(|rule| !rule.satisfied));
+}
+
+#[test]
+fn report_auto_enablement_requires_complete_single_team_pairs_and_no_pending_cells() {
+    let mut runs = Vec::new();
+    for repetition in 0..SUFFICIENT_SAMPLE_SIZE as u32 {
+        let mut single = dummy_run("c", AgentMode::Single, RunStatus::Passed, 1000);
+        single.key.repetition = repetition;
+        let mut team = dummy_run("c", AgentMode::Multi, RunStatus::Passed, 600);
+        team.key.repetition = repetition;
+        runs.extend([single, team]);
+    }
+    assert!(report_pairing_guardrail(&runs, &[]).satisfied);
+    assert!(
+        compare_report_statistics(&runs, &[]).enabled,
+        "complete paired speed gain may qualify"
+    );
+
+    let mut incomplete = runs.clone();
+    incomplete.pop();
+    let blocked = compare_report_statistics(&incomplete, &[]);
+    assert!(!blocked.enabled);
+    assert!(blocked
+        .alignment_guardrails
+        .iter()
+        .any(|rule| !rule.satisfied));
+    assert!(format_mode_comparison(&blocked).contains("缺少一侧"));
+
+    let pending = vec![MatrixKey::new("next".to_string(), AgentMode::Multi, 0)];
+    let blocked = compare_report_statistics(&runs, &pending);
+    assert!(!blocked.enabled);
+    assert!(blocked
+        .alignment_guardrails
+        .iter()
+        .any(|rule| !rule.satisfied));
 }

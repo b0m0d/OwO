@@ -138,8 +138,8 @@ pub fn parallel_roles(writers: usize) -> Vec<RoleSpec> {
     let mut lead = RoleSpec::agent("lead");
     lead.handoff_contract = Some(format!(
         "只读拆分目标，输出 TaskGraphV1 JSON。任务数 1 到 128，可多于 {writers} 个 Worker 槽位。\
-         对象包含 version=1 和 tasks 数组；每项包含 task_id、worker（可省略）、task、depends_on、\
-         read_refs、write_paths、contract_refs、required_capabilities、estimated_effort、verification、risk、priority、acceptance。模型只估算 estimated_effort；宿主按该值和 Worker 角色上限计算每任务每次尝试的模型请求上限，模型不得输出或覆盖预算字段。\
+         对象包含 version=1 和 tasks 数组；每项包含 task_id、worker（可省略）、task、depends_on、requirement_quotes、\
+         read_refs、write_paths、contract_refs、required_capabilities、estimated_effort、verification、risk、priority、acceptance。requirement_quotes 必须是从当前用户目标原文逐字引用的数组；每条引用也必须逐字出现在当前任务的 task 或 acceptance 字段；每个任务至少引用一条实际由该任务负责的用户要求，且显式验收清单中的每项都必须被至少一个任务精确引用。模型只估算 estimated_effort；宿主按该值和 Worker 角色上限计算每任务每次尝试的模型请求上限，模型不得输出或覆盖预算字段。\
          依赖引用 task_id；重叠写范围必须有依赖顺序；目标和验收不能为空。\
          代码实现任务必须包含 required=true 的 workspace-command-success-v1 行为检查，scope.kind=workspace_paths 且 relative_paths 覆盖被改代码；arguments.command 使用宿主登记的测试入口，并在 required_capabilities 声明 run_command。\
          scope 路径必须位于该任务 write_paths 内；required=true，resources 用 cpu_slots=1、memory_mb=8..128、exclusive_workspace=false、timeout_ms=1..30000。\
@@ -253,20 +253,31 @@ pub fn default_relay_roles() -> Vec<RoleSpec> {
 #[derive(Debug, Clone)]
 pub struct CancelToken {
     tx: tokio::sync::watch::Sender<bool>,
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CancelToken {
     pub fn new() -> Self {
         let (tx, _) = tokio::sync::watch::channel(false);
-        Self { tx }
+        Self {
+            tx,
+            aborted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
     pub fn cancel(&self) {
+        self.aborted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.tx.send(true);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        *self.tx.borrow()
+        self.aborted.load(std::sync::atomic::Ordering::SeqCst) || *self.tx.borrow()
+    }
+
+    /// Shared abort flag for in-flight GoalRunner work; cancellation sets it before waking watchers.
+    pub fn abort_signal(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.aborted)
     }
 
     pub fn rx(&self) -> tokio::sync::watch::Receiver<bool> {
@@ -292,4 +303,21 @@ pub async fn wait_cancel(token: &CancelToken) -> bool {
         }
     }
     false
+}
+#[cfg(test)]
+mod cancel_token_tests {
+    use super::CancelToken;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn cancel_sets_shared_abort_flag_before_returning() {
+        let token = CancelToken::new();
+        let abort = token.abort_signal();
+        assert!(!abort.load(Ordering::SeqCst));
+
+        token.cancel();
+
+        assert!(abort.load(Ordering::SeqCst));
+        assert!(token.is_cancelled());
+    }
 }

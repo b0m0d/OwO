@@ -101,10 +101,64 @@
     function metricsCardsHtml(vm, budgetPerRole) {
       if (!vm) return '<div class="hint owo-ws-metrics-empty">暂无角色指标（指标由角色 Worker 执行时采集；服务端未提供时此区保持空态）。</div>';
       var s = vm.summary;
+      var lifecycleStages = vm.lifecycleStages || [];
+      var stageLabels = {
+        registry_build: "注册表构建",
+        phase_orchestration: "阶段编排与执行",
+        delivery_finalize: "最终交付验收",
+      };
+      var executionEpochs = vm.executionEpochs || [];
+      var epochHtml = executionEpochs.length
+        ? '<div class="owo-ws-epochs"><b>执行代次（最近 ' + executionEpochs.length + (vm.executionEpochsTruncated ? '+': '') + '）</b>' + executionEpochs.slice().reverse().map(function (epoch) {
+            var tokenText = epoch.promptTokens != null || epoch.completionTokens != null
+              ? ' · token ' + (epoch.usageKnown ? "" : "≥") + (epoch.promptTokens == null ? "—" : epoch.promptTokens) + '/' + (epoch.completionTokens == null ? "—" : epoch.completionTokens)
+              : "";
+            var overlapText = epoch.overlapFactor != null ? ' · Worker时长/窗口 ' + epoch.overlapFactor.toFixed(2) + 'x' : "";
+            return '<span><b>epoch ' + esc(epoch.phaseEpoch) + '</b>' +
+              (epoch.phaseDurationMs != null ? ' · 编排 ' + fmtMs(epoch.phaseDurationMs) : '') +
+              ' · Worker窗口 ' + fmtMs(epoch.workerWindowMs) +
+              ' · Worker累计 ' + fmtMs(epoch.workerWallMsSum) +
+              ' · 任务尝试 ' + (epoch.taskAttemptCount == null ? 0 : epoch.taskAttemptCount) +
+              ' · 调用 ' + (epoch.modelCalls == null ? 0 : epoch.modelCalls) + tokenText +
+              ' · 失败 ' + (epoch.failedSpans == null ? 0 : epoch.failedSpans) + overlapText + '</span>';
+          }).join("") + '</div>'
+        : "";
+      var lifecycleHtml = lifecycleStages.length
+        ? '<div class="owo-ws-lifecycle"><b>运行阶段耗时</b>' + lifecycleStages.map(function (stage) {
+            var label = stageLabels[stage.stage] || stage.stage;
+            return '<span title="次数 ' + (stage.count == null ? "—" : stage.count) + '，失败 ' + (stage.failures == null ? 0 : stage.failures) + '">' + esc(label) + ' <b>P50 ' + fmtMs(stage.durationMsP50) + ' / P90 ' + fmtMs(stage.durationMsP90) + '</b></span>';
+          }).join("") + '</div>'
+        : "";
+      var contextAssembly = vm.contextAssembly || {};
+      var contextRoles = contextAssembly.byRole || [];
+      var contextEpochs = contextAssembly.byEpoch || [];
+      var contextSamplingNote = contextAssembly.sampleTruncated || contextAssembly.auditScanTruncated
+        ? ' · 最近样本，统计可能不完整'
+        : "";
+      var contextAssemblyVisible = contextAssembly.sampleCount > 0 || contextAssembly.attributionMissingCount > 0;
+      var contextAssemblyHtml = contextAssemblyVisible
+        ? '<div class="owo-ws-lifecycle"><b>上下文装配（Worker 内部耗时，不与墙钟相加）</b>' +
+          '<span>样本 ' + (contextAssembly.sampleCount || 0) + contextSamplingNote +
+          ' · P50 ' + fmtMs(contextAssembly.durationMsP50) +
+          ' / P90 ' + fmtMs(contextAssembly.durationMsP90) +
+          ' · 失败 ' + (contextAssembly.failures || 0) +
+          ((contextAssembly.attributionMissingCount || 0) > 0 ? ' · 未归因 ' + contextAssembly.attributionMissingCount : '') + '</span>' +
+          contextRoles.map(function (role) {
+            return '<span title="样本 ' + (role.sampleCount || 0) + '，失败 ' + (role.failures || 0) +
+              '，累计工作时长不代表墙钟">' + esc(role.role) + ' <b>P50 ' +
+              fmtMs(role.durationMsP50) + ' / P90 ' + fmtMs(role.durationMsP90) + '</b></span>';
+          }).join("") +
+          contextEpochs.slice(-12).map(function (epoch) {
+            return '<span title="样本 ' + (epoch.sampleCount || 0) + '，失败 ' + (epoch.failures || 0) +
+              '">epoch ' + esc(epoch.phaseEpoch) + ' 上下文 P50 ' +
+              fmtMs(epoch.durationMsP50) + ' / P90 ' + fmtMs(epoch.durationMsP90) + '</span>';
+          }).join("") + '</div>'
+        : "";
       var chips =
         '<div class="owo-ws-metrics-sum">' +
         '<span>总墙钟 <b>' + fmtMs(s.wallClockMs) + "</b></span>" +
         '<span>总调用 <b>' + (s.totalModelCalls == null ? "—" : s.totalModelCalls) + "</b></span>" +
+        (s.totalBudgetReservationWaitMs != null ? '<span>预算预留等待 <b>' + fmtMs(s.totalBudgetReservationWaitMs) + "</b></span>" : "") +
         (s.totalTokensIn != null || s.totalTokensOut != null
           ? "<span>token <b>" + (s.totalTokensIn == null ? "—" : s.totalTokensIn) + " / " + (s.totalTokensOut == null ? "—" : s.totalTokensOut) + "</b></span>"
           : "") +
@@ -115,7 +169,7 @@
         (s.artifactVersions != null ? "<span>产物版本 <b>" + s.artifactVersions + "</b></span>" : "") +
         (s.budgetExhausted ? '<span class="owo-ws-budget-exhausted bad">预算耗尽' + (s.budgetReason ? "：" + esc(s.budgetReason) : "") + "</span>" : "") +
         "</div>";
-      if (!vm.workers.length) return chips;
+      if (!vm.workers.length) return chips + epochHtml + lifecycleHtml + contextAssemblyHtml;
       var cards = vm.workers
         .map(function (w) {
           var remain = budgetPerRole != null && w.modelCalls != null ? budgetPerRole - w.modelCalls : null;
@@ -127,11 +181,15 @@
             "</div>" +
             '<div class="hint">' +
             "耗时 " + fmtMs(w.durationMs) +
+            (w.budgetReservationWaitMs != null ? " · 预算预留等待 " + fmtMs(w.budgetReservationWaitMs) : "") +
             " · 调用 " + (w.modelCalls == null ? "—" : w.modelCalls) +
             (remain != null ? "（余 " + remain + "" : "") + (remain != null ? "）" : "") +
             (w.tokensIn != null || w.tokensOut != null ? " · token " + (w.tokensIn == null ? "—" : w.tokensIn) + "/" + (w.tokensOut == null ? "—" : w.tokensOut) : "") +
             (w.estCost != null ? " · $" + w.estCost.toFixed(4) : "") +
-            (w.attempts != null ? " · 尝试 " + w.attempts : "") +
+            (w.attempts != null ? " · 次数 " + w.attempts : "") +
+            (w.taskId ? " · task " + esc(w.taskId) : "") +
+            (w.attemptId ? " · attempt " + esc(w.attemptId) : "") +
+            (w.phaseEpoch != null ? " · epoch " + esc(w.phaseEpoch) : "") +
             "</div>" +
             (w.failureReason ? '<div class="bad hint">失败：' + esc(short(w.failureReason, 120)) + "</div>" : "") +
             (w.artifactIds.length ? '<div class="hint">产物：' + esc(w.artifactIds.join("、")) + "</div>" : "") +
@@ -139,7 +197,7 @@
           );
         })
         .join("");
-      return chips + '<div class="owo-ws-mgrid">' + cards + "</div>";
+      return chips + epochHtml + lifecycleHtml + contextAssemblyHtml + '<div class="owo-ws-mgrid">' + cards + "</div>";
     }
 
     // —— 自面板迁入：diffHtml ——
@@ -904,6 +962,63 @@
     );
   }
 
+  function teamConversationHtml(handoffs, members, markdown, errorText) {
+    if (errorText) {
+      return '<div class="owo-ws-chat-state bad" role="alert">' + esc(errorText) + "</div>";
+    }
+    if (handoffs === null) {
+      return '<div class="owo-ws-chat-state hint" aria-live="polite">正在读取团队交接记录…</div>';
+    }
+    if (!Array.isArray(handoffs) || !handoffs.length) {
+      return '<div class="owo-ws-chat-state hint">暂无已保存的交接消息。逐轮内部对话只有在服务端持久化后才能展示。</div>';
+    }
+    var memberMap = {};
+    (Array.isArray(members) ? members : []).forEach(function (m) {
+      if (m && m.member_id) memberMap[String(m.member_id)] = m;
+    });
+    var rows = handoffs.slice().sort(function (a, b) {
+      return String((a && a.created_at) || "").localeCompare(String((b && b.created_at) || ""));
+    });
+    return '<div class="owo-ws-chat-log" role="log" aria-label="团队交接对话">' +
+      rows.map(function (h, index) {
+        h = h || {};
+        var senderId = String(h.from_member || "");
+        var receiverId = String(h.to_member || "");
+        var member = memberMap[senderId] || {};
+        var role = String(member.role || senderId || "团队成员");
+        var initial = role.trim().slice(0, 1) || "团";
+        var slug = role.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "member";
+        var summary = String(h.completed_summary || "");
+        var body = typeof markdown === "function"
+          ? markdown(summary)
+          : '<div class="md-p">' + esc(summary).replace(/\n/g, "<br>") + "</div>";
+        var receiver = receiverId
+          ? '<span class="owo-ws-chat-to">发给 ' + esc((memberMap[receiverId] && memberMap[receiverId].role) || receiverId) + "</span>"
+          : "";
+        var extras = "";
+        [
+          ["遗留问题", h.open_issues],
+          ["下一步", h.suggested_next_actions],
+          ["已知风险", h.known_risks],
+        ].forEach(function (pair) {
+          var values = Array.isArray(pair[1]) ? pair[1].filter(Boolean) : [];
+          if (!values.length) return;
+          extras += '<div class="owo-ws-chat-extra"><b>' + pair[0] + "</b><ul>" +
+            values.map(function (value) { return "<li>" + esc(value) + "</li>"; }).join("") +
+            "</ul></div>";
+        });
+        var refs = Array.isArray(h.output_artifact_refs) ? h.output_artifact_refs.filter(Boolean) : [];
+        return '<article class="owo-ws-chat-row speaker-' + esc(slug) + '" data-handoff-index="' + index + '">' +
+          '<div class="owo-ws-chat-avatar" aria-hidden="true">' + esc(initial) + "</div>" +
+          '<div class="owo-ws-chat-card"><header class="owo-ws-chat-head"><b>' + esc(role) + "</b>" +
+          '<span class="owo-ws-chat-id">' + esc(senderId) + "</span>" + receiver +
+          '<time>' + esc(h.created_at || "") + "</time></header>" +
+          '<div class="owo-ws-chat-body">' + body + "</div>" + extras +
+          (refs.length ? '<div class="owo-ws-chat-refs">关联产物：' + refs.map(esc).join(" · ") + "</div>" : "") +
+          "</div></article>";
+      }).join("") + "</div>";
+  }
+
   var api = {
     bindEsc: bindEsc,
     bindShort: bindShort,
@@ -942,6 +1057,7 @@
     changeSetsHtml: changeSetsHtml,
     artifactRowHtml: artifactRowHtml,
     refPickerHtml: refPickerHtml,
+    teamConversationHtml: teamConversationHtml,
   };
 
   win.OwoWorkswarmRender = api;

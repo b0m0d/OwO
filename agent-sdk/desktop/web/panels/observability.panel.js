@@ -11,13 +11,19 @@ window.OwoPanels.observability = (function () {
   "use strict";
 
   var id = "observability";
+  var panelGeneration = 0;
+  var refreshGeneration = 0;
+  var reportGeneration = 0;
+  var sectionEl = null;
 
   function defaultHelpers() {
     var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
     function get(path) {
-      return fetch(baseUrl + path).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
+      return window.OwoApi.stream(path).then(function (r) {
+        if (!r.ok) return r.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error((body && (body.message || body.error)) || "HTTP " + r.status);
+        });
+        return r.status === 204 ? null : r.json();
       });
     }
     function esc(s) {
@@ -84,83 +90,84 @@ window.OwoPanels.observability = (function () {
   }
 
   function mount(root, helpers) {
-    if (helpers) H = helpers;
+    dispose();
+    H = helpers || defaultHelpers();
     root.innerHTML = nav();
+    sectionEl = root.querySelector('[data-panel="observability"]');
     root.querySelector("#owo-mtr-refresh").addEventListener("click", refresh);
     var reportBtn = root.querySelector("#owo-mtr-report-refresh");
     if (reportBtn) reportBtn.addEventListener("click", loadReport);
     refresh();
   }
 
+  function showMetricError(selector, error) {
+    var target = sectionEl && sectionEl.querySelector(selector);
+    if (!target) return;
+    var message = "加载失败：" + H.friendlyError(error);
+    if (selector === "#owo-mtr-tools tbody") {
+      target.innerHTML = '<tr><td colspan="4" style="color:var(--red)">' + H.esc(message) + "</td></tr>";
+    } else {
+      target.textContent = message;
+      target.style.color = "var(--red)";
+    }
+  }
+
   function refresh() {
-    H.get("/metrics/overview")
-      .then(function (data) {
-        state.overview = data;
-        renderCards();
-      })
-      .catch(function (e) {
-        var el = document.getElementById("owo-mtr-cards");
-        if (el) el.innerHTML = '<span style="color:var(--red)">' + H.esc(H.friendlyError(e)) + "</span>";
-      });
-    H.get("/metrics/turns?limit=50")
-      .then(function (data) {
-        state.turns = (data && data.turns) || [];
-        renderChart();
-      })
-      .catch(function () {});
-    H.get("/metrics/tools")
-      .then(function (data) {
-        state.tools = (data && data.tools) || [];
-        renderTools();
-      })
-      .catch(function () {});
-    H.get("/metrics/health")
-      .then(function (data) {
-        state.health = data;
-        renderHealth();
-      })
-      .catch(function () {});
-    H.get("/metrics/runtime")
-      .then(function (data) {
-        state.runtime = data;
-        renderRuntime();
-      })
-      .catch(function () {});
-    H.get("/metrics/slo")
-      .then(function (data) {
-        state.slo = data;
-        renderSlo();
-      })
-      .catch(function () {});
-    H.get("/usage/summary")
-      .then(function (data) {
-        state.usage = data;
-        renderUsage();
-      })
-      .catch(function () {});
-    H.get("/metrics/slo/alerts")
-      .then(function (data) {
-        state.alerts = data;
-        renderAlerts();
-      })
-      .catch(function () {});
-    H.get("/metrics/telemetry/status")
-      .then(function (data) {
-        state.telemetry = data;
-        renderTelemetry();
-      })
-      .catch(function () {});
+    var request = ++refreshGeneration;
+    var owner = panelGeneration;
+    var refreshButton = sectionEl && sectionEl.querySelector("#owo-mtr-refresh");
+    if (refreshButton) {
+      refreshButton.disabled = true;
+      refreshButton.setAttribute("aria-busy", "true");
+      refreshButton.textContent = "刷新中…";
+    }
+    var endpoints = [
+      ["/metrics/overview", function (data) { state.overview = data; renderCards(); }, "#owo-mtr-cards"],
+      ["/metrics/turns?limit=50", function (data) { state.turns = (data && data.turns) || []; renderChart(); }, "#owo-mtr-chart"],
+      ["/metrics/tools", function (data) { state.tools = (data && data.tools) || []; renderTools(); }, "#owo-mtr-tools tbody"],
+      ["/metrics/health", function (data) { state.health = data; renderHealth(); }, "#owo-mtr-health"],
+      ["/metrics/runtime", function (data) { state.runtime = data; renderRuntime(); }, "#owo-mtr-runtime"],
+      ["/metrics/slo", function (data) { state.slo = data; renderSlo(); }, "#owo-mtr-slo"],
+      ["/usage/summary", function (data) { state.usage = data; renderUsage(); }, "#owo-mtr-usage"],
+      ["/metrics/slo/alerts", function (data) { state.alerts = data; renderAlerts(); }, "#owo-mtr-alerts"],
+      ["/metrics/telemetry/status", function (data) { state.telemetry = data; renderTelemetry(); }, "#owo-mtr-telemetry"],
+    ];
+    return Promise.all(endpoints.map(function (endpoint) {
+      return H.get(endpoint[0])
+        .then(function (data) {
+          if (request !== refreshGeneration || owner !== panelGeneration) return;
+          endpoint[1](data || {});
+        })
+        .catch(function (error) {
+          if (request !== refreshGeneration || owner !== panelGeneration) return;
+          showMetricError(endpoint[2], error);
+        });
+    })).finally(function () {
+      if (request !== refreshGeneration || owner !== panelGeneration) return;
+      var button = sectionEl && sectionEl.querySelector("#owo-mtr-refresh");
+      if (button) {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.textContent = "刷新";
+      }
+    });
   }
 
   function loadReport() {
-    H.get("/metrics/slo/report?days=7")
+    var request = ++reportGeneration;
+    var owner = panelGeneration;
+    var reportEl = sectionEl && sectionEl.querySelector("#owo-mtr-report");
+    if (reportEl) reportEl.textContent = "正在加载周报…";
+    return H.get("/metrics/slo/report?days=7")
       .then(function (data) {
-        state.report = data;
+        if (request !== reportGeneration || owner !== panelGeneration) return;
+        state.report = data || {};
         renderReport();
       })
-      .catch(function (e) {
-        var el = document.getElementById("owo-mtr-report");
-        if (el) el.innerHTML = '<span style="color:var(--red)">' + H.esc(H.friendlyError(e)) + "</span>";
+      .catch(function (error) {
+        if (request !== reportGeneration || owner !== panelGeneration) return;
+        var currentReport = sectionEl && sectionEl.querySelector("#owo-mtr-report");
+        if (currentReport) currentReport.innerHTML = '<span style="color:var(--red)">' + H.esc(H.friendlyError(error)) + "</span>";
       });
   }
 
@@ -371,7 +378,7 @@ window.OwoPanels.observability = (function () {
   }
 
   function renderReport() {
-    var el = document.getElementById("owo-mtr-report");
+    var el = sectionEl && sectionEl.querySelector("#owo-mtr-report");
     if (!el || !state.report) return;
     var data = state.report;
     if (data.note) {
@@ -442,11 +449,20 @@ window.OwoPanels.observability = (function () {
       "</table>";
   }
 
+  function dispose() {
+    panelGeneration += 1;
+    refreshGeneration += 1;
+    reportGeneration += 1;
+    sectionEl = null;
+  }
+
   return {
     id: id,
     title: "可观测性",
     nav: nav,
     mount: mount,
     refresh: refresh,
+    dispose: dispose,
+    _test: { loadReport: loadReport },
   };
 })();

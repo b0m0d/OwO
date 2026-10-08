@@ -1,4 +1,48 @@
 use super::*;
+use serde::Deserialize;
+use std::collections::BTreeMap;
+
+#[derive(Deserialize)]
+struct ContextAttemptProjection {
+    records: BTreeMap<String, ContextAttemptRecord>,
+}
+
+#[derive(Deserialize)]
+struct ContextAttemptRecord {
+    attempt_id: Option<String>,
+}
+
+fn parse_context_attempts(
+    raw: &str,
+) -> Result<BTreeMap<String, Option<String>>, serde_json::Error> {
+    let projection: ContextAttemptProjection = serde_json::from_str(raw)?;
+    Ok(projection
+        .records
+        .into_iter()
+        .map(|(step_id, record)| (step_id, record.attempt_id))
+        .collect())
+}
+
+impl TeamCoordinator {
+    /// Read only the mutable attempt identities needed by Worker context assembly.
+    /// Serde skips the immutable plan, event log, validation receipts and other history.
+    pub(super) fn load_context_attempts(
+        &self,
+        team_id: &str,
+    ) -> WorkSwarmResult<BTreeMap<String, Option<String>>> {
+        let path = self.run_dir.join(format!("{team_id}.json"));
+        let raw = std::fs::read_to_string(&path).map_err(|error| {
+            WorkSwarmError::Io(format!("读取 {} 失败：{error}", path.display()))
+        })?;
+        parse_context_attempts(&raw).map_err(|error| {
+            WorkSwarmError::CorruptState(format!(
+                "运行状态文件损坏（原文件已保留，未被覆盖）：{}：{error}",
+                path.display()
+            ))
+        })
+    }
+}
+
 impl TeamCoordinator {
     pub(crate) async fn load_bundle(
         &self,
@@ -150,7 +194,17 @@ impl TeamCoordinator {
                 }
             }
         }
-        state
+        let epoch = Self::durable_execution_epoch(state).max(self.phase_epoch(&state.run_id));
+        if epoch == state.execution_epoch {
+            return state
+                .persist(&self.run_dir)
+                .map(|_| ())
+                .map_err(WorkSwarmError::Run);
+        }
+        // Clone only on a generation change, not on every progress checkpoint.
+        let mut checkpoint = state.clone();
+        checkpoint.execution_epoch = epoch;
+        checkpoint
             .persist(&self.run_dir)
             .map(|_| ())
             .map_err(WorkSwarmError::Run)
@@ -200,4 +254,37 @@ impl TeamCoordinator {
     }
 
     // -- 组队（§6.1：模板优先 + 动态组队 ≤5 Agent） --
+}
+
+#[cfg(test)]
+mod context_attempt_projection_tests {
+    use super::parse_context_attempts;
+
+    #[test]
+    fn attempt_projection_skips_immutable_plan_events_and_receipt_history() {
+        let raw = serde_json::json!({
+            "goal": {"objective": "large goal"},
+            "plan": {"steps": [{"id": "large", "input": {"prompt": "x".repeat(64 * 1024)}}]},
+            "events": ["old event".repeat(1024)],
+            "validation_receipts": [{"detail": "old receipt".repeat(1024)}],
+            "records": {
+                "step-a": {
+                    "attempt_id": "attempt-a",
+                    "output": "old output".repeat(1024),
+                    "validation_receipts": [{"detail": "step receipt".repeat(1024)}]
+                },
+                "step-b": {"attempt_id": null, "output": "unused"}
+            }
+        })
+        .to_string();
+
+        let attempts = parse_context_attempts(&raw).unwrap();
+        assert_eq!(attempts.get("step-a"), Some(&Some("attempt-a".to_string())));
+        assert_eq!(attempts.get("step-b"), Some(&None));
+    }
+
+    #[test]
+    fn malformed_attempt_projection_fails_closed() {
+        assert!(parse_context_attempts(r#"{"records":{"step-a":{"attempt_id":7}}}"#).is_err());
+    }
 }

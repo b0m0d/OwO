@@ -14,9 +14,10 @@ pub mod blackboard;
 /// `team_template_catalog_api`——目录只展示，安装幂等且不自动扩权）。
 pub mod builtin_team_templates;
 pub mod bus_store;
+mod command_evidence;
+pub mod completion;
 pub mod computer_use;
 pub mod contract_worker;
-pub mod completion;
 pub mod critic;
 pub mod execution_target;
 pub mod external_tools;
@@ -33,9 +34,9 @@ pub mod hooks;
 pub mod node_agent;
 /// 用户提问通道（ask_user 工具；取优合并自远端 engine）。
 pub mod question;
-pub mod request_requirements;
 #[cfg(target_os = "windows")]
 pub mod remote_step;
+pub mod request_requirements;
 pub mod schema_budget;
 pub mod session;
 pub mod settings;
@@ -43,8 +44,8 @@ pub mod share;
 pub mod skill_pack;
 pub mod sqlite_store;
 pub mod subagent;
-pub mod team_prompt;
 pub mod task_context;
+pub mod team_prompt;
 /// 自适应组队策略引擎（R3 第一路：single/team/auto 判定 + 可展示理由）。
 pub mod team_strategy;
 pub mod tools;
@@ -55,6 +56,7 @@ pub mod worker_pool;
 /// 画像驱动子代理执行器（注册表面即权限边界）。
 pub mod worker_profile;
 pub mod worker_runtime;
+mod workspace_snapshot;
 pub mod workswarm;
 
 // ---------------------------------------------------------------------------
@@ -222,9 +224,11 @@ pub use owo_agent_policy::{grant_store, mcp_health, permission_spec, permissions
 pub use owo_agent_executor::executor;
 pub use owo_agent_workflow::{action_program, assert, workflow};
 
+#[cfg(feature = "stt")]
+pub use owo_agent_perception::stt;
 pub use owo_agent_perception::{
-    accessibility, element_registry, locate, ocr, onnx_ocr, paddle_ocr, perception, scene, stt,
-    vision, window_template,
+    accessibility, element_registry, locate, ocr, onnx_ocr, paddle_ocr, perception, scene, vision,
+    window_template,
 };
 
 pub use owo_agent_plugins::{plugin, McpServerConfig};
@@ -258,7 +262,8 @@ pub use owo_agent_kernel::{
 
 pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
 pub use agent::{
-    estimate_tokens, Agent, AgentConfig, CommandExecutionReceipt, ModelCallRecord, TurnEvent, TurnOutcome,
+    estimate_tokens, Agent, AgentConfig, CommandExecutionReceipt, ModelCallRecord, TurnEvent,
+    TurnOutcome,
 };
 pub use audit::{AuditEntry, AuditLog};
 pub use audit_chain::{
@@ -425,6 +430,7 @@ pub use skill_pack::{
     BuiltinSkillManifest, SkillPackageInfo,
 };
 pub use sqlite_store::SqliteSessionStore;
+#[cfg(feature = "stt")]
 pub use stt::{LocalStt, SttOutcome};
 pub use team_strategy::{
     RolePlan, TaskProfile, TeamPlan, TeamSelectionMode, TeamStrategyEngine, TeamStrategyThresholds,

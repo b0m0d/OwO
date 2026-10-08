@@ -19,9 +19,9 @@ license.workspace = true
 # 单目标链接 8–16 s，`target/debug/deps/*.exe` 累积 2.68 GB。
 
 [features]
-default = ["stt"]
-# STT（Sherpa-ONNX）做成可选：群组内没有任何模块引用 `stt`，只有 server 通过 core 的
-# re-export 用它（`owo_agent_core::LocalStt`）。关掉它即可完全不解析 sherpa-onnx。
+default = []
+# STT（Sherpa-ONNX）默认关闭：Agent/Core、执行器和工作流不需要语音运行时；
+# Server 通过 `owo-agent-core/stt` 显式启用，关掉后完全不解析 sherpa-onnx。
 # ADR-002 §3.1 说明：更细的 `ocr`/`cloud` 分组需要给 `ocr.rs`/`vision.rs` 内部加 cfg
 # 分支（那是行为保持的重构，不是搬迁），本步不做，留到需要时单独一步。
 stt = ["dep:sherpa-onnx"]

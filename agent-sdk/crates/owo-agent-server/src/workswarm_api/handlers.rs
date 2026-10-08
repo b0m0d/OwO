@@ -859,6 +859,18 @@ async fn team_metrics(
         workswarm_metrics::RequestReservationJournal::for_team(coordinator.run_dir(), &id)
             .reservation_count(),
     );
+    let lifecycle_journal =
+        workswarm_metrics::TeamLifecycleMetricsJournal::for_team(coordinator.run_dir(), &id);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "lifecycle".to_string(),
+            workswarm_metrics::aggregate_lifecycle_metrics(&lifecycle_journal.read_records()),
+        );
+        object.insert(
+            "lifecycle_metrics_file".to_string(),
+            json!(lifecycle_journal.path().display().to_string()),
+        );
+    }
     // 数据源路径（可观测：UI/运维可直接定位 TeamRun 数据目录里的指标文件）。
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(
@@ -972,13 +984,26 @@ async fn team_diagnostic(
 
     // 指标（与 /teams/{id}/metrics 同一聚合口径）。
     let journal = workswarm_metrics::MetricsJournal::for_team(coordinator.run_dir(), &id);
-    let mut metrics = workswarm_metrics::aggregate_metrics(&id, &journal.read_records(), &team.budget);
+    let mut metrics =
+        workswarm_metrics::aggregate_metrics(&id, &journal.read_records(), &team.budget);
     workswarm_metrics::attach_request_budget_status(
         &mut metrics,
         &team.budget,
         workswarm_metrics::RequestReservationJournal::for_team(coordinator.run_dir(), &id)
             .reservation_count(),
     );
+    let lifecycle_journal =
+        workswarm_metrics::TeamLifecycleMetricsJournal::for_team(coordinator.run_dir(), &id);
+    if let Some(object) = metrics.as_object_mut() {
+        object.insert(
+            "lifecycle".to_string(),
+            workswarm_metrics::aggregate_lifecycle_metrics(&lifecycle_journal.read_records()),
+        );
+        object.insert(
+            "lifecycle_metrics_file".to_string(),
+            json!(lifecycle_journal.path().display().to_string()),
+        );
+    }
     let metrics_file = journal.path().display().to_string();
 
     // TeamRun 本体（budget 等自由 JSON 脱敏）+ 运行标志。

@@ -1,0 +1,321 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+
+const source = readFileSync(new URL("../panels/notes.panel.js", import.meta.url), "utf8");
+
+function makeNotesPanel(getOverride, confirmOverride, deleteOverride) {
+  function element() {
+    return {
+      hidden: false,
+      disabled: false,
+      value: "",
+      textContent: "",
+      innerHTML: "",
+      dataset: {},
+      style: {},
+      handlers: {},
+      children: [],
+      setAttribute(name, value) { this[name] = value; },
+      removeAttribute(name) { delete this[name]; },
+      addEventListener(name, handler) { this.handlers[name] = handler; },
+      appendChild(child) { this.children.push(child); return child; },
+      querySelector(selector) { return this.selectors && this.selectors[selector] || null; },
+    };
+  }
+  const selectors = [
+    ".owo-notes-btn-new", ".owo-notes-btn-save", ".owo-notes-btn-cancel",
+    ".owo-notes-search", ".owo-notes-list", ".owo-notes-detail",
+    ".owo-notes-editor", ".owo-notes-title", ".owo-notes-md",
+    ".owo-notes-detail-title", ".owo-notes-detail-actions", ".owo-notes-detail-count",
+    ".owo-notes-tree", ".owo-notes-btn-export-md", ".owo-notes-btn-export-html",
+    ".owo-notes-btn-del", ".owo-notes-btn-rename", ".owo-notes-meta-item",
+  ];
+  const section = element();
+  section.selectors = Object.fromEntries(selectors.map((selector) => [selector, element()]));
+  const editor = section.selectors[".owo-notes-editor"];
+  editor.selectors = {
+    ".owo-notes-title": section.selectors[".owo-notes-title"],
+    ".owo-notes-md": section.selectors[".owo-notes-md"],
+  };
+  const detail = section.selectors[".owo-notes-detail"];
+  detail.hidden = false;
+  detail.dataset.id = "existing-note";
+  detail.selectors = {
+    ".owo-notes-detail-title": section.selectors[".owo-notes-detail-title"],
+    "#owo-notes-detail-count": section.selectors[".owo-notes-meta-item"],
+    ".owo-notes-tree": section.selectors[".owo-notes-tree"],
+  };
+  const panelRoot = element();
+  panelRoot.querySelector = () => section;
+  const document = {
+    getElementById(id) { return id === "panelRoot" ? panelRoot : null; },
+    createElement() { return element(); },
+  };
+  const window = { OwoPanels: {}, location: { origin: "http://localhost" } };
+  runInNewContext(source, { window, document, Promise, Object, String, JSON, Blob: function () {} });
+  const posts = [];
+  const panel = window.OwoPanels.notes;
+  panel.mount(section, {
+    get(path) {
+      if (typeof getOverride === "function") return getOverride(path);
+      if (path === "/notes") return Promise.resolve({ notes: [] });
+      return Promise.reject(new Error("unexpected GET: " + path));
+    },
+    post(path, body) { posts.push([path, body]); return Promise.resolve({ ok: true }); },
+    put() { throw new Error("unexpected PUT"); },
+    del(path) {
+      if (typeof deleteOverride === "function") return deleteOverride(path);
+      throw new Error("unexpected DELETE");
+    },
+    confirm: confirmOverride || (() => Promise.resolve(false)),
+    notify() {},
+    esc: String,
+    friendlyError: (error) => error.message,
+  });
+  return { panel, section, editor, detail, posts };
+}
+
+test("creating a note after viewing another clears the stale note identity and saves typed Markdown", async () => {
+  const h = makeNotesPanel();
+  h.section.selectors[".owo-notes-btn-new"].handlers.click();
+  assert.equal(h.editor.dataset.returnNoteId, "existing-note");
+  assert.equal(h.detail.hidden, true);
+  assert.equal(h.detail.dataset.id, "");
+
+  h.section.selectors[".owo-notes-title"].value = "新笔记";
+  h.section.selectors[".owo-notes-md"].value = `# 新正文
+
+这里是编辑框里的内容`;
+  await h.section.selectors[".owo-notes-btn-save"].handlers.click();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(h.posts)), [[
+    "/notes",
+    { title: "新笔记", markdown: `# 新正文
+
+这里是编辑框里的内容` },
+  ]]);
+  assert.equal(h.editor.hidden, true);
+  assert.equal(h.detail.hidden, true);
+  assert.equal(h.section.selectors[".owo-notes-btn-save"].disabled, false);
+});
+
+test("cancelling note creation restores the previously selected note", () => {
+  const h = makeNotesPanel();
+  h.section.selectors[".owo-notes-btn-new"].handlers.click();
+  h.section.selectors[".owo-notes-btn-cancel"].handlers.click();
+  assert.equal(h.detail.dataset.id, "existing-note");
+  assert.equal(h.detail.hidden, false);
+  assert.equal(h.editor.hidden, true);
+});
+
+test("deleting a note does not hide a different selection when the response arrives late", async () => {
+  let resolveDelete;
+  const h = makeNotesPanel(
+    (path) => path === "/notes" ? Promise.resolve({ notes: [] }) : Promise.reject(new Error("unexpected GET: " + path)),
+    () => Promise.resolve(true),
+    (path) => {
+      assert.equal(path, "/notes/existing-note");
+      return new Promise((resolve) => { resolveDelete = resolve; });
+    },
+  );
+  const detailTitle = h.section.selectors[".owo-notes-detail-title"];
+  detailTitle.textContent = "原笔记";
+  const deleting = h.section.selectors[".owo-notes-btn-del"].handlers.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  h.detail.dataset.id = "another-note";
+  h.detail.hidden = false;
+  resolveDelete({ ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.detail.hidden, false, "the currently selected note must remain visible");
+  assert.equal(h.detail.dataset.id, "another-note");
+  await deleting;
+});
+
+test("unmounting while delete confirmation is open prevents the delayed delete", async () => {
+  let resolveConfirm;
+  let deletes = 0;
+  const h = makeNotesPanel(
+    (path) => path === "/notes" ? Promise.resolve({ notes: [] }) : Promise.reject(new Error("unexpected GET: " + path)),
+    () => new Promise((resolve) => { resolveConfirm = resolve; }),
+    async () => { deletes += 1; },
+  );
+  const deleting = h.section.selectors[".owo-notes-btn-del"].handlers.click();
+  h.panel.dispose();
+  resolveConfirm(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(deletes, 0, "a confirmation resolved after unmount must not delete");
+  await deleting;
+});
+
+test("note list shows a retryable inline error and recovers on retry", async () => {
+  let attempts = 0;
+  const h = makeNotesPanel((path) => {
+    assert.equal(path, "/notes");
+    attempts += 1;
+    if (attempts === 1) return Promise.reject(new Error("service unavailable"));
+    return Promise.resolve({ notes: [{ id: "note-1", title: "Recovered note" }] });
+  });
+  const list = h.section.selectors[".owo-notes-list"];
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(list.innerHTML, /列表加载失败：service unavailable/);
+  assert.match(list.innerHTML, /data-notes-retry/);
+
+  const target = {
+    closest(selector) {
+      return selector === "[data-notes-retry]" ? { dataset: {} } : null;
+    },
+  };
+  list.handlers.click({ target });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(attempts, 2);
+  assert.match(list.innerHTML, /Recovered note/);
+  assert.doesNotMatch(list.innerHTML, /列表加载失败/);
+});
+
+test("note list announces its loading state before data arrives", async () => {
+  let resolveNotes;
+  const h = makeNotesPanel(() => new Promise((resolve) => { resolveNotes = resolve; }));
+  const list = h.section.selectors[".owo-notes-list"];
+  assert.match(list.innerHTML, /正在加载笔记/);
+  await Promise.resolve();
+  resolveNotes({ notes: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(list.innerHTML, /暂无笔记/);
+});
+
+test("search uses latest-result-wins and exposes searching state", async () => {
+  let resolveFirst;
+  let resolveSecond;
+  const h = makeNotesPanel((path) => {
+    if (path === "/notes") return Promise.resolve({ notes: [] });
+    if (path.endsWith("q=first")) return new Promise((resolve) => { resolveFirst = resolve; });
+    if (path.endsWith("q=second")) return new Promise((resolve) => { resolveSecond = resolve; });
+    return Promise.reject(new Error("unexpected GET: " + path));
+  });
+  const search = h.section.selectors[".owo-notes-search"];
+  const list = h.section.selectors[".owo-notes-list"];
+  await new Promise((resolve) => setImmediate(resolve));
+
+  search.value = "first";
+  search.handlers.keydown({ key: "Enter" });
+  await Promise.resolve();
+  search.value = "second";
+  search.handlers.keydown({ key: "Enter" });
+  await Promise.resolve();
+  assert.match(list.innerHTML, /正在搜索/);
+
+  resolveSecond({ hits: [{ doc_id: "n2", snippet: "new result" }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFirst({ hits: [{ doc_id: "n1", snippet: "old result" }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(list.innerHTML, /new result/);
+  assert.doesNotMatch(list.innerHTML, /old result/);
+});
+
+test("dispose prevents in-flight list response from mutating the unmounted page", async () => {
+  let resolveNotes;
+  const h = makeNotesPanel(() => new Promise((resolve) => { resolveNotes = resolve; }));
+  const list = h.section.selectors[".owo-notes-list"];
+  await Promise.resolve();
+  h.panel.dispose();
+  resolveNotes({ notes: [{ id: "late", title: "Late response" }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(list.innerHTML, /正在加载笔记/);
+  assert.doesNotMatch(list.innerHTML, /Late response/);
+});
+
+test("slow create response does not close or replace a newer draft", async () => {
+  const h = makeNotesPanel();
+  let resolveCreated;
+  h.panel.post = () => new Promise((resolve) => { resolveCreated = resolve; });
+  h.section.selectors[".owo-notes-btn-new"].handlers.click();
+  h.section.selectors[".owo-notes-title"].value = "第一篇";
+  const saving = h.section.selectors[".owo-notes-btn-save"].handlers.click();
+  await Promise.resolve();
+
+  h.section.selectors[".owo-notes-btn-new"].handlers.click();
+  h.section.selectors[".owo-notes-title"].value = "第二篇";
+  resolveCreated({ id: "first-note" });
+  await saving;
+
+  assert.equal(h.editor.hidden, false);
+  assert.equal(h.section.selectors[".owo-notes-title"].value, "第二篇");
+  assert.equal(h.detail.hidden, true);
+});
+
+
+test("note list results are keyboard-focusable buttons with accessible names", async () => {
+  const h = makeNotesPanel((path) => path === "/notes"
+    ? Promise.resolve({ notes: [{ id: "note-1", title: "可访问笔记", updated_at: "2026-10-09T10:00:00Z" }] })
+    : Promise.resolve({
+        id: "note-1", title: "可访问笔记", root: "root",
+        blocks: { root: { id: "root", kind: { Paragraph: { text: "正文" } }, children: [] } },
+      }));
+  const list = h.section.selectors[".owo-notes-list"];
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(list.innerHTML, /<button type="button" class="owo-notes-open"/);
+  assert.match(list.innerHTML, /data-notes-open/);
+  assert.match(list.innerHTML, /aria-label="打开笔记：可访问笔记"/);
+
+  const target = {
+    closest(selector) {
+      return selector === "[data-notes-open]" ? { dataset: { id: "note-1" } } : null;
+    },
+  };
+  list.handlers.click({ target });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.detail.dataset.id, "note-1");
+  assert.equal(h.detail.hidden, false);
+});
+
+test("search failures expose an in-place retry that repeats the current query", async () => {
+  let attempts = 0;
+  const h = makeNotesPanel((path) => {
+    if (path === "/notes") return Promise.resolve({ notes: [] });
+    if (path.includes("/notes/search?")) {
+      attempts += 1;
+      if (attempts === 1) return Promise.reject(new Error("temporary failure"));
+      return Promise.resolve({ hits: [{ doc_id: "note-2", snippet: "匹配内容" }] });
+    }
+    return Promise.reject(new Error("unexpected GET: " + path));
+  });
+  const search = h.section.selectors[".owo-notes-search"];
+  const list = h.section.selectors[".owo-notes-list"];
+  await new Promise((resolve) => setImmediate(resolve));
+  search.value = "query";
+  search.handlers.keydown({ key: "Enter" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(list.innerHTML, /data-notes-search-retry/);
+  list.handlers.click({
+    target: {
+      closest(selector) {
+        return selector === "[data-notes-search-retry]" ? { dataset: {} } : null;
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2);
+  assert.match(list.innerHTML, /匹配内容/);
+  assert.match(list.innerHTML, /data-notes-open/);
+});
+
+test("note title rename has a visible button and ignores a response after switching notes", async () => {
+  const h = makeNotesPanel((path) => {
+    if (path === "/notes") return Promise.resolve({ notes: [] });
+    if (path === "/notes/existing-note") return Promise.resolve({ id: "existing-note", title: "改名后", root: "", blocks: {} });
+    return Promise.reject(new Error("unexpected GET: " + path));
+  });
+  assert.match(h.panel.nav(), /owo-notes-btn-rename/);
+  assert.match(h.panel.nav(), /修改标题/);
+  h.panel.prompt = () => Promise.resolve("改名后");
+  const updates = [];
+  h.panel.put = async (path, body) => { updates.push([path, body]); return { ok: true }; };
+  h.section.selectors[".owo-notes-btn-rename"].handlers.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(updates)), [["/notes/existing-note", { title: "改名后" }]]);
+  assert.equal(h.detail.querySelector(".owo-notes-detail-title").textContent, "改名后");
+});

@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-05",
+  "scope": "WorkSwarm dependency context CAS preview fan-out",
+  "source_changes": [
+    "ArtifactPreviewCache::read_many loads independent verified previews through a bounded Tokio JoinSet with default caller limit 4.",
+    "Results are reassembled in original direct-dependency order; duplicate (hash, byte-limit) reads share one Arc page within the batch and operation-local cache.",
+    "CAS length, artifact-declared size, UTF-8 truncation and the retained-cache ceiling continue to be checked.",
+    "assemble_context_slice reserves each read from the existing 8 KiB aggregate / 2.4 KiB per-artifact prompt budget before fan-out; it reads only artifacts that are direct dependencies."
+  ],
+  "regression_test_source": "bounded_batch_preview_reads_keep_order_and_deduplicate_verified_pages covers order, duplicate identity, UTF-8 preview truncation and declared-size drift.",
+  "validation": {
+    "rustfmt_check": "passed for artifact_read.rs and coord_context_slice.rs",
+    "git_diff_check": "passed for touched tracked source; new module files are checked for UTF-8 and trailing whitespace separately",
+    "cargo_test": {
+      "requested": "owo-agent-core lib test bounded_batch_preview_reads_keep_order_and_deduplicate_verified_pages",
+      "status": "resource_limited; Cargo did not start",
+      "available_ram_gb": 5.26,
+      "used_percent": 83.4,
+      "required": "at least 6 GB free and under 80% used"
+    }
+  },
+  "performance_evidence": "No elapsed-time benchmark was run. The code removes serial awaits among independent artifact reads and bounds fan-out at 4; measured Team latency improvement is not yet established.",
+  "remaining_risks": [
+    "The new Rust code and unit test have not been type-checked or executed because the repository resource gate rejected Cargo.",
+    "No live ProductEval Single-vs-Team paired comparison was run.",
+    "The cloud task queue still holds a global lock across remote transport awaits; that independent bottleneck remains open."
+  ]
+}

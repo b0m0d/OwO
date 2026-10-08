@@ -22,6 +22,16 @@ use std::sync::Arc;
 
 const GRANT_REVOKE_PATH: &str = "/permissions/grants/revoke";
 
+struct TurnDoneGuard(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for TurnDoneGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
 pub(crate) async fn run(args: super::repl::ReplArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let root = ensure_data_root(args.data_dir.clone(), &workspace);
@@ -600,35 +610,37 @@ impl DaemonRepl {
         self.run_turn_capture(prompt).await.map(|_| ())
     }
 
-    /// 执行一回合并返回最终文本（`/goal` 依赖它判断完成标记）。
+    /// 执行一回合并返回最终文本与宿主完成状态（`/goal` 据此闭合任务）。
     async fn run_turn_capture(
         &mut self,
         prompt: &str,
-    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    ) -> Result<crate::support::GoalTurnResult, Box<dyn std::error::Error>> {
         let id = self.current_session().await?;
         self.abort.store(false, Ordering::Relaxed);
         let mut stream = self.client.open_turn(&id, prompt).await?;
 
         // Ctrl+C 监听随回合结束而退出（旧实现每回合 spawn 一个永不结束的任务：
         // `/goal` 多轮会累积监听器，回合结束后按 Ctrl+C 还会误置 abort）。
-        let turn_done = Arc::new(tokio::sync::Notify::new());
+        let (turn_done_tx, turn_done_rx) = tokio::sync::oneshot::channel();
+        let _turn_done = TurnDoneGuard(Some(turn_done_tx));
         let cancel_client = self.client.clone();
         let cancel_id = id.clone();
         let abort_flag = Arc::clone(&self.abort);
-        let done = Arc::clone(&turn_done);
         tokio::spawn(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     abort_flag.store(true, Ordering::Relaxed);
                     let _ = cancel_client.cancel_turn(&cancel_id).await;
                 }
-                _ = done.notified() => {}
+                _ = turn_done_rx => {}
             }
         });
 
         println!("{} {}", "▶".green(), prompt.dimmed());
         let mut steps = 0usize;
         let mut final_text: Option<String> = None;
+        let mut completion_status = owo_agent_protocol::CompletionStatusV1::Unverified;
+        let mut failed = false;
         let mut printer = StreamPrinter::new();
         while let Some(event) = stream.next_event().await {
             let event = event?;
@@ -641,8 +653,30 @@ impl DaemonRepl {
                         .respond_permission(&id, request_id, &response)
                         .await;
                 }
+                SseEvent::UserQuestion { question_id, .. } => {
+                    printer.print_sse(&event);
+                    let answer = self.read_question_answer(&event)?;
+                    self.client
+                        .answer_question(&id, question_id, &answer)
+                        .await?;
+                }
                 SseEvent::Final { text } => {
                     final_text = Some(text.clone());
+                    printer.print_sse(&event);
+                }
+                SseEvent::TurnStats {
+                    completion_status: status,
+                    ..
+                } => {
+                    completion_status = *status;
+                    printer.print_sse(&event);
+                }
+                SseEvent::TurnFailed {
+                    completion_status: status,
+                    ..
+                } => {
+                    completion_status = *status;
+                    failed = completion_status != owo_agent_protocol::CompletionStatusV1::Aborted;
                     printer.print_sse(&event);
                 }
                 other => {
@@ -654,7 +688,6 @@ impl DaemonRepl {
             }
         }
         printer.finish();
-        turn_done.notify_waiters();
         let diff_count = self
             .client
             .session_diff(&id)
@@ -667,7 +700,11 @@ impl DaemonRepl {
             steps,
             diff_count
         );
-        Ok(final_text)
+        Ok(crate::support::GoalTurnResult {
+            final_text,
+            completion_status,
+            failed,
+        })
     }
 
     /// 目标激活且未完成时，把目标附到每次输入前（目标推进期间用户插话也带目标上下文）。
@@ -711,7 +748,7 @@ impl DaemonRepl {
         Ok(())
     }
 
-    /// `/goal [目标|status|clear]`：目标模式——未完成时持续自动推进，模型标记完成才停。
+    /// `/goal [目标|status|clear]`：目标模式——模型标记完成且宿主裁决允许交付时才停止。
     async fn handle_goal(&mut self, arg: &str) -> Result<(), Box<dyn std::error::Error>> {
         use crate::support::{
             goal_continue_prompt, goal_first_prompt, goal_max_iterations, GoalState,
@@ -723,7 +760,7 @@ impl DaemonRepl {
                         "目标：{}\n  轮次：{}/{}  状态：{}",
                         goal.objective,
                         goal.iterations,
-                        goal_max_iterations(),
+                        crate::support::goal_iteration_label(goal_max_iterations()),
                         if goal.done { "已完成" } else { "推进中" }
                     ),
                     None => println!("（未设定目标；用法：/goal <目标描述>）"),
@@ -743,9 +780,11 @@ impl DaemonRepl {
                     done: false,
                 });
                 println!(
-                    "{}（最多 {max} 轮；/goal clear 停止）",
-                    format!("目标已设定：{objective}").green()
+                    "{}（轮次上限：{}；/goal clear 停止）",
+                    format!("目标已设定：{objective}").green(),
+                    crate::support::goal_iteration_label(max)
                 );
+                let mut previous_status = None;
                 loop {
                     if self.abort.load(Ordering::Relaxed) {
                         println!("{}", "（目标推进已中止）".yellow());
@@ -757,7 +796,7 @@ impl DaemonRepl {
                     if goal.done {
                         break;
                     }
-                    if goal.iterations >= max {
+                    if crate::support::goal_iteration_limit_reached(goal.iterations, max) {
                         println!(
                             "{}",
                             format!("已达最大迭代 {max}，目标未标记完成（/goal status 查看）")
@@ -768,23 +807,49 @@ impl DaemonRepl {
                     let iteration = goal.iterations + 1;
                     let prompt = if iteration == 1 {
                         goal_first_prompt(objective)
+                    } else if let Some(status) = previous_status {
+                        crate::support::goal_continue_prompt_after_status(
+                            objective, iteration, status,
+                        )
                     } else {
                         goal_continue_prompt(objective, iteration)
                     };
-                    println!("{}", format!("── 目标推进 {iteration}/{max} ──").bold());
-                    let final_text = self.run_turn_capture(&prompt).await?;
+                    let limit = crate::support::goal_iteration_label(max);
+                    println!("{}", format!("── 目标推进 {iteration}/{limit} ──").bold());
+                    let turn = self.run_turn_capture(&prompt).await?;
                     if let Some(goal) = self.goal.as_mut() {
                         goal.iterations = iteration;
                     }
-                    if let Some(text) = final_text {
-                        if text.contains(crate::support::GOAL_DONE_MARKER) {
-                            if let Some(goal) = self.goal.as_mut() {
-                                goal.done = true;
-                            }
-                            println!("{} 目标完成（第 {iteration} 轮）", "✓".green());
-                            break;
-                        }
+                    if turn.failed {
+                        println!(
+                            "{} 回合失败，目标未完成（/goal status 查看；修复问题后可重新提交）",
+                            "!".red()
+                        );
+                        break;
                     }
+                    if turn.completion_status == owo_agent_protocol::CompletionStatusV1::Aborted {
+                        println!("{} 目标推进已中止", "!".yellow());
+                        break;
+                    }
+                    if crate::support::goal_claim_is_accepted(&turn) {
+                        if let Some(goal) = self.goal.as_mut() {
+                            goal.done = true;
+                        }
+                        println!("{} 目标完成（第 {iteration} 轮）", "✓".green());
+                        break;
+                    }
+                    if turn
+                        .final_text
+                        .as_deref()
+                        .is_some_and(crate::support::goal_is_done)
+                    {
+                        println!(
+                            "{} 模型报告完成，但宿主状态为 {:?}，继续推进验收",
+                            "!".yellow(),
+                            turn.completion_status
+                        );
+                    }
+                    previous_status = Some(turn.completion_status);
                 }
                 Ok(())
             }
@@ -797,7 +862,7 @@ impl DaemonRepl {
         &mut self,
         parts: std::str::SplitWhitespace<'_>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        const USAGE: &str = "用法：/team [--single|--team|--auto] [--parallel <2..=8> | --role <名>[:依赖1|依赖2]] [--model <模型>] [--model <角色>=<模型>] [--write <角色>=<路径>[;<路径>]] <目标>（缺省自动并行开发；--auto 使用策略选择）| list | use <团队ID> | status | watch | context [publish <key> <内容>] | steer <说明> | retry <步骤ID> | cancel | diff";
+        const USAGE: &str = "用法：/team [--single|--team|--auto] [--parallel <2..=8> | --role <名>[:依赖1|依赖2]] [--model <模型>] [--model <角色>=<模型>] [--write <角色>=<路径>[;<路径>]] <目标>（缺省自动并行开发；--auto 使用策略选择）| list | use <团队ID> | status | watch | context [publish <key> <内容>] | steer <说明> | retry <步骤ID> | cancel | diff | accept <ChangeSet ID> [说明] | reject <ChangeSet ID> [说明] | revert <ChangeSet ID> [说明]";
         // 前置参数解析（纯函数 `parse_team_args`，便于单测）。声明了自定义角色时
         // 策略缺省强制 team（避免 auto 判定裁剪显式编排）。
         let raw: Vec<String> = parts.map(str::to_string).collect();
@@ -875,6 +940,12 @@ impl DaemonRepl {
             Some("diff") => {
                 let id = self.team_required()?;
                 self.team_diff(&id).await?;
+            }
+            Some(action @ ("accept" | "reject" | "revert")) => {
+                let team_id = self.team_required()?;
+                let decision = parse_team_change_set_decision(action, &parts.collect::<Vec<_>>())
+                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+                self.team_change_set_decide(&team_id, &decision).await?;
             }
             Some(first) => {
                 // 目标可能含空格：把剩余片段拼回。
@@ -1317,6 +1388,80 @@ impl DaemonRepl {
         Ok(())
     }
 
+    async fn team_change_set_decide(
+        &self,
+        team_id: &str,
+        decision: &TeamChangeSetDecision,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Resolve the target through the selected team first; ChangeSet action routes use a
+        // global ID, so this prevents a typo or stale selection from mutating another team.
+        let listed = self
+            .client
+            .get_json::<serde_json::Value>(&format!("/teams/{team_id}/change-sets"))
+            .await?;
+        let change_sets = listed
+            .get("change_sets")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("服务端没有返回团队 ChangeSet 列表")?;
+        let target = change_sets.iter().find(|item| {
+            item.get("change_set_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(decision.change_set_id.as_str())
+        });
+        let Some(target) = target else {
+            return Err(format!(
+                "ChangeSet {} 不属于当前团队 {team_id}；请先 /team diff 核对 ID",
+                decision.change_set_id
+            )
+            .into());
+        };
+        if target.get("team_id").and_then(serde_json::Value::as_str) != Some(team_id) {
+            return Err("服务端 ChangeSet 的 team_id 与当前团队不一致，拒绝继续".into());
+        }
+
+        let idempotency_key = team_change_set_idempotency_key(team_id, decision);
+        let mut body = serde_json::json!({ "idempotency_key": idempotency_key });
+        if let Some(note) = &decision.note {
+            body["note"] = serde_json::Value::String(note.clone());
+        }
+        let result = self
+            .client
+            .post_json::<_, serde_json::Value>(
+                &format!(
+                    "/change-sets/{}/{}",
+                    decision.change_set_id, decision.action
+                ),
+                &body,
+            )
+            .await?;
+        let change_set = result
+            .get("change_set")
+            .filter(|value| {
+                value
+                    .get("change_set_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(decision.change_set_id.as_str())
+                    && value.get("team_id").and_then(serde_json::Value::as_str) == Some(team_id)
+            })
+            .ok_or("ChangeSet 决定响应的团队或变更集身份不匹配")?;
+        let status = change_set
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("ChangeSet 决定响应缺少状态")?;
+        let replayed = result
+            .get("replayed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        println!(
+            "{} ChangeSet {} → {}{}",
+            "团队变更已处理：".green(),
+            decision.change_set_id,
+            status,
+            if replayed { "（幂等重放）" } else { "" }
+        );
+        Ok(())
+    }
+
     async fn team_diff(&self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let value = self
             .client
@@ -1367,9 +1512,37 @@ impl DaemonRepl {
                 println!("      diff: {diff_ref}");
             }
         }
-        println!("  （接受/拒绝/回滚：POST /change-sets/{id}/accept|reject|revert）");
+        println!("  处理方式：/team accept <ChangeSet ID> [说明] | reject <ChangeSet ID> [说明] | revert <ChangeSet ID> [说明]");
         Ok(())
     }
+    fn read_question_answer(&self, event: &SseEvent) -> Result<String, Box<dyn std::error::Error>> {
+        let SseEvent::UserQuestion {
+            question_id,
+            options,
+            ..
+        } = event
+        else {
+            return Err("无效的用户提问事件".into());
+        };
+        use std::io::Write;
+        loop {
+            if options.is_empty() {
+                eprint!("回答 {question_id}（输入后按 Enter）：");
+            } else {
+                eprint!("回答 {question_id}（输入序号或文字，按 Enter）：");
+            }
+            let _ = std::io::stderr().flush();
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line)? == 0 {
+                return Err("标准输入已关闭，无法回答 Agent 的问题".into());
+            }
+            if let Some(answer) = crate::ui_output::resolve_question_answer(&line, options) {
+                return Ok(answer);
+            }
+            eprintln!("回答不能为空；回合仍在等待你的补充信息。");
+        }
+    }
+
     fn decide_permission(
         &self,
         event: &SseEvent,
@@ -1713,11 +1886,62 @@ fn print_help() {
     println!(
         "                    并行 N 路：lead 拆解 → w1..wN 并行 → leader 汇总；模型/并行/角色缺省读 <workspace>/settings.json 的 team 段（list/status/steer/retry/cancel/diff）"
     );
+    println!("                    accept/reject/revert <ChangeSet ID> [说明] 处理团队变更集");
     println!("                    context 查看团队共享事实；context publish <key> <内容> 发布带 revision 的候选事实");
     println!("  /audit /skills /settings /traces  读取服务端状态");
     println!("  /clear             清屏");
     println!("  /exit | /quit      退出");
     println!("  其它命令请用 --local 使用旧 REPL（迁移中）");
+}
+
+/// CLI 决定 ChangeSet 的参数；stable idempotency identity 使网络重试可安全重放。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TeamChangeSetDecision {
+    action: String,
+    change_set_id: String,
+    note: Option<String>,
+}
+
+fn team_change_set_idempotency_key(team_id: &str, decision: &TeamChangeSetDecision) -> String {
+    format!(
+        "cli-team:{team_id}:{}:{}",
+        decision.change_set_id, decision.action
+    )
+}
+
+fn parse_team_change_set_decision(
+    action: &str,
+    args: &[String],
+) -> Result<TeamChangeSetDecision, String> {
+    if !matches!(action, "accept" | "reject" | "revert") {
+        return Err(format!("未知 ChangeSet 操作：{action}"));
+    }
+    let change_set_id = args
+        .first()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("用法：/team {action} <ChangeSet ID> [说明]"))?;
+    if matches!(change_set_id, "." | "..")
+        || !change_set_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+    {
+        return Err("ChangeSet ID 只能包含 ASCII 字母、数字、连字符、下划线、冒号或点".to_string());
+    }
+    let note = args
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    Ok(TeamChangeSetDecision {
+        action: action.to_string(),
+        change_set_id: change_set_id.to_string(),
+        note: (!note.is_empty()).then_some(note),
+    })
 }
 
 /// `/team` 前置参数解析结果（纯逻辑，便于单测）。
@@ -1951,6 +2175,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn turn_done_guard_signals_listener_even_when_stream_exits_early() {
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        let guard = TurnDoneGuard(Some(sender));
+        drop(guard);
+        assert!(receiver.try_recv().is_ok());
+    }
+
+    #[test]
     fn cli_grant_revoke_is_limited_to_one_exact_grant() {
         assert_eq!(GRANT_REVOKE_PATH, "/permissions/grants/revoke");
         assert_eq!(
@@ -1961,6 +2193,40 @@ mod tests {
 
     fn team_args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn team_change_set_idempotency_key_is_stable_and_action_scoped() {
+        let accept =
+            parse_team_change_set_decision("accept", &team_args(&["cs-team-123:task-1-456"]))
+                .unwrap();
+        let retry = accept.clone();
+        let reject =
+            parse_team_change_set_decision("reject", &team_args(&["cs-team-123:task-1-456"]))
+                .unwrap();
+
+        assert_eq!(
+            team_change_set_idempotency_key("team-123", &accept),
+            team_change_set_idempotency_key("team-123", &retry)
+        );
+        assert_ne!(
+            team_change_set_idempotency_key("team-123", &accept),
+            team_change_set_idempotency_key("team-123", &reject)
+        );
+    }
+
+    #[test]
+    fn team_change_set_decisions_validate_ids_and_preserve_notes() {
+        let args = team_args(&["cs-team-123:task-1-456", "确认", "已检查"]);
+        let decision = parse_team_change_set_decision("accept", &args).unwrap();
+        assert_eq!(decision.action, "accept");
+        assert_eq!(decision.change_set_id, "cs-team-123:task-1-456");
+        assert_eq!(decision.note.as_deref(), Some("确认 已检查"));
+
+        assert!(parse_team_change_set_decision("overwrite", &args).is_err());
+        assert!(parse_team_change_set_decision("revert", &team_args(&["../outside"])).is_err());
+        assert!(parse_team_change_set_decision("revert", &team_args(&[".."])).is_err());
+        assert!(parse_team_change_set_decision("reject", &[]).is_err());
     }
 
     #[test]

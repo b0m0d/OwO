@@ -7,27 +7,38 @@ window.OwoPanels.command = (function () {
 
   var id = "command";
   var H = null;
+  var panelGeneration = 0;
+  var auditGeneration = 0;
+  var commandGeneration = 0;
+  var commandBusy = false;
+  function notify(message, kind) {
+    if (H && H.notify) H.notify(message, kind || "error");
+    else if (window.OwoToast) window.OwoToast(message);
+    else window.alert(message);
+  }
 
   function defaultHelpers() {
     var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
     function get(path) {
-      return fetch(baseUrl + path).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
+      return window.OwoApi.stream(path).then(function (r) {
+        if (!r.ok) return r.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error((body && (body.message || body.error)) || "HTTP " + r.status);
+        });
+        return r.status === 204 ? null : r.json();
       });
     }
     function post(path, body) {
-      return fetch(baseUrl + path, {
+      return window.OwoApi.stream(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),
       }).then(function (r) {
         if (!r.ok) {
-          return r.json().then(function (j) {
-            throw new Error((j && j.error) || "HTTP " + r.status);
+          return r.json().catch(function () { return {}; }).then(function (body) {
+            throw new Error((body && (body.message || body.error)) || "HTTP " + r.status);
           });
         }
-        return r.json();
+        return r.status === 204 ? null : r.json();
       });
     }
     function esc(s) {
@@ -70,7 +81,8 @@ window.OwoPanels.command = (function () {
   }
 
   function mount(root, helpers) {
-    if (helpers) H = helpers;
+    dispose();
+    H = helpers || defaultHelpers();
     root.innerHTML = nav();
     root.querySelector("#owo-command-run").addEventListener("click", runCommand);
     root.querySelector("#owo-command-text").addEventListener("keydown", function (e) {
@@ -84,18 +96,25 @@ window.OwoPanels.command = (function () {
   }
 
   function refresh() {
-    H.get("/command/audit")
+    var request = ++auditGeneration;
+    var owner = panelGeneration;
+    return H.get("/command/audit")
       .then(function (data) {
-        var el = document.getElementById("owo-command-audit");
-        if (!el) return;
-        el.textContent = (data.audit || [])
+        if (request !== auditGeneration || owner !== panelGeneration) return;
+        var auditEl = document.getElementById("owo-command-audit");
+        if (!auditEl) return;
+        auditEl.textContent = (data && data.audit || [])
           .slice(0, 20)
           .map(function (a) {
-            return a.event + " — " + a.detail;
+            return String(a.event || "") + " — " + String(a.detail || "");
           })
           .join("\n");
       })
-      .catch(function () {});
+      .catch(function (error) {
+        if (request !== auditGeneration || owner !== panelGeneration) return;
+        var auditEl = document.getElementById("owo-command-audit");
+        if (auditEl) auditEl.textContent = "审计记录加载失败：" + H.friendlyError(error);
+      });
   }
 
   function readWavBase64(file) {
@@ -111,81 +130,144 @@ window.OwoPanels.command = (function () {
   }
 
   /// 区域 OCR：把屏幕上指定矩形里的文字识别出来当命令用（L2 视觉层需已授权）。
-  function captureRegionToText(done) {
-    var raw = window.prompt(
-      "区域 OCR：输入屏幕像素区域 x,y,width,height（例如 100,200,600,80）",
-      "0,0,800,200"
-    );
-    if (!raw) return;
-    var parts = String(raw)
-      .split(/[,\s]+/)
-      .filter(function (s) { return s.length; })
-      .map(Number);
-    if (parts.length !== 4 || parts.some(function (n) { return !isFinite(n); })) {
-      alert("格式应为 x,y,width,height 四个数字");
-      return;
+  function captureRegionToText() {
+    var promptOptions = {
+      title: "区域 OCR",
+      label: "输入屏幕像素区域 x,y,width,height（例如 100,200,600,80）",
+      value: "0,0,800,200",
+      confirmText: "开始识别",
+    };
+    var requested;
+    try {
+      requested = H && H.prompt
+        ? H.prompt(promptOptions)
+        : Promise.resolve(window.prompt(promptOptions.label, promptOptions.value));
+    } catch (error) {
+      requested = Promise.reject(error);
     }
-    H.post("/perception/ocr/region", { x: parts[0], y: parts[1], width: parts[2], height: parts[3] })
-      .then(function (data) {
+    return Promise.resolve(requested).then(function (raw) {
+      if (!raw) return null;
+      var parts = String(raw)
+        .split(/[，,\s]+/)
+        .filter(function (part) { return part.length; })
+        .map(Number);
+      if (parts.length !== 4 || parts.some(function (number) { return !isFinite(number) || number < 0; }) ||
+          parts[2] <= 0 || parts[3] <= 0) {
+        notify("请输入有效的 x,y,width,height；坐标不能为负，宽度和高度必须大于 0。", "error");
+        return null;
+      }
+      return H.post("/perception/ocr/region", {
+        x: parts[0], y: parts[1], width: parts[2], height: parts[3],
+      }).then(function (data) {
         var text = data && (data.text || (data.lines || []).join("\n"));
         if (!text) {
-          alert("该区域未识别到文字");
-          return;
+          notify("该区域未识别到文字。", "warning");
+          return null;
         }
-        done(text);
-      })
-      .catch(function (e) {
-        var msg = (e && e.message) || String(e);
-        alert("区域 OCR 失败：" + msg + "\n提示：L2 视觉层默认关闭，需先在感知/设置里授权后再用。");
+        return text;
       });
+    }).catch(function (e) {
+      var msg = (e && e.message) || String(e);
+      notify("区域 OCR 失败：" + msg + "。请确认已在设置中授权视觉识别。", "error");
+      return null;
+    });
   }
 
   function runCommand() {
-    var mode = document.getElementById("owo-command-mode").value;
-    var text = document.getElementById("owo-command-text").value;
-    var body = { mode: mode };
-    if (mode === "region") {
-      captureRegionToText(function (ocrText) {
-        document.getElementById("owo-command-mode").value = "text";
-        document.getElementById("owo-command-text").value = ocrText;
-        runCommand();
-      });
-      return;
+    if (commandBusy) return Promise.resolve();
+    var modeEl = document.getElementById("owo-command-mode");
+    var textEl = document.getElementById("owo-command-text");
+    var runButton = document.getElementById("owo-command-run");
+    if (!modeEl || !textEl) return Promise.resolve();
+    var mode = modeEl.value;
+    var text = textEl.value;
+    var owner = panelGeneration;
+    var request = ++commandGeneration;
+    commandBusy = true;
+    if (runButton) {
+      runButton.disabled = true;
+      runButton.setAttribute("aria-busy", "true");
+      runButton.textContent = "执行中…";
     }
-    if (mode === "voice") {
-      var wavInput = document.getElementById("owo-command-wav");
-      if (!wavInput.files || !wavInput.files.length) {
-        alert("语音模式请先选择 wav 文件");
-        return;
+
+    function finish() {
+      if (request !== commandGeneration) return;
+      commandBusy = false;
+      if (runButton) {
+        runButton.disabled = false;
+        runButton.removeAttribute("aria-busy");
+        runButton.textContent = "执行";
       }
-      readWavBase64(wavInput.files[0]).then(function (wavB64) {
-        body.wav_b64 = wavB64;
-        postCommand(body);
-      });
-      return;
     }
-    body.text = text;
-    postCommand(body);
+    function execute(body) {
+      if (owner !== panelGeneration || request !== commandGeneration) return Promise.resolve();
+      return postCommand(body, owner, request);
+    }
+
+    var operation;
+    if (mode === "region") {
+      operation = captureRegionToText().then(function (ocrText) {
+        if (!ocrText || owner !== panelGeneration || request !== commandGeneration) return;
+        modeEl.value = "text";
+        textEl.value = ocrText;
+        return execute({ mode: "text", text: ocrText });
+      });
+    } else if (mode === "voice") {
+      var wavInput = document.getElementById("owo-command-wav");
+      if (!wavInput || !wavInput.files || !wavInput.files.length) {
+        notify("语音模式请先选择 WAV 文件。", "error");
+        finish();
+        return Promise.resolve();
+      }
+      operation = readWavBase64(wavInput.files[0])
+        .then(function (wavB64) {
+          return execute({ mode: "voice", wav_b64: wavB64 });
+        })
+        .catch(function (error) {
+          if (owner === panelGeneration && request === commandGeneration) {
+            notify("读取 WAV 文件失败：" + ((error && error.message) || error), "error");
+          }
+        });
+    } else {
+      if (!String(text || "").trim()) {
+        notify("请先输入要执行的命令。", "error");
+        finish();
+        return Promise.resolve();
+      }
+      operation = execute({ mode: "text", text: text });
+    }
+    return Promise.resolve(operation).finally(finish);
   }
 
-  function postCommand(body) {
-    H.post("/command/run", body)
+  function postCommand(body, owner, request) {
+    var posted;
+    try {
+      posted = H.post("/command/run", body);
+    } catch (error) {
+      posted = Promise.reject(error);
+    }
+    return Promise.resolve(posted)
       .then(function (data) {
+        if (owner !== panelGeneration || request !== commandGeneration) return;
+        data = data || {};
+        var confidence = Number(data.confidence);
+        if (!isFinite(confidence)) confidence = 0;
         var intentEl = document.getElementById("owo-command-intent");
         if (intentEl) {
           intentEl.innerHTML =
-            '<span class="owo-command-tag">' + H.esc(data.intent) + "</span>" +
-            "置信度 " + (data.confidence || 0).toFixed(2) + " ｜ " + H.esc(data.text || "");
+            '<span class="owo-command-tag">' + H.esc(data.intent || "命令") + "</span>" +
+            "置信度 " + confidence.toFixed(2) + " ｜ " + H.esc(data.text || "");
         }
         var resultsEl = document.getElementById("owo-command-results");
-        if (resultsEl) {
-          resultsEl.innerHTML = renderResults(data.results || {});
-        }
+        if (resultsEl) resultsEl.innerHTML = renderResults(data.results || {});
         refresh();
       })
       .catch(function (e) {
+        if (owner !== panelGeneration || request !== commandGeneration) return;
+        var message = H.friendlyError(e);
         var intentEl = document.getElementById("owo-command-intent");
-        if (intentEl) intentEl.innerHTML = '<span class="owo-command-tag">' + H.esc(H.friendlyError(e)) + "</span>";
+        if (intentEl) intentEl.innerHTML = '<span class="owo-command-tag">' + H.esc(message) + "</span>";
+        notify(message, "error");
       });
   }
 
@@ -199,7 +281,8 @@ window.OwoPanels.command = (function () {
       if (Array.isArray(value)) {
         rendered = value
           .map(function (v) {
-            return typeof v === "object" ? JSON.stringify(v) : String(v);
+            var text = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+            return H.esc(text);
           })
           .join("<br>");
       } else if (typeof value === "object" && value !== null) {
@@ -212,11 +295,20 @@ window.OwoPanels.command = (function () {
     return lines.length ? lines.map(function (l) { return '<div class="owo-command-result">' + l + "</div>"; }).join("") : "";
   }
 
+  function dispose() {
+    panelGeneration += 1;
+    auditGeneration += 1;
+    commandGeneration += 1;
+    commandBusy = false;
+  }
+
   return {
     id: id,
     title: "统一命令入口",
     nav: nav,
     mount: mount,
     refresh: refresh,
+    dispose: dispose,
+    _test: { renderResults: renderResults, runCommand: runCommand },
   };
 })();

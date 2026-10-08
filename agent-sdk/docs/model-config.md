@@ -26,7 +26,11 @@ OwO Agent 的模型配置写在**一个独立配置文件**里，风格对齐 co
     "api_key": "",
     "api_key_env": "OPENAI_API_KEY",
     "context_window": 128000,
-    "max_output_tokens": 4096,
+    "max_output_tokens": 32000,
+    "model_output_tokens": {
+      "glm-5.3-flash": 24000,
+      "qwen3.8-max": 32000
+    },
     "temperature": 0.7,
     "timeout_secs": 180,
     "keep_recent": 20,
@@ -44,7 +48,8 @@ OwO Agent 的模型配置写在**一个独立配置文件**里，风格对齐 co
 | `api_key` | **可选**。填了就用它；留空则去读 `api_key_env` 指向的环境变量 |
 | `api_key_env` | 凭据环境变量名，缺省 `OPENAI_API_KEY` |
 | `context_window` | **上下文窗口（token）**。核心据此设置压缩预算；留空 = 核心默认 60000 |
-| `max_output_tokens` | 单次回复最大输出 token；留空 = 由模型/服务商决定 |
+| `max_output_tokens` | 默认单次回复最大输出 token；缺省为 32000（32k），有效范围 1–32000 |
+| `model_output_tokens` | 可选的模型名 → 输出 token 上限映射；精确匹配实际请求模型，未配置时回退到默认值 |
 | `temperature` | 采样温度（0–2）；留空 = 核心默认 |
 | `timeout_secs` | 单次模型请求超时秒数；留空 = 核心默认 |
 | `keep_recent` | 压缩时保留最近多少条消息；留空 = 核心默认 20 |
@@ -67,12 +72,13 @@ OwO Agent 的模型配置写在**一个独立配置文件**里，风格对齐 co
 | `api_key` / `api_key_env` | `OPENAI_API_KEY` |
 | `context_window` | `OWO_MODEL_CONTEXT_WINDOW` |
 | `max_output_tokens` | `OWO_MODEL_MAX_OUTPUT_TOKENS` |
+| `model_output_tokens` | `OWO_MODEL_OUTPUT_TOKENS_BY_MODEL`（JSON 对象） |
 | `temperature` | `OWO_MODEL_TEMPERATURE` |
 | `timeout_secs` | `OWO_MODEL_TIMEOUT_SECS` |
 | `keep_recent` | `OWO_AGENT_KEEP_RECENT` |
 | `compaction` | `OWO_AGENT_COMPACTION` |
 
-**未填写的字段不会被注入**——核心保留自己的默认值，不会凭空编造一个数字。
+桌面端默认输出上限为 32000（32k）；`model_output_tokens` 可为不同模型单独覆盖。未填写的单模型项回退到默认值。
 
 ## 凭据优先级
 

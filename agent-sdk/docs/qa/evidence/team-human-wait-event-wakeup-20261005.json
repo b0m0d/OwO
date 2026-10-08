@@ -1,0 +1,20 @@
+{
+  "date": "2026-10-05",
+  "scope": "Event-driven Team human-wait latch",
+  "finding": "The Server polled every 200 ms while waiting for human input, repeating budget reads and full phase orchestration; successful human-result persistence did not publish the existing progress sequence.",
+  "change": "TeamCoordinator exposes a per-team watch subscription. Successful human-result recording advances progress. The runtime latch waits on progress, cancellation, and a 1-second budget heartbeat; only progress wakes phase orchestration. It subscribes and rechecks phase state to close the human-submit race.",
+  "regression_test_source": "Added Core test for subscriber notification and latest-sequence delivery to late subscribers; not executed.",
+  "static_checks": {
+    "cargo_fmt_all": "passed",
+    "git_diff_check": "passed"
+  },
+  "rust_tests": {
+    "status": "resource_limited",
+    "command": "Invoke-CiCargo cargo test -p owo-agent-core --lib --locked -j 2 -- --test-threads=2; then Server runtime tests",
+    "cargo_started": false,
+    "available_memory_gb": 4.39,
+    "memory_used_percent": 86.1,
+    "required": "at least 6 GB available and memory use strictly below 80%"
+  },
+  "limitations": "No Rust type-check or Rust test has run for this change. Event latency, race behavior, and measured idle-wait resource reduction remain unverified."
+}

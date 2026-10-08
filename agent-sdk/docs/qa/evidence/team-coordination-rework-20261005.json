@@ -1,0 +1,117 @@
+{
+  "date": "2026-10-05",
+  "scope": "Team coordination module boundaries and complete grouped review repair",
+  "baseline_coord_run_lines": 3958,
+  "current_coord_run_lines": 886,
+  "checks": {
+    "rustfmt_parse_and_format_consistency": {
+      "files": 11,
+      "passed": true
+    },
+    "sibling_import_definitions_present": true,
+    "old_coord_run_helper_references_removed": true,
+    "new_regressions_declared": 14,
+    "new_regressions_executed": false,
+    "git_diff_check": {
+      "exit_code": 0
+    },
+    "utf8_new_files_trailing_whitespace": {
+      "passed": true
+    }
+  },
+  "compilation": {
+    "status": "not_run",
+    "reason": "user requested code and architecture work without compilation"
+  },
+  "runtime_acceptance": "unverified",
+  "live_model_calls": 0,
+  "team_benefit_proven": false,
+  "goal_status": "active",
+  "changes": [
+    "split creation, phase execution, pure graph validation, graph application, review planning and shared rework",
+    "plan all findings with complete per-owner instructions and issue identities",
+    "check every owner before resetting dependent owners; one union closure and epoch advance per batch",
+    "select review artifact by team/producer/task/attempt/version, verify CAS content identity",
+    "avoid storage scan when no completed reviewer; query project artifact set once per review scan",
+    "share rework transition across user, validator and review APIs; preserve write/acceptance contracts"
+  ],
+  "limitations": [
+    "Rust type/link checks and tests deliberately not run",
+    "Goal checkpoint and ProjectSpace/Decision/TeamRun stores do not form one cross-store transaction",
+    "No measured wall clock, model/tool call or token improvement; matched live comparison outstanding",
+    "Reference/no-model fixtures do not prove real agent task execution"
+  ],
+  "new_test_names": [
+    "all_findings_group_by_owner_without_repeating_repair_rounds",
+    "malformed_second_finding_rejects_entire_plan",
+    "stale_owner_attempt_and_self_review_cannot_dispatch",
+    "duplicate_finding_is_one_issue_and_one_instruction",
+    "oversized_review_or_instruction_fails_without_truncation",
+    "reviewer_selection_uses_attempt_and_version_when_timestamps_tie",
+    "task_alias_resolution_closes_only_new_approved_owner_attempt",
+    "multiple_reviewers_share_one_owner_repair_with_distinct_issue_ids",
+    "dependent_owners_are_validated_together_and_reset_once",
+    "stale_second_owner_rejects_without_mutation",
+    "replay_does_not_consume_another_attempt_and_changed_instruction_conflicts",
+    "missing_input_or_exhausted_budget_prevents_silent_rework",
+    "partial_replay_or_duplicate_owner_never_applies_a_partial_batch",
+    "review_batch_repairs_dependent_owners_once_and_closes_every_issue"
+  ],
+  "source_files": [
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_run.rs",
+      "lines": 886,
+      "sha256": "13e47077b5057b283bbe103fd5ff0b32aae5f7c9942819951e4861317b99f2d3"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_create.rs",
+      "lines": 755,
+      "sha256": "e68dea9ed990ac50917bceb8cf72125684b076de5edfc85d8af5611d3df3d5ce"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_assignment.rs",
+      "lines": 288,
+      "sha256": "e1e09f4a1f2eccafa8ed147df84b33ea9457e5ed58b9393dd2450081289c3baf"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_review.rs",
+      "lines": 895,
+      "sha256": "caa9ecb2a4b11d84ee266a9df5232a65076db8471f188080a3495a032415023b"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_rework.rs",
+      "lines": 482,
+      "sha256": "e59de9851fb6fd06a727bdb0f4bb1123a170ed9d3c37118c741f57e688f40b95"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/task_graph.rs",
+      "lines": 897,
+      "sha256": "ea06b01303661c90696a2a00ffde4dbd5d2af620fb1ea7fbe3426bec1c1ce36c"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/task_graph_tests.rs",
+      "lines": 591,
+      "sha256": "d9bb298dd008b59c1122b7b0826682b910e95c23cff0311f1dc3e70ef2a77a05"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_steer.rs",
+      "lines": 670,
+      "sha256": "3d3f7da9b2e3d1e22044b6249d397ebc8052c5bfbcd3c346ac2fed9b362f5a0e"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_lifecycle.rs",
+      "lines": 2090,
+      "sha256": "3d8973b66e53fc3176caf3ec2748c73a76af4ffa7a440d02f3fe07ed18d81265"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/mod.rs",
+      "lines": 163,
+      "sha256": "e53004f270748d20799410debab7e8ca9354980bb19b7d572924f5b5b8240787"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/tests/workswarm_tests.rs",
+      "lines": 3528,
+      "sha256": "a8bc25e6b31a38f2c12a4a9f69d523b355a25f4b833d577acc01f3c977eeee81"
+    }
+  ]
+}

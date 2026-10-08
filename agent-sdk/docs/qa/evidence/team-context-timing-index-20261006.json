@@ -1,0 +1,32 @@
+{
+  "evidence_id": "team-context-timing-index-20261006",
+  "scope": "source-review-and-frontend-tests",
+  "claim": "Context timing attribution uses a bounded coordinator-owned one-shot hash index (maximum 4096 pending records), avoiding per-Worker scans and JSON parsing of shared audit history; matched values are persisted in existing Worker JSONL spans and aggregated by role and phase epoch.",
+  "verification": [
+    "rustfmt --edition 2021 --check passed for all touched Rust implementation and test files.",
+    "node --test desktop/web/tests/workswarm.panel.test.mjs passed: 70 tests, 0 failed.",
+    "node --check passed for WorkSwarm format.js and render.js.",
+    "git diff --check passed; Git reported CRLF normalization warnings for dirty working-tree files.",
+    "The evidence JSON and all listed source SHA-256 values were checked after the edits."
+  ],
+  "limits": [
+    "Rust compilation, unit tests, and WorkSwarm API integration tests were not run: latest sample showed 4.73 GB free RAM and 85.06% used, below the repository Cargo gate.",
+    "Pending timings beyond 4096 are evicted; their Worker spans report missing attribution instead of zero.",
+    "No live Team execution or paired Team-vs-Single benchmark was performed; no speed, quality, or token improvement is claimed."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/context_timing.rs": "cb62d2026c2f21c1b540d68a8ab3ae6d79a437b45ba784703ea0ec4ea7778702",
+    "crates/owo-agent-core/src/workswarm/mod.rs": "4eddaed9fe9450c916448327b6548d6ae27b46a227a787ddb64fe588b01730d9",
+    "crates/owo-agent-core/src/workswarm/coord_accessors.rs": "e5e56af63c6d69056a96e473af3c88e2aac264fa0780909c9ca4865822ff8dec",
+    "crates/owo-agent-core/src/workswarm/role_worker.rs": "97c27c7bbc5cf07925355f2e1ac4ff50eba8ee3dd1ef8713d203492bb25be9eb",
+    "crates/owo-agent-server/src/workswarm_metrics/metrics.rs": "8ab15b182374186741fc4b01e5ffa6779a713143fb46c64f3255bfe08616d0c9",
+    "crates/owo-agent-server/src/workswarm_metrics/lifecycle.rs": "62efddc23cba11e9b6793363ca88ec940b68484b8eb1ad7e68e1fcfff64d6ad6",
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs": "8d3f43683d91608b4aa01a6e0798d7b4f3b70ef41e81a6a5a8a8b8d2c00fb674",
+    "crates/owo-agent-server/tests/workswarm_api_tests.rs": "79ec8d76322419929ef22a4651de54f4c6f7ae97bebe23c67b279ac11714e16b",
+    "desktop/web/panels/workswarm/format.js": "c6cfe5ef309ffb633d2e83f192b2118929568b2ea8b0adcaa41f00da24181abe",
+    "desktop/web/panels/workswarm/render.js": "d5bf340226bef6a32ed5e5719e4e366bd44133129756a87faff62bda3cc38d57",
+    "desktop/web/tests/workswarm.panel.test.mjs": "7dfabaa479cda7d6a2ff8554350f5017414d639cca6bb8a9cd0f681fd99b57a2",
+    "docs/Team架构综合审查与改造方案-2026-10-06.md": "576165577f0798187302b86a7c8342b6ffc91ed5c2943729744a7f4f955e5170",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3"
+  }
+}

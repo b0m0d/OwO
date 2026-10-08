@@ -331,8 +331,12 @@ async fn goal_step_lease_released_after_run() {
     let mut a = StepSpec::new("a", "echo");
     a.input = json!({ "text": "A" });
     plan.add_step(a);
+    let mut goal = Goal::new("g-l", "步骤租约释放");
+    goal.acceptance = vec![owo_agent_core::plan::VerificationSpec::OutputContains(
+        "A".to_string(),
+    )];
     let mut runner = GoalRunner::new(
-        Goal::new("g-l", "步骤租约释放"),
+        goal,
         plan,
         RunnerConfig {
             leases: Some(leases.clone()),

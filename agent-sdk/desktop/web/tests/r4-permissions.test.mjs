@@ -23,6 +23,7 @@ const sources = {
 };
 const indexHtml = readFileSync(join(WEB, "index.html"), "utf8");
 const appSource = readFileSync(join(WEB, "app.js"), "utf8");
+const appDomainSource = readFileSync(join(WEB, "app-domain.js"), "utf8");
 
 // ---- 假 DOM shim（本仓无 core/dom-harness.js，视图测试各自内联，同 r4-* 先例）----
 function makeElement(tag) {
@@ -128,7 +129,7 @@ const OVERVIEW = {
     { key: "persistence", label: "授权有效期", effective: "task", source: "profile", configurable: true, summary: "审批授权仅在当前任务内复用" },
   ],
   pending: [
-    { request_id: "req-1", session_id: "s1", tool: "shell", level: "execute", reason: "执行 npm test", explain: "构建验证", redacted_args: { command: "npm test" }, risk_note: "可能改动工作区" },
+    { request_id: "req-1", session_id: "s1", tool: "shell", level: "execute", destructive: true, reason: "执行 npm test", explain: "构建验证", redacted_args: { command: "npm test" }, risk_note: "可能改动工作区" },
   ],
   grants: [{ grant_id: "g-1", tool_id: "file_write", scope: "workspace", created_at: "2026-09-18T10:00:00Z", expires_at: null, remaining_uses: null, path_scope: null, host_scope: null }],
   recent_decisions: [{ ts: "2026-09-18T10:02:03Z", tool: "shell", approved: true, detail: "本次允许" }],
@@ -463,7 +464,7 @@ test("controller·empty：三个列表全空且无维度矩阵时是空态，不
 });
 
 test("controller·提交前校验：非法草稿被拦住，一次请求都不发", async () => {
-  const h = harness([]);
+  const h = harness([{ value: OVERVIEW }]);
   await h.controller.load();
   h.controller.setDimension("filesystem", "everything");
   h.controller.setScopes(["../outside"]);
@@ -542,13 +543,14 @@ test("controller·取消二次确认回到未提交态；一步关闭完全访�
 
 test("controller·审批四动作：body {allow,scope} 正确，成功后重拉概览", async () => {
   const actions = ["deny", "once", "task", "workspace"];
+  const readOnlyItem = { request_id: "req-1", session_id: "s1", level: "read", destructive: false };
   for (const action of actions) {
     const h = harness([{ value: OVERVIEW }, { value: { ok: true } }, { value: clone(OVERVIEW) }]);
     await h.controller.load();
     const before = h.calls.length;
-    await h.controller.respondApproval({ request_id: "req-1", session_id: "s1" }, action);
+    await h.controller.respondApproval(readOnlyItem, action);
     const approval = h.calls.slice(before).find((call) => call.path === "/session/s1/permission/req-1");
-    assert.ok(approval, `${action} 必须打到会话审批端点`);
+    assert.ok(approval, "审批动作必须打到会话审批端点：" + action);
     if (action === "deny") assert.deepEqual(approval.body, { allow: false });
     else assert.deepEqual(approval.body, { allow: true, scope: action });
     assert.equal(h.calls[h.calls.length - 1].path, "/permissions/overview", "动作后要重新拉权威概览");
@@ -556,10 +558,19 @@ test("controller·审批四动作：body {allow,scope} 正确，成功后重拉�
   }
   const unknown = harness([{ value: OVERVIEW }]);
   await unknown.controller.load();
-  const rejected = await unknown.controller.respondApproval({ request_id: "req-1", session_id: "s1" }, "always_readonly");
+  const rejected = await unknown.controller.respondApproval(readOnlyItem, "always_readonly");
   assert.equal(rejected.ok, false, "旧审批条字面量不属于权限中心四动作，必须拒绝而不是猜");
 });
 
+test("controller·破坏性审批不可请求持久授权", async () => {
+  const h = harness([{ value: OVERVIEW }]);
+  await h.controller.load();
+  const before = h.calls.length;
+  const item = { request_id: "req-1", session_id: "s1", level: "execute", destructive: true };
+  const result = await h.controller.respondApproval(item, "workspace");
+  assert.equal(result.ok, false);
+  assert.equal(h.calls.length, before, "必须在客户端拦截，并由服务端重复校验");
+});
 test("controller·审批条目已消失（404/gone）走空态而非错误态", async () => {
   const h = harness([
     { value: OVERVIEW },
@@ -719,25 +730,28 @@ test("渲染·四维表：可配置维度给下拉，不可配置维度只给文
   assert.ok(!/data-perm-nonconfigurable="1"[^>]*><select/.test(honest));
 });
 
-test("渲染·待审批：会话/工具/级别/理由/参数摘要 + 四个动作按钮；空列表走空态", () => {
+test("渲染·待审批：破坏性请求只给一次性动作，只读请求可选授权范围", () => {
   const sandbox = loadModules();
   const view = sandbox.OwoPermissionsView._test;
-  const html = view.renderPending(baseSnapshot({ pending: OVERVIEW.pending }));
-  assert.match(html, /s1/, "会话标识");
-  assert.match(html, /shell/);
-  assert.match(html, /execute/, "级别");
-  assert.match(html, /执行 npm test/, "理由");
-  assert.match(html, /command=npm test/, "脱敏参数摘要");
-  assert.match(html, /可能改动工作区/, "风险说明");
-  for (const label of ["拒绝", "仅本次", "本任务", "工作区长期"]) {
-    assert.ok(html.includes(">" + label + "<"), `缺少审批动作：${label}`);
-  }
-  assert.equal((html.match(/data-perm-action="approval"/g) || []).length, 4);
+  const destructive = view.renderPending(baseSnapshot({ pending: OVERVIEW.pending }));
+  assert.match(destructive, /s1/, "会话标识");
+  assert.match(destructive, /shell/);
+  assert.match(destructive, /execute/, "级别");
+  assert.match(destructive, /执行 npm test/, "理由");
+  assert.match(destructive, /command=npm test/, "脱敏参数摘要");
+  assert.match(destructive, /可能改动工作区/, "风险说明");
+  for (const label of ["拒绝", "仅本次"]) assert.ok(destructive.includes(">" + label + "<"));
+  assert.ok(!destructive.includes(">本任务<") && !destructive.includes(">工作区长期<"));
+  assert.equal((destructive.match(/data-perm-action="approval"/g) || []).length, 2);
+
+  const readItem = { ...clone(OVERVIEW.pending[0]), level: "read", destructive: false };
+  const readonly = view.renderPending(baseSnapshot({ pending: [readItem] }));
+  for (const label of ["拒绝", "仅本次", "本任务", "工作区长期"]) assert.ok(readonly.includes(">" + label + "<"));
+  assert.equal((readonly.match(/data-perm-action="approval"/g) || []).length, 4);
   const empty = view.renderPending(baseSnapshot({ pending: [] }));
   assert.match(empty, /data-perm-empty="pending"/, "空列表必须是空态标记，不是错误");
   assert.ok(!/读取失败|错误码/.test(empty), "空态不得混进错误文案");
 });
-
 test("渲染·已授予列表：有效期/到期/次数/范围 + 三粒度撤销按钮", () => {
   const sandbox = loadModules();
   const html = sandbox.OwoPermissionsView._test.renderGrants(baseSnapshot({ grants: OVERVIEW.grants }));
@@ -749,6 +763,10 @@ test("渲染·已授予列表：有效期/到期/次数/范围 + 三粒度撤销
   assert.match(html, /data-perm-action="revoke-grant"/);
   assert.match(html, /data-perm-action="revoke-tool"/);
   assert.match(html, /data-perm-action="revoke-all"/);
+  const inactive = clone(OVERVIEW.grants[0]);
+  inactive.effective = false;
+  const inactiveHtml = sandbox.OwoPermissionsView._test.renderGrants(baseSnapshot({ grants: [inactive] }));
+  assert.match(inactiveHtml, /历史授权已失效/, "旧非只读授权要明确标为不可复用");
   const empty = sandbox.OwoPermissionsView._test.renderGrants(baseSnapshot({ grants: [] }));
   assert.match(empty, /data-perm-empty="grants"/);
   assert.ok(!/revoke-all/.test(empty), "无授权时不给撤销入口（避免空操作假控件）");
@@ -761,7 +779,7 @@ test("渲染·三态与复查提示：loading/error/empty 都有专属标记，�
   const error = view.renderStates(baseSnapshot({ phase: "error", lastError: { code: "permissions/unavailable", message: "端点未就绪", status: 404 } }));
   assert.match(error, /data-perm-phase="error"/);
   assert.match(error, /permissions\/unavailable/, "稳定错误码要在页面上可见（§3.4）");
-  assert.match(error, /data-perm-action="reload"/, "错误态必须给重试出口");
+  assert.doesNotMatch(error, /data-perm-action="reload"/, "重试按钮统一放在页头，避免重复出口");
   assert.match(view.renderStates(baseSnapshot({ empty: true })), /data-perm-phase="empty"/);
   assert.match(view.renderStates(baseSnapshot({ verify: "撤销后自动复查…" })), /^$/);
   const root = makeRoot();
@@ -893,29 +911,85 @@ test("分层红线：view 零网络、api/domain 零 DOM、网络只经注入的
   assert.ok(!/https?:\/\/(127\.0\.0\.1|localhost)/.test(sources.api + sources.domain + sources.controller), "权限模块不得硬编码本机 URL");
 });
 
-test("接线：ROUTE_META/rail/脚本顺序/状态条降级分支改指权限中心", () => {
-  assert.match(appSource, /permissions:\s*\{\s*title:\s*"权限中心"/, "ROUTE_META 必须加 permissions（中文标签）");
-  assert.match(indexHtml, /data-rail-target="permissions"/, "rail 必须有权限中心入口");
-  assert.match(appSource, /if \(route === "permissions"\) mountPermissionsPanel\(root\);/, "路由回调必须挂载权限面板");
-  assert.match(appSource, /navigate\("permissions"\);/, "状态条权限段改指权限中心");
-  assert.ok(!/navigate\("settings"\);\s*\n\s*return;\s*\n\s*\}\s*\n\s*if \(ROUTE_META\[target\]\)/.test(appSource), "旧的 permission→settings 临时降级分支必须移除");
+test("接线：权限中心注册为按需面板，状态条点击进入该面板", () => {
   const order = ["permissions/permissions.domain.js", "permissions/permissions.api.js", "permissions/permissions.controller.js", "permissions/permissions.view.js"].map(
     (src) => indexHtml.indexOf('<script src="' + src + '"></script>'),
   );
-  assert.ok(order.every((at) => at >= 0), "四个脚本都必须引入");
-  assert.deepEqual(order, order.slice().sort((a, b) => a - b), "脚本顺序必须 domain → api → controller → view");
-  assert.ok(order[3] < indexHtml.indexOf('<script src="app.js"></script>'), "权限模块必须在 app.js 之前");
-  // §8.2 首屏 ≤5：权限数据绝不能进首屏任务清单。
-  const boot = /const BOOT_LAZY_TASKS = \[([\s\S]*?)\];/.exec(appSource);
-  const hydrate = /const BOOT_HYDRATE_TASKS = \[([\s\S]*?)\];/.exec(appSource);
-  assert.ok(boot && hydrate, "首屏任务清单应存在");
-  assert.ok(!/[Pp]ermissions?/.test(boot[1] + hydrate[1]), "权限中心不得进首屏清单（按需加载）");
-  assert.ok(!/REFRESH_PLANS[\s\S]{0,1200}?permissions/i.test(boot[1] + hydrate[1]), "权限中心不参与定时兜底刷新");
+  assert.ok(order.every((at) => at >= 0), "权限模块四层都必须引入");
+  assert.deepEqual(order, order.slice().sort((a, b) => a - b), "加载顺序必须 domain → api → controller → view");
+  assert.ok(order[3] < indexHtml.indexOf('<script src="app-domain.js"></script>'), "面板必须在装配层之前加载");
+  assert.match(appDomainSource, /const PANEL_ORDER = \[[\s\S]*?"permissions"/, "权限中心必须进入工具面板目录");
+  assert.match(appDomainSource, /function mountPanel\(id, writeHash = true\)/, "权限面板必须复用统一 mount/dispose 生命周期");
+  assert.match(appSource, /key === "permission"[\s\S]*?openToolsView\(\);[\s\S]*?mountPanel\("permissions"\)/,
+    "全局权限状态必须打开工具视图并挂载权限中心");
+  assert.match(appDomainSource, /function initPanels\(\)[\s\S]*?button\.addEventListener\("click", \(\) => mountPanel\(id\)\)/,
+    "面板首个请求由用户显式打开触发");
+  const boot = /const BOOT_HYDRATE_TASKS = \[([\s\S]*?)\];/.exec(appSource);
+  assert.ok(boot, "首屏水合任务清单应存在");
+  assert.ok(!/[Pp]ermissions?/.test(boot[1]), "权限读取不得进入首屏水合");
 });
 
-test("既有审批条字面量未被触碰（ui-ia-fixes 锁定的 scope 一个字都没改）", () => {
-  for (const literal of ['data-scope="once"', 'data-scope="session"', 'data-scope="one_hour"', 'data-scope="always_readonly"']) {
-    assert.ok(indexHtml.includes(literal), `index.html 审批按钮字面量必须保留：${literal}`);
-  }
-  assert.ok(!sources.view.includes('data-scope='), "权限中心不复用审批条的旧 scope 字面量（两套互不影响）");
+test("权限审批动作与长期授权撤销粒度保持独立", () => {
+  assert.ok(indexHtml.includes('id="approvalList"'), "回合审批继续走独立审批队列");
+  assert.ok(sources.view.includes('data-perm-action="approval"'), "权限中心通过本面板动作处理审批");
+  assert.ok(sources.view.includes('data-perm-action="revoke-grant"'), "长期授权撤销通过权限中心动作处理");
+  assert.ok(sources.domain.includes('scope: "once"') && sources.domain.includes('scope: "task"') &&
+    sources.domain.includes('scope: "workspace"'), "持久授权范围由权限域契约定义");
+  assert.ok(!sources.view.includes('data-scope='), "权限中心不复用旧审批条作用域控件");
+});
+
+test("controller·读取失败或只读时所有权限变更入口 fail closed", async () => {
+  const failed = harness([{ reject: new Error("auth/pairing_required/not_retryable") }]);
+  await failed.controller.load();
+  const afterOverview = failed.calls.length;
+  assert.equal(failed.controller.setDimension("command", "unrestricted").blocked, true);
+  assert.equal(failed.controller.setScopes(["src/**"]).blocked, true);
+  assert.equal((await failed.controller.submitDraft()).blocked, true);
+  assert.equal(failed.controller.requestFullAccess(), null);
+  assert.equal((await failed.controller.respondApproval({ request_id: "req-1", session_id: "s1" }, "deny")).blocked, true);
+  assert.equal((await failed.controller.revoke({ all: true })).blocked, true);
+  assert.equal(failed.calls.length, afterOverview, "overview 失败后不能提交配置、审批或撤销请求");
+
+  const readOnlyOverview = clone(OVERVIEW);
+  readOnlyOverview.read_only = true;
+  const readonly = harness([{ value: readOnlyOverview }]);
+  await readonly.controller.load();
+  const readOnlyCalls = readonly.calls.length;
+  assert.equal((await readonly.controller.submitDraft()).blocked, true);
+  assert.equal((await readonly.controller.respondApproval({ request_id: "req-1", session_id: "s1" }, "deny")).blocked, true);
+  assert.equal((await readonly.controller.revoke({ all: true })).blocked, true);
+  assert.equal(readonly.calls.length, readOnlyCalls, "服务端只读档不得发任何变更请求");
+});
+
+test("渲染·权限事实未就绪时隐藏推测状态，只留重试；只读档禁用每个变更控件", () => {
+  const sandbox = loadModules();
+  const view = sandbox.OwoPermissionsView._test;
+  const failedRoot = makeRoot();
+  view.render(failedRoot, baseSnapshot({
+    phase: "error",
+    profile: "未知档位",
+    draft: { filesystem: "workspace_write", command: "allowlisted", network: "deny", persistence: "task", scopes: [] },
+    lastError: { code: "auth/pairing_required/not_retryable", message: "桌面进程配对证明缺失", status: 401 },
+    errors: ["桌面进程配对证明缺失"],
+  }));
+  assert.match(failedRoot.innerHTML, /data-perm-data-unavailable/);
+  assert.match(failedRoot.innerHTML, /auth\/pairing_required\/not_retryable/);
+  assert.doesNotMatch(failedRoot.innerHTML, /当前档位|待审批请求|完全访问|撤销当前工作区/);
+  assert.match(failedRoot.innerHTML, /data-perm-action="submit" disabled/);
+  assert.match(failedRoot.innerHTML, />权限概览不可用</);
+  assert.equal((failedRoot.innerHTML.match(/data-perm-action="reload"/g) || []).length, 1, "页头只保留一个重试入口");
+
+  const readonlyRoot = makeRoot();
+  view.render(readonlyRoot, baseSnapshot({
+    readOnly: true,
+    dimensions: sandbox.OwoPermissionsDomain.dimensionsFromOverview(OVERVIEW),
+    pending: OVERVIEW.pending,
+    grants: OVERVIEW.grants,
+    fullAccess: OVERVIEW.full_access,
+  }));
+  assert.match(readonlyRoot.innerHTML, /核心处于只读降级/);
+  const mutationButtons = [...readonlyRoot.innerHTML.matchAll(/<button[^>]*data-perm-action="(?!reload)[^"]+"[^>]*>/g)].map((match) => match[0]);
+  assert.ok(mutationButtons.length > 0);
+  assert.ok(mutationButtons.every((button) => /\sdisabled(?:\s|>)/.test(button)), "所有审批、保存、授权与撤销动作均禁用");
+  assert.match(readonlyRoot.innerHTML, /<select[^>]+disabled/);
 });

@@ -62,6 +62,7 @@ fn trace_record(
         error: None,
         performance_task: None,
         completion_record: None,
+        task_context: None,
     }
 }
 
@@ -634,7 +635,7 @@ async fn e2e_event_stream_feeds_runtime_metrics() {
     event_stream::hub().publish_progress("e1");
     event_stream::hub().publish_progress("e2");
     event_stream::hub().publish_approval("e3");
-    let _ = subscription.try_recv(); // 消费一个，制造队列深度。
+    let _ = subscription.recv_async().await; // 消费一个，制造队列深度。
     let response = send(state.clone(), "GET", "/metrics/runtime").await;
     assert_eq!(response.status().as_u16(), 200);
     let body = body_json(response).await;

@@ -4,7 +4,7 @@ use super::stream::*;
 use super::*;
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -1209,6 +1209,7 @@ async fn deferred_provider_ready_when_configured_and_reuses_instances() {
 async fn request_body_applies_bounded_output_token_env() {
     let _guard = ENV_LOCK.lock().await;
     let saved = std::env::var("OWO_MODEL_MAX_OUTPUT_TOKENS").ok();
+    let saved_by_model = std::env::var("OWO_MODEL_OUTPUT_TOKENS_BY_MODEL").ok();
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: "http://127.0.0.1:11434/v1".to_string(),
         api_key: String::new(),
@@ -1218,21 +1219,38 @@ async fn request_body_applies_bounded_output_token_env() {
     .unwrap();
 
     std::env::remove_var("OWO_MODEL_MAX_OUTPUT_TOKENS");
-    assert!(provider
-        .request_body(None, &[], &[], false)
-        .get("max_tokens")
-        .is_none());
-    std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", "32000");
+    std::env::remove_var("OWO_MODEL_OUTPUT_TOKENS_BY_MODEL");
+    assert_eq!(
+        provider.request_body(None, &[], &[], false)["max_tokens"],
+        32000,
+        "默认输出上限应为 32k"
+    );
+    std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", "16000");
     assert_eq!(
         provider.request_body(None, &[], &[], true)["max_tokens"],
-        32000
+        16000
     );
     std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", "32001");
-    assert!(provider
-        .request_body(None, &[], &[], false)
-        .get("max_tokens")
-        .is_none());
+    assert_eq!(
+        provider.request_body(None, &[], &[], false)["max_tokens"],
+        32000
+    );
 
+    std::env::set_var("OWO_MODEL_OUTPUT_TOKENS_BY_MODEL", r#"{"vision-x":8192}"#);
+    assert_eq!(
+        provider.request_body(Some("vision-x"), &[], &[], false)["max_tokens"],
+        8192,
+        "每模型配置应覆盖全局默认值"
+    );
+    assert_eq!(
+        provider.request_body(Some("other-model"), &[], &[], false)["max_tokens"],
+        32000,
+        "未配置的模型应回退到 32k 默认值"
+    );
+    match saved_by_model {
+        Some(value) => std::env::set_var("OWO_MODEL_OUTPUT_TOKENS_BY_MODEL", value),
+        None => std::env::remove_var("OWO_MODEL_OUTPUT_TOKENS_BY_MODEL"),
+    }
     match saved {
         Some(value) => std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", value),
         None => std::env::remove_var("OWO_MODEL_MAX_OUTPUT_TOKENS"),

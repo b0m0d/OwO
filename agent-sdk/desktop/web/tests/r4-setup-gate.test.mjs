@@ -54,16 +54,24 @@ function makeHarness(options) {
   const sandbox = {
     SETUP_GATE_SETTLE_MS: opts.settleMs == null ? 600 : opts.settleMs,
     SETUP_GATE_TICK_MS: opts.tickMs == null ? 20 : opts.tickMs,
+    localStorage: {
+      getItem: key => key === "owo.setup.provider-deferred" && opts.providerDeferred ? "1" : null,
+      setItem: () => {},
+      removeItem: () => {},
+    },
     setTimeout,
     Date,
     Promise,
     console,
+    __workspaceInput: { value: "" },
+    $: (id) => id === "workspace" ? sandbox.__workspaceInput : null,
     http: { request: () => httpCalls.push("http") },
     window: {
       __TAURI_INTERNALS__: {
         invoke: (command) => {
           invoked.push(command);
           if (command === "get_provider_status") return Promise.resolve(opts.providerStatus || { ready: true });
+          if (command === "get_workspace") return Promise.resolve(opts.workspace || { workspace: "C:\projects\demo", configured: true });
           return Promise.resolve(null);
         },
       },
@@ -78,6 +86,7 @@ function makeHarness(options) {
     },
   };
   sandbox.window.apiClient = sandbox.apiClient;
+  sandbox.window.OwoApi = sandbox.apiClient;
   vm.createContext(sandbox);
   vm.runInContext(`${NEEDS_SETUP_SOURCE}\nglobalThis.__run = needsSetup;`, sandbox, { filename: "needsSetup-extract.js" });
   sandbox.invoked = invoked;
@@ -120,7 +129,8 @@ test("真故障终态不被引导页盖掉归因：failed 直接放行错误卡�
     states: [{ state: "failed", errorCode: "core/exited", message: "后台意外退出" }],
   });
   assert.equal(await sandbox.__run(), false, "core/exited 是故障，不是未配置提供商");
-  assert.deepEqual(sandbox.invoked, [], "故障终态不得再问 get_provider_status 制造第二归因");
+  assert.ok(!sandbox.invoked.includes("get_provider_status"), "故障终态不得再问 get_provider_status 制造第二归因");
+  assert.equal(sandbox.httpCalls.filter(call => call === "http").length, 0, "设置门探测不得调用 HTTP");
 });
 
 test("未选工作区仍是即时终态；稳定码 provider/not_configured 也直接进引导", async () => {
@@ -132,6 +142,19 @@ test("未选工作区仍是即时终态；稳定码 provider/not_configured 也�
     states: [{ state: "failed", errorCode: "provider/not_configured" }],
   });
   assert.equal(await code.__run(), true, "壳/core 已上报该稳定码时立即引导（R3-BUG-19 路径保留）");
+});
+
+
+test("workspace 为空时必须进引导；已明确稍后配置模型时只要求工作区", async () => {
+  const missingWorkspace = makeHarness({ states: [{ state: "ready" }], workspace: { workspace: "" } });
+  assert.equal(await missingWorkspace.__run(), true, "没有项目工作区时不得进入 Agent 主界面");
+
+  const fallbackOnly = makeHarness({ states: [{ state: "ready" }], workspace: { workspace: "C:\\Users\\23843", configured: false } });
+  assert.equal(await fallbackOnly.__run(), true, "核心启动回退目录不能冒充用户项目工作区");
+  assert.equal(fallbackOnly.__workspaceInput.value, "", "未配置时应清空旧 UI 选择");
+
+  const deferred = makeHarness({ states: [{ state: "ready" }], workspace: { workspace: "C:\\projects\\demo" }, providerStatus: { ready: false }, providerDeferred: true });
+  assert.equal(await deferred.__run(), false, "用户明确选择稍后配置后可以进入主界面");
 });
 
 test("取不到终态时不得无限等待：超时按不进引导处理", async () => {
@@ -151,4 +174,21 @@ test("非壳环境（纯浏览器 dev）不判引导；引导门取样全程零 
   // 任何 HTTP 都会污染 §8.2 的首屏请求口径。
   assert.ok(!/\bapi\(|fetch\(|XMLHttpRequest/.test(NEEDS_SETUP_SOURCE), `needsSetup 只能走 IPC：\n${NEEDS_SETUP_SOURCE}`);
   assert.match(appSource, /const SETUP_GATE_SETTLE_MS = 6000;/, "等待窗口必须显式常量（≤ §3.4 的 10s 可操作时限）");
+});
+
+
+test("设置门脚本接线：桌面先加载原生目录选择器与配置视图，后加载 app 主入口", () => {
+  const html = readFileSync(join(WEB, "index.html"), "utf8");
+  assert.match(html, /<main id="setupRoot"[^>]*hidden/);
+  const picker = html.indexOf('<script src="core/folder-picker.js"></script>');
+  const guide = html.indexOf('<script src="views/setup-guide.view.js"></script>');
+  const app = html.indexOf('<script src="app.js"></script>');
+  assert.ok(picker >= 0 && guide > picker && app > guide, "设置视图依赖必须先于 app 加载");
+});
+
+
+test("明确配置的 shell 工作区会回灌输入框，即使 WebView 本地存储为空", async () => {
+  const selected = makeHarness({ states: [{ state: "ready" }], workspace: { workspace: "D:\\work\\demo", configured: true } });
+  assert.equal(await selected.__run(), false);
+  assert.equal(selected.__workspaceInput.value, "D:\\work\\demo");
 });

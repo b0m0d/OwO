@@ -1,0 +1,53 @@
+{
+  "created_at": "2026-10-04T22:58:35.413449+00:00",
+  "source_head": "3d2b03ac7f04443984cef20f0c00c3bdf7b5e7eb",
+  "source_worktree_dirty": true,
+  "claim": "Static implementation correction only. Team role budgets now flow from resolved RunMeta into server Worker profiles; compile, runtime and performance impact remain unverified.",
+  "finding": {
+    "strategy_budget_calls_are_not_global_request_guarantees": true,
+    "dynamic_workers_without_template_budget_used_worker_profile_default_turns": 12,
+    "source": "server work_swarm runtime previously used template descriptor budgets only; missing role entry passed 0 to WorkerProfile"
+  },
+  "change": {
+    "template_explicit_budget_precedence": "preserved",
+    "dynamic_role_budget_resolution": "producer/reviewer/integrator role mapping stored in RunMeta",
+    "server_worker_budget_source": "RunMeta first, template descriptor compatibility fallback"
+  },
+  "regression_sources": [
+    "dynamic_workers_receive_strategy_budgets_and_template_limits_win",
+    "unknown_dynamic_role_uses_producer_ceiling_instead_of_worker_default",
+    "resolved_role_budget_wins_and_template_budget_is_a_compatibility_fallback"
+  ],
+  "files": [
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_create.rs",
+      "sha256": "f4cdb1340e9581b6be8f8fa885e092d7bf8d3206f7f8b8d84756904aa5a3318b",
+      "bytes": 36743,
+      "lines": 851
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-server/src/workswarm_api/runtime.rs",
+      "sha256": "b4b8df06dd6773b1456f550e5bcc70cb1318fb283cfd89e378dffbb812ccc0db",
+      "bytes": 26354,
+      "lines": 583
+    }
+  ],
+  "validation": {
+    "coord_create_rustfmt_check": "passed",
+    "server_runtime_rustfmt_parse": "passed_stdin_parse",
+    "server_runtime_rustfmt_check": "not_clean_existing_unrelated_format_differences",
+    "git_diff_check": "passed_exit_code_0",
+    "cargo_check": "not_run_user_requested_no_compilation",
+    "cargo_test": "not_run",
+    "live_model_calls": "not_run",
+    "worker_call_count": "not_measured",
+    "token_and_latency_delta": "not_measured",
+    "static_cross_module_wiring": "passed_source_assertions"
+  },
+  "limits": [
+    "Old RunMeta without resolved budget still falls back to template metadata then WorkerProfile default.",
+    "Role call/turn ceilings do not provide a global team request scheduler.",
+    "No runtime evidence yet shows reduced calls, token use or elapsed time.",
+    "Full Single/Team quality and performance objective remains open."
+  ]
+}

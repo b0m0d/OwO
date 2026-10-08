@@ -28,6 +28,7 @@ const shellCss = readFileSync(join(here, "../style.css"), "utf8");
 const drain = () => new Promise((r) => setTimeout(r, 5));
 
 function resetState() {
+  panel.dispose();
   T.state.objective = "";
   T.state.root = "";
   T.state.readOnly = true;
@@ -36,6 +37,12 @@ function resetState() {
   T.state.strategy = "auto";
   T.state.catalog = [];
   T.state.catalogLoaded = false;
+  T.state.catalogError = "";
+  T.state.treeError = "";
+  T.state.treeLoadFailed = false;
+  T.state.treePickerOpen = false;
+  T.state.treeEntries = null;
+  T.state.pickedRows = [];
   T.state.selectedTemplate = "";
   T.state.installBusy = {};
   T.state.creating = false;
@@ -181,6 +188,90 @@ test("buildPreview：目录命中模板；未命中回退策略预览", () => {
 });
 
 // ---------- 目录渲染 ----------
+
+test("目录树读取失败时提供可访问的重试，成功后恢复目录选择器", async () => {
+  resetState();
+  const treeBox = { innerHTML: "" };
+  const fields = {
+    "#pl-root": { value: "C:\\demo" },
+    "#pl-depth": { value: "2" },
+    "#pl-treebox": treeBox,
+  };
+  T.setRoot({
+    querySelector(selector) {
+      return fields[selector] || null;
+    },
+  });
+  let attempts = 0;
+  T.setTransport({
+    get(path) {
+      assert.match(path, /^\/workspace\/tree\?/);
+      attempts += 1;
+      if (attempts === 1 || attempts === 3) return Promise.reject(new Error("tree unavailable"));
+      return Promise.resolve({
+        root: "C:\\demo",
+        depth: 2,
+        entries: [{ path: "src", type: "dir" }],
+      });
+    },
+  });
+
+  await T.loadTree();
+  assert.equal(T.state.treeLoadFailed, true);
+  assert.match(T.state.treeError, /tree unavailable/);
+  assert.match(treeBox.innerHTML, /role="alert"/);
+  assert.match(treeBox.innerHTML, /data-pl-tree-reload/);
+  assert.match(T.viewHtml(), /data-pl-tree-reload/);
+
+  await T.loadTree();
+  assert.equal(attempts, 2);
+  assert.equal(T.state.treeLoadFailed, false);
+  assert.equal(T.state.treePickerOpen, true);
+  assert.match(treeBox.innerHTML, /data-pl-tree-path="src"/);
+
+  await T.loadTree();
+  assert.equal(T.state.treeLoadFailed, true);
+  assert.match(treeBox.innerHTML, /data-pl-tree-reload/);
+  assert.match(T.viewHtml(), /目录树读取失败：[\s\S]*data-pl-tree-reload/);
+});
+
+test("模板目录失败时展示可访问的重试状态，重试成功后恢复候选", async () => {
+  resetState();
+  const catalogBox = { innerHTML: "" };
+  const templateSelect = { innerHTML: "", value: "" };
+  T.setRoot({
+    querySelector(selector) {
+      if (selector === "#pl-catalog") return catalogBox;
+      if (selector === "#pl-template") return templateSelect;
+      return null;
+    },
+  });
+  let attempts = 0;
+  T.setTransport({
+    get() {
+      attempts += 1;
+      if (attempts === 1) return Promise.reject(new Error("catalog unavailable"));
+      return Promise.resolve({
+        catalog: [{ template_id: "code-change-v1", title: "代码变更", version: 1, installed: true }],
+      });
+    },
+    post() { throw new Error("unexpected POST"); },
+  });
+
+  await T.loadCatalog();
+  assert.equal(T.state.catalogLoaded, true);
+  assert.match(T.state.catalogError, /catalog unavailable/);
+  assert.match(catalogBox.innerHTML, /role="alert"/);
+  assert.match(catalogBox.innerHTML, /data-pl-catalog-retry/);
+  assert.match(T.viewHtml(), /data-pl-catalog-retry/);
+  assert.match(T.viewHtml(), /手动创建/);
+
+  await T.loadCatalog();
+  assert.equal(attempts, 2);
+  assert.equal(T.state.catalogError, "");
+  assert.match(catalogBox.innerHTML, /代码变更/);
+  assert.match(templateSelect.innerHTML, /code-change-v1/);
+});
 
 test("templateOptionsHtml：未安装禁用 + 选中态", () => {
   const catalog = [
@@ -344,6 +435,7 @@ test("viewHtml：七步骨架 + 错误区 aria-live + 预览区在场", () => {
   assert.match(html, /id="pl-preview"/);
   assert.match(html, /id="pl-create" class="primary"/);
   assert.match(html, /id="pl-errors" aria-live="polite"/);
+  assert.match(html, /id="pl-catalog"/);
   assert.match(html, /id="pl-result"/);
   assert.ok(!html.includes("##"), "不得出现 '## 选择器' 回归");
 });
@@ -434,16 +526,15 @@ test("failureCodeLabel / failureBadgeHtml：三码映射与 error 前缀兜底",
 
 // ---------- 样式守卫 ----------
 
-test("style.css 第 20 节守卫：Launcher 布局/预览/目录/工作区/徽标/窄栏在场", () => {
-  assert.match(shellCss, /20\. 六期：Project Launcher/);
-  assert.match(shellCss, /\.owo-pl \{ display: flex; flex-direction: column;/);
+test("Project Launcher 当前 DOM 具有布局、长路径换行与目录树滚动样式", () => {
+  assert.match(shellCss, /20\. Project Launcher/);
+  assert.match(shellCss, /\.owo-pl \{ display: flex; flex-direction: column;[^}]*min-width: 0/);
   assert.match(shellCss, /\.owo-pl-step \{[^}]*min-width: 0/);
   assert.match(shellCss, /\.owo-pl-roles \{ display: flex; flex-wrap: wrap;/);
   assert.match(shellCss, /\.owo-pl-cats \{[^}]*min-width: 0/);
   assert.match(shellCss, /\.owo-pl-badge/);
-  assert.match(shellCss, /\.owo-pl-wsbox \{[^}]*min-width: 0/);
-  assert.match(shellCss, /\.owo-pl-tree \{[^}]*overflow: auto/);
-  assert.match(shellCss, /owo-pl-tree > div \{ overflow-wrap: anywhere/);
+  assert.match(shellCss, /\.owo-pl-tree-list \{[^}]*overflow: auto/);
+  assert.match(shellCss, /\.owo-pl-tree-row \{[^}]*overflow-wrap: anywhere/);
   assert.match(shellCss, /@media \(max-width: 1280px\)/);
 });
 
@@ -526,4 +617,140 @@ test("previewHtml：每角色附实际执行权限行（模板与策略两来源
   const single = T.previewFromStrategy("single");
   const htmlSingle = T.previewHtml(single, { readOnly: false, writePathsRaw: "docs/" });
   assert.match(htmlSingle, /实际执行权限：可写 docs\//);
+});
+
+test("模板安装失败会释放锁，用户可以再次安装", async () => {
+  resetState();
+  const root = {
+    querySelector(selector) {
+      if (selector === "#pl-catalog") return { innerHTML: "", querySelector: () => null };
+      if (selector === "#pl-errors") return { innerHTML: "" };
+      return null;
+    },
+  };
+  T.setRoot(root);
+  let posts = 0;
+  T.setTransport({
+    get() { return Promise.resolve({ catalog: [] }); },
+    post() {
+      posts++;
+      return Promise.reject(new Error("temporary install failure"));
+    },
+  });
+
+  await T.installTemplate("example-v1");
+  assert.equal(T.state.installBusy["example-v1"], undefined);
+  await T.installTemplate("example-v1");
+  assert.equal(posts, 2, "失败后第二次调用必须重新发送安装请求");
+  assert.equal(T.state.installBusy["example-v1"], undefined);
+});
+
+test("过期目录请求不能覆盖后发出的模板目录", async () => {
+  resetState();
+  const catalogBox = { innerHTML: "" };
+  const templateSelect = { innerHTML: "", value: "" };
+  T.setRoot({
+    querySelector(selector) {
+      if (selector === "#pl-catalog") return catalogBox;
+      if (selector === "#pl-template") return templateSelect;
+      return null;
+    },
+  });
+  let resolveOld;
+  let request = 0;
+  T.setTransport({
+    get() {
+      request++;
+      if (request === 1) return new Promise((resolve) => { resolveOld = resolve; });
+      return Promise.resolve({ catalog: [{ template_id: "new", title: "新目录模板", installed: true }] });
+    },
+  });
+  const oldLoad = T.loadCatalog();
+  await Promise.resolve();
+  await T.loadCatalog();
+  resolveOld({ catalog: [{ template_id: "old", title: "旧目录模板", installed: true }] });
+  await oldLoad;
+  assert.equal(T.state.catalog[0].template_id, "new");
+  assert.match(catalogBox.innerHTML, /新目录模板/);
+  assert.doesNotMatch(catalogBox.innerHTML, /旧目录模板/);
+});
+
+test("dispose 使在途目录树响应失效", async () => {
+  resetState();
+  const treeBox = { innerHTML: "" };
+  T.state.root = "C:\\demo";
+  T.setRoot({
+    querySelector(selector) {
+      if (selector === "#pl-root") return { value: "C:\\demo" };
+      if (selector === "#pl-depth") return { value: "2" };
+      if (selector === "#pl-treebox") return treeBox;
+      return null;
+    },
+  });
+  let resolveTree;
+  T.setTransport({ get() { return new Promise((resolve) => { resolveTree = resolve; }); } });
+  const pending = T.loadTree();
+  await Promise.resolve();
+  panel.dispose();
+  resolveTree({ root: "C:\\demo", depth: 2, entries: [{ path: "late", type: "dir" }] });
+  await pending;
+  assert.equal(T.state.treeEntries, null);
+  assert.equal(T.state.treePickerOpen, false);
+  assert.equal(T.state.treeBusy, false);
+});
+
+test("dispose 在创建请求进行中可释放 UI 锁且不触碰已卸载根节点", async () => {
+  resetState();
+  T.state.objective = "创建项目";
+  T.state.root = "C:\\demo";
+  let rootQueries = 0;
+  T.setRoot({ querySelector() { rootQueries++; return null; } });
+  let resolveCreate;
+  T.setTransport({ post() { return new Promise((resolve) => { resolveCreate = resolve; }); } });
+  T.doCreate();
+  await Promise.resolve();
+  const queriesBeforeDispose = rootQueries;
+  panel.dispose();
+  resolveCreate({ team_id: "created-while-away" });
+  await drain();
+  assert.equal(T.state.creating, false);
+  assert.equal(T.state.result.team_id, "created-while-away");
+  assert.equal(rootQueries, queriesBeforeDispose, "卸载后不再查找或写入旧根节点");
+});
+
+test("旧面板的创建响应不污染后来挂载的页面，并释放新页面的创建锁", async () => {
+  resetState();
+  T.state.objective = "创建项目";
+  T.state.root = "C:\\demo";
+  let resolveCreate;
+  T.setTransport({
+    get() { return Promise.resolve({ catalog: [] }); },
+    post() { return new Promise((resolve) => { resolveCreate = resolve; }); },
+  });
+  const oldRoot = { querySelector() { return null; } };
+  T.setRoot(oldRoot);
+  T.doCreate();
+  await Promise.resolve();
+  panel.dispose();
+
+  const resultBox = { innerHTML: "新页面结果" };
+  const errorsBox = { innerHTML: "新页面错误" };
+  const button = { disabled: true, textContent: "创建中…" };
+  const newRoot = {
+    querySelector(selector) {
+      if (selector === "#pl-result") return resultBox;
+      if (selector === "#pl-errors") return errorsBox;
+      if (selector === "#pl-create") return button;
+      return null;
+    },
+  };
+  T.setRoot(newRoot);
+  resolveCreate({ team_id: "created-in-old-panel" });
+  await drain();
+
+  assert.equal(T.state.result.team_id, "created-in-old-panel", "后台创建结果仍保留");
+  assert.equal(resultBox.innerHTML, "新页面结果", "旧请求不得覆盖新页面内容");
+  assert.equal(errorsBox.innerHTML, "新页面错误");
+  assert.equal(button.disabled, false, "新挂载页面的共享创建锁应解开");
+  assert.equal(button.textContent, "创建团队并开始执行");
 });

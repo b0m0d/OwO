@@ -1,0 +1,65 @@
+{
+  "date": "2026-10-05",
+  "scope": "Desktop domain single-source refactor plus current Rust Core compile audit",
+  "desktop_domain_refactor": {
+    "active_load_order": [
+      "core/turn-sse.js",
+      "core/completion-record.js",
+      "app-domain.js",
+      "app.js"
+    ],
+    "moved_source_chars": 88759,
+    "app_js_lines_before": 6798,
+    "app_js_lines_after": 4297,
+    "unique_owner": "app-domain.js owns sessions, turn streaming/replay, approvals, session list, MCP UI helpers, extension panel routing; app.js owns startup and base runtime",
+    "node_syntax_check": "passed for app-domain.js, app.js, and updated turn-sse test",
+    "responsive_style": "added Action Center and Project History task-row/status styles"
+  },
+  "web_tests": {
+    "command": "node --test --test-reporter=spec desktop/web/tests/*.test.mjs",
+    "passed": 416,
+    "failed": 24,
+    "total": 440,
+    "exit_code": 1,
+    "remaining_failure_groups": [
+      "settings-route node migration contract",
+      "readiness/hydration and background refresh lifecycle",
+      "shell event invalidation/recovery single-flight/background-state contract",
+      "model/setup/approval UI and launcher style contracts",
+      "legacy eval-panel test file loads a classic browser script without window"
+    ],
+    "focused_owner_tests": "Action Center registration/styles, Project History registration/styles, turn SSE ownership, completion record, and the remaining api-client tests other than settings-route contract passed in observed runs"
+  },
+  "rust": {
+    "workspace_fmt_applied": "passed via Invoke-CiCargo cargo fmt --all",
+    "workspace_fmt_check": "passed via Invoke-CiCargo cargo fmt --all -- --check",
+    "core_check_first_attempt": {
+      "status": "failed",
+      "exit_code": 101,
+      "errors_reported": 48,
+      "summary": "Tool trait and workspace-edit helper visibility/re-export errors after module extraction"
+    },
+    "code_fix_applied": "Moved the single public Tool trait back to tools.rs and changed domain helper imports/reexports to remain module-private; retained validate_single_verification_plan pub(crate).",
+    "core_check_retry": {
+      "status": "resource_limited",
+      "exit_code": 1,
+      "cargo_started": false,
+      "free_gb": 4.72,
+      "used_percent": 85.1,
+      "required_free_gb": 6.0,
+      "required_used_percent": "<80"
+    },
+    "rust_tests_run_after_fix": false,
+    "static_audit_after_fix": {
+      "tools_path_modules": 11,
+      "missing_module_paths": [],
+      "inline_tools_tests": 16,
+      "rustfmt_check": "passed for tools.rs and all 11 tools/*.rs using edition 2021",
+      "git_diff_check": "passed; Git emitted existing CRLF-to-LF normalization notices",
+      "cargo_after_fix": "not run; previous retry was resource_limited and user chose static checks",
+      "resource_snapshot_gb_free": 4.97,
+      "resource_snapshot_used_percent": 84.3
+    }
+  },
+  "interpretation": "Desktop domain ownership improved and Rust workspace formatting is clean, but full Web acceptance and repaired Core compilation/tests remain incomplete."
+}

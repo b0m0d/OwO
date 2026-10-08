@@ -9,20 +9,37 @@
   window.OwoPanels.fleet = (function () {
     var H = {};
     var sectionEl = null;
+    var panelGeneration = 0;
+    var nodesRequestGeneration = 0;
+    var taskViewRequestGeneration = 0;
+    var actionBusy = { register: false, submit: false, approval: false };
 
     function defaultGet(path) {
-      return fetch((H.baseUrl || "") + path).then(function (r) {
-        return r.json();
+      return window.OwoApi.stream(path).then(function (r) {
+        if (!r.ok) return r.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error((body && (body.message || body.error)) || "HTTP " + r.status);
+        });
+        return r.status === 204 ? null : r.json();
       });
     }
     function defaultPost(path, body) {
-      return fetch((H.baseUrl || "") + path, {
+      return window.OwoApi.stream(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),
       }).then(function (r) {
-        return r.json();
+        if (!r.ok) return r.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error((body && (body.message || body.error)) || "HTTP " + r.status);
+        });
+        return r.status === 204 ? null : r.json();
       });
+    }
+    function safePost(path, body) {
+      try {
+        return Promise.resolve(H.post(path, body));
+      } catch (error) {
+        return Promise.reject(error);
+      }
     }
     function defaultEsc(s) {
       return String(s == null ? "" : s)
@@ -116,6 +133,7 @@
     }
 
     function mount(root, helpers) {
+      dispose();
       H = helpers || {};
       H.baseUrl = H.baseUrl || (window.OwoPanels && window.OwoPanels.baseUrl) || "";
       H.get = H.get || defaultGet;
@@ -160,6 +178,7 @@
         );
       });
 
+      syncWriteButtons();
       listNodes();
     }
 
@@ -175,6 +194,21 @@
     }
 
     // 向指定结果区写结构化 HTML（限面板内查找，避免误匹配）
+    function syncWriteButtons() {
+      if (!sectionEl) return;
+      var buttons = [
+        [".owo-fleet-node-register", actionBusy.register, "注册中…", "注册"],
+        [".owo-fleet-task-submit", actionBusy.submit, "提交中…", "提交"],
+        [".owo-fleet-approval-respond", actionBusy.approval, "处理中…", "裁决"],
+      ];
+      for (var i = 0; i < buttons.length; i++) {
+        var button = sectionEl.querySelector(buttons[i][0]);
+        if (!button) continue;
+        button.disabled = buttons[i][1];
+        button.textContent = buttons[i][1] ? buttons[i][2] : buttons[i][3];
+      }
+    }
+
     function render(sel, html) {
       if (!alive()) return;
       var el = sectionEl.querySelector(sel);
@@ -251,8 +285,12 @@
     // ---------- 节点注册 ----------
 
     function doRegister(nodeId, worker) {
+      var owner = panelGeneration;
       if (!nodeId) return render(".owo-fleet-node-result", errCard("请填写 node_id"));
-      H.post("/fleet/nodes/register", {
+      if (actionBusy.register) return;
+      actionBusy.register = true;
+      syncWriteButtons();
+      safePost("/fleet/nodes/register", {
         node_id: nodeId,
         card: {
           worker: worker || nodeId,
@@ -262,7 +300,7 @@
         },
       })
         .then(function (d) {
-          if (!alive()) return;
+          if (owner !== panelGeneration || !alive()) return;
           var st = (d && d.status) || {};
           var healthy = st.healthy ? '<span class="owo-fleet-badge ok">健康</span>' : '<span class="owo-fleet-badge bad">异常</span>';
           render(
@@ -281,7 +319,12 @@
           listNodes();
         })
         .catch(function (e) {
+          if (owner !== panelGeneration || !alive()) return;
           render(".owo-fleet-node-result", errCard("注册失败：" + H.friendlyError(e)));
+        })
+        .finally(function () {
+          actionBusy.register = false;
+          syncWriteButtons();
         });
     }
 
@@ -312,9 +355,11 @@
     }
 
     function listNodes() {
-      H.get("/fleet/nodes")
+      var request = ++nodesRequestGeneration;
+      var owner = panelGeneration;
+      return H.get("/fleet/nodes")
         .then(function (d) {
-          if (!alive()) return;
+          if (request !== nodesRequestGeneration || owner !== panelGeneration || !alive()) return;
           var nodes = (d && d.nodes) || [];
           if (!nodes.length) {
             render(".owo-fleet-nodes", '<div class="owo-fleet-meta">暂无节点，先在上方注册</div>');
@@ -327,6 +372,7 @@
           render(".owo-fleet-nodes", html);
         })
         .catch(function (e) {
+          if (request !== nodesRequestGeneration || owner !== panelGeneration || !alive()) return;
           render(".owo-fleet-nodes", errCard("列表失败：" + H.friendlyError(e)));
         });
     }
@@ -334,6 +380,7 @@
     // ---------- 任务提交 ----------
 
     function doSubmit(taskId, worker, inputText, approvalRequired) {
+      var owner = panelGeneration;
       if (!taskId || !worker) return render(".owo-fleet-task-submit-result", errCard("请填写 task_id 与 worker"));
       var input = {};
       try {
@@ -341,14 +388,17 @@
       } catch (e) {
         return render(".owo-fleet-task-submit-result", errCard("input 不是合法 JSON：" + H.friendlyError(e)));
       }
-      H.post("/fleet/tasks/submit", {
+      if (actionBusy.submit) return;
+      actionBusy.submit = true;
+      syncWriteButtons();
+      safePost("/fleet/tasks/submit", {
         task_id: taskId,
         worker: worker,
         input: input,
         approval_required: !!approvalRequired,
       })
         .then(function (d) {
-          if (!alive()) return;
+          if (owner !== panelGeneration || !alive()) return;
           render(
             ".owo-fleet-task-submit-result",
             '<div class="owo-fleet-card">' +
@@ -361,7 +411,12 @@
           );
         })
         .catch(function (e) {
+          if (owner !== panelGeneration || !alive()) return;
           render(".owo-fleet-task-submit-result", errCard("提交失败：" + H.friendlyError(e)));
+        })
+        .finally(function () {
+          actionBusy.submit = false;
+          syncWriteButtons();
         });
     }
 
@@ -437,21 +492,26 @@
 
     function getTask(taskId) {
       if (!taskId) return render(".owo-fleet-task-view", errCard("请填写 task_id"));
+      var request = ++taskViewRequestGeneration;
+      var owner = panelGeneration;
       H.get("/fleet/tasks/" + encodeURIComponent(taskId))
         .then(function (d) {
-          if (!alive()) return;
+          if (request !== taskViewRequestGeneration || owner !== panelGeneration || !alive()) return;
           render(".owo-fleet-task-view", taskCard(d || { task_id: taskId }));
         })
         .catch(function (e) {
+          if (request !== taskViewRequestGeneration || owner !== panelGeneration || !alive()) return;
           render(".owo-fleet-task-view", errCard("查询失败：" + H.friendlyError(e)));
         });
     }
 
     function cancelTask(taskId) {
       if (!taskId) return render(".owo-fleet-task-view", errCard("请填写 task_id"));
+      var request = ++taskViewRequestGeneration;
+      var owner = panelGeneration;
       H.post("/fleet/tasks/" + encodeURIComponent(taskId) + "/cancel", {})
         .then(function (d) {
-          if (!alive()) return;
+          if (request !== taskViewRequestGeneration || owner !== panelGeneration || !alive()) return;
           render(
             ".owo-fleet-task-view",
             '<div class="owo-fleet-card">' +
@@ -464,15 +524,18 @@
           );
         })
         .catch(function (e) {
+          if (request !== taskViewRequestGeneration || owner !== panelGeneration || !alive()) return;
           render(".owo-fleet-task-view", errCard("取消失败：" + H.friendlyError(e)));
         });
     }
 
     function taskEvents(taskId) {
       if (!taskId) return render(".owo-fleet-task-view", errCard("请填写 task_id"));
+      var request = ++taskViewRequestGeneration;
+      var owner = panelGeneration;
       H.get("/fleet/tasks/" + encodeURIComponent(taskId) + "/events?format=json")
         .then(function (d) {
-          if (!alive()) return;
+          if (request !== taskViewRequestGeneration || owner !== panelGeneration || !alive()) return;
           var events = Array.isArray(d) ? d : (d && d.events) || [];
           render(
             ".owo-fleet-task-view",
@@ -483,6 +546,7 @@
           );
         })
         .catch(function (e) {
+          if (request !== taskViewRequestGeneration || owner !== panelGeneration || !alive()) return;
           render(".owo-fleet-task-view", errCard("事件拉取失败：" + H.friendlyError(e)));
         });
     }
@@ -490,13 +554,17 @@
     // ---------- 审批响应 ----------
 
     function respondApproval(taskId, decision, approvedBy) {
+      var owner = panelGeneration;
       if (!taskId) return render(".owo-fleet-approval-result", errCard("请填写审批任务 task_id"));
-      H.post("/fleet/approvals/" + encodeURIComponent(taskId) + "/respond", {
+      if (actionBusy.approval) return;
+      actionBusy.approval = true;
+      syncWriteButtons();
+      safePost("/fleet/approvals/" + encodeURIComponent(taskId) + "/respond", {
         decision: decision,
         approved_by: approvedBy || "workbench",
       })
         .then(function (d) {
-          if (!alive()) return;
+          if (owner !== panelGeneration || !alive()) return;
           var dec = d && d.decision;
           var badge =
             dec === "approved"
@@ -517,8 +585,20 @@
           );
         })
         .catch(function (e) {
+          if (owner !== panelGeneration || !alive()) return;
           render(".owo-fleet-approval-result", errCard("裁决失败：" + H.friendlyError(e)));
+        })
+        .finally(function () {
+          actionBusy.approval = false;
+          syncWriteButtons();
         });
+    }
+
+    function dispose() {
+      panelGeneration += 1;
+      nodesRequestGeneration += 1;
+      taskViewRequestGeneration += 1;
+      sectionEl = null;
     }
 
     return {
@@ -527,6 +607,7 @@
       nav: nav,
       mount: mount,
       refresh: refresh,
+      dispose: dispose,
     };
   })();
 })();

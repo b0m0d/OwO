@@ -106,9 +106,13 @@
         return {
           worker: pickStr(w, ["worker", "worker_id", "member_id", "name", "role"]),
           role: pickStr(w, ["role", "worker_role"]),
+          taskId: pickStr(w, ["task_id", "taskId"]),
+          attemptId: pickStr(w, ["attempt_id", "attemptId"]),
+          phaseEpoch: pickNum(w, ["phase_epoch", "phaseEpoch"]),
           startedAt: pickStr(w, ["started_at", "startedAt", "start"]),
           endedAt: pickStr(w, ["ended_at", "endedAt", "end", "finished_at"]),
           durationMs: pickNum(w, ["duration_ms", "durationMs", "wall_ms", "wall_ms_sum", "elapsed_ms"]),
+          budgetReservationWaitMs: pickNum(w, ["budget_reservation_wait_ms"]),
           modelCalls: pickNum(w, ["model_calls", "calls", "model_call_count"]),
           tokensIn: pickNum(w, ["tokens_in", "input_tokens", "prompt_tokens"]),
           tokensOut: pickNum(w, ["tokens_out", "output_tokens", "completion_tokens"]),
@@ -124,12 +128,93 @@
       var slowest = s.slowest_worker;
       if (slowest && typeof slowest === "object") slowest = slowest.role || slowest.worker || slowest.span_id || "";
       var budget = (d && d.budget) || {};
+      var rawLifecycle = (d && d.lifecycle) || {};
+      var lifecycleStages = Array.isArray(rawLifecycle.stages) ? rawLifecycle.stages.map(function (stage) {
+        return {
+          stage: pickStr(stage, ["stage"]),
+          count: pickNum(stage, ["count"]),
+          failures: pickNum(stage, ["failures"]),
+          durationMsSum: pickNum(stage, ["duration_ms_sum"]),
+          durationMsP50: pickNum(stage, ["duration_ms_p50"]),
+          durationMsP90: pickNum(stage, ["duration_ms_p90"]),
+          durationMsMax: pickNum(stage, ["duration_ms_max"]),
+        };
+      }).filter(function (stage) { return stage.stage; }) : [];
+      var lifecycleEpochs = {};
+      (Array.isArray(rawLifecycle.epochs) ? rawLifecycle.epochs : []).forEach(function (epoch) {
+        var id = pickNum(epoch, ["phase_epoch"]);
+        if (id != null) lifecycleEpochs[String(id)] = pickNum(epoch, ["phase_duration_ms_sum"]);
+      });
+      var rawContextAssembly = (d && d.context_assembly) || {};
+      var contextAssemblyRoles = Array.isArray(rawContextAssembly.by_role)
+        ? rawContextAssembly.by_role.map(function (role) {
+            return {
+              role: pickStr(role, ["role"]),
+              sampleCount: pickNum(role, ["sample_count"]),
+              failures: pickNum(role, ["failures"]),
+              durationMsSum: pickNum(role, ["duration_ms_sum"]),
+              durationMsP50: pickNum(role, ["duration_ms_p50"]),
+              durationMsP90: pickNum(role, ["duration_ms_p90"]),
+            };
+          }).filter(function (role) { return role.role; })
+        : [];
+      var contextAssemblyEpochs = Array.isArray(rawContextAssembly.by_epoch)
+        ? rawContextAssembly.by_epoch.map(function (epoch) {
+            return {
+              phaseEpoch: pickNum(epoch, ["phase_epoch"]),
+              sampleCount: pickNum(epoch, ["sample_count"]),
+              failures: pickNum(epoch, ["failures"]),
+              durationMsSum: pickNum(epoch, ["duration_ms_sum"]),
+              durationMsP50: pickNum(epoch, ["duration_ms_p50"]),
+              durationMsP90: pickNum(epoch, ["duration_ms_p90"]),
+            };
+          }).filter(function (epoch) { return epoch.phaseEpoch != null; })
+        : [];
+      var contextAssembly = {
+        sampleCount: pickNum(rawContextAssembly, ["sample_count"]),
+        attributionMissingCount: pickNum(rawContextAssembly, ["attribution_missing_count"]),
+        sampleCap: pickNum(rawContextAssembly, ["sample_cap"]),
+        sampleTruncated: !!rawContextAssembly.sample_truncated,
+        auditScanTruncated: !!rawContextAssembly.audit_scan_truncated,
+        invalidRecords: pickNum(rawContextAssembly, ["invalid_records"]),
+        failures: pickNum(rawContextAssembly, ["failures"]),
+        durationMsSum: pickNum(rawContextAssembly, ["duration_ms_sum"]),
+        durationMsP50: pickNum(rawContextAssembly, ["duration_ms_p50"]),
+        durationMsP90: pickNum(rawContextAssembly, ["duration_ms_p90"]),
+        byRole: contextAssemblyRoles,
+        byEpoch: contextAssemblyEpochs,
+      };
+      var rawEpochSummary = (d && d.execution_epochs) || {};
+      var executionEpochs = Array.isArray(rawEpochSummary.items) ? rawEpochSummary.items.map(function (epoch) {
+        var id = pickNum(epoch, ["phase_epoch"]);
+        return {
+          phaseEpoch: id,
+          workerSpanCount: pickNum(epoch, ["worker_span_count"]),
+          taskAttemptCount: pickNum(epoch, ["task_attempt_count"]),
+          failedSpans: pickNum(epoch, ["failed_spans"]),
+          modelCalls: pickNum(epoch, ["model_calls"]),
+          promptTokens: pickNum(epoch, ["prompt_tokens"]),
+          completionTokens: pickNum(epoch, ["completion_tokens"]),
+          totalTokens: pickNum(epoch, ["total_tokens"]),
+          usageKnown: !!epoch.usage_known,
+          costUsd: pickNum(epoch, ["cost_usd"]),
+          costKnown: !!epoch.cost_known,
+          workerWallMsSum: pickNum(epoch, ["worker_wall_ms_sum"]),
+          workerWindowMs: pickNum(epoch, ["worker_window_ms"]),
+          overlapFactor: pickNum(epoch, ["parallel_overlap_factor"]),
+          providerWaitMsSum: pickNum(epoch, ["provider_wait_ms_sum"]),
+          budgetWaitMsSum: pickNum(epoch, ["budget_reservation_wait_ms_sum"]),
+          leaseWaitMsSum: pickNum(epoch, ["lease_wait_ms_sum"]),
+          phaseDurationMs: id == null ? null : lifecycleEpochs[String(id)],
+        };
+      }).filter(function (epoch) { return epoch.phaseEpoch != null; }) : [];
       var summary = {
         wallClockMs: pickNum(s, ["wall_clock_ms", "wallClockMs", "wall_window_ms", "wall_ms", "total_wall_ms"]),
         totalModelCalls: pickNum(s, ["total_model_calls", "total_calls", "model_calls"]),
         totalTokensIn: pickNum(s, ["total_tokens_in", "tokens_in", "prompt_tokens"]),
         totalTokensOut: pickNum(s, ["total_tokens_out", "tokens_out", "completion_tokens"]),
         totalEstCost: pickNum(s, ["total_est_cost", "total_cost_usd", "total_cost", "cost_usd", "est_cost"]),
+        totalBudgetReservationWaitMs: pickNum(s, ["budget_reservation_wait_ms_sum"]),
         slowestWorker: typeof slowest === "string" ? slowest : pickStr(s, ["slowest_worker", "slowest"]),
         failures: pickNum(s, ["failures", "failed_spans", "failure_count"]),
         reworks: pickNum(s, ["reworks", "rework_count"]),
@@ -142,8 +227,16 @@
           return typeof br === "string" ? br : "";
         })(),
       };
-      if (!workers.length && summary.wallClockMs == null && summary.totalModelCalls == null) return null;
-      return { workers: workers, summary: summary };
+      if (!workers.length && summary.wallClockMs == null && summary.totalModelCalls == null && !lifecycleStages.length && !executionEpochs.length && !(contextAssembly.sampleCount || contextAssembly.attributionMissingCount)) return null;
+      return {
+        workers: workers,
+        summary: summary,
+        lifecycleStages: lifecycleStages,
+        contextAssembly: contextAssembly,
+        executionEpochs: executionEpochs,
+        executionEpochCount: pickNum(rawEpochSummary, ["epoch_count"]),
+        executionEpochsTruncated: !!rawEpochSummary.epochs_truncated,
+      };
     }
     function fmtMs(ms) {
       if (ms == null || !isFinite(ms)) return "—";

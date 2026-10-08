@@ -13,7 +13,7 @@
 //   - 行为：load() 聚合落 state（404 产物静默、详情失败降级）、
 //     submitRetry 提交锁（快速双击只发一次）+ 失败兜底 + 成功后重载；
 //   - 深链：无 DOM 环境安全（Node 下不抛错）；
-//   - 接线守卫：index.html 脚本、app.js PANEL_ORDER、style.css 第 21 节在场。
+//   - 接线守卫：index.html 脚本、app-domain.js PANEL_ORDER、style.css 第 21 节在场。
 // ============================================================================
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -60,6 +60,7 @@ function detail(teamId, teamStatus, tasks, members, extra) {
 }
 
 function resetState() {
+  panel.dispose();
   T.state.loading = false;
   T.state.loadedOnce = false;
   T.state.teams = [];
@@ -78,6 +79,76 @@ function resetState() {
   T.state.inboxResults = {};
   T.setRoot(null);
 }
+
+// ---------- 注册与纯逻辑 ----------
+
+test("dispose 存在：离开面板时可隔离在途请求", () => {
+  assert.equal(typeof panel.dispose, "function");
+});
+
+test("刷新 Inbox 与初始加载竞争时，较新的刷新结果优先", async () => {
+  resetState();
+  let resolveInitial;
+  let gets = 0;
+  T.setTransport({
+    get(path) {
+      assert.equal(path, "/human/inbox");
+      gets++;
+      if (gets === 1) return new Promise((resolve) => { resolveInitial = resolve; });
+      return Promise.resolve({ items: [inboxItem("fresh", "step_retry", "open")] });
+    },
+    post() { throw new Error("unexpected POST"); },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+  const initial = T.load();
+  await T.refreshInbox();
+  resolveInitial({ items: [inboxItem("stale", "step_retry", "open")] });
+  await initial;
+  assert.deepEqual(T.state.inbox.map((item) => item.item_id), ["fresh"]);
+  assert.equal(T.state.loading, false);
+});
+
+test("dispose：忽略离开面板前发出的 Inbox 响应", async () => {
+  resetState();
+  let resolveInbox;
+  T.setTransport({
+    get(path) {
+      assert.equal(path, "/human/inbox");
+      return new Promise((resolve) => { resolveInbox = resolve; });
+    },
+    post() { throw new Error("unexpected POST"); },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+  const pending = T.load();
+  panel.dispose();
+  resolveInbox({ items: [inboxItem("late", "step_retry", "open")] });
+  await pending;
+  assert.equal(T.state.inboxSource, "");
+  assert.equal(T.state.inbox.length, 0);
+  assert.equal(T.state.loadedOnce, false);
+  assert.equal(T.state.loading, false);
+});
+
+test("dispose：忽略离开面板前发出的待办处理结果", async () => {
+  resetState();
+  let resolvePost;
+  let gets = 0;
+  T.state.inbox = T.inboxItemsOf({ items: [inboxItem("late-action", "step_retry", "open")] });
+  T.state.inboxSource = "inbox";
+  T.setTransport({
+    get() { gets++; return Promise.resolve({ items: [] }); },
+    post() { return new Promise((resolve) => { resolvePost = resolve; }); },
+  });
+  T.setRoot({ innerHTML: "", querySelector: () => null });
+  const pending = T.startInboxAction("late-action", "resolve");
+  await Promise.resolve();
+  panel.dispose();
+  resolvePost({ replayed: false });
+  await pending;
+  assert.equal(T.state.inboxResults["late-action"], undefined);
+  assert.equal(T.state.inboxBusy["late-action:resolve"], undefined);
+  assert.equal(gets, 0, "卸载后不应触发列表刷新");
+});
 
 // ---------- 注册与纯逻辑 ----------
 
@@ -523,7 +594,9 @@ test("接线守卫：index.html 脚本 + PANEL_ORDER 唯一来源 app-domain.js 
   assert.ok(indexHtml.includes('<script src="panels/action-center.panel.js"></script>'), "index.html 缺 action-center 脚本");
   // 模块拆分（§12.3）后 PANEL_ORDER 唯一来源为 app-domain.js；app.js 不得复制回巨型文件。
   assert.ok(!/const\s+PANEL_ORDER\s*=/.test(appJs), "PANEL_ORDER 不得在 app.js 中定义（唯一来源 app-domain.js）");
-  assert.match(appDomainJs, /const PANEL_ORDER = \[\s*"capabilities",\s*"action-center"/, "app-domain.js PANEL_ORDER 未注册 action-center");
+  assert.match(appDomainJs, /const PANEL_ORDER = \[([\s\S]*?)\]/, "app-domain.js PANEL_ORDER 未定义");
+  const panelOrder = /const PANEL_ORDER = \[([\s\S]*?)\]/.exec(appDomainJs)[1];
+  assert.ok(panelOrder.includes("\"capabilities\"") && panelOrder.includes("\"action-center\""), "app-domain.js PANEL_ORDER 未注册核心面板");
   assert.match(indexHtml, /<script src="app-domain\.js"><\/script>[\s\S]*<script src="app\.js"><\/script>/, "app-domain.js 必须先于 app.js 载入（经典脚本顺序）");
   assert.ok(shellCss.includes("21. 七期：Action Center"), "style.css 缺第 21 节 Action Center");
   for (const cls of [".owo-ac-item", ".owo-ac-badge.warn", ".owo-ac-count.has", ".owo-ac-result.ok"]) {

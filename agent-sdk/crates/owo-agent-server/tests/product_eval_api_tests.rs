@@ -597,6 +597,79 @@ async fn cancel_marks_running_run_cancelled_immediately_and_keeps_partial_report
     assert_eq!(again["status"], "cancelled");
 }
 
+#[tokio::test]
+async fn concurrent_matrices_are_rejected_until_cancelled_executor_finishes() {
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let started_for_factory = Arc::clone(&started);
+    let release_for_factory = Arc::clone(&release);
+    let env = env_with_factory(Arc::new(move || {
+        Ok(Arc::new(SlowStubExecutor {
+            started: Arc::clone(&started_for_factory),
+            release: Arc::clone(&release_for_factory),
+        }) as Arc<dyn CaseExecutor>)
+    }));
+    let request = json!({
+        "suite": "v1", "execution": "live", "modes": ["single", "workswarm"],
+        "repetitions": 1, "only": "document-draft-note"
+    });
+    let (status, first) = post(&env, request.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{first}");
+    let first_id = first["run_id"].as_str().unwrap().to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !started.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        started.load(Ordering::SeqCst),
+        "first matrix must be executing"
+    );
+
+    let (status, busy) = post(
+        &env,
+        json!({
+            "suite": "v1", "execution": "reference", "modes": ["single"], "repetitions": 1
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{busy}");
+    assert!(busy["error"].as_str().unwrap().contains("互相干扰"));
+
+    let (status, cancelled) = cancel(&env, &first_id).await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+    assert_eq!(cancelled["status"], "cancelled");
+    let (status, still_finishing) = post(&env, request).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "取消已登记但执行器仍在收尾：{still_finishing}"
+    );
+
+    release.store(true, Ordering::SeqCst);
+    let _ = wait_status(&env, &first_id, &["cancelled"], Duration::from_secs(5)).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut next_run = None;
+    while std::time::Instant::now() < deadline {
+        let (status, body) = post(
+            &env,
+            json!({
+                "suite": "v1", "execution": "reference", "modes": ["single"], "repetitions": 1,
+                "only": "document-draft-note"
+            }),
+        )
+        .await;
+        if status == StatusCode::ACCEPTED {
+            next_run = Some(body["run_id"].as_str().unwrap().to_string());
+            break;
+        }
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let next_run = next_run.expect("slot should reopen after the cancelled matrix finishes");
+    let completed = wait_status(&env, &next_run, &["completed"], Duration::from_secs(10)).await;
+    assert_eq!(completed["status"], "completed");
+}
+
 // ---------------------------------------------------------------------------
 // 5. 重启恢复：queued/running → interrupted；completed 原样可查
 // ---------------------------------------------------------------------------

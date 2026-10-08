@@ -88,6 +88,18 @@
       render(snapshot());
     }
 
+    function blockMutation() {
+      let reason = "";
+      if (disposed) reason = "权限页面已关闭，请重新打开后操作。";
+      else if (state.phase !== "ready") reason = "权限数据尚未成功读取，暂不能修改。";
+      else if (state.readOnly) reason = "核心当前处于只读模式，不能提交权限变更。";
+      else if (state.busy) reason = "正在处理上一项权限操作，请稍后。";
+      if (!reason) return null;
+      state.notice = reason;
+      paint();
+      return { ok: false, blocked: true, reason: reason };
+    }
+
     function snapshot() {
       return {
         phase: state.phase,
@@ -232,6 +244,8 @@
 
     /** 编辑草稿中的某个维度（不落库，仅本地态；提交仍要过 validateSpec）。 */
     function setDimension(key, value) {
+      const blocked = blockMutation();
+      if (blocked) return blocked;
       if (!state.draft) state.draft = defaultDraft();
       state.draft[key] = value;
       state.errors = [];
@@ -240,6 +254,8 @@
     }
 
     function setScopes(scopes) {
+      const blocked = blockMutation();
+      if (blocked) return blocked;
       if (!state.draft) state.draft = defaultDraft();
       state.draft.scopes = (Array.isArray(scopes) ? scopes : []).map(text).filter(Boolean);
       paint();
@@ -247,6 +263,8 @@
 
     /** 一步关闭完全访问：把不受限维度收回白名单档，不需要确认要素。 */
     function closeFullAccess() {
+      const blocked = blockMutation();
+      if (blocked) return Promise.resolve(blocked);
       const target = state.draft ? JSON.parse(JSON.stringify(state.draft)) : defaultDraft();
       if (text(target.command) === "unrestricted") target.command = "allowlisted";
       if (text(target.network) === "unrestricted") target.network = "allowlisted";
@@ -257,6 +275,8 @@
 
     /** 打开完全访问二次确认：先给出风险清单 + 时长选择，未确认前不发请求。 */
     function requestFullAccess(spec) {
+      const blocked = blockMutation();
+      if (blocked) return null;
       const candidate = isPlainObject(spec) ? spec : state.draft;
       if (!candidate || !domain || !domain.needsFullAccessConfirm(candidate)) {
         // 不能静默 return：按钮就摆在那里，点了什么都不发生等于一个死控件
@@ -302,6 +322,8 @@
      *   ③ 通过后才发请求（confirm/duration_secs 由 api 层补齐）。
      */
     function submitDraft() {
+      const blocked = blockMutation();
+      if (blocked) return Promise.resolve(blocked);
       const spec = state.draft;
       const problems = domain ? domain.validateSpec(spec) : [];
       if (problems.length) {
@@ -360,10 +382,16 @@
      * 条目已消失（404/gone）是**正常终态**：清掉本地条目 + 给一条提示，不进错误态。
      */
     function respondApproval(item, action) {
+      const blocked = blockMutation();
+      if (blocked) return Promise.resolve(blocked);
       const actions = domain ? domain.APPROVAL_ACTIONS : [];
       const decision = actions.find((row) => row.action === action);
       if (!decision) return Promise.resolve({ ok: false, error: { message: "未知的审批动作" } });
       if (!isPlainObject(item) || !item.request_id) return Promise.resolve({ ok: false, error: { message: "审批条目缺少标识" } });
+      const mayRemember = item.destructive === false && item.level === "read";
+      if (decision.allow && decision.scope && decision.scope !== "once" && !mayRemember) {
+        return Promise.resolve({ ok: false, error: { message: "该操作只支持本次审批，不允许保存为授权。" } });
+      }
       state.busy = true;
       state.notice = "正在提交审批结果…";
       paint();
@@ -415,6 +443,8 @@
      * 都是正常终态（幂等撤销），不得渲染成错误。
      */
     function revoke(input) {
+      const blocked = blockMutation();
+      if (blocked) return Promise.resolve(blocked);
       const normalized = domain ? domain.revokePayload(input) : { ok: true, payload: input };
       if (!normalized.ok) {
         state.errors = [normalized.error];

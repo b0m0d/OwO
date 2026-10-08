@@ -34,8 +34,6 @@ impl AgentWorker {
             worker_model.as_deref(),
         )
     }
-
-
 }
 
 #[async_trait]

@@ -1,3 +1,17 @@
+#[path = "worker_artifact_tool.rs"]
+mod artifact_tool;
+#[path = "worker_context_tool.rs"]
+mod context_tool;
+#[cfg(test)]
+use artifact_tool::team_artifact_read_effect;
+use artifact_tool::TeamArtifactReadTool;
+#[cfg(test)]
+use context_tool::{
+    team_context_fact_freshness, team_context_fact_is_visible, team_context_publish_effect,
+    team_context_read_effect,
+};
+use context_tool::{TeamContextPublishTool, TeamContextReadTool};
+
 use super::write_lease::{WriteLease, WriteScope};
 use super::{project_workspace, workspace_change_tracker, workswarm_metrics};
 use async_trait::async_trait;
@@ -7,8 +21,9 @@ use owo_agent_core::goal::Worker;
 use owo_agent_core::permissions::AutoApprover;
 use owo_agent_core::subagent::SubagentRunner;
 use owo_agent_core::task_context::ResolvedTaskContext;
-use owo_agent_core::tool_effects::{EffectClass, ToolEffect};
-use owo_agent_core::tools::{Tool, ToolContext, ToolSpec};
+#[cfg(test)]
+use owo_agent_core::tool_effects::EffectClass;
+use owo_agent_core::tools::Tool;
 use owo_agent_core::worker_profile::{ProfileSubagentRunner, TurnEventSink, WorkerProfile};
 use owo_agent_core::workswarm::TeamCoordinator;
 use serde_json::{json, Value};
@@ -67,12 +82,6 @@ impl Worker for AgentSubagentWorker {
     }
 
     async fn run(&self, input: &Value) -> Result<String, String> {
-        let prompt = input
-            .get("prompt")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .ok_or_else(|| "agent 步骤缺少 prompt 参数".to_string())?;
         let input_read_only = input
             .get("read_only")
             .and_then(Value::as_bool)
@@ -96,28 +105,111 @@ impl Worker for AgentSubagentWorker {
         let effective_write_allowed = task_write_allowed
             .clone()
             .unwrap_or_else(|| self.write_allowed.clone());
+        // Resolve the task-local profile once. The same value controls model-visible
+        // prompt guards, ToolRegistry, write lease, and request budget.
+        let mut task_profile = self.profile.clone();
+        if let Some(profile) = task_profile.as_mut() {
+            if task_context.is_task_graph_assignment() {
+                apply_task_capability_scope(profile, &task_context, task_has_no_write_scope);
+                if let Some(total_calls) = task_context.model_calls_per_attempt {
+                    *profile = profile
+                        .clone()
+                        .with_task_model_call_budget(total_calls as usize)?;
+                }
+            }
+            if task_write_allowed.is_some() {
+                let command_was_assigned = task_context
+                    .required_capabilities
+                    .as_deref()
+                    .is_some_and(|capabilities| {
+                        capabilities.iter().any(|item| item == "run_command")
+                    });
+                profile.can_run_command &= command_was_assigned;
+                if !command_was_assigned {
+                    profile.visible_tools.retain(|tool| tool != "run_command");
+                }
+                if task_has_no_write_scope {
+                    profile.read_only = true;
+                }
+            }
+            if read_only {
+                *profile = profile.clone().restricted_to_read_only();
+            }
+            profile.write_allowed_paths = if profile.read_only {
+                Vec::new()
+            } else if effective_write_allowed.is_empty() {
+                vec![".".to_string()]
+            } else {
+                prompt_workspace_write_paths(&self.workspace, &effective_write_allowed)
+            };
+        }
+        let prompt = if let Some(team_context) = input.get("team_prompt_context") {
+            let (mut prompt, prompt_meta) = match task_profile.as_ref() {
+                Some(profile) => {
+                    TeamCoordinator::compile_role_prompt_with_profile(team_context, profile)
+                }
+                None => TeamCoordinator::compile_role_prompt_with_meta(team_context),
+            };
+            if let Some(instruction) = input.get("team_prompt_rework").and_then(Value::as_str) {
+                prompt.push_str(&format!(
+                    "\n\n## 本次评审返修（保持原任务范围与写权限）\n{instruction}\n"
+                ));
+            }
+            let mut event =
+                json!({"kind": "context", "role": self.role, "step_id": task_context.step_id});
+            if let (Some(obj), Some(meta)) = (event.as_object_mut(), prompt_meta.as_object()) {
+                for (key, value) in meta {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+            self.coordinator
+                .note_adaptive_event(&self.team_id, event)
+                .await;
+            prompt
+        } else {
+            input
+                .get("prompt")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|prompt| !prompt.is_empty())
+                .ok_or_else(|| "agent 步骤缺少 prompt 参数".to_string())?
+                .to_string()
+        };
         let configured_model = std::env::var("OWO_AGENT_MODEL").ok();
         let model = resolve_agent_model(input, configured_model.as_deref());
         // 指标计数注入：MeasuredProvider 包装共享 provider（计数仅对本 span 生效）。
-        let provider: Arc<dyn ModelProvider> = match &self.model_calls {
-            Some(counter) => {
-                let request_usage = self
-                    .request_usage
+        let provider: Arc<dyn ModelProvider> =
+            if self.model_calls.is_some() || self.team_request_budget.is_some() {
+                let counter = self
+                    .model_calls
                     .clone()
-                    .unwrap_or_else(|| Arc::new(workswarm_metrics::RequestUsageCollector::default()));
-                Arc::new(workswarm_metrics::MeasuredProvider::new_with_request_budget(
-                    self.agent.provider(),
-                    Arc::clone(counter),
-                    request_usage,
-                    workswarm_metrics::request_scope_key(
-                        task_context.step_id.as_deref().unwrap_or("unknown"),
-                        task_context.phase_epoch,
+                    .unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+                let request_usage = self.request_usage.clone().unwrap_or_else(|| {
+                    Arc::new(workswarm_metrics::RequestUsageCollector::default())
+                });
+                let phase_scope_key = workswarm_metrics::request_scope_key(
+                    task_context.step_id.as_deref().unwrap_or("unknown"),
+                    task_context.phase_epoch,
+                );
+                let attempt_scope_key = workswarm_metrics::task_attempt_budget_scope_key(
+                    &phase_scope_key,
+                    task_context.task_id.as_deref(),
+                    task_context.attempt_id.as_deref(),
+                );
+                Arc::new(
+                    workswarm_metrics::MeasuredProvider::new_with_task_attempt_request_budget(
+                        self.agent.provider(),
+                        counter,
+                        request_usage,
+                        phase_scope_key,
+                        attempt_scope_key,
+                        self.team_request_budget.clone(),
+                        task_context.model_calls_per_attempt.map(u64::from),
                     ),
-                    self.team_request_budget.clone(),
-                ))
-            }
-            None => self.agent.provider(),
-        };
+                )
+            } else {
+                self.agent.provider()
+            };
         // 审批器（七期 · 二路）：绑定作用域 → 白名单审批器，白名单取「角色 ∩ 绑定」
         // 交集（角色白名单空 = 绑定原样）；未绑定保持 AutoApprover 原行为。
         let scope = self.workspace_scope.as_ref();
@@ -151,44 +243,14 @@ impl Worker for AgentSubagentWorker {
         };
         // 七期（第二路）：画像执行器——注册表面即权限边界 + 模板预算回合上限；
         // 无画像（防御分支，现网构建路径恒有画像）退回通用执行器保持旧行为。
-        let output = match &self.profile {
-            Some(profile) => {
-                let mut task_profile = profile.clone();
-                let is_task_graph_work = task_context.is_task_graph_assignment();
-                if is_task_graph_work {
-                    apply_task_capability_scope(
-                        &mut task_profile,
-                        &task_context,
-                        task_has_no_write_scope,
-                    );
-                    if let Some(total_calls) = task_context.model_calls_per_attempt {
-                        task_profile = task_profile
-                            .with_task_model_call_budget(total_calls as usize)?;
-                    }
-                }
-                if task_write_allowed.is_some() {
-                    let command_was_assigned = task_context
-                        .required_capabilities
-                        .as_deref()
-                        .is_some_and(|capabilities| {
-                            capabilities.iter().any(|item| item == "run_command")
-                        });
-                    task_profile.can_run_command &= command_was_assigned;
-                    if !command_was_assigned {
-                        task_profile.visible_tools.retain(|tool| tool != "run_command");
-                    }
-                    task_profile.write_allowed_paths = effective_write_allowed
-                        .iter().map(|path| path.to_string_lossy().to_string()).collect();
-                    if task_has_no_write_scope {
-                        task_profile.read_only = true;
-                    }
-                }
+        let output = match task_profile.as_ref() {
+            Some(task_profile) => {
                 let raw_step_id = task_context
                     .step_id
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string());
                 let assigned_task_id = task_context.task_id.clone();
-                let refs = task_context
+                let refs: Vec<String> = task_context
                     .read_refs
                     .iter()
                     .chain(task_context.contract_refs.iter())
@@ -201,7 +263,7 @@ impl Worker for AgentSubagentWorker {
                     member_id: format!("m-{}", self.role),
                     step_id: raw_step_id.clone(),
                     task_id: assigned_task_id.clone(),
-                    refs,
+                    refs: refs.clone(),
                     workspace_root: self.workspace.clone(),
                 });
                 let artifact_tool: Arc<dyn Tool> = Arc::new(TeamArtifactReadTool {
@@ -226,6 +288,7 @@ impl Worker for AgentSubagentWorker {
                         team_id: self.team_id.clone(),
                         member_id: format!("m-{}", self.role),
                         task_id: assigned_task_id.clone().unwrap_or_else(|| raw_step_id.clone()),
+                        allowed_source_refs: refs,
                     }));
                 }
                 let tool_started_at = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
@@ -280,7 +343,7 @@ impl Worker for AgentSubagentWorker {
                     provider, approver, abort, depth: 0, model,
                     is_critic: self.is_critic,
                     write_allowed: effective_write_allowed,
-                    profile: task_profile,
+                    profile: task_profile.clone(),
                     agent_config: None,
                     budget_note_override: task_context.model_calls_per_attempt.map(|total| {
                         format!(
@@ -290,14 +353,18 @@ impl Worker for AgentSubagentWorker {
                     }),
                     extra_tools,
                     extra_system_prompt: Some(
-                         "如需获取执行期间新增的团队事实，请调用 team_context_read。需要上游产物全文时使用 team_artifact_read，它仅允许读取直接依赖产物。具备当前任务写权限时可使用 team_context_publish：先读取 revision，再以 expected_revision 发布；冲突后重读。发布结果始终是 candidate/unverified\n".to_string(),
+                         "如需获取执行期间新增的团队事实，请调用 team_context_read。需要上游产物相关正文时使用 team_artifact_read，它仅允许读取当前直接依赖。大产物按 offset_bytes 分页；eof=false 时使用 next_offset_bytes 和 sha256 作为下次 offset_bytes、expected_sha256；不要重复读取第一页，按需读取，确需全文时读到 eof=true。具备当前任务写权限时可使用 team_context_publish：source_refs 仅填写当前任务已分配的 read_refs/contract_refs；带 file_hash 时 source_refs 必须是唯一安全工作区相对路径。先读取 revision，再以 expected_revision 发布；冲突后重读。发布结果始终是 candidate/unverified\n".to_string(),
                     ),
                     event_sink: Some(event_sink),
                     session_store: Some(Arc::clone(&self.session_store)),
-                    worker_session_id: Some(worker_session_id(&self.team_id, assigned_task_id.as_deref().unwrap_or(&raw_step_id))),
+                    worker_session_id: Some(worker_session_id(
+                        &self.team_id,
+                        assigned_task_id.as_deref().unwrap_or(&raw_step_id),
+                        task_context.attempt_id.as_deref().unwrap_or("unbound"),
+                    )),
                     parent_session_id: self.parent_session_id.clone(),
                 };
-                runner.run(&self.workspace, prompt).await
+                runner.run(&self.workspace, &prompt).await
             }
             None => {
                 let runner = SubagentRunner {
@@ -313,7 +380,7 @@ impl Worker for AgentSubagentWorker {
                     model,
                     events: None,
                 };
-                runner.run(&self.workspace, prompt, read_only).await
+                runner.run(&self.workspace, &prompt, read_only).await
             }
         }
         .map_err(|e| format!("agent 子代理执行失败：{e}"))?;
@@ -321,9 +388,9 @@ impl Worker for AgentSubagentWorker {
     }
 }
 
-fn worker_session_id(team_id: &str, task_id: &str) -> String {
+fn worker_session_id(team_id: &str, task_id: &str, attempt_id: &str) -> String {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("{team_id}\0{task_id}").as_bytes());
+    let digest = Sha256::digest(format!("{team_id}\0{task_id}\0{attempt_id}").as_bytes());
     let suffix = digest
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -366,457 +433,33 @@ fn safe_team_tool_event(
     Some((event_name, detail))
 }
 
-fn team_context_fact_is_visible(
-    fact: &owo_agent_protocol::SharedContextFact,
-    task_id: Option<&str>,
-    step_id: &str,
-    refs: &[String],
-) -> bool {
-    fact.task_id.is_none()
-        || fact.task_id.as_deref() == task_id
-        || fact.task_id.as_deref() == Some(step_id)
-        || fact.source_refs.iter().any(|source| refs.contains(source))
-}
-
-fn team_context_fact_freshness(
-    fact: &owo_agent_protocol::SharedContextFact,
-    workspace_root: &std::path::Path,
-) -> &'static str {
-    let Some(expected) = fact.file_hash.as_deref() else {
-        return "untracked";
-    };
-    if fact.source_refs.len() != 1 {
-        return "unverifiable";
-    }
-    let relative = std::path::Path::new(&fact.source_refs[0]);
-    if relative.is_absolute()
-        || !relative
-            .components()
-            .any(|c| matches!(c, std::path::Component::Normal(_)))
-        || relative.components().any(|c| {
-            !matches!(
-                c,
-                std::path::Component::Normal(_) | std::path::Component::CurDir
-            )
-        })
-    {
-        return "stale";
-    }
-    let root = workspace_change_tracker::simplify_path(
-        &workspace_root
-            .canonicalize()
-            .unwrap_or_else(|_| workspace_root.to_path_buf()),
-    );
-    let source = canonicalize_task_path(&root.join(relative));
-    if !source.starts_with(&root) {
-        return "stale";
-    }
-    let Ok(metadata) = std::fs::metadata(&source) else {
-        return "stale";
-    };
-    if !metadata.is_file() {
-        return "stale";
-    }
-    let Ok(bytes) = std::fs::read(&source) else {
-        return "stale";
-    };
-    let actual = format!("sha256:{}", owo_agent_core::CasStore::hash_of(&bytes));
-    if actual.eq_ignore_ascii_case(expected) {
-        "current"
-    } else {
-        "stale"
-    }
-}
-
-fn take_utf8_bytes(value: &str, max_bytes: usize) -> String {
-    value
-        .char_indices()
-        .take_while(|(offset, ch)| offset + ch.len_utf8() <= max_bytes)
-        .map(|(_, ch)| ch)
-        .collect()
-}
-
-fn team_context_read_effect() -> ToolEffect {
-    ToolEffect {
-        tool: "team_context_read".to_string(),
-        class: EffectClass::Read,
-        source: "builtin".to_string(),
-        risk_note: None,
-        annotations: None,
-        host_verified_readonly: true,
-    }
-}
-
-fn team_context_publish_effect() -> ToolEffect {
-    ToolEffect {
-        tool: "team_context_publish".into(),
-        class: EffectClass::Write,
-        source: "builtin".into(),
-        risk_note: Some("发布团队共享事实，使用 revision CAS；保持 candidate/unverified".into()),
-        annotations: None,
-        host_verified_readonly: false,
-    }
-}
-struct TeamContextPublishTool {
-    coordinator: Arc<TeamCoordinator>,
-    team_id: String,
-    member_id: String,
-    task_id: String,
-}
-#[async_trait]
-impl Tool for TeamContextPublishTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::with_effect(
-            "team_context_publish",
-            "使用 expected_revision/CAS 发布当前任务的候选事实，不会提升可信等级。".into(),
-            json!({"type":"object","properties":{
-                "key":{"type":"string","minLength":1,"maxLength":160},
-                "value":{"type":"string","minLength":1,"maxLength":65536},
-                "expected_revision":{"type":"integer","minimum":0},
-                "source_refs":{"type":"array","items":{"type":"string"},"maxItems":8},
-                "file_hash":{"type":"string","pattern":"^sha256:[0-9a-fA-F]{64}$"}},
-                "required":["key","value","expected_revision"],"additionalProperties":false}),
-            Some(team_context_publish_effect()),
-        )
-    }
-    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        let key = args
-            .get("key")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "key 必须是字符串".to_string())?
-            .to_string();
-        let value = args
-            .get("value")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "value 必须是字符串".to_string())?
-            .to_string();
-        let expected_revision = args
-            .get("expected_revision")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "expected_revision 必须是非负整数".to_string())?;
-        let source_refs = args
-            .get("source_refs")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| {
-                        item.as_str()
-                            .map(str::to_string)
-                            .ok_or_else(|| "source_refs 只能包含字符串".to_string())
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let file_hash = args
-            .get("file_hash")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let fact = self
-            .coordinator
-            .publish_team_context_fact(
-                &self.team_id,
-                expected_revision,
-                owo_agent_core::workswarm::SharedContextFactDraft {
-                    key,
-                    value,
-                    producer: self.member_id.clone(),
-                    task_id: Some(self.task_id.clone()),
-                    source_refs,
-                    file_hash,
-                },
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(
-            json!({"key":fact.key,"revision":fact.revision,"producer":fact.producer,
-            "task_id":fact.task_id,"source_refs":fact.source_refs,"file_hash":fact.file_hash,
-            "confidence":fact.confidence,"status":fact.status}),
-        )
-    }
-}
-fn team_artifact_read_effect() -> ToolEffect {
-    ToolEffect {
-        tool: "team_artifact_read".into(),
-        class: EffectClass::Read,
-        source: "builtin".into(),
-        risk_note: None,
-        annotations: None,
-        host_verified_readonly: true,
-    }
-}
-struct TeamArtifactReadTool {
-    coordinator: Arc<TeamCoordinator>,
-    team_id: String,
-    member_id: String,
-    step_id: String,
-}
-#[async_trait]
-impl Tool for TeamArtifactReadTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::with_effect(
-            "team_artifact_read",
-            "按 artifact_id 读取当前步骤直接依赖的产物正文，输出有字节上限。".into(),
-            json!({"type":"object","properties":{
-                "artifact_id":{"type":"string","minLength":1,"maxLength":256},
-                "max_bytes":{"type":"integer","minimum":1,"maximum":65536}},
-                "required":["artifact_id"],"additionalProperties":false}),
-            Some(team_artifact_read_effect()),
-        )
-    }
-    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        let id = args
-            .get("artifact_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| "artifact_id 必须是非空字符串".to_string())?;
-        let max = args
-            .get("max_bytes")
-            .and_then(Value::as_u64)
-            .unwrap_or(16 * 1024)
-            .clamp(1, 64 * 1024) as usize;
-        self.coordinator
-            .read_dependency_artifact(&self.team_id, &self.member_id, &self.step_id, id, max)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-struct TeamContextReadTool {
-    coordinator: Arc<TeamCoordinator>,
-    team_id: String,
-    member_id: String,
-    step_id: String,
-    task_id: Option<String>,
-    refs: Vec<String>,
-    workspace_root: PathBuf,
-}
-
-#[async_trait]
-impl Tool for TeamContextReadTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::with_effect(
-            "team_context_read",
-            "按需读取当前任务相关的版本化团队事实正文；返回 revision 和来源引用。".to_string(),
-            json!({"type":"object","properties":{
-                "key":{"type":"string"},
-                "limit":{"type":"integer","minimum":1,"maximum":32}
-            },"additionalProperties":false}),
-            Some(team_context_read_effect()),
-        )
-    }
-
-    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        let key_filter = args.get("key").and_then(Value::as_str);
-        let limit = args
-            .get("limit")
-            .and_then(Value::as_u64)
-            .unwrap_or(12)
-            .clamp(1, 32) as usize;
-        let snapshot = self
-            .coordinator
-            .read_team_context(&self.team_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut latest_keys = HashSet::new();
-        let mut facts = Vec::new();
-        let mut remaining_bytes = 16 * 1024usize;
-        let mut context_revision = snapshot.revision;
-        for fact in snapshot.facts.iter().rev() {
-            if !latest_keys.insert(fact.key.as_str())
-                || (fact.status != "candidate" && fact.status != "confirmed")
-                || key_filter.is_some_and(|key| key != fact.key)
-            {
-                continue;
-            }
-            if !team_context_fact_is_visible(
-                fact,
-                self.task_id.as_deref(),
-                &self.step_id,
-                &self.refs,
-            ) {
-                continue;
-            }
-            let freshness = team_context_fact_freshness(fact, &self.workspace_root);
-            if freshness == "stale" {
-                if let Ok(stale) = self
-                    .coordinator
-                    .mark_team_context_fact_stale(
-                        &self.team_id,
-                        &fact.key,
-                        fact.revision,
-                        context_revision,
-                    )
-                    .await
-                {
-                    context_revision = stale.revision;
-                } else if let Ok(current) = self.coordinator.read_team_context(&self.team_id).await
-                {
-                    context_revision = current.revision;
-                }
-                continue;
-            }
-            if fact.file_hash.is_some() && freshness != "current" {
-                continue;
-            }
-            if facts.len() >= limit || remaining_bytes == 0 {
-                break;
-            }
-            let hash = fact
-                .value_ref
-                .strip_prefix("cas://sha256:")
-                .ok_or_else(|| "共享事实 CAS 引用格式无效".to_string())?;
-            let full = self
-                .coordinator
-                .cas()
-                .get_text(hash)
-                .ok_or_else(|| format!("共享事实正文缺失：{}", fact.key))?;
-            let value = take_utf8_bytes(&full, remaining_bytes);
-            remaining_bytes = remaining_bytes.saturating_sub(value.len());
-            facts.push(json!({
-                "key":fact.key,"value":value,"revision":fact.revision,"producer":fact.producer,
-                "task_id":fact.task_id,"source_refs":fact.source_refs,"file_hash":fact.file_hash,
-                "confidence":fact.confidence,"status":fact.status,"freshness":freshness
-            }));
-        }
-        Ok(json!({"team_id":self.team_id,"member_id":self.member_id,
-            "step_id":self.step_id,"revision":context_revision,"facts":facts}))
-    }
-}
-
-fn canonicalize_task_path(path: &std::path::Path) -> PathBuf {
-    let mut current = path.to_path_buf();
-    let mut suffix = Vec::new();
-    while !current.exists() {
-        let Some(name) = current.file_name().map(std::ffi::OsString::from) else {
-            break;
-        };
-        suffix.push(name);
-        if !current.pop() {
-            break;
-        }
-    }
-    let mut canonical = current.canonicalize().unwrap_or(current);
-    for part in suffix.iter().rev() {
-        canonical.push(part);
-    }
-    workspace_change_tracker::simplify_path(&canonical)
-}
-
 fn task_lacks_file_write_capability(task: &ResolvedTaskContext) -> bool {
     task.lacks_file_write_capability()
 }
 
-/// Narrow a role profile to the exact capabilities approved on this TaskGraph task.
+/// Compatibility adapter; the shared capability narrowing lives in Core.
 fn apply_task_capability_scope(
     profile: &mut WorkerProfile,
     task: &ResolvedTaskContext,
     task_has_no_write_scope: bool,
 ) {
-    let Some(capabilities) = task.required_capabilities.as_deref() else {
-        profile.read_only = true;
-        profile.can_run_command = false;
-        profile
-            .visible_tools
-            .retain(|tool| matches!(tool.as_str(), "read_file" | "list_dir" | "search_files"));
-        if profile.visible_tools.is_empty() {
-            profile
-                .visible_tools
-                .push("__owo_no_task_tool__".to_string());
-        }
-        return;
-    };
-    let required = capabilities.iter().map(String::as_str).collect::<HashSet<_>>();
-    profile.verification_timeout_ms = task
-        .verification
-        .as_ref()
-        .and_then(|plan| plan.get("requirements"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|requirement| {
-            requirement.get("validator_id").and_then(Value::as_str)
-                == Some("workspace-command-success-v1")
-        })
-        .filter_map(|requirement| {
-            requirement
-                .pointer("/resources/timeout_ms")
-                .and_then(Value::as_u64)
-        })
-        .min();
-    let can_write_files = !task_has_no_write_scope
-        && (required.contains("write_file") || required.contains("apply_patch"));
-    profile
-        .visible_tools
-        .retain(|tool| required.contains(tool.as_str()));
-    profile.can_run_command =
-        profile.can_run_command && can_write_files && required.contains("run_command");
-    if !can_write_files {
-        profile.read_only = true;
-        profile
-            .visible_tools
-            .retain(|tool| !matches!(tool.as_str(), "write_file" | "apply_patch"));
-    }
-    // WorkerProfile uses an empty list to mean no role-level filter. Keep an
-    // impossible registered name so an empty TaskGraph capability set means no
-    // workspace tools, rather than restoring the role's broader tool surface.
-    if profile.visible_tools.is_empty() {
-        profile
-            .visible_tools
-            .push("__owo_no_task_tool__".to_string());
-    }
+    profile.apply_task_capability_scope(task, task_has_no_write_scope);
 }
 
-/// Resolve a task-local allowlist and intersect it with the role/workspace allowlist.
+fn prompt_workspace_write_paths(
+    workspace_root: &std::path::Path,
+    paths: &[PathBuf],
+) -> Vec<String> {
+    WorkerProfile::workspace_relative_write_paths(workspace_root, paths)
+}
+
+/// Compatibility adapter for existing server call sites and regression tests.
 fn assigned_task_write_allowlist(
     task: &ResolvedTaskContext,
     workspace_root: &std::path::Path,
     role_allowed: &[PathBuf],
 ) -> Result<Option<Vec<PathBuf>>, String> {
-    let Some(paths) = task.write_paths.as_ref() else {
-        return Ok(None);
-    };
-    // canonicalize() on Windows returns a verbatim path (\\?\...). Normalize
-    // the workspace root exactly like the candidate before prefix checks.
-    let workspace_root = workspace_change_tracker::simplify_path(
-        &workspace_root
-            .canonicalize()
-            .unwrap_or_else(|_| workspace_root.to_path_buf()),
-    );
-    let mut resolved = Vec::with_capacity(paths.len());
-    for raw in paths {
-        let relative = std::path::Path::new(raw);
-        if raw.trim().is_empty()
-            || relative.is_absolute()
-            || !relative
-                .components()
-                .any(|part| matches!(part, std::path::Component::Normal(_)))
-            || relative.components().any(|part| {
-                !matches!(
-                    part,
-                    std::path::Component::Normal(_) | std::path::Component::CurDir
-                )
-            })
-        {
-            return Err(format!("任务写范围路径无效：{raw}"));
-        }
-        let absolute = workspace_root.join(relative);
-        let canonical = canonicalize_task_path(&absolute);
-        if !canonical.starts_with(&workspace_root) {
-            return Err(format!("任务写范围越出工作区：{raw}"));
-        }
-        if !role_allowed.is_empty()
-            && !role_allowed
-                .iter()
-                .any(|base| canonical.starts_with(workspace_change_tracker::simplify_path(base)))
-        {
-            return Err(format!("任务写范围超出角色/团队范围：{raw}"));
-        }
-        resolved.push(canonical);
-    }
-    resolved.sort();
-    resolved.dedup();
-    Ok(Some(resolved))
+    WorkerProfile::resolve_task_write_allowlist(task, workspace_root, role_allowed)
 }
 
 #[cfg(test)]
@@ -824,11 +467,34 @@ mod team_context_scope_tests {
     use super::*;
 
     #[test]
-    fn worker_sessions_are_stable_per_team_and_task() {
-        let first = worker_session_id("team-a", "task-a");
-        assert_eq!(first, worker_session_id("team-a", "task-a"));
-        assert_ne!(first, worker_session_id("team-a", "task-b"));
-        assert_ne!(first, worker_session_id("team-b", "task-a"));
+    fn prompt_write_paths_are_relative_and_never_expose_outside_paths() {
+        let workspace = tempfile::tempdir().unwrap();
+        let allowed = vec![
+            workspace.path().join("apps/api"),
+            workspace.path().join("src/lib.rs"),
+        ];
+        assert_eq!(
+            prompt_workspace_write_paths(workspace.path(), &allowed),
+            vec!["apps/api", "src/lib.rs"]
+        );
+        let outside = vec![workspace
+            .path()
+            .parent()
+            .unwrap()
+            .join("outside-secret-path")];
+        assert_eq!(
+            prompt_workspace_write_paths(workspace.path(), &outside),
+            vec!["<outside-workspace-denied>"]
+        );
+    }
+
+    #[test]
+    fn worker_sessions_are_stable_per_team_task_and_attempt() {
+        let first = worker_session_id("team-a", "task-a", "attempt-1");
+        assert_eq!(first, worker_session_id("team-a", "task-a", "attempt-1"));
+        assert_ne!(first, worker_session_id("team-a", "task-a", "attempt-2"));
+        assert_ne!(first, worker_session_id("team-a", "task-b", "attempt-1"));
+        assert_ne!(first, worker_session_id("team-b", "task-a", "attempt-1"));
         assert!(first.starts_with("worker-"));
         assert_eq!(first.len(), 71);
     }
@@ -910,7 +576,10 @@ mod team_context_scope_tests {
             false,
         );
         assert!(empty.read_only);
-        assert_eq!(empty.visible_tools, vec!["__owo_no_task_tool__".to_string()]);
+        assert_eq!(
+            empty.visible_tools,
+            vec!["__owo_no_task_tool__".to_string()]
+        );
         assert!(empty.build_registry(Vec::new()).specs().is_empty());
 
         assert!(task_lacks_file_write_capability(&resolved_task(&json!({
@@ -992,8 +661,8 @@ mod team_context_scope_tests {
         ));
     }
 
-    #[test]
-    fn context_fact_freshness_detects_changes_and_rejects_escaping_refs() {
+    #[tokio::test]
+    async fn context_fact_freshness_detects_changes_and_rejects_escaping_refs() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("src")).unwrap();
         let source = root.path().join("src/api.rs");
@@ -1014,22 +683,28 @@ mod team_context_scope_tests {
             };
         let current = fact(vec!["src/api.rs".into()], Some(format!("sha256:{digest}")));
         assert_eq!(
-            team_context_fact_freshness(&current, root.path()),
+            team_context_fact_freshness(&current, root.path()).await,
             "current"
         );
         std::fs::write(&source, b"changed").unwrap();
-        assert_eq!(team_context_fact_freshness(&current, root.path()), "stale");
+        assert_eq!(
+            team_context_fact_freshness(&current, root.path()).await,
+            "stale"
+        );
         let escape = fact(
             vec!["../outside.rs".into()],
             Some(format!("sha256:{digest}")),
         );
-        assert_eq!(team_context_fact_freshness(&escape, root.path()), "stale");
+        assert_eq!(
+            team_context_fact_freshness(&escape, root.path()).await,
+            "stale"
+        );
         let ambiguous = fact(
             vec!["src/api.rs".into(), "api".into()],
             Some(format!("sha256:{digest}")),
         );
         assert_eq!(
-            team_context_fact_freshness(&ambiguous, root.path()),
+            team_context_fact_freshness(&ambiguous, root.path()).await,
             "unverifiable"
         );
     }
@@ -1278,12 +953,7 @@ impl Worker for TrackedRoleWorker {
         let violation =
             workspace_change_tracker::check_whitelist(&changed, &tracking.root, &tracking.allowed)
                 .err();
-        let step = input
-            .get("_workswarm")
-            .and_then(|meta| meta.get("step_id"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
+        let step = step_id.to_string();
         let (record, record_error) = match tracking
             .record(&step, &post, &changed, violation.as_deref(), Some(&base))
             .await
@@ -1344,10 +1014,7 @@ impl Worker for TrackedRoleWorker {
             &tracking.root,
             record.as_ref().and_then(|record| record.diff_ref.clone()),
         );
-        change_set.attempt_id = workswarm
-            .and_then(|meta| meta.get("attempt_id"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        change_set.attempt_id = task_context.attempt_id.clone();
         let store = owo_agent_core::change_set_store::ChangeSetStore::new(&tracking.run_dir);
         let changeset_error = match store.save_upsert(&change_set) {
             Ok(()) => {
@@ -1408,6 +1075,7 @@ impl Worker for TrackedRoleWorker {
 #[cfg(test)]
 mod worker_context_integration_tests {
     use super::*;
+    use owo_agent_core::tools::ToolContext;
 
     #[tokio::test]
     async fn worker_context_publish_is_visible_on_next_read_and_prompt_slice() {
@@ -1464,6 +1132,7 @@ mod worker_context_integration_tests {
             team_id: team.team_id.clone(),
             member_id: "m-runner".into(),
             task_id: step_id.clone(),
+            allowed_source_refs: vec!["src/api.rs".into()],
         };
         let published = publisher
             .run(

@@ -36,6 +36,17 @@
   };
 
   function backendFromDiagnostics(diag, streamState) {
+    const hasDesktopBridge = !!(
+      (global.__TAURI__ && global.__TAURI__.core && typeof global.__TAURI__.core.invoke === "function") ||
+      (global.__TAURI_INTERNALS__ && typeof global.__TAURI_INTERNALS__.invoke === "function")
+    );
+    if (!diag && !hasDesktopBridge) {
+      return {
+        text: "浏览器预览",
+        tone: "muted",
+        detail: "此页面没有 Electron 桌面诊断连接；页眉显示的服务状态反映 API 连通性",
+      };
+    }
     const info = diag || {};
     const state = String(info.state || "unknown");
     const code = info.errorCode ? String(info.errorCode) : null;
@@ -50,7 +61,7 @@
     if (state === "starting" || state === "restarting") return { text: "正在启动", tone: "warn" };
     if (state === "no_workspace") return { text: "未选工作区", tone: "warn" };
     if (state === "stopped") return { text: "已停止", tone: "muted" };
-    return { text: "检查中", tone: "muted" };
+    return { text: "诊断重试中", tone: "warn", detail: info.message || "桌面服务状态暂未返回" };
   }
 
   // 稳定码 → 用户术语（与 §4.7「相同错误码相同术语」同源，不在此页另起口径）。
@@ -97,6 +108,19 @@
     return null;
   }
 
+  function modelLabel(value, keys) {
+    if (typeof value === "string" || typeof value === "number") {
+      const text = String(value).trim();
+      return text === "[object Object]" || text === "undefined" || text === "null" ? "" : text;
+    }
+    if (!value || typeof value !== "object") return "";
+    for (const key of keys) {
+      const text = modelLabel(value[key], keys);
+      if (text) return text;
+    }
+    return "";
+  }
+
   function modelFromCache() {
     // 两份真相不能混着说（R3-B 缺陷 23 的同族问题，真机截图抓到）：
     // 密钥由壳注入 sidecar 环境时，壳自己的 get_provider_status 仍会报
@@ -105,14 +129,16 @@
     // 「未配置」当结论标红，必须说明这是壳侧视图。
     if (cache.model) {
       const info = cache.model;
-      const label = [info.provider, info.model].filter(Boolean).join(" · ") || "已配置";
+      const provider = modelLabel(info.provider, ["provider", "id", "name"]);
+      const model = modelLabel(info.model, ["model", "id", "name"]);
+      const label = [provider, model].filter(Boolean).join(" · ") || "已配置";
       return { text: label, tone: "ok", detail: "来源：core 实际生效配置（设置页水合）" };
     }
     const entry = cache.provider.value;
     if (!entry) return { text: "读取中…", tone: "muted" };
     if (entry.error) return { text: "未读取", tone: "warn", detail: entry.error };
-    const model = entry.model || "未设置";
-    const provider = entry.provider || "未知";
+    const model = modelLabel(entry.model, ["model", "id", "name"]) || "未设置";
+    const provider = modelLabel(entry.provider, ["provider", "id", "name"]) || "未知";
     const coreReady = String((global.__owoCoreDiagnostics || {}).state || "") === "ready";
     // 未显式选择提供商但环境里有凭据：壳与 core 现在同一口径判"可用"（provider.rs
     // 的"显式选择 > 环境凭据"），这里必须说清是**内置端点兜底**，而不是谎称用户选过。
@@ -225,7 +251,7 @@
       (result) => {
         cache.workspace.pending = false;
         cache.workspace.at = Date.now();
-        const root = result && typeof result.workspace === "string" ? result.workspace : "";
+        const root = result && result.configured === false ? "" : result && typeof result.workspace === "string" ? result.workspace : "";
         // 壳报空也要清缓存：引导页里用户撤销/换目录后，状态条不得停留在旧值上。
         cache.workspace.root = root;
         repaint();

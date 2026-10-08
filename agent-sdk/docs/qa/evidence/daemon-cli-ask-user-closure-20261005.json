@@ -1,0 +1,23 @@
+{
+  "evidence_id": "daemon-cli-ask-user-closure-20261005",
+  "scope": "source-only",
+  "claim": "Daemon REPL and TUI now collect ask_user answers and submit them through the existing daemon route; TUI keeps reading SSE while the answer is pending and clears pending UI state on user/timeout terminal events.",
+  "verification": [
+    "Rust formatting checks and git diff --check are recorded separately.",
+    "Python source assertions verify endpoint wiring, both CLI input paths, TUI asynchronous submission/state handling and regression-test sources."
+  ],
+  "limits": [
+    "No Cargo compilation or Rust tests were run per current user instruction.",
+    "No terminal/TUI live interaction, daemon request or timeout/abort scenario was executed.",
+    "This closes source-level interaction wiring only; runtime correctness remains unverified."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-client/src/turns.rs": "4c1528821f108e5a6eb76fd5c4cc152bce4023692bb4f1a272e7ed3a1aa27077",
+    "crates/owo-agent-client/tests/client_contract_tests.rs": "76a536054e05e38ab8b45f7f2c973fae87430bbbe6eb34b4a37f3f18c34c178f",
+    "crates/owo-agent-cli/src/commands/repl_daemon.rs": "2fe8aa6173384121b8eae1ba8df72b632e5b50ddc1500ee4b26ce3bdfb7286e6",
+    "crates/owo-agent-cli/src/tui.rs": "ce34f0579795b6a594a21c0129af3ccb12d730cb0ebfd52507e2f231cfb6722a",
+    "crates/owo-agent-cli/src/ui_output.rs": "25bdd2ef9323313444adcdba4f2be8d987a06827dbc4cbba68a269c6bf1fa686",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "d95bd96e7dc0ebd5498b39d3a39da50fd9386fbeba58ab7d4d95f4cc2e2421f7"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-05",
+  "scope": "untrusted freeze.json task entries",
+  "finding": "verify_freeze previously read bundle.dir.join(freeze_entry.file) before proving that file belonged to the validated suite; equal entry count also allowed duplicate paths to conceal omissions.",
+  "change": [
+    "Match each file entry against the exact suite-owned relative-path map before filesystem access.",
+    "Reject unknown/out-of-suite paths without reading them.",
+    "Reject duplicate entries and report every missing suite task.",
+    "Require file id to match the case bound to that path.",
+    "Require permissions_sha256 and continue verifying its value."
+  ],
+  "regressions_added": [
+    "unknown traversal path is rejected and its suite task is reported missing",
+    "duplicate file entry is rejected and omitted suite task is reported missing",
+    "task id/file mismatch is rejected",
+    "missing permissions_sha256 is rejected"
+  ],
+  "validation": {
+    "rustfmt": {
+      "status": "passed",
+      "changed_rust_sources": 42
+    },
+    "cargo_test": "not run; resource_limited",
+    "resource_snapshot": {
+      "free_physical_gib": 4.71,
+      "memory_used_percent": 85.1,
+      "gate": "requires at least 6 GiB free and memory use below 80%"
+    },
+    "source_order_check": "passed; suite membership lookup precedes the only freeze-supplied path join in verify_freeze"
+  },
+  "limitations": [
+    "Regression test source has not been compiled or executed."
+  ]
+}

@@ -2,6 +2,50 @@ use crate::goal::GoalBudget;
 use crate::plan::{VerificationPlanV1, VerificationSpec};
 use serde_json::Value;
 use std::path::Path;
+
+/// Resolve the one effective model shared by model-driven team roles. Explicit
+/// per-role input overrides role and request defaults, matching plan construction.
+pub(super) fn resolve_team_model_binding(
+    roles: &[super::RoleSpec],
+    request_model: Option<&str>,
+    provider_model: &str,
+) -> Option<String> {
+    let request_model = request_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let provider_model = provider_model.trim();
+    let mut effective = None::<String>;
+    for role in roles
+        .iter()
+        .filter(|role| !role.assignee.eq_ignore_ascii_case("human"))
+    {
+        let input_model = role
+            .extra_input
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let role_model = role
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let model = input_model
+            .or(role_model)
+            .or(request_model)
+            .unwrap_or(provider_model);
+        if model.is_empty() {
+            return None;
+        }
+        match effective.as_deref() {
+            None => effective = Some(model.to_string()),
+            Some(existing) if existing == model => {}
+            Some(_) => return None,
+        }
+    }
+    effective
+}
+
 pub(super) fn now_ts() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -16,10 +60,9 @@ pub(super) fn now_ms() -> u64 {
 /// 十期·四路：把三路冻结的收益策略 gate 接入真实运行入口（create_team_run）。
 ///
 /// - 策略加载：`OWO_TEAM_POLICY` 环境变量指向的 JSON；缺省尝试
-///   `evals/v1/team-policy.json`（工作区根/当前目录向上探测）；再缺省用
-///   [`crate::team_benefit::TeamPolicy::embedded_defaults`]（与 evals/v1 语义一致，
-///   测试与无配置文件时使用）。解析失败一律回退内嵌默认并留 warning——绝不因
-///   策略文件损坏阻断团队创建。
+///   `evals/v1/team-policy.json`（工作区根/当前目录向上探测）；没有配置文件时用
+///   [`crate::team_benefit::TeamPolicy::embedded_defaults`]。配置无效会继续找有效替代；
+///   若存在无效配置但没有有效替代，则回退内置阈值并关闭 Auto Team，显式 Force Team 不受影响。
 /// - 证据加载：`OWO_TEAM_PAIRED_REPORT` 指向二路生成的配对对照报告（可选）。
 ///   报告解析/组匹配失败 → 视为无证据（保守 single，附可展示理由）。
 /// - 判定：`gate_auto(policy, task_group, verdict, bindings, now)`；无证据/不达标/
@@ -53,12 +96,17 @@ pub(super) fn benefit_gate_for_runtime(
         })
         .unwrap_or_else(|| crate::gateway::DEFAULT_MODEL_ID.to_string());
     let model_binding = resolve_team_model_binding(roles, request_model, &provider_model);
-    let current = model_binding.as_ref().map(|model| crate::team_benefit::BenefitBindings {
-        model: Some(model.clone()),
-        template: template_id.map(str::to_string),
-        task_set: None,
-        strategy_version: policy.strategy_version.clone(),
-    });
+    let current = model_binding
+        .as_ref()
+        .map(|model| crate::team_benefit::BenefitBindings {
+            model: Some(model.clone()),
+            template: template_id.map(str::to_string),
+            task_set: std::env::var("OWO_TEAM_TASK_SET")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            strategy_version: policy.strategy_version.clone(),
+        });
     let gate = crate::team_benefit::gate_auto(
         &policy,
         &task_group,
@@ -68,20 +116,50 @@ pub(super) fn benefit_gate_for_runtime(
     );
     let evidence = if model_binding.is_none() {
         "无法确认唯一模型，配对报告不背书（默认 single）".to_string()
+    } else if gate.allow_team {
+        "配对报告与当前模型、模板、任务集和策略版本匹配".to_string()
     } else if verdict.is_some() {
-        "有配对报告证据".to_string()
+        "存在配对报告，但未通过收益、样本或配置绑定门槛；默认 single".to_string()
     } else {
         "无配对报告证据（默认 single，等二路验收报告）".to_string()
     };
     (gate, verdict, evidence)
 }
 
+fn disable_auto_team(policy: &mut crate::team_benefit::TeamPolicy) {
+    for group in policy.groups.values_mut() {
+        group.allow_auto_team = false;
+    }
+}
+
+#[cfg(test)]
+mod policy_fallback_tests {
+    use super::disable_auto_team;
+    use crate::team_benefit::TeamPolicy;
+
+    #[test]
+    fn invalid_policy_fallback_keeps_manual_team_but_disables_auto_groups() {
+        let mut policy = TeamPolicy::embedded_defaults();
+        let group_count = policy.groups.len();
+        assert!(policy.groups.values().any(|group| group.allow_auto_team));
+        disable_auto_team(&mut policy);
+        assert_eq!(policy.groups.len(), group_count);
+        assert!(policy.groups.values().all(|group| !group.allow_auto_team));
+    }
+}
+
 /// 运行时策略加载（见 [`benefit_gate_for_runtime`] 说明）。
 pub(super) fn load_team_policy_for_runtime(run_dir: &Path) -> crate::team_benefit::TeamPolicy {
     use crate::team_benefit::TeamPolicy;
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    let mut invalid_config_seen = false;
     if let Ok(path) = std::env::var("OWO_TEAM_POLICY") {
-        candidates.push(std::path::PathBuf::from(path));
+        let path = std::path::PathBuf::from(path);
+        if path.as_os_str().is_empty() || !path.is_file() {
+            tracing::warn!(candidate = %path.display(), "显式 OWO_TEAM_POLICY 不存在，禁用 Auto Team 回退");
+            invalid_config_seen = true;
+        }
+        candidates.push(path);
     }
     // 工作区探测：run_dir 向上找 agent-sdk/evals/v1/team-policy.json；
     // 再加 cwd 相对路径两种写法。
@@ -95,16 +173,26 @@ pub(super) fn load_team_policy_for_runtime(run_dir: &Path) -> crate::team_benefi
         }
     }
     for candidate in candidates {
-        if let Ok(text) = std::fs::read_to_string(&candidate) {
-            match TeamPolicy::from_json(&text) {
+        match std::fs::read_to_string(&candidate) {
+            Ok(text) => match TeamPolicy::from_json(&text) {
                 Ok(policy) => return policy,
                 Err(error) => {
-                    tracing::warn!(candidate = %candidate.display(), %error, "team-policy.json 解析失败，回退内嵌默认");
+                    tracing::warn!(candidate = %candidate.display(), %error, "team-policy.json 无效；继续查找有效配置");
+                    invalid_config_seen = true;
                 }
+            },
+            Err(error) if candidate.is_file() => {
+                tracing::warn!(candidate = %candidate.display(), %error, "team-policy.json 不可读取");
+                invalid_config_seen = true;
             }
+            Err(_) => {}
         }
     }
-    TeamPolicy::embedded_defaults()
+    let mut policy = TeamPolicy::embedded_defaults();
+    if invalid_config_seen {
+        disable_auto_team(&mut policy);
+    }
+    policy
 }
 
 /// 运行时证据加载：`OWO_TEAM_PAIRED_REPORT` → 二路配对对照报告 → 命中任务组 →

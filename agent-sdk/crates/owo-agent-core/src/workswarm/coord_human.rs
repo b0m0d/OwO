@@ -111,19 +111,16 @@ impl TeamCoordinator {
         if !self.is_interrupt_candidate(team_id, team.status) {
             return Ok(None);
         }
-        let steps: Vec<String> = state
-            .records
-            .values()
-            .filter(|r| r.status == StepStatus::Running)
-            .map(|r| r.step_id.clone())
-            .collect();
-        // Running 步骤转为可恢复状态（Aborted）；其余记录不触碰。
-        for r in state.records.values_mut() {
-            if r.status == StepStatus::Running {
-                r.status = StepStatus::Aborted;
-                r.error = Some("进程重启：执行被中断（可 continue / retry 显式恢复）".to_string());
-            }
-        }
+        // 仅将崩溃前仍 Running 的步骤标记为可恢复中断；已完成记录不触碰。
+        let steps = match super::run_state::apply_run_execution_event(
+            &mut state,
+            super::run_state::RunExecutionEvent::MarkInterrupted {
+                error: "进程重启：执行被中断（可 continue / retry 显式恢复）".to_string(),
+            },
+        ) {
+            Ok(super::run_state::RunExecutionEffect::RunInterrupted(steps)) => steps,
+            _ => unreachable!("interruption must produce the matching run-state effect"),
+        };
         self.persist_state(&state)?;
         let record = InterruptedRun {
             team_id: team_id.to_string(),
@@ -262,24 +259,14 @@ impl TeamCoordinator {
         closure
     }
 
-    /// 合并阶段子状态到完整状态（仅阶段内步骤记录 + 计数器增量；已完成步骤记录不被覆盖）。
-    pub(crate) fn merge_phase_into_full(&self, full: &mut GoalRunState, sub: &GoalRunState) {
-        let sub_ids: HashSet<String> = sub.plan.steps.iter().map(|s| s.id.clone()).collect();
-        for (id, sr) in &sub.records {
-            if !sub_ids.contains(id) {
-                continue;
-            }
-            if let Some(fr) = full.records.get_mut(id) {
-                if fr.status == StepStatus::Succeeded {
-                    continue; // 已完成永不回退
-                }
-                *fr = sr.clone();
-            }
-        }
-        full.steps_taken = full.steps_taken.saturating_add(sub.steps_taken);
-        full.total_retries = full.total_retries.saturating_add(sub.total_retries);
-        if sub.goal.error.is_some() {
-            full.goal.error = sub.goal.error.clone();
+    /// Merge a phase projection through the shared durable run-state reducer.
+    pub(crate) fn merge_phase_records_into_full(full: &mut GoalRunState, sub: &GoalRunState) {
+        match super::run_state::apply_run_execution_event(
+            full,
+            super::run_state::RunExecutionEvent::PhaseProjection(sub),
+        ) {
+            Ok(super::run_state::RunExecutionEffect::PhaseProjected) => {}
+            _ => unreachable!("phase projection must produce the matching effect"),
         }
     }
 }
@@ -288,7 +275,36 @@ impl TeamCoordinator {
 mod downstream_recheck_tests {
     use super::TeamCoordinator;
     use crate::goal::{Goal, GoalRunState};
-    use crate::plan::{Plan, StepSpec};
+    use crate::plan::{Plan, StepSpec, StepStatus};
+
+    #[test]
+    fn phase_projection_merge_never_mutates_durable_run_budget_counters() {
+        let mut plan = Plan::new("plan-budget-merge", "goal-budget-merge");
+        plan.add_step(StepSpec::new("step-a", "writer"));
+        let goal = Goal::new("goal-budget-merge", "budget ownership");
+        let mut durable = GoalRunState::new(goal.clone(), plan.clone());
+        durable.execution_epoch = 7;
+        durable.steps_taken = 8;
+        durable.total_retries = 3;
+        let durable_record = durable.records.get_mut("step-a").unwrap();
+        durable_record.attempt_id = Some("attempt-current".to_string());
+        durable_record.phase_epoch = Some(7);
+
+        let mut phase = GoalRunState::new(goal, plan);
+        phase.execution_epoch = 7;
+        phase.steps_taken = 5;
+        phase.total_retries = 4;
+        let phase_record = phase.records.get_mut("step-a").unwrap();
+        phase_record.status = StepStatus::Succeeded;
+        phase_record.attempt_id = Some("attempt-current".to_string());
+        phase_record.phase_epoch = Some(7);
+
+        TeamCoordinator::merge_phase_records_into_full(&mut durable, &phase);
+
+        assert_eq!(durable.records["step-a"].status, StepStatus::Succeeded);
+        assert_eq!(durable.steps_taken, 8);
+        assert_eq!(durable.total_retries, 3);
+    }
 
     #[test]
     fn rework_invalidates_successful_transitive_dependents() {

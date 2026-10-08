@@ -847,29 +847,98 @@ pub(crate) struct GoalState {
     pub done: bool,
 }
 
-/// `/goal` 最大自动推进轮数（env `OWO_GOAL_MAX_ITERATIONS`，默认 25）。
+#[derive(Debug, Clone)]
+pub(crate) struct GoalTurnResult {
+    pub final_text: Option<String>,
+    pub completion_status: owo_agent_protocol::CompletionStatusV1,
+    pub failed: bool,
+}
+
+pub(crate) fn goal_claim_is_accepted(result: &GoalTurnResult) -> bool {
+    !result.failed
+        && result.final_text.as_deref().is_some_and(goal_is_done)
+        && matches!(
+            result.completion_status,
+            owo_agent_protocol::CompletionStatusV1::ResponseComplete
+                | owo_agent_protocol::CompletionStatusV1::Accepted
+        )
+}
+
+pub(crate) fn goal_continue_prompt_after_status(
+    objective: &str,
+    iteration: usize,
+    status: owo_agent_protocol::CompletionStatusV1,
+) -> String {
+    let status_note = match status {
+        owo_agent_protocol::CompletionStatusV1::ResponseComplete => {
+            "宿主确认本回合没有候选文件变更。继续推进目标；只有整体目标确已完成才输出完成标记。"
+        }
+        owo_agent_protocol::CompletionStatusV1::Candidate => {
+            "宿主只确认候选变更存在，尚未通过验收。请继续登记并执行真实行为验证，修复失败项；未被宿主接受前不要输出完成标记。"
+        }
+        owo_agent_protocol::CompletionStatusV1::Accepted => {
+            "宿主已接受本回合候选版本。检查整体目标是否全部完成；仍有任务则继续，否则输出完成标记。"
+        }
+        owo_agent_protocol::CompletionStatusV1::Unverified => {
+            "宿主认为验收证据缺失或过期。请补齐当前版本所需的行为验证或评审并修复；未通过前不要输出完成标记。"
+        }
+        owo_agent_protocol::CompletionStatusV1::Blocked => {
+            "宿主验收发现失败项或阻断问题。请分析原因、修复并对最终版本重新验证；阻断未解除前不要输出完成标记。"
+        }
+        owo_agent_protocol::CompletionStatusV1::Aborted => {
+            "当前回合已中止。不要声称目标完成。"
+        }
+    };
+    format!(
+        "{}\n\n宿主完成状态：{:?}。{}",
+        goal_continue_prompt(objective, iteration),
+        status,
+        status_note
+    )
+}
+
+/// `/goal` 最大自动推进轮数（env `OWO_GOAL_MAX_ITERATIONS`；默认 0 表示不设上限）。
 pub(crate) fn goal_max_iterations() -> usize {
     std::env::var("OWO_GOAL_MAX_ITERATIONS")
         .ok()
         .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(25)
+        .unwrap_or(0)
+}
+
+pub(crate) fn goal_iteration_limit_reached(iterations: usize, max_iterations: usize) -> bool {
+    max_iterations > 0 && iterations >= max_iterations
+}
+
+pub(crate) fn goal_iteration_label(max_iterations: usize) -> String {
+    if max_iterations == 0 {
+        "不限".to_string()
+    } else {
+        max_iterations.to_string()
+    }
 }
 
 /// 目标模式首轮提示。
 pub(crate) fn goal_first_prompt(objective: &str) -> String {
     format!(
-        "【目标模式】目标：{objective}\n\n请开始推进该目标。完成后，在回复的**最后一行单独**输出 \
-         {GOAL_DONE_MARKER}；未完成时不要输出该标记，继续推进。"
+        "【目标模式】目标：{objective}\n\n请开始推进该目标。模型判断整体目标已完成时，可在回复的**最后一行单独**输出 \
+         {GOAL_DONE_MARKER}；宿主会独立检查本回合状态，只有 Accepted 或 ResponseComplete 才会结束目标，否则会反馈问题并继续推进。"
     )
 }
 
 /// 目标模式续推提示。
 pub(crate) fn goal_continue_prompt(objective: &str, iteration: usize) -> String {
     format!(
-        "【目标模式·第 {iteration} 轮】目标：{objective}\n\n请继续推进未完成部分。若目标已全部完成，\
-         在回复的**最后一行单独**输出 {GOAL_DONE_MARKER}；否则继续推进，不要输出该标记。"
+        "【目标模式·第 {iteration} 轮】目标：{objective}\n\n请继续推进未完成部分。模型判断整体目标已完成时，在回复的**最后一行单独**输出 \
+         {GOAL_DONE_MARKER}；宿主会独立核对本回合状态，未接受时将反馈问题并继续推进。"
     )
+}
+
+pub(crate) fn goal_is_done(final_text: &str) -> bool {
+    final_text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.trim() == GOAL_DONE_MARKER)
 }
 
 /// 目标激活且未完成时，把目标附到输入前；否则原样返回。
@@ -1053,6 +1122,72 @@ mod repl_completion_tests {
     }
 
     #[test]
+    fn goal_done_requires_the_exact_final_nonempty_line() {
+        assert!(super::goal_is_done("任务完成\nGOAL_DONE\n"));
+        assert!(super::goal_is_done("GOAL_DONE\n\n"));
+        assert!(!super::goal_is_done("讨论 GOAL_DONE 标记，但还没做完"));
+        assert!(!super::goal_is_done("GOAL_DONE\n还需继续"));
+        assert!(!super::goal_is_done("```text\nGOAL_DONE\n```"));
+        assert!(!super::goal_is_done("> GOAL_DONE"));
+    }
+
+    #[test]
+    fn goal_done_marker_cannot_override_host_completion_status() {
+        use owo_agent_protocol::CompletionStatusV1;
+        let result = |completion_status| super::GoalTurnResult {
+            final_text: Some("完成\nGOAL_DONE".to_string()),
+            completion_status,
+            failed: false,
+        };
+        assert!(super::goal_claim_is_accepted(&result(
+            CompletionStatusV1::ResponseComplete
+        )));
+        assert!(super::goal_claim_is_accepted(&result(
+            CompletionStatusV1::Accepted
+        )));
+        assert!(!super::goal_claim_is_accepted(&result(
+            CompletionStatusV1::Candidate
+        )));
+        assert!(!super::goal_claim_is_accepted(&result(
+            CompletionStatusV1::Unverified
+        )));
+        assert!(!super::goal_claim_is_accepted(&result(
+            CompletionStatusV1::Blocked
+        )));
+        assert!(!super::goal_claim_is_accepted(&result(
+            CompletionStatusV1::Aborted
+        )));
+        let failed = super::GoalTurnResult {
+            final_text: Some("GOAL_DONE".to_string()),
+            completion_status: CompletionStatusV1::Accepted,
+            failed: true,
+        };
+        assert!(!super::goal_claim_is_accepted(&failed));
+    }
+
+    #[test]
+    fn goal_continuation_explains_host_rejection() {
+        let prompt = super::goal_continue_prompt_after_status(
+            "重构登录模块",
+            4,
+            owo_agent_protocol::CompletionStatusV1::Candidate,
+        );
+        assert!(prompt.contains("宿主完成状态：Candidate"));
+        assert!(prompt.contains("真实行为验证"));
+        assert!(prompt.contains("不要输出完成标记"));
+    }
+
+    #[test]
+    fn goal_iteration_limit_is_opt_in() {
+        assert!(!super::goal_iteration_limit_reached(0, 0));
+        assert!(!super::goal_iteration_limit_reached(100, 0));
+        assert!(!super::goal_iteration_limit_reached(24, 25));
+        assert!(super::goal_iteration_limit_reached(25, 25));
+        assert_eq!(super::goal_iteration_label(0), "不限");
+        assert_eq!(super::goal_iteration_label(25), "25");
+    }
+
+    #[test]
     fn goal_context_attached_only_while_active() {
         let active = super::GoalState {
             objective: "重构登录模块".to_string(),
@@ -1108,5 +1243,98 @@ mod repl_completion_tests {
         assert_eq!(strip_ansi(&build), "build ❯ ");
         assert_eq!(strip_ansi(&plan), "plan ❯ ");
         assert_eq!(other, "other ");
+    }
+}
+
+/// 在 Daemon 发出 core_ready 后连接可选 MCP，并热注册工具、resources 与 prompts。
+/// `connect_mcp_clients` 自身对所有服务器使用并发连接和 3 秒总预算。
+pub(crate) fn spawn_mcp_connections(
+    agent: Arc<Agent>,
+    configs: Vec<McpServerConfig>,
+    plugin_state: Arc<Mutex<owo_agent_core::plugin::PluginStateStore>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if configs.is_empty() {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        for (server_name, client) in connect_mcp_clients(&configs).await {
+            let (tools, resources, prompts) = {
+                let connected = client.lock().await;
+                (
+                    connected.tools(),
+                    connected.resources(),
+                    connected.prompts(),
+                )
+            };
+            let tool_count = tools.len();
+            let resource_count = resources.len();
+            let prompt_count = prompts.len();
+            agent.register_mcp_tools(&server_name, Arc::clone(&client), tools);
+            agent.register_mcp_extras(&server_name, client, resources, prompts);
+
+            let disabled = plugin_state
+                .lock()
+                .map(|state| state.disabled_ids().iter().any(|id| id == &server_name))
+                .unwrap_or(false);
+            if disabled {
+                let prefix = owo_agent_core::tools::mcp_tool_prefix(&server_name);
+                agent.set_tool_prefix_enabled(&prefix, false);
+            }
+            eprintln!(
+                "✓ MCP {server_name} 已接入：tools={tool_count}, resources={resource_count}, prompts={prompt_count}{}",
+                if disabled { "（插件已禁用）" } else { "" }
+            );
+        }
+    }))
+}
+
+#[cfg(test)]
+mod mcp_startup_tests {
+    use super::spawn_mcp_connections;
+    use owo_agent_core::{Agent, AgentConfig, McpServerConfig, Policy, ToolRegistry};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn pending_mcp_handshake_does_not_block_background_startup() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            // Keep the HTTP MCP handshake open until the client task is cancelled.
+            std::future::pending::<()>().await;
+        });
+        let workspace =
+            std::env::temp_dir().join(format!("owo-mcp-ready-{}", uuid::Uuid::new_v4()));
+        let agent = Arc::new(Agent::new(
+            Arc::new(owo_agent_core::gateway::ResilientProvider::from_deferred()),
+            ToolRegistry::new(),
+            Policy::read_only(workspace),
+            AgentConfig::default(),
+        ));
+        let plugin_state = Arc::new(Mutex::new(owo_agent_core::plugin::PluginStateStore::new(
+            None,
+        )));
+        let task = spawn_mcp_connections(
+            agent,
+            vec![McpServerConfig::http(
+                "slow-handshake",
+                format!("http://{address}/mcp"),
+            )],
+            plugin_state,
+        )
+        .expect("配置了 MCP 时应返回后台任务句柄");
+
+        tokio::time::timeout(Duration::from_millis(500), accepted_rx)
+            .await
+            .expect("后台 MCP 连接应开始，但不能等待握手完成")
+            .expect("本地测试服务器应接收到连接");
+        task.abort();
+        let _ = task.await;
+        server.abort();
     }
 }

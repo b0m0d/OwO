@@ -3,13 +3,13 @@
 //! - `POST /eval/gate/run {suite?, model?}`：无 OPENAI_API_KEY 返回
 //!   `200 {skipped: true, reason}`；有凭据则 `run_suite` 并把报告落盘
 //!   `data_root/eval/reports/<UTC 时间戳>.json`。
-//! - `GET /eval/gate/report`：最新一份报告。
+//! - `GET /eval/gate/report[?file=<filename>]`：报告文件名省略时返回最新报告，指定时读取对应历史报告。
 //! - `GET /eval/gate/reports`：历史报告列表（按时间倒序）。
 //!
 //! 本模块不引用 `crate::`/`super::`，可被测试以 `#[path] mod` 独立编译；
 //! AppState 一律写全限定 `owo_agent_server::AppState`。
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use axum::Router;
@@ -165,19 +165,43 @@ fn list_report_files(dir: &std::path::Path) -> Vec<PathBuf> {
     files
 }
 
-async fn latest_report(State(state): State<Arc<AppState>>) -> ApiResult {
+#[derive(Deserialize)]
+struct ReportQuery {
+    file: Option<String>,
+}
+
+async fn latest_report(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ReportQuery>,
+) -> ApiResult {
     let dir = reports_dir(&state.data_root);
     let files = list_report_files(&dir);
-    let file = files.first().ok_or_else(|| {
-        err(
-            StatusCode::NOT_FOUND,
-            "暂无 eval 报告（先 POST /eval/gate/run）",
-        )
-    })?;
-    let report = read_report_file(file)
-        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "最新报告读取失败"))?;
+    let selected_file = if let Some(name) = query.file {
+        let valid_name = name.len() <= 255
+            && name.ends_with(".json")
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte));
+        if !valid_name {
+            return Err(err(StatusCode::BAD_REQUEST, "eval 报告文件名无效"));
+        }
+        let path = dir.join(name);
+        if !path.is_file() {
+            return Err(err(StatusCode::NOT_FOUND, "指定的 eval 报告不存在"));
+        }
+        path
+    } else {
+        files.first().cloned().ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "暂无 eval 报告（先 POST /eval/gate/run）",
+            )
+        })?
+    };
+    let report = read_report_file(&selected_file)
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "指定报告读取失败"))?;
     Ok(Json(json!({
-        "file": file.file_name().unwrap_or_default().to_string_lossy(),
+        "file": selected_file.file_name().unwrap_or_default().to_string_lossy(),
         "report": report,
     })))
 }

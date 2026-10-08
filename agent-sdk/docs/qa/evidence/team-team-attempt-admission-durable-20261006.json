@@ -1,0 +1,33 @@
+{
+  "evidence_id": "team-team-attempt-admission-durable-20261006",
+  "scope": "static-source-review-and-rust-format-check",
+  "claim": "Team worker and critic-author calls wait for a host acknowledgement after attempt and retry counters are checkpointed; rejected or stale admissions do not invoke a Worker.",
+  "verification": [
+    "Pure state regression source verifies admission counters and step attempt counts are updated only for a matching phase epoch and attempt identity.",
+    "Goal execution regression source verifies a rejected durable admission returns before the Worker is invoked.",
+    "Bounded channel regression source verifies the sender waits for host acknowledgement.",
+    "rustfmt --edition 2021 --check and scoped git diff --check passed; Rust tests and Cargo type checking were not run.",
+    "Durable Team admission transaction is isolated in coord_admission.rs; the phase runner only drives request handling.",
+    "Progress merge and persistence are grouped in coord_progress.rs; coord_run.rs remains the phase lifecycle driver.",
+    "Phase result persistence and terminal/rework selection are isolated in coord_finalize.rs; run_phase delegates after Worker completion."
+  ],
+  "limits": [
+    "No Cargo tests, crash-injection run, or Team runtime test ran because free memory is below the repository build gate.",
+    "Standalone GoalRunner without a Team admission host still has only in-memory per-attempt reservations.",
+    "No live Team-versus-Single comparison of latency, quality, delivery success, or token usage was performed."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/goal/types.rs": "40ba446b4f814a4db7bc73d1aca1b4437ece0438a2067af8fed97caf75416570",
+    "crates/owo-agent-core/src/goal/execution.rs": "17ca890746d6aef525dd3bca80033126259c0612f7fcdb7c2a50cc0464069b3c",
+    "crates/owo-agent-core/src/goal/mod.rs": "b03be7e71a60dc7fbd738fc26a5341bb342471440152e5d6517385c3f323d31d",
+    "crates/owo-agent-core/src/goal/tests.rs": "337dfe0a0803142784f702982948c7d7bdcbb8be35c88437a7d4aea885439053",
+    "crates/owo-agent-core/src/workswarm/coord_progress.rs": "37a98aeddbae63daf33d87e41ea38cb14f098c60b0e57b6ef4f94ab6450e620c",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs": "77f75a41726dbc83bba2e5124531023aab612fab698ad98274bf4ba3f76c3951",
+    "crates/owo-agent-core/src/workswarm/coord_human.rs": "faa07bc02e3b14f6525609ef4d38470a4597eb19f053399b2d11e5dfdadfcefc",
+    "docs/Team架构综合审查与改造方案-2026-10-06.md": "af2b588fa57d19a15cc4893e4ca5baae8a798d4b41ce4596300a8aa9ed4ca9dc",
+    "docs/工程代码结构说明.md": "555abc98c3bda123d89f82b93136fc1c3ed600a3d67fd04a85686f9f1d2c87a4",
+    "crates/owo-agent-core/src/workswarm/coord_admission.rs": "b0e48854ad8a08436ffcd5d93b29bbe618effe726302b1a8fe4ebc806ecee5e5",
+    "crates/owo-agent-core/src/workswarm/mod.rs": "80247b99be013b217ec664bc7eef6f0860d42ad00063b891a8d91149ac5e55df",
+    "crates/owo-agent-core/src/workswarm/coord_finalize.rs": "caac1dadc7db72893a9e908caf98c879da60dfa498b5569284b8c2d70ffcf06c"
+  }
+}

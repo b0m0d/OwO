@@ -22,13 +22,18 @@
 // 指标记录（JSONL 行结构）
 // ---------------------------------------------------------------------------
 
+mod execution_epochs;
+mod lifecycle;
 mod metrics;
+mod request_budget;
 mod sanitize;
 mod util;
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) use lifecycle::*;
 pub(crate) use metrics::*;
+pub(crate) use request_budget::*;
 pub(crate) use sanitize::*;
 pub(crate) use util::*;

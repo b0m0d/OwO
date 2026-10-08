@@ -145,7 +145,30 @@ async fn overview_expands_dimensions_server_side() {
 }
 
 #[tokio::test]
-async fn approval_actions_apply_grant_scope_and_keep_inject_one_shot() {
+async fn legacy_destructive_grant_is_visible_but_marked_inactive() {
+    let (state, _temp) = test_state().await;
+    let legacy: owo_agent_core::grant_store::Grant = serde_json::from_value(json!({
+        "grant_id": "legacy-write-grant",
+        "tool_id": "write_file",
+        "workspace_id": state.workspace_id(),
+        "path_scope": null,
+        "host_scope": null,
+        "argument_fingerprint": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "expires_at": null,
+        "remaining_uses": 10,
+        "scope": "workspace"
+    }))
+    .unwrap();
+    state.grants.insert(legacy);
+    let (status, body) = send_json(&state, "GET", "/permissions/grants", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["grants"][0]["effective"], json!(false));
+    assert_eq!(state.grants.list().len(), 1, "旧授权保留给用户显式撤销");
+}
+
+#[tokio::test]
+async fn approval_actions_persist_only_read_grants_and_keep_inject_one_shot() {
     let (state, temp) = test_state().await;
     for (scope, allow, expected_grant_scope) in [
         (Some("once"), true, None),
@@ -154,9 +177,9 @@ async fn approval_actions_apply_grant_scope_and_keep_inject_one_shot() {
         (None, false, None),
     ] {
         let request = PermissionRequest::new(
-            "write_file",
+            "read_file",
             json!({ "path": format!("{scope:?}.txt") }),
-            Level::Write,
+            Level::Read,
             "契约测试",
         );
         let request_id = request.request_id.clone();
@@ -186,6 +209,16 @@ async fn approval_actions_apply_grant_scope_and_keep_inject_one_shot() {
         .await;
         assert_eq!(status, 200, "审批响应应成功：{response}");
         assert_eq!(
+            response["allowed"],
+            json!(allow),
+            "允许/拒绝结果需与 Grant 状态分开回报"
+        );
+        assert_eq!(
+            response["granted"],
+            json!(expected_grant_scope.is_some()),
+            "granted 只表示成功写入可复用授权"
+        );
+        assert_eq!(
             receiver.await.unwrap(),
             if allow {
                 Decision::Allow
@@ -209,6 +242,51 @@ async fn approval_actions_apply_grant_scope_and_keep_inject_one_shot() {
         }
     }
     assert!(temp.path().join("grants.json").exists());
+
+    // Scope 是用户对风险的再次确认，但所有非只读请求均不得转成自动复用的 Grant。
+    for (tool, level, args) in [
+        (
+            "write_file",
+            Level::Write,
+            json!({ "path": "blocked-write.txt" }),
+        ),
+        (
+            "run_command",
+            Level::Execute,
+            json!({ "command": "echo blocked" }),
+        ),
+    ] {
+        let request = PermissionRequest::new(tool, args, level, "非只读审批");
+        let request_id = request.request_id.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        state
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .insert(request_id.clone(), (sender, request));
+        state
+            .pending_approval_sessions
+            .lock()
+            .unwrap()
+            .insert(request_id.clone(), "session-p3".to_string());
+        let before = state.grants.list().len();
+        let (status, response) = send_json(
+            &state,
+            "POST",
+            &format!("/session/session-p3/permission/{request_id}"),
+            Some(json!({ "allow": true, "scope": "workspace" })),
+        )
+        .await;
+        assert_eq!(status, 200, "本次审批仍应成功：{response}");
+        assert_eq!(receiver.await.unwrap(), Decision::Allow);
+        assert_eq!(response["allowed"], json!(true));
+        assert_eq!(response["granted"], json!(false));
+        assert_eq!(
+            state.grants.list().len(),
+            before,
+            "写入/执行批准不得保存为 Grant"
+        );
+    }
 
     let request = PermissionRequest::new(
         "desktop_key",
@@ -238,6 +316,8 @@ async fn approval_actions_apply_grant_scope_and_keep_inject_one_shot() {
     .await;
     assert_eq!(status, 200, "单次审批可放行但不得记为 Grant：{response}");
     assert_eq!(receiver.await.unwrap(), Decision::Allow);
+    assert_eq!(response["allowed"], json!(true));
+    assert_eq!(response["granted"], json!(false));
     assert_eq!(state.grants.list().len(), before, "Inject 不得生成持久授权");
 }
 

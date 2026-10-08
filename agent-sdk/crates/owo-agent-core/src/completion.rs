@@ -126,20 +126,20 @@ mod tests {
 
     #[test]
     fn candidate_version_hash_binds_the_candidate_snapshot() {
-        let first = std::collections::BTreeMap::from([
-            ("src/a.rs", "sha-a"),
-            ("src/b.rs", "sha-b"),
-        ]);
-        let second = std::collections::BTreeMap::from([
-            ("src/b.rs", "sha-b"),
-            ("src/a.rs", "sha-a"),
-        ]);
-        let changed = std::collections::BTreeMap::from([
-            ("src/a.rs", "sha-changed"),
-            ("src/b.rs", "sha-b"),
-        ]);
-        assert_eq!(hash_candidate_version(&first).unwrap(), hash_candidate_version(&second).unwrap());
-        assert_ne!(hash_candidate_version(&first).unwrap(), hash_candidate_version(&changed).unwrap());
+        let first =
+            std::collections::BTreeMap::from([("src/a.rs", "sha-a"), ("src/b.rs", "sha-b")]);
+        let second =
+            std::collections::BTreeMap::from([("src/b.rs", "sha-b"), ("src/a.rs", "sha-a")]);
+        let changed =
+            std::collections::BTreeMap::from([("src/a.rs", "sha-changed"), ("src/b.rs", "sha-b")]);
+        assert_eq!(
+            hash_candidate_version(&first).unwrap(),
+            hash_candidate_version(&second).unwrap()
+        );
+        assert_ne!(
+            hash_candidate_version(&first).unwrap(),
+            hash_candidate_version(&changed).unwrap()
+        );
     }
 
     #[test]
@@ -159,8 +159,14 @@ mod tests {
         assert_eq!(record.task_id, "task-1");
         assert_eq!(record.attempt_id, "attempt-7");
         assert_eq!(record.status, CompletionStatusV1::Accepted);
-        assert_eq!(record.evidence_receipt_ids, vec!["receipt-a".to_string(), "receipt-b".to_string()]);
-        assert_eq!(record.candidate_version_sha256.as_deref(), Some("candidate-sha256"));
+        assert_eq!(
+            record.evidence_receipt_ids,
+            vec!["receipt-a".to_string(), "receipt-b".to_string()]
+        );
+        assert_eq!(
+            record.candidate_version_sha256.as_deref(),
+            Some("candidate-sha256")
+        );
         assert!(!record.decided_at.is_empty());
     }
 
@@ -255,7 +261,10 @@ mod tests {
             CompletionStatusV1::Unverified
         );
         assert_eq!(
-            apply_required_review(CompletionStatusV1::Accepted, ValidationVerdictV1::Unverified),
+            apply_required_review(
+                CompletionStatusV1::Accepted,
+                ValidationVerdictV1::Unverified
+            ),
             CompletionStatusV1::Unverified
         );
         assert_eq!(

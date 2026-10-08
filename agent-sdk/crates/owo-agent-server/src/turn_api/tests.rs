@@ -1,5 +1,6 @@
+use super::handlers::turn_replay_state;
 use super::queue::*;
-use owo_agent_protocol::SseEvent;
+use owo_agent_protocol::{CompletionStatusV1, SseEvent, TurnEventRecord, TurnReplayState};
 use std::sync::{Arc, Weak};
 
 fn queue_and_receiver() -> (TurnEventQueue, Arc<()>, Weak<()>) {
@@ -148,5 +149,77 @@ fn dropped_receiver_stops_accepting_events() {
         crate::observability_api::turn_sse_counts_for_test().1,
         disconnects_before + 1,
         "repeated producer callbacks should count one disconnect per turn stream"
+    );
+}
+
+fn replay_record(seq: u64, payload: SseEvent) -> TurnEventRecord {
+    TurnEventRecord {
+        session_id: "session".to_string(),
+        turn_id: "turn".to_string(),
+        seq,
+        created_at: "2026-10-04T00:00:00Z".to_string(),
+        payload,
+    }
+}
+
+fn replay_stats() -> SseEvent {
+    SseEvent::TurnStats {
+        steps: 1,
+        duration_ms: 1,
+        prompt_tokens: 1,
+        completion_tokens: 1,
+        total_tokens: 2,
+        cost_usd: 0.0,
+        completion_status: CompletionStatusV1::Accepted,
+        completion_record: None,
+        model_calls: Vec::new(),
+    }
+}
+
+#[test]
+fn replay_page_with_lookahead_remains_active_until_final_stats_page() {
+    let first_page = vec![replay_record(
+        7,
+        SseEvent::Final {
+            text: "done".to_string(),
+        },
+    )];
+    assert_eq!(
+        turn_replay_state(&first_page, true, false),
+        TurnReplayState::Active
+    );
+
+    let terminal_marker_with_more = vec![replay_record(8, replay_stats())];
+    assert_eq!(
+        turn_replay_state(&terminal_marker_with_more, true, false),
+        TurnReplayState::Active,
+        "a later page may contain a failure tail"
+    );
+
+    let terminal_page = vec![replay_record(8, replay_stats())];
+    assert_eq!(
+        turn_replay_state(&terminal_page, false, false),
+        TurnReplayState::Completed
+    );
+}
+
+#[test]
+fn replay_page_without_more_data_reports_interrupted_and_failures_are_terminal() {
+    assert_eq!(
+        turn_replay_state(&[], false, false),
+        TurnReplayState::Interrupted
+    );
+
+    let failed = vec![replay_record(
+        9,
+        SseEvent::TurnFailed {
+            message: "save failed".to_string(),
+            completion_status: CompletionStatusV1::Unverified,
+            completion_record: None,
+        },
+    )];
+    assert_eq!(
+        turn_replay_state(&failed, false, false),
+        TurnReplayState::Failed
     );
 }

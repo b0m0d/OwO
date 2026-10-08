@@ -58,7 +58,8 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
         owo_agent_core::plugin::discover_enabled_plugins(&workspace, &root, &plugin_state);
     let mut mcp_configs = load_mcp_configs(&root);
     merge_plugin_mcp(&plugins, &mut mcp_configs);
-    let mcp_clients = connect_mcp_clients(&mcp_configs).await;
+    // MCP 是可选扩展，握手不能占用 Daemon 的 ready 关键路径。
+    // 成功后通过 Agent 的线程安全注册表热挂工具；服务仍先对本地客户端可用。
     let _ = install_builtin_packages(&builtin_skills_root(), &root);
     let mut skills = SkillRegistry::discover(&workspace, &root);
     apply_disabled_skills(&mut skills, &settings);
@@ -66,7 +67,7 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
         &workspace,
         &model,
         settings.read_only,
-        &mcp_clients,
+        &[],
         &skills,
         &settings.deny_commands,
     )?;
@@ -225,7 +226,17 @@ pub(crate) async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error:
             None
         }
     };
+    let mcp_initialization = spawn_mcp_connections(
+        Arc::clone(&state.agent),
+        mcp_configs,
+        Arc::clone(&state.plugin_state),
+    );
     let result = axum::serve(listener, app).await;
+    // 服务退出时取消尚未完成的 MCP 握手，再终止已连接的 stdio 子进程。
+    if let Some(task) = mcp_initialization {
+        task.abort();
+        let _ = task.await;
+    }
     // 服务退出：终止全部 MCP stdio 子进程，不留孤儿进程。
     let shutdown_errors = state.agent.shutdown_all_mcp().await;
     for (name, error) in shutdown_errors {

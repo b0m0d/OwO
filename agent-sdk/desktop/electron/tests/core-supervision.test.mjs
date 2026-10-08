@@ -11,6 +11,17 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const sup = require("../src/main/core-supervision.js");
 
+test("Electron 桌宠请求必须使用当前核心 bearer token", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { dirname, join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const mainPath = join(dirname(fileURLToPath(import.meta.url)), "../src/main/main.js");
+  const source = readFileSync(mainPath, "utf8");
+  assert.match(source, /function coreAuthorizationHeaders\(\)[\s\S]*?Bearer.*coreState\.token/);
+  assert.match(source, /httpPost\(coreState\.port, "\/desktop\/pet", coreAuthorizationHeaders\(\)/);
+  assert.match(source, /httpGet\(coreState\.port, "\/desktop\/pet", coreAuthorizationHeaders\(\)/);
+});
+
 test("解析标准 core_ready 行", () => {
   const value = sup.parseReadyLine(
     '{"event":"core_ready","pid":1234,"port":6071,"api_version":"0.7","build_id":"abc","instance_id":"a1b2"}'
@@ -117,6 +128,15 @@ test("配置校验：结构性错误被拦下", () => {
   assert.equal(range.ok, false);
 });
 
+test("模型默认输出上限按可支持范围拒绝超过 32k 的值", () => {
+  const result = sup.validateConfig({
+    version: 1,
+    model: { provider: "bigmodel", max_output_tokens: 32001 },
+  }, {});
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((item) => item.includes("max_output_tokens")));
+});
+
 test("配置校验：合法配置放行，缺凭据只告警不阻断", () => {
   const ok = sup.validateConfig({
     version: 1,
@@ -158,6 +178,27 @@ test("safeLogWrite：EPIPE 等写入异常被吞掉，不向上抛", () => {
   const write = sup.safeLogWrite(boom);
   assert.doesNotThrow(() => write("[core] x\n"), "写入异常不得向上抛（否则主进程崩）");
   assert.equal(write("[core] x\n"), false, "应报告失败而不是抛错");
+});
+
+test("safeStreamLogWrite：异步 EPIPE 后停止写入且不崩溃", () => {
+  let onError = null;
+  const seen = [];
+  const stream = {
+    on(event, handler) {
+      if (event === "error") onError = handler;
+    },
+    write(text) {
+      seen.push(text);
+    },
+  };
+  const write = sup.safeStreamLogWrite(stream);
+  assert.equal(write("ready\n"), true);
+  const error = new Error("broken pipe");
+  error.code = "EPIPE";
+  onError(error);
+  assert.doesNotThrow(() => write("after-close\n"));
+  assert.equal(write("after-close\n"), false);
+  assert.deepEqual(seen, ["ready\n"]);
 });
 
 test("safeLogWrite：底层非函数 / 流已关闭时静默降级", () => {

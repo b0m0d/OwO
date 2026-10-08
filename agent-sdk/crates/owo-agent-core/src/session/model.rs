@@ -62,6 +62,9 @@ pub struct Session {
     /// Host-produced behavior validation evidence for ordinary Agent work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation_receipts: Vec<crate::plan::ValidationReceiptV1>,
+    /// Latest host completion decision, bound to this turn and its candidate snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_record: Option<owo_agent_protocol::TaskCompletionRecordV1>,
     /// Durable Single review findings and their receipt-bound repair closure.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub single_review_issues: Vec<crate::goal::DeliveryIssueV1>,
@@ -135,6 +138,7 @@ impl Session {
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
             validation_receipts: Vec::new(),
+            completion_record: None,
             single_review_issues: Vec::new(),
             single_verification_plan: None,
             single_verification_plan_input_sha256: None,
@@ -527,9 +531,12 @@ impl Session {
             snapshots: HashMap::new(),
             execution_receipts: Vec::new(),
             validation_receipts: Vec::new(),
+            completion_record: None,
             single_review_issues: Vec::new(),
             single_verification_plan: self.single_verification_plan.clone(),
-            single_verification_plan_input_sha256: self.single_verification_plan_input_sha256.clone(),
+            single_verification_plan_input_sha256: self
+                .single_verification_plan_input_sha256
+                .clone(),
             single_verification_plan_turn_id: self.single_verification_plan_turn_id.clone(),
             active_task_context: None,
             transient_model_calls: Vec::new(),

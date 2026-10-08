@@ -177,7 +177,10 @@ pub(crate) async fn submit_rework(
     // 只有创建新任务时才按当前 Artifact 状态拒绝返工。
     use owo_agent_protocol::ReviewState;
     if existing_task.is_none()
-        && matches!(artifact.review_state, ReviewState::Rejected | ReviewState::Superseded)
+        && matches!(
+            artifact.review_state,
+            ReviewState::Rejected | ReviewState::Superseded
+        )
     {
         return Err((
             StatusCode::CONFLICT,
@@ -224,7 +227,10 @@ pub(crate) async fn submit_rework(
                 ) })),
             )
         })?;
-    if existing_task.as_ref().is_some_and(|task| task.step_id != step_id) {
+    if existing_task
+        .as_ref()
+        .is_some_and(|task| task.step_id != step_id)
+    {
         return Err((
             StatusCode::CONFLICT,
             Json(json!({
@@ -290,7 +296,11 @@ pub(crate) async fn submit_rework(
     }
 
     Ok((
-        if replayed { StatusCode::OK } else { StatusCode::CREATED },
+        if replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
         Json(json!({ "replayed": replayed, "rework": task })),
     ))
 }

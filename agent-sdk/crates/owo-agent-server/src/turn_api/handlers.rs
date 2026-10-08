@@ -17,44 +17,69 @@ use super::queue::*;
 use super::wire::*;
 use owo_agent_server::AppState;
 
+pub(super) fn turn_replay_state(
+    events: &[owo_agent_protocol::TurnEventRecord],
+    has_more: bool,
+    turn_is_running: bool,
+) -> owo_agent_protocol::TurnReplayState {
+    // A terminal marker in this page is not authoritative while later same-turn
+    // events remain beyond the page boundary (for example, legacy save-failure tails).
+    if has_more {
+        return owo_agent_protocol::TurnReplayState::Active;
+    }
+    if let Some(state) = events
+        .iter()
+        .rev()
+        .find_map(|record| match &record.payload {
+            SseEvent::TurnStats { .. } => Some(owo_agent_protocol::TurnReplayState::Completed),
+            event if is_turn_failed_event(event) => {
+                Some(owo_agent_protocol::TurnReplayState::Failed)
+            }
+            _ => None,
+        })
+    {
+        return state;
+    }
+    if turn_is_running {
+        owo_agent_protocol::TurnReplayState::Active
+    } else {
+        owo_agent_protocol::TurnReplayState::Interrupted
+    }
+}
+
 pub(crate) async fn turn_events(
     State(state): State<Arc<AppState>>,
     AxumPath(session_id): AxumPath<String>,
     Query(query): Query<TurnEventsQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     crate::session_api::load_session(&state, &session_id)?;
-    let events = state
+    // Read one lookahead record so a bounded page can distinguish "more replay data"
+    // from a genuinely interrupted turn after the producer has already exited.
+    let page_limit = query.limit.unwrap_or(256).clamp(1, 999);
+    let mut events = state
         .store
         .turn_events_after(
             &session_id,
             Some(&query.turn_id),
             query.after_seq,
-            query.limit.unwrap_or(256),
+            page_limit + 1,
         )
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let has_more = events.len() > page_limit;
+    if has_more {
+        events.truncate(page_limit);
+    }
     let active_turn_id = state
         .active_turn_ids
         .lock()
         .map_err(poison)?
         .get(&session_id)
         .cloned();
-    let replay_state = events
-        .iter()
-        .filter_map(|record| match &record.payload {
-            SseEvent::Final { .. } => Some(owo_agent_protocol::TurnReplayState::Completed),
-            event if is_turn_failed_event(event) => {
-                Some(owo_agent_protocol::TurnReplayState::Failed)
-            }
-            _ => None,
-        })
-        .next_back()
-        .unwrap_or_else(|| {
-            if active_turn_id.as_deref() == Some(query.turn_id.as_str()) {
-                owo_agent_protocol::TurnReplayState::Active
-            } else {
-                owo_agent_protocol::TurnReplayState::Interrupted
-            }
-        });
+    let replay_state = turn_replay_state(
+        &events,
+        has_more,
+        active_turn_id.as_deref() == Some(query.turn_id.as_str()),
+    );
     let active = replay_state == owo_agent_protocol::TurnReplayState::Active;
     let next_after_seq = events
         .last()
@@ -274,6 +299,7 @@ pub(crate) async fn turn(
             queue: Arc::clone(&producer_queue),
             receiver: producer_receiver.clone(),
         };
+        let mut success_stats = None;
         match agent
             .run_turn_with_images(
                 &mut current,
@@ -328,40 +354,34 @@ pub(crate) async fn turn(
                         outcome.usage.completion_tokens,
                     );
                 }
-                // 取优合并（远端 engine）：回合结束补发 TurnStats，前端汇报卡展示
-                // 耗时/步数/消耗；失败在此前已由 TurnFailed 终态收口。
-                let _ = persist_and_queue_event(
-                    producer_store.as_ref(),
-                    &producer_session_id,
-                    &producer_turn_id,
-                    &producer_queue,
-                    &producer_receiver,
-                    SseEvent::TurnStats {
-                        steps: outcome.steps,
-                        duration_ms: outcome.duration_ms,
-                        prompt_tokens: outcome.usage.prompt_tokens,
-                        completion_tokens: outcome.usage.completion_tokens,
-                        total_tokens: outcome.usage.total_tokens,
-                        cost_usd,
-                        completion_status: outcome.completion_status,
-                        model_calls: outcome.model_calls.iter().map(|call| {
-                            owo_agent_protocol::ModelRequestMetricV1 {
-                                request_id: call.metadata.request_id.clone(),
-                                model: call.metadata.model.clone(),
-                                usage: call.metadata.usage.map(|usage| {
-                                    owo_agent_protocol::ModelTokenUsageV1 {
-                                        prompt_tokens: usage.prompt_tokens,
-                                        completion_tokens: usage.completion_tokens,
-                                        total_tokens: usage.total_tokens,
-                                    }
-                                }),
-                                latency_ms: call.metadata.latency_ms,
-                                succeeded: call.succeeded,
-                            }
+                // Delay successful terminal stats until session persistence succeeds.
+                success_stats = Some(SseEvent::TurnStats {
+                    steps: outcome.steps,
+                    duration_ms: outcome.duration_ms,
+                    prompt_tokens: outcome.usage.prompt_tokens,
+                    completion_tokens: outcome.usage.completion_tokens,
+                    total_tokens: outcome.usage.total_tokens,
+                    cost_usd,
+                    completion_status: outcome.completion_status,
+                    completion_record: current.completion_record.clone(),
+                    model_calls: outcome
+                        .model_calls
+                        .iter()
+                        .map(|call| owo_agent_protocol::ModelRequestMetricV1 {
+                            request_id: call.metadata.request_id.clone(),
+                            model: call.metadata.model.clone(),
+                            usage: call.metadata.usage.map(|usage| {
+                                owo_agent_protocol::ModelTokenUsageV1 {
+                                    prompt_tokens: usage.prompt_tokens,
+                                    completion_tokens: usage.completion_tokens,
+                                    total_tokens: usage.total_tokens,
+                                }
+                            }),
+                            latency_ms: call.metadata.latency_ms,
+                            succeeded: call.succeeded,
                         })
                         .collect(),
-                    },
-                );
+                });
             }
             Err(error) => {
                 let error_text = error.to_string();
@@ -393,6 +413,8 @@ pub(crate) async fn turn(
                     .as_ref()
                     .map(|record| record.status)
                     .unwrap_or(owo_agent_protocol::CompletionStatusV1::Unverified);
+                current.completion_record = trace.completion_record.clone();
+                let completion_record = current.completion_record.clone();
                 let _ = owo_agent_core::save_trace(&traces_dir, &trace);
                 crate::event_stream::hub()
                     .publish_invalidate(crate::event_stream::InvalidateDomain::Traces);
@@ -407,6 +429,7 @@ pub(crate) async fn turn(
                     SseEvent::TurnFailed {
                         message: error_text.to_string(),
                         completion_status,
+                        completion_record,
                     },
                 );
             }
@@ -423,9 +446,20 @@ pub(crate) async fn turn(
                 &producer_turn_id,
                 &producer_queue,
                 &producer_receiver,
-                SseEvent::Progress {
+                SseEvent::TurnFailed {
                     message: format!("session save failed: {error}"),
+                    completion_status: owo_agent_protocol::CompletionStatusV1::Unverified,
+                    completion_record: None,
                 },
+            );
+        } else if let Some(stats) = success_stats {
+            let _ = persist_and_queue_event(
+                producer_store.as_ref(),
+                &producer_session_id,
+                &producer_turn_id,
+                &producer_queue,
+                &producer_receiver,
+                stats,
             );
         }
         if let Ok(mut aborts) = state_for_audit.aborts.lock() {
@@ -503,11 +537,12 @@ pub(crate) async fn respond_permission(
         .lock()
         .map_err(poison)?
         .remove(&request_id);
+    let mut grant_created = false;
     let decision = if response.allow {
-        // §5.4 审批选项 → 临时授权（Grant）：响应后同工作区同参数不再弹卡。
+        // §5.4 只有只读动作可转换成可复用 Grant；写入/执行仅批准当前请求。
         // 破坏性/注入请求不允许生成 grant（scope 一律忽略，仅放行本次）。
         if let Some(scope) = response.scope.as_deref() {
-            let level_ok = request.level != owo_agent_core::permissions::Level::Inject;
+            let level_ok = !request.is_destructive();
             if level_ok {
                 if let Some(scope_enum) = owo_agent_core::grant_store::GrantScope::parse(scope) {
                     if let Some(grant) =
@@ -516,6 +551,7 @@ pub(crate) async fn respond_permission(
                             .grant_from_scope(&request, &state.workspace_id(), scope_enum)
                     {
                         state.grants.insert(grant);
+                        grant_created = true;
                     }
                 }
             }
@@ -527,7 +563,11 @@ pub(crate) async fn respond_permission(
     sender
         .send(decision)
         .map_err(|_| (StatusCode::GONE, "审批通道已关闭".to_string()))?;
-    Ok(Json(json!({ "ok": true, "granted": response.allow })))
+    Ok(Json(json!({
+        "ok": true,
+        "allowed": response.allow,
+        "granted": grant_created,
+    })))
 }
 
 /// ask_user 的 SSE 提问通道（取优合并自远端 engine）：

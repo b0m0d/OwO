@@ -42,8 +42,10 @@ test("needsSetup 必须把 provider/not_configured 认成引导页（不是错�
   const body = /async function needsSetup\(\)\s*\{([\s\S]*?)\n\}/.exec(app);
   assert.ok(body, "needsSetup 应存在");
   assert.match(body[1], /connection\.state === "no_workspace"/, "工作区缺失 → 引导");
-  assert.match(body[1], /connection\.errorCode === "provider\/not_configured"/,
-    "core 以 provider/not_configured 失败退出时，规定终态仍是模型配置引导");
+  assert.match(body[1], /const errorCode = connection && connection\.errorCode;/,
+    "稳定码先从壳连接快照提取，避免重复读取或混用错误来源");
+  assert.match(body[1], /connection\.state === "failed" && errorCode !== "provider\/not_configured"/,
+    "core 的其他失败码必须保留给错误卡；只有 provider/not_configured 进入配置引导");
   assert.match(body[1], /get_provider_status/, "core ready 时按壳的提供商就绪态分流");
 });
 

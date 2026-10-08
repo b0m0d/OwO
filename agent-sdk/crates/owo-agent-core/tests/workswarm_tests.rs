@@ -84,7 +84,11 @@ impl Worker for EchoWorker {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+                .filter_map(|artifact| {
+                    artifact
+                        .get("review_requirements")
+                        .and_then(Value::as_array)
+                })
                 .flatten()
                 .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
                 .map(str::to_string)
@@ -99,7 +103,8 @@ impl Worker for EchoWorker {
                 },
                 "evidence": [],
                 "open_issues": []
-            }).to_string());
+            })
+            .to_string());
         }
         Ok(input
             .get("text")
@@ -125,6 +130,17 @@ impl Worker for ReviewRepairWorker {
             .and_then(Value::as_str)
             .unwrap_or_default();
         if role == "builder" {
+            if let Some(rework) = input.get("rework") {
+                let instruction = rework
+                    .get("instruction")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !instruction.contains("补齐失败路径的行为说明")
+                    || !instruction.contains("补齐取消后的恢复说明")
+                {
+                    return Err("返修遗漏同一评审的 finding".into());
+                }
+            }
             let content = if input.get("rework").is_some() {
                 "修复后的候选交付"
             } else {
@@ -149,7 +165,11 @@ impl Worker for ReviewRepairWorker {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+            .filter_map(|artifact| {
+                artifact
+                    .get("review_requirements")
+                    .and_then(Value::as_array)
+            })
             .flatten()
             .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
             .map(str::to_string)
@@ -165,6 +185,12 @@ impl Worker for ReviewRepairWorker {
                 "findings": [{
                     "severity": "blocker",
                     "detail": "补齐失败路径的行为说明",
+                    "requirement_id": reviewed_requirement_ids.first(),
+                    "evidence_refs": ["artifact-content"],
+                    "suggested_owner": "m-builder"
+                }, {
+                    "severity": "major",
+                    "detail": "补齐取消后的恢复说明",
                     "requirement_id": reviewed_requirement_ids.first(),
                     "evidence_refs": ["artifact-content"],
                     "suggested_owner": "m-builder"
@@ -385,7 +411,26 @@ async fn relay_run_completes_with_artifacts_handoffs_and_proposal() {
     let outcome = drive_next(&h, &team_id, &registry).await;
     assert!(
         matches!(outcome, PhaseOutcome::Done),
-        "接力应成功收尾，实际：{outcome:?}"
+        "接力应成功收尾，实际：{outcome:?}；运行状态：{:?}",
+        h.coordinator
+            .load_run_state(&team_id)
+            .map(|state| (state.goal.error, state.events))
+    );
+    let context_events = h
+        .audit
+        .lock()
+        .unwrap()
+        .entries
+        .iter()
+        .filter(|entry| entry.session_id == team_id && entry.event == "team.context.assembled")
+        .map(|entry| entry.detail.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(context_events.len(), roles.len());
+    assert!(
+        context_events
+            .iter()
+            .any(|detail| detail.contains(r#""phase_snapshot_cache_hit":true"#)),
+        "阶段内的后续 Worker 应复用快照并记录缓存命中"
     );
 
     // 团队与项目空间终态。
@@ -1087,7 +1132,12 @@ async fn adopted_template_is_reused_for_next_dynamic_run() {
         Some(template.template_id.as_str()),
         "同形态组队必须复用已采纳模板"
     );
-    assert_eq!(team2.members.len(), 4, "模板角色数 = 4（接力）");
+    assert_eq!(
+        team2.members.len(),
+        1,
+        "自动匹配的模板按 single 策略裁剪为一个执行者"
+    );
+    assert_eq!(team2.strategy_decision.as_ref().unwrap()["mode"], "single");
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,6 +1228,29 @@ async fn swarmflow_requires_versioned_template() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn single_mode_ignores_template_and_never_injects_a_reviewer() {
+    let h = harness();
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: "单 Agent 模式完成一项普通工作".to_string(),
+        mode: TeamMode::Single,
+        template_id: Some("template-id-that-must-be-ignored".to_string()),
+        roles: vec![RoleSpec::agent("builder")],
+        budget: Value::Null,
+        human_policy: None,
+        strategy: None,
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    assert_eq!(team.members.len(), 1, "single 不得暗中增加 Reviewer 成员");
+    assert!(team.template_id.is_none(), "single 请求必须忽略模板");
+    assert_eq!(team.strategy_decision.as_ref().unwrap()["mode"], "single");
+}
+
+#[tokio::test]
 async fn single_mode_runs_one_step_and_skips_template_proposal() {
     let h = harness();
     let req = CreateTeamRequest {
@@ -1239,7 +1312,17 @@ async fn strategy_auto_trims_default_relay_to_single_and_exposes_decision() {
         parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
-    assert_eq!(team.members.len(), 1, "auto+简单任务默认裁剪到单角色");
+    assert_eq!(
+        team.members.len(),
+        1,
+        "single 策略不启动隐藏的 Reviewer Worker"
+    );
+    let meta = h.coordinator.load_run_meta(&team.team_id).unwrap();
+    assert_eq!(
+        meta.roles.iter().filter(|role| !role.is_reviewer()).count(),
+        1,
+        "single 保留一个执行者，独立评审按声明能力分类"
+    );
     let decision = team
         .strategy_decision
         .as_ref()
@@ -1326,7 +1409,7 @@ fn install_template(h: &Harness, template_id: &str) -> Vec<RoleSpec> {
 }
 
 #[tokio::test]
-async fn adaptive_code_template_trims_reviewer_at_creation() {
+async fn adaptive_code_template_retains_reviewer_until_runtime() {
     let h = harness();
     let template_roles = install_template(&h, builtin_team_templates::CODE_CHANGE_V1);
     // 角色来自模板（req.roles 为空）→ 创建期裁剪生效。
@@ -1345,32 +1428,25 @@ async fn adaptive_code_template_trims_reviewer_at_creation() {
         parent_context_snapshot: None,
     };
     let team = h.coordinator.create_team_run(&req).await.unwrap();
-    // 简单代码任务：analyzer + implementer（reviewer 被自适应裁剪，减少 1 个 Worker）。
-    assert_eq!(team.members.len(), template_roles.len() - 1);
-    assert!(!team.members.iter().any(|m| m.role == "reviewer"));
+    // Reviewer 保留至宿主观察候选变化；无变化时才由运行期跳过。
+    assert_eq!(team.members.len(), template_roles.len());
+    assert!(team.members.iter().any(|m| m.role == "reviewer"));
     let adaptive = team
         .strategy_decision
         .as_ref()
         .expect("strategy_decision 应存在")["adaptive"]
         .clone();
-    assert_eq!(adaptive["saved_budget_calls"], 3, "reviewer 预算 3 次调用");
-    let skipped = adaptive["skipped_roles"].as_array().unwrap();
-    assert_eq!(skipped.len(), 1);
-    assert_eq!(skipped[0]["role"], "reviewer");
+    assert_eq!(adaptive["saved_budget_calls"], 0);
     assert!(
-        skipped[0]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("analyzer + implementer"),
-        "skip_reason 应可展示：{}",
-        skipped[0]["reason"]
+        adaptive["skipped_roles"].as_array().unwrap().is_empty(),
+        "创建时不能在候选版本出现前删除 Reviewer"
     );
     // 全链路可运行（DAG 合法且收尾成功）。
     let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &template_roles);
     let outcome = drive_next(&h, &team.team_id, &registry).await;
     assert!(
         matches!(outcome, PhaseOutcome::Done),
-        "裁剪后团队应正常收尾：{outcome:?}"
+        "保留 reviewer 的团队应正常收尾：{outcome:?}"
     );
 }
 
@@ -1594,7 +1670,7 @@ async fn explicit_review_capability_is_read_only_and_requires_bound_upstream_sna
         )
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("没有可绑定的上游产物快照"));
+    assert!(error.to_string().contains("Worker 实际读取的宿主源码快照"));
 }
 
 #[tokio::test]
@@ -1672,6 +1748,27 @@ async fn review_finding_dispatches_bounded_repair_to_original_owner() {
     assert_eq!(
         review["reviewed_artifacts"][0]["sha256"],
         builder_versions[1].sha256
+    );
+
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert_eq!(
+        state.delivery_issues.len(),
+        2,
+        "全部 finding 必须登记到交付问题账本"
+    );
+    assert!(state
+        .delivery_issues
+        .iter()
+        .all(|issue| issue.status == owo_agent_core::goal::DeliveryIssueStatusV1::Resolved));
+    let owner_step = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-builder")
+        .unwrap();
+    assert_eq!(
+        owner_step.input["rework"]["attempt"], 1,
+        "多个 finding 只消耗一次 owner 返修"
     );
 
     let space = h.store.get_project_space(&project_id).await.unwrap();
@@ -1830,9 +1927,10 @@ async fn parallel_team_runs_only_lead_before_dynamic_task_assignment() {
         calls: std::sync::Mutex::new(Vec::new()),
         tasks: vec![serde_json::json!({
             "task_id": "only", "worker": "w1", "task": "实现唯一任务", "depends_on": [],
+            "requirement_quotes": ["执行动态任务"],
             "read_refs": [], "write_paths": [], "contract_refs": [],
             "required_capabilities": [], "estimated_effort": 1, "verification": "non_empty",
-            "risk": "low", "priority": 1, "acceptance": "交付任务结果"
+            "risk": "low", "priority": 1, "acceptance": "执行动态任务：交付任务结果"
         })],
     });
     let registry = build_registry(&h, &team.team_id, inner.clone(), &roles);
@@ -1888,21 +1986,30 @@ async fn parallel_independent_tasks_skip_leader_and_publish_host_manifest() {
                 "read_refs": [], "write_paths": ["src/a"], "contract_refs": [],
                 "required_capabilities": ["write_file"], "estimated_effort": 2,
                 "verification": "non_empty", "risk": "low", "priority": 80,
-                "acceptance": "模块 A 结果已提交"
+                "requirement_quotes": ["互不冲突的模块"],
+                "acceptance": "互不冲突的模块：模块 A 结果已提交"
             }),
             serde_json::json!({
                 "task_id": "module-b", "worker": "w2", "task": "交付模块 B", "depends_on": [],
                 "read_refs": [], "write_paths": ["src/b"], "contract_refs": [],
                 "required_capabilities": ["write_file"], "estimated_effort": 2,
                 "verification": "non_empty", "risk": "low", "priority": 80,
-                "acceptance": "模块 B 结果已提交"
+                "requirement_quotes": ["独立交付两个互不冲突的模块"],
+                "acceptance": "独立交付两个互不冲突的模块：模块 B 结果已提交"
             }),
         ],
     });
     let registry = build_registry(&h, &team.team_id, inner.clone(), &roles);
 
     let outcome = drive_next(&h, &team.team_id, &registry).await;
-    assert!(matches!(outcome, PhaseOutcome::Done), "{outcome:?}");
+    assert!(
+        matches!(outcome, PhaseOutcome::Done),
+        "{outcome:?}; error={:?}",
+        h.coordinator
+            .load_run_state(&team.team_id)
+            .ok()
+            .and_then(|state| state.goal.error)
+    );
     let calls = inner.calls.lock().unwrap().clone();
     assert_eq!(
         calls.iter().filter(|role| role.as_str() == "lead").count(),
@@ -1974,7 +2081,7 @@ async fn parallel_lead_assignment_applies_writer_scopes_and_tasks() {
     }
     let req = CreateTeamRequest {
         goal_id: None,
-        objective: "并行实现两个独立模块".to_string(),
+        objective: OBJECTIVE.to_string(),
         mode: TeamMode::Team,
         template_id: None,
         roles: roles.clone(),
@@ -2007,9 +2114,9 @@ async fn parallel_lead_assignment_applies_writer_scopes_and_tasks() {
         serde_json::json!({
             "version": 1,
             "tasks": [
-                {"task_id":"a", "worker": "w1", "task": "实现模块 A", "depends_on":[], "read_refs":["src/lib.rs"], "write_paths": ["src/a"], "contract_refs":["API-A"], "required_capabilities":["write_file"], "estimated_effort":3, "verification":"contains:done", "risk":"normal", "priority":80, "acceptance": "A 通过"},
-                {"task_id":"b", "worker": "w2", "task": "实现模块 B", "depends_on":[], "read_refs":[], "write_paths": ["src/b"], "contract_refs":[], "required_capabilities":["write_file"], "estimated_effort":5, "verification":"non_empty", "risk":"normal", "priority":80, "acceptance": "B 通过"},
-                {"task_id":"c", "worker": "w1", "task": "实现模块 C", "depends_on":["a"], "read_refs":[], "write_paths": ["src/c"], "contract_refs":[], "required_capabilities":["apply_patch"], "estimated_effort":2, "verification":"non_empty", "risk":"critical", "priority":100, "acceptance": "C 通过"}
+                {"task_id":"a", "worker": "w1", "task": "实现模块 A", "depends_on":[], "requirement_quotes":["完成浏览器表单任务"], "read_refs":["src/lib.rs"], "write_paths": ["src/a"], "contract_refs":["API-A"], "required_capabilities":["write_file"], "estimated_effort":3, "verification":"contains:done", "risk":"normal", "priority":80, "acceptance": "完成浏览器表单任务：A 通过"},
+                {"task_id":"b", "worker": "w2", "task": "实现模块 B", "depends_on":[], "requirement_quotes":["提交报告"], "read_refs":[], "write_paths": ["src/b"], "contract_refs":[], "required_capabilities":["write_file"], "estimated_effort":5, "verification":"non_empty", "risk":"normal", "priority":80, "acceptance": "提交报告：B 通过"},
+                {"task_id":"c", "worker": "w1", "task": "实现模块 C", "depends_on":["a"], "requirement_quotes":["浏览器表单任务"], "read_refs":[], "write_paths": ["src/c"], "contract_refs":[], "required_capabilities":["apply_patch"], "estimated_effort":2, "verification":"non_empty", "risk":"critical", "priority":100, "acceptance": "浏览器表单任务：C 通过"}
             ]
         })
         .to_string(),
@@ -2079,7 +2186,10 @@ async fn parallel_lead_assignment_applies_writer_scopes_and_tasks() {
     };
     assert_eq!(step("s-w1").input["assigned_task"], "实现模块 A");
     assert_eq!(step("s-w1").input["assigned_task_id"], "a");
-    assert_eq!(step("s-w1").input["assigned_acceptance"], "A 通过");
+    assert_eq!(
+        step("s-w1").input["assigned_acceptance"],
+        "完成浏览器表单任务：A 通过"
+    );
     assert_eq!(step("s-w1").input["assigned_verification"], "contains:done");
     assert_eq!(
         step("s-w1").input["assigned_read_refs"],
@@ -2102,20 +2212,26 @@ async fn parallel_lead_assignment_applies_writer_scopes_and_tasks() {
         step("s-reviewer").depends_on,
         vec![
             "s-lead".to_string(),
+            "s-leader".to_string(),
             "s-task-c".to_string(),
             "s-w1".to_string(),
             "s-w2".to_string(),
         ]
     );
-    assert!(step("s-leader")
-        .depends_on
-        .contains(&"s-reviewer".to_string()));
+    assert!(
+        !step("s-leader")
+            .depends_on
+            .contains(&"s-reviewer".to_string()),
+        "integrator must run before the reviewer to bind the review to the final integrated snapshot"
+    );
     assert_eq!(
         state.records["s-reviewer"].status,
         owo_agent_core::plan::StepStatus::Succeeded
     );
-    assert!(state.records["s-leader"].skip_reason.is_none());
-    assert!(state.records["s-leader"].output.is_some());
+    assert_eq!(
+        state.records["s-leader"].skip_reason.as_deref(),
+        Some("host_manifest:independent_task_graph")
+    );
 }
 
 #[tokio::test]
@@ -2221,7 +2337,14 @@ async fn parallel_assignment_respects_preexisting_write_scope() {
 
     let registry = build_registry(&h, &team.team_id, Arc::new(EchoWorker), &roles);
     let outcome = drive_next(&h, &team.team_id, &registry).await;
-    assert!(matches!(outcome, PhaseOutcome::Done), "{outcome:?}");
+    assert!(
+        matches!(outcome, PhaseOutcome::Done),
+        "{outcome:?}; error={:?}",
+        h.coordinator
+            .load_run_state(&team.team_id)
+            .ok()
+            .and_then(|state| state.goal.error)
+    );
 
     let meta_raw = std::fs::read_to_string(
         h.dir
@@ -2328,6 +2451,61 @@ async fn source_session_core_spec_is_saved_in_cas_and_restored_for_workers() {
         .unwrap();
     assert!(slice["core_spec"].to_string().contains("保留现有 API"));
     assert!(slice["core_spec"].to_string().contains("优先完成功能闭环"));
+
+    let hash = team.shared_context_refs[0]
+        .strip_prefix("cas://sha256:")
+        .unwrap();
+    std::fs::write(h.dir.join("cas").join(hash), b"tampered").unwrap();
+    assert!(
+        h.coordinator
+            .assemble_context_slice(&team.team_id, "m-runner", &step_id)
+            .await
+            .is_err(),
+        "损坏的父会话约束必须阻断组装，不能静默当成无上下文"
+    );
+}
+
+#[tokio::test]
+async fn parent_context_cas_uses_bounded_single_pass_and_enforces_size_limit() {
+    let h = harness();
+    let long_constraint = "约束".repeat(40_000);
+    let snapshot = serde_json::json!({
+        "kind": "source_session_context_v1",
+        "core_spec": { "system_constraints": long_constraint }
+    })
+    .to_string();
+    let mut request = CreateTeamRequest::new("保留完整父会话约束", TeamMode::Single);
+    request.parent_context_snapshot = Some(snapshot);
+    let team = h.coordinator.create_team_run(&request).await.unwrap();
+    let step_id = h
+        .coordinator
+        .load_run_state(&team.team_id)
+        .unwrap()
+        .plan
+        .steps[0]
+        .id
+        .clone();
+    let slice = h
+        .coordinator
+        .assemble_context_slice(&team.team_id, "m-runner", &step_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        slice["core_spec"][0]["system_constraints"].as_str(),
+        Some(long_constraint.as_str()),
+        "跨 64 KiB 分页后的上下文必须完整还原"
+    );
+
+    let oversized = format!(
+        "{{\"kind\":\"source_session_context_v1\",\"core_spec\":{{\"text\":\"{}\"}}}}",
+        "x".repeat(256 * 1024)
+    );
+    let mut invalid = CreateTeamRequest::new("拒绝超大父会话上下文", TeamMode::Single);
+    invalid.parent_context_snapshot = Some(oversized);
+    assert!(matches!(
+        h.coordinator.create_team_run(&invalid).await,
+        Err(owo_agent_core::WorkSwarmError::Validation(_))
+    ));
 }
 
 #[tokio::test]
@@ -2485,6 +2663,76 @@ async fn published_shared_context_is_versioned_and_reaches_worker_slice() {
         .to_string()
         .contains("verified by route test"));
     assert!(slice["shared_facts"].to_string().contains("unverified"));
+
+    let hash = revised_fact
+        .value_ref
+        .strip_prefix("cas://sha256:")
+        .unwrap();
+    std::fs::write(h.dir.join("cas").join(hash), b"tampered").unwrap();
+    assert!(
+        h.coordinator
+            .assemble_context_slice(&team.team_id, "m-runner", &step)
+            .await
+            .is_err(),
+        "损坏的共享约束必须阻断组装，不能静默跳过"
+    );
+}
+
+#[tokio::test]
+async fn shared_fact_context_parallel_reads_keep_newest_first_and_exact_byte_budget() {
+    let h = harness();
+    let team = h
+        .coordinator
+        .create_team_run(&CreateTeamRequest::new(
+            "assemble bounded shared facts",
+            TeamMode::Single,
+        ))
+        .await
+        .unwrap();
+    for revision in 0..5_u64 {
+        h.coordinator
+            .publish_team_context_fact(
+                &team.team_id,
+                revision,
+                owo_agent_core::workswarm::SharedContextFactDraft {
+                    key: format!("fact-{revision}"),
+                    value: format!("fact-{revision} {}", "x".repeat(3000)),
+                    producer: "m-runner".to_string(),
+                    task_id: None,
+                    source_refs: Vec::new(),
+                    file_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let step = h
+        .coordinator
+        .load_run_state(&team.team_id)
+        .unwrap()
+        .plan
+        .steps[0]
+        .id
+        .clone();
+    let slice = h
+        .coordinator
+        .assemble_context_slice(&team.team_id, "m-runner", &step)
+        .await
+        .unwrap();
+    let facts = slice["shared_facts"].as_array().unwrap();
+
+    assert_eq!(facts.len(), 4);
+    assert_eq!(facts[0]["key"], "fact-4");
+    assert_eq!(facts[1]["key"], "fact-3");
+    assert_eq!(facts[2]["key"], "fact-2");
+    assert_eq!(facts[3]["key"], "fact-1");
+    let lengths = facts
+        .iter()
+        .map(|fact| fact["value"].as_str().unwrap().len())
+        .collect::<Vec<_>>();
+    assert_eq!(lengths, vec![2400, 2400, 2400, 992]);
+    assert_eq!(lengths.iter().sum::<usize>(), 8 * 1024);
+    assert!(facts.iter().all(|fact| fact["truncated"] == true));
 }
 
 #[tokio::test]
@@ -2673,7 +2921,7 @@ async fn finalize_success_rejects_unaccepted_changeset_for_current_attempt() {
         role: role.to_string(),
         base_hashes: Vec::new(),
         result_hashes: Vec::new(),
-        changed_files: vec!["src/main.rs".to_string()],
+        changed_files: vec!["docs/report.md".to_string()],
         diff_ref: Some("test.patch".to_string()),
         status: owo_agent_protocol::ChangeSetStatus::PendingReview,
         created_at: "2026-10-02T00:00:00Z".to_string(),
@@ -2802,7 +3050,9 @@ async fn finalize_success_rejects_missing_manifest_artifact_before_success() {
 #[tokio::test]
 async fn finalize_success_records_workspace_validation_bound_to_file_hash() {
     let h = harness();
-    let roles = vec![RoleSpec::agent("builder")];
+    let mut builder = RoleSpec::agent("builder");
+    builder.worker = Some("fixed".to_string());
+    let roles = vec![builder];
     let req = CreateTeamRequest {
         goal_id: None,
         objective: OBJECTIVE.to_string(),
@@ -2906,7 +3156,9 @@ async fn finalize_success_records_workspace_validation_bound_to_file_hash() {
 #[tokio::test]
 async fn finalize_success_rechecks_workspace_after_a_previously_passed_receipt() {
     let h = harness();
-    let roles = vec![RoleSpec::agent("builder")];
+    let mut builder = RoleSpec::agent("builder");
+    builder.worker = Some("fixed".to_string());
+    let roles = vec![builder];
     let req = CreateTeamRequest {
         goal_id: None,
         objective: OBJECTIVE.to_string(),
@@ -3056,6 +3308,7 @@ async fn finalize_success_rechecks_workspace_after_a_previously_passed_receipt()
 async fn finalize_success_checks_assertion_against_artifact_not_worker_report() {
     let h = harness();
     let mut builder = RoleSpec::agent("builder");
+    builder.worker = Some("fixed".to_string());
     builder.verify = Some("contains:ACCEPTED".to_string());
     let req = CreateTeamRequest {
         goal_id: None,
@@ -3180,7 +3433,10 @@ async fn finalize_success_rejects_non_review_runtime_skip() {
         objective: OBJECTIVE.to_string(),
         mode: TeamMode::Team,
         template_id: None,
-        roles: vec![RoleSpec::agent("builder")],
+        roles: vec![RoleSpec {
+            worker: Some("fixed".to_string()),
+            ..RoleSpec::agent("builder")
+        }],
         budget: Value::Null,
         human_policy: None,
         strategy: None,
@@ -3317,4 +3573,329 @@ async fn finalize_success_rejects_latest_artifact_with_open_issues() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("未解决问题"));
+}
+
+struct BatchReviewRepairWorker {
+    calls: std::sync::Mutex<HashMap<String, usize>>,
+}
+
+#[async_trait]
+impl Worker for BatchReviewRepairWorker {
+    fn name(&self) -> &str {
+        "batch-review-repair"
+    }
+
+    async fn run(&self, input: &Value) -> Result<String, String> {
+        let role = input
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let call = {
+            let mut calls = self.calls.lock().unwrap();
+            let count = calls.entry(role.to_string()).or_default();
+            *count += 1;
+            *count
+        };
+        if role != "quality_gate" {
+            if call == 2 {
+                let instruction = input
+                    .pointer("/rework/instruction")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !instruction.contains(&format!("repair {role}")) {
+                    return Err(format!("{role} 未收到自身的修复问题"));
+                }
+            }
+            return Ok(serde_json::json!({"status":"done","summary":"candidate",
+                "artifact":{"kind":"document","format":"markdown","content":format!("完整文档 {role} 版本 {call}")},
+                "evidence":[],"open_issues":[]}).to_string());
+        }
+        let context = input
+            .get("text")
+            .and_then(Value::as_str)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .unwrap_or_else(|| input.clone());
+        let ids = context
+            .get("upstream")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|artifact| {
+                artifact
+                    .get("review_requirements")
+                    .and_then(Value::as_array)
+            })
+            .flatten()
+            .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let findings = if call == 1 {
+            vec![
+                serde_json::json!({"detail":"repair a boundary","target_task_id":"s-a","severity":"major","evidence_refs":["artifact"]}),
+                serde_json::json!({"detail":"repair a cancellation","target_task_id":"s-a","severity":"major","evidence_refs":["artifact"]}),
+                serde_json::json!({"detail":"repair b integration","target_task_id":"s-b","severity":"major","evidence_refs":["artifact"]}),
+            ]
+        } else {
+            Vec::new()
+        };
+        Ok(serde_json::json!({"status":"done","summary":"review",
+            "review_result":{"verdict":if call==1 {"changes_requested"} else {"approved"},
+                "reviewed_requirement_ids":ids,"findings":findings},
+            "evidence":[],"open_issues":[]})
+        .to_string())
+    }
+}
+
+#[tokio::test]
+async fn review_batch_repairs_dependent_owners_once_and_closes_every_issue() {
+    let h = harness();
+    let mut a = RoleSpec::agent("a");
+    a.worker = Some("batch-review-repair".into());
+    a.verify = Some("non_empty".into());
+    let mut b = RoleSpec::agent("b");
+    b.worker = a.worker.clone();
+    b.verify = a.verify.clone();
+    b.depends_on = vec!["a".into()];
+    let mut review = RoleSpec::agent("quality_gate");
+    review.worker = a.worker.clone();
+    review.verify = a.verify.clone();
+    review.capabilities = vec!["review".into()];
+    review.depends_on = vec!["a".into(), "b".into()];
+    let roles = vec![a, b, review];
+    let req = CreateTeamRequest {
+        goal_id: None,
+        objective: OBJECTIVE.into(),
+        mode: TeamMode::Team,
+        template_id: None,
+        roles: roles.clone(),
+        budget: Value::Null,
+        human_policy: None,
+        strategy: Some(owo_agent_core::team_strategy::TeamSelectionMode::ForceTeam),
+        model: None,
+        parallel: false,
+        max_agent_members: None,
+        parent_context_snapshot: None,
+    };
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let worker = Arc::new(BatchReviewRepairWorker {
+        calls: std::sync::Mutex::new(HashMap::new()),
+    });
+    let registry = build_registry(&h, &team.team_id, worker.clone(), &roles);
+    let outcome = drive_next(&h, &team.team_id, &registry).await;
+    assert!(
+        matches!(outcome, PhaseOutcome::Done),
+        "batch repair must converge: {outcome:?}"
+    );
+    let calls = worker.calls.lock().unwrap();
+    for role in ["a", "b", "quality_gate"] {
+        assert_eq!(calls.get(role), Some(&2), "{role} must run exactly twice");
+    }
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    assert_eq!(state.delivery_issues.len(), 3);
+    assert!(state
+        .delivery_issues
+        .iter()
+        .all(|issue| issue.status == owo_agent_core::goal::DeliveryIssueStatusV1::Resolved));
+    for step in state
+        .plan
+        .steps
+        .iter()
+        .filter(|step| step.worker == "m-a" || step.worker == "m-b")
+    {
+        assert_eq!(step.input["rework"]["attempt"], 1);
+    }
+}
+
+#[tokio::test]
+async fn dependency_context_bounds_preview_keeps_full_hash_and_rejects_member_spoofing() {
+    let h = harness();
+    let mut producer = RoleSpec::agent("producer");
+    producer.worker = Some("echo".into());
+    let mut consumer = RoleSpec::agent("consumer");
+    consumer.worker = Some("echo".into());
+    consumer.depends_on = vec!["producer".into()];
+    let mut req = CreateTeamRequest::new("verify current context", TeamMode::Team);
+    req.roles = vec![producer, consumer];
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let producer_step = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-producer")
+        .unwrap();
+    let consumer_step = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-consumer")
+        .unwrap();
+    let full = "中文全文".repeat(2000);
+    let artifact = h
+        .coordinator
+        .register_step_output(
+            &team.team_id,
+            "m-producer",
+            "producer",
+            &producer_step.id,
+            &full,
+        )
+        .await
+        .unwrap();
+    let context = h
+        .coordinator
+        .assemble_context_slice(&team.team_id, "m-consumer", &consumer_step.id)
+        .await
+        .unwrap();
+    let upstream = context["upstream"].as_array().unwrap();
+    assert_eq!(upstream.len(), 1);
+    let preview = upstream[0]["content"].as_str().unwrap();
+    assert!(preview.len() <= owo_agent_core::team_prompt::DEFAULT_PER_ARTIFACT_BYTES);
+    assert!(full.starts_with(preview));
+    assert_eq!(upstream[0]["truncated"], true);
+    assert_eq!(upstream[0]["content_bytes"], full.len());
+    assert_eq!(upstream[0]["sha256"], artifact.sha256);
+    assert_ne!(
+        owo_agent_core::cas_store::CasStore::hash_of(preview.as_bytes()),
+        artifact.sha256
+    );
+    assert!(h
+        .coordinator
+        .assemble_context_slice(&team.team_id, "m-producer", &consumer_step.id)
+        .await
+        .is_err());
+    assert!(h
+        .coordinator
+        .read_dependency_artifact(
+            &team.team_id,
+            "m-producer",
+            &consumer_step.id,
+            &artifact.artifact_id,
+            100
+        )
+        .await
+        .is_err());
+    std::fs::write(h.dir.join("cas").join(&artifact.sha256), b"tampered").unwrap();
+    assert!(h
+        .coordinator
+        .assemble_context_slice(&team.team_id, "m-consumer", &consumer_step.id)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn artifact_pages_reach_tail_and_pin_current_task_attempt_and_hash() {
+    use owo_agent_core::workswarm::DependencyArtifactRead;
+    let h = harness();
+    let mut producer = RoleSpec::agent("producer");
+    producer.worker = Some("echo".into());
+    let mut consumer = RoleSpec::agent("consumer");
+    consumer.worker = Some("echo".into());
+    consumer.depends_on = vec!["producer".into()];
+    let mut req = CreateTeamRequest::new("read full large dependency", TeamMode::Team);
+    req.roles = vec![producer, consumer];
+    let team = h.coordinator.create_team_run(&req).await.unwrap();
+    let state = h.coordinator.load_run_state(&team.team_id).unwrap();
+    let producer_step = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-producer")
+        .unwrap();
+    let consumer_step = state
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.worker == "m-consumer")
+        .unwrap();
+    let full = format!("{}尾部验收要求", "正文😀".repeat(12000));
+    let artifact = h
+        .coordinator
+        .register_step_output(
+            &team.team_id,
+            "m-producer",
+            "producer",
+            &producer_step.id,
+            &full,
+        )
+        .await
+        .unwrap();
+    let mut read = DependencyArtifactRead {
+        max_bytes: 32 * 1024,
+        ..Default::default()
+    };
+    let mut assembled = String::new();
+    loop {
+        let page = h
+            .coordinator
+            .read_dependency_artifact_page(
+                &team.team_id,
+                "m-consumer",
+                &consumer_step.id,
+                &artifact.artifact_id,
+                &read,
+            )
+            .await
+            .unwrap();
+        assembled.push_str(page["content"].as_str().unwrap());
+        assert_eq!(page["sha256"], artifact.sha256);
+        if page["eof"] == true {
+            break;
+        }
+        let next = page["next_offset_bytes"].as_u64().unwrap();
+        assert!(next > read.offset_bytes);
+        read.offset_bytes = next;
+        read.expected_sha256 = Some(artifact.sha256.clone());
+    }
+    assert_eq!(assembled, full);
+    assert!(assembled.ends_with("尾部验收要求"));
+    let wrong = DependencyArtifactRead {
+        offset_bytes: 3,
+        max_bytes: 100,
+        expected_sha256: Some("a".repeat(64)),
+    };
+    assert!(h
+        .coordinator
+        .read_dependency_artifact_page(
+            &team.team_id,
+            "m-consumer",
+            &consumer_step.id,
+            &artifact.artifact_id,
+            &wrong
+        )
+        .await
+        .is_err());
+    let unpinned = DependencyArtifactRead {
+        offset_bytes: 3,
+        ..Default::default()
+    };
+    assert!(h
+        .coordinator
+        .read_dependency_artifact_page(
+            &team.team_id,
+            "m-consumer",
+            &consumer_step.id,
+            &artifact.artifact_id,
+            &unpinned
+        )
+        .await
+        .is_err());
+    let mut restarted = h.coordinator.load_run_state(&team.team_id).unwrap();
+    restarted
+        .records
+        .get_mut(&producer_step.id)
+        .unwrap()
+        .attempt_id = Some("different-attempt".into());
+    restarted.persist(&h.dir.join("runs")).unwrap();
+    assert!(h
+        .coordinator
+        .read_dependency_artifact_page(
+            &team.team_id,
+            "m-consumer",
+            &consumer_step.id,
+            &artifact.artifact_id,
+            &read
+        )
+        .await
+        .is_err());
 }

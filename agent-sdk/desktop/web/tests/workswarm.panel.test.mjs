@@ -43,6 +43,7 @@ const TASKS_MIXED = [
 ];
 
 function resetState() {
+  T.setRoot(null);
   T.state.current = null;
   T.state.team = null;
   T.state.teamStatus = "";
@@ -54,8 +55,16 @@ function resetState() {
   T.state.progress = null;
   T.state.lastProgressSeq = 0;
   T.state.cancelling = false;
+  T.state.pollRequest = null;
   T.state.reviewBusy = {};
   T.state.artifacts = [];
+  T.state.artifactLoadError = "";
+  T.state.handoffArtsFetched = false;
+  T.state.handoffArtsLoading = false;
+  T.state.handoffArtsError = "";
+  T.state.handoffArtsRequest = null;
+  T.state.handoffRefs = { arts: [], evid: [] };
+  T.state.handoffRefQuery = { arts: "", evid: "" };
   T.state.reviewResult = null;
   // —— 五期字段 ——
   T.state.strategyDecision = null;
@@ -97,6 +106,49 @@ test("模块导出与浏览器骨架完好", () => {
   assert.match(html, /data-panel="workswarm"/);
   assert.match(html, /<style>/);
   assert.ok(!html.includes("##"), "禁止出现 '##' 非法选择器（历史空白面板回归）");
+});
+
+test("WorkSwarm live polling deduplicates slow snapshots and aborts stale requests", async () => {
+  resetState();
+  const previous = T.getTransport();
+  const requests = [
+    { resolve: null, reject: null, signal: null },
+    { resolve: null, reject: null, signal: null },
+  ];
+  const pending = requests.map((item) => new Promise((resolve, reject) => {
+    item.resolve = resolve;
+    item.reject = reject;
+  }));
+  let index = 0;
+  T.state.current = "team-a";
+  T.setTransport({
+    get(path, options) {
+      const item = requests[index];
+      item.path = path;
+      item.signal = options && options.signal;
+      return pending[index++];
+    },
+  });
+  try {
+    const first = T.pollOnce();
+    const duplicate = T.pollOnce();
+    assert.equal(first, duplicate, "interval ticks during a slow poll must join the same request pair");
+    assert.equal(index, 2, "only one event snapshot and one detail request should be in flight");
+    assert.ok(requests.every((item) => item.signal && item.signal === requests[0].signal));
+    assert.ok(requests[0].path.includes("/teams/team-a/events"));
+    assert.equal(requests[1].path, "/teams/team-a");
+
+    T.stopLive("已离开团队页面");
+    assert.equal(requests[0].signal.aborted, true, "leaving live mode should abort both fetches");
+    requests[0].resolve({ active: true, status: "Running", audit: [] });
+    requests[1].resolve({ team: { team_id: "team-a" }, tasks: [] });
+    await Promise.all([first, duplicate]);
+    assert.equal(T.state.streamNote, "已离开团队页面", "late responses must not replace the stop reason");
+    assert.equal(T.state.pollRequest, null);
+  } finally {
+    T.setTransport(previous);
+    resetState();
+  }
 });
 
 test("normStatus / isTerminalTeam 状态归一化", () => {
@@ -183,6 +235,12 @@ test("dagSvg：仅 Failed/Aborted 节点出现重试按钮；终态成功团队�
   assert.ok(!svgDone.includes("data-ws-retry"), "终态成功团队不得出现重试入口");
 });
 
+test("三态提示具备读屏告警与加载语义", () => {
+  assert.match(T.stateBox("error", "请求失败", "detail"), /role="alert"/);
+  assert.match(T.stateBox("loading", "正在加载"), /role="status" aria-live="polite"/);
+  assert.match(T.stateBox("error", "请求失败", "detail"), /data-retry="detail"/);
+});
+
 test("renderDetail 骨架：运行摘要 / 中断横幅 / 审计键盘焦点 / retry 提示", () => {
   const html = T.renderDetail();
   assert.match(html, /id="ws-d-summary" class="owo-ws-sumbox" aria-live="polite"/);
@@ -211,6 +269,64 @@ test("explainError：400/404/409/网络/凭据映射", () => {
   assert.match(T.explainError({ message: "Failed to fetch" }), /无法连接 owo-agent-server/);
   const cred = T.explainError({ message: '500: {"error":"OPENAI_API_KEY missing"}' });
   assert.match(cred, /环境变量/);
+});
+
+test("WorkSwarm 错误态中的交付物与评审历史重试按钮会重新发起对应请求", async () => {
+  resetState();
+  T.state.current = "team-1";
+  T.state.team = { team_id: "team-1", project_space_id: "project-1" };
+  T.state.deliverablesOpen = true;
+  const historyTarget = {
+    innerHTML: "",
+    getAttribute(name) { return name === "data-art-history-box" ? "art-1" : null; },
+  };
+  const artifactBox = {
+    querySelectorAll() { return [historyTarget]; },
+  };
+  const deliverableBox = { hidden: false, innerHTML: "" };
+  T.setRoot({
+    querySelector(selector) {
+      if (selector === "#ws-d-artifacts") return artifactBox;
+      if (selector === "#ws-dlv-box") return deliverableBox;
+      return null;
+    },
+  });
+
+  const calls = [];
+  T.setTransport({
+    get(path) {
+      calls.push(path);
+      if (path === "/projects/project-1/deliverables") {
+        if (calls.filter((x) => x === path).length === 1) return Promise.reject(new Error("deliverables unavailable"));
+        return Promise.resolve({ approved: [{ artifact_id: "art-approved", kind: "report", version: 1 }] });
+      }
+      if (path === "/artifacts/art-1/history") {
+        if (calls.filter((x) => x === path).length === 1) return Promise.reject(new Error("history unavailable"));
+        return Promise.resolve({ reviews: [{ review_id: "review-1", decision: "approve" }] });
+      }
+      throw new Error("unexpected GET " + path);
+    },
+  });
+
+  await T.loadDeliverables();
+  assert.match(deliverableBox.innerHTML, /role="alert"/);
+  assert.match(deliverableBox.innerHTML, /data-retry="deliverables"/);
+  await T.retryAction("deliverables");
+  assert.equal(T.state.deliverables.approved[0].artifactId, "art-approved");
+  assert.doesNotMatch(deliverableBox.innerHTML, /data-retry="deliverables"/);
+
+  await T.loadArtifactHistory("art-1");
+  assert.match(historyTarget.innerHTML, /role="alert"/);
+  assert.match(historyTarget.innerHTML, /data-retry="history-art-1"/);
+  await T.retryAction("history-art-1");
+  assert.equal(T.state.historyReviews["art-1"][0].review_id, "review-1");
+  assert.doesNotMatch(historyTarget.innerHTML, /data-retry="history-art-1"/);
+  assert.deepEqual(calls, [
+    "/projects/project-1/deliverables",
+    "/projects/project-1/deliverables",
+    "/artifacts/art-1/history",
+    "/artifacts/art-1/history",
+  ]);
 });
 
 test("handleRetryClick：快速双击只产生一次请求；结束后解锁并恢复文案", async () => {
@@ -277,15 +393,15 @@ test("syncDetail：interrupted 标记从详情响应流入面板状态", async (
 });
 
 test("style.css 第 16 节守卫：inline 换行/中断徽标/重试按钮/表格包裹/窄栏断点/焦点环", () => {
-  const flat = shellCss.replace(/\s+/g, "");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-inline{display:flex;flex-wrap:wrap"), "inline 行必须可换行（防 1280 溢出）");
-  assert.ok(flat.includes(".owo-ws-badge.st-interrupted"), "中断徽标样式在场");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-interrupted"), "中断横幅样式在场");
-  assert.ok(flat.includes("button.owo-ws-retry"), "重试按钮样式在场");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-tablewrap"), "表格横向滚动包裹在场");
-  assert.ok(flat.includes("@media(max-width:1280px)"), "窄栏断点在场");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-audit:focus-visible"), "审计区键盘焦点环在场");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-ellip"), "长文本省略工具类在场");
+  const cssText = shellCss.replace(/\s+/g, " ");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-inline { display: flex; flex-wrap: wrap"), "inline 行必须可换行（防 1280 溢出）");
+  assert.ok(cssText.includes(".owo-ws-badge.st-interrupted"), "中断徽标样式在场");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-interrupted"), "中断横幅样式在场");
+  assert.ok(cssText.includes("button.owo-ws-retry"), "重试按钮样式在场");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-tablewrap"), "表格横向滚动包裹在场");
+  assert.ok(cssText.includes("@media (max-width: 1280px)"), "窄栏断点在场");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-audit:focus-visible"), "审计区键盘焦点环在场");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-ellip"), "长文本省略工具类在场");
 });
 
 // ==================== 四期：实时进度（progress 事件） ====================
@@ -422,18 +538,16 @@ test("handleEventFrame：audit 帧去重入列", () => {
   assert.equal(T.state.audit.length, 1);
 });
 
-test("四期样式守卫：style.css 第 18 节进度区/评审闭环/统计判读/徽标/窄栏守卫在场", () => {
-  const flat = shellCss.replace(/\s+/g, "");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-prog-step.run"), "运行中步骤高亮样式在场");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-prog-cancelling"), "取消中徽标样式在场");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-art-row.head"), "版本链链头样式在场");
-  assert.ok(flat.includes(".owo-ws-badge.rv-ok"), "已批准徽标样式在场");
-  assert.ok(flat.includes(".owo-ws-badge.rv-bad"), "已驳回徽标样式在场");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-review-act:disabled"), "评审按钮锁定样式在场");
-  assert.ok(flat.includes(".owo-ws-panel.owo-ws-review-act:focus-visible"), "评审按钮焦点环在场");
-  assert.ok(flat.includes(".owo-pe-panel.owo-pe-stats"), "eval 统计判读区样式在场");
-  assert.ok(flat.includes(".owo-pe-panel.owo-pe-stat-note.bad"), "样本不足提示样式在场");
-  assert.ok(flat.includes("@keyframesowo-ws-pulse"), "取消中脉冲动画在场");
+test("四期样式守卫：style.css 第 18 节 WorkSwarm 进度区/评审闭环/徽标守卫在场", () => {
+  const cssText = shellCss.replace(/\s+/g, " ");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-prog-step.run"), "运行中步骤高亮样式在场");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-prog-cancelling"), "取消中徽标样式在场");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-art-row.head"), "版本链链头样式在场");
+  assert.ok(cssText.includes(".owo-ws-badge.rv-ok"), "已批准徽标样式在场");
+  assert.ok(cssText.includes(".owo-ws-badge.rv-bad"), "已驳回徽标样式在场");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-review-act:disabled"), "评审按钮锁定样式在场");
+  assert.ok(cssText.includes(".owo-ws-panel .owo-ws-review-act:focus-visible"), "评审按钮焦点环在场");
+  assert.ok(cssText.includes("@keyframes owo-ws-pulse"), "取消中脉冲动画在场");
 });
 
 // ============================================================================
@@ -486,13 +600,42 @@ test("metricsFromPayload：标准形状/别名形状/空形状", () => {
   resetState();
   const std = T.metricsFromPayload({
     workers: [
-      { worker: "m-writer", role: "writer", duration_ms: 1200, model_calls: 3, tokens_in: 100, tokens_out: 50, est_cost: 0.002, attempts: 1, terminal: "Succeeded", failure_reason: "", artifact_ids: ["a1"] },
+      { worker: "m-writer", role: "writer", task_id: "task-7", attempt_id: "attempt-2", phase_epoch: 9, duration_ms: 1200, budget_reservation_wait_ms: 14, model_calls: 3, tokens_in: 100, tokens_out: 50, est_cost: 0.002, attempts: 1, terminal: "Succeeded", failure_reason: "", artifact_ids: ["a1"] },
     ],
-    summary: { wall_clock_ms: 5000, total_model_calls: 3, total_tokens_in: 100, total_tokens_out: 50, total_est_cost: 0.002, slowest_worker: "m-writer", failures: 0, reworks: 0, artifact_versions: 1 },
+    execution_epochs: { epoch_count: 1, items: [
+      { phase_epoch: 9, worker_span_count: 1, task_attempt_count: 1, failed_spans: 0, model_calls: 3, prompt_tokens: 100, completion_tokens: 50, usage_known: true, worker_wall_ms_sum: 1200, worker_window_ms: 1200, parallel_overlap_factor: 1.0 },
+    ] },
+    lifecycle: { epochs: [ { phase_epoch: 9, phase_duration_ms_sum: 2500 } ] },
+    context_assembly: {
+      sample_count: 2, sample_cap: 1000, sample_truncated: false, audit_scan_truncated: false,
+      failures: 0, duration_ms_p50: 12, duration_ms_p90: 18,
+      by_role: [{ role: "writer", sample_count: 2, failures: 0, duration_ms_p50: 12, duration_ms_p90: 18 }],
+      by_epoch: [{ phase_epoch: 9, sample_count: 2, failures: 0, duration_ms_p50: 12, duration_ms_p90: 18 }],
+    },
+    summary: { wall_clock_ms: 5000, total_model_calls: 3, budget_reservation_wait_ms_sum: 14, total_tokens_in: 100, total_tokens_out: 50, total_est_cost: 0.002, slowest_worker: "m-writer", failures: 0, reworks: 0, artifact_versions: 1 },
   });
   assert.equal(std.workers.length, 1);
   assert.equal(std.workers[0].modelCalls, 3);
   assert.equal(std.workers[0].durationMs, 1200);
+  assert.equal(std.workers[0].budgetReservationWaitMs, 14);
+  assert.equal(std.workers[0].taskId, "task-7");
+  assert.equal(std.workers[0].attemptId, "attempt-2");
+  assert.equal(std.workers[0].phaseEpoch, 9);
+  assert.equal(std.executionEpochs.length, 1);
+  assert.equal(std.executionEpochs[0].phaseDurationMs, 2500);
+  assert.equal(std.executionEpochs[0].usageKnown, true);
+  assert.equal(std.contextAssembly.sampleCount, 2);
+  assert.equal(std.contextAssembly.byRole[0].durationMsP90, 18);
+  assert.equal(std.contextAssembly.byEpoch[0].phaseEpoch, 9);
+  assert.equal(std.summary.totalBudgetReservationWaitMs, 14);
+  const epochHtml = T.metricsCardsHtml(std, null);
+  assert.match(epochHtml, /上下文装配（Worker 内部耗时，不与墙钟相加）/);
+  assert.match(epochHtml, /writer <b>P50 12ms \/ P90 18ms/);
+  assert.match(epochHtml, /epoch 9 上下文 P50 12ms \/ P90 18ms/);
+  assert.match(epochHtml, /执行代次（最近 1）/);
+  assert.match(epochHtml, /epoch 9<\/b> · 编排 2.5s · Worker窗口 1.2s/);
+  const identityHtml = T.metricsCardsHtml(std, null);
+  assert.match(identityHtml, /task task-7 · attempt attempt-2 · epoch 9/);
   assert.equal(std.summary.wallClockMs, 5000);
   assert.equal(std.summary.slowestWorker, "m-writer");
   // 别名：roles/items + calls/cost_usd
@@ -504,9 +647,33 @@ test("metricsFromPayload：标准形状/别名形状/空形状", () => {
   const budget = T.metricsFromPayload({ summary: { wall_clock_ms: 1, budget_exhausted: true, budget_reason: "调用预算用尽" } });
   assert.equal(budget.summary.budgetExhausted, true);
   assert.equal(budget.summary.budgetReason, "调用预算用尽");
+  const lifecycleOnly = T.metricsFromPayload({ lifecycle: { span_count: 2, stages: [
+    { stage: "phase_orchestration", count: 2, failures: 0, duration_ms_p50: 900, duration_ms_p90: 1200 },
+  ] } });
+  assert.equal(lifecycleOnly.lifecycleStages[0].durationMsP90, 1200);
+  const lifecycleHtml = T.metricsCardsHtml(lifecycleOnly, null);
+  assert.match(lifecycleHtml, /运行阶段耗时/);
+  assert.match(lifecycleHtml, /P50 900ms \/ P90 1.2s/);
   // 完全无指标 → null（UI 保持空态）
   assert.equal(T.metricsFromPayload(null), null);
   assert.equal(T.metricsFromPayload({}), null);
+});
+
+test("metricsFromPayload：上下文耗时可独立呈现且标明截断采样", () => {
+  const contextOnly = T.metricsFromPayload({
+    context_assembly: {
+      sample_count: 1000, sample_cap: 1000, sample_truncated: true, audit_scan_truncated: true,
+      attribution_missing_count: 2, failures: 1, duration_ms_p50: 5, duration_ms_p90: 20,
+      by_role: [{ role: "reviewer", sample_count: 1000, failures: 1, duration_ms_p50: 5, duration_ms_p90: 20 }],
+      by_epoch: [],
+    },
+  });
+  assert.equal(contextOnly.contextAssembly.sampleTruncated, true);
+  assert.equal(contextOnly.contextAssembly.auditScanTruncated, true);
+  assert.match(T.metricsCardsHtml(contextOnly, null), /最近样本，统计可能不完整/);
+  assert.match(T.metricsCardsHtml(contextOnly, null), /未归因 2/);
+  const legacyOnly = T.metricsFromPayload({ context_assembly: { sample_count: 0, attribution_missing_count: 3 } });
+  assert.match(T.metricsCardsHtml(legacyOnly, null), /样本 0.*未归因 3/);
 });
 
 test("metricsCardsHtml：汇总条/卡片/预算余量/空态", () => {
@@ -515,12 +682,13 @@ test("metricsCardsHtml：汇总条/卡片/预算余量/空态", () => {
   assert.match(empty, /暂无角色指标/);
   const html = T.metricsCardsHtml(
     T.metricsFromPayload({
-      workers: [{ worker: "m-w", role: "writer", duration_ms: 900, model_calls: 3, terminal: "Succeeded" }],
-      summary: { wall_clock_ms: 900, total_model_calls: 3, failures: 1, reworks: 0 },
+      workers: [{ worker: "m-w", role: "writer", duration_ms: 900, budget_reservation_wait_ms: 12, model_calls: 3, terminal: "Succeeded" }],
+      summary: { wall_clock_ms: 900, total_model_calls: 3, budget_reservation_wait_ms_sum: 12, failures: 1, reworks: 0 },
     }),
     4
   );
   assert.match(html, /总墙钟/);
+  assert.match(html, /预算预留等待/);
   assert.match(html, /最慢|总调用/);
   assert.match(html, /writer/);
   assert.match(html, /余 1）/, "预算余量 = budget - calls");
@@ -755,6 +923,74 @@ test("latestChangesReviewId：取最近一次要求修改评审 id", () => {
   T.state.historyReviews["a2"] = [{ review_id: "rev-3", decision: "reject" }];
   assert.equal(T.latestChangesReviewId("a2"), "");
   assert.equal(T.latestChangesReviewId("missing"), "");
+});
+
+test("交接引用候选失败可读可重试，重试成功后候选及时更新", async () => {
+  resetState();
+  T.state.current = "team-1";
+  T.state.team = { team_id: "team-1", project_space_id: "project-1" };
+  const listeners = {};
+  function fakeBox(id) {
+    return {
+      id,
+      innerHTML: "",
+      addEventListener(type, handler) { listeners[type + ":" + id] = handler; },
+      querySelector() { return null; },
+    };
+  }
+  const artifactAttrs = {};
+  const artifactBox = {
+    innerHTML: "",
+    getAttribute(name) { return artifactAttrs[name] || null; },
+    setAttribute(name, value) { artifactAttrs[name] = String(value); },
+    addEventListener() {},
+  };
+  const artsBox = fakeBox("arts");
+  const evidBox = fakeBox("evid");
+  const elements = {
+    "#ws-d-artifacts": artifactBox,
+    "#ws-x-arts-pick": artsBox,
+    "#ws-x-evid-pick": evidBox,
+  };
+  T.setRoot({ querySelector(selector) { return elements[selector] || null; } });
+
+  let attempts = 0;
+  T.setTransport({
+    get(path) {
+      assert.equal(path, "/projects/project-1/artifacts");
+      attempts += 1;
+      if (attempts === 1) return Promise.reject(new Error("artifact options unavailable"));
+      const id = attempts === 2 ? "art-1" : "art-2";
+      return Promise.resolve({
+        artifacts: [{ artifact_id: id, kind: "markdown", version: attempts - 1, producer: "m-writer", review_state: "PendingReview", preview: "# Result" }],
+      });
+    },
+  });
+
+  T.bindHandoffRefPickers();
+  T.paintHandoffRefPickers();
+  await T.loadHandoffArtifacts();
+  assert.equal(T.state.handoffArtsFetched, false);
+  assert.equal(T.state.handoffArtsLoading, false);
+  assert.match(artsBox.innerHTML, /role="alert"/);
+  assert.match(artsBox.innerHTML, /data-ws-ref-retry-artifacts/);
+  assert.match(artsBox.innerHTML, /仍可手动输入引用/);
+
+  listeners["click:arts"]({ target: {
+    hasAttribute(name) { return name === "data-ws-ref-retry-artifacts"; },
+    getAttribute() { return null; },
+  } });
+  await T.loadHandoffArtifacts();
+  assert.equal(attempts, 2);
+  assert.equal(T.state.handoffArtsFetched, true, T.state.artifactLoadError || T.state.handoffArtsError || "candidate load did not complete");
+  assert.equal(T.state.handoffArtsError, "");
+  assert.match(artsBox.innerHTML, /data-ws-ref-add="arts:art-1"/);
+  assert.doesNotMatch(artsBox.innerHTML, /data-ws-ref-retry-artifacts/);
+
+  await T.loadHandoffArtifacts(true);
+  assert.equal(attempts, 3);
+  assert.match(artsBox.innerHTML, /data-ws-ref-add="arts:art-2"/);
+  assert.doesNotMatch(artsBox.innerHTML, /data-ws-ref-add="arts:art-1"/);
 });
 
 test("artifactRowHtml：链内最新 Draft/Rejected 行带返工表单，其余状态不带", () => {
@@ -1333,4 +1569,62 @@ test("startChangeSetAction()（九期）：请求体携带 idempotency_key（修
   );
   // 每次点击新键：提交锁保证单次发送；失败后重试是新一轮真实决定。
   assert.notEqual(T.csIdemKey("cs1", "reject"), T.csIdemKey("cs1", "reject"));
+});
+
+test("创建团队表单使用任务语言并提供可访问的状态入口", () => {
+  const html = T.renderCreate();
+  assert.match(html, /团队目标/);
+  assert.match(html, /运行模式/);
+  assert.match(html, /组队策略/);
+  assert.match(html, /多 Agent 接力/);
+  assert.match(html, /单 Agent 执行/);
+  assert.match(html, /DAG 工作流/);
+  assert.match(html, /ws-create-template-retry/);
+  assert.match(html, /aria-live="polite"/);
+  assert.doesNotMatch(html, /目标 objective|模式 mode|角色规格 roles/);
+  assert.equal(html.includes(">strategy<"), false);
+  const roleHtml = T.roleRowHtml({ role: "planner", assignee: "agent", worker: "agent", depends_on: [] });
+  assert.match(roleHtml, /aria-label="角色名称"/);
+  assert.match(roleHtml, /Agent 执行/);
+  assert.match(roleHtml, /自定义 Worker 名称或用户 ID/);
+  const defaultRoleHtml = T.roleRowHtml({});
+  assert.match(defaultRoleHtml, /<option value="agent" selected>/);
+  assert.match(defaultRoleHtml, /class="owo-ws-role-worker"[^>]* hidden/);
+
+});
+
+test("模板加载失败时可就地重试，手工角色配置仍保留", async () => {
+  resetState();
+  T.state.templates = [];
+  const elements = {
+    "#ws-template": { value: "", innerHTML: "" },
+    "#ws-create-template-retry": { hidden: true, disabled: false, textContent: "" },
+    "#ws-create-template-status": { textContent: "" },
+  };
+  T.setRoot({ querySelector: (selector) => elements[selector] || null });
+  const previous = T.getTransport();
+  let calls = 0;
+  T.setTransport({
+    get: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("desktop authorization required");
+      return { templates: [{ template_id: "review", name: "代码审查", mode: "team" }] };
+    },
+    post: previous.post,
+  });
+  try {
+    const failed = await T.loadCreateTemplates();
+    assert.equal(failed, null);
+    assert.equal(elements["#ws-create-template-retry"].hidden, false);
+    assert.match(elements["#ws-create-template-status"].textContent, /仍可直接填写角色规格创建团队/);
+    assert.match(elements["#ws-template"].innerHTML, /按上方角色规格/);
+    const loaded = await T.loadCreateTemplates();
+    assert.equal(loaded.length, 1);
+    assert.equal(elements["#ws-create-template-retry"].hidden, true);
+    assert.match(elements["#ws-template"].innerHTML, /代码审查/);
+  } finally {
+    T.setTransport(previous);
+    T.setRoot(null);
+    T.state.templates = [];
+  }
 });

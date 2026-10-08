@@ -167,7 +167,10 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "session VerificationPlan 回合身份绑定",
         run: |conn| {
             let columns = table_columns(conn, "sessions")?;
-            if !columns.iter().any(|existing| existing == "single_verification_plan_turn_id") {
+            if !columns
+                .iter()
+                .any(|existing| existing == "single_verification_plan_turn_id")
+            {
                 conn.execute_batch(
                     "ALTER TABLE sessions ADD COLUMN single_verification_plan_turn_id TEXT",
                 )
@@ -181,11 +184,29 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "session Single review issues 持久化",
         run: |conn| {
             let columns = table_columns(conn, "sessions")?;
-            if !columns.iter().any(|existing| existing == "single_review_issues_json") {
+            if !columns
+                .iter()
+                .any(|existing| existing == "single_review_issues_json")
+            {
                 conn.execute_batch(
                     "ALTER TABLE sessions ADD COLUMN single_review_issues_json TEXT NOT NULL DEFAULT '[]'",
                 )
                 .map_err(sqlite_error)?;
+            }
+            Ok(())
+        },
+    },
+    Migration {
+        version: 9,
+        name: "session Single completion record 持久化",
+        run: |conn| {
+            let columns = table_columns(conn, "sessions")?;
+            if !columns
+                .iter()
+                .any(|existing| existing == "completion_record_json")
+            {
+                conn.execute_batch("ALTER TABLE sessions ADD COLUMN completion_record_json TEXT")
+                    .map_err(sqlite_error)?;
             }
             Ok(())
         },
@@ -256,7 +277,8 @@ fn base_schema() -> &'static str {
          single_verification_plan_json TEXT,
          single_verification_plan_input_sha256 TEXT,
          single_verification_plan_turn_id TEXT,
-         single_review_issues_json TEXT NOT NULL DEFAULT '[]'
+         single_review_issues_json TEXT NOT NULL DEFAULT '[]',
+         completion_record_json TEXT
      );
      CREATE TABLE IF NOT EXISTS audit (
          id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -419,8 +441,8 @@ impl SqliteSessionStore {
                  redo_json, message_redo_json, title, archived, pinned, model_override,
                  validation_receipts_json, single_verification_plan_json,
                  single_verification_plan_input_sha256, single_verification_plan_turn_id,
-                 single_review_issues_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                 single_review_issues_json, completion_record_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
              ON CONFLICT(id) DO UPDATE SET
                  workspace=excluded.workspace,
                  model=excluded.model,
@@ -441,7 +463,8 @@ impl SqliteSessionStore {
                  single_verification_plan_json=excluded.single_verification_plan_json,
                  single_verification_plan_input_sha256=excluded.single_verification_plan_input_sha256,
                  single_verification_plan_turn_id=excluded.single_verification_plan_turn_id,
-                 single_review_issues_json=excluded.single_review_issues_json",
+                 single_review_issues_json=excluded.single_review_issues_json,
+                 completion_record_json=excluded.completion_record_json",
             params![
                 session.id,
                 session.workspace.to_string_lossy(),
@@ -465,6 +488,7 @@ impl SqliteSessionStore {
                 session.single_verification_plan_input_sha256,
                 session.single_verification_plan_turn_id,
                 serde_json::to_string(&session.single_review_issues).map_err(json_error)?,
+                session.completion_record.as_ref().map(serde_json::to_string).transpose().map_err(json_error)?,
             ],
         )
         .map_err(sqlite_error)?;
@@ -479,7 +503,7 @@ impl SqliteSessionStore {
                         redo_json, message_redo_json, title, archived, pinned, model_override,
                         validation_receipts_json, single_verification_plan_json,
                         single_verification_plan_input_sha256, single_verification_plan_turn_id,
-                        single_review_issues_json
+                        single_review_issues_json, completion_record_json
                  FROM sessions WHERE id = ?1",
                 [id],
                 |row| {
@@ -506,6 +530,7 @@ impl SqliteSessionStore {
                         row.get::<_, Option<String>>(19)?,
                         row.get::<_, Option<String>>(20)?,
                         row.get::<_, String>(21)?,
+                        row.get::<_, Option<String>>(22)?,
                     ))
                 },
             )
@@ -525,10 +550,21 @@ impl SqliteSessionStore {
                 .map_err(json_error)?,
             execution_receipts: serde_json::from_str(&row.6).map_err(json_error)?,
             validation_receipts: serde_json::from_str(&row.17).map_err(json_error)?,
-            single_verification_plan: row.18.as_deref().map(serde_json::from_str).transpose().map_err(json_error)?,
+            single_verification_plan: row
+                .18
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(json_error)?,
             single_verification_plan_input_sha256: row.19,
             single_verification_plan_turn_id: row.20,
             single_review_issues: serde_json::from_str(&row.21).map_err(json_error)?,
+            completion_record: row
+                .22
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(json_error)?,
             active_task_context: None,
             transient_model_calls: Vec::new(),
             created_at: row.7,
@@ -932,26 +968,28 @@ mod tests {
         });
         session.single_verification_plan_input_sha256 = Some("input-hash".to_string());
         session.single_verification_plan_turn_id = Some("turn-1".to_string());
-        session.single_review_issues.push(crate::goal::DeliveryIssueV1 {
-            issue_id: "single-issue-1".to_string(),
-            source_review_artifact_id: "single-review-1".to_string(),
-            source_review_sha256: "review-sha".to_string(),
-            finding_sha256: "finding-sha".to_string(),
-            severity: "major".to_string(),
-            detail: "Repair this behavior".to_string(),
-            requirement_id: Some("feature-visible".to_string()),
-            target_task_id: "task-1".to_string(),
-            target_attempt_id: "turn-1".to_string(),
-            target_artifact_id: None,
-            owner_step_id: "single:session".to_string(),
-            status: crate::goal::DeliveryIssueStatusV1::RepairDispatched,
-            repair_attempt: 1,
-            resolution_review_artifact_id: None,
-            resolution_review_sha256: None,
-            resolution_attempt_id: None,
-            opened_at: "2026-10-04T00:00:00Z".to_string(),
-            updated_at: "2026-10-04T00:00:01Z".to_string(),
-        });
+        session
+            .single_review_issues
+            .push(crate::goal::DeliveryIssueV1 {
+                issue_id: "single-issue-1".to_string(),
+                source_review_artifact_id: "single-review-1".to_string(),
+                source_review_sha256: "review-sha".to_string(),
+                finding_sha256: "finding-sha".to_string(),
+                severity: "major".to_string(),
+                detail: "Repair this behavior".to_string(),
+                requirement_id: Some("feature-visible".to_string()),
+                target_task_id: "task-1".to_string(),
+                target_attempt_id: "turn-1".to_string(),
+                target_artifact_id: None,
+                owner_step_id: "single:session".to_string(),
+                status: crate::goal::DeliveryIssueStatusV1::RepairDispatched,
+                repair_attempt: 1,
+                resolution_review_artifact_id: None,
+                resolution_review_sha256: None,
+                resolution_attempt_id: None,
+                opened_at: "2026-10-04T00:00:00Z".to_string(),
+                updated_at: "2026-10-04T00:00:01Z".to_string(),
+            });
         session
             .validation_receipts
             .push(crate::plan::ValidationReceiptV1 {
@@ -977,6 +1015,13 @@ mod tests {
                 started_at: "2026-10-04T00:00:00Z".to_string(),
                 completed_at: "2026-10-04T00:00:01Z".to_string(),
             });
+        session.completion_record = Some(crate::completion::build_completion_record(
+            &session.id,
+            "turn-1",
+            owo_agent_protocol::CompletionStatusV1::Accepted,
+            vec!["single-validation-test".to_string()],
+            Some("single-candidate-sha".to_string()),
+        ));
         store.save(&session).unwrap();
         let child = session.fork(1);
         store.save(&child).unwrap();
@@ -989,19 +1034,38 @@ mod tests {
         assert!(loaded.archived);
         assert_eq!(loaded.validation_receipts, session.validation_receipts);
         assert_eq!(loaded.single_review_issues, session.single_review_issues);
-        assert_eq!(loaded.single_verification_plan, session.single_verification_plan);
+        assert_eq!(loaded.completion_record, session.completion_record);
+        assert_eq!(
+            loaded.single_verification_plan,
+            session.single_verification_plan
+        );
         assert_eq!(
             loaded.single_verification_plan_input_sha256.as_deref(),
             Some("input-hash")
         );
-        assert_eq!(loaded.single_verification_plan_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            loaded.single_verification_plan_turn_id.as_deref(),
+            Some("turn-1")
+        );
         let loaded_child = store.load(&child.id).unwrap();
         assert_eq!(loaded_child.parent_id.as_deref(), Some(session.id.as_str()));
         assert_eq!(loaded_child.fork_point, Some(1));
         assert!(loaded_child.single_review_issues.is_empty());
-        assert_eq!(loaded_child.single_verification_plan, session.single_verification_plan);
-        assert_eq!(loaded_child.single_verification_plan_input_sha256.as_deref(), Some("input-hash"));
-        assert_eq!(loaded_child.single_verification_plan_turn_id.as_deref(), Some("turn-1"));
+        assert!(loaded_child.completion_record.is_none());
+        assert_eq!(
+            loaded_child.single_verification_plan,
+            session.single_verification_plan
+        );
+        assert_eq!(
+            loaded_child
+                .single_verification_plan_input_sha256
+                .as_deref(),
+            Some("input-hash")
+        );
+        assert_eq!(
+            loaded_child.single_verification_plan_turn_id.as_deref(),
+            Some("turn-1")
+        );
         assert!(loaded_child.title.is_none());
         assert!(!loaded_child.pinned);
         assert!(!loaded_child.archived);
@@ -1112,20 +1176,20 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("owo-sqlite-migrate-{}.db", uuid::Uuid::new_v4()));
         let store = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(store.migration_status().schema_version, 5);
+        assert_eq!(store.migration_status().schema_version, 9);
         assert!(store.migration_status().pending.is_empty());
         assert!(!store.is_read_only());
         drop(store);
         // 再次打开：无新迁移应用，schema_version 保持。
         let reopened = SqliteSessionStore::open(&path).unwrap();
-        assert_eq!(reopened.migration_status().schema_version, 5);
+        assert_eq!(reopened.migration_status().schema_version, 9);
         assert!(reopened.migration_status().applied.is_empty());
         assert!(!reopened.is_read_only());
         let conn = Connection::open(&path).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 9);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
@@ -1163,6 +1227,10 @@ mod tests {
                 "v3: session turn events 持久化与单调 seq",
                 "v4: session execution receipts 持久化",
                 "v5: session behavior validation receipts 持久化",
+                "v6: session Single VerificationPlan 持久化",
+                "v7: session VerificationPlan 回合身份绑定",
+                "v8: session Single review issues 持久化",
+                "v9: session Single completion record 持久化",
             ]
         );
         let mut session = store.create(Path::new("."), "mock", None).unwrap();

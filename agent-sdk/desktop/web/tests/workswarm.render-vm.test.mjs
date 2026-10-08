@@ -146,3 +146,49 @@ test("artifactRowHtml：返工表单仅限链内最新 Draft/Rejected（isHead �
   const busyRow = R.artifactRowHtml(head, { items: [head] }, { ...vm0(), reworkBusy: { a1: true } });
   assert.match(busyRow, /data-rework-go="a1" disabled/);
 });
+
+test("teamConversationHtml：按发言人渲染真实交接、接收者、Markdown 与时间顺序", () => {
+  const handoffs = [
+    {
+      from_member: "m-reviewer", to_member: "m-implementer",
+      created_at: "2026-10-08T12:25:00Z",
+      completed_summary: "请补充验证。",
+      open_issues: ["宿主检查尚未记录"],
+      suggested_next_actions: ["重新运行检查"],
+      known_risks: ["报告标题可能不匹配"],
+      output_artifact_refs: ["artifact-2"],
+    },
+    {
+      from_member: "m-implementer", to_member: "m-reviewer",
+      created_at: "2026-10-08T12:24:00Z",
+      completed_summary: "已修复末项遗漏。",
+    },
+  ];
+  const members = [
+    { member_id: "m-implementer", role: "implementer" },
+    { member_id: "m-reviewer", role: "reviewer" },
+  ];
+  const html = R.teamConversationHtml(handoffs, members, (text) => "<strong>" + text + "</strong>");
+  assert.ok(html.indexOf("implementer") < html.indexOf("reviewer"), "消息按创建时间升序");
+  assert.match(html, /speaker-implementer/);
+  assert.match(html, /speaker-reviewer/);
+  assert.match(html, /发给 implementer/);
+  assert.ok(html.includes("<strong>请补充验证。</strong>"));
+  assert.match(html, /遗留问题/);
+  assert.match(html, /重新运行检查/);
+  assert.match(html, /artifact-2/);
+});
+
+test("teamConversationHtml：空态、错误态和自由文本均安全转义", () => {
+  assert.match(R.teamConversationHtml([], []), /暂无已保存的交接消息/);
+  assert.match(R.teamConversationHtml(null, []), /正在读取团队交接记录/);
+  assert.match(R.teamConversationHtml([], [], null, "<拒绝>"), /&lt;拒绝&gt;/);
+  const html = R.teamConversationHtml([{
+    from_member: "<img src=x>",
+    completed_summary: "<script>alert(1)</script>",
+    created_at: "now",
+  }], []);
+  assert.ok(!html.includes("<script>"));
+  assert.ok(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"));
+  assert.match(html, /&lt;img src=x&gt;/);
+});

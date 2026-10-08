@@ -100,6 +100,13 @@ fn single_step_plan(goal_id: &str, step_id: &str, text: &str) -> Plan {
     let mut plan = Plan::new("plan-target", goal_id);
     let mut step = StepSpec::new(step_id, "echo");
     step.input = json!({ "text": text });
+    step.verification_plan = Some(owo_agent_core::plan::VerificationPlanV1 {
+        plan_id: format!("target-output-{step_id}"),
+        requirements: vec![owo_agent_core::verification::requirement_for_spec(
+            "target-output",
+            &owo_agent_core::plan::VerificationSpec::OutputNonEmpty,
+        )],
+    });
     plan.add_step(step);
     plan
 }

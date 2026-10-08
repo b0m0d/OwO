@@ -852,6 +852,23 @@ pub fn backoff_delay(base_secs: u64, retry_count: u32) -> std::time::Duration {
     std::time::Duration::from_secs(secs.min(60))
 }
 
+fn validate_task_spec(spec: &CloudTaskSpec, allowlist: &[String]) -> Result<(), String> {
+    validate_commands(&spec.commands, allowlist)?;
+    if spec.commands.is_empty() {
+        return Err("任务至少需要一条命令".to_string());
+    }
+    if spec.env_passthrough.iter().any(|key| key.contains('=')) {
+        return Err("env_passthrough 只允许变量名，禁止内联值".to_string());
+    }
+    if !spec.workspace_dir.is_dir() {
+        return Err(format!(
+            "工作区目录不存在：{}",
+            spec.workspace_dir.display()
+        ));
+    }
+    Ok(())
+}
+
 /// 命令校验：危险模式恒拒绝；提供前缀白名单时，非白名单命令也拒绝。
 pub fn validate_commands(commands: &[String], allowlist: &[String]) -> Result<(), String> {
     const DANGEROUS: &[&str] = &[
@@ -911,6 +928,55 @@ impl CloudTaskQueue {
         }
     }
 
+    /// Persist a task without borrowing the long-lived execution queue.
+    /// Callers must serialize this operation across writers so sequential IDs
+    /// remain unique. The execution owner refreshes this durable record later.
+    pub fn submit_persisted(
+        dir: &Path,
+        spec: CloudTaskSpec,
+        command_allowlist: &[String],
+    ) -> Result<TaskRecord, String> {
+        validate_task_spec(&spec, command_allowlist)?;
+        std::fs::create_dir_all(dir).map_err(|error| format!("创建队列目录失败：{error}"))?;
+        let mut max_id = 0u32;
+        for entry in std::fs::read_dir(dir).map_err(|error| format!("读取队列目录失败：{error}"))?
+        {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(number) = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.strip_prefix("cloud-"))
+                .and_then(|suffix| suffix.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            max_id = max_id.max(number);
+        }
+        let next_id = max_id
+            .checked_add(1)
+            .ok_or_else(|| "云端任务 ID 空间已耗尽".to_string())?;
+        let task_id = format!("cloud-{next_id:04}");
+        let record = TaskRecord {
+            task_id,
+            remote_id: None,
+            spec,
+            state: TaskState::Queued,
+            retry_count: 0,
+            last_error: None,
+            result: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            duration_ms: 0,
+        };
+        let content = serde_json::to_string_pretty(&record).map_err(|error| error.to_string())?;
+        std::fs::write(dir.join(format!("{}.json", record.task_id)), content)
+            .map_err(|error| format!("任务持久化失败：{error}"))?;
+        Ok(record)
+    }
+
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
@@ -923,19 +989,7 @@ impl CloudTaskQueue {
 
     /// 提交：校验（工作区/命令/白名单）→ Queued → 持久化 → 审计。
     pub fn submit(&mut self, spec: CloudTaskSpec) -> Result<String, String> {
-        validate_commands(&spec.commands, &self.command_allowlist)?;
-        if spec.commands.is_empty() {
-            return Err("任务至少需要一条命令".to_string());
-        }
-        if spec.env_passthrough.iter().any(|k| k.contains('=')) {
-            return Err("env_passthrough 只允许变量名，禁止内联值".to_string());
-        }
-        if !spec.workspace_dir.is_dir() {
-            return Err(format!(
-                "工作区目录不存在：{}",
-                spec.workspace_dir.display()
-            ));
-        }
+        validate_task_spec(&spec, &self.command_allowlist)?;
         let next_id = self
             .tasks
             .keys()
@@ -977,14 +1031,57 @@ impl CloudTaskQueue {
     /// 执行队列中第一个 Queued 任务，推进到终态；返回该任务 id。
     /// 失败未超重试上限 → 回 Queued（等待 retry()/下一轮 run_next），超限 → Failed。
     pub async fn run_next(&mut self, sink: &dyn ProgressSink) -> Result<Option<String>, String> {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let result = self.run_next_with_cancel(sink, cancel_rx).await;
+        drop(cancel_tx);
+        result
+    }
+
+    pub async fn run_next_with_cancel(
+        &mut self,
+        sink: &dyn ProgressSink,
+        cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Option<String>, String> {
         let task_id = self
             .tasks
             .iter()
-            .find(|(_, t)| t.state == TaskState::Queued)
+            .find(|(_, task)| task.state == TaskState::Queued)
             .map(|(id, _)| id.clone());
         let Some(task_id) = task_id else {
             return Ok(None);
         };
+        self.run_task_with_cancel(&task_id, sink, cancel_rx).await
+    }
+
+    /// Execute one specific queued task. The server dispatcher uses this to
+    /// drain a fixed queue snapshot without accidentally rerunning a retry that
+    /// was returned to Queued during the same drain.
+    pub async fn run_task_with_cancel(
+        &mut self,
+        task_id: &str,
+        sink: &dyn ProgressSink,
+        mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Option<String>, String> {
+        if !self
+            .tasks
+            .get(task_id)
+            .is_some_and(|task| task.state == TaskState::Queued)
+        {
+            return Ok(None);
+        }
+        let task_id = task_id.to_string();
+
+        // A cancellation signal may predate runner subscription (for example,
+        // an HTTP cancel racing background dispatch). Honor its current value
+        // before marking the task Running or starting remote work.
+        let canceled_before_start = *cancel_rx.borrow();
+        if canceled_before_start {
+            self.cancel(&task_id).await?;
+            sink.emit(&CloudProgress::Canceled {
+                task_id: task_id.clone(),
+            });
+            return Ok(Some(task_id));
+        }
 
         self.set_state(&task_id, TaskState::Running, None)?;
         let started_at = std::time::Instant::now();
@@ -996,7 +1093,18 @@ impl CloudTaskQueue {
         });
 
         let spec = self.tasks.get(&task_id).unwrap().spec.clone();
-        let outcome = self.run_via_transport(&task_id, &spec, sink).await;
+        let outcome = self
+            .run_via_transport(&task_id, &spec, sink, &mut cancel_rx)
+            .await;
+
+        let canceled_during_run = *cancel_rx.borrow();
+        if outcome.is_err() && canceled_during_run {
+            self.cancel(&task_id).await?;
+            sink.emit(&CloudProgress::Canceled {
+                task_id: task_id.clone(),
+            });
+            return Ok(Some(task_id));
+        }
 
         match outcome {
             Ok(result) => {
@@ -1047,11 +1155,60 @@ impl CloudTaskQueue {
         Ok(Some(task_id))
     }
 
+    /// Retry one task through a terminal state, applying cancellable backoff
+    /// between attempts. Queue owners should call this when a dispatch token is
+    /// consumed so a retry cannot be stranded in Queued.
+    pub async fn run_task_to_terminal_with_cancel(
+        &mut self,
+        task_id: &str,
+        sink: &dyn ProgressSink,
+        mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Option<String>, String> {
+        loop {
+            let result = self
+                .run_task_with_cancel(task_id, sink, cancel_rx.clone())
+                .await?;
+            let Some(result_id) = result else {
+                return Ok(None);
+            };
+            let Some(record) = self.tasks.get(task_id) else {
+                return Err(format!("任务执行后记录丢失：{task_id}"));
+            };
+            if record.state != TaskState::Queued {
+                return Ok(Some(result_id));
+            }
+
+            let delay = backoff_delay(self.base_backoff_secs, record.retry_count);
+            let canceled = *cancel_rx.borrow();
+            if canceled {
+                self.cancel(task_id).await?;
+                sink.emit(&CloudProgress::Canceled {
+                    task_id: task_id.to_string(),
+                });
+                return Ok(Some(result_id));
+            }
+            tokio::select! {
+                biased;
+                changed = cancel_rx.changed() => {
+                    if changed.is_err() || *cancel_rx.borrow() {
+                        self.cancel(task_id).await?;
+                        sink.emit(&CloudProgress::Canceled {
+                            task_id: task_id.to_string(),
+                        });
+                        return Ok(Some(result_id));
+                    }
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+    }
+
     async fn run_via_transport(
         &mut self,
         task_id: &str,
         spec: &CloudTaskSpec,
         sink: &dyn ProgressSink,
+        cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
     ) -> Result<CloudTaskResult, String> {
         let remote_id = self.transport.submit(spec).await?;
         sink.emit(&CloudProgress::Submitted {
@@ -1071,7 +1228,17 @@ impl CloudTaskQueue {
         let deadline = tokio::time::Instant::now() + budget;
         let mut poll_attempts = 0u32;
         let status = loop {
-            let status = match self.transport.status(&remote_id).await {
+            let status_result = tokio::select! {
+                biased;
+                changed = cancel_rx.changed() => {
+                    if changed.is_err() || *cancel_rx.borrow() {
+                        return Err("cancelled".to_string());
+                    }
+                    continue;
+                }
+                result = self.transport.status(&remote_id) => result,
+            };
+            let status = match status_result {
                 Ok(status) => status,
                 Err(e) => {
                     // 断线重连：瞬时传输错误按退避重试（最多 4 次），不直接判失败。
@@ -1085,7 +1252,15 @@ impl CloudTaskQueue {
                         task_id: task_id.to_string(),
                         retry_count: poll_attempts,
                     });
-                    tokio::time::sleep(backoff_delay(1, poll_attempts)).await;
+                    tokio::select! {
+                        biased;
+                        changed = cancel_rx.changed() => {
+                            if changed.is_err() || *cancel_rx.borrow() {
+                                return Err("cancelled".to_string());
+                            }
+                        }
+                        _ = tokio::time::sleep(backoff_delay(1, poll_attempts)) => {}
+                    }
                     continue;
                 }
             };
@@ -1097,7 +1272,15 @@ impl CloudTaskQueue {
                     if tokio::time::Instant::now() >= deadline {
                         return Err(format!("远端任务轮询超时（{budget:?}）"));
                     }
-                    tokio::time::sleep(self.poll_interval).await;
+                    tokio::select! {
+                        biased;
+                        changed = cancel_rx.changed() => {
+                            if changed.is_err() || *cancel_rx.borrow() {
+                                return Err("cancelled".to_string());
+                            }
+                        }
+                        _ = tokio::time::sleep(self.poll_interval) => {}
+                    }
                 }
             }
         };
@@ -1106,7 +1289,17 @@ impl CloudTaskQueue {
             task_id: task_id.to_string(),
         });
         let result = loop {
-            match self.transport.fetch_result(&remote_id).await {
+            let fetch_result = tokio::select! {
+                biased;
+                changed = cancel_rx.changed() => {
+                    if changed.is_err() || *cancel_rx.borrow() {
+                        return Err("cancelled".to_string());
+                    }
+                    continue;
+                }
+                result = self.transport.fetch_result(&remote_id) => result,
+            };
+            match fetch_result {
                 Ok(result) => break result,
                 Err(e) => {
                     if poll_attempts >= POLL_RETRY_MAX {
@@ -1119,7 +1312,15 @@ impl CloudTaskQueue {
                         task_id: task_id.to_string(),
                         retry_count: poll_attempts,
                     });
-                    tokio::time::sleep(backoff_delay(1, poll_attempts)).await;
+                    tokio::select! {
+                        biased;
+                        changed = cancel_rx.changed() => {
+                            if changed.is_err() || *cancel_rx.borrow() {
+                                return Err("cancelled".to_string());
+                            }
+                        }
+                        _ = tokio::time::sleep(backoff_delay(1, poll_attempts)) => {}
+                    }
                 }
             }
         };
@@ -1162,6 +1363,9 @@ impl CloudTaskQueue {
             .tasks
             .get(task_id)
             .ok_or_else(|| format!("任务不存在：{task_id}"))?;
+        if record.state == TaskState::Canceled {
+            return Ok(());
+        }
         if record.state == TaskState::Succeeded || record.state == TaskState::Failed {
             return Err(format!("任务 {task_id} 已终结，无法取消"));
         }
@@ -1260,16 +1464,30 @@ impl CloudTaskQueue {
             let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
             let mut record: TaskRecord = serde_json::from_str(&content)
                 .map_err(|e| format!("任务记录解析失败（{}）：{e}", path.display()))?;
-            match record.state {
-                TaskState::Queued | TaskState::Running => {
-                    record.state = TaskState::Queued;
-                    record.last_error = Some("进程重启，任务恢复为待执行".to_string());
-                }
-                _ => {}
+            let file_task_id = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| format!("任务记录文件名无效：{}", path.display()))?;
+            if record.task_id != file_task_id
+                || !record.task_id.starts_with("cloud-")
+                || !record
+                    .task_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(format!("任务记录身份与文件名不匹配：{}", path.display()));
+            }
+            let was_running = record.state == TaskState::Running;
+            if was_running {
+                record.state = TaskState::Queued;
+                record.last_error = Some("进程重启，任务恢复为待执行".to_string());
             }
             recovered += 1;
             let task_id = record.task_id.clone();
-            self.tasks.insert(task_id, record);
+            self.tasks.insert(task_id.clone(), record);
+            if was_running {
+                self.persist(&task_id)?;
+            }
         }
         self.audit.record(
             "cloud",
@@ -1312,5 +1530,357 @@ impl CloudTaskQueue {
         let content = serde_json::to_string_pretty(record).map_err(|e| e.to_string())?;
         std::fs::write(self.dir.join(format!("{task_id}.json")), content)
             .map_err(|e| format!("任务持久化失败：{e}"))
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct WaitingTransport {
+        submitted: std::sync::Arc<AtomicBool>,
+        status_started: std::sync::Arc<AtomicBool>,
+        canceled: std::sync::Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl CloudTransport for WaitingTransport {
+        fn kind(&self) -> &'static str {
+            "waiting-test"
+        }
+
+        async fn submit(&self, _spec: &CloudTaskSpec) -> Result<String, String> {
+            self.submitted.store(true, Ordering::SeqCst);
+            Ok("remote-test-1".to_string())
+        }
+
+        async fn status(&self, _remote_id: &str) -> Result<RemoteStatus, String> {
+            self.status_started.store(true, Ordering::SeqCst);
+            std::future::pending().await
+        }
+
+        async fn fetch_result(&self, _remote_id: &str) -> Result<CloudTaskResult, String> {
+            unreachable!("status never completes in this test")
+        }
+
+        async fn cancel(&self, remote_id: &str) -> Result<(), String> {
+            assert_eq!(remote_id, "remote-test-1");
+            self.canceled.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_pending_remote_status_and_persists_terminal_state() {
+        let root = std::env::temp_dir().join(format!("owo-cloud-cancel-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let queue_dir = root.join("queue");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let submitted = std::sync::Arc::new(AtomicBool::new(false));
+        let status_started = std::sync::Arc::new(AtomicBool::new(false));
+        let canceled = std::sync::Arc::new(AtomicBool::new(false));
+        let transport = WaitingTransport {
+            submitted: submitted.clone(),
+            status_started: status_started.clone(),
+            canceled: canceled.clone(),
+        };
+        let mut queue = CloudTaskQueue::new(queue_dir.clone(), Box::new(transport));
+        let task_id = queue
+            .submit(CloudTaskSpec {
+                name: "cancel pending status".to_string(),
+                workspace_dir: workspace,
+                commands: vec!["echo ok".to_string()],
+                env_passthrough: Vec::new(),
+                timeout_secs: 30,
+            })
+            .unwrap();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let sink = std::sync::Arc::new(CollectingSink::new());
+        let run_sink = sink.clone();
+        let runner = tokio::spawn(async move {
+            let result = queue
+                .run_next_with_cancel(run_sink.as_ref(), cancel_rx)
+                .await;
+            (queue, result)
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !status_started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("remote status should start");
+        cancel_tx.send(true).unwrap();
+
+        let (queue, run_result) = tokio::time::timeout(std::time::Duration::from_secs(2), runner)
+            .await
+            .expect("cancellation should interrupt pending status")
+            .unwrap();
+        assert_eq!(run_result.unwrap().as_deref(), Some(task_id.as_str()));
+        assert!(submitted.load(Ordering::SeqCst));
+        assert!(canceled.load(Ordering::SeqCst));
+        assert_eq!(queue.record(&task_id).unwrap().state, TaskState::Canceled);
+        assert_eq!(
+            sink.all()
+                .iter()
+                .filter(|event| matches!(event, CloudProgress::Canceled { .. }))
+                .count(),
+            1
+        );
+
+        let persisted = std::fs::read_to_string(queue_dir.join(format!("{task_id}.json"))).unwrap();
+        let restored: TaskRecord = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(restored.state, TaskState::Canceled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[tokio::test]
+    async fn cancellation_already_requested_before_runner_start_skips_remote_submission() {
+        let root = std::env::temp_dir().join(format!(
+            "owo-cloud-cancel-before-run-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let queue_dir = root.join("queue");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let submitted = std::sync::Arc::new(AtomicBool::new(false));
+        let status_started = std::sync::Arc::new(AtomicBool::new(false));
+        let canceled = std::sync::Arc::new(AtomicBool::new(false));
+        let transport = WaitingTransport {
+            submitted: submitted.clone(),
+            status_started: status_started.clone(),
+            canceled: canceled.clone(),
+        };
+        let mut queue = CloudTaskQueue::new(queue_dir.clone(), Box::new(transport));
+        let task_id = queue
+            .submit(CloudTaskSpec {
+                name: "cancel before runner subscription".to_string(),
+                workspace_dir: workspace,
+                commands: vec!["echo ok".to_string()],
+                env_passthrough: Vec::new(),
+                timeout_secs: 30,
+            })
+            .unwrap();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(true);
+        let sink = CollectingSink::new();
+
+        assert_eq!(
+            queue
+                .run_next_with_cancel(&sink, cancel_rx)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(task_id.as_str())
+        );
+        assert!(!submitted.load(Ordering::SeqCst));
+        assert!(!status_started.load(Ordering::SeqCst));
+        assert!(!canceled.load(Ordering::SeqCst));
+        assert_eq!(queue.record(&task_id).unwrap().state, TaskState::Canceled);
+        assert_eq!(
+            sink.all()
+                .iter()
+                .filter(|event| matches!(event, CloudProgress::Canceled { .. }))
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod queue_recovery_tests {
+    use super::*;
+
+    struct RetryThenSuccessTransport {
+        attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CloudTransport for RetryThenSuccessTransport {
+        fn kind(&self) -> &'static str {
+            "retry-test"
+        }
+
+        async fn submit(&self, _spec: &CloudTaskSpec) -> Result<String, String> {
+            Ok("remote-retry".to_string())
+        }
+
+        async fn status(&self, _remote_id: &str) -> Result<RemoteStatus, String> {
+            let attempt = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt == 0 {
+                Ok(RemoteStatus::Failed("temporary failure".to_string()))
+            } else {
+                Ok(RemoteStatus::Succeeded)
+            }
+        }
+
+        async fn fetch_result(&self, remote_id: &str) -> Result<CloudTaskResult, String> {
+            Ok(CloudTaskResult {
+                task_id: remote_id.to_string(),
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                diff: Vec::new(),
+                diff_truncated: false,
+            })
+        }
+
+        async fn cancel(&self, _remote_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn spec(workspace: PathBuf, name: &str) -> CloudTaskSpec {
+        CloudTaskSpec {
+            name: name.to_string(),
+            workspace_dir: workspace,
+            commands: vec!["echo ok".to_string()],
+            env_passthrough: Vec::new(),
+            timeout_secs: 5,
+        }
+    }
+
+    #[test]
+    fn detached_submit_allocates_next_id_without_rewriting_active_task_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "owo-cloud-detached-submit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let queue_dir = root.join("queue");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut owner = CloudTaskQueue::new(
+            queue_dir.clone(),
+            Box::new(MockRemoteTransport::new(root.join("scratch"))),
+        );
+        let first = owner
+            .submit(spec(workspace.clone(), "already running"))
+            .unwrap();
+        let first_path = queue_dir.join(format!("{first}.json"));
+        let mut active = owner.record(&first).unwrap().clone();
+        active.state = TaskState::Running;
+        std::fs::write(&first_path, serde_json::to_vec(&active).unwrap()).unwrap();
+
+        let second = CloudTaskQueue::submit_persisted(
+            &queue_dir,
+            spec(workspace, "accepted during execution"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(first, "cloud-0001");
+        assert_eq!(second.task_id, "cloud-0002");
+        let still_active: TaskRecord =
+            serde_json::from_slice(&std::fs::read(first_path).unwrap()).unwrap();
+        assert_eq!(still_active.state, TaskState::Running);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn specific_task_execution_does_not_consume_an_earlier_queued_task() {
+        let root =
+            std::env::temp_dir().join(format!("owo-cloud-specific-task-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let queue_dir = root.join("queue");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut queue = CloudTaskQueue::new(
+            queue_dir,
+            Box::new(MockRemoteTransport::new(root.join("scratch"))),
+        );
+        let first = queue.submit(spec(workspace.clone(), "first")).unwrap();
+        let second = queue.submit(spec(workspace, "second")).unwrap();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(true);
+        let sink = CollectingSink::new();
+
+        assert_eq!(
+            queue
+                .run_task_with_cancel(&second, &sink, cancel_rx)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(queue.record(&first).unwrap().state, TaskState::Queued);
+        assert_eq!(queue.record(&second).unwrap().state, TaskState::Canceled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatch_retry_runs_with_backoff_until_terminal_instead_of_stranding_queued() {
+        let root =
+            std::env::temp_dir().join(format!("owo-cloud-retry-terminal-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut queue = CloudTaskQueue::new(
+            root.join("queue"),
+            Box::new(RetryThenSuccessTransport {
+                attempts: attempts.clone(),
+            }),
+        )
+        .with_max_retries(1);
+        queue.base_backoff_secs = 0;
+        let task_id = queue.submit(spec(workspace, "retry to terminal")).unwrap();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let sink = CollectingSink::new();
+
+        assert_eq!(
+            queue
+                .run_task_to_terminal_with_cancel(&task_id, &sink, cancel_rx)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(task_id.as_str())
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(queue.record(&task_id).unwrap().state, TaskState::Succeeded);
+        assert_eq!(queue.record(&task_id).unwrap().retry_count, 1);
+        let events = sink.all();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, CloudProgress::Retrying { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, CloudProgress::Succeeded { .. })));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_persists_running_as_queued_and_rejects_filename_identity_mismatch() {
+        let root = std::env::temp_dir().join(format!("owo-cloud-recover-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let queue_dir = root.join("queue");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut original = CloudTaskQueue::new(
+            queue_dir.clone(),
+            Box::new(MockRemoteTransport::new(root.join("scratch"))),
+        );
+        let task_id = original.submit(spec(workspace, "recover")).unwrap();
+        let path = queue_dir.join(format!("{task_id}.json"));
+        let mut record = original.record(&task_id).unwrap().clone();
+        record.state = TaskState::Running;
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+        let mut recovered = CloudTaskQueue::new(
+            queue_dir.clone(),
+            Box::new(MockRemoteTransport::new(root.join("scratch"))),
+        );
+        assert_eq!(recovered.recover().unwrap(), 1);
+        assert_eq!(recovered.record(&task_id).unwrap().state, TaskState::Queued);
+        let persisted: TaskRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted.state, TaskState::Queued);
+
+        let mut mismatched = recovered.record(&task_id).unwrap().clone();
+        mismatched.task_id = "cloud-escape".to_string();
+        std::fs::write(&path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+        let mut invalid = CloudTaskQueue::new(
+            queue_dir,
+            Box::new(MockRemoteTransport::new(root.join("scratch"))),
+        );
+        assert!(invalid.recover().is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1,12 +1,16 @@
 {
   "schema_version": 1,
-  "strategy_version": "ten-3-default",
+  "strategy_version": "ten-5-independent-case-samples",
   "min_samples_default": 30,
   "max_record_age_days": 30,
   "thresholds": {
     "success_rate_pp": 5.0,
     "quality_pct": 10.0,
-    "wall_rel_save": 0.30
+    "wall_rel_save": 0.3,
+    "max_token_ratio": 1.5,
+    "max_model_call_ratio": 1.5,
+    "max_tool_call_ratio": 2.0,
+    "max_cost_ratio": 1.5
   },
   "groups": {
     "code": {

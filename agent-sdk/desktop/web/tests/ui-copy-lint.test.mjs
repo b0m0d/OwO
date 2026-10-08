@@ -42,7 +42,35 @@ const stripTechnicalDetail = (source) =>
     .join("\n");
 
 // 提取含中文的字符串字面量（用户文案判定：本产品用户文案均为中文）。
-const CJK_STRING = /(["'`])((?:\\.|(?!\1)[\s\S])*?[\u4e00-\u9fff](?:\\.|(?!\1)[\s\S])*?)\1/g;
+function cjkStrings(line) {
+  const found = [];
+  const tick = String.fromCharCode(96);
+  for (let index = 0; index < line.length;) {
+    const quote = line[index];
+    if (quote !== "\"" && quote !== "'" && quote !== tick) {
+      index += 1;
+      continue;
+    }
+    index += 1;
+    let value = "";
+    while (index < line.length) {
+      const char = line[index];
+      if (char === "\\") {
+        if (index + 1 < line.length) value += char + line[index + 1];
+        index += 2;
+        continue;
+      }
+      if (char === quote) {
+        index += 1;
+        break;
+      }
+      value += char;
+      index += 1;
+    }
+    if (/[\u4e00-\u9fff]/.test(value)) found.push(value);
+  }
+  return found;
+}
 
 const BANNED = [
   [/\b(GET|POST|PUT|DELETE) \//, "HTTP 方法+路径"],
@@ -60,8 +88,7 @@ function collectUserCopyViolations(source, fileName) {
   const lines = cleaned.split("\n");
   lines.forEach((line, index) => {
     if (line.includes("ui-copy-lint:allow")) return;
-    for (const match of line.matchAll(CJK_STRING)) {
-      const copy = match[2];
+    for (const copy of cjkStrings(line)) {
       for (const [pattern, label] of BANNED) {
         if (pattern.test(copy)) {
           violations.push(
@@ -73,6 +100,14 @@ function collectUserCopyViolations(source, fileName) {
   });
   return violations;
 }
+
+test("UI copy lexer scans quoted and template strings in linear time", () => {
+  const cjk = String.fromCharCode(0x6a21, 0x578b);
+  const tick = String.fromCharCode(96);
+  const templateContents = cjk + ":" + String.fromCharCode(36) + "{name}";
+  const line = 'const a = "prefix ' + cjk + '"; const b = ' + tick + templateContents + tick + ';';
+  assert.deepEqual(cjkStrings(line), ["prefix " + cjk, templateContents]);
+});
 
 test("§8.2 UI 文案 lint：普通界面不得泄漏 API 路径、HTTP 方法与内部字段名", () => {
   const violations = sources.flatMap(([file, source]) =>

@@ -50,6 +50,56 @@ fn completion_status_label(status: owo_agent_protocol::CompletionStatusV1) -> St
     }
 }
 
+/// Resolve one-based option input or retain free text; empty input leaves the question pending.
+pub(crate) fn resolve_question_answer(input: &str, options: &[String]) -> Option<String> {
+    let answer = input.trim();
+    if answer.is_empty() {
+        return None;
+    }
+    if let Ok(index) = answer.parse::<usize>() {
+        if let Some(option) = index.checked_sub(1).and_then(|index| options.get(index)) {
+            return Some(option.clone());
+        }
+    }
+    Some(answer.to_string())
+}
+
+/// Human-readable pointer to the host's durable completion evidence. Machine output keeps
+/// the original protocol payload unchanged; interactive surfaces show a compact locator.
+pub(crate) fn completion_record_summary(
+    record: Option<&owo_agent_protocol::TaskCompletionRecordV1>,
+) -> Option<String> {
+    let record = record?;
+    let short = |value: &str, limit: usize| value.chars().take(limit).collect::<String>();
+    let receipts = record
+        .evidence_receipt_ids
+        .iter()
+        .take(3)
+        .map(|id| short(id, 10))
+        .collect::<Vec<_>>();
+    let mut summary = format!(
+        "交付记录 task={} attempt={} 收据 {} 项",
+        short(&record.task_id, 8),
+        short(&record.attempt_id, 8),
+        record.evidence_receipt_ids.len(),
+    );
+    if !receipts.is_empty() {
+        summary.push_str(&format!(
+            " [{}{}]",
+            receipts.join(", "),
+            if receipts.len() < record.evidence_receipt_ids.len() {
+                ", …"
+            } else {
+                ""
+            }
+        ));
+    }
+    if let Some(hash) = record.candidate_version_sha256.as_deref() {
+        summary.push_str(&format!(" · 候选 SHA-256 {}", short(hash, 12)));
+    }
+    Some(summary)
+}
+
 // ---------- 协议渲染纯函数（协议稳定性由测试锁定） ----------
 
 /// jsonl：把任意可序列化事件包裹为稳定协议行（turn/repl 共用同一 schema）。
@@ -225,6 +275,8 @@ impl StreamPrinter {
                 error,
                 // 预览由 TUI 步骤面板消费；行式 REPL 保持单行输出。
                 preview: _,
+                // Host receipts are consumed by completion validation, not rendered as tool text.
+                command_receipt: _,
             } => {
                 self.clear_status();
                 let suffix = self.elapsed_suffix(id);
@@ -348,6 +400,7 @@ impl StreamPrinter {
             SseEvent::TurnFailed {
                 message,
                 completion_status,
+                completion_record,
             } => {
                 self.clear_status();
                 println!(
@@ -355,6 +408,9 @@ impl StreamPrinter {
                     "✘".red(),
                     completion_status_label(*completion_status)
                 );
+                if let Some(summary) = completion_record_summary(completion_record.as_ref()) {
+                    println!("    {summary}");
+                }
             }
             SseEvent::Compaction { summary } => {
                 self.clear_status();
@@ -377,6 +433,7 @@ impl StreamPrinter {
                 duration_ms,
                 total_tokens,
                 completion_status,
+                completion_record,
                 model_calls,
                 ..
             } => {
@@ -387,6 +444,9 @@ impl StreamPrinter {
                     model_calls.len(),
                     completion_status_label(*completion_status)
                 );
+                if let Some(summary) = completion_record_summary(completion_record.as_ref()) {
+                    println!("    {summary}");
+                }
             }
             SseEvent::UserQuestion {
                 question_id,
@@ -479,6 +539,43 @@ fn preview_suffix(preview: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn question_answer_accepts_numbered_options_or_nonempty_free_text() {
+        let options = vec!["继续".to_string(), "停止".to_string()];
+        assert_eq!(
+            resolve_question_answer("1", &options).as_deref(),
+            Some("继续")
+        );
+        assert_eq!(
+            resolve_question_answer(" 2 ", &options).as_deref(),
+            Some("停止")
+        );
+        assert_eq!(
+            resolve_question_answer("自定义说明", &options).as_deref(),
+            Some("自定义说明")
+        );
+        assert_eq!(resolve_question_answer("", &options), None);
+        assert_eq!(resolve_question_answer("0", &options).as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn completion_record_summary_exposes_receipts_and_candidate_version_compactly() {
+        let record = owo_agent_protocol::TaskCompletionRecordV1 {
+            task_id: "task-123456789".to_string(),
+            attempt_id: "attempt-abcdefghi".to_string(),
+            status: owo_agent_protocol::CompletionStatusV1::Accepted,
+            evidence_receipt_ids: vec!["receipt-one".to_string(), "receipt-two".to_string()],
+            candidate_version_sha256: Some("0123456789abcdef".to_string()),
+            decided_at: "now".to_string(),
+        };
+        let summary = completion_record_summary(Some(&record)).unwrap();
+        assert!(summary.contains("task=task-12"));
+        assert!(summary.contains("attempt=attempt"));
+        assert!(summary.contains("receipt-on"));
+        assert!(summary.contains("0123456789ab"));
+        assert!(completion_record_summary(None).is_none());
+    }
 
     #[test]
     fn jsonl_turn_event_wraps_event() {

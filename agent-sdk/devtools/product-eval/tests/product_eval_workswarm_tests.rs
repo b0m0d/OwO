@@ -61,7 +61,9 @@ impl ModelProvider for ScriptedProvider {
             .ok()
             .and_then(|mut queue| queue.pop_front())
             .ok_or_else(|| "脚本输出耗尽".to_string())?;
-        Ok(ModelOutput::Text(text))
+        Ok(ModelOutput::Text(scripted_response_for_prompt(
+            text, _messages,
+        )))
     }
 }
 
@@ -83,6 +85,57 @@ const LEADER_FINAL: &str =
 const DRAFTER_CONTRACT: &str = r###"{"status":"done","summary":"初稿完成","artifact":{"kind":"draft","format":"markdown","content":"## 草稿\n关键结论 A 的初稿，结构完整，待评审。"},"evidence":[],"open_issues":[]}"###;
 const CONTENT_REVIEWER_CONTRACT: &str = r###"{"status":"done","summary":"评审通过","review_result":{"verdict":"approved","findings":[]},"evidence":[],"open_issues":[]}"###;
 const FINALIZER_CONTRACT: &str = r###"{"status":"done","summary":"最终交付","artifact":{"kind":"final","format":"markdown","content":"# 最终交付\n交付完成：关键结论 A 已核验。\n## 结论\n采纳草稿并修正措辞。"},"evidence":[],"open_issues":[]}"###;
+
+fn scripted_response_for_prompt(text: String, messages: &[ChatMessage]) -> String {
+    if text != CONTENT_REVIEWER_CONTRACT {
+        return text;
+    }
+    let Some(prompt) = messages
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .find(|prompt| prompt.contains("宿主绑定的评审清单（只读）："))
+    else {
+        return text;
+    };
+    let marker = "宿主绑定的评审清单（只读）：";
+    let Some(manifest_text) = prompt
+        .split_once(marker)
+        .and_then(|(_, rest)| rest.split_once("。逐项审查").map(|(manifest, _)| manifest))
+    else {
+        return text;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest_text) else {
+        return text;
+    };
+    let requirement_ids = manifest
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|artifact| {
+            artifact
+                .get("review_requirements")
+                .and_then(serde_json::Value::as_array)
+        })
+        .flatten()
+        .filter_map(|requirement| {
+            requirement
+                .get("requirement_id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "status": "done",
+        "summary": "评审通过",
+        "review_result": {
+            "verdict": "approved",
+            "reviewed_requirement_ids": requirement_ids,
+            "findings": []
+        },
+        "evidence": [],
+        "open_issues": []
+    })
+    .to_string()
+}
 
 fn ws_case(id: &str) -> ProductEvalCase {
     ProductEvalCase {

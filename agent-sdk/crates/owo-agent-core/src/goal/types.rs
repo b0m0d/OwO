@@ -43,8 +43,7 @@ pub struct GoalBudget {
     pub max_replans: u32,
     /// 最大执行时长（秒，0 = 不限）。
     pub max_duration_secs: u64,
-    /// 并行度上限（十一期 · 团队并行开发：同一 wave 内并发执行的步骤数；
-    /// 缺省 4；旧持久化状态缺字段时按缺省反序列化）。
+    /// 并行度上限（同一调度阶段内同时在飞的步骤数；缺省 4；旧状态缺字段时取默认值）。
     #[serde(default = "default_max_parallel")]
     pub max_parallel: u32,
 }
@@ -206,15 +205,139 @@ pub struct StepProgressUpdate {
     pub step_id: String,
     pub worker: String,
     pub record: StepRecord,
+    /// Runner-local budget snapshot for diagnostics only; durable Team counters are
+    /// written exclusively by attempt admission and never projected from this value.
     pub steps_taken: u32,
+    /// Runner-local retry snapshot for diagnostics only; see `steps_taken`.
     pub total_retries: u32,
     pub skip_reason: Option<String>,
+}
+
+/// Coalescing progress handoff: retain the latest record per step and use a single
+/// bounded wake-up signal instead of cloning every intermediate snapshot into a queue.
+#[derive(Clone)]
+pub struct StepProgressSender {
+    signal: tokio::sync::mpsc::Sender<()>,
+    pending: Arc<Mutex<BTreeMap<String, StepProgressUpdate>>>,
+}
+
+pub struct StepProgressReceiver {
+    signal: tokio::sync::mpsc::Receiver<()>,
+    pending: Arc<Mutex<BTreeMap<String, StepProgressUpdate>>>,
+}
+
+/// Durable host acknowledgement required before a Worker/critic call may start.
+#[derive(Clone)]
+pub(crate) struct AttemptAdmissionSender {
+    sender: tokio::sync::mpsc::Sender<AttemptAdmissionRequest>,
+}
+
+pub(crate) struct AttemptAdmissionRequest {
+    pub(crate) step_id: String,
+    pub(crate) attempt_id: String,
+    pub(crate) is_retry: bool,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+impl AttemptAdmissionSender {
+    pub(crate) async fn admit(
+        &self,
+        step_id: String,
+        attempt_id: String,
+        is_retry: bool,
+    ) -> Result<(), String> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(AttemptAdmissionRequest {
+                step_id,
+                attempt_id,
+                is_retry,
+                reply,
+            })
+            .await
+            .map_err(|_| "持久化执行准入宿主已关闭".to_string())?;
+        response
+            .await
+            .map_err(|_| "执行准入确认通道已关闭".to_string())?
+    }
+}
+
+impl AttemptAdmissionRequest {
+    pub(crate) fn respond(self, result: Result<(), String>) {
+        let _ = self.reply.send(result);
+    }
+}
+
+pub(crate) fn attempt_admission_channel() -> (
+    AttemptAdmissionSender,
+    tokio::sync::mpsc::Receiver<AttemptAdmissionRequest>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::channel(32);
+    (AttemptAdmissionSender { sender }, receiver)
+}
+
+pub fn step_progress_channel() -> (StepProgressSender, StepProgressReceiver) {
+    let (signal, receiver) = tokio::sync::mpsc::channel(1);
+    let pending = Arc::new(Mutex::new(BTreeMap::new()));
+    (
+        StepProgressSender {
+            signal,
+            pending: Arc::clone(&pending),
+        },
+        StepProgressReceiver {
+            signal: receiver,
+            pending,
+        },
+    )
+}
+
+impl StepProgressSender {
+    pub fn send(&self, update: StepProgressUpdate) {
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        let mut update = update;
+        if let Some(previous) = pending.get(&update.step_id) {
+            if update.skip_reason.is_none() {
+                update.skip_reason = previous.skip_reason.clone();
+            }
+            if update.record.skip_reason.is_none() {
+                update.record.skip_reason = previous.record.skip_reason.clone();
+            }
+        }
+        pending.insert(update.step_id.clone(), update);
+        let _ = self.signal.try_send(());
+    }
+}
+
+impl StepProgressReceiver {
+    fn drain(&self) -> Vec<StepProgressUpdate> {
+        self.pending
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending).into_values().collect())
+            .unwrap_or_default()
+    }
+
+    pub async fn recv(&mut self) -> Option<Vec<StepProgressUpdate>> {
+        self.signal.recv().await?;
+        Some(self.drain())
+    }
+
+    pub fn try_recv(
+        &mut self,
+    ) -> Result<Vec<StepProgressUpdate>, tokio::sync::mpsc::error::TryRecvError> {
+        self.signal.try_recv()?;
+        Ok(self.drain())
+    }
 }
 
 /// 一次运行的完整状态（可整体持久化：<dir>/<run_id>.json）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalRunState {
     pub run_id: String,
+    /// Durable fencing high-water mark; legacy snapshots recover from step records.
+    #[serde(default)]
+    pub execution_epoch: u64,
     pub goal: Goal,
     pub plan: Plan,
     /// step_id → 执行记录。
@@ -265,6 +388,7 @@ impl GoalRunState {
             .collect();
         Self {
             run_id: format!("run-{}", chrono::Utc::now().timestamp_millis()),
+            execution_epoch: 0,
             goal,
             plan,
             records,
@@ -282,12 +406,7 @@ impl GoalRunState {
 
     /// 持久化：`<dir>/<run_id>.json`（含目标/计划/步骤记录，重启恢复）。
     pub fn persist(&self, dir: &Path) -> Result<PathBuf, String> {
-        std::fs::create_dir_all(dir).map_err(|e| format!("创建运行目录失败：{e}"))?;
-        let path = dir.join(format!("{}.json", self.run_id));
-        let json =
-            serde_json::to_string_pretty(self).map_err(|e| format!("运行状态序列化失败：{e}"))?;
-        std::fs::write(&path, json).map_err(|e| format!("运行状态写入失败：{e}"))?;
-        Ok(path)
+        super::persistence::persist_checkpoint(self, dir)
     }
 
     /// 从磁盘恢复运行状态。
@@ -302,7 +421,7 @@ impl GoalRunState {
 /// 调度器配置。
 #[derive(Clone)]
 pub struct RunnerConfig {
-    /// 并行度上限（wave 内并发执行的步骤数）。
+    /// 并行度上限（同时在飞的步骤数）。
     pub max_parallel: usize,
     /// 持久化目录（Some 时每步执行后落盘；恢复时读取）。
     pub persist_dir: Option<PathBuf>,
@@ -382,5 +501,66 @@ impl std::fmt::Debug for RunnerConfig {
             .field("leases", &self.leases)
             .field("bindings", &self.bindings.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod progress_queue_tests {
+    use super::{step_progress_channel, StepProgressUpdate, StepRecord};
+    use crate::plan::StepStatus;
+
+    fn update(attempts: u32) -> StepProgressUpdate {
+        StepProgressUpdate {
+            step_id: "step-a".to_string(),
+            worker: "worker-a".to_string(),
+            record: StepRecord {
+                step_id: "step-a".to_string(),
+                status: StepStatus::Running,
+                attempts,
+                attempt_id: None,
+                output: None,
+                error: None,
+                skip_reason: (attempts == 2).then(|| "adaptive skip".to_string()),
+                phase_epoch: None,
+                validation_receipts: Vec::new(),
+            },
+            steps_taken: attempts,
+            total_retries: attempts.saturating_sub(1),
+            skip_reason: (attempts == 1).then(|| "adaptive skip".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_admission_waits_for_durable_host_acknowledgement() {
+        let (sender, mut receiver) = super::attempt_admission_channel();
+        let request = tokio::spawn(async move {
+            sender
+                .admit("step-a".to_string(), "attempt-a".to_string(), true)
+                .await
+        });
+        let admission = receiver.recv().await.expect("admission request");
+        assert_eq!(admission.step_id, "step-a");
+        assert_eq!(admission.attempt_id, "attempt-a");
+        assert!(admission.is_retry);
+        admission.respond(Ok(()));
+        assert!(request.await.unwrap().is_ok());
+    }
+
+    #[test]
+    fn progress_queue_coalesces_snapshots_by_step() {
+        let (sender, mut receiver) = step_progress_channel();
+        sender.send(update(1));
+        sender.send(update(2));
+
+        let batch = receiver.try_recv().expect("one bounded wake-up signal");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].record.attempts, 2);
+        assert_eq!(batch[0].steps_taken, 2);
+        assert_eq!(batch[0].skip_reason.as_deref(), Some("adaptive skip"));
+        assert_eq!(
+            batch[0].record.skip_reason.as_deref(),
+            Some("adaptive skip")
+        );
+        assert!(receiver.try_recv().is_err());
     }
 }

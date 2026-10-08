@@ -451,6 +451,9 @@
     );
   }
 
+  let activeRoot = null;
+  let loadSequence = 0;
+
   function render(root, data) {
     if (!root) return;
     const ledger = (data && data.ledger) || {};
@@ -465,6 +468,7 @@
     const boot = lastBootstrap(records);
     const state = { data: data };
     root.innerHTML =
+      '<section data-panel="diagnostics-ledger" class="owo-ledger-panel">' +
       '<style>' +
       ".owo-ledger-cards{display:flex;flex-wrap:wrap;gap:6px}" +
       ".owo-ledger-card{min-width:120px;padding:6px 10px;background:#f4f6f8;border-radius:6px;text-align:center}" +
@@ -514,7 +518,8 @@
           renderCoreFacts(core, boot) +
           "<h4>SSE 事件流</h4>" +
           renderSse(overview, core)) +
-      '<pre id="owoLedgerBundle" class="json-fallback" hidden></pre>';
+      '<pre id="owoLedgerBundle" class="json-fallback" hidden></pre>' +
+      '</section>';
 
     root.__owoLedgerState = state;
     const refreshBtn = root.querySelector("#owoLedgerRefresh");
@@ -602,6 +607,8 @@
   /** 拉取 ledger + overview 并渲染（首次进入设置路由时由 app.js 调用）。 */
   function load(root, options) {
     if (!root) return Promise.resolve(null);
+    activeRoot = root;
+    const sequence = ++loadSequence;
     const force = Boolean(options && options.force);
     const now = Date.now();
     if (!force && now - lastLoadAt < MIN_REFRESH_MS) return Promise.resolve(null);
@@ -612,6 +619,7 @@
       apiGet(OVERVIEW_PATH).catch(() => null),
     ]).then(
       (results) => {
+        if (activeRoot !== root || loadSequence !== sequence) return null;
         const data = {
           ledger: results[0] || { records: [], aggregates: {} },
           overview: results[1] || null,
@@ -632,6 +640,7 @@
         return data;
       },
       (error) => {
+        if (activeRoot !== root || loadSequence !== sequence) return null;
         const data = {
           failed: true,
           errorText: String((error && error.message) || error),
@@ -667,4 +676,22 @@
     readCoreSnapshot: readCoreSnapshot,
   };
   global.renderOwoDiagnosticsLedger = render;
+  const panel = {
+    id: "diagnostics-ledger",
+    title: "诊断请求台账",
+    mount(root) {
+      activeRoot = root;
+      return load(root, { force: true });
+    },
+    refresh() {
+      return activeRoot ? load(activeRoot, { force: true }) : Promise.resolve(null);
+    },
+    dispose() {
+      activeRoot = null;
+      loadSequence += 1;
+      lastLoadAt = 0;
+    },
+  };
+  global.OwoPanels = global.OwoPanels || {};
+  global.OwoPanels[panel.id] = panel;
 })(typeof window !== "undefined" ? window : globalThis);

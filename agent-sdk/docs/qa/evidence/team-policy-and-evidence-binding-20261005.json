@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-05",
+  "scope": "WorkSwarm auto-team policy validation and paired-evidence binding",
+  "changes": [
+    "Validate finite/ranged gain thresholds, non-empty strategy version, resource ceilings, and positive sample counts; gate_auto fails closed for invalid in-memory policies.",
+    "Require complete, exact model/task-set/strategy-version bindings and exact template equality (including both absent); runtime task-set comes from OWO_TEAM_TASK_SET. Missing or mismatched scope denies auto-team.",
+    "Invalid or unreadable policy files disable auto-team groups when no valid replacement is found; a completely absent policy file retains the embedded defaults."
+  ],
+  "regressions_added": [
+    "Reject invalid thresholds, empty policy version, and zero sample counts at policy load.",
+    "Reject incomplete or mismatched evidence bindings, unbound records without runtime context, and invalid in-memory policies at the gate.",
+    "Pure fallback test verifies invalid-policy fallback disables automatic groups while retaining configured group entries."
+  ],
+  "static_checks": {
+    "rustfmt_check": "passed for all 141 changed or newly added Rust files with rustfmt --check --edition 2021",
+    "git_diff_check": "passed with exit code 0; Git emitted CRLF-to-LF normalization notices",
+    "source_review": "passed; exact call path inspected from policy load through gate_auto and runtime binding assembly"
+  },
+  "cargo_check": "not_run",
+  "rust_tests": "not_run",
+  "reason": "User selected static inspection. Controlled Invoke-CiCargo gate refused the Core + WorkSwarm tests before Cargo start because the latest gate snapshot was 4.26 GB available and 86.5% used; no Cargo process was launched.",
+  "limitations": "No Rust type-check or runtime test evidence for this change; static checks do not prove behavior.",
+  "cargo_gate": {
+    "status": "resource_limited",
+    "cargo_started": false,
+    "wrapper_exit_code": 2,
+    "cargo_exit_code": null,
+    "reason": "拒绝启动：可用物理内存 4.26 GB / 已用 86.5%；要求可用 >= 6 GB 且已用 < 80%."
+  }
+}

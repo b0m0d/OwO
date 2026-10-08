@@ -1,3 +1,5 @@
+use super::execution_epochs::aggregate_execution_epochs;
+use super::request_budget::TeamModelRequestBudget;
 use super::*;
 use async_trait::async_trait;
 use owo_agent_core::gateway::{
@@ -50,13 +52,16 @@ fn span(role: &str, step: &str, cost: f64, attempt: u32, started_ms: u64) -> Wor
         step_id: step.to_string(),
         task_id: None,
         attempt_id: None,
+        phase_epoch: None,
         model_call_budget: None,
         started_at: "2026-08-28T00:00:00+00:00".to_string(),
         ended_at: "2026-08-28T00:00:01+00:00".to_string(),
         started_at_ms: started_ms,
         ended_at_ms: started_ms + 1000,
         wall_ms: 1000,
+        context_assembly_ms: None,
         provider_wait_ms: 0,
+        budget_reservation_wait_ms: 0,
         lease_wait_ms: 0,
         outcome: "succeeded".to_string(),
         error: None,
@@ -78,6 +83,54 @@ fn span(role: &str, step: &str, cost: f64, attempt: u32, started_ms: u64) -> Wor
 }
 
 #[test]
+fn execution_epoch_summary_separates_worker_window_from_overlapping_wall_sum() {
+    let mut first = span("builder", "step-a", 0.02, 1, 1_000);
+    first.phase_epoch = Some(7);
+    first.task_id = Some("task-a".to_string());
+    first.attempt_id = Some("attempt-1".to_string());
+    first.ended_at_ms = 3_000;
+    first.wall_ms = 2_000;
+    first.model_calls = 2;
+    first.prompt_tokens = Some(100);
+    first.completion_tokens = Some(30);
+    first.total_tokens = Some(130);
+    first.cost_known = true;
+
+    let mut second = span("critic", "step-b", 0.01, 1, 1_500);
+    second.phase_epoch = Some(7);
+    second.task_id = Some("task-b".to_string());
+    second.attempt_id = Some("attempt-2".to_string());
+    second.ended_at_ms = 2_500;
+    second.wall_ms = 1_000;
+    second.outcome = "failed".to_string();
+    second.model_calls = 1;
+    second.prompt_tokens = Some(40);
+    second.completion_tokens = Some(10);
+    second.total_tokens = Some(50);
+    second.cost_known = true;
+
+    let mut later = span("writer", "step-c", 0.0, 1, 5_000);
+    later.phase_epoch = Some(8);
+    later.ended_at_ms = 5_500;
+    later.wall_ms = 500;
+
+    let summary = aggregate_execution_epochs(&[first, second, later]);
+    let epoch = &summary["items"][0];
+    assert_eq!(summary["epoch_count"], 2);
+    assert_eq!(epoch["phase_epoch"], 7);
+    assert_eq!(epoch["worker_span_count"], 2);
+    assert_eq!(epoch["task_attempt_count"], 2);
+    assert_eq!(epoch["failed_spans"], 1);
+    assert_eq!(epoch["model_calls"], 3);
+    assert_eq!(epoch["total_tokens"], 180);
+    assert_eq!(epoch["usage_known"], true);
+    assert_eq!(epoch["worker_wall_ms_sum"], 3_000);
+    assert_eq!(epoch["worker_window_ms"], 2_000);
+    assert_eq!(epoch["parallel_overlap_factor"], 1.5);
+    assert_eq!(epoch["slowest_worker"]["step_id"], "step-a");
+}
+
+#[test]
 fn host_task_budget_metadata_is_extracted_from_worker_input() {
     let input = json!({
         "assigned_task_id": "task-api",
@@ -95,24 +148,138 @@ fn task_budget_metrics_roundtrip_and_legacy_records_remain_readable() {
     let mut record = span("builder", "s-task", 0.0, 1, 1);
     record.task_id = Some("task-api".to_string());
     record.attempt_id = Some("attempt-7".to_string());
+    record.phase_epoch = Some(3);
     record.model_call_budget = Some(6);
     let encoded = serde_json::to_value(&record).unwrap();
     let decoded: WorkerSpanRecord = serde_json::from_value(encoded.clone()).unwrap();
     assert_eq!(decoded.task_id.as_deref(), Some("task-api"));
     assert_eq!(decoded.attempt_id.as_deref(), Some("attempt-7"));
+    assert_eq!(decoded.phase_epoch, Some(3));
     assert_eq!(decoded.model_call_budget, Some(6));
 
     let mut legacy = encoded;
     let object = legacy.as_object_mut().unwrap();
     object.remove("task_id");
     object.remove("attempt_id");
+    object.remove("phase_epoch");
     object.remove("model_call_budget");
     object.remove("cost_known");
     let decoded_legacy: WorkerSpanRecord = serde_json::from_value(legacy).unwrap();
     assert_eq!(decoded_legacy.task_id, None);
     assert_eq!(decoded_legacy.attempt_id, None);
+    assert_eq!(decoded_legacy.phase_epoch, None);
     assert_eq!(decoded_legacy.model_call_budget, None);
+    assert_eq!(decoded_legacy.context_assembly_ms, None);
     assert!(!decoded_legacy.cost_known);
+}
+
+#[test]
+fn team_lifecycle_metrics_journal_persists_stage_quantiles_and_outcomes() {
+    let dir = std::env::temp_dir().join(format!(
+        "owo-team-lifecycle-metrics-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = TeamLifecycleMetricsJournal::for_team(&dir, "team-lifecycle");
+    for (index, duration_ms, outcome) in [
+        (1, 10, "succeeded"),
+        (2, 20, "succeeded"),
+        (3, 30, "failed"),
+    ] {
+        journal
+            .append(&TeamLifecycleSpanRecord {
+                span_id: format!("span-{index}"),
+                team_id: "team-lifecycle".to_string(),
+                sequence: index,
+                phase_epoch: Some(index),
+                stage: "phase_orchestration".to_string(),
+                started_at: "2026-10-05T00:00:00Z".to_string(),
+                ended_at: "2026-10-05T00:00:01Z".to_string(),
+                started_at_ms: index * 1_000,
+                ended_at_ms: index * 1_000 + duration_ms,
+                duration_ms,
+                outcome: outcome.to_string(),
+            })
+            .unwrap();
+    }
+    let records = TeamLifecycleMetricsJournal::for_team(&dir, "team-lifecycle").read_records();
+    let payload = aggregate_lifecycle_metrics(&records);
+    assert_eq!(payload["span_count"], 3);
+    assert_eq!(payload["stages"][0]["stage"], "phase_orchestration");
+    assert_eq!(payload["spans"][0]["phase_epoch"], 1);
+    assert_eq!(payload["epoch_count"], 3);
+    assert_eq!(payload["epochs"][0]["phase_epoch"], 1);
+    assert_eq!(payload["epochs"][0]["phase_duration_ms_sum"], 10);
+    assert_eq!(payload["stages"][0]["count"], 3);
+    assert_eq!(payload["stages"][0]["failures"], 1);
+    assert_eq!(payload["stages"][0]["duration_ms_p50"], 20);
+    assert_eq!(payload["stages"][0]["duration_ms_p90"], 30);
+    assert_eq!(payload["stages"][0]["duration_ms_max"], 30);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn context_assembly_metrics_aggregate_durable_worker_spans_by_role_and_epoch() {
+    let mut first = span("writer", "s-writer", 0.0, 1, 1_000);
+    first.phase_epoch = Some(4);
+    first.task_id = Some("task-a".to_string());
+    first.attempt_id = Some("attempt-a".to_string());
+    first.context_assembly_ms = Some(20);
+    let mut second = span("writer", "s-writer-2", 0.0, 1, 1_500);
+    second.phase_epoch = Some(5);
+    second.task_id = Some("task-b".to_string());
+    second.attempt_id = Some("attempt-b".to_string());
+    second.context_assembly_ms = Some(30);
+    second.outcome = "failed".to_string();
+    let legacy = span("critic", "s-critic", 0.0, 1, 2_000);
+
+    let payload = aggregate_context_assembly_metrics(&[first, second, legacy]);
+
+    assert_eq!(payload["sample_count"], 2);
+    assert_eq!(payload["attribution_missing_count"], 1);
+    assert_eq!(payload["failures"], 1);
+    assert_eq!(payload["duration_ms_sum"], 50);
+    assert_eq!(payload["duration_ms_p50"], 20);
+    assert_eq!(payload["duration_ms_p90"], 30);
+    assert_eq!(payload["by_role"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["by_role"][0]["role"], "writer");
+    assert_eq!(payload["by_role"][0]["sample_count"], 2);
+    assert_eq!(payload["by_role"][0]["duration_ms_p90"], 30);
+    assert_eq!(payload["by_epoch"].as_array().unwrap().len(), 2);
+    assert_eq!(payload["by_epoch"][0]["phase_epoch"], 4);
+    assert_eq!(payload["by_epoch"][1]["phase_epoch"], 5);
+    assert_eq!(payload["by_epoch"][1]["failures"], 1);
+}
+
+#[test]
+fn lifecycle_api_span_details_are_bounded_but_aggregates_cover_all_records() {
+    let records = (0..205)
+        .map(|index| TeamLifecycleSpanRecord {
+            span_id: format!("span-{index}"),
+            team_id: "team-bounded".to_string(),
+            sequence: index,
+            phase_epoch: Some(index),
+            stage: "phase_orchestration".to_string(),
+            started_at: "2026-10-05T00:00:00Z".to_string(),
+            ended_at: "2026-10-05T00:00:01Z".to_string(),
+            started_at_ms: index * 1_000,
+            ended_at_ms: index * 1_000 + 1,
+            duration_ms: 1,
+            outcome: "succeeded".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let payload = aggregate_lifecycle_metrics(&records);
+    assert_eq!(payload["span_count"], 205);
+    assert_eq!(payload["returned_span_count"], 200);
+    assert_eq!(payload["spans_truncated"], true);
+    assert_eq!(payload["stages"][0]["count"], 205);
+    assert_eq!(payload["spans"][0]["sequence"], 5);
+    assert_eq!(payload["spans"][199]["sequence"], 204);
+    assert_eq!(payload["epoch_count"], 205);
+    assert_eq!(payload["returned_epoch_count"], 100);
+    assert_eq!(payload["epochs_truncated"], true);
+    // 205 epochs retain the newest 100: indices 105..=204.
+    assert_eq!(payload["epochs"][0]["phase_epoch"], 105);
 }
 
 #[test]
@@ -192,11 +359,11 @@ fn aggregate_reports_task_model_call_budget_overruns() {
 
 #[test]
 fn aggregate_reports_roles_slowest_and_rework() {
-    let records = vec![
-        span("planner", "s1", 0.0, 1, 100),
-        span("builder", "s2", 0.25, 1, 200),
-        span("builder", "s2", 0.25, 2, 300),
-    ];
+    let mut planner = span("planner", "s1", 0.0, 1, 100);
+    planner.budget_reservation_wait_ms = 12;
+    let mut builder_first = span("builder", "s2", 0.25, 1, 200);
+    builder_first.budget_reservation_wait_ms = 20;
+    let records = vec![planner, builder_first, span("builder", "s2", 0.25, 2, 300)];
     let agg = aggregate_metrics("team-t", &records, &json!({}));
     let summary = &agg["summary"];
     assert_eq!(summary["span_count"], 3);
@@ -205,12 +372,14 @@ fn aggregate_reports_roles_slowest_and_rework() {
     assert_eq!(summary["rework_count"], 1, "attempt>1 记返工");
     assert_eq!(summary["artifact_versions"], 3);
     assert_eq!(summary["model_calls"], 0);
+    assert_eq!(summary["budget_reservation_wait_ms_sum"], 32);
     assert_eq!(summary["cost_usd"], 0.5);
     assert_eq!(summary["slowest_worker"]["role"], "planner");
     let roles = agg["roles"].as_array().unwrap();
     assert_eq!(roles.len(), 2);
     let builder = roles.iter().find(|r| r["role"] == "builder").unwrap();
     assert_eq!(builder["spans"], 2);
+    assert_eq!(builder["budget_reservation_wait_ms_sum"], 20);
     assert_eq!(builder["rework"], 1);
     assert_eq!(builder["artifact_versions"], 2);
     assert_eq!(agg["workers"].as_array().unwrap().len(), 3);
@@ -362,6 +531,59 @@ fn request_scoped_usage_is_accepted_by_cost_budget_gate() {
 }
 
 #[test]
+fn reservation_journal_persists_multiple_request_slots_in_one_durable_batch() {
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-batch-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = RequestReservationJournal::for_team(&dir, "team-batch");
+    let scopes = vec![
+        ("worker-a#1".to_string(), None),
+        ("worker-b#1".to_string(), None),
+        ("worker-c#1".to_string(), None),
+    ];
+
+    journal.append_reservations(&scopes).unwrap();
+
+    assert_eq!(journal.reservation_count().unwrap(), 3);
+    assert_eq!(journal.durable_batch_count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn concurrent_team_request_reservations_never_exceed_the_durable_budget() {
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-concurrent-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = RequestReservationJournal::for_team(&dir, "team-concurrent");
+    let budget = Arc::new(TeamModelRequestBudget::new(5, journal.clone()).unwrap());
+    let barrier = Arc::new(std::sync::Barrier::new(9));
+    let mut requests = Vec::new();
+    for index in 0..8 {
+        let budget = Arc::clone(&budget);
+        let barrier = Arc::clone(&barrier);
+        requests.push(std::thread::spawn(move || {
+            barrier.wait();
+            budget.reserve(&format!("worker-{index}#1"), None).is_ok()
+        }));
+    }
+    barrier.wait();
+    let granted = requests
+        .into_iter()
+        .map(|request| request.join().unwrap())
+        .filter(|granted| *granted)
+        .count();
+
+    assert_eq!(granted, 5);
+    assert_eq!(budget.used(), 5);
+    assert_eq!(journal.reservation_count().unwrap(), 5);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn team_request_budget_is_concurrent_and_survives_recreation() {
     let dir = std::env::temp_dir().join(format!(
         "owo-request-budget-test-{}-{}",
@@ -376,7 +598,7 @@ fn team_request_budget_is_concurrent_and_survives_recreation() {
             let budget = std::sync::Arc::clone(&budget);
             let completed = std::sync::Arc::clone(&completed);
             std::thread::spawn(move || {
-                if budget.reserve("step#1").is_ok() {
+                if budget.reserve("step#1", None).is_ok() {
                     completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             })
@@ -390,19 +612,89 @@ fn team_request_budget_is_concurrent_and_survives_recreation() {
 
     let resumed = TeamModelRequestBudget::new(8, journal.clone()).unwrap();
     assert_eq!(resumed.used(), 4);
-    assert!(resumed.reserve("step-next#2").is_ok());
+    assert!(resumed.reserve("step-next#2", None).is_ok());
     assert_eq!(journal.reservation_count().unwrap(), 5);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn task_attempt_budget_scope_changes_per_attempt_without_changing_metric_scope() {
+    let phase_scope = request_scope_key("step-a", Some(7));
+    let attempt_a = task_attempt_budget_scope_key(&phase_scope, Some("task-a"), Some("attempt-a"));
+    let attempt_b = task_attempt_budget_scope_key(&phase_scope, Some("task-a"), Some("attempt-b"));
+    assert_eq!(request_scope_key("step-a", Some(7)), phase_scope);
+    assert_ne!(attempt_a, attempt_b);
+
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-attempt-reset-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = RequestReservationJournal::for_team(&dir, "team-attempt-reset");
+    let budget = TeamModelRequestBudget::new(10, journal.clone()).unwrap();
+    assert!(budget.reserve(&attempt_a, Some(2)).is_ok());
+    assert!(budget.reserve(&attempt_a, Some(2)).is_ok());
+    assert!(budget.reserve(&attempt_a, Some(2)).is_err());
+    assert!(budget.reserve(&attempt_b, Some(2)).is_ok());
+    assert_eq!(journal.reservation_count().unwrap(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn task_attempt_request_limit_is_enforced_and_restored_from_the_durable_journal() {
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-task-scope-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = RequestReservationJournal::for_team(&dir, "team-task-scope");
+    let budget = TeamModelRequestBudget::new(10, journal.clone()).unwrap();
+
+    assert!(budget.reserve("step-a#7", Some(2)).is_ok());
+    assert!(budget.reserve("step-a#7", Some(2)).is_ok());
+    let exhausted = budget.reserve("step-a#7", Some(2)).unwrap_err();
+    assert!(exhausted.contains("task_model_call_budget_exhausted"));
+    assert_eq!(journal.reservation_count().unwrap(), 2);
+
+    let resumed = TeamModelRequestBudget::new(10, journal.clone()).unwrap();
+    assert!(resumed.reserve("step-a#7", Some(2)).is_err());
+    assert!(resumed.reserve("step-a#8", Some(2)).is_ok());
+    assert_eq!(journal.reservation_count().unwrap(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unbounded_team_durably_enforces_capped_task_attempts() {
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-task-memory-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = RequestReservationJournal::for_team(&dir, "team-task-memory");
+    let budget = TeamModelRequestBudget::new_scoped_only(journal.clone()).unwrap();
+
+    assert!(!budget.requires_durable_reservation(None));
+    assert!(budget.requires_durable_reservation(Some(1)));
+    assert!(budget.reserve("step-a#3", Some(1)).is_ok());
+    assert!(budget
+        .reserve("step-a#3", Some(1))
+        .unwrap_err()
+        .contains("task_model_call_budget_exhausted"));
+    assert_eq!(budget.used(), 1);
+    assert_eq!(journal.reservation_count().unwrap(), 1);
+    let resumed = TeamModelRequestBudget::new_scoped_only(journal.clone()).unwrap();
+    assert!(resumed
+        .reserve("step-a#3", Some(1))
+        .unwrap_err()
+        .contains("task_model_call_budget_exhausted"));
+    assert_eq!(journal.reservation_count().unwrap(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn request_budget_status_is_reported_without_claiming_usd_exhaustion() {
     let mut payload = aggregate_metrics("team-budget", &[], &json!({"max_model_calls": 7}));
-    attach_request_budget_status(
-        &mut payload,
-        &json!({"max_model_calls": 7}),
-        Ok(5),
-    );
+    attach_request_budget_status(&mut payload, &json!({"max_model_calls": 7}), Ok(5));
     assert_eq!(payload["budget"]["max_model_calls"], 7);
     assert_eq!(payload["budget"]["reserved_model_calls"], 5);
     assert_eq!(payload["budget"]["remaining_model_calls"], 2);
@@ -447,6 +739,125 @@ async fn measured_provider_does_not_call_provider_after_team_budget_is_full() {
     assert!(error.contains("team_model_call_budget_exhausted"));
     assert_eq!(inner.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn measured_provider_enforces_task_limit_before_global_reservation() {
+    struct CountingProvider(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl ModelProvider for CountingProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ModelOutput::Text("ok".to_string()))
+        }
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-provider-task-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = RequestReservationJournal::for_team(&dir, "team-budget");
+    let budget = Arc::new(TeamModelRequestBudget::new(10, journal.clone()).unwrap());
+    let inner = Arc::new(CountingProvider(std::sync::atomic::AtomicUsize::new(0)));
+    let calls = Arc::new(AtomicU64::new(0));
+    let provider = MeasuredProvider::new_with_scoped_request_budget(
+        inner.clone(),
+        calls.clone(),
+        Arc::new(RequestUsageCollector::default()),
+        "step-task#1".to_string(),
+        Some(budget),
+        Some(1),
+    );
+
+    assert!(provider.complete(&[], &[]).await.is_ok());
+    let error = provider.complete(&[], &[]).await.unwrap_err();
+    assert!(error.contains("task_model_call_budget_exhausted"));
+    assert_eq!(inner.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(journal.reservation_count().unwrap(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn team_request_budget_disk_reservation_does_not_block_async_workers() {
+    struct CountingProvider(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl ModelProvider for CountingProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ModelOutput::Text("ok".to_string()))
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "owo-request-budget-async-test-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let journal = RequestReservationJournal::for_team(&dir, "team-budget");
+    let budget = Arc::new(TeamModelRequestBudget::new(1, journal).unwrap());
+    let inner = Arc::new(CountingProvider(std::sync::atomic::AtomicUsize::new(0)));
+    let collector = Arc::new(RequestUsageCollector::default());
+    let provider = MeasuredProvider::new_with_request_budget(
+        inner.clone(),
+        Arc::new(AtomicU64::new(0)),
+        collector.clone(),
+        "step#1".to_string(),
+        Some(budget),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(async {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx.await.unwrap();
+
+        let request = tokio::spawn(async move {
+            let messages: Vec<ChatMessage> = Vec::new();
+            provider.complete(&messages, &[]).await
+        });
+        let executor_kept_progress = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            tokio::time::sleep(std::time::Duration::from_millis(10)),
+        )
+        .await
+        .is_ok();
+        let provider_calls_before_release = inner.0.load(std::sync::atomic::Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        let request_result = request.await.unwrap();
+        assert!(
+            executor_kept_progress,
+            "async executor must keep polling while blocking pool is occupied"
+        );
+        assert_eq!(
+            provider_calls_before_release, 0,
+            "provider must wait for its off-thread durable reservation"
+        );
+        assert!(request_result.is_ok());
+    });
+    assert!(
+        collector.take_budget_reservation_wait("step#1") > 0,
+        "time waiting for durable budget reservation must be measured"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -513,9 +924,11 @@ async fn measured_provider_preserves_request_metadata_once() {
     assert_eq!(records[0].0.model.as_deref(), Some("model-actual"));
     assert_eq!(records[0].0.usage.unwrap().total_tokens, 20);
     assert!(records[0].0.latency_ms.unwrap_or(0) >= 5);
-    assert!(records[0].1, "成功的 observed provider call 保留逐请求 outcome");
+    assert!(
+        records[0].1,
+        "成功的 observed provider call 保留逐请求 outcome"
+    );
 }
-
 
 #[tokio::test]
 async fn failed_provider_call_is_retained_as_failed_request_metric() {
@@ -692,23 +1105,15 @@ fn invalid_team_request_budget_is_reported_as_unknown() {
 
 #[test]
 fn malformed_legacy_budget_stops_scheduling_instead_of_disabling_the_limit() {
-    let reason = budget_exhaustion_reason(
-        &json!({"max_cost_usd": "unknown"}),
-        &[],
-        0,
-    )
-    .expect("malformed cost limit must fail closed");
+    let reason = budget_exhaustion_reason(&json!({"max_cost_usd": "unknown"}), &[], 0)
+        .expect("malformed cost limit must fail closed");
     assert!(reason.contains("max_cost_usd"));
     assert_eq!(
         budget_state(&json!({"max_cost_usd": "unknown"}), &[], 0)["max_cost_usd"],
         "unknown"
     );
 
-    let wall_reason = budget_exhaustion_reason(
-        &json!({"max_wall_secs": -1}),
-        &[],
-        0,
-    )
-    .expect("malformed wall limit must fail closed");
+    let wall_reason = budget_exhaustion_reason(&json!({"max_wall_secs": -1}), &[], 0)
+        .expect("malformed wall limit must fail closed");
     assert!(wall_reason.contains("max_wall_secs"));
 }

@@ -30,6 +30,7 @@ pub fn parse_sse_data_line(line: &str) -> Option<Result<SseEvent>> {
 pub struct SseBuffer {
     buffer: Vec<u8>,
     finished: bool,
+    overflowed: bool,
     last_event_id: Option<String>,
 }
 
@@ -41,12 +42,22 @@ pub struct SseFrame {
 }
 
 impl SseBuffer {
+    const MAX_BUFFER_BYTES: usize = 1024 * 1024;
+
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 追加一段原始字节。
+    /// 追加一段原始字节；缓冲总量设上限，避免畸形/永不结束的帧无限吃内存。
     pub fn push(&mut self, bytes: &[u8]) {
+        if self.overflowed {
+            return;
+        }
+        if self.buffer.len().saturating_add(bytes.len()) > Self::MAX_BUFFER_BYTES {
+            self.buffer.clear();
+            self.overflowed = true;
+            return;
+        }
         self.buffer.extend_from_slice(bytes);
     }
 
@@ -63,6 +74,12 @@ impl SseBuffer {
 
     /// 取出事件及其最近的 SSE `id:` 游标，供断线恢复使用。
     pub fn next_frame(&mut self) -> Option<Result<SseFrame>> {
+        if self.overflowed {
+            self.overflowed = false;
+            return Some(Err(ClientError::Protocol(
+                "Turn SSE 缓冲超过 1 MiB 上限".to_string(),
+            )));
+        }
         while let Some(position) = self.buffer.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = self.buffer.drain(..=position).collect();
             let line = String::from_utf8_lossy(&line);
@@ -289,6 +306,9 @@ pub struct TurnStream {
     pending: VecDeque<TurnEventRecord>,
     stream_ended: bool,
     terminal: bool,
+    final_seen: bool,
+    stats_seen: bool,
+    replay_in_progress: bool,
     terminal_after_pending: bool,
     replay_state: Option<TurnReplayState>,
     stream_error: Option<String>,
@@ -311,13 +331,16 @@ impl TurnStream {
             pending: VecDeque::new(),
             stream_ended: false,
             terminal: false,
+            final_seen: false,
+            stats_seen: false,
+            replay_in_progress: false,
             terminal_after_pending: false,
             replay_state: None,
             stream_error: None,
         }
     }
 
-    /// 下一个事件：断线后按持久 session seq 补拉，`None` = turn 已终止。
+    /// 下一个事件：断线后按持久 session seq 补拉；Final 后继续消费 TurnStats/TurnFailed 终态。
     pub async fn next_event(&mut self) -> Option<Result<SseEvent>> {
         loop {
             if self.terminal {
@@ -326,7 +349,19 @@ impl TurnStream {
             if let Some(record) = self.pending.pop_front() {
                 self.last_seq = self.last_seq.max(record.seq);
                 if matches!(&record.payload, SseEvent::Final { .. }) {
-                    self.terminal = true;
+                    self.final_seen = true;
+                    return Some(Ok(record.payload));
+                }
+                if matches!(&record.payload, SseEvent::TurnStats { .. }) {
+                    self.stats_seen = true;
+                }
+                if matches!(
+                    &record.payload,
+                    SseEvent::TurnStats { .. } | SseEvent::TurnFailed { .. }
+                ) {
+                    // Replay pages can contain legacy events written after a terminal marker.
+                    // Drain the page, and any lookahead pages, before ending the stream.
+                    self.terminal = self.pending.is_empty() && self.terminal_after_pending;
                     return Some(Ok(record.payload));
                 }
                 if let Some(message) = turn_failure_message(&record.payload) {
@@ -339,11 +374,24 @@ impl TurnStream {
                 return self.finish_replay();
             }
             if let Some(frame) = self.buffer.next_frame() {
+                if frame.is_err() {
+                    // A malformed or oversized turn frame invalidates the live cursor; do not
+                    // continue presenting a partial turn as if no events had been lost.
+                    self.terminal = true;
+                }
                 return Some(frame.and_then(|frame| {
                     if let Some(id) = frame.id.as_deref().and_then(|id| id.parse::<u64>().ok()) {
                         self.last_seq = self.last_seq.max(id);
                     }
                     if matches!(&frame.event, SseEvent::Final { .. }) {
+                        self.final_seen = true;
+                        return Ok(frame.event);
+                    }
+                    if matches!(&frame.event, SseEvent::TurnStats { .. }) {
+                        self.stats_seen = true;
+                        return Ok(frame.event);
+                    }
+                    if matches!(&frame.event, SseEvent::TurnFailed { .. }) {
                         self.terminal = true;
                         return Ok(frame.event);
                     }
@@ -355,6 +403,14 @@ impl TurnStream {
                 }));
             }
             if self.stream_ended {
+                if self.stream_error.is_none()
+                    && self.final_seen
+                    && self.stats_seen
+                    && !self.replay_in_progress
+                {
+                    self.terminal = true;
+                    return None;
+                }
                 return self.next_replayed_event().await;
             }
             match self.response.chunk().await {
@@ -373,6 +429,7 @@ impl TurnStream {
     }
 
     async fn next_replayed_event(&mut self) -> Option<Result<SseEvent>> {
+        self.replay_in_progress = true;
         let Some(turn_id) = self.turn_id.clone() else {
             self.terminal = true;
             return self
@@ -404,7 +461,19 @@ impl TurnStream {
             if let Some(record) = self.pending.pop_front() {
                 self.last_seq = self.last_seq.max(record.seq);
                 if matches!(&record.payload, SseEvent::Final { .. }) {
-                    self.terminal = true;
+                    self.final_seen = true;
+                    return Some(Ok(record.payload));
+                }
+                if matches!(&record.payload, SseEvent::TurnStats { .. }) {
+                    self.stats_seen = true;
+                }
+                if matches!(
+                    &record.payload,
+                    SseEvent::TurnStats { .. } | SseEvent::TurnFailed { .. }
+                ) {
+                    // Replay pages can contain legacy events written after a terminal marker.
+                    // Drain the page, and any lookahead pages, before ending the stream.
+                    self.terminal = self.pending.is_empty() && self.terminal_after_pending;
                     return Some(Ok(record.payload));
                 }
                 if let Some(message) = turn_failure_message(&record.payload) {
@@ -423,12 +492,14 @@ impl TurnStream {
     fn finish_replay(&mut self) -> Option<Result<SseEvent>> {
         self.terminal = true;
         match self.replay_state.take() {
+            Some(TurnReplayState::Completed) if self.final_seen => None,
             Some(TurnReplayState::Completed) => Some(Err(ClientError::Protocol(
                 "回合标记为完成，但重放中缺少 final 事件".to_string(),
             ))),
             Some(TurnReplayState::Failed) => Some(Err(ClientError::Protocol(
                 "回合执行失败，但重放中缺少失败详情".to_string(),
             ))),
+            Some(TurnReplayState::Interrupted) if self.final_seen && self.stats_seen => None,
             Some(TurnReplayState::Interrupted) => Some(Err(ClientError::Protocol(
                 "回合在写入终态前中断；仅收到已持久化的部分事件".to_string(),
             ))),

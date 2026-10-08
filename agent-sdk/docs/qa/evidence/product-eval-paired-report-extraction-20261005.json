@@ -1,0 +1,29 @@
+{
+  "date": "2026-10-05",
+  "scope": "devtools/product-eval paired Single/Team report boundary",
+  "change": {
+    "source_before_lines": 4957,
+    "source_after_lines": 4325,
+    "new_module": "devtools/product-eval/src/product_eval/paired_report.rs",
+    "new_module_lines": 647,
+    "moved_implementation_lines_approx": 632,
+    "public_api": "Existing symbols remain re-exported from product_eval; consumer import paths are unchanged"
+  },
+  "responsibilities_moved": [
+    "Paired report schema and binding options",
+    "Single/Team run identity and matrix alignment checks",
+    "Case-cluster bootstrap intervals and paired resource/quality deltas",
+    "Mode-specific report splitting and paired JSON construction"
+  ],
+  "validation": {
+    "rustfmt_changed_files": 40,
+    "rustfmt_check": "passed for all 40 changed/new Rust files",
+    "dedicated_rustfmt_check": "passed for product_eval.rs and product_eval/paired_report.rs",
+    "cargo_check": "not run; resource_limited: 5.39 GiB free and 83% memory used",
+    "rust_tests": "not run; devtools/product-eval is an independent workspace and the same resource gate applies"
+  },
+  "limitations": [
+    "Formatting and syntax parsing do not prove Rust visibility/type correctness",
+    "Re-export behavior and paired statistics regression tests still require Cargo verification"
+  ]
+}

@@ -11,7 +11,7 @@ test("runTurn 复用自定义请求头并处理无换行的最后一个 SSE 事�
   globalThis.fetch = async (input, init) => {
     requestUrl = String(input);
     requestHeaders = new Headers(init?.headers);
-    return new Response('data: {"type":"final","text":"完成"}', {
+    return new Response('data: {"type":"final","text":"完成"}\n\ndata: {"type":"turn_stats","completion_status":"accepted","completion_record":{"task_id":"session/1","attempt_id":"turn-1","status":"accepted","evidence_receipt_ids":["receipt-1"],"candidate_version_sha256":"sha256:abc","decided_at":"2026-10-05T00:00:00Z"}}', {
       status: 200,
       headers: { "Content-Type": "text/event-stream" },
     });
@@ -24,7 +24,7 @@ test("runTurn 复用自定义请求头并处理无换行的最后一个 SSE 事�
       headers: { Authorization: "Bearer test-token", "X-Client": "unit" },
     });
 
-    await client.runTurn(
+    const completion = await client.runTurn(
       { id: "session/1", prompt: "测试" },
       { onEvent: (event) => events.push(event) },
     );
@@ -36,7 +36,16 @@ test("runTurn 复用自定义请求头并处理无换行的最后一个 SSE 事�
     assert.equal(requestHeaders?.get("Authorization"), "Bearer test-token");
     assert.equal(requestHeaders?.get("X-Client"), "unit");
     assert.equal(requestHeaders?.get("Content-Type"), "application/json");
-    assert.deepEqual(events, [{ type: "final", text: "完成" }]);
+    assert.equal(completion.completionStatus, "accepted");
+    assert.deepEqual(completion.stats.completion_record, {
+      task_id: "session/1",
+      attempt_id: "turn-1",
+      status: "accepted",
+      evidence_receipt_ids: ["receipt-1"],
+      candidate_version_sha256: "sha256:abc",
+      decided_at: "2026-10-05T00:00:00Z",
+    });
+    assert.deepEqual(events[1].completion_record, completion.stats.completion_record);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -277,6 +286,7 @@ test("ProductEval 冻结契约（创建/列表/详情/取消 + 六态 + workswar
           status: "passed",
           wall_ms: 12,
           model_calls: 0,
+          tool_calls: null,
           prompt_tokens: null,
           completion_tokens: null,
           total_tokens: null,
@@ -303,6 +313,7 @@ test("ProductEval 冻结契约（创建/列表/详情/取消 + 六态 + workswar
         success_rate: 0.5,
         mean_wall_ms: 12,
         total_model_calls: 0,
+        total_tool_calls: null,
         total_tokens: null,
         estimated_cost_usd: null,
       },
@@ -316,6 +327,7 @@ test("ProductEval 冻结契约（创建/列表/详情/取消 + 六态 + workswar
           success_rate: 1,
           mean_wall_ms: 12,
           mean_model_calls: 0,
+          mean_tool_calls: null,
           total_tokens: null,
         },
       ],

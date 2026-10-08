@@ -27,7 +27,8 @@ pub fn explicit_acceptance_items(request: &str) -> Vec<String> {
                 .any(|needle| title.contains(needle));
             if is_acceptance_heading {
                 acceptance_heading_level = Some(level);
-            } else if acceptance_heading_level.is_some_and(|active| active == 0 || level <= active) {
+            } else if acceptance_heading_level.is_some_and(|active| active == 0 || level <= active)
+            {
                 acceptance_heading_level = None;
             }
             continue;
@@ -37,8 +38,14 @@ pub fn explicit_acceptance_items(request: &str) -> Vec<String> {
             .trim()
             .to_lowercase();
         if [
-            "验收", "验收标准", "验收条件", "验收点", "完成标准",
-            "acceptance criteria", "acceptance requirements", "criteria",
+            "验收",
+            "验收标准",
+            "验收条件",
+            "验收点",
+            "完成标准",
+            "acceptance criteria",
+            "acceptance requirements",
+            "criteria",
         ]
         .contains(&plain_heading.as_str())
         {
@@ -47,10 +54,8 @@ pub fn explicit_acceptance_items(request: &str) -> Vec<String> {
         }
 
         let checkbox_item = strip_checkbox_marker(trimmed);
-        let body = checkbox_item.or_else(|| {
-            acceptance_heading_level
-                .and_then(|_| strip_list_marker(trimmed))
-        });
+        let body = checkbox_item
+            .or_else(|| acceptance_heading_level.and_then(|_| strip_list_marker(trimmed)));
         let Some(body) = body else {
             continue;
         };
@@ -64,6 +69,27 @@ pub fn explicit_acceptance_items(request: &str) -> Vec<String> {
 
 /// Require each explicit checklist item to have an exact user-request citation
 /// on at least one required host validation obligation.
+pub fn validate_exact_user_request_quotes(quotes: &[String], request: &str) -> Result<(), String> {
+    if quotes.is_empty() {
+        return Err("任务没有引用任何用户原文要求".to_string());
+    }
+    let normalized_request = normalize_whitespace(request);
+    let mut seen = std::collections::HashSet::new();
+    for quote in quotes {
+        let normalized_quote = normalize_whitespace(quote);
+        if normalized_quote.is_empty() || normalized_quote.len() > 2_048 {
+            return Err("用户原文引用不能为空且不得超过 2048 字节".to_string());
+        }
+        if !seen.insert(normalized_quote.clone()) {
+            return Err("任务重复引用同一条用户原文要求".to_string());
+        }
+        if !normalized_request.contains(&normalized_quote) {
+            return Err(format!("任务引用不属于当前用户目标原文：{quote}"));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_plan_covers_explicit_acceptance(
     plan: &VerificationPlanV1,
     request: &str,
@@ -79,16 +105,16 @@ pub fn validate_plan_covers_explicit_acceptance(
 
     for item in explicit_acceptance_items(request) {
         if !citations.contains(&item) {
-            return Err(format!(
-                "显式验收清单项未绑定到必需验证要求：{item}"
-            ));
+            return Err(format!("显式验收清单项未绑定到必需验证要求：{item}"));
         }
     }
     Ok(())
 }
 
 fn strip_checkbox_marker(line: &str) -> Option<&str> {
-    for marker in ["- [ ]", "- [x]", "- [X]", "* [ ]", "* [x]", "* [X]", "+ [ ]", "+ [x]", "+ [X]"] {
+    for marker in [
+        "- [ ]", "- [x]", "- [X]", "* [ ]", "* [x]", "* [X]", "+ [ ]", "+ [x]", "+ [X]",
+    ] {
         if let Some(rest) = line.strip_prefix(marker) {
             return Some(rest.trim_start());
         }
@@ -126,7 +152,10 @@ mod tests {
             plan_id: "checklist-plan".to_string(),
             requirements: vec![VerificationRequirementV1 {
                 requirement_id: "checklist".to_string(),
-                covers_requirement_ids: citations.iter().map(|quote| format!("user-request:{quote}")).collect(),
+                covers_requirement_ids: citations
+                    .iter()
+                    .map(|quote| format!("user-request:{quote}"))
+                    .collect(),
                 validator_id: "workspace-command-success-v1".to_string(),
                 validator_version: Some("1".to_string()),
                 scope: VerificationScopeV1::WorkspacePaths {
@@ -149,11 +178,7 @@ mod tests {
         let request = "## 验收标准\n- 默认页码为 1\n  1. 越界返回空列表\n\n示例：\n```md\n- 不是要求\n```\n- [ ] 写入审计日志";
         assert_eq!(
             explicit_acceptance_items(request),
-            vec![
-                "默认页码为 1",
-                "越界返回空列表",
-                "写入审计日志",
-            ]
+            vec!["默认页码为 1", "越界返回空列表", "写入审计日志",]
         );
     }
 

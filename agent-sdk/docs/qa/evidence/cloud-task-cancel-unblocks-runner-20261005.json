@@ -1,0 +1,27 @@
+{
+  "date": "2026-10-05",
+  "scope": "Cancel active cloud task without waiting for the cloud queue mutex",
+  "finding": "cloud_task_submit held the queue mutex through remote submission, polling and result retrieval. cloud_task_cancel attempted to acquire that mutex before it could cancel, so cancellation could not interrupt an active remote status wait.",
+  "change": "AppState now keeps per-task watch senders separate from the queue lock. The cancel endpoint signals first. CloudTaskQueue::run_next_with_cancel selects on cancellation during status polling, retry backoff, result retrieval and fetch backoff, then invokes remote cancel, persists Canceled and emits one terminal event. Repeated cancel is idempotent.",
+  "regression_test_source": [
+    "pending remote status is interrupted within a bounded test deadline",
+    "remote transport cancel is called",
+    "Canceled state is persisted to the task JSON",
+    "exactly one Canceled progress event is emitted"
+  ],
+  "static_checks": {
+    "cargo_fmt": "passed",
+    "git_diff_check": "passed",
+    "evidence_json_parse": "passed"
+  },
+  "rust_tests": {
+    "status": "resource_limited",
+    "command": "Invoke-CiCargo cargo test -p owo-agent-extensions --lib --locked -j 2 -- --test-threads=2",
+    "cargo_started": false,
+    "available_memory_gb": 4.32,
+    "memory_used_percent": 86.3,
+    "required": "at least 6 GB available and memory use strictly below 80%",
+    "result": "resource_limited: Invoke-CiCargo rejected before Cargo launch; required at least 6 GB available and memory use below 80%."
+  },
+  "limitations": "The queue mutex still blocks concurrent GET status/result requests, and the submit endpoint returns only after execution. A queue actor and immediate task acknowledgement remain unimplemented. No Rust type check or test execution has verified this change."
+}

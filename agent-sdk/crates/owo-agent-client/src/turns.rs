@@ -29,6 +29,28 @@ impl AgentClient {
         ))
     }
 
+    /// 回答当前会话中挂起的 ask_user 问题。
+    pub async fn answer_question(
+        &self,
+        session_id: &str,
+        question_id: &str,
+        answer: &str,
+    ) -> Result<Value> {
+        #[derive(serde::Serialize)]
+        struct QuestionAnswerRequest<'a> {
+            question_id: &'a str,
+            answer: &'a str,
+        }
+        self.post_json(
+            &format!("/session/{session_id}/answer/{question_id}"),
+            &QuestionAnswerRequest {
+                question_id,
+                answer,
+            },
+        )
+        .await
+    }
+
     /// 取消运行中的回合（幂等；无运行中回合时服务端仍返回 ok）。
     pub async fn cancel_turn(&self, session_id: &str) -> Result<Value> {
         self.post_empty(&format!("/session/{session_id}/abort"))

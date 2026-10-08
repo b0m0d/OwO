@@ -58,6 +58,8 @@
       ".owo-perm-warn{color:#b26a00}" +
       ".owo-perm-empty{padding:8px 10px;border:1px dashed #ccc;border-radius:8px;color:#666;font-size:12px}" +
       ".owo-perm-risk{margin:4px 0 4px 18px;padding:0}" +
+      ".owo-perm-locked{background:#f5f6f8;color:#555}" +
+      ".owo-perm-grid button:disabled,.owo-perm-grid select:disabled,.owo-perm-grid input:disabled{opacity:.55;cursor:not-allowed}" +
       "</style>"
     );
   }
@@ -82,13 +84,14 @@
     const rows = Array.isArray(snap.dimensions) ? snap.dimensions : [];
     if (!rows.length) return '<div class="owo-perm-empty">未收到服务端的权限维度矩阵，暂不展示可配置项。</div>';
     const draft = snap.draft || {};
+    const editable = canMutate(snap);
     const body = rows
       .map((row) => {
         const key = text(row.key);
         const effective = d ? d.summarizeScope(row.effective) : text(row.effective);
         const source = d ? d.sourceLabel(row.source) : text(row.source);
         const summary = text(row.summary) || "（服务端未提供范围说明）";
-        const control = row.configurable ? dimensionControl(key, draft[key]) : honestNonConfigurable(effective);
+        const control = row.configurable ? dimensionControl(key, draft[key], editable) : honestNonConfigurable(effective);
         return (
           "<tr>" +
           "<th>" + esc(text(row.label) || (d ? d.dimensionLabel(key) : key)) + "</th>" +
@@ -109,23 +112,23 @@
     );
   }
 
-  function dimensionControl(key, value) {
+  function dimensionControl(key, value, editable) {
     const d = domain();
     if (!d) return "";
     if (key === "persistence") {
-      return selectControl("perm-dimension-persistence", d.PERSISTENCE_VALUES, text(value), d.persistenceLabel);
+      return selectControl("perm-dimension-persistence", d.PERSISTENCE_VALUES, text(value), d.persistenceLabel, editable);
     }
     const allowed =
       key === "filesystem" ? d.FILESYSTEM_VALUES : key === "command" ? d.COMMAND_VALUES : key === "network" ? d.NETWORK_VALUES : null;
     if (!allowed) return "";
-    return selectControl("perm-dimension-" + key, allowed, text(value), d.summarizeScope);
+    return selectControl("perm-dimension-" + key, allowed, text(value), d.summarizeScope, editable);
   }
 
-  function selectControl(name, values, current, labeler) {
+  function selectControl(name, values, current, labeler, editable) {
     const options = values
       .map((value) => '<option value="' + esc(value) + '"' + (value === current ? " selected" : "") + ">" + esc(labeler ? labeler(value) : value) + "</option>")
       .join("");
-    return '<select name="' + esc(name) + '" aria-label="' + esc(name) + '">' + options + "</select>";
+    return '<select name="' + esc(name) + '" aria-label="' + esc(name) + '"' + (editable ? "" : " disabled") + '>' + options + "</select>";
   }
 
   /** 不可配置维度的诚实呈现：没有 <select>/<input>，只有文字与原因。 */
@@ -134,19 +137,23 @@
   }
 
   function renderScopes(snap) {
+    const editable = canMutate(snap);
+    const disabled = editable ? "" : " disabled";
     const scopes = snap.draft && Array.isArray(snap.draft.scopes) ? snap.draft.scopes : [];
     const chips = scopes
-      .map((scope, index) => '<li><code>' + esc(scope) + '</code> <button type="button" class="secondary" data-perm-action="drop-scope" data-index="' + index + '">移除</button></li>')
+      .map((scope, index) => '<li><code>' + esc(scope) + '</code> <button type="button" class="secondary" data-perm-action="drop-scope" data-index="' + index + '"' + disabled + '>移除</button></li>')
       .join("");
     return (
       "<h4>允许范围（工作区相对路径）</h4>" +
       (chips ? "<ul>" + chips + "</ul>" : '<div class="owo-perm-empty">未添加额外范围：使用档位默认范围即可。</div>') +
-      '<div class="inline"><input id="permScopeInput" placeholder="如 src/** （工作区内相对路径）" aria-label="新增允许范围">' +
-      '<button type="button" id="permAddScope" data-perm-action="add-scope">添加范围</button></div>'
+      '<div class="inline"><input id="permScopeInput" placeholder="如 src/** （工作区内相对路径）" aria-label="新增允许范围"' + disabled + '>' +
+      '<button type="button" id="permAddScope" data-perm-action="add-scope"' + disabled + '>添加范围</button></div>'
     );
   }
 
   function renderFullAccess(snap) {
+    const editable = canMutate(snap);
+    const disabled = editable ? "" : " disabled";
     const info = isPlainObject(snap.fullAccess) ? snap.fullAccess : {};
     const risks = Array.isArray(info.risk_notes) ? info.risk_notes : [];
     const active = info.active === true;
@@ -168,7 +175,7 @@
             esc(option.secs) +
             '"' +
             (Number(option.secs) === Number(confirming.durationSecs) ? " checked" : "") +
-            "> " +
+            disabled + "> " +
             esc(option.label) +
             "</label>",
         )
@@ -187,15 +194,15 @@
           "<ul class=\"owo-perm-risk\">" +
           (confirming.riskNotes.length ? confirming.riskNotes.map((note) => "<li>" + esc(note) + "</li>").join("") : "<li>不受限的命令与网络访问可能造成不可逆的数据外发或本地破坏。</li>") +
           "</ul>" +
-          '<div class="inline"><button type="button" class="primary danger" data-perm-action="confirm-full-access">确认开启（含时长）</button>' +
+          '<div class="inline"><button type="button" class="primary danger" data-perm-action="confirm-full-access"' + disabled + '>确认开启（含时长）</button>' +
           '<button type="button" class="secondary" data-perm-action="cancel-confirm">取消</button></div>' +
           "</div>",
       );
     } else {
       parts.push(
-        '<div class="inline"><button type="button" class="primary" data-perm-action="request-full-access">申请完全访问（需二次确认）</button>' +
+        '<div class="inline"><button type="button" class="primary" data-perm-action="request-full-access"' + disabled + '>申请完全访问（需二次确认）</button>' +
           (active || hasUnrestricted(snap.draft)
-            ? '<button type="button" class="secondary" data-perm-action="close-full-access">一步关闭完全访问</button>'
+            ? '<button type="button" class="secondary" data-perm-action="close-full-access"' + disabled + '>一步关闭完全访问</button>'
             : "") +
           "</div>",
       );
@@ -212,6 +219,8 @@
   function renderPending(snap) {
     const d = domain();
     const groups = d ? d.groupByDimension(snap.pending) : [];
+    const editable = canMutate(snap);
+    const disabled = editable ? "" : " disabled";
     const notices = (snap.goneNotices || []).map((note) => '<div class="sub owo-perm-warn">' + esc(note) + "</div>").join("");
     if (!groups.length) {
       return (
@@ -227,7 +236,11 @@
         const items = group.items
           .map((item) => {
             seq += 1;
-            const buttons = actions
+            const availableActions =
+              item.destructive === false && item.level === "read"
+                ? actions
+                : actions.filter((action) => !action.allow || action.scope === "once");
+            const buttons = availableActions
               .map(
                 (action) =>
                   '<button type="button" class="' +
@@ -238,7 +251,7 @@
                   seq +
                   '" title="' +
                   esc(action.label) +
-                  '">' +
+                  '"' + disabled + '>' +
                   esc(action.label) +
                   "</button>",
               )
@@ -268,6 +281,8 @@
   /** 已授予权限 + 三粒度撤销（单条 / 按工具 / 当前工作区全部）。 */
   function renderGrants(snap) {
     const d = domain();
+    const editable = canMutate(snap);
+    const disabled = editable ? "" : " disabled";
     const grants = Array.isArray(snap.grants) ? snap.grants : [];
     if (!grants.length) {
       return '<h4>已授予的权限</h4><div class="owo-perm-empty" data-perm-empty="grants">暂无长期授权记录。审批时选择「本任务」或「工作区长期」会出现在这里。</div>';
@@ -278,12 +293,14 @@
         const uses = grant.remaining_uses == null ? "次数不限" : "剩余 " + esc(grant.remaining_uses) + " 次";
         return (
           "<tr" + ' data-grant-row="' + esc(index) + '">' +
-          "<td>" + esc(text(grant.tool_id) || "—") + "</td>" +
+          "<td>" + esc(text(grant.tool_id) || "—") +
+            (grant.effective === false ? '<div class="owo-perm-warn">历史授权已失效，当前不会自动放行</div>' : "") +
+            "</td>" +
           "<td>" + esc(d ? d.persistenceLabel(grant.scope) : text(grant.scope)) + "</td>" +
           "<td>" + expiry + "</td>" +
           "<td>" + uses + "</td>" +
           "<td>" + scopeDetail(grant) + "</td>" +
-          '<td><button type="button" class="secondary" data-perm-action="revoke-grant" data-grant="' + esc(grant.grant_id) + '">撤销此条</button></td>' +
+          '<td><button type="button" class="secondary" data-perm-action="revoke-grant" data-grant="' + esc(grant.grant_id) + '"' + disabled + '>撤销此条</button></td>' +
           "</tr>"
         );
       })
@@ -299,7 +316,7 @@
         ([toolId, count]) =>
           '<button type="button" class="secondary" data-perm-action="revoke-tool"' +
           (text(toolId) ? ' data-tool="' + esc(toolId) + '"' : "") +
-          '">撤销「' +
+          '"' + disabled + '>撤销「' +
           esc(toolId) +
           "」全部（" +
           count +
@@ -308,12 +325,12 @@
       .join(" ");
     return (
       "<h4>已授予的权限</h4>" +
-      '<table class="owo-perm-table"><thead><tr><th>工具</th><th>有效期</th><th>到期</th><th>次数</th><th>范围</th><th>撤销</th></tr></thead><tbody>' +
+      '<table class="owo-perm-table"><thead><tr><th>工具 / 状态</th><th>有效期</th><th>到期</th><th>次数</th><th>范围</th><th>撤销</th></tr></thead><tbody>' +
       rows +
       "</tbody></table>" +
       '<div class="inline">' +
       perTool +
-      ' <button type="button" class="secondary" data-perm-action="revoke-all">撤销当前工作区全部授权</button>' +
+      ' <button type="button" class="secondary" data-perm-action="revoke-all"' + disabled + '>撤销当前工作区全部授权</button>' +
       "</div>"
     );
   }
@@ -348,6 +365,10 @@
     return '<h4>最近审批决定</h4><table class="owo-perm-table"><thead><tr><th>时间</th><th>工具</th><th>决定</th><th>说明</th></tr></thead><tbody>' + body + "</tbody></table>";
   }
 
+  function canMutate(snap) {
+    return Boolean(snap && snap.phase === "ready" && snap.readOnly !== true && snap.busy !== true);
+  }
+
   function renderStates(snap) {
     if (snap.phase === "loading") {
       return '<div class="owo-perm-empty" data-perm-phase="loading">正在读取权限概览…（进入本页才请求，不参与首屏链路）</div>';
@@ -358,7 +379,7 @@
         '<div class="owo-perm-empty owo-perm-bad" data-perm-phase="error">权限数据读取失败：' +
         esc(text(info.message) || "未知错误") +
         (info.code ? "（稳定错误码：" + esc(info.code) + "）" : "") +
-        ' <button type="button" data-perm-action="reload">重试</button></div>'
+        '</div>'
       );
     }
     if (snap.empty) {
@@ -368,6 +389,7 @@
   }
 
   function renderErrors(snap) {
+    if (snap.phase === "error") return "";
     const errors = Array.isArray(snap.errors) ? snap.errors.filter(Boolean) : [];
     if (!errors.length) return "";
     return '<div class="owo-perm-bad" data-perm-errors="1">' + errors.map((line) => "<div>" + esc(line) + "</div>").join("") + "</div>";
@@ -377,26 +399,34 @@
 
   function render(root, snap) {
     if (!root || !isPlainObject(snap)) return;
+    const ready = snap.phase === "ready";
+    const editable = canMutate(snap);
+    const facts = ready
+      ? "<h4>权限档位与生效范围</h4>" +
+        renderHeader(snap) +
+        renderDimensionTable(snap) +
+        renderScopes(snap) +
+        renderFullAccess(snap) +
+        renderPending(snap) +
+        renderGrants(snap) +
+        renderDecisions(snap)
+      : '<div class="owo-perm-empty owo-perm-locked" data-perm-data-unavailable="1">只有成功读取到服务端权限概览后，才会显示权限状态与变更操作。读取失败时不推测当前授权。</div>';
     root.innerHTML =
       styleBlock() +
       '<section data-panel="permissions" class="stack">' +
       '<div class="inline">' +
-      '<button type="button" class="primary" data-perm-action="reload">刷新权限概览</button>' +
-      '<button type="button" class="primary" data-perm-action="submit">保存权限配置</button>' +
+      '<button type="button" class="primary" data-perm-action="reload"' + (snap.phase === "loading" || snap.busy ? " disabled" : "") + '>刷新权限概览</button>' +
+      '<button type="button" class="primary" data-perm-action="submit"' + (editable ? "" : ' disabled title="权限概览成功读取且当前为可写模式后才能保存"') + '>保存权限配置</button>' +
       '<span class="sub" data-perm-status="1">' +
-      esc(snap.verify || snap.notice || (snap.updatedAt ? "更新于 " + text(snap.updatedAt).slice(11, 19) : "尚未加载")) +
+      esc(snap.verify || snap.notice ||
+        (snap.phase === "loading" ? "正在读取权限概览…" :
+          snap.phase === "error" ? "权限概览不可用" :
+            snap.updatedAt ? "更新于 " + text(snap.updatedAt).slice(11, 19) : "尚未加载")) +
       "</span>" +
       "</div>" +
       renderStates(snap) +
       renderErrors(snap) +
-      "<h4>权限档位与生效范围</h4>" +
-      renderHeader(snap) +
-      renderDimensionTable(snap) +
-      renderScopes(snap) +
-      renderFullAccess(snap) +
-      renderPending(snap) +
-      renderGrants(snap) +
-      renderDecisions(snap) +
+      facts +
       "</section>";
     bindOnce(root);
   }

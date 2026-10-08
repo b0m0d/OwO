@@ -109,7 +109,11 @@ pub(crate) async fn run_cloud(args: CloudArgs) -> Result<(), Box<dyn std::error:
                 queue_dir.display()
             );
             if submit.run {
-                while let Some(id) = queue.run_next(&NullSink).await? {
+                let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+                if let Some(id) = queue
+                    .run_task_to_terminal_with_cancel(&task_id, &NullSink, cancel_rx)
+                    .await?
+                {
                     let record = queue.record(&id).unwrap();
                     let diff_count = record.result.as_ref().map(|r| r.diff.len()).unwrap_or(0);
                     let error = record
@@ -121,9 +125,6 @@ pub(crate) async fn run_cloud(args: CloudArgs) -> Result<(), Box<dyn std::error:
                         "任务 {id} → {:?}（diff 条目={diff_count}）{error}",
                         record.state
                     );
-                    if id == task_id {
-                        break;
-                    }
                 }
             }
         }

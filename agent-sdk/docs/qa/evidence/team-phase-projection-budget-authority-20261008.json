@@ -1,0 +1,22 @@
+{
+  "evidence_id": "team-phase-projection-budget-authority-20261008",
+  "scope": "static-source-review-and-rust-format-check",
+  "claim": "Team phase snapshot projection updates step records only; run-wide budget counters are derived from the durable attempt-admission high-water mark and phase baseline.",
+  "verification": [
+    "Coordinator finalization derives steps_taken and total_retries from durable counters and the phase baseline.",
+    "Regression source asserts merging a phase projection cannot mutate durable run-wide budget counters.",
+    "rustfmt --edition 2021 --check passed for coord_human.rs and coord_finalize.rs.",
+    "Full-worktree git diff --check passed; the output contained only existing Git line-ending normalization notices."
+  ],
+  "limits": [
+    "Cargo type checking and Rust tests were not run because free memory was below 6 GB, memory use was above 80%, and the T drive had less than 6 GB free.",
+    "This removes ambiguous counter side effects but does not eliminate duplicated phase-local StepRecord state."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/coord_human.rs": "1f402b8194fb35ceddc4d999ca91ed1f05eea17bf6fe3db09648d19dc95fcf22",
+    "crates/owo-agent-core/src/workswarm/coord_finalize.rs": "982f434b902a2ecbfa3688f3a3b1d172eb726ca35a088b8bb80ecd76f170afc0",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs": "77f75a41726dbc83bba2e5124531023aab612fab698ad98274bf4ba3f76c3951",
+    "docs/工程代码结构说明.md": "22d35ac9b8701e43e1f0a9d4a68d6a588145dd507bd56da4402d0587fcc1abfb",
+    "docs/Team架构综合审查与改造方案-2026-10-06.md": "fb8fc93a8be614d4e88791c1945d157eca74a11ea4f0095edb0681a1902c97e7"
+  }
+}

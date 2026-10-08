@@ -17,13 +17,12 @@ pub(super) fn is_source_code_path(raw: &str) -> bool {
         .unwrap_or_default()
         .to_ascii_lowercase();
     let source_extensions = [
-        "rs", "c", "h", "cc", "hh", "cpp", "hpp", "cxx", "hxx", "cs", "fs", "vb",
-        "java", "kt", "kts", "scala", "go", "py", "pyi", "js", "jsx", "mjs", "cjs",
-        "ts", "tsx", "vue", "svelte", "html", "css", "scss", "sass", "less", "sql",
-        "sh", "bash", "ps1", "psm1", "bat", "cmd", "lua", "rb", "php", "swift", "dart",
-        "ex", "exs", "hs", "lhs", "clj", "cljs", "cljc", "proto", "graphql", "gql",
-        "m", "mm", "pl", "r", "jl", "tf", "tfvars", "nix", "astro", "mdx",
-        "csproj", "fsproj", "vbproj", "sln", "cmake", "gradle", "cabal",
+        "rs", "c", "h", "cc", "hh", "cpp", "hpp", "cxx", "hxx", "cs", "fs", "vb", "java", "kt",
+        "kts", "scala", "go", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "vue", "svelte",
+        "html", "css", "scss", "sass", "less", "sql", "sh", "bash", "ps1", "psm1", "bat", "cmd",
+        "lua", "rb", "php", "swift", "dart", "ex", "exs", "hs", "lhs", "clj", "cljs", "cljc",
+        "proto", "graphql", "gql", "m", "mm", "pl", "r", "jl", "tf", "tfvars", "nix", "astro",
+        "mdx", "csproj", "fsproj", "vbproj", "sln", "cmake", "gradle", "cabal",
     ];
     if source_extensions.contains(&extension.as_str()) {
         return true;
@@ -35,10 +34,23 @@ pub(super) fn is_source_code_path(raw: &str) -> bool {
         .to_ascii_lowercase();
     if matches!(
         file_name.as_str(),
-        "cargo.toml" | "go.mod" | "go.sum" | "package.json" | "pnpm-lock.yaml"
-            | "yarn.lock" | "package-lock.json" | "tsconfig.json" | "pyproject.toml"
-            | "requirements.txt" | "pom.xml" | "build.gradle" | "build.gradle.kts"
-            | "makefile" | "justfile" | "cmakelists.txt" | "dockerfile"
+        "cargo.toml"
+            | "go.mod"
+            | "go.sum"
+            | "package.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "package-lock.json"
+            | "tsconfig.json"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "makefile"
+            | "justfile"
+            | "cmakelists.txt"
+            | "dockerfile"
     ) {
         return true;
     }
@@ -90,8 +102,7 @@ pub(super) fn uncovered_source_paths(
         .requirements
         .iter()
         .filter(|requirement| {
-            requirement.required
-                && requirement.validator_id == "workspace-command-success-v1"
+            requirement.required && requirement.validator_id == "workspace-command-success-v1"
         })
         .filter_map(|requirement| match &requirement.scope {
             crate::plan::VerificationScopeV1::WorkspacePaths { relative_paths } => {
@@ -114,6 +125,18 @@ pub(super) fn review_source_snapshot(
     attempt_id: &str,
     change_sets: &[owo_agent_protocol::ChangeSet],
     workspace: Option<&std::path::Path>,
+) -> Value {
+    let mut snapshot = crate::workspace_snapshot::WorkspaceSnapshotBatch::new(workspace);
+    review_source_snapshot_with_batch(team_id, step_id, attempt_id, change_sets, &mut snapshot)
+}
+
+/// Callers building multiple upstream bindings share only this operation's fence.
+pub(super) fn review_source_snapshot_with_batch(
+    team_id: &str,
+    step_id: &str,
+    attempt_id: &str,
+    change_sets: &[owo_agent_protocol::ChangeSet],
+    snapshot: &mut crate::workspace_snapshot::WorkspaceSnapshotBatch,
 ) -> Value {
     let mut matching = change_sets
         .iter()
@@ -149,13 +172,17 @@ pub(super) fn review_source_snapshot(
             })
         })
         .collect::<Vec<_>>();
-    let change_set_sha256 = CasStore::hash_of(
-        &serde_json::to_vec(&stable_change_sets).unwrap_or_default(),
-    );
+    let change_set_sha256 =
+        CasStore::hash_of(&serde_json::to_vec(&stable_change_sets).unwrap_or_default());
 
     let mut paths = std::collections::BTreeSet::new();
     for change_set in &matching {
-        paths.extend(change_set.changed_files.iter().map(|path| path.replace('\\', "/")));
+        paths.extend(
+            change_set
+                .changed_files
+                .iter()
+                .map(|path| path.replace('\\', "/")),
+        );
         paths.extend(
             change_set
                 .result_hashes
@@ -163,44 +190,12 @@ pub(super) fn review_source_snapshot(
                 .map(|file| file.path.replace('\\', "/")),
         );
     }
-    let root = workspace.and_then(|path| path.canonicalize().ok());
     let mut source_hashes = std::collections::BTreeMap::new();
     for path in &paths {
-        let relative = std::path::Path::new(path);
-        let observation = if relative.is_absolute()
-            || relative.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::ParentDir
-                        | std::path::Component::Prefix(_)
-                        | std::path::Component::RootDir
-                )
-            })
-        {
-            json!({"observed": false, "exists": Value::Null, "sha256": Value::Null})
-        } else if let Some(root) = root.as_ref() {
-            let target = root.join(relative);
-            match std::fs::symlink_metadata(&target) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    json!({"observed": true, "exists": false, "sha256": Value::Null})
-                }
-                Err(_) => json!({"observed": false, "exists": Value::Null, "sha256": Value::Null}),
-                Ok(_) => match target.canonicalize() {
-                    Ok(canonical) if canonical.starts_with(root) && canonical.is_file() => {
-                        match std::fs::read(canonical) {
-                            Ok(bytes) => json!({
-                                "observed": true,
-                                "exists": true,
-                                "sha256": CasStore::hash_of(&bytes),
-                            }),
-                            Err(_) => json!({"observed": false, "exists": true, "sha256": Value::Null}),
-                        }
-                    }
-                    _ => json!({"observed": false, "exists": true, "sha256": Value::Null}),
-                },
-            }
-        } else {
-            json!({"observed": false, "exists": Value::Null, "sha256": Value::Null})
+        let observation = match snapshot.read(path) {
+            Some(Some(hash)) => json!({"observed":true,"exists":true,"sha256":hash}),
+            Some(None) => json!({"observed":true,"exists":false,"sha256":Value::Null}),
+            None => json!({"observed":false,"exists":Value::Null,"sha256":Value::Null}),
         };
         source_hashes.insert(path.clone(), observation);
     }
@@ -252,7 +247,7 @@ pub(super) fn review_source_snapshot(
         "change_set_ids": change_set_ids,
         "change_set_sha256": change_set_sha256,
         "source_hashes": source_hashes,
-        "workspace_observed": root.is_some(),
+        "workspace_observed": snapshot.is_bound(),
         "changeset_source_consistent": changeset_source_consistent,
         "contains_source_code": paths.iter().any(|path| is_source_code_path(path)),
     })
@@ -268,9 +263,8 @@ pub(super) fn workspace_receipt_snapshot_matches_current(
     {
         return true;
     }
-    workspace_root.is_some_and(|root| {
-        crate::verification::workspace_subjects_match_current(root, subjects)
-    })
+    workspace_root
+        .is_some_and(|root| crate::verification::workspace_subjects_match_current(root, subjects))
 }
 
 pub(super) fn validate_review_artifact_kind(is_reviewer: bool, kind: &str) -> Result<(), String> {
@@ -305,7 +299,28 @@ pub(super) fn review_requirements_for_step(
             }));
         }
     }
-    if let Some(acceptance) = step.input.get("assigned_acceptance").and_then(Value::as_str) {
+    if let Some(quotes) = step
+        .input
+        .get("assigned_user_requirement_quotes")
+        .and_then(Value::as_array)
+    {
+        for (index, quote) in quotes.iter().filter_map(Value::as_str).enumerate() {
+            let quote = quote.trim();
+            if quote.is_empty() {
+                continue;
+            }
+            requirements.push(serde_json::json!({
+                "requirement_id": format!("{}:user-request-quote:{index}", step.id),
+                "kind": "user_request_quote",
+                "description": quote,
+            }));
+        }
+    }
+    if let Some(acceptance) = step
+        .input
+        .get("assigned_acceptance")
+        .and_then(Value::as_str)
+    {
         let acceptance = acceptance.trim();
         if !acceptance.is_empty() {
             requirements.push(serde_json::json!({
@@ -347,7 +362,11 @@ pub(super) fn review_requirements_for_step(
     if let Some(task) = step.input.get("assigned_task").and_then(Value::as_str) {
         add_explicit_items(task, "task-checklist");
     }
-    if let Some(acceptance) = step.input.get("assigned_acceptance").and_then(Value::as_str) {
+    if let Some(acceptance) = step
+        .input
+        .get("assigned_acceptance")
+        .and_then(Value::as_str)
+    {
         add_explicit_items(acceptance, "acceptance-checklist");
     }
     if let Some(plan) = &step.verification_plan {
@@ -400,7 +419,9 @@ pub(super) fn validate_review_requirement_coverage(
         })
         .next()
     {
-        return Err(format!("ReviewResult finding 引用了未知验收要求：{unexpected}"));
+        return Err(format!(
+            "ReviewResult finding 引用了未知验收要求：{unexpected}"
+        ));
     }
     Ok(())
 }
@@ -539,7 +560,12 @@ pub(super) fn evaluate_workspace_command_receipt(
     use crate::plan::{ValidationVerdictV1, VerificationScopeV1};
 
     let unsupported = |detail: String| {
-        (ValidationVerdictV1::Unsupported, Some(detail), std::collections::BTreeMap::new(), None)
+        (
+            ValidationVerdictV1::Unsupported,
+            Some(detail),
+            std::collections::BTreeMap::new(),
+            None,
+        )
     };
     let VerificationScopeV1::WorkspacePaths { relative_paths } = &requirement.scope else {
         return unsupported("行为检查要求绑定 WorkspacePaths 文件集合".to_string());
@@ -551,7 +577,7 @@ pub(super) fn evaluate_workspace_command_receipt(
         return unsupported("行为检查命令不在宿主登记的测试命令集合内".to_string());
     }
     let command_sha256 = CasStore::hash_of(command.trim().as_bytes());
-    let matching = event_details.iter().filter_map(|detail| {
+    let mut matching = event_details.iter().filter_map(|detail| {
         let event: Value = serde_json::from_str(detail).ok()?;
         if event.get("step_id").and_then(Value::as_str) != Some(step_id)
             || event.get("attempt_id").and_then(Value::as_str) != Some(attempt_id)
@@ -559,14 +585,12 @@ pub(super) fn evaluate_workspace_command_receipt(
             return None;
         }
         let receipt = event.get("receipt")?;
-        if receipt.get("command_sha256").and_then(Value::as_str)
-            != Some(command_sha256.as_str())
-        {
+        if receipt.get("command_sha256").and_then(Value::as_str) != Some(command_sha256.as_str()) {
             return None;
         }
         Some(receipt.clone())
     });
-    let Some(receipt_value) = matching.last() else {
+    let Some(receipt_value) = matching.next_back() else {
         return (
             ValidationVerdictV1::Unverified,
             Some("当前 task/attempt 没有匹配的宿主命令执行回执".to_string()),
@@ -578,31 +602,12 @@ pub(super) fn evaluate_workspace_command_receipt(
         Ok(receipt) => receipt,
         Err(error) => return unsupported(format!("宿主命令回执结构无效：{error}")),
     };
-    if receipt.validator_id.as_deref() != Some("workspace-command-success-v1")
-        || receipt.validator_version.as_deref() != Some("1")
+    if let Err((verdict, detail)) =
+        crate::command_evidence::validate_command_receipt(requirement, &receipt)
     {
         return (
-            ValidationVerdictV1::Unverified,
-            Some("宿主命令回执没有匹配已登记行为验证器身份".to_string()),
-            std::collections::BTreeMap::new(),
-            Some(format!("command-result:sha256:{}", receipt.result_sha256)),
-        );
-    }
-    let Some(duration_ms) = receipt.duration_ms else {
-        return (
-            ValidationVerdictV1::Unverified,
-            Some("命令回执缺少宿主计时数据，无法验证声明的超时预算".to_string()),
-            std::collections::BTreeMap::new(),
-            Some(format!("command-result:sha256:{}", receipt.result_sha256)),
-        );
-    };
-    if duration_ms > u64::from(requirement.resources.timeout_ms) {
-        return (
-            ValidationVerdictV1::Failed,
-            Some(format!(
-                "宿主命令耗时 {duration_ms}ms，超过验证计划预算 {}ms",
-                requirement.resources.timeout_ms
-            )),
+            verdict,
+            Some(detail),
             std::collections::BTreeMap::new(),
             Some(format!("command-result:sha256:{}", receipt.result_sha256)),
         );
@@ -626,9 +631,10 @@ pub(super) fn evaluate_workspace_command_receipt(
                         change_set.team_id == team_id
                             && change_set.step_id == step_id
                             && change_set.attempt_id.as_deref() == Some(attempt_id)
-                            && change_set.changed_files.iter().any(|changed| {
-                                changed.replace('\\', "/") == path
-                            })
+                            && change_set
+                                .changed_files
+                                .iter()
+                                .any(|changed| changed.replace('\\', "/") == path)
                             && change_set.result_hashes.iter().any(|file| {
                                 file.path.replace('\\', "/") == path && file.sha256.is_none()
                             })
@@ -672,7 +678,9 @@ pub(super) fn evaluate_workspace_command_receipt(
     }
     (
         ValidationVerdictV1::Passed,
-        Some(format!("宿主登记命令成功，exit_code=0 command_sha256={command_sha256}")),
+        Some(format!(
+            "宿主登记命令成功，exit_code=0 command_sha256={command_sha256}"
+        )),
         subject_hashes,
         evidence_ref,
     )
@@ -701,7 +709,12 @@ pub(super) fn validate_workspace_receipt_snapshot(
     let mut expected = std::collections::BTreeMap::new();
     let mut changed = std::collections::BTreeSet::new();
     for change_set in matching {
-        changed.extend(change_set.changed_files.iter().map(|path| path.replace('\\', "/")));
+        changed.extend(
+            change_set
+                .changed_files
+                .iter()
+                .map(|path| path.replace('\\', "/")),
+        );
         for file in &change_set.result_hashes {
             let path = file.path.replace('\\', "/");
             if expected
@@ -721,9 +734,9 @@ pub(super) fn validate_workspace_receipt_snapshot(
             continue;
         };
         let evidence_key = format!("workspace-path:{raw_path}");
-        let actual_hash = subject_hashes.get(&evidence_key).ok_or_else(|| {
-            format!("workspace 验证未为 ChangeSet 文件 {path} 产生最终源码哈希")
-        })?;
+        let actual_hash = subject_hashes
+            .get(&evidence_key)
+            .ok_or_else(|| format!("workspace 验证未为 ChangeSet 文件 {path} 产生最终源码哈希"))?;
         let matches_result = match expected_hash {
             Some(expected_hash) => actual_hash == expected_hash,
             None if changed.contains(&path) => {
@@ -838,7 +851,6 @@ pub(super) fn make_validation_receipt(
     }
 }
 
-
 #[cfg(test)]
 mod review_requirement_tests {
     use super::*;
@@ -902,23 +914,24 @@ mod review_requirement_tests {
         let mut step = crate::plan::StepSpec::new("step-a", "m-builder");
         step.input = serde_json::json!({
             "assigned_task": "implement the API",
-            "assigned_acceptance": "Acceptance criteria\n- returns the saved record"
+            "assigned_acceptance": "Acceptance criteria\n- returns the saved record",
+            "assigned_user_requirement_quotes": ["return the saved record"]
         });
         step.verification_plan = Some(crate::plan::VerificationPlanV1 {
             plan_id: "verify-step-a".to_string(),
             requirements: vec![
                 crate::plan::VerificationRequirementV1 {
-                requirement_id: "behavior".to_string(),
-                covers_requirement_ids: Vec::new(),
-                validator_id: "workspace-command-success-v1".to_string(),
-                validator_version: Some("1".to_string()),
-                scope: crate::plan::VerificationScopeV1::WorkspacePaths {
-                    relative_paths: vec!["src/api.rs".to_string()],
+                    requirement_id: "behavior".to_string(),
+                    covers_requirement_ids: Vec::new(),
+                    validator_id: "workspace-command-success-v1".to_string(),
+                    validator_version: Some("1".to_string()),
+                    scope: crate::plan::VerificationScopeV1::WorkspacePaths {
+                        relative_paths: vec!["src/api.rs".to_string()],
+                    },
+                    arguments: serde_json::json!({"command":"cargo test"}),
+                    required: true,
+                    resources: Default::default(),
                 },
-                arguments: serde_json::json!({"command":"cargo test"}),
-                required: true,
-                resources: Default::default(),
-            },
                 crate::plan::VerificationRequirementV1 {
                     requirement_id: "goal-checklist:0".to_string(),
                     covers_requirement_ids: Vec::new(),
@@ -945,6 +958,7 @@ mod review_requirement_tests {
         assert!(ids.contains("step-a:goal-checklist:0:host"));
         assert!(ids.contains("step-a:task-objective"));
         assert!(ids.contains("step-a:task-acceptance"));
+        assert!(ids.contains("step-a:user-request-quote:0"));
         assert!(ids.contains("step-a:acceptance-checklist:0"));
         assert!(ids.contains("step-a:behavior"));
     }

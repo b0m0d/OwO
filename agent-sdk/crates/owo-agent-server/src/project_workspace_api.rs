@@ -30,10 +30,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 use super::error_response;
 use crate::AppState;
 
-/// 进程内绑定缓存（team_id → binding；PUT 后刷新，循环迭代读缓存免磁盘 IO）。
-fn bindings_cache() -> &'static Mutex<HashMap<String, WorkspaceBinding>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, WorkspaceBinding>>> = OnceLock::new();
+/// 进程内绑定缓存（run_dir + team_id → binding；不同 daemon 数据目录互相隔离）。
+fn bindings_cache() -> &'static Mutex<HashMap<(PathBuf, String), WorkspaceBinding>> {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), WorkspaceBinding>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn binding_cache_key(run_dir: &Path, team_id: &str) -> (PathBuf, String) {
+    (
+        std::fs::canonicalize(run_dir).unwrap_or_else(|_| run_dir.to_path_buf()),
+        team_id.to_string(),
+    )
 }
 
 /// POST /teams `workspace` 字段与 PUT 请求体。
@@ -206,31 +213,83 @@ fn sidecar_path(run_dir: &Path, team_id: &str) -> PathBuf {
     run_dir.join(format!("{team_id}-workspace.json"))
 }
 
-/// 读取团队工作区绑定（缓存 → sidecar → None）。
-pub fn load_binding(run_dir: &Path, team_id: &str) -> Option<WorkspaceBinding> {
+/// 读取并校验团队工作区绑定 sidecar。缺失表示未绑定；I/O、格式、身份或路径校验失败必须返回错误。
+pub fn load_binding_checked(
+    run_dir: &Path,
+    team_id: &str,
+) -> Result<Option<WorkspaceBinding>, String> {
+    let cache_key = binding_cache_key(run_dir, team_id);
     if let Ok(map) = bindings_cache().lock() {
-        if let Some(binding) = map.get(team_id) {
-            return Some(binding.clone());
+        if let Some(binding) = map.get(&cache_key) {
+            if binding.team_id != team_id {
+                return Err("团队工作区绑定缓存身份无效".to_string());
+            }
+            return Ok(Some(binding.clone()));
         }
     }
-    let text = std::fs::read_to_string(sidecar_path(run_dir, team_id)).ok()?;
-    let binding: WorkspaceBinding = serde_json::from_str(&text).ok()?;
+
+    let path = sidecar_path(run_dir, team_id);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("读取团队工作区绑定失败：{error}")),
+    };
+    let binding: WorkspaceBinding =
+        serde_json::from_str(&text).map_err(|error| format!("团队工作区绑定格式损坏：{error}"))?;
+    let binding = validate_loaded_binding(team_id, binding)?;
     if let Ok(mut map) = bindings_cache().lock() {
-        map.insert(team_id.to_string(), binding.clone());
+        map.insert(cache_key, binding.clone());
     }
-    Some(binding)
+    Ok(Some(binding))
+}
+
+fn validate_loaded_binding(
+    team_id: &str,
+    binding: WorkspaceBinding,
+) -> Result<WorkspaceBinding, String> {
+    if binding.team_id != team_id
+        || binding.root.trim().is_empty()
+        || binding.root_canonical.trim().is_empty()
+        || binding.created_at.trim().is_empty()
+    {
+        return Err("团队工作区绑定身份或必需字段无效".to_string());
+    }
+    if binding.tree_depth > 8 {
+        return Err("团队工作区绑定目录深度超出上限，请重新绑定".to_string());
+    }
+    let revalidated = validate_workspace_spec(&WorkspaceSpec {
+        root: binding.root.clone(),
+        read_only: binding.read_only,
+        write_allowed_paths: binding.write_allowed_paths.clone(),
+        tree_depth: Some(binding.tree_depth),
+    })?;
+    if revalidated.root_canonical != binding.root_canonical
+        || revalidated.write_allowed_canonical != binding.write_allowed_canonical
+    {
+        return Err("团队工作区绑定的规范路径已变化，请重新绑定".to_string());
+    }
+    Ok(binding)
+}
+
+/// 兼容只需要 Option 的查询端；执行/注册表装配必须使用 load_binding_checked。
+pub fn load_binding(run_dir: &Path, team_id: &str) -> Option<WorkspaceBinding> {
+    load_binding_checked(run_dir, team_id).ok().flatten()
 }
 
 /// 保存团队工作区绑定（sidecar + 缓存）。
 pub fn save_binding(run_dir: &Path, binding: &WorkspaceBinding) -> Result<(), String> {
+    let binding = validate_loaded_binding(&binding.team_id, binding.clone())?;
     let path = sidecar_path(run_dir, &binding.team_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建运行目录失败：{e}"))?;
     }
-    let text = serde_json::to_string_pretty(binding).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(&binding).map_err(|e| e.to_string())?;
     std::fs::write(&path, text).map_err(|e| format!("写工作区绑定失败：{e}"))?;
     if let Ok(mut map) = bindings_cache().lock() {
-        map.insert(binding.team_id.clone(), binding.clone());
+        map.insert(
+            binding_cache_key(run_dir, &binding.team_id),
+            binding.clone(),
+        );
     }
     Ok(())
 }
@@ -794,5 +853,84 @@ mod tests {
         assert_eq!(loaded.root_canonical, binding.root_canonical);
         assert_eq!(loaded.project_id, "proj-x");
         assert!(load_binding(temp.path(), "team-none").is_none());
+    }
+
+    #[test]
+    fn checked_binding_loader_distinguishes_missing_and_corrupt_sidecars() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_id = format!("missing-{}", uuid::Uuid::new_v4());
+        assert!(load_binding_checked(temp.path(), &missing_id)
+            .unwrap()
+            .is_none());
+
+        let corrupt_id = format!("corrupt-{}", uuid::Uuid::new_v4());
+        std::fs::write(sidecar_path(temp.path(), &corrupt_id), "{invalid").unwrap();
+        assert!(load_binding_checked(temp.path(), &corrupt_id).is_err());
+
+        let mismatch_id = format!("requested-{}", uuid::Uuid::new_v4());
+        let mut wrong_identity = validate_workspace_spec(&WorkspaceSpec {
+            root: temp.path().to_string_lossy().to_string(),
+            read_only: true,
+            write_allowed_paths: vec![],
+            tree_depth: None,
+        })
+        .unwrap();
+        wrong_identity.team_id = "another-team".to_string();
+        wrong_identity.project_id = "project".to_string();
+        std::fs::write(
+            sidecar_path(temp.path(), &mismatch_id),
+            serde_json::to_vec(&wrong_identity).unwrap(),
+        )
+        .unwrap();
+        assert!(load_binding_checked(temp.path(), &mismatch_id).is_err());
+
+        let root = temp.path().join("bound-root");
+        let inside = root.join("inside");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let tampered_id = format!("tampered-{}", uuid::Uuid::new_v4());
+        let mut tampered = validate_workspace_spec(&WorkspaceSpec {
+            root: root.to_string_lossy().to_string(),
+            read_only: false,
+            write_allowed_paths: vec!["inside".to_string()],
+            tree_depth: None,
+        })
+        .unwrap();
+        tampered.team_id = tampered_id.clone();
+        tampered.write_allowed_canonical[0] = std::fs::canonicalize(&outside)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        std::fs::write(
+            sidecar_path(temp.path(), &tampered_id),
+            serde_json::to_vec(&tampered).unwrap(),
+        )
+        .unwrap();
+        assert!(load_binding_checked(temp.path(), &tampered_id).is_err());
+    }
+
+    #[test]
+    fn binding_cache_isolated_by_run_directory() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let team_id = format!("same-id-{}", uuid::Uuid::new_v4());
+        let mut binding = validate_workspace_spec(&WorkspaceSpec {
+            root: first.path().to_string_lossy().to_string(),
+            read_only: true,
+            write_allowed_paths: vec![],
+            tree_depth: None,
+        })
+        .unwrap();
+        binding.team_id = team_id.clone();
+        binding.project_id = String::new();
+        save_binding(first.path(), &binding).unwrap();
+
+        assert!(load_binding_checked(first.path(), &team_id)
+            .unwrap()
+            .is_some());
+        assert!(load_binding_checked(second.path(), &team_id)
+            .unwrap()
+            .is_none());
     }
 }

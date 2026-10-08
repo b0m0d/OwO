@@ -23,7 +23,10 @@
 //!
 //! | 模块 | 职责 |
 //! |---|---|
-//! | [`product_eval`] | 固定任务集 × 重复 × 单/多 Agent 对照的矩阵运行器、journal、报告、统计与冻结点 |
+//! | [`product_eval`] | 任务与 suite schema、输入校验、检查器、指标聚合和兼容 API 门面 |
+//! | [`product_eval::paired_report`]（内部模块；现有 API 继续由 `product_eval` 重导出） | 配对报告 schema、Single/Team 单元对齐、任务聚类统计与比较 JSON |
+//! | [`product_eval::freeze`]（内部模块；现有 API 继续由 `product_eval` 重导出） | suite 任务、权限、预算、模型与版本的冻结清单及漂移校验 |
+//! | [`product_eval::matrix_runner`]（内部模块；现有 API 继续由 `product_eval` 重导出） | 矩阵计划、顺序配对执行、journal 续跑与逐单元报告 |
 //! | [`product_eval::single_agent`] | Route 1 真实单 Agent 执行器（审批器 + 范围工具） |
 //! | [`product_eval::workswarm_executor`] | Route 2 WorkSwarm 真实 TeamRun 适配器（与 Route 1 同任务定义/同权限/同预算） |
 //! | [`eval`] | 面向工程回归的内置 demo 单轮套件（`builtin_suite` / `run_suite`） |

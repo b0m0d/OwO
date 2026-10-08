@@ -1,0 +1,49 @@
+{
+  "evidence_id": "team-execution-epoch-aggregation-20261005",
+  "scope": "source-only",
+  "claim": "Team metrics aggregate Worker activity by coordinator epoch and correlate phase orchestration duration; the WorkSwarm UI renders bounded epoch summaries.",
+  "verification": [
+    "Python source assertions verified epoch grouping, bounded result count, phase-duration correlation, API field, UI mapping/rendering, regression-test source, and documentation.",
+    "node --test agent-sdk/desktop/web/tests/workswarm.panel.test.mjs passed: 69 tests, 0 failures.",
+    "rustfmt --edition 2021 --check --config skip_children=true passed for the affected WorkSwarm server Rust modules.",
+    "node --check passed for the modified WorkSwarm formatter, renderer, and panel test source.",
+    "git diff --check passed."
+  ],
+  "limits": [
+    "No Rust compilation or Rust tests were run per user instruction; backend behavior remains unverified at runtime.",
+    "No live model calls or paired Single/Team measurements were performed; no speed or delivery-quality improvement is claimed.",
+    "Epoch activity windows are not a DAG critical-path calculation; phase spans may enclose parallel Worker/review activity.",
+    "Token and cost unknowns remain explicitly marked and must not be interpreted as zero."
+  ],
+  "source_assertions": {
+    "crates/owo-agent-server/src/workswarm_metrics/execution_epochs.rs::pub(crate) fn aggregate_execution_epochs": true,
+    "crates/owo-agent-server/src/workswarm_metrics/execution_epochs.rs::parallel_overlap_factor": true,
+    "crates/owo-agent-server/src/workswarm_metrics/execution_epochs.rs::MAX_RETURNED_EPOCHS": true,
+    "crates/owo-agent-server/src/workswarm_metrics/lifecycle.rs::phase_duration_ms_sum": true,
+    "crates/owo-agent-server/src/workswarm_metrics/metrics.rs::execution_epochs": true,
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs::execution_epoch_summary_separates_worker_window_from_overlapping_wall_sum": true,
+    "desktop/web/panels/workswarm/format.js::rawEpochSummary": true,
+    "desktop/web/panels/workswarm/render.js::执行代次（最近": true,
+    "desktop/web/tests/workswarm.panel.test.mjs::phaseDurationMs": true,
+    "docs/工程代码结构说明.md::## 52. Team 遥测收尾": true,
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md::## 52. 本轮实现": true
+  },
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/coord_identity.rs": "5d614d2cdb79efe8a37e31b30e87b08d79bee561b711bb689438763b087fbd0b",
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs": "f72935c2539f9e45127c77bb9387b575b1d2ad063e15e7b42cf4d7b123241dd7",
+    "crates/owo-agent-server/src/workswarm_api/registry_builder.rs": "b3604e22342f5f2124e328f368b2f9ff76d4dd692918494defd9c3b0aec961d6",
+    "crates/owo-agent-server/src/workswarm_api/mod.rs": "50746126802a8905cb22f9d29faaf430ca044f1ff67b23e0b3f4f311b975919c",
+    "crates/owo-agent-server/src/workswarm_api/handlers.rs": "b9d06053d0cdce21684d9addfdff69d34f2791e69576d0ea3534db54506cf799",
+    "crates/owo-agent-server/src/workswarm_metrics/execution_epochs.rs": "5917755b48e26d31b841c7914df5bfd4c71f7e56bdafaa199040f71c3b0a51f9",
+    "crates/owo-agent-server/src/workswarm_metrics/lifecycle.rs": "b26ff33dff04f7b8667c298307e53d61b16dfa69fc2c6d873a24b1b9d14c1540",
+    "crates/owo-agent-server/src/workswarm_metrics/metrics.rs": "25a57cac9b1abce822ee389308f4b16bcc2331342884fcdff0d3bff226948660",
+    "crates/owo-agent-server/src/workswarm_metrics/mod.rs": "72c7e9b822b6a88804c03ec74a70c0102af5ce929712ac13b9bd4ba97fb54a78",
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs": "9cb01f131d0bd486debf84a7004041b8ac4beb097bd14821143dd0ec6f5774b2",
+    "desktop/web/panels/workswarm/format.js": "fe4f97281f27d913dc4142b228cf8f1d70731a553636e5e05f2c7ded06d77ec9",
+    "desktop/web/panels/workswarm/render.js": "d70278f4568edb4d507b436d30e73a27a198eb72ba21f549baaafb3a8f1df891",
+    "desktop/web/tests/workswarm.panel.test.mjs": "e8c133a9da4b3892e1d44b0d2f4cddad8a6c7f6669fa7ab01c41759b4860bb14",
+    "desktop/web/style.css": "227f8280fe992f07cdfdddcc7bfa871e48d39d96ac8d9775bf4379b6f05dcb8c",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "6cdb56e96b2985df27fc40dd7ebece4dd0f6fc9c4d981aca144d5f0e81621bc8"
+  }
+}

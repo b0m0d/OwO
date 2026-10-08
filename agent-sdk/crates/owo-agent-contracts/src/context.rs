@@ -34,7 +34,6 @@ pub fn build_system_prompt(configured: Option<&str>, rules: &str) -> String {
     parts.join("\n\n")
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::build_system_prompt;

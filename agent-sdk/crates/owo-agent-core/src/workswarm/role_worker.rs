@@ -53,6 +53,7 @@ fn apply_assigned_task_context(
         return Err("团队上下文不是可修改对象".to_string());
     };
     let paths = json!(task.write_paths.clone().unwrap_or_default());
+    context.insert("objective_text".into(), json!(task_text));
     let task_contract = task
         .prompt_contract()
         .ok_or_else(|| "TaskGraph 任务提示契约无法编译".to_string())?;
@@ -114,17 +115,48 @@ impl Worker for RoleWorker {
 
     async fn run(&self, input: &Value) -> Result<String, String> {
         let task_context = crate::task_context::ResolvedTaskContext::from_assignment_input(input)?;
+        task_context.validate_runtime_binding()?;
         let step_id = task_context.step_id.clone().unwrap_or_default();
         // 领取代次：cancel/retry/replace 接管现场后，旧阶段回传凭此被拒收。
         let phase_epoch = task_context.phase_epoch;
         let attempt_id = task_context.attempt_id.clone();
-        let ctx = match self
+        // 单独量化上下文读取成本。Worker span 的 wall_ms 覆盖上下文、模型执行
+        // 与产物登记；这个无内容审计事件让诊断能把上下文开销从模型等待中区分出来。
+        let context_started = std::time::Instant::now();
+        let context_result = self
             .coordinator
-            .assemble_context_slice(&self.team_id, &self.member_id, &step_id)
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => return Err(format!("上下文切片组装失败：{e}")),
+            .assemble_context_slice_for_attempt(
+                &self.team_id,
+                &self.member_id,
+                &step_id,
+                phase_epoch,
+            )
+            .await;
+        let snapshot_cache_hit = context_result
+            .as_ref()
+            .is_ok_and(|(_, cache_hit)| *cache_hit);
+        let context_assembly_ms = context_started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.coordinator.record_context_assembly_timing(
+            &self.team_id,
+            &self.role,
+            &step_id,
+            task_context.task_id.as_deref(),
+            attempt_id.as_deref(),
+            phase_epoch,
+            context_assembly_ms,
+            if context_result.is_ok() {
+                "succeeded"
+            } else {
+                "failed"
+            },
+            snapshot_cache_hit,
+        );
+        let ctx = match context_result {
+            Ok((context, _)) => context,
+            Err(error) => return Err(format!("上下文切片组装失败：{error}")),
         };
         let worker_kind = self.inner.name().to_string();
         let mut ctx = ctx;
@@ -147,30 +179,9 @@ impl Worker for RoleWorker {
             })
             .unwrap_or_else(|| self.capabilities.clone());
         let is_reviewer = super::util::is_review_role(&self.role, &effective_capabilities);
-        let enriched = TeamCoordinator::build_enriched_input(&ctx, input, &worker_kind);
-        // 八期一路：Prompt 编译元数据 → 自适应指标（context_bytes/截断记录）。
-        // best-effort：指标落盘失败不影响 Worker 执行。
-        if worker_kind == "agent" {
-            if let Some(prompt_meta) = enriched
-                .get("_workswarm")
-                .and_then(|w| w.get("prompt_meta"))
-                .cloned()
-            {
-                let mut event = json!({
-                    "kind": "context",
-                    "role": self.role,
-                    "step_id": step_id,
-                });
-                if let (Some(obj), Some(meta)) = (event.as_object_mut(), prompt_meta.as_object()) {
-                    for (key, value) in meta {
-                        obj.insert(key.clone(), value.clone());
-                    }
-                }
-                self.coordinator
-                    .note_adaptive_event(&self.team_id, event)
-                    .await;
-            }
-        }
+        let enriched = TeamCoordinator::build_enriched_input_owned(ctx, input, &worker_kind);
+        // Prompt 上下文指标在 Server 使用最终 WorkerProfile 编译后记录，
+        // 避免这里先用粗略角色画像生成一份与实际工具面不一致的 Prompt。
         // Worker 上下文装配完成、即将进入真实执行时推进进度状态。
         // Server 指标包装器同样调用该方法；核心入口的调用保证内嵌/测试宿主行为一致，重复调用幂等。
         self.coordinator

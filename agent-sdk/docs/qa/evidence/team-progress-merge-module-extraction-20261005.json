@@ -1,0 +1,24 @@
+{
+  "evidence_id": "team-progress-merge-module-extraction-20261005",
+  "scope": "source-only",
+  "claim": "Coalesced Team progress snapshot merge rules and their regression source are separated from phase lifecycle orchestration without changing the merge algorithm.",
+  "source_observations": {
+    "coord_run_lines_after_extraction": 848,
+    "coord_progress_lines": 149,
+    "preserved_merge_test": true,
+    "separated_behaviors": [
+      "monotonic progress counters",
+      "receipt-only record changes",
+      "skip event extraction"
+    ]
+  },
+  "limits": [
+    "No Rust compilation, Rust tests, clippy, runtime Team tasks, or model calls were run.",
+    "This is a module-boundary refactor and does not establish speed, quality, or runtime-stability improvements."
+  ],
+  "files": {
+    "crates/owo-agent-core/src/workswarm/coord_progress.rs": "3d911465840bc8f3306660e306a69e1b409a162c91913b75186efd2dfac8aa4f",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs": "8c823740261f265a50a8e6927ade1e622c544a1706d3ae2597392e2c9c0c34bf",
+    "crates/owo-agent-core/src/workswarm/mod.rs": "31bdcc6394238d41d40ecf36721fd556ed58e333dbe8767142ecc15c572ac3f9"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "evidence_id": "team-context-assembly-timing-20261006",
+  "scope": "superseded-evidence-pointer",
+  "status": "superseded",
+  "claim": "The original audit-event-only implementation was extended with durable JSONL attribution, then replaced its per-Worker audit scan with a bounded O(1) coordinator index.",
+  "superseded_by": "docs/qa/evidence/team-context-timing-index-20261006.json",
+  "limits": [
+    "Consult the superseding evidence file for current source hashes and validation results.",
+    "Rust compilation and Rust tests remain pending under the repository resource gate."
+  ]
+}

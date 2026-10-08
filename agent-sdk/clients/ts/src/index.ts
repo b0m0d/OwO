@@ -29,6 +29,18 @@ export interface TurnEvent {
   [key: string]: unknown;
 }
 
+export type CompletionStatus = "response_complete" | "candidate" | "accepted" | "unverified" | "blocked" | "aborted";
+export interface TurnCompletion {
+  completionStatus: CompletionStatus;
+  finalText: string;
+  stats: TurnEvent;
+}
+export class TurnFailure extends Error {
+  constructor(message: string, public readonly completionStatus: string) {
+    super(message); this.name = "TurnFailure";
+  }
+}
+
 export type ApiClient = ReturnType<typeof createFetchClient<paths>> & {
   /** 便捷方法：创建会话。 */
   createSession(input: { workspace: string; prompt?: string }): Promise<{
@@ -39,7 +51,7 @@ export type ApiClient = ReturnType<typeof createFetchClient<paths>> & {
   runTurn(
     input: { id: string; prompt: string },
     stream: TurnStreamOptions,
-  ): Promise<void>;
+  ): Promise<TurnCompletion>;
   /** 便捷方法：健康检查。 */
   health(): Promise<boolean>;
 };
@@ -76,7 +88,8 @@ export function createClient(options: ClientOptions): ApiClient {
     const controller = new AbortController();
     const requestHeaders = new Headers(options.headers);
     requestHeaders.set("Content-Type", "application/json");
-    const abortUrl = `${baseUrl}/session/${encodeURIComponent(input.id)}/abort`;
+    const sessionPath = "/session/" + encodeURIComponent(input.id);
+    const abortUrl = baseUrl + sessionPath + "/abort";
     const onAbort = () => {
       void fetch(abortUrl, {
         method: "POST",
@@ -92,43 +105,117 @@ export function createClient(options: ClientOptions): ApiClient {
       }
     }
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let streamEnded = false;
     let buffer = "";
-    let sawFinal = false;
-    try {
-      const response = await fetch(
-        `${baseUrl}/session/${encodeURIComponent(input.id)}/turn`,
-        {
-          method: "POST",
-          headers: requestHeaders,
-          body: JSON.stringify({ prompt: input.prompt }),
-          signal: controller.signal,
-        },
-      );
-      if (!response.ok || !response.body) {
-        throw new Error(`agentTurn 失败：HTTP ${response.status}`);
+    let turnId: string | null = null;
+    let cursor = 0;
+    let finalText: string | null = null;
+    let terminal: TurnEvent | null = null;
+    const observe = (event: TurnEvent, sequence?: number) => {
+      if (sequence !== undefined && sequence <= cursor) return;
+      if (event.type === "final") finalText = typeof event.text === "string" ? event.text : "";
+      if (event.type === "turn_failed" || (event.type === "turn_stats" && terminal?.type !== "turn_failed")) terminal = event;
+      stream.onEvent(event);
+      if (sequence !== undefined && sequence > cursor) cursor = sequence;
+    };
+    const finish = (): TurnCompletion => {
+      const completion = terminal;
+      if (!completion) throw new Error("agentTurn 流结束但未收到 final 事件或宿主完成记录");
+      const status = completion.completion_status;
+      if (!["response_complete", "candidate", "accepted", "unverified", "blocked", "aborted"].includes(String(status))) {
+        throw new Error("agentTurn 缺少有效的宿主完成状态");
       }
-      const streamReader = response.body.getReader();
-      reader = streamReader;
+      if (completion.type === "turn_failed") {
+        throw new TurnFailure(String(completion.message || "回合执行失败"), String(status));
+      }
+      if (finalText === null) throw new Error("agentTurn 宿主已结束回合，但缺少 final 事件");
+      return { completionStatus: status as CompletionStatus, finalText, stats: completion };
+    };
+
+    try {
+      const response = await fetch(baseUrl + sessionPath + "/turn", {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({ prompt: input.prompt }),
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        throw new Error("agentTurn 失败：HTTP " + response.status);
+      }
+      turnId = response.headers.get("x-owo-turn-id");
+      reader = response.body.getReader();
       const decoder = new TextDecoder();
-      const onEvent = (event: TurnEvent) => {
-        if (event.type === "final") sawFinal = true;
-        stream.onEvent(event);
-      };
       while (true) {
-        const { done, value } = await streamReader.read();
-        if (done) {
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try {
+          chunk = await reader.read();
+        } catch (error) {
+          if (stream.signal?.aborted || controller.signal.aborted || !turnId) throw error;
+          break; // The durable event journal can recover a dropped SSE connection.
+        }
+        if (chunk.done) {
+          streamEnded = true;
           buffer += decoder.decode();
-          if (buffer) {
-            consumeSseLines(`${buffer}\n`, onEvent);
-          }
+          if (buffer) buffer = consumeSseFrames(buffer + "\n\n", observe);
           break;
         }
-        buffer += decoder.decode(value, { stream: true });
-        buffer = consumeSseLines(buffer, onEvent);
+        buffer += decoder.decode(chunk.value, { stream: true });
+        buffer = consumeSseFrames(buffer, observe);
       }
-      if (!sawFinal) throw new Error("agentTurn 流结束但未收到 final 事件");
+
+      if (!terminal && turnId) {
+        let emptyPages = 0;
+        let replayFinished = false;
+        while (!replayFinished) {
+          if (stream.signal?.aborted) {
+            const error = new Error("Aborted"); error.name = "AbortError"; throw error;
+          }
+          let page: TurnReplayPage | undefined;
+          let replayStatus = 0;
+          try {
+            const replayResult = await client.GET("/session/{id}/turn/events", {
+              params: {
+                path: { id: input.id },
+                query: { turn_id: turnId, after_seq: cursor, limit: 256 },
+              },
+              signal: stream.signal,
+            });
+            replayStatus = replayResult.response.status;
+            page = replayResult.data as unknown as TurnReplayPage | undefined;
+          } catch (error) {
+            if (stream.signal?.aborted) throw error;
+            await waitForTurnReplay(Math.min(2500, 200 * (2 ** Math.min(emptyPages++, 4))), stream.signal);
+            continue;
+          }
+          if (replayStatus < 200 || replayStatus >= 300) throw new Error("agentTurn 重放失败：HTTP " + replayStatus);
+          if (!page) throw new Error("agentTurn 重放响应缺少事件页");
+          const records = Array.isArray(page.events) ? page.events : [];
+          const pending = records
+            .filter((record) => record && record.turn_id === turnId && Number.isSafeInteger(Number(record.seq)) && Number(record.seq) > cursor)
+            .sort((left, right) => Number(left.seq) - Number(right.seq));
+          for (const record of pending) {
+            if (!record.payload || typeof record.payload !== "object") throw new Error("agentTurn 重放事件格式无效");
+            observe(record.payload, Number(record.seq));
+          }
+          if (page.active !== true) {
+            if (page.state === "interrupted") throw new Error("回合在写入完成结果前中断；已保留部分回答");
+            if (page.state !== "completed" && page.state !== "failed") {
+              throw new Error("回合重放结束但缺少宿主完成记录；结果尚未确认");
+            }
+            replayFinished = true;
+          } else if (pending.length > 0) {
+            emptyPages = 0; // Drain full replay pages without adding polling delay.
+          } else {
+            await waitForTurnReplay(Math.min(2500, 200 * (2 ** Math.min(emptyPages++, 4))), stream.signal);
+          }
+        }
+      }
+      return finish();
     } finally {
-      reader?.releaseLock();
+      if (reader) {
+        if (!streamEnded) await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
+      }
       stream.signal?.removeEventListener("abort", onAbort);
     }
   };
@@ -141,22 +228,49 @@ export function createClient(options: ClientOptions): ApiClient {
   return api;
 }
 
-function consumeSseLines(
-  text: string,
-  onEvent: (event: TurnEvent) => void,
-): string {
-  const lines = text.split("\n");
-  const remainder = lines.pop() ?? "";
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("data:")) continue;
-    const payload = trimmed.slice(5).trim();
-    if (!payload || payload === "[DONE]") continue;
-    try {
-      onEvent(JSON.parse(payload) as TurnEvent);
-    } catch {
-      // 只忽略格式错误的事件，保留流的后续事件处理能力。
+function consumeSseFrames(text: string, onEvent: (event: TurnEvent, sequence?: number) => void): string {
+  const blocks = text.split(/\r?\n\r?\n/);
+  const remainder = blocks.pop() ?? "";
+  const encoder = new TextEncoder();
+  if (encoder.encode(remainder).length > 1024 * 1024) throw new Error("SSE 事件超过 1 MiB 上限");
+  for (const block of blocks) {
+    let eventName = "message";
+    let eventId: string | undefined;
+    const data: string[] = [];
+    for (const line of block.split(/\r?\n/)) {
+      if (line.startsWith("event:")) eventName = line.slice(6).trim();
+      if (line.startsWith("id:")) eventId = line.slice(3).trim();
+      if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
     }
+    const raw = data.join("\n");
+    if (!raw || raw === "[DONE]") continue;
+    if (encoder.encode(raw).length > 1024 * 1024) throw new Error("SSE 事件超过 1 MiB 上限");
+    let event: TurnEvent;
+    try { event = JSON.parse(raw) as TurnEvent; }
+    catch { throw new Error("SSE 事件格式无效"); }
+    if (!event || typeof event !== "object") throw new Error("SSE 事件格式无效");
+    if (eventName !== "message") event = { ...event, type: eventName };
+    const sequence = eventId && /^\d+$/.test(eventId) ? Number(eventId) : undefined;
+    onEvent(event, sequence !== undefined && Number.isSafeInteger(sequence) && sequence > 0 ? sequence : undefined);
   }
   return remainder;
+}
+
+function waitForTurnReplay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    const timer = setTimeout(() => { cleanup(); resolve(); }, milliseconds);
+    const abort = () => {
+      clearTimeout(timer); cleanup();
+      const error = new Error("Aborted"); error.name = "AbortError"; reject(error);
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+interface TurnReplayPage {
+  events?: Array<{ turn_id: string; seq: number; payload: TurnEvent }>;
+  active?: boolean;
+  state?: "active" | "completed" | "failed" | "interrupted";
 }

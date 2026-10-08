@@ -8,9 +8,11 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <main id="setupRoot" class="setup-root" hidden aria-label="首次配置"></main>
   <!-- 全局菜单栏（仿 Codex 桌面：文件/编辑/视图/帮助 + 连接状态 + 主题） -->
   <div id="menubar">
     <div class="menubar-side">
+      <button id="mobileSidebarToggle" class="mobile-sidebar-toggle" type="button" aria-label="打开会话侧栏" aria-expanded="false" aria-controls="sidebar">☰</button>
       <span class="menubar-brand"><span class="brand-mark" aria-hidden="true">O</span><strong>OwO</strong></span>
       <nav class="menubar-menus" aria-label="主菜单">
         <button type="button" class="menubar-menu-btn" data-menu="file">文件</button>
@@ -26,9 +28,10 @@
     <!-- 下拉菜单（文件/编辑/视图/帮助与左下用户卡共用，JS 动态填充并定位） -->
     <div id="menuPopover" class="menu-popover hidden" role="menu" aria-hidden="true"></div>
   </div>
+  <button id="mobileSidebarBackdrop" class="mobile-sidebar-backdrop" type="button" aria-label="关闭会话侧栏" tabindex="-1"></button>
 
   <header>
-    <div class="project-label"><span class="project-dot"></span>当前工作区 <strong>本地项目</strong></div>
+    <div class="project-label"><span class="project-dot"></span>当前工作区 <strong>未选择项目</strong></div>
     <div class="header-right">
       <button id="themeToggle" class="theme-toggle" type="button" title="切换深色主题" aria-label="切换深色主题">☾</button>
       <span id="health" class="pill">连接中…</span>
@@ -36,6 +39,7 @@
       <span id="learnState" class="pill">学习：—</span>
     </div>
   </header>
+  <div id="globalStatusBar" class="global-status-bar" role="group" aria-label="工作台运行状态"></div>
 
   <aside id="sidebar">
     <!-- Codex 侧栏：顶部图标行 / 新对话 / 导航 / 会话列表 / 底部用户卡 -->
@@ -49,6 +53,11 @@
           <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.2" y="2.2" width="5" height="5" rx="1.2"/><rect x="8.8" y="2.2" width="5" height="5" rx="1.2"/><rect x="2.2" y="8.8" width="5" height="5" rx="1.2"/><rect x="8.8" y="8.8" width="5" height="5" rx="1.2"/></svg>
         </button>
       </div>
+      <button id="sidebarWorkspaceBtn" class="codex-workspace-switcher" type="button" title="切换或新建项目工作区" aria-haspopup="menu" aria-expanded="false">
+        <span class="codex-workspace-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h5.1c.66 0 1.2.54 1.2 1.2v5.7c0 .66-.54 1.2-1.2 1.2H3.2c-.66 0-1.2-.54-1.2-1.2V4.4z"/><path d="M2.2 6.2h11.5"/></svg></span>
+        <span class="codex-workspace-meta"><small>项目工作区</small><strong id="sidebarWorkspaceName">未选择项目</strong></span>
+        <svg class="codex-workspace-chevron" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m4.5 6.2 3.5 3.5 3.5-3.5"/></svg>
+      </button>
       <button id="newSession" class="codex-new-chat" type="button">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
         新对话
@@ -394,13 +403,13 @@
               <option value="http">http</option>
             </select>
           </div>
-          <div class="tool-field tool-field-full">
+          <div class="tool-field tool-field-full" data-mcp-group="stdio">
             <label for="mcpCommand">启动命令（stdio）</label>
-            <input id="mcpCommand" placeholder="如 npx -y @modelcontextprotocol/server-filesystem">
+            <input id="mcpCommand" placeholder="如 npx -y @modelcontextprotocol/server-filesystem" required>
           </div>
-          <div class="tool-field tool-field-full">
+          <div class="tool-field tool-field-full" data-mcp-group="http" hidden>
             <label for="mcpUrl">URL（http 传输）</label>
-            <input id="mcpUrl" placeholder="如 http://127.0.0.1:8000/mcp">
+            <input id="mcpUrl" type="url" placeholder="如 http://127.0.0.1:8000/mcp" disabled>
           </div>
           <div class="tool-actions tool-actions-end tool-field-full">
             <button type="submit" class="primary">添加并连接</button>
@@ -536,6 +545,19 @@
                     <option value="deepseek-v4-flash-0731">deepseek-v4-flash-0731</option>
                     <option value="glm-5.2">glm-5.2</option>
                   </select>
+                  <div id="modelCompatibilityHint" class="sub settings-model-hint" hidden></div>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>模型输出上限</strong><span>按模型分别设置；模型思考与答复共用额度，未单独设置时默认 32k</span></div>
+                <div class="settings-row-control settings-output-control">
+                  <input id="modelOutputModel" type="text" list="modelOutputCandidates" placeholder="模型名称" autocomplete="off">
+                  <datalist id="modelOutputCandidates"></datalist>
+                  <input id="modelOutputLimit" type="number" min="1" max="32000" step="1" aria-label="模型输出 Token 上限" title="1–32000 Tokens">
+                  <span>Tokens</span>
+                  <button type="button" id="modelOutputSaveBtn">保存并重启核心</button>
+                  <button type="button" id="modelOutputResetBtn">恢复默认</button>
+                  <div id="modelOutputHint" class="sub settings-output-hint">读取模型输出上限…</div>
                 </div>
               </div>
               <div class="settings-row">
@@ -846,8 +868,9 @@
             <path d="M32 11c11.6 0 21 9.4 21 21s-9.4 21-21 21-19.4-8.2-19.4-18.1C12.6 26.6 20.4 20 28.9 20c6.9 0 12 4.8 12 11.1 0 5-3.8 8.8-8.8 8.8-4 0-7-2.8-7-6.6"/>
           </svg>
         </div>
-        <h2>今天要构建什么？</h2>
-        <p>从左侧选择会话继续，或直接输入指令开始</p>
+        <h2 id="emptyStateTitle">今天要构建什么？</h2>
+        <p id="emptyStateDescription">从左侧选择会话继续，或直接输入指令开始</p>
+        <button type="button" id="emptyStateWorkspaceBtn" class="primary codex-empty-action" hidden>选择或新建项目工作区</button>
       </div>
       <div id="messages"></div>
       <button type="button" id="scrollBottomBtn" class="scroll-bottom hidden" title="回到底部" aria-label="回到底部">
@@ -875,7 +898,7 @@
       </div>
       <button type="button" id="composerProjectBtn" class="codex-project-chip" title="选择工作区">
         <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h4.5c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H3.4c-.66 0-1.2-.54-1.2-1.2V4.4z"/></svg>
-        <span id="composerProjectName">本地项目</span>
+        <span id="composerProjectName">未选择项目</span>
       </button>
       <textarea id="prompt" rows="1" placeholder="描述任务，Enter 发送（Shift+Enter 换行）；/new 建新会话"></textarea>
       <div class="prompt-toolbar">
@@ -972,7 +995,16 @@
        它承担桌面壳的两道认证门（x-owo-desktop-pairing 配对 + x-owo-desktop-instance 实例身份），
        必须在 app.js 与各面板之前加载，否则页面拿不到 token → 全线 401。 -->
   <script src="core/api-client.js"></script>
+  <script src="core/events.js"></script>
   <script src="config/provider-presets.js"></script>
+  <script src="core/folder-picker.js"></script>
+  <script src="permissions/permissions.domain.js"></script>
+  <script src="permissions/permissions.api.js"></script>
+  <script src="permissions/permissions.controller.js"></script>
+  <script src="permissions/permissions.view.js"></script>
+  <script src="views/setup-guide.view.js"></script>
+  <script src="views/status-bar.view.js"></script>
+  <script src="views/diagnostics-ledger.view.js"></script>
   <script src="panels/notes.panel.js"></script>
   <script src="panels/automations.panel.js"></script>
   <script src="panels/plugin-market.panel.js"></script>
@@ -980,6 +1012,7 @@
   <script src="panels/goal.panel.js"></script>
   <script src="panels/team.panel.js"></script>
   <script src="panels/eval.panel.js"></script>
+  <script src="panels/product-comparison.panel.js"></script>
   <script src="panels/observability.panel.js"></script>
   <script src="panels/memory.panel.js"></script>
   <script src="panels/command.panel.js"></script>
@@ -993,6 +1026,18 @@
   <script src="panels/workswarm/format.js"></script>
   <script src="panels/workswarm/render.js"></script>
   <script src="panels/workswarm.panel.js"></script>
+  <script src="core/recovery.js"></script>
+  <script src="core/workbench-refresh.js"></script>
+  <script src="core/turn-sse.js"></script>
+  <script src="core/completion-record.js"></script>
+  <script src="core/workbench-view.js"></script>
+  <script src="core/observer-scope.js"></script>
+  <script src="core/model-routing.js"></script>
+  <script src="core/session-start.js"></script>
+  <script src="core/workspace-routing.js"></script>
+  <script src="core/model-recovery.js"></script>
+  <script src="core/panel-runtime.js"></script>
+  <script src="app-domain.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

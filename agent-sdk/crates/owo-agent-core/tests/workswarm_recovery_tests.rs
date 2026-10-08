@@ -60,7 +60,11 @@ impl Worker for EchoWorker {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+                .filter_map(|artifact| {
+                    artifact
+                        .get("review_requirements")
+                        .and_then(Value::as_array)
+                })
                 .flatten()
                 .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
                 .map(str::to_string)
@@ -75,7 +79,8 @@ impl Worker for EchoWorker {
                 },
                 "evidence": [],
                 "open_issues": []
-            }).to_string());
+            })
+            .to_string());
         }
         Ok(input
             .get("text")
@@ -268,7 +273,11 @@ impl Worker for FlakyEchoWorker {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+                .filter_map(|artifact| {
+                    artifact
+                        .get("review_requirements")
+                        .and_then(Value::as_array)
+                })
                 .flatten()
                 .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
                 .map(str::to_string)
@@ -1032,6 +1041,15 @@ async fn restart_leftover_running_detected_then_continue_recovers() {
     // ——补齐「崩溃时 planner 正在执行」的记录现场（真实崩溃由进程消亡产生；
     //    记录级 Running 落盘需要 mid-merge 场景，这里直写状态文件等价构造）。
     tamper_step_running(&h, &team_id, "s-planner");
+    let old_epoch = h
+        .coordinator
+        .load_run_state(&team_id)
+        .unwrap()
+        .execution_epoch;
+    assert!(
+        old_epoch > 0,
+        "host must persist a nonzero generation before execution"
+    );
 
     // ——模拟进程重启：全新协调器（运行标志/循环存活表为空）。
     let coordinator2 = reopen(&h);
@@ -1051,6 +1069,8 @@ async fn restart_leftover_running_detected_then_continue_recovers() {
 
     // 磁盘：Running 步骤转为可恢复（Aborted）+ 中断说明。
     let state = coordinator2.load_run_state(&team_id).unwrap();
+    let interrupted_attempt_id = state.records["s-planner"].attempt_id.clone();
+    let interrupted_phase_epoch = state.records["s-planner"].phase_epoch;
     assert_eq!(
         state.records["s-planner"].status,
         StepStatus::Aborted,
@@ -1082,6 +1102,17 @@ async fn restart_leftover_running_detected_then_continue_recovers() {
     assert!(!coordinator2.is_interrupted(&team_id), "恢复后标记应清除");
     let state = coordinator2.load_run_state(&team_id).unwrap();
     assert_eq!(state.records["s-planner"].status, StepStatus::Pending);
+    assert_eq!(state.records["s-planner"].attempts, 0);
+    assert_eq!(state.records["s-planner"].attempt_id, None);
+    assert_eq!(state.records["s-planner"].phase_epoch, None);
+    assert_eq!(state.records["s-planner"].output, None);
+    assert_eq!(state.records["s-planner"].error, None);
+    assert!(interrupted_attempt_id.is_some());
+    assert!(interrupted_phase_epoch.is_some());
+    assert!(
+        state.execution_epoch > old_epoch,
+        "restarted host must durably fence the previous attempt before dispatch"
+    );
 
     // 新协调器驱动到底：各步骤各执行 1 次、各 1 个产物（无重复执行）。
     let registry2 = build_registry(&coordinator2, &team_id, Arc::new(EchoWorker), &roles);

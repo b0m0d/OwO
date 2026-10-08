@@ -1,0 +1,22 @@
+{
+  "evidence_id": "team-step-progress-attempt-fencing-20261006",
+  "scope": "static-source-review-and-rust-format-check",
+  "claim": "Team progress snapshots are merged only when both the run phase epoch and the current step attempt identity match; stale snapshots cannot change records, budget counters, or dynamic-skip events.",
+  "verification": [
+    "Regression test source gives the current record a newer attempt_id, then submits a stale Failed snapshot with inflated counters and a skip reason; assertions require the current Running record and counters to remain unchanged and no skip events to be emitted.",
+    "rustfmt --edition 2021 --check and scoped git diff --check are run separately; no Cargo test or type check was run.",
+    "Progress merge and persistence are grouped in coord_progress.rs; coord_run.rs remains the phase lifecycle driver.",
+    "Phase result persistence and terminal/rework selection are isolated in coord_finalize.rs; run_phase delegates after Worker completion."
+  ],
+  "limits": [
+    "The in-source Rust regression test has not been executed because free memory is below the repository Cargo gate.",
+    "No live concurrent Team phase, recovery, or benchmark was performed."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/coord_progress.rs": "37a98aeddbae63daf33d87e41ea38cb14f098c60b0e57b6ef4f94ab6450e620c",
+    "docs/工程代码结构说明.md": "555abc98c3bda123d89f82b93136fc1c3ed600a3d67fd04a85686f9f1d2c87a4",
+    "docs/Team架构综合审查与改造方案-2026-10-06.md": "af2b588fa57d19a15cc4893e4ca5baae8a798d4b41ce4596300a8aa9ed4ca9dc",
+    "crates/owo-agent-core/src/goal/execution.rs": "17ca890746d6aef525dd3bca80033126259c0612f7fcdb7c2a50cc0464069b3c",
+    "crates/owo-agent-core/src/workswarm/coord_finalize.rs": "caac1dadc7db72893a9e908caf98c879da60dfa498b5569284b8c2d70ffcf06c"
+  }
+}

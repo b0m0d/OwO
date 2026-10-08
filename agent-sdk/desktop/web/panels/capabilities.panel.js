@@ -11,6 +11,10 @@
   win.OwoPanels.capabilities = (function () {
     var ID = "capabilities";
     var H = {};
+    var rootEl = null;
+    var lifecycleGeneration = 0;
+    var refreshGeneration = 0;
+    var hasSnapshot = false;
 
     function defaultGet(path) {
       return window.OwoApi.get(path);
@@ -85,13 +89,24 @@
       return (
         '<section data-panel="capabilities" class="owo-cap-panel">' +
         '<div class="owo-cap-tools"><h3>我现在能做什么</h3>' +
-        '<button type="button" class="owo-cap-refresh">刷新</button></div>' +
+        '<button type="button" class="owo-cap-refresh" aria-label="刷新能力目录">刷新</button></div>' +
         '<div class="hint">按任务展示产品能力与入口；标记「高级」的能力在开发者模式下显示。</div>' +
-        '<div class="owo-cap-meta sub">加载中…</div>' +
+        '<div class="owo-cap-meta sub" role="status" aria-live="polite">加载中…</div>' +
         '<div class="owo-cap-list"></div>' +
-        '<div class="owo-cap-error sub" hidden></div>' +
+        '<div class="owo-cap-error sub" role="alert" hidden></div>' +
         "</section>"
       );
+    }
+
+    function isCurrent(root, lifecycle, request) {
+      return root === rootEl && lifecycle === lifecycleGeneration &&
+        request === refreshGeneration &&
+        (typeof root.isConnected !== "boolean" || root.isConnected);
+    }
+
+    function developerMode() {
+      return typeof document !== "undefined" && document.body &&
+        document.body.classList.contains("dev-mode");
     }
 
     /// 纯渲染（Node 可测）：dev=false 时过滤 advanced 能力并隐藏技术入口。
@@ -120,17 +135,28 @@
     }
 
     function refresh(root) {
-      if (!root) return Promise.resolve();
+      root = root || rootEl;
+      if (!root || (rootEl && root !== rootEl)) return Promise.resolve();
+      var lifecycle = lifecycleGeneration;
+      var request = ++refreshGeneration;
       var errBox = root.querySelector(".owo-cap-error");
+      var meta = root.querySelector(".owo-cap-meta");
+      if (errBox) {
+        errBox.hidden = true;
+        errBox.textContent = "";
+      }
+      if (meta) meta.textContent = hasSnapshot ? "正在更新能力目录…（保留当前结果）" : "加载中…";
       return H.get("/capabilities")
         .then(function (data) {
-          if (errBox) {
-            errBox.hidden = true;
-            errBox.textContent = "";
-          }
-          paint(data, root, document.body.classList.contains("dev-mode"));
+          if (!isCurrent(root, lifecycle, request)) return;
+          hasSnapshot = true;
+          paint(data, root, developerMode());
         })
         .catch(function (e) {
+          if (!isCurrent(root, lifecycle, request)) return;
+          if (meta) meta.textContent = hasSnapshot
+            ? "更新失败，已保留上次读取结果"
+            : "能力目录加载失败，可重试";
           if (errBox) {
             errBox.hidden = false;
             errBox.textContent = "功能目录加载失败：" + H.friendlyError(e);
@@ -139,12 +165,15 @@
     }
 
     function mount(root, helpers) {
+      dispose();
       H = {
         get: (helpers && helpers.get) || defaultGet,
         friendlyError: (helpers && helpers.friendlyError) || defaultFriendlyError,
         esc: (helpers && helpers.esc) || defaultEsc,
       };
       if (!root) return;
+      rootEl = root;
+      hasSnapshot = false;
       root.innerHTML = nav();
       var btn = root.querySelector(".owo-cap-refresh");
       if (btn)
@@ -152,6 +181,13 @@
           refresh(root);
         });
       refresh(root);
+    }
+
+    function dispose() {
+      lifecycleGeneration += 1;
+      refreshGeneration += 1;
+      rootEl = null;
+      hasSnapshot = false;
     }
 
     var TEST_API = {
@@ -167,6 +203,7 @@
       nav: nav,
       mount: mount,
       refresh: refresh,
+      dispose: dispose,
       _test: TEST_API,
     };
   })();

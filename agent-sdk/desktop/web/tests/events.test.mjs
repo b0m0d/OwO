@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
 const OwoInvalidation = require("../core/events.js");
@@ -392,4 +394,32 @@ test("R3 §8.2 进入 Degraded 不得立即全量冲刷（兜底仍按周期跑�
   await sleep(100);
   assert.ok(ticks >= 1, "兜底轮询必须按周期继续（降级不失明）");
   inv.stop();
+});
+
+
+test("active workbench consumes every server invalidation domain through one authenticated stream", () => {
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const index = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const rust = readFileSync(new URL("../../../crates/owo-agent-server/src/event_stream.rs", import.meta.url), "utf8");
+  assert.match(index, /<script src="core\/events\.js"><\/script>/);
+  const block = app.match(/const INVALIDATE_HANDLERS = Object\.freeze\(\{[\s\S]*?\n\}\);/);
+  assert.ok(block, "app shell must own one explicit invalidation map");
+  const context = {
+    refreshWhitelist() {}, refreshMcp() {}, refreshSettings() {}, refreshPackages() {},
+    refreshLearn() {}, refreshPlugins() {}, refreshPluginMarket() {}, refreshComputerTasks() {},
+    refreshTraces() {}, refreshProjectRules() {}, refreshSkills() {}, refreshSessions() {}, refreshUsage() {},
+    refreshMountedPanel() {},
+  };
+  vm.createContext(context); vm.runInContext(block[0], context);
+  const handlers = [...vm.runInContext("Object.keys(INVALIDATE_HANDLERS)", context)];
+  const allBlock = rust.match(/pub const ALL: &\'static \[InvalidateDomain\] = &\[([\s\S]*?)\];/);
+  assert.ok(allBlock, "server must publish its complete domain registry");
+  const variants = [...allBlock[1].matchAll(/Self::(\w+)/g)].map(match => match[1]);
+  const mappingBlock = rust.match(/pub fn as_str\(self\) -> &\'static str \{([\s\S]*?)\n    \}/);
+  assert.ok(mappingBlock);
+  const names = new Map([...mappingBlock[1].matchAll(/Self::(\w+) => "([^"]+)"/g)].map(match => [match[1], match[2]]));
+  assert.deepEqual(handlers.sort(), variants.map(name => names.get(name)).sort());
+  assert.match(app, /openStream: \(path, options\) => apiClient\.openEventStream\(path, options\)/);
+  assert.match(app, /if \(!shellHydrated \\|\\| !window\.OwoInvalidation/);
+  assert.match(app, /pollIntervalMs: 600000/);
 });

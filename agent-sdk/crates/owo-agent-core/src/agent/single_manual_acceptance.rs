@@ -4,7 +4,7 @@ use crate::session::Session;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 
-use super::{single_path_is_source_code, single_workspace_path_matches, wait_for_abort};
+use super::{single_workspace_path_matches, wait_for_abort};
 
 pub(super) const SINGLE_MANUAL_ACCEPT_OPTION: &str = "验收当前候选版本";
 pub(super) const SINGLE_MANUAL_REJECT_OPTION: &str = "暂不验收";
@@ -34,13 +34,15 @@ pub(super) fn manual_acceptance_answer_verdict(
     question_id: &str,
 ) -> crate::plan::ValidationVerdictV1 {
     match answer {
-        Some(answer) if answer.question_id == question_id
-            && answer.answer == SINGLE_MANUAL_ACCEPT_OPTION =>
+        Some(answer)
+            if answer.question_id == question_id
+                && answer.answer == SINGLE_MANUAL_ACCEPT_OPTION =>
         {
             crate::plan::ValidationVerdictV1::ManualAccepted
         }
-        Some(answer) if answer.question_id == question_id
-            && answer.answer == SINGLE_MANUAL_REJECT_OPTION =>
+        Some(answer)
+            if answer.question_id == question_id
+                && answer.answer == SINGLE_MANUAL_REJECT_OPTION =>
         {
             crate::plan::ValidationVerdictV1::Failed
         }
@@ -54,11 +56,16 @@ fn single_candidate_hashes(
 ) -> std::collections::BTreeMap<String, Option<String>> {
     let mut pending_hashes = std::collections::BTreeMap::new();
     for execution in session.execution_receipts.iter().filter(|execution| {
-        execution.status == "executed" || (execution.turn_id == turn_id && execution.status == "accepted")
+        execution.status == "executed"
+            || (execution.turn_id == turn_id && execution.status == "accepted")
     }) {
         for relative in &execution.changed_files {
             let normalized = relative.replace('\\', "/");
-            if let Some((_, hash)) = execution.after_hashes.iter().find(|(path, _)| path.replace('\\', "/") == normalized) {
+            if let Some((_, hash)) = execution
+                .after_hashes
+                .iter()
+                .find(|(path, _)| path.replace('\\', "/") == normalized)
+            {
                 pending_hashes.insert(normalized, hash.clone());
             }
         }
@@ -94,7 +101,10 @@ fn current_plan_receipt<'a>(
     let input_sha256 = session.single_verification_plan_input_sha256.as_deref()?;
     let changeset_sha256 = current_candidate_changeset_sha256(session, turn_id)?;
     let environment_id = crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
-    let validator_version = requirement.validator_version.as_deref().unwrap_or("unknown");
+    let validator_version = requirement
+        .validator_version
+        .as_deref()
+        .unwrap_or("unknown");
     let arguments_sha256 = crate::CasStore::hash_of(requirement.arguments.to_string().as_bytes());
     let plan_sha256 = verification_plan_sha256(plan);
     session.validation_receipts.iter().rev().find(|receipt| {
@@ -107,9 +117,10 @@ fn current_plan_receipt<'a>(
             && receipt.input_sha256 == input_sha256
             && receipt.environment_id == environment_id
             && receipt.changeset_sha256.as_deref() == Some(changeset_sha256.as_str())
-            && receipt.evidence_refs.iter().any(|reference| {
-                reference == &format!("verification-plan-sha256:{plan_sha256}")
-            })
+            && receipt
+                .evidence_refs
+                .iter()
+                .any(|reference| reference == &format!("verification-plan-sha256:{plan_sha256}"))
     })
 }
 
@@ -136,9 +147,10 @@ fn current_coverage_receipt<'a>(
             && receipt.input_sha256 == input_sha256
             && receipt.environment_id == environment_id
             && receipt.changeset_sha256.as_deref() == Some(changeset_sha256.as_str())
-            && receipt.evidence_refs.iter().any(|reference| {
-                reference == &format!("verification-plan-sha256:{plan_sha256}")
-            })
+            && receipt
+                .evidence_refs
+                .iter()
+                .any(|reference| reference == &format!("verification-plan-sha256:{plan_sha256}"))
     })
 }
 
@@ -156,10 +168,18 @@ fn completion_from_single_plan_receipts(
     let mut failed_count = 0usize;
     let mut stale_evidence = false;
 
-    for requirement in plan.requirements.iter().filter(|requirement| requirement.required) {
+    for requirement in plan
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.required)
+    {
         required_count += 1;
-        match current_plan_receipt(session, plan, turn_id, requirement).map(|receipt| receipt.verdict) {
-            Some(ValidationVerdictV1::Passed | ValidationVerdictV1::ManualAccepted) => passed_count += 1,
+        match current_plan_receipt(session, plan, turn_id, requirement)
+            .map(|receipt| receipt.verdict)
+        {
+            Some(ValidationVerdictV1::Passed | ValidationVerdictV1::ManualAccepted) => {
+                passed_count += 1
+            }
             Some(ValidationVerdictV1::Failed) => failed_count += 1,
             Some(ValidationVerdictV1::Stale) => stale_evidence = true,
             _ => {}
@@ -195,25 +215,38 @@ pub(super) async fn request_single_manual_acceptance(
     use crate::plan::{ValidationVerdictV1, VerificationScopeV1};
     use std::collections::{BTreeMap, BTreeSet};
 
-    let manual_requirements = plan.requirements.iter().filter(|requirement| {
-        requirement.required
-            && requirement.validator_id == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
-            && requirement.validator_version.as_deref() == Some("1")
-            && matches!(&requirement.scope, VerificationScopeV1::Manual)
-            && requirement.arguments == serde_json::json!({})
-    }).collect::<Vec<_>>();
+    let manual_requirements = plan
+        .requirements
+        .iter()
+        .filter(|requirement| {
+            requirement.required
+                && requirement.validator_id
+                    == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
+                && requirement.validator_version.as_deref() == Some("1")
+                && matches!(&requirement.scope, VerificationScopeV1::Manual)
+                && requirement.arguments == serde_json::json!({})
+        })
+        .collect::<Vec<_>>();
     if manual_requirements.is_empty() {
         return owo_agent_protocol::CompletionStatusV1::Unverified;
     }
 
-    let required_manual_ids = manual_requirements.iter().map(|requirement| requirement.requirement_id.as_str()).collect::<BTreeSet<_>>();
-    let other_requirements_passed = plan.requirements.iter().filter(|requirement| {
-        requirement.required
-            && requirement.validator_id != crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
-    }).all(|requirement| {
-        current_plan_receipt(session, plan, turn_id, requirement)
-            .is_some_and(|receipt| receipt.verdict == ValidationVerdictV1::Passed)
-    });
+    let required_manual_ids = manual_requirements
+        .iter()
+        .map(|requirement| requirement.requirement_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let other_requirements_passed = plan
+        .requirements
+        .iter()
+        .filter(|requirement| {
+            requirement.required
+                && requirement.validator_id
+                    != crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
+        })
+        .all(|requirement| {
+            current_plan_receipt(session, plan, turn_id, requirement)
+                .is_some_and(|receipt| receipt.verdict == ValidationVerdictV1::Passed)
+        });
     let coverage_passed = current_coverage_receipt(session, plan, turn_id)
         .is_some_and(|receipt| receipt.verdict == ValidationVerdictV1::Passed);
     if !other_requirements_passed || !coverage_passed {
@@ -225,10 +258,18 @@ pub(super) async fn request_single_manual_acceptance(
         return completion_from_single_plan_receipts(session, plan, turn_id);
     }
 
-    let snapshot_subjects = pending_hashes.iter().map(|(path, hash)| {
-        (format!("workspace-path:{path}"), hash.clone().unwrap_or_else(crate::verification::workspace_path_absence_sha256))
-    }).collect::<std::collections::HashMap<_, _>>();
-    let candidate_version_sha256 = match crate::completion::hash_candidate_version(&pending_hashes) {
+    let snapshot_subjects = pending_hashes
+        .iter()
+        .map(|(path, hash)| {
+            (
+                format!("workspace-path:{path}"),
+                hash.clone()
+                    .unwrap_or_else(crate::verification::workspace_path_absence_sha256),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let candidate_version_sha256 = match crate::completion::hash_candidate_version(&pending_hashes)
+    {
         Ok(hash) => hash,
         Err(_) => return owo_agent_protocol::CompletionStatusV1::Unverified,
     };
@@ -239,10 +280,14 @@ pub(super) async fn request_single_manual_acceptance(
     let Some(root) = session.workspace.canonicalize().ok() else {
         return owo_agent_protocol::CompletionStatusV1::Unverified;
     };
-    let snapshot_matches = || pending_hashes.iter().all(|(path, hash)| {
-        let expected = hash.clone().unwrap_or_else(crate::verification::workspace_path_absence_sha256);
-        single_workspace_path_matches(&root, path, &expected)
-    });
+    let snapshot_matches = || {
+        pending_hashes.iter().all(|(path, hash)| {
+            let expected = hash
+                .clone()
+                .unwrap_or_else(crate::verification::workspace_path_absence_sha256);
+            single_workspace_path_matches(&root, path, &expected)
+        })
+    };
     if !snapshot_matches() {
         for receipt in session.validation_receipts.iter_mut().filter(|receipt| {
             receipt.attempt_id == turn_id
@@ -256,23 +301,34 @@ pub(super) async fn request_single_manual_acceptance(
         return completion_from_single_plan_receipts(session, plan, turn_id);
     }
 
-    let plan_evidence_ref = format!("verification-plan-sha256:{}", verification_plan_sha256(plan));
-    let prior_decision = session.validation_receipts.iter().rev().find(|receipt| {
-        receipt.attempt_id == turn_id
-            && receipt.validator_id == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
-            && receipt.changeset_sha256.as_deref() == Some(changeset_sha256.as_str())
-            && receipt.evidence_refs.iter().any(|reference| reference == &plan_evidence_ref)
-            && receipt.evidence_refs.iter().any(|reference| {
-                reference.starts_with("manual-question:")
-                    || reference == "manual-question-unavailable"
-            })
-            && matches!(
-                receipt.verdict,
-                ValidationVerdictV1::ManualAccepted
-                    | ValidationVerdictV1::Failed
-                    | ValidationVerdictV1::Unverified
-            )
-    }).cloned();
+    let plan_evidence_ref = format!(
+        "verification-plan-sha256:{}",
+        verification_plan_sha256(plan)
+    );
+    let prior_decision = session
+        .validation_receipts
+        .iter()
+        .rev()
+        .find(|receipt| {
+            receipt.attempt_id == turn_id
+                && receipt.validator_id == crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
+                && receipt.changeset_sha256.as_deref() == Some(changeset_sha256.as_str())
+                && receipt
+                    .evidence_refs
+                    .iter()
+                    .any(|reference| reference == &plan_evidence_ref)
+                && receipt.evidence_refs.iter().any(|reference| {
+                    reference.starts_with("manual-question:")
+                        || reference == "manual-question-unavailable"
+                })
+                && matches!(
+                    receipt.verdict,
+                    ValidationVerdictV1::ManualAccepted
+                        | ValidationVerdictV1::Failed
+                        | ValidationVerdictV1::Unverified
+                )
+        })
+        .cloned();
     let reused_prior_acceptance = prior_decision
         .as_ref()
         .is_some_and(|prior| prior.verdict == ValidationVerdictV1::ManualAccepted);
@@ -294,13 +350,25 @@ pub(super) async fn request_single_manual_acceptance(
         }
     }
 
-    let quote_lines = manual_requirements.iter().flat_map(|requirement| {
-        requirement.covers_requirement_ids.iter().filter_map(|id| id.strip_prefix("user-request:"))
-    }).map(|quote| format!("- {quote}")).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-    let file_lines = pending_hashes.iter().map(|(path, hash)| {
-        let hash = hash.as_deref().unwrap_or("deleted");
-        format!("- {path}  sha256:{hash}")
-    }).collect::<Vec<_>>();
+    let quote_lines = manual_requirements
+        .iter()
+        .flat_map(|requirement| {
+            requirement
+                .covers_requirement_ids
+                .iter()
+                .filter_map(|id| id.strip_prefix("user-request:"))
+        })
+        .map(|quote| format!("- {quote}"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let file_lines = pending_hashes
+        .iter()
+        .map(|(path, hash)| {
+            let hash = hash.as_deref().unwrap_or("deleted");
+            format!("- {path}  sha256:{hash}")
+        })
+        .collect::<Vec<_>>();
     let question_id = format!("single-manual-accept-{}", uuid::Uuid::new_v4());
     let question = crate::question::UserQuestion {
         question_id: question_id.clone(),
@@ -346,27 +414,35 @@ pub(super) async fn request_single_manual_acceptance(
         let index = if let Some(index) = existing {
             index
         } else {
-            let input_sha256 = session.single_verification_plan_input_sha256.clone().unwrap_or_default();
-            session.validation_receipts.push(crate::plan::ValidationReceiptV1 {
-                receipt_id: format!("single-manual-validation-{}", uuid::Uuid::new_v4()),
-                task_id: session.id.clone(),
-                attempt_id: turn_id.to_string(),
-                epoch: session.validation_receipts.len() as u64 + 1,
-                requirement_id: requirement.requirement_id.clone(),
-                validator_id: crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID.to_string(),
-                validator_version: "1".to_string(),
-                arguments_sha256: crate::CasStore::hash_of(b"{}"),
-                input_sha256,
-                environment_id: crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes()),
-                changeset_sha256: Some(changeset_sha256.clone()),
-                detail: None,
-                subject_sha256: HashMap::new(),
-                verdict: ValidationVerdictV1::Unverified,
-                evidence_refs: Vec::new(),
-                review_result: None,
-                started_at: started_at.clone(),
-                completed_at: started_at.clone(),
-            });
+            let input_sha256 = session
+                .single_verification_plan_input_sha256
+                .clone()
+                .unwrap_or_default();
+            session
+                .validation_receipts
+                .push(crate::plan::ValidationReceiptV1 {
+                    receipt_id: format!("single-manual-validation-{}", uuid::Uuid::new_v4()),
+                    task_id: session.id.clone(),
+                    attempt_id: turn_id.to_string(),
+                    epoch: session.validation_receipts.len() as u64 + 1,
+                    requirement_id: requirement.requirement_id.clone(),
+                    validator_id: crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
+                        .to_string(),
+                    validator_version: "1".to_string(),
+                    arguments_sha256: crate::CasStore::hash_of(b"{}"),
+                    input_sha256,
+                    environment_id: crate::CasStore::hash_of(
+                        session.workspace.to_string_lossy().as_bytes(),
+                    ),
+                    changeset_sha256: Some(changeset_sha256.clone()),
+                    detail: None,
+                    subject_sha256: HashMap::new(),
+                    verdict: ValidationVerdictV1::Unverified,
+                    evidence_refs: Vec::new(),
+                    review_result: None,
+                    started_at: started_at.clone(),
+                    completed_at: started_at.clone(),
+                });
             session.validation_receipts.len() - 1
         };
         let receipt = &mut session.validation_receipts[index];
@@ -374,7 +450,9 @@ pub(super) async fn request_single_manual_acceptance(
         receipt.changeset_sha256 = Some(changeset_sha256.clone());
         receipt.subject_sha256 = snapshot_subjects.clone();
         receipt.detail = Some(match verdict {
-            ValidationVerdictV1::ManualAccepted => "用户明确验收了与该回执绑定的候选快照".to_string(),
+            ValidationVerdictV1::ManualAccepted => {
+                "用户明确验收了与该回执绑定的候选快照".to_string()
+            }
             ValidationVerdictV1::Failed => "用户明确拒绝验收当前候选快照".to_string(),
             ValidationVerdictV1::Stale => "等待用户答复期间候选文件发生变化".to_string(),
             _ => "没有取得与候选快照匹配的明确用户验收答复".to_string(),
@@ -389,21 +467,29 @@ pub(super) async fn request_single_manual_acceptance(
                 .as_ref()
                 .map(|answer| crate::CasStore::hash_of(answer.answer.as_bytes()))
             {
-                receipt.evidence_refs.push(format!("user-answer-sha256:{answer_hash}"));
+                receipt
+                    .evidence_refs
+                    .push(format!("user-answer-sha256:{answer_hash}"));
             }
         }
         receipt.evidence_refs.push(format!(
             "verification-plan-sha256:{}",
             verification_plan_sha256(plan)
         ));
-        receipt.evidence_refs.push(format!("candidate-version-sha256:{candidate_version_sha256}"));
+        receipt.evidence_refs.push(format!(
+            "candidate-version-sha256:{candidate_version_sha256}"
+        ));
         receipt.completed_at = completed_at.clone();
-        manual_receipt_ids.insert(requirement.requirement_id.as_str(), receipt.receipt_id.clone());
+        manual_receipt_ids.insert(
+            requirement.requirement_id.as_str(),
+            receipt.receipt_id.clone(),
+        );
     }
 
     let status = completion_from_single_plan_receipts(session, plan, turn_id);
     if status == owo_agent_protocol::CompletionStatusV1::Accepted {
-        let accepted_receipt_id = manual_requirements.first()
+        let accepted_receipt_id = manual_requirements
+            .first()
             .and_then(|requirement| manual_receipt_ids.get(requirement.requirement_id.as_str()))
             .cloned()
             .unwrap_or_default();
@@ -417,10 +503,17 @@ pub(super) async fn request_single_manual_acceptance(
             if execution.status != "executed" {
                 continue;
             }
-            let paths = execution.changed_files.iter().map(|path| path.replace('\\', "/")).collect::<Vec<_>>();
-            if !paths.is_empty() && paths.iter().all(|path| {
-                pending_hashes.contains_key(path) && latest_receipt_by_path.get(path) == Some(&index)
-            }) {
+            let paths = execution
+                .changed_files
+                .iter()
+                .map(|path| path.replace('\\', "/"))
+                .collect::<Vec<_>>();
+            if !paths.is_empty()
+                && paths.iter().all(|path| {
+                    pending_hashes.contains_key(path)
+                        && latest_receipt_by_path.get(path) == Some(&index)
+                })
+            {
                 execution.status = "accepted".to_string();
                 execution.validation_receipt_id = Some(accepted_receipt_id.clone());
             }
@@ -433,8 +526,8 @@ pub(super) async fn request_single_manual_acceptance(
 mod tests {
     use super::*;
     use crate::plan::{
-        ValidationReceiptV1, ValidationVerdictV1, VerificationPlanV1,
-        VerificationRequirementV1, VerificationResourcesV1, VerificationScopeV1,
+        ValidationReceiptV1, ValidationVerdictV1, VerificationPlanV1, VerificationRequirementV1,
+        VerificationResourcesV1, VerificationScopeV1,
     };
     use crate::session::{ExecutionReceipt, Session};
     use std::collections::HashMap;
@@ -471,15 +564,22 @@ mod tests {
             changed_files: vec!["src/lib.rs".to_string()],
             snapshot_keys: HashMap::new(),
             before_hashes: HashMap::from([("src/lib.rs".to_string(), None)]),
-            after_hashes: HashMap::from([("src/lib.rs".to_string(), Some("source-hash".to_string()))]),
+            after_hashes: HashMap::from([(
+                "src/lib.rs".to_string(),
+                Some("source-hash".to_string()),
+            )]),
             diff_sha256: "diff-hash".to_string(),
             created_at: "2026-10-04T00:00:00Z".to_string(),
             status: "executed".to_string(),
             validation_receipt_id: None,
         });
         let changeset_sha256 = current_candidate_changeset_sha256(&session, turn_id).unwrap();
-        let environment_id = crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
-        let plan_ref = format!("verification-plan-sha256:{}", verification_plan_sha256(&plan));
+        let environment_id =
+            crate::CasStore::hash_of(session.workspace.to_string_lossy().as_bytes());
+        let plan_ref = format!(
+            "verification-plan-sha256:{}",
+            verification_plan_sha256(&plan)
+        );
         session.validation_receipts.push(ValidationReceiptV1 {
             receipt_id: "wrong-validator".to_string(),
             task_id: session.id.clone(),
@@ -488,12 +588,17 @@ mod tests {
             requirement_id: requirement.requirement_id.clone(),
             validator_id: "different-validator-v1".to_string(),
             validator_version: "1".to_string(),
-            arguments_sha256: crate::CasStore::hash_of(requirement.arguments.to_string().as_bytes()),
+            arguments_sha256: crate::CasStore::hash_of(
+                requirement.arguments.to_string().as_bytes(),
+            ),
             input_sha256,
             environment_id: environment_id.clone(),
             changeset_sha256: Some(changeset_sha256.clone()),
             detail: None,
-            subject_sha256: HashMap::from([("workspace-path:src/lib.rs".to_string(), "source-hash".to_string())]),
+            subject_sha256: HashMap::from([(
+                "workspace-path:src/lib.rs".to_string(),
+                "source-hash".to_string(),
+            )]),
             verdict: ValidationVerdictV1::Passed,
             evidence_refs: vec![plan_ref.clone()],
             review_result: None,
@@ -513,7 +618,10 @@ mod tests {
             environment_id,
             changeset_sha256: Some(changeset_sha256),
             detail: None,
-            subject_sha256: HashMap::from([("workspace-path:src/lib.rs".to_string(), "source-hash".to_string())]),
+            subject_sha256: HashMap::from([(
+                "workspace-path:src/lib.rs".to_string(),
+                "source-hash".to_string(),
+            )]),
             verdict: ValidationVerdictV1::Passed,
             evidence_refs: vec![plan_ref],
             review_result: None,

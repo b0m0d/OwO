@@ -111,6 +111,7 @@ fn dummy_run(key: MatrixKey, status: RunStatus) -> ProductEvalRun {
         validation_wall_ms: 0,
         delivery_gate_wall_ms: 0,
         model_calls: 0,
+        tool_calls: None,
         prompt_tokens: None,
         completion_tokens: None,
         total_tokens: None,
@@ -123,6 +124,7 @@ fn dummy_run(key: MatrixKey, status: RunStatus) -> ProductEvalRun {
         checker_passed: 0,
         checker_total: 0,
         sandbox_rel: None,
+        artifact_snapshot_rel: None,
         model: None,
         started_at: "2026-01-01T00:00:00Z".to_string(),
         finished_at: "2026-01-01T00:00:01Z".to_string(),
@@ -473,6 +475,28 @@ async fn dry_run_reference_passes_and_resume_skips_completed() {
     assert_eq!(report.runs[0].status, RunStatus::Passed);
     assert_eq!(report.runs[0].model_calls, 0);
     assert_eq!(report.runs[0].artifact_refs, vec!["out/report.md"]);
+    let snapshot_rel = report.runs[0]
+        .artifact_snapshot_rel
+        .as_ref()
+        .expect("成功运行应保留登记产物快照");
+    let snapshot = out.join(snapshot_rel);
+    assert_eq!(
+        std::fs::read_to_string(snapshot.join("out/report.md")).unwrap(),
+        b.clone().cases[0].reference_outputs["out/report.md"]
+    );
+    assert!(snapshot.join("manifest.json").is_file());
+    assert!(format_report_summary(&report).contains(snapshot_rel));
+    assert!(
+        report.runs[0].sandbox_rel.is_none(),
+        "成功快照不保留整个临时沙盒"
+    );
+    let mut legacy_run = serde_json::to_value(&report.runs[0]).unwrap();
+    legacy_run
+        .as_object_mut()
+        .unwrap()
+        .remove("artifact_snapshot_rel");
+    let legacy_run: ProductEvalRun = serde_json::from_value(legacy_run).unwrap();
+    assert!(legacy_run.artifact_snapshot_rel.is_none());
     assert!(report.pending.is_empty());
     assert!(report.metrics.success_rate == 1.0);
 
@@ -510,18 +534,8 @@ async fn resume_rejects_model_execution_and_batch_label_drift() {
         .unwrap();
 
     let variants = [
-        (
-            "live-agent",
-            Some("model-b"),
-            opts.clone(),
-            "模型",
-        ),
-        (
-            "dry-reference",
-            Some("model-a"),
-            opts.clone(),
-            "执行器",
-        ),
+        ("live-agent", Some("model-b"), opts.clone(), "模型"),
+        ("dry-reference", Some("model-a"), opts.clone(), "执行器"),
         (
             "live-agent",
             Some("model-a"),
@@ -565,8 +579,11 @@ async fn resume_rejects_changed_effective_budget_even_when_suite_hash_is_unchang
     assert_eq!(first.runs.len(), 1);
 
     let mut changed_bundle = b;
-    changed_bundle.suite.defaults.max_model_calls =
-        changed_bundle.suite.defaults.max_model_calls.saturating_add(1);
+    changed_bundle.suite.defaults.max_model_calls = changed_bundle
+        .suite
+        .defaults
+        .max_model_calls
+        .saturating_add(1);
     assert_eq!(
         suite_hash(&first_runner.bundle),
         suite_hash(&changed_bundle),
@@ -613,7 +630,10 @@ async fn dry_run_single_multi_parity() {
         "each paired repetition must contain both topologies"
     );
     assert_eq!(
-        modes[0..2].iter().copied().collect::<std::collections::HashSet<_>>(),
+        modes[0..2]
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>(),
         modes[2..4]
             .iter()
             .copied()
@@ -779,7 +799,9 @@ async fn torn_journal_tail_is_tolerated_mid_corruption_is_fatal() {
         RunStatus::Passed,
     ))
     .unwrap();
-    std::fs::write(out.join("state.jsonl"), format!("{a_line}\n{{torn")).unwrap();
+    let mut torn_journal = format!("{a_line}\n{{\"partial\":\"").into_bytes();
+    torn_journal.extend_from_slice(&[0xE4, 0xB8]); // 截断在 UTF-8 多字节字符中间。
+    std::fs::write(out.join("state.jsonl"), torn_journal).unwrap();
     let report = run_matrix(
         &runner,
         Arc::new(ReferenceDryExecutor),
@@ -790,6 +812,16 @@ async fn torn_journal_tail_is_tolerated_mid_corruption_is_fatal() {
     .await;
     assert_eq!(report.runs.len(), 2, "撕裂尾 + 补跑 1 格 = 2");
     assert_eq!(report.metrics.passed, 2);
+    let resumed = run_matrix(
+        &runner,
+        Arc::new(ReferenceDryExecutor),
+        "dry-reference",
+        &opts,
+        no_cancel(),
+    )
+    .await;
+    assert_eq!(resumed.runs.len(), 2, "修复后的 journal 必须可再次恢复");
+    assert_eq!(resumed.metrics.passed, 2);
 
     // 中部损坏：拒绝静默丢弃，明确失败。
     let out2 = temp_out("mid-corrupt");
@@ -823,8 +855,40 @@ async fn torn_journal_tail_is_tolerated_mid_corruption_is_fatal() {
         .await;
     let message = result.expect_err("中部损坏必须报错").0;
     assert!(message.contains("损坏"), "{message}");
+
+    // 损坏但换行完整的末行不是撕裂写入，不能静默截断。
+    let out3 = temp_out("complete-corrupt-tail");
+    let runner3 = MatrixRunner::new(b, &out3);
+    let _ = run_matrix(
+        &runner3,
+        Arc::new(ReferenceDryExecutor),
+        "dry-reference",
+        &opts,
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    std::fs::write(
+        out3.join("state.jsonl"),
+        format!("{a_line}\n{{broken-tail}}\n"),
+    )
+    .unwrap();
+    let result = runner3
+        .run(
+            Arc::new(ReferenceDryExecutor),
+            "dry-reference",
+            None,
+            &opts,
+            no_cancel(),
+        )
+        .await;
+    assert!(result
+        .expect_err("换行完整的损坏末行必须报错")
+        .0
+        .contains("损坏"));
+
     let _ = std::fs::remove_dir_all(&out);
     let _ = std::fs::remove_dir_all(&out2);
+    let _ = std::fs::remove_dir_all(&out3);
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,9 +1087,11 @@ fn compare_reports_flags_regressions_and_mismatched_execution() {
             success_rate: 1.0,
             mean_wall_ms: 10.0,
             mean_model_calls: 1.0,
+            mean_tool_calls: None,
             total_tokens: None,
             quality: None,
         }],
+        comparison: None,
     };
     let mut report_b = report_a.clone();
     report_b.execution = "dry-reference".into();
@@ -1252,6 +1318,7 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         pending: vec![],
         metrics: aggregate_metrics(std::slice::from_ref(&a)),
         per_case: aggregate_per_case(std::slice::from_ref(&a)),
+        comparison: None,
     };
     let multi = ProductEvalReport {
         schema_version: 1,
@@ -1269,12 +1336,13 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         pending: vec![],
         metrics: aggregate_metrics(std::slice::from_ref(&b)),
         per_case: aggregate_per_case(std::slice::from_ref(&b)),
+        comparison: None,
     };
     let opts = PairedReportOptions {
         model: Some("glm-5.3-flash".into()),
         template: Some("default".into()),
         task_set: Some("v1-r1-product-suite".into()),
-        strategy_version: "ten-3-default".into(),
+        strategy_version: "ten-5-independent-case-samples".into(),
     };
     let paired = build_paired_report_json(&single, &multi, &opts, Some("t3"));
     assert_eq!(
@@ -1307,21 +1375,17 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
         matched["uncertainty"]["success_rate_delta_case_cluster_bootstrap_95_ci"]["reason"],
         "requires_at_least_3_independent_cases"
     );
-    assert_eq!(
-        matched["team_minus_single_wall_ms_all"]["mean"],
-        15.0
-    );
-    assert_eq!(
-        matched["team_minus_single_model_calls"]["mean"],
-        2.0
-    );
-    assert_eq!(
-        matched["team_minus_single_checker_quality"]["mean"],
-        -0.5
-    );
+    assert_eq!(matched["team_minus_single_wall_ms_all"]["mean"], 15.0);
+    assert_eq!(matched["team_minus_single_model_calls"]["mean"], 2.0);
+    assert_eq!(matched["team_minus_single_checker_quality"]["mean"], -0.5);
     assert_eq!(matched["team_minus_single_total_tokens"]["mean"], 150.0);
     assert!(
-        (matched["team_minus_single_cost_usd"]["mean"].as_f64().unwrap() - 0.06).abs() < 1e-9
+        (matched["team_minus_single_cost_usd"]["mean"]
+            .as_f64()
+            .unwrap()
+            - 0.06)
+            .abs()
+            < 1e-9
     );
     assert_eq!(matched["cell_deltas"].as_array().unwrap().len(), 1);
 
@@ -1352,8 +1416,12 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
 
     let mut different_contract_multi = multi.clone();
     different_contract_multi.run_contract_sha256 = Some("different-budget".into());
-    let different_contract =
-        build_paired_report_json(&single, &different_contract_multi, &opts, Some("t-contract"));
+    let different_contract = build_paired_report_json(
+        &single,
+        &different_contract_multi,
+        &opts,
+        Some("t-contract"),
+    );
     assert_eq!(
         different_contract["run_alignment"]["configuration_aligned"],
         serde_json::Value::Bool(false)
@@ -1379,8 +1447,12 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
     );
     let mut different_endpoint_multi = multi.clone();
     different_endpoint_multi.provider_endpoint_sha256 = Some("endpoint-v2".into());
-    let different_endpoint =
-        build_paired_report_json(&single, &different_endpoint_multi, &opts, Some("t-endpoint"));
+    let different_endpoint = build_paired_report_json(
+        &single,
+        &different_endpoint_multi,
+        &opts,
+        Some("t-endpoint"),
+    );
     assert_eq!(
         different_endpoint["run_alignment"]["configuration_aligned"],
         serde_json::Value::Bool(false)
@@ -1407,8 +1479,7 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
     cross_side_pending
         .pending
         .push(MatrixKey::new("not-single", AgentMode::Multi, 0));
-    let pending_report =
-        build_paired_report_json(&cross_side_pending, &multi, &opts, Some("t5"));
+    let pending_report = build_paired_report_json(&cross_side_pending, &multi, &opts, Some("t5"));
     let pending_alignment = pending_report.get("run_alignment").unwrap();
     assert_eq!(
         pending_alignment.get("configuration_aligned"),
@@ -1425,8 +1496,7 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
 
     let mut blank_case_single = single.clone();
     blank_case_single.runs[0].key.case_id = "  ".into();
-    let blank_case_report =
-        build_paired_report_json(&blank_case_single, &multi, &opts, Some("t6"));
+    let blank_case_report = build_paired_report_json(&blank_case_single, &multi, &opts, Some("t6"));
     assert_eq!(
         blank_case_report["run_alignment"]["configuration_aligned"],
         serde_json::Value::Bool(false)
@@ -1445,8 +1515,8 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
     assert_eq!(s.get("sample_sufficient").unwrap(), false);
     assert_eq!(
         s.get("quality").unwrap(),
-        &serde_json::Value::Null,
-        "无检查器计数 → quality=null"
+        &serde_json::json!(0.75),
+        "单侧快照应反映该运行的检查器通过率"
     );
     let m = overall.get("multi").unwrap();
     assert_eq!(m.get("mode").unwrap(), "multi");
@@ -1455,7 +1525,10 @@ fn paired_report_json_matches_route3_paired_stats_contract() {
     assert_eq!(bindings.get("model").unwrap(), "glm-5.3-flash");
     assert_eq!(bindings.get("template").unwrap(), "default");
     assert_eq!(bindings.get("task_set").unwrap(), "v1-r1-product-suite");
-    assert_eq!(bindings.get("strategy_version").unwrap(), "ten-3-default");
+    assert_eq!(
+        bindings.get("strategy_version").unwrap(),
+        "ten-5-independent-case-samples"
+    );
     // 每 case 一组。
     assert!(pairs
         .iter()
@@ -1528,6 +1601,62 @@ fn freeze_build_verify_and_drift_detection() {
         issues.iter().any(|issue| issue.contains("权限哈希漂移")),
         "{issues:?}"
     );
+    // 外部 freeze 不得指定套件之外的路径，且必须覆盖每个唯一任务文件。
+    let mut external_path = freeze.clone();
+    external_path["tasks"][0]["file"] = serde_json::Value::String("../../outside.txt".to_string());
+    let issues = verify_freeze(&bundle, &external_path, Some("glm-5.3-flash"));
+    assert!(
+        issues.iter().any(|issue| issue.contains("当前套件之外")),
+        "{issues:?}"
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("freeze 缺少任务文件")),
+        "{issues:?}"
+    );
+
+    let mut duplicate_path = freeze.clone();
+    let duplicate_file = duplicate_path["tasks"][1]["file"].clone();
+    duplicate_path["tasks"][0]["file"] = duplicate_file;
+    let issues = verify_freeze(&bundle, &duplicate_path, Some("glm-5.3-flash"));
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("重复包含任务文件")),
+        "{issues:?}"
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("freeze 缺少任务文件")),
+        "{issues:?}"
+    );
+
+    let mut mismatched_id = freeze.clone();
+    mismatched_id["tasks"][0]["id"] = serde_json::Value::String("other-task".to_string());
+    let issues = verify_freeze(&bundle, &mismatched_id, Some("glm-5.3-flash"));
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("任务 ID 与文件不匹配")),
+        "{issues:?}"
+    );
+
+    let mut missing_permission_digest = freeze.clone();
+    let removed_permission_digest = missing_permission_digest["tasks"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("permissions_sha256");
+    assert!(removed_permission_digest.is_some());
+    let issues = verify_freeze(&bundle, &missing_permission_digest, Some("glm-5.3-flash"));
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("缺少 permissions_sha256")),
+        "{issues:?}"
+    );
+
     // 序列化往返可解析。
     let text = serde_json::to_string(&freeze).unwrap();
     let parsed = parse_freeze(&text).expect("freeze.json 解析失败");
@@ -1562,6 +1691,7 @@ async fn batch_label_enforced_and_tags_recorded() {
         fresh: false,
         batch_label: Some("acceptance-01".into()),
         tags: vec!["formal".into(), "b1".into()],
+        provider_endpoint_sha256: None,
     };
     let report = run_matrix(
         &runner,
@@ -1582,6 +1712,7 @@ async fn batch_label_enforced_and_tags_recorded() {
         fresh: false,
         batch_label: Some("acceptance-02".into()),
         tags: vec![],
+        provider_endpoint_sha256: None,
     };
     let result = runner
         .run(

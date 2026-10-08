@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "name": "v2-code-repair-candidate",
+  "description": "Candidate paired benchmark: 30 independent Python code-repair cases plus one multi-source research case. This focused corpus supports code-group sampling and must not be treated as a full-stack or architecture benchmark. V1 remains the historical frozen baseline.",
+  "defaults": {
+    "repetitions": 2,
+    "timeout_secs": 900,
+    "max_model_calls": 64
+  },
+  "tasks": [
+    "tasks/01-code-sum-last-element.json",
+    "tasks/02-code-average-empty-and-last.json",
+    "tasks/03-code-clamp-lower-bound.json",
+    "tasks/04-code-percentage-scale.json",
+    "tasks/05-code-celsius-to-fahrenheit.json",
+    "tasks/06-code-fahrenheit-to-celsius.json",
+    "tasks/07-code-count-vowels-case.json",
+    "tasks/08-code-slug-normalization.json",
+    "tasks/09-code-pagination-offset.json",
+    "tasks/10-code-palindrome-normalization.json",
+    "tasks/11-code-stable-deduplicate.json",
+    "tasks/12-code-merge-counts.json",
+    "tasks/13-code-even-median.json",
+    "tasks/14-code-leap-century.json",
+    "tasks/15-code-seconds-hms.json",
+    "tasks/16-code-parse-bool.json",
+    "tasks/17-code-format-bytes.json",
+    "tasks/18-code-normalize-email.json",
+    "tasks/19-code-csv-quoted-field.json",
+    "tasks/20-code-chunk-final-tail.json",
+    "tasks/21-code-retry-delay-cap.json",
+    "tasks/22-code-moving-average.json",
+    "tasks/23-code-word-frequency.json",
+    "tasks/24-code-unicode-truncate.json",
+    "tasks/25-code-safe-filename.json",
+    "tasks/26-code-sort-date-desc.json",
+    "tasks/27-code-merge-touching-intervals.json",
+    "tasks/28-code-money-half-up.json",
+    "tasks/29-code-limit-zero-default.json",
+    "tasks/30-code-checksum-last-byte.json",
+    "tasks/31-research-independent-evidence-brief.json"
+  ]
+}

@@ -7,27 +7,44 @@ window.OwoPanels.memory = (function () {
 
   var id = "memory";
   var H = null;
+  var panelGeneration = 0;
+  var timelineGeneration = 0;
+  var entitiesGeneration = 0;
+  var relationsGeneration = 0;
+  var entriesGeneration = 0;
+  var recallGeneration = 0;
+  var mineGeneration = 0;
+  var addRelationGeneration = 0;
+  var mining = false;
+  var addingRelation = false;
+  function notify(message, kind) {
+    if (H && H.notify) H.notify(message, kind || "error");
+    else if (window.OwoToast) window.OwoToast(message);
+    else window.alert(message);
+  }
 
   function defaultHelpers() {
     var baseUrl = (window.OwoPanels && window.OwoPanels.baseUrl) || window.location.origin;
     function get(path) {
-      return fetch(baseUrl + path).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
+      return window.OwoApi.stream(path).then(function (r) {
+        if (!r.ok) return r.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error((body && (body.message || body.error)) || "HTTP " + r.status);
+        });
+        return r.status === 204 ? null : r.json();
       });
     }
     function post(path, body) {
-      return fetch(baseUrl + path, {
+      return window.OwoApi.stream(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),
       }).then(function (r) {
         if (!r.ok) {
-          return r.json().then(function (j) {
-            throw new Error((j && j.error) || "HTTP " + r.status);
+          return r.json().catch(function () { return {}; }).then(function (body) {
+            throw new Error((body && (body.message || body.error)) || "HTTP " + r.status);
           });
         }
-        return r.json();
+        return r.status === 204 ? null : r.json();
       });
     }
     function esc(s) {
@@ -85,7 +102,8 @@ window.OwoPanels.memory = (function () {
   }
 
   function mount(root, helpers) {
-    if (helpers) H = helpers;
+    dispose();
+    H = helpers || defaultHelpers();
     root.innerHTML = nav();
     root.querySelector("#owo-memory-recall-btn").addEventListener("click", doRecall);
     root.querySelector("#owo-memory-recall").addEventListener("keydown", function (e) {
@@ -102,6 +120,7 @@ window.OwoPanels.memory = (function () {
 
   /// 从情景记忆挖掘技能包：观察动作序列 → 泛化 → 沉淀（服务端 /memory/mine-skill）。
   function mineSkill() {
+    if (mining) return Promise.resolve();
     var nameEl = document.getElementById("owo-memory-mine-name");
     var name = (nameEl && nameEl.value.trim()) || "";
     var result = document.getElementById("owo-memory-mine-result");
@@ -118,16 +137,20 @@ window.OwoPanels.memory = (function () {
         return s.trim();
       })
       .filter(Boolean);
+    mining = true;
+    var request = ++mineGeneration;
+    var owner = panelGeneration;
     var button = document.getElementById("owo-memory-mine-btn");
     if (button) button.disabled = true;
     if (result) result.textContent = "正在挖掘…";
-    H.post("/memory/mine-skill", {
+    return H.post("/memory/mine-skill", {
       name: name,
       target_apps: targetApps,
       description: (descEl && descEl.value.trim()) || "",
       sensitivity: (sensEl && sensEl.value) || "low",
     })
       .then(function (data) {
+        if (request !== mineGeneration || owner !== panelGeneration) return;
         var el = document.getElementById("owo-memory-mine-result"); // 面板已卸载则跳过
         if (!el) return;
         var variables = (data && data.variables) || [];
@@ -137,10 +160,13 @@ window.OwoPanels.memory = (function () {
           "，可在「操作学习」区块查看 / 导出 / 导入。";
       })
       .catch(function (e) {
+        if (request !== mineGeneration || owner !== panelGeneration) return;
         var el = document.getElementById("owo-memory-mine-result"); // 面板已卸载则跳过
         if (el) el.textContent = H.friendlyError(e);
       })
-      .then(function () {
+      .finally(function () {
+        if (request !== mineGeneration) return;
+        mining = false;
         var btn = document.getElementById("owo-memory-mine-btn"); // 面板已卸载则跳过
         if (btn) btn.disabled = false;
       });
@@ -154,122 +180,151 @@ window.OwoPanels.memory = (function () {
   }
 
   function doRecall() {
+    var request = ++recallGeneration;
+    var owner = panelGeneration;
     var input = document.getElementById("owo-memory-recall");
-    var q = (input && input.value.trim()) || "";
-    H.get("/memory/graph/recall?q=" + encodeURIComponent(q) + "&top_k=5")
+    var query = (input && input.value.trim()) || "";
+    var box = document.getElementById("owo-memory-recall-box");
+    if (box) box.textContent = "正在检索…";
+    return H.get("/memory/graph/recall?q=" + encodeURIComponent(query) + "&top_k=5")
       .then(function (data) {
-        var box = document.getElementById("owo-memory-recall-box");
-        if (!box) return;
-        box.innerHTML =
-          "<div class='sub'>命中 " + (data.count || 0) + " 条</div>" +
-          (data.hits || [])
-            .map(function (h) {
-              return (
-                '<div class="owo-memory-hit">[' + H.esc(h.app_id) + "] " + H.esc(h.ts) + " — " +
-                H.esc(h.summary) +
-                (h.matched_entities && h.matched_entities.length ? " ｜ 实体命中：" + h.matched_entities.map(H.esc).join("、") : "") +
-                "</div>"
-              );
-            })
-            .join("");
+        if (request !== recallGeneration || owner !== panelGeneration) return;
+        var currentBox = document.getElementById("owo-memory-recall-box");
+        if (!currentBox) return;
+        currentBox.innerHTML = "<div class='sub'>命中 " + ((data && data.count) || 0) + " 条</div>" +
+          ((data && data.hits) || []).map(function (hit) {
+            return '<div class="owo-memory-hit">[' + H.esc(hit.app_id) + "] " + H.esc(hit.ts) + " — " + H.esc(hit.summary) +
+              (hit.matched_entities && hit.matched_entities.length ? " ｜ 实体命中：" + hit.matched_entities.map(H.esc).join("、") : "") + "</div>";
+          }).join("");
       })
-      .catch(function (e) {
-        var box = document.getElementById("owo-memory-recall-box");
-        if (box) box.innerHTML = '<div class="owo-memory-hit">' + H.esc(H.friendlyError(e)) + "</div>";
+      .catch(function (error) {
+        if (request !== recallGeneration || owner !== panelGeneration) return;
+        var currentBox = document.getElementById("owo-memory-recall-box");
+        if (currentBox) currentBox.innerHTML = '<div class="owo-memory-hit">' + H.esc(H.friendlyError(error)) + "</div>";
       });
   }
-
   function loadTimeline() {
-    H.get("/memory/graph/timeline")
+    var request = ++timelineGeneration;
+    var owner = panelGeneration;
+    return H.get("/memory/graph/timeline")
       .then(function (data) {
-        var el = document.getElementById("owo-memory-timeline");
-        if (!el) return;
-        el.innerHTML = (data.buckets || [])
-          .map(function (b) {
-            return (
-              '<div class="owo-memory-row"><b>' + H.esc(b.day) + "</b> ｜ " +
-              b.count + " 条</div>"
-            );
-          })
-          .join("");
+        if (request !== timelineGeneration || owner !== panelGeneration) return;
+        var current = document.getElementById("owo-memory-timeline");
+        if (!current) return;
+        current.innerHTML = ((data && data.buckets) || []).map(function (bucket) {
+          return '<div class="owo-memory-row"><b>' + H.esc(bucket.day) + "</b> ｜ " + H.esc(bucket.count) + " 条</div>";
+        }).join("");
       })
-      .catch(function () {});
+      .catch(function (error) {
+        if (request !== timelineGeneration || owner !== panelGeneration) return;
+        var current = document.getElementById("owo-memory-timeline");
+        if (current) current.innerHTML = '<div class="owo-memory-row">' + H.esc(H.friendlyError(error)) + "</div>";
+      });
   }
-
   function loadEntities() {
-    H.get("/memory/graph/entities?limit=30")
+    var request = ++entitiesGeneration;
+    var owner = panelGeneration;
+    return H.get("/memory/graph/entities?limit=30")
       .then(function (data) {
-        var el = document.getElementById("owo-memory-entities");
-        if (!el) return;
-        el.innerHTML = (data.entities || [])
-          .map(function (e) {
-            var related = (e.related || [])
-              .map(function (r) {
-                return H.esc(r.entity) + "×" + r.count;
-              })
-              .join(", ");
-            return (
-              '<span class="owo-memory-card"><b>' + H.esc(e.entity) + "</b>×" + e.count +
-              (related ? " <small>(" + related + ")</small>" : "") +
-              "</span>"
-            );
-          })
-          .join("");
+        if (request !== entitiesGeneration || owner !== panelGeneration) return;
+        var current = document.getElementById("owo-memory-entities");
+        if (!current) return;
+        current.innerHTML = ((data && data.entities) || []).map(function (entity) {
+          var related = (entity.related || []).map(function (relation) {
+            return H.esc(relation.entity) + "×" + H.esc(relation.count);
+          }).join(", ");
+          return '<span class="owo-memory-card"><b>' + H.esc(entity.entity) + "</b>×" + H.esc(entity.count) +
+            (related ? " <small>(" + related + ")</small>" : "") + "</span>";
+        }).join("");
       })
-      .catch(function () {});
+      .catch(function (error) {
+        if (request !== entitiesGeneration || owner !== panelGeneration) return;
+        var current = document.getElementById("owo-memory-entities");
+        if (current) current.innerHTML = '<div class="owo-memory-card">' + H.esc(H.friendlyError(error)) + "</div>";
+      });
   }
-
   function loadRelations() {
-    H.get("/memory/graph/links")
+    var request = ++relationsGeneration;
+    var owner = panelGeneration;
+    return H.get("/memory/graph/links")
       .then(function (data) {
-        var el = document.getElementById("owo-memory-relations");
-        if (!el) return;
-        el.innerHTML = (data.links || [])
-          .map(function (l) {
-            return (
-              '<span class="owo-memory-rel">' + H.esc(l.a) + " —" + H.esc(l.relation) + "→ " + H.esc(l.b) + "</span>"
-            );
-          })
-          .join("");
+        if (request !== relationsGeneration || owner !== panelGeneration) return;
+        var current = document.getElementById("owo-memory-relations");
+        if (!current) return;
+        current.innerHTML = ((data && data.links) || []).map(function (link) {
+          return '<span class="owo-memory-rel">' + H.esc(link.a) + " —" + H.esc(link.relation) + "→ " + H.esc(link.b) + "</span>";
+        }).join("");
       })
-      .catch(function () {});
+      .catch(function (error) {
+        if (request !== relationsGeneration || owner !== panelGeneration) return;
+        var current = document.getElementById("owo-memory-relations");
+        if (current) current.innerHTML = '<span class="owo-memory-rel">' + H.esc(H.friendlyError(error)) + "</span>";
+      });
   }
-
   function addRelation() {
+    if (addingRelation) return Promise.resolve();
     var a = document.getElementById("owo-memory-rel-a");
     var b = document.getElementById("owo-memory-rel-b");
-    var r = document.getElementById("owo-memory-rel-r");
-    H.post("/memory/graph/link", { a: a.value.trim(), b: b.value.trim(), relation: r.value.trim() })
+    var relation = document.getElementById("owo-memory-rel-r");
+    var values = { a: (a && a.value.trim()) || "", b: (b && b.value.trim()) || "", relation: (relation && relation.value.trim()) || "" };
+    if (!values.a || !values.b || !values.relation) {
+      notify("请填写实体 A、实体 B 和关系。", "error");
+      return Promise.resolve();
+    }
+    addingRelation = true;
+    var request = ++addRelationGeneration;
+    var owner = panelGeneration;
+    var button = document.getElementById("owo-memory-rel-add");
+    if (button) button.disabled = true;
+    return H.post("/memory/graph/link", values)
       .then(function () {
-        a.value = "";
-        b.value = "";
-        r.value = "";
-        loadRelations();
+        if (request !== addRelationGeneration || owner !== panelGeneration) return;
+        a.value = ""; b.value = ""; relation.value = "";
+        return loadRelations();
       })
-      .catch(function (e) {
-        alert(H.friendlyError(e));
+      .catch(function (error) {
+        if (request === addRelationGeneration && owner === panelGeneration) notify(H.friendlyError(error), "error");
+      })
+      .finally(function () {
+        if (request !== addRelationGeneration) return;
+        addingRelation = false;
+        var currentButton = document.getElementById("owo-memory-rel-add");
+        if (currentButton) currentButton.disabled = false;
       });
   }
-
   function loadEntries() {
+    var request = ++entriesGeneration;
+    var owner = panelGeneration;
     var app = document.getElementById("owo-memory-app");
     var query = (app && app.value.trim()) ? "?app=" + encodeURIComponent(app.value.trim()) : "";
-    H.get("/memory/graph/entries" + query + (query ? "&" : "?") + "limit=50")
+    var list = document.getElementById("owo-memory-entries");
+    if (list) list.textContent = "正在加载条目…";
+    return H.get("/memory/graph/entries" + query + (query ? "&" : "?") + "limit=50")
       .then(function (data) {
-        var el = document.getElementById("owo-memory-entries");
-        if (!el) return;
-        el.innerHTML = (data.entries || [])
-          .map(function (e) {
-            return (
-              '<div class="owo-memory-row">[' + H.esc(e.app_id) + "] " + H.esc(e.ts) + " — " + H.esc(e.summary) + "</div>"
-            );
-          })
-          .join("");
+        if (request !== entriesGeneration || owner !== panelGeneration) return;
+        var current = document.getElementById("owo-memory-entries");
+        if (!current) return;
+        current.innerHTML = ((data && data.entries) || []).map(function (entry) {
+          return '<div class="owo-memory-row">[' + H.esc(entry.app_id) + "] " + H.esc(entry.ts) + " — " + H.esc(entry.summary) + "</div>";
+        }).join("") || '<div class="sub">暂无记忆条目</div>';
       })
-      .catch(function (e) {
-        var el = document.getElementById("owo-memory-entries");
-        if (el) el.innerHTML = H.esc(H.friendlyError(e));
+      .catch(function (error) {
+        if (request !== entriesGeneration || owner !== panelGeneration) return;
+        var current = document.getElementById("owo-memory-entries");
+        if (current) current.innerHTML = H.esc(H.friendlyError(error));
       });
+  }
+  function dispose() {
+    panelGeneration += 1;
+    timelineGeneration += 1;
+    entitiesGeneration += 1;
+    relationsGeneration += 1;
+    entriesGeneration += 1;
+    recallGeneration += 1;
+    mineGeneration += 1;
+    addRelationGeneration += 1;
+    mining = false;
+    addingRelation = false;
   }
 
   return {
@@ -278,5 +333,7 @@ window.OwoPanels.memory = (function () {
     nav: nav,
     mount: mount,
     refresh: refresh,
+    dispose: dispose,
+    _test: { doRecall: doRecall, loadEntries: loadEntries, addRelation: addRelation, mineSkill: mineSkill },
   };
 })();

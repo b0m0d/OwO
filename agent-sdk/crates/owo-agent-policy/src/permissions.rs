@@ -124,12 +124,12 @@ impl PermissionRequest {
         self
     }
 
-    /// 是否可能含有敏感载荷（token/cookie/header/文件内容等；用于拒绝
-    /// 「始终允许此只读动作」选项——§5.4 破坏性操作不允许）。
+    /// 是否为非只读动作。授权记忆只接受 Read 级且工具注册表也声明为 Read 的请求；
+    /// 同时用于权限中心风险标记和拒绝危险级别的 Grant。
     pub fn is_destructive(&self) -> bool {
         self.level != Level::Read
             || crate::tool_effects::effect_class_for(&self.tool)
-                == crate::tool_effects::EffectClass::Inject
+                != crate::tool_effects::EffectClass::Read
     }
 }
 
@@ -1037,30 +1037,21 @@ mod tests {
     }
 
     #[test]
-    fn grant_hit_allows_ask_tool_without_prompting() {
-        use crate::grant_store::{GrantScope, GrantStore};
-        let store = GrantStore::new();
-        let policy = Policy::new(".").with_grants(std::sync::Arc::new(store));
-        // 先一次授权（session）再请求：同参数指纹应直接放行。
+    fn destructive_requests_ignore_legacy_grants() {
+        use crate::grant_store::{Grant, GrantScope, GrantStore};
+        let store = std::sync::Arc::new(GrantStore::new());
+        let policy = Policy::new(".").with_grants(store.clone());
+        let request = policy.evaluate("run_command", &json!({ "command": "ls -la" }));
         let workspace_id = policy.workspace_id();
-        let probe = policy.evaluate("run_command", &json!({ "command": "ls -la" }));
-        let grants_ref = policy
-            .grants
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone())
-            .expect("grants 已注入");
-        let grant = grants_ref
-            .grant_from_scope(&probe, &workspace_id, GrantScope::Session)
-            .expect("session 生成 grant");
-        grants_ref.insert(grant);
-        assert_eq!(
-            policy.decision(&probe),
-            Decision::Allow,
-            "grant 命中放行执行类工具"
-        );
-    }
+        assert_eq!(policy.decision(&request), Decision::Ask);
+        assert!(store
+            .grant_from_scope(&request, &workspace_id, GrantScope::Task)
+            .is_none());
 
+        // 即使旧版或导入的数据里已有执行工具授权，匹配阶段也必须拒绝复用。
+        store.insert(Grant::test("run_command", &workspace_id, None, None));
+        assert_eq!(policy.decision(&request), Decision::Ask);
+    }
     #[test]
     fn custom_deny_command_fragment_is_enforced() {
         let mut policy = Policy::new(".");
@@ -1158,7 +1149,17 @@ mod tests {
         let read = Policy::new(".").evaluate("read_file", &json!({ "path": "a.txt" }));
         assert!(!read.is_destructive(), "只读操作可始终允许");
         let inject = Policy::new(".").evaluate("desktop_type", &json!({ "text": "hi" }));
-        assert!(inject.is_destructive(), "注入不可逆，不允许始终允许");
+        assert!(inject.is_destructive(), "注入不可逆，不允许授权记忆");
+        let misclassified = PermissionRequest::new(
+            "write_file",
+            json!({ "path": "a.txt" }),
+            Level::Read,
+            "错误等级夹具",
+        );
+        assert!(
+            misclassified.is_destructive(),
+            "工具注册表为 Write 时，不得被错误的 Read 标签降级"
+        );
     }
 
     /// §4.5.3 测试夹具：四个维度独立可设，scopes 留空。
@@ -1177,56 +1178,19 @@ mod tests {
     }
 
     #[test]
-    fn dimension_deny_beats_grant_hit() {
-        // 用户在权限中心把「命令执行」关掉之后，先前授出去的 session 授权必须失效。
-        // 若判定顺序写错（grant 在前），这条会变成 Allow —— 界面显示"已拒绝"、
-        // 后端却继续执行命令，就是假合规。
-        use crate::grant_store::{GrantScope, GrantStore};
+    fn filesystem_deny_beats_read_default() {
         use crate::permission_spec::{FilesystemScope, RuleScope};
-
-        let store = std::sync::Arc::new(GrantStore::new());
-        let policy = Policy::new(".").with_grants(store.clone());
-        let probe = policy.evaluate("run_command", &json!({ "command": "ls -la" }));
-        let grant = store
-            .grant_from_scope(&probe, &policy.workspace_id(), GrantScope::Session)
-            .expect("session 生成 grant");
-        store.insert(grant);
-
-        // 对照：白名单档不接管命令 → 仍是 grant 命中放行。
+        let policy = Policy::new(".");
+        let request = policy.evaluate("read_file", &json!({ "path": "a.txt" }));
+        assert_eq!(policy.decision(&request), Decision::Allow);
         policy.set_spec(spec(
-            FilesystemScope::WorkspaceWrite,
-            RuleScope::Allowlisted,
-            RuleScope::Deny,
-        ));
-        assert_eq!(
-            policy.decision(&probe),
-            Decision::Allow,
-            "未显式拒绝该维度时，grant 照常生效（收紧层不得改变既有行为）"
-        );
-
-        // 同一策略、同一 grant，只把命令维度改成 Deny → 必须立刻拒绝。
-        policy.set_spec(spec(
-            FilesystemScope::WorkspaceWrite,
+            FilesystemScope::None,
             RuleScope::Deny,
             RuleScope::Deny,
         ));
-        assert_eq!(
-            policy.decision(&probe),
-            Decision::Deny,
-            "维度显式拒绝优先于 grant 命中"
-        );
-        assert_eq!(
-            policy.profile(),
-            PermissionProfile::Workspace,
-            "工作区可写 + 命令拒绝不是全禁，档位不应升到只读"
-        );
-        assert_eq!(
-            store.list().len(),
-            1,
-            "拒绝不该顺手删掉授权记录（撤销是显式动作）"
-        );
+        assert_eq!(policy.decision(&request), Decision::Deny);
+        assert_eq!(policy.profile(), PermissionProfile::ReadOnly);
     }
-
     #[test]
     fn filesystem_none_denies_reads_too() {
         // Read 级默认放行是既有语义；filesystem:none 是唯一能把「读」也关掉的面板，

@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-05",
+  "scope": "Goal single-step execution boundary extraction from DAG coordinator",
+  "source_changes": [
+    "Moved worker resolution, explicit execution target dispatch, step attempt retry loop, host/step verification, cancellation bridging, and lease cleanup from goal/mod.rs into goal/execution.rs.",
+    "Kept GoalRunner DAG readiness scheduling and result aggregation in goal/mod.rs; exposed StepRuntime, StepOutcome, StepResult and StepStop only to the parent goal module.",
+    "Kept acceptance.rs responsible for receipt matching and aggregate completion; it continues to call the same step receipt identity matcher through the parent module.",
+    "Current source sizes: goal/mod.rs 884 lines, execution.rs 1038 lines, acceptance.rs 551 lines."
+  ],
+  "static_validation": {
+    "rustfmt_check": "passed for goal/mod.rs, execution.rs, acceptance.rs and goal/tests.rs",
+    "source_review": "checked all symbol call sites from GoalRunner, acceptance.rs and tests.rs; module parsing succeeded via rustfmt",
+    "utf8_whitespace": "UTF-8 and trailing-whitespace checks passed for the touched files",
+    "git_diff_check": "passed for tracked changed files"
+  },
+  "runtime_validation": {
+    "cargo_check": "not_run_resource_gate; no Cargo process started",
+    "goal_tests": "not_run_resource_gate",
+    "resource_snapshot": "2026-10-05 latest preflight: 4.19 GB available physical memory; 86.7 percent used; below repository gate (at least 6 GB available and below 80 percent used)"
+  },
+  "remaining_risks": [
+    "Rust type checking has not confirmed the module visibility boundary after relocation.",
+    "GoalRunner scheduling and result aggregation remain in one module and still need behavior tests before further restructuring.",
+    "Full Single/Team closure and matched performance evidence remain outstanding."
+  ]
+}

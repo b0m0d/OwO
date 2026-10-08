@@ -59,7 +59,11 @@ impl Worker for SlowEchoWorker {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+                .filter_map(|artifact| {
+                    artifact
+                        .get("review_requirements")
+                        .and_then(Value::as_array)
+                })
                 .flatten()
                 .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
                 .map(str::to_string)
@@ -329,6 +333,8 @@ fn chain_roles(names: &[&str]) -> Vec<RoleSpec> {
     let mut roles: Vec<RoleSpec> = Vec::new();
     for (index, name) in names.iter().enumerate() {
         let mut role = RoleSpec::agent(*name);
+        // This harness executes custom SlowEchoWorker, not a model-backed writer.
+        role.worker = Some("slow-echo".to_string());
         role.verify = Some("non_empty".to_string());
         if index > 0 {
             role.depends_on = vec![names[index - 1].to_string()];

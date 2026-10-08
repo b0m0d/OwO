@@ -75,6 +75,9 @@ impl TeamCoordinator {
             }
         }
         self.persist_state(&state)?;
+        // Wake the runtime as soon as the human result and successful step state are durable;
+        // ancillary activity/audit failures must not strand an already-committed handoff.
+        self.advance_progress(team_id);
         self.space_activity(
             team_id,
             &format!(
@@ -125,10 +128,10 @@ impl TeamCoordinator {
                 record.status
             )));
         }
-        let source_artifact = self
-            .latest_artifact_for_step(&space, &state, task_id)
-            .await
-            .map(|artifact| artifact.artifact_id);
+        let catalog = self.artifact_catalog(team_id, &space).await?;
+        let source_artifact = catalog
+            .current(&state, task_id)?
+            .map(|artifact| artifact.artifact_id.clone());
         let handoff = HandoffRecord {
             handoff_id: format!("{team_id}:{task_id}:manual:{}", now_ms()),
             from_member: from_member.to_string(),

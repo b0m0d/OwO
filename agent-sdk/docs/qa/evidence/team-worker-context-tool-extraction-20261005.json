@@ -1,0 +1,22 @@
+{
+  "evidence_id": "team-worker-context-tool-extraction-20261005",
+  "scope": "source-only",
+  "claim": "Versioned Team shared-context tools and their read/write effect metadata, task visibility filtering, source freshness checks, and bounded CAS value reads are isolated in worker_context_tool.rs. workers.rs retains Worker execution assembly and decides when authorized tasks receive the tools; artifact paging remains in worker_artifact_tool.rs.",
+  "limits": [
+    "No Cargo compilation or Rust tests were run; rustfmt parsing and source-boundary assertions do not prove Rust type correctness.",
+    "No live Team run or server runtime capture was performed; tool registration and shared-fact behavior are not runtime verified.",
+    "No latency, token, tool-call, or delivery-quality gain is claimed; this change isolates responsibilities without changing the intended tool contract."
+  ],
+  "verification": [
+    "rustfmt --check --edition 2021 --config skip_children=true passed for workers.rs and worker_context_tool.rs.",
+    "Python source assertions passed for module wiring, moved tool implementations, retained authorization injection points, and separation from artifact paging.",
+    "git diff --check exited 0; existing repository line-ending normalization warnings may be reported for unrelated dirty files."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-server/src/workswarm_api/workers.rs": "dbbe917e5ce27acacdffaaaafcb1d962b1603e4743eb6abd51c66e7988e7c326",
+    "crates/owo-agent-server/src/workswarm_api/worker_context_tool.rs": "286aff8f6790a81b592b21e8b81c6b945c61e53dcae80c7864e48fe9e939563b",
+    "crates/owo-agent-server/src/workswarm_api/worker_artifact_tool.rs": "d588bb7b78cd7529329ba433778618fc0abbe976ea5d90c828d2a6f321f01793",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "62fd159bb0e607e40a361909d11054a841fdb6c63c0604ac7547f4ffcc5146fa"
+  }
+}

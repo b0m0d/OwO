@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-04T13:09:17.398121+00:00",
+  "git_head": "3d2b03ac7f04443984cef20f0c00c3bdf7b5e7eb",
+  "worktree": "dirty; pre-existing changes preserved",
+  "changes": [
+    "Host-owned execution identity extracted into coord_identity; nonzero first claim and durable restart fencing",
+    "GoalRunState additive execution_epoch checkpoint retains high-water mark when step records reset",
+    "Atomic same-directory complete checkpoint publication for Goal/Team with sync and pending-file cleanup",
+    "Cached cancellation fencing avoids state-file read on the active cancel path",
+    "Progress checkpoint cloning happens only when execution_epoch changes",
+    "New identity/checkpoint regression tests and restart assertions",
+    "Correct role-capability classification and custom-worker test declarations without disabling review or delivery gates"
+  ],
+  "source_sha256": {
+    "crates/owo-agent-core/src/goal/mod.rs": "71a4c501cec29655fa029cfb83ab06c095f10fbad9be79587d9d028636ebaed5",
+    "crates/owo-agent-core/src/goal/types.rs": "1bac7d8ba0cf6611d8dd2dd234f30ac4d407256f54cb983b82f3c6ce07e87f60",
+    "crates/owo-agent-core/src/goal/persistence.rs": "dc889c9ce683d6875e1e3d08e4bb739c9c2dbe28add456bda115ad0a401242b4",
+    "crates/owo-agent-core/src/workswarm/mod.rs": "fdabf6c5cb06e4be116fd7a2121b50ff7d3e8c934a65160c5ad8b676f9598a9f",
+    "crates/owo-agent-core/src/workswarm/coord_identity.rs": "68ca1ab38d74aa5021c3095d35fe3a515bbc25681bc305f76a81c074f9e8215b",
+    "crates/owo-agent-core/src/workswarm/coord_accessors.rs": "610ed84b0f2b45df0f7d01068a6e697f6790e89ebbdeb2e10492a0e1ba0948ef",
+    "crates/owo-agent-core/src/workswarm/coord_load.rs": "a8a96b1998b6823dd3f600695b4b001c047baaba266d5f3506c9d9a867de4dd6",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs": "0d36dca8b70c1356a4b051c09bea69034d8125661a881a712599c0bcb094d4ab",
+    "crates/owo-agent-core/src/workswarm/coord_steer.rs": "2f3c186809378f5b1724954df67072061270e3e5050a7fb5b0b52c4e613fe825",
+    "crates/owo-agent-core/tests/workswarm_tests.rs": "667412f623679635bad0c7bfc72d4db39fd8fa376e1c4c1ca4443fd8d0c227ac",
+    "crates/owo-agent-core/tests/workswarm_recovery_tests.rs": "389a4b1527345b526f505a9e01bcb4c364af2c5d059674aff27405890987c1d3",
+    "crates/owo-agent-core/tests/workswarm_responsiveness_tests.rs": "b2034e3bb8c05ce04c50db47d20f97e362db4aa994a7fef1b8f4e9a2074aeb23"
+  },
+  "verification": {
+    "final_cargo_check_core_server_cli": {
+      "exit_code": 0,
+      "warnings_present": true
+    },
+    "combined_core_units_and_team_tests": {
+      "status": "resource_limited",
+      "exit_code": 137,
+      "test_results": "not obtained; process terminated during link/build",
+      "used_memory_percent": 80.5
+    },
+    "final_team_tests_retry": {
+      "status": "resource_limited",
+      "exit_code": 1,
+      "test_results": "not run; preflight rejected",
+      "used_memory_percent": 80.7,
+      "available_physical_memory_gb": 6.12
+    },
+    "format_consistency": [
+      {
+        "path": "crates/owo-agent-core/src/goal/mod.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/src/goal/types.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/src/goal/persistence.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/src/workswarm/mod.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0,
+        "normalized_by_python": true
+      },
+      {
+        "path": "crates/owo-agent-core/src/workswarm/coord_identity.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/src/workswarm/coord_accessors.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/src/workswarm/coord_load.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/src/workswarm/coord_run.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/src/workswarm/coord_steer.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/tests/workswarm_tests.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/tests/workswarm_recovery_tests.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      },
+      {
+        "path": "crates/owo-agent-core/tests/workswarm_responsiveness_tests.rs",
+        "matches_rustfmt": true,
+        "exit_code": 0
+      }
+    ],
+    "new_unit_tests_executed": false,
+    "real_command_toolchain_test_executed": false,
+    "cloud_model_calls": 0,
+    "desktop_acceptance": false,
+    "matched_live_comparison": false
+  },
+  "previous_audit_baseline": {
+    "note": "Before current fixes; not final-source acceptance",
+    "team_integration_passed": 40,
+    "team_integration_failed": 4,
+    "recovery_passed": 8,
+    "responsiveness_passed": 4,
+    "responsiveness_failed": 1
+  },
+  "remaining": [
+    "Execute final-source unit, Team integration/recovery/responsiveness and meaningful ToolHost acceptance tests when resources permit",
+    "Diagnose any remaining TaskGraph/review failures from per-step evidence; do not weaken gates",
+    "Production CLI/Daemon golden path and UI final-state/rendering acceptance",
+    "Unify production acceptance and validation scheduling; real matched repeated Single/Team evaluation",
+    "Requested final recurring comparison not installed; comprehensive goal remains active"
+  ]
+}

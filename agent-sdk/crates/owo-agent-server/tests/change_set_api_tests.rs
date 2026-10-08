@@ -198,7 +198,11 @@ impl owo_agent_core::goal::Worker for EchoTeamWorker {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|artifact| artifact.get("review_requirements").and_then(Value::as_array))
+                .filter_map(|artifact| {
+                    artifact
+                        .get("review_requirements")
+                        .and_then(Value::as_array)
+                })
                 .flatten()
                 .filter_map(|requirement| requirement.get("requirement_id").and_then(Value::as_str))
                 .map(str::to_string)
@@ -213,7 +217,8 @@ impl owo_agent_core::goal::Worker for EchoTeamWorker {
                 },
                 "evidence": [],
                 "open_issues": []
-            }).to_string());
+            })
+            .to_string());
         }
         Ok(input
             .get("text")

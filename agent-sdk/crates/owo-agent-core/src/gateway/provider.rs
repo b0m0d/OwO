@@ -1,7 +1,7 @@
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 
 use super::config::*;
@@ -274,8 +274,9 @@ impl OpenAiCompatibleProvider {
             })
             .collect();
 
+        let effective_model = self.effective_model(model);
         let mut body = json!({
-            "model": self.effective_model(model),
+            "model": effective_model.clone(),
             "messages": messages_payload,
             "stream": stream,
         });
@@ -285,9 +286,7 @@ impl OpenAiCompatibleProvider {
         if stream {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        if let Some(max_tokens) = max_output_tokens_from_env() {
-            body["max_tokens"] = Value::from(max_tokens);
-        }
+        body["max_tokens"] = Value::from(max_output_tokens_for_model(&effective_model));
         // 推理档位只在用户显式选择时才下发（默认请求体与旧版完全一致）。
         if let Some(effort) = reasoning_effort_from_env() {
             body["reasoning_effort"] = Value::String(effort);
@@ -311,15 +310,22 @@ fn reasoning_effort_from_env() -> Option<String> {
     }
 }
 
-/// OpenAI-compatible output cap. GLM accepts `max_tokens`; invalid/out-of-range values
-/// are ignored so a stale local setting cannot turn every request into a provider 400.
-fn max_output_tokens_from_env() -> Option<u64> {
-    std::env::var("OWO_MODEL_MAX_OUTPUT_TOKENS")
-        .ok()?
-        .trim()
-        .parse::<u64>()
+/// Resolve the response budget against the effective model, then use the configured default.
+/// Model-specific values allow one endpoint to host models with different output limits.
+fn max_output_tokens_for_model(model: &str) -> u64 {
+    let by_model = std::env::var("OWO_MODEL_OUTPUT_TOKENS_BY_MODEL")
         .ok()
+        .and_then(|value| serde_json::from_str::<serde_json::Map<String, Value>>(&value).ok())
+        .and_then(|values| values.get(model).and_then(Value::as_u64))
+        .filter(|value| (1..=32000).contains(value));
+    if let Some(value) = by_model {
+        return value;
+    }
+    std::env::var("OWO_MODEL_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| (1..=32000).contains(value))
+        .unwrap_or(32000)
 }
 
 #[async_trait]

@@ -290,7 +290,7 @@ function applySkin(entry) {
 }
 
 async function loadSkinIndex() {
-  const response = await fetch(`${ASSETS}/index.json`, { cache: "no-store" });
+  const response = await window.OwoApi.resource(`${ASSETS}/index.json`, { cache: "no-store" });
   if (!response.ok) throw new Error(`皮肤清单 HTTP ${response.status}`);
   skinIndex = await response.json();
 }

@@ -1,0 +1,52 @@
+{
+  "id": "team-context-parallel-storage-reads-20261008",
+  "date": "2026-10-08",
+  "scope": "Team context assembly storage wait overlap and Core verification",
+  "implementation": {
+    "file": "crates/owo-agent-core/src/workswarm/coord_context_slice.rs",
+    "behavior": [
+      "Runs Artifact Catalog, team context snapshot, and parent-session CAS core-spec reads concurrently after current run and step validation.",
+      "Bounds parent-session CAS reads to four concurrent operations while preserving shared_context_refs order.",
+      "Does not cache step state, artifacts, shared facts, or review source snapshots."
+    ]
+  },
+  "verification": {
+    "parent_snapshot_order_test": {
+      "passed": 1,
+      "failed": 0
+    },
+    "core_library": {
+      "passed": 552,
+      "failed": 0,
+      "ignored": 3
+    },
+    "workswarm_integration": {
+      "passed": 50,
+      "failed": 0
+    },
+    "real_toolhost_write_pytest_review": {
+      "passed": 1,
+      "failed": 0,
+      "explicitly_run": true
+    },
+    "workspace_cargo_check": {
+      "exit_code": 0,
+      "jobs": 1
+    },
+    "cli_cargo_build": {
+      "exit_code": 0,
+      "jobs": 1
+    },
+    "cargo_fmt_check": {
+      "exit_code": 0
+    },
+    "git_diff_check": {
+      "exit_code": 0
+    }
+  },
+  "limitations": [
+    "No before/after wall-clock benchmark was run; no speedup or token reduction is claimed.",
+    "No matched real-model Single-versus-Team evaluation was run.",
+    "Two Core library ignored tests remain unexecuted; the full workspace test suite and desktop interaction are not covered."
+  ]
+}

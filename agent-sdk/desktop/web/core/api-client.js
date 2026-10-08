@@ -17,6 +17,7 @@
       this.name = "ApiError";
       this.status = details && details.status ? details.status : 0;
       this.body = details && details.body;
+      this.code = details && details.code;
       this.traceId = details && details.traceId;
     }
   }
@@ -199,7 +200,21 @@
         return global.fetch(this.url("/auth/token"), { headers: headers });
       }).then(async (response) => {
         if (!response.ok) {
-          throw new ApiError("token 引导失败（HTTP " + response.status + "）", { status: response.status });
+          const body = await response.text();
+          let code = "";
+          try {
+            const payload = JSON.parse(body);
+            code = payload && payload.code ? String(payload.code) : "";
+          } catch (_) {
+            /* 非 JSON 错误仍保留状态码，不把服务端原文直接灌进 UI。 */
+          }
+          let message = "token 引导失败（HTTP " + response.status + "）";
+          if (code === "auth/pairing_required/not_retryable") {
+            message = "此浏览器未获得桌面授权，请在 Electron 工作台中打开会话。";
+          } else if (code === "auth/instance_mismatch/not_retryable") {
+            message = "当前核心属于另一个桌面实例，请在 Electron 工作台重启核心后重试。";
+          }
+          throw new ApiError(message, { status: response.status, body: body, code: code });
         }
         const data = await response.json();
         if (!data || !data.token) throw new ApiError("token 引导响应缺少 token");
@@ -245,6 +260,8 @@
       if (opts.body != null && typeof opts.body === "string" && !headers.has("Content-Type")) {
         headers.set("Content-Type", "application/json");
       }
+      // Resolve the shell address even for public health checks before token bootstrap.
+      await this.ensureCoreConnection();
       const execute = async (allowRetry) => {
         // 每次尝试使用独立 Headers，避免 401 重试回写前一次请求的观测对象。
         const requestHeaders = new Headers(headers);
@@ -294,6 +311,14 @@
         try { return JSON.parse(text); } catch (_) { return text; }
       };
       return execute(retryAuth);
+    }
+
+    // Static assets and explicit provider probes must never inherit daemon credentials,
+    // pairing, source headers, retries, or the daemon's dynamic base URL.
+    resource(url, options) {
+      const opts = Object.assign({}, options || {});
+      if (opts.credentials === undefined) opts.credentials = "omit";
+      return global.fetch(url, opts);
     }
 
     get(path, options) { return this.request(path, Object.assign({}, options || {}, { method: "GET" })); }

@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-06",
+  "scope": "Grant eligibility and approval scope enforcement",
+  "sources": [
+    "crates/owo-agent-policy/src/permissions.rs",
+    "crates/owo-agent-policy/src/grant_store.rs",
+    "crates/owo-agent-server/src/turn_api/handlers.rs",
+    "crates/owo-agent-server/src/settings_api/mod.rs",
+    "crates/owo-agent-server/tests/permissions_center_api_tests.rs",
+    "crates/owo-agent-server/tests/permissions_profile_api_tests.rs",
+    "desktop/web/permissions/permissions.view.js",
+    "desktop/web/permissions/permissions.controller.js",
+    "desktop/web/app-domain.js"
+  ],
+  "verification": {
+    "cargo_fmt_all_check": "passed",
+    "node_permissions_center_tests": "passed, 39 tests",
+    "node_syntax_checks": "passed",
+    "git_diff_check": "passed, CRLF normalization warnings only",
+    "rust_tests": "resource_limited; Invoke-CiCargo refused before Cargo start",
+    "available_memory_gb": 4.57,
+    "memory_used_percent": 85.6
+  },
+  "limits": [
+    "Rust type checking and tests not run",
+    "No browser interaction test"
+  ],
+  "notes": [
+    "Legacy non-read grants are marked ineffective and remain revocable."
+  ]
+}

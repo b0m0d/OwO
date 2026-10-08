@@ -1,0 +1,23 @@
+{
+  "evidence_id": "team-role-profile-resolution-single-source-20261005",
+  "scope": "source-only",
+  "claim": "Core WorkerProfile now owns RoleSpec-to-profile resolution, fullstack w1/w2 command restrictions, relative role path validation, and workspace path materialization. Server and ProductEval pass the same role specification, role budget, template id and persisted RunMeta.parallel flag into these shared functions, then apply task-level capability and path narrowing through the same Core logic.",
+  "limits": [
+    "No Cargo compilation or Rust tests were run; static call-site checks do not prove Rust type correctness or runtime behavior.",
+    "Server and ProductEval tool registries were not captured at runtime; exact schema equality is not yet demonstrated.",
+    "No performance, token, tool-call, or delivery-quality gain is claimed."
+  ],
+  "verification": [
+    "rustfmt --check --edition 2021 --config skip_children=true passed for WorkerProfile, server Team runtime registry, and ProductEval WorkSwarm executor.",
+    "Python source assertions passed for shared Core profile/path builders, matching parallel/template inputs, removal of duplicated role/template resolution, read-only empty-scope handling, and regression source.",
+    "git diff --check exited 0; it reported line-ending normalization warnings for unrelated pre-existing dirty files."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/worker_profile.rs": "5fc40b1f08733ad04adf094b4e09b17da46f0b7972fdd519eab612281bed3a65",
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs": "a7b9023645ebc38628c4d0f588eacfd0246c49f32156ca57b52a85425bdc98a3",
+    "crates/owo-agent-server/src/workswarm_api/workers.rs": "33739ae072b2edb68f0ee101c588231bc89da6259fc5b995c664dfe11da7888b",
+    "devtools/product-eval/src/product_eval/workswarm_executor.rs": "1f7d4676409ddd8216d1e31d4d199dc832b0b6b720edc5f8f6ad0e77497cd4aa",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "fd489e6ded7a88d520922afbd114ce67fe2f10c25b642b6da359712da412d27e"
+  }
+}

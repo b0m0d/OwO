@@ -4614,6 +4614,7 @@ export interface components {
             /** @enum {string} */
             category: "code" | "research" | "document";
             mean_model_calls: number;
+            mean_tool_calls: ((number | null) | null) | null;
             mean_wall_ms: number;
             passed: number;
             runs_total: number;
@@ -4687,10 +4688,13 @@ export interface components {
             /** Format: int64 */
             total_model_calls: number;
             /** Format: int64 */
+            total_tool_calls: ((number | null) | null) | null;
+            /** Format: int64 */
             total_tokens: ((number | null) | null) | null;
         };
         /** @description ProductEvalReport 原样（core 序列化；聚合全部 journal 记录含失败 + 未完成单元格清单） */
         ProductEvalReport: {
+            comparison?: components["schemas"]["ModeComparison"] | null;
             /** @enum {string} */
             execution: "reference" | "live";
             generated_at: string;
@@ -4704,6 +4708,21 @@ export interface components {
             suite_name: string;
         };
         /** @description 一次运行的完整记录（journal 最小单元；失败记录同样保留；Option 字段缺数据时序列化为 null） */
+        EnablementRule: { detail: string; name: string; satisfied: boolean; };
+        ModeComparison: {
+            enabled: boolean;
+            multi_calls_rel_change: number | null;
+            multi_cost_rel_change: number | null;
+            multi_success_rate_diff: number;
+            multi_tokens_rel_change: number | null;
+            multi_tool_calls_rel_change: number | null;
+            multi_wall_rel_change: number | null;
+            alignment_guardrails: components["schemas"]["EnablementRule"][];
+            quality_guardrails: components["schemas"]["EnablementRule"][];
+            resource_guardrails: components["schemas"]["EnablementRule"][];
+            rules: components["schemas"]["EnablementRule"][];
+            sample_sufficient: boolean;
+        };
         ProductEvalRun: {
             /** @description 最终 Artifact 引用（沙盒内相对路径） */
             artifact_refs: string[];
@@ -4720,6 +4739,7 @@ export interface components {
             key: components["schemas"]["MatrixKey"];
             model: ((string | null) | null) | null;
             model_calls: number;
+            tool_calls: ((number | null) | null) | null;
             /** Format: int64 */
             prompt_tokens: ((number | null) | null) | null;
             retries: number;
@@ -5535,7 +5555,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description cloud task submitted and executed */
+            /** @description cloud task durably queued; task_id is returned before background execution */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5575,7 +5595,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description cloud task canceled */
+            /** @description cancellation accepted; active tasks report cancel_requested until the runner persists Canceled */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6585,7 +6605,10 @@ export interface operations {
     };
     evalGateReport: {
         parameters: {
-            query?: never;
+            query?: {
+                /** Report file name; omitted to return the latest report. */
+                file?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;

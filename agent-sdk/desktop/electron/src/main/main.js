@@ -66,6 +66,7 @@ const http = require("node:http");
 const crypto = require("node:crypto");
 const supervision = require("./core-supervision.js");
 const shellCommands = require("./shell-commands.js");
+const { configuredWorkspacePath } = require("./workspace-state.js");
 
 const {
   CORE_API_VERSION,
@@ -232,15 +233,8 @@ function redactSecrets(text) {
 
 function workspacePath() {
   // 与旧壳同源：数据目录下 workspace.json 的 path 字段。
-  try {
-    const text = fs.readFileSync(path.join(dataRoot(), "workspace.json"), "utf8");
-    const parsed = JSON.parse(text);
-    if (parsed && typeof parsed.path === "string" && parsed.path) {
-      return parsed.path;
-    }
-  } catch (_) {
-    /* 没配置过就走下面的默认 */
-  }
+  const configured = configuredWorkspacePath(dataRoot());
+  if (configured) return configured;
   // 默认**不能**用 `process.cwd()`：那个值是 electron 的启动目录（
   // `desktop/electron` 甚至 electron 安装目录），作为"用户工作区"毫无意义——
   // 实测它会让核心以程序目录为工作区启动，而用户在会话里选自己的项目目录后，
@@ -285,7 +279,8 @@ const DEFAULT_CONFIG = {
     api_key: "",
     api_key_env: "OPENAI_API_KEY",
     context_window: null,
-    max_output_tokens: null,
+    max_output_tokens: 32000,
+    model_output_tokens: {},
     temperature: null,
     timeout_secs: null,
     keep_recent: null,
@@ -365,7 +360,6 @@ function coreEnv(config, extra = {}) {
     // 上下文与采样参数：**未配置就不注入**，核心保留自己的默认值。
     const numeric = {
       OWO_MODEL_CONTEXT_WINDOW: model.context_window,
-      OWO_MODEL_MAX_OUTPUT_TOKENS: model.max_output_tokens,
       OWO_MODEL_TEMPERATURE: model.temperature,
       OWO_MODEL_TIMEOUT_SECS: model.timeout_secs,
       OWO_AGENT_KEEP_RECENT: model.keep_recent,
@@ -378,7 +372,9 @@ function coreEnv(config, extra = {}) {
     if (model.compaction === true) env.OWO_AGENT_COMPACTION = "1";
     if (model.compaction === false) env.OWO_AGENT_COMPACTION = "0";
   }
-  // 凭据：文件里的 key 优先，其次 api_key_env 指向的环境变量，再退 OPENAI_API_KEY。
+  // 输出预算由 config.json 单一管理；不要沿用桌面进程继承的旧环境值。
+  shellCommands.applyModelOutputEnv(env, model);
+  // 凭据：文件里的 key 优先，其次 api_key_env 指向的环境变量，再退 OPENAI_API_KEY.
   const fileKey = typeof model.api_key === "string" ? model.api_key.trim() : "";
   if (fileKey) {
     env.OPENAI_API_KEY = fileKey;
@@ -753,12 +749,12 @@ async function startCore({ reason = "auto", userInitiated = false } = {}) {
     notifyState();
     scheduleAutoRestart(myGeneration);
   });
-  // 日志转发到本进程 stdout。**必须过 safeLogWrite**：stdout 的对端可能随时消失
+  // stdout 日志必须使用带异步 error 监听的 safeStreamLogWrite：对端可能随时消失
   // （管道被上游截断、重定向到已退处的程序、CI 里跑），此时 write 抛 EPIPE，
   // 而这里处在核心 stdout 的 'data' 回调里 —— 一次未捕获异常就会崩掉整个主进程
   //（表现为「A JavaScript error occurred in the main process」，窗口直接消失）。
   // 日志只是诊断手段，写不进去绝不能影响壳的可用性。
-  const writeStdout = supervision.safeLogWrite((text) => process.stdout.write(text));
+  const writeStdout = supervision.safeStreamLogWrite(process.stdout);
   core = { proc, log: (line) => writeStdout(`[core] ${line}\n`) };
   return coreState;
 }
@@ -955,10 +951,16 @@ function syncPetWindow(port) {
 /// 如果谁都直接 hide()/show()，就会出现"页面以为可见、窗口其实被藏了"的错位——
 /// 页面继续报 visible:true，而屏幕上一个像素都没有，两个真相源互相骗。
 /// 统一写 `POST /desktop/pet` 之后，桌宠页心跳读到 desired 再执行，全链路只有一个真相。
+function coreAuthorizationHeaders() {
+  return coreState && coreState.token
+    ? { Authorization: "Bearer " + coreState.token }
+    : {};
+}
+
 async function setPetDesired(visible) {
   if (!coreState.port) return { ok: false, reason: "core_not_ready" };
   try {
-    await httpPost(coreState.port, "/desktop/pet", {}, { visible });
+    await httpPost(coreState.port, "/desktop/pet", coreAuthorizationHeaders(), { visible });
   } catch (error) {
     return { ok: false, reason: String(error && error.message ? error.message : error) };
   }
@@ -981,7 +983,7 @@ function startPetWatchdog() {
   petWatchdog = setInterval(async () => {
     if (!coreState.port || !petWindow || petWindow.isDestroyed()) return;
     try {
-      const response = await httpGet(coreState.port, "/desktop/pet");
+      const response = await httpGet(coreState.port, "/desktop/pet", coreAuthorizationHeaders());
       if (response.status !== 200) return;
       const data = JSON.parse(response.body);
       if (typeof data.desired !== "boolean") return;
@@ -1307,7 +1309,7 @@ const SHELL_COMMAND_HANDLERS = {
     return { opened: coreLogPath(), ok: opened };
   },
 
-  get_workspace: () => ({ workspace: workspacePath(), state: coreState.state }),
+  get_workspace: () => ({ workspace: workspacePath(), configured: Boolean(configuredWorkspacePath(dataRoot())), state: coreState.state }),
 
   set_workspace: async (args) => {
     const target = String((args && args.path) || "").trim();
@@ -1319,6 +1321,27 @@ const SHELL_COMMAND_HANDLERS = {
     const picked = await pickDirectory("选择项目工作区");
     if (!picked) return { ok: false, canceled: true };
     return setWorkspaceTarget(picked);
+  },
+
+  create_project_workspace: async (args) => {
+    const validation = shellCommands.validateProjectFolderName(args && args.name);
+    if (!validation.ok) return validation;
+    const parent = await pickDirectory("选择新项目的上级目录");
+    if (!parent) return { ok: false, canceled: true };
+    const target = path.join(parent, validation.name);
+    try {
+      fs.mkdirSync(target);
+    } catch (error) {
+      if (error && error.code === "EEXIST") {
+        return { ok: false, error: "该目录已存在，请使用其他项目名称" };
+      }
+      return { ok: false, error: String((error && error.message) || error) };
+    }
+    if (args && args.activate === false) {
+      return { ok: true, path: target, activated: false };
+    }
+    const result = await setWorkspaceTarget(target);
+    return result.ok ? { ...result, path: target, activated: true } : result;
   },
 
   choose_data_directory: async () => {

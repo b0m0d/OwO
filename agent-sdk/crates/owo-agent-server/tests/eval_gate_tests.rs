@@ -239,6 +239,51 @@ async fn reports_history_newest_first() {
 }
 
 #[tokio::test]
+async fn report_endpoint_loads_requested_history_file_and_rejects_paths() {
+    let (state, temp) = test_state().await;
+    let dir = temp.path().join("eval").join("reports");
+    std::fs::create_dir_all(&dir).unwrap();
+    let report = serde_json::json!({
+        "file": "20260101T000000Z.json",
+        "timestamp": "20260101T000000Z",
+        "suite": "older-suite",
+        "total": 1, "passed": 1, "pass_rate": 1.0, "total_duration_ms": 10,
+        "failures": [], "model": "m1",
+    });
+    std::fs::write(
+        dir.join("20260101T000000Z.json"),
+        serde_json::to_string(&report).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("20260202T000000Z.json"),
+        serde_json::to_string(&serde_json::json!({ "suite": "newer-suite" })).unwrap(),
+    )
+    .unwrap();
+
+    let selected = send(
+        state.clone(),
+        "GET",
+        "/eval/gate/report?file=20260101T000000Z.json",
+        None,
+    )
+    .await;
+    assert_eq!(selected.status().as_u16(), 200);
+    let body = body_json(selected).await;
+    assert_eq!(body["report"]["suite"], "older-suite");
+    assert_eq!(body["file"], "20260101T000000Z.json");
+
+    let invalid = send(
+        state,
+        "GET",
+        "/eval/gate/report?file=..%2Fsecrets.json",
+        None,
+    )
+    .await;
+    assert_eq!(invalid.status().as_u16(), 400);
+}
+
+#[tokio::test]
 async fn run_with_bad_suite_path_returns_400() {
     let _guard = env_lock().lock().await;
     let _env = EnvGuard::save();

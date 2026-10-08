@@ -71,6 +71,7 @@ pub mod workswarm_metrics;
 
 mod dto;
 mod handlers;
+mod registry_builder;
 mod runtime;
 mod state;
 mod workers;

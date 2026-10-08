@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// 注册的 suite 名（仅此名单可被 API 触发；客户端本地路径一律拒绝）。
 const REGISTERED_SUITES: &[&str] = &["v1"];
@@ -104,6 +105,8 @@ pub struct ProductEvalHub {
     /// suite 注册根目录（workspace/evals；运行时拼 `/{suite}/suite.json`）。
     suite_root: PathBuf,
     live_factory: LiveExecutorFactory,
+    /// A single active matrix keeps paired Single/Team measurements free from cross-run load.
+    run_slot: Arc<Semaphore>,
     handles: Mutex<HashMap<String, Arc<RunHandle>>>,
 }
 
@@ -117,6 +120,7 @@ impl ProductEvalHub {
             runs_root,
             suite_root,
             live_factory,
+            run_slot: Arc::new(Semaphore::new(1)),
             handles: Mutex::new(HashMap::new()),
         };
         hub.recover_interrupted();
@@ -161,9 +165,18 @@ impl ProductEvalHub {
 
     /// 受理一次评测运行（校验后的入口）：
     /// 先同步加载 suite 与过滤（错误 → 400），再落盘 hub.json（queued）并后台执行矩阵。
-    fn create(&self, params: CreateParams) -> Result<EvalRunRecord, String> {
+    fn create(&self, params: CreateParams) -> Result<EvalRunRecord, (StatusCode, String)> {
+        let run_permit = Arc::clone(&self.run_slot)
+            .try_acquire_owned()
+            .map_err(|_| {
+                (
+                    StatusCode::CONFLICT,
+                    "已有评测矩阵正在执行或收尾；请等待结束后再启动，避免两组测量互相干扰"
+                        .to_string(),
+                )
+            })?;
         let bundle = product_eval::load_suite(&self.suite_path(&params.suite))
-            .map_err(|e| format!("suite 加载失败：{}", e.0))?;
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("suite 加载失败：{}", e.0)))?;
         let opts = RunOptions {
             modes: params.modes.clone(),
             reps_override: Some(params.repetitions),
@@ -176,7 +189,10 @@ impl ProductEvalHub {
         };
         let cases = product_eval::filter_cases(&bundle, &opts);
         if cases.is_empty() {
-            return Err("过滤条件下没有可执行的任务（检查 category/only）".to_string());
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "过滤条件下没有可执行的任务（检查 category/only）".to_string(),
+            ));
         }
         let planned_total: usize = cases
             .iter()
@@ -189,7 +205,12 @@ impl ProductEvalHub {
 
         let run_id = format!("eval-{}", uuid::Uuid::new_v4().simple());
         let dir = self.runs_root.join(&run_id);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("创建运行目录失败：{e}"))?;
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("创建运行目录失败：{e}"),
+            )
+        })?;
         let record = EvalRunRecord {
             run_id: run_id.clone(),
             suite: params.suite.clone(),
@@ -212,7 +233,12 @@ impl ProductEvalHub {
             dir.join("hub.json"),
             serde_json::to_string_pretty(&record).unwrap_or_default(),
         )
-        .map_err(|e| format!("写入 hub.json 失败：{e}"))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("写入 hub.json 失败：{e}"),
+            )
+        })?;
 
         let handle = Arc::new(RunHandle {
             record: Mutex::new(record.clone()),
@@ -225,7 +251,14 @@ impl ProductEvalHub {
 
         let suite_path = self.suite_path(&params.suite);
         let live_factory = Arc::clone(&self.live_factory);
-        tokio::spawn(run_job(suite_path, live_factory, handle, params, dir));
+        tokio::spawn(run_job(
+            suite_path,
+            live_factory,
+            handle,
+            params,
+            dir,
+            run_permit,
+        ));
         Ok(record)
     }
 
@@ -312,6 +345,7 @@ async fn run_job(
     handle: Arc<RunHandle>,
     params: CreateParams,
     dir: PathBuf,
+    _run_permit: OwnedSemaphorePermit,
 ) {
     // queued → running（若已被取消则跳过；最终态不回退）。
     {
@@ -607,7 +641,7 @@ async fn create_run(
         .map_err(|(code, message)| (code, Json(json!({ "error": message }))))?;
     let record = hub
         .create(params)
-        .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
+        .map_err(|(status, message)| (status, Json(json!({ "error": message }))))?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({ "run_id": record.run_id, "status": record.status })),

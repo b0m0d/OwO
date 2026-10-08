@@ -1,0 +1,21 @@
+{
+  "evidence_id": "core-command-tool-module-extraction-20261005",
+  "scope": "source-only",
+  "claim": "RunCommandTool, BackgroundShell state, ShellOutputTool, and KillShellTool are isolated in tools/command.rs. ToolRegistry retains the same registrations and shared sandbox policy, path normalization, and output decoder remain in tools.rs.",
+  "limits": [
+    "No Cargo compilation, Rust tests, clippy, runtime command execution, or model calls were run.",
+    "Source assertions and rustfmt do not prove type correctness or runtime behavior.",
+    "No end-to-end latency, token, tool-call, or delivery-quality improvement is claimed; this is a responsibility-boundary extraction."
+  ],
+  "verification": [
+    "rustfmt --check --edition 2021 --config skip_children=true passed for tools.rs and tools/command.rs.",
+    "Python source assertions passed for module wiring, unchanged registry call sites, moved definitions, shared sandbox policy, path resolution, and output decoding.",
+    "git diff --check is evaluated separately after evidence generation."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/tools.rs": "e429baa3bc72e84fe1c0f98d9449f754a1b0d17c1f28b11decf13d1e4cb9225f",
+    "crates/owo-agent-core/src/tools/command.rs": "d03ed1257c811bc0e5270e3dbe61040e1ea698a22ec7425ca522f9cfe9201d17",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "7b40bfdd591670e2ab5f7d1eb1a204d7c0a47139de4963a19c14f35b1038b205"
+  }
+}

@@ -342,6 +342,10 @@
       }).then(function (result) {
         if (result && result.ok) {
           form.dataset.done = "1";
+          try {
+            if (mode === "unset") global.localStorage.setItem("owo.setup.provider-deferred", "1");
+            else global.localStorage.removeItem("owo.setup.provider-deferred");
+          } catch (_) { /* desktop storage may be unavailable; this session can still continue */ }
           showMessage(form, "提供商已保存：" + result.provider + " · " + (result.baseUrl || "稍后配置"), true);
           if (typeof global.renderOwoSetupGuide === "function" && global.__owoSetupContinue) {
             global.__owoSetupContinue("provider");
@@ -372,7 +376,10 @@
     const guide = document.createElement("div");
     guide.className = "setup-guide";
     root.appendChild(guide);
-    let completed = { workspace: false, provider: false };
+    let completed = {
+      workspace: diagnostics && diagnostics.workspaceConfigured === true,
+      provider: diagnostics && diagnostics.providerReady === true,
+    };
     global.__owoSetupContinue = function (which) {
       completed[which] = true;
       if (completed.workspace && completed.provider && typeof onReady === "function") {
@@ -380,7 +387,11 @@
         onReady();
       }
     };
-    renderWorkspaceCard(guide, diagnostics || null);
-    renderProviderCard(guide, diagnostics || null);
+    if (!completed.workspace) renderWorkspaceCard(guide, diagnostics || null);
+    if (!completed.provider) renderProviderCard(guide, diagnostics || null);
+    if (completed.workspace && completed.provider && typeof onReady === "function") {
+      global.__owoSetupContinue = null;
+      onReady();
+    }
   };
 })(typeof window !== "undefined" ? window : globalThis);

@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-05",
+  "scope": "desktop/web workbench view state and user-facing copy",
+  "changes": [
+    "Extracted workbench chat/tools/settings visibility state into desktop/web/core/workbench-view.js",
+    "Kept app.js compatibility entry points as controller delegates and loaded the controller before app.js",
+    "Added workbench view state behavior tests and updated stale DOM relocation source contract",
+    "Mapped perception snapshot levels to user-facing Chinese labels and removed internal SSE route from cloud progress help text"
+  ],
+  "validation": {
+    "node_syntax_app_js": "passed",
+    "node_syntax_workbench_view_js": "passed",
+    "targeted_node_tests": {
+      "passed": 74,
+      "failed": 0,
+      "scope": [
+        "panels-lint",
+        "api-client",
+        "workbench-view",
+        "product-comparison"
+      ]
+    },
+    "full_web_tests": {
+      "total": 446,
+      "passed": 430,
+      "failed": 16,
+      "status": "not fully passing; Launcher CSS guard now passes; remaining failures are listed and have not all been proven stale",
+      "failures": [
+        "desktop\\web\\tests\\product-eval.panel.test.mjs (file-level harness failure)",
+        "index.html/app.js 旧路由设置面板按需加载契约",
+        "原生文件选择器与工作区字段接线契约",
+        "ROUTE_META/rail/脚本顺序/权限中心状态条降级契约",
+        "审批条字面量保持不变契约",
+        "页面容器与脚本/boot 初期挂载/导航事件接线契约",
+        "ServiceUnavailable 统一断连卡片契约",
+        "OpenAPI 链接绝对地址契约",
+        "900x600 rail 窗口尺寸契约",
+        "审批卡脱敏与开发者详情契约",
+        "设置页约束控件契约",
+        "路由化设置页与开发者模式契约",
+        "侧栏工具/开发者分区位置契约",
+        "会话卡片低频操作菜单契约",
+        "模型参数文件驱动契约",
+        "模型配置入口与会话级切换契约"
+      ]
+    },
+    "rust_cargo": "not run; user requested static checks while memory gate was below repository threshold",
+    "project_launcher_tests": {
+      "passed": 29,
+      "failed": 0
+    },
+    "browser_rendering": "not run; Browser plugin unavailable and local Playwright/Puppeteer/Chromium plus a UI server were not present; no dependencies installed"
+  },
+  "limitations": [
+    "Node tests do not establish Rust compilation or runtime API correctness",
+    "Remaining full-suite failures require individual source-vs-contract triage before being classified as stale"
+  ]
+}

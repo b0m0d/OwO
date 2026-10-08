@@ -4,6 +4,14 @@ use crate::plan::{
 };
 use serde_json::Value;
 
+#[path = "verification_workspace.rs"]
+mod workspace;
+pub(crate) use workspace::WorkspaceValidationBatch;
+pub use workspace::{
+    execute_workspace_requirement, is_registered_workspace_validator,
+    workspace_validator_arguments_supported,
+};
+
 /// Domain-separated digest used in receipt subject_sha256 when a changed workspace path is absent.
 pub(crate) fn workspace_path_absence_sha256() -> String {
     crate::CasStore::hash_of(b"owo-agent:workspace-path-absence:v1")
@@ -15,92 +23,11 @@ pub(crate) fn workspace_subjects_match_current(
     workspace_root: &Path,
     subjects: &std::collections::HashMap<String, String>,
 ) -> bool {
-    let workspace_subjects = subjects
-        .iter()
-        .filter_map(|(subject, expected)| {
-            subject
-                .strip_prefix("workspace-path:")
-                .map(|relative| (relative, expected))
-        })
-        .collect::<Vec<_>>();
-    if workspace_subjects.is_empty() {
-        return true;
-    }
-    let Ok(root) = workspace_root.canonicalize() else {
-        return false;
-    };
-    if !root.is_dir() {
-        return false;
-    }
-
-    for (raw, expected) in workspace_subjects {
-        let relative = Path::new(raw);
-        if raw.trim().is_empty()
-            || raw.len() > 512
-            || raw.contains('\0')
-            || relative.is_absolute()
-            || relative.components().any(|part| {
-                matches!(
-                    part,
-                    Component::ParentDir | Component::Prefix(_) | Component::RootDir
-                )
-            })
-        {
-            return false;
-        }
-        let target = root.join(relative);
-        match std::fs::symlink_metadata(&target) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if expected != &workspace_path_absence_sha256() {
-                    return false;
-                }
-                let mut ancestor = target.as_path();
-                let mut contained = false;
-                loop {
-                    if let Ok(canonical) = ancestor.canonicalize() {
-                        contained = canonical.starts_with(&root);
-                        break;
-                    }
-                    let Some(parent) = ancestor.parent() else {
-                        break;
-                    };
-                    ancestor = parent;
-                }
-                if !contained {
-                    return false;
-                }
-            }
-            Err(_) => return false,
-            Ok(_) => {
-                let Ok(canonical) = target.canonicalize() else {
-                    return false;
-                };
-                if !canonical.starts_with(&root) {
-                    return false;
-                }
-                let Ok(metadata) = std::fs::metadata(&canonical) else {
-                    return false;
-                };
-                if !metadata.is_file() || metadata.len() > 8 * 1024 * 1024 {
-                    return false;
-                }
-                let Ok(bytes) = std::fs::read(&canonical) else {
-                    return false;
-                };
-                if bytes.len() as u64 != metadata.len()
-                    || format!("{:x}", Sha256::digest(&bytes)) != *expected
-                    || expected == &workspace_path_absence_sha256()
-                {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    crate::workspace_snapshot::WorkspaceSnapshotBatch::new(Some(workspace_root))
+        .subjects_match(subjects)
 }
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::{Component, Path};
+use std::path::Path;
 
 /// Compile the legacy output assertion into the same host-owned validator contract
 /// used by Team delivery checks. Legacy names never create executable validators.
@@ -266,32 +193,6 @@ pub fn execute_registered_requirement(
     }
 }
 
-pub fn workspace_validator_arguments_supported(validator_id: &str, arguments: &Value) -> bool {
-    match validator_id {
-        "workspace-file-exists-v1" | "workspace-file-non-empty-v1" => arguments
-            .as_object()
-            .is_some_and(|object| object.is_empty()),
-        "workspace-file-contains-v1" => exact_string_argument(arguments, "text")
-            .is_some_and(|text| !text.is_empty() && text.len() <= 2_048),
-        "workspace-json-field-equals-v1" => arguments.as_object().is_some_and(|object| {
-            object.len() == 2
-                && object
-                    .get("field")
-                    .and_then(Value::as_str)
-                    .is_some_and(|field| {
-                        !field.is_empty() && field.len() <= 128 && !field.contains('.')
-                    })
-                && object
-                    .get("expected")
-                    .and_then(Value::as_str)
-                    .is_some_and(|expected| expected.len() <= 1_024)
-        }),
-        "workspace-command-success-v1" => exact_string_argument(arguments, "command")
-            .is_some_and(is_registered_behavior_command),
-        _ => false,
-    }
-}
-
 pub fn is_registered_behavior_command(command: &str) -> bool {
     let command = command.trim();
     if command.is_empty()
@@ -352,228 +253,6 @@ pub fn is_registered_behavior_command(command: &str) -> bool {
     }
 }
 
-pub fn is_registered_workspace_validator(validator_id: &str) -> bool {
-    matches!(
-        validator_id,
-        "workspace-file-exists-v1"
-            | "workspace-file-non-empty-v1"
-            | "workspace-file-contains-v1"
-            | "workspace-json-field-equals-v1"
-            | "workspace-command-success-v1"
-    )
-}
-
-/// Execute only the host-registered, read-only workspace validators. The scope is
-/// path-bound and every file is canonicalized under the supplied workspace root.
-pub fn execute_workspace_requirement(
-    requirement: &VerificationRequirementV1,
-    workspace_root: &Path,
-) -> (
-    ValidationVerdictV1,
-    Option<String>,
-    BTreeMap<String, String>,
-) {
-    let unsupported = |detail: String| {
-        (
-            ValidationVerdictV1::Unsupported,
-            Some(detail),
-            BTreeMap::new(),
-        )
-    };
-    if requirement.validator_version.as_deref() != Some("1") {
-        return unsupported(format!(
-            "validator {} 版本未注册，当前为 unsupported/unverified",
-            requirement.validator_id
-        ));
-    }
-    if requirement.resources.cpu_slots != 1
-        || requirement.resources.memory_mb < 8
-        || requirement.resources.memory_mb > 128
-        || requirement.resources.exclusive_workspace
-        || requirement.resources.timeout_ms == 0
-        || requirement.resources.timeout_ms > 30_000
-    {
-        return unsupported("workspace validator 资源声明超出宿主注册范围".to_string());
-    }
-    let started = std::time::Instant::now();
-    let paths = match &requirement.scope {
-        VerificationScopeV1::WorkspacePaths { relative_paths }
-            if !relative_paths.is_empty() && relative_paths.len() <= 16 =>
-        {
-            relative_paths
-        }
-        _ => return unsupported("workspace validator 要求 1..=16 个 WorkspacePaths".to_string()),
-    };
-    let root = match workspace_root.canonicalize() {
-        Ok(root) if root.is_dir() => root,
-        _ => {
-            return (
-                ValidationVerdictV1::Unverified,
-                Some("workspace 根目录不可用，验证未执行".to_string()),
-                BTreeMap::new(),
-            )
-        }
-    };
-    let expected_text = match requirement.validator_id.as_str() {
-        "workspace-file-exists-v1" | "workspace-file-non-empty-v1" => {
-            if !requirement
-                .arguments
-                .as_object()
-                .is_some_and(|args| args.is_empty())
-            {
-                return unsupported(format!("{} 不接受参数", requirement.validator_id));
-            }
-            None
-        }
-        "workspace-file-contains-v1" => {
-            let Some(text) = exact_string_argument(&requirement.arguments, "text") else {
-                return unsupported(
-                    "workspace-file-contains-v1 要求且仅接受字符串参数 text".to_string(),
-                );
-            };
-            if text.is_empty() {
-                return unsupported("workspace-file-contains-v1 的 text 不能为空".to_string());
-            }
-            Some(text.to_string())
-        }
-        "workspace-json-field-equals-v1" => {
-            let Some(arguments) = requirement.arguments.as_object() else {
-                return unsupported(
-                    "workspace-json-field-equals-v1 要求对象参数 field 和 expected".to_string(),
-                );
-            };
-            if arguments.len() != 2 {
-                return unsupported(
-                    "workspace-json-field-equals-v1 只接受 field 与 expected 两个参数".to_string(),
-                );
-            }
-            let Some(field) = arguments.get("field").and_then(Value::as_str) else {
-                return unsupported(
-                    "workspace-json-field-equals-v1 要求字符串参数 field".to_string(),
-                );
-            };
-            let Some(expected) = arguments.get("expected").and_then(Value::as_str) else {
-                return unsupported(
-                    "workspace-json-field-equals-v1 要求字符串参数 expected".to_string(),
-                );
-            };
-            if field.is_empty() || field.contains('.') {
-                return unsupported(
-                    "workspace-json-field-equals-v1 只接受顶层 JSON 字段与字符串 expected"
-                        .to_string(),
-                );
-            }
-            Some(format!("{field}\0{expected}"))
-        }
-        "workspace-command-success-v1" => {
-            return unsupported(
-                "workspace-command-success-v1 必须由 DeliveryGate 消费宿主命令回执".to_string(),
-            )
-        }
-        unknown => {
-            return unsupported(format!(
-                "workspace validator「{unknown}」未注册，当前为 unsupported/unverified"
-            ))
-        }
-    };
-
-    let mut hashes = BTreeMap::new();
-    let mut failure = None;
-    for raw in paths {
-        let relative = Path::new(raw);
-        if raw.trim().is_empty()
-            || raw.len() > 512
-            || raw.contains('\0')
-            || relative.is_absolute()
-            || relative.components().any(|part| {
-                matches!(
-                    part,
-                    Component::ParentDir | Component::Prefix(_) | Component::RootDir
-                )
-            })
-        {
-            return unsupported(format!("workspace scope 路径非法：{raw}"));
-        }
-        let target = root.join(relative);
-        let canonical = match target.canonicalize() {
-            Ok(path) if path.starts_with(&root) => path,
-            Ok(_) => return unsupported(format!("workspace 路径越界：{raw}")),
-            Err(error) => {
-                failure = Some(format!("workspace 文件不可读取 {raw}：{error}"));
-                continue;
-            }
-        };
-        let metadata = match std::fs::metadata(&canonical) {
-            Ok(metadata) if metadata.is_file() && metadata.len() <= 8 * 1024 * 1024 => metadata,
-            Ok(metadata) if metadata.len() > 8 * 1024 * 1024 => {
-                return unsupported(format!("workspace 文件超过 8 MiB 验证上限：{raw}"))
-            }
-            Ok(_) => {
-                failure = Some(format!("workspace 路径不是普通文件：{raw}"));
-                continue;
-            }
-            Err(error) => {
-                failure = Some(format!("workspace 文件元数据不可读取 {raw}：{error}"));
-                continue;
-            }
-        };
-        let bytes = match std::fs::read(&canonical) {
-            Ok(bytes) if bytes.len() as u64 == metadata.len() => bytes,
-            Ok(_) => {
-                failure = Some(format!("workspace 文件在读取期间发生变化：{raw}"));
-                continue;
-            }
-            Err(error) => {
-                failure = Some(format!("workspace 文件读取失败 {raw}：{error}"));
-                continue;
-            }
-        };
-        if started.elapsed().as_millis() > u128::from(requirement.resources.timeout_ms) {
-            return (
-                ValidationVerdictV1::Unverified,
-                Some("workspace validator 超过声明的执行时间预算".to_string()),
-                hashes,
-            );
-        }
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        hashes.insert(format!("workspace-path:{raw}"), digest);
-        let valid = match requirement.validator_id.as_str() {
-            "workspace-file-exists-v1" => true,
-            "workspace-file-non-empty-v1" => !bytes.is_empty(),
-            "workspace-file-contains-v1" => {
-                std::str::from_utf8(&bytes).ok().is_some_and(|content| {
-                    expected_text
-                        .as_deref()
-                        .is_some_and(|text| content.contains(text))
-                })
-            }
-            "workspace-json-field-equals-v1" => {
-                let parsed = serde_json::from_slice::<Value>(&bytes);
-                match (parsed.ok(), expected_text.as_deref()) {
-                    (Some(value), Some(encoded)) => {
-                        let mut pair = encoded.splitn(2, '\0');
-                        let field = pair.next().unwrap_or_default();
-                        let expected = pair.next().unwrap_or_default();
-                        value.get(field).and_then(Value::as_str) == Some(expected)
-                    }
-                    _ => false,
-                }
-            }
-            _ => unreachable!("validator id was checked above"),
-        };
-        if !valid {
-            failure = Some(format!(
-                "workspace validator {} 对文件 {} 未通过",
-                requirement.validator_id, raw
-            ));
-        }
-    }
-    match failure {
-        Some(detail) => (ValidationVerdictV1::Failed, Some(detail), hashes),
-        None => (ValidationVerdictV1::Passed, None, hashes),
-    }
-}
-
 fn exact_string_argument<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
     let object = arguments.as_object()?;
     if object.len() != 1 {
@@ -585,6 +264,7 @@ fn exact_string_argument<'a>(arguments: &'a Value, key: &str) -> Option<&'a str>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn legacy_assertion_compiles_to_registered_requirement() {
@@ -766,9 +446,13 @@ mod tests {
 
     #[test]
     fn behavior_commands_are_registered_test_runners_without_shell_chaining() {
-        assert!(is_registered_behavior_command("cargo test -p owo-agent-core"));
+        assert!(is_registered_behavior_command(
+            "cargo test -p owo-agent-core"
+        ));
         assert!(is_registered_behavior_command("npm test"));
-        assert!(is_registered_behavior_command("python -m pytest tests/test_api.py"));
+        assert!(is_registered_behavior_command(
+            "python -m pytest tests/test_api.py"
+        ));
         assert!(!is_registered_behavior_command("echo passed"));
         assert!(!is_registered_behavior_command("cargo test --no-run"));
         assert!(!is_registered_behavior_command("cargo test -- --list"));
@@ -777,7 +461,6 @@ mod tests {
         assert!(!is_registered_behavior_command("npm test && echo passed"));
         assert!(!is_registered_behavior_command("cargo check"));
     }
-
 
     #[test]
     fn workspace_subject_snapshot_recheck_detects_mutation_and_escape() {
@@ -809,5 +492,4 @@ mod tests {
         )]);
         assert!(!workspace_subjects_match_current(root.path(), &escaped));
     }
-
 }

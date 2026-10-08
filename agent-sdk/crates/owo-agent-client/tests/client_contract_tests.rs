@@ -7,6 +7,8 @@ use owo_agent_client::discovery::{descriptor_path, DaemonDiscovery};
 use owo_agent_client::sse::{parse_sse_data_line, JsonSseBuffer, SseBuffer};
 use owo_agent_client::{AgentClient, ClientConfig};
 use owo_agent_protocol::{DaemonDescriptor, SseEvent};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -37,6 +39,22 @@ fn sse_preserves_multibyte_utf8_split_across_chunks() {
         Some(Ok(SseEvent::TokenDelta { delta })) => assert_eq!(delta, "好"),
         other => panic!("UTF-8 跨 chunk 被损坏：{other:?}"),
     }
+}
+
+#[test]
+fn turn_sse_buffer_rejects_oversized_partial_frames_and_recovers() {
+    let mut buffer = SseBuffer::new();
+    buffer.push(b"data: ");
+    buffer.push(&vec![b'x'; 1024 * 1024]);
+    let error = buffer.next_frame().expect("overflow should be surfaced");
+    assert!(error.unwrap_err().to_string().contains("1 MiB"));
+    assert!(buffer.next_frame().is_none());
+
+    buffer.push(b"data: {\"type\":\"token_delta\",\"delta\":\"ok\"}\n");
+    assert!(matches!(
+        buffer.next_event(),
+        Some(Ok(SseEvent::TokenDelta { delta })) if delta == "ok"
+    ));
 }
 
 #[test]
@@ -182,7 +200,8 @@ fn route(method: &str, path: &str, headers: &str) -> (u16, &'static str, Vec<u8>
             "event: progress\ndata: {\"type\":\"progress\",\"message\":\"模型调用\",\"v\":1}\n\n",
             "event: token_delta\ndata: {\"type\":\"token_delta\",\"delta\":\"你\",\"v\":1}\n\n",
             "event: token_delta\ndata: {\"type\":\"token_delta\",\"delta\":\"好\",\"v\":1}\n\n",
-            "event: final\ndata: {\"type\":\"final\",\"text\":\"你好\",\"v\":1}\n\n"
+            "event: final\ndata: {\"type\":\"final\",\"text\":\"你好\",\"v\":1}\n\n",
+            "event: turn_stats\ndata: {\"type\":\"turn_stats\",\"steps\":1,\"duration_ms\":7,\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5,\"cost_usd\":0.0,\"completion_status\":\"accepted\"}\n\n"
         );
         return (200, "text/event-stream", body.as_bytes().to_vec());
     }
@@ -209,6 +228,9 @@ fn route(method: &str, path: &str, headers: &str) -> (u16, &'static str, Vec<u8>
             .as_bytes()
             .to_vec(),
         );
+    }
+    if method == "POST" && path.contains("/answer/") {
+        return (200, "application/json", br#"{"ok":true}"#.to_vec());
     }
     if method == "POST" && path.ends_with("/abort") {
         return (200, "application/json", br#"{"ok":true}"#.to_vec());
@@ -253,14 +275,16 @@ async fn spawn_fake_daemon() -> String {
     format!("http://127.0.0.1:{}", address.port())
 }
 
-async fn spawn_replay_daemon(interrupted: bool) -> String {
+async fn spawn_replay_daemon(interrupted: bool, failed: bool, split_final_stats: bool) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let replay_page_requests = Arc::new(AtomicUsize::new(0));
     tokio::spawn(async move {
         loop {
             let Ok((mut socket, _)) = listener.accept().await else {
                 break;
             };
+            let replay_page_requests = Arc::clone(&replay_page_requests);
             tokio::spawn(async move {
                 let (method, path, _headers) = read_request(&mut socket).await;
                 let (content_type, extra_headers, body) = if method == "POST"
@@ -277,9 +301,48 @@ async fn spawn_replay_daemon(interrupted: bool) -> String {
                         .to_vec(),
                     )
                 } else if method == "GET" && path.contains("/turn/events?") {
-                    let (events, state, next_after_seq) = if interrupted {
-                        (serde_json::json!([]), "interrupted", 2)
-                    } else {
+                    let page_request_index = replay_page_requests.fetch_add(1, Ordering::Relaxed);
+                    let (events, state, next_after_seq, active) = if interrupted {
+                        (serde_json::json!([]), "interrupted", 2, false)
+                    } else if failed {
+                        (
+                            serde_json::json!([{
+                                "session_id": "sess-1",
+                                "turn_id": "turn-1",
+                                "seq": 3,
+                                "created_at": "2026-09-22T00:00:00Z",
+                                "payload": {"type": "final", "text": "saved response"}
+                            }, {
+                                "session_id": "sess-1",
+                                "turn_id": "turn-1",
+                                "seq": 4,
+                                "created_at": "2026-09-22T00:00:01Z",
+                                "payload": {
+                                    "type": "turn_stats",
+                                    "steps": 1,
+                                    "duration_ms": 7,
+                                    "prompt_tokens": 3,
+                                    "completion_tokens": 2,
+                                    "total_tokens": 5,
+                                    "cost_usd": 0.0,
+                                    "completion_status": "accepted"
+                                }
+                            }, {
+                                "session_id": "sess-1",
+                                "turn_id": "turn-1",
+                                "seq": 5,
+                                "created_at": "2026-09-22T00:00:02Z",
+                                "payload": {
+                                    "type": "turn_failed",
+                                    "message": "session save failed",
+                                    "completion_status": "unverified"
+                                }
+                            }]),
+                            "failed",
+                            5,
+                            false,
+                        )
+                    } else if split_final_stats && page_request_index == 0 {
                         (
                             serde_json::json!([{
                                 "session_id": "sess-1",
@@ -288,8 +351,37 @@ async fn spawn_replay_daemon(interrupted: bool) -> String {
                                 "created_at": "2026-09-22T00:00:00Z",
                                 "payload": {"type": "final", "text": "resumed"}
                             }]),
-                            "completed",
+                            "active",
                             3,
+                            true,
+                        )
+                    } else {
+                        (
+                            serde_json::json!([{
+                                "session_id": "sess-1",
+                                "turn_id": "turn-1",
+                                "seq": 3,
+                                "created_at": "2026-09-22T00:00:00Z",
+                                "payload": {"type": "final", "text": "resumed"}
+                            }, {
+                                "session_id": "sess-1",
+                                "turn_id": "turn-1",
+                                "seq": 4,
+                                "created_at": "2026-09-22T00:00:01Z",
+                                "payload": {
+                                    "type": "turn_stats",
+                                    "steps": 1,
+                                    "duration_ms": 7,
+                                    "prompt_tokens": 3,
+                                    "completion_tokens": 2,
+                                    "total_tokens": 5,
+                                    "cost_usd": 0.0,
+                                    "completion_status": "accepted"
+                                }
+                            }]),
+                            "completed",
+                            4,
+                            false,
                         )
                     };
                     (
@@ -297,7 +389,7 @@ async fn spawn_replay_daemon(interrupted: bool) -> String {
                         "",
                         serde_json::json!({
                             "events": events,
-                            "active": false,
+                            "active": active,
                             "state": state,
                             "next_after_seq": next_after_seq
                         })
@@ -323,7 +415,7 @@ async fn spawn_replay_daemon(interrupted: bool) -> String {
 
 #[tokio::test]
 async fn client_resumes_turn_from_persisted_events_after_stream_eof() {
-    let base_url = spawn_replay_daemon(false).await;
+    let base_url = spawn_replay_daemon(false, false, false).await;
     let client = AgentClient::new(ClientConfig::new(base_url, None)).expect("client");
     let mut stream = client.open_turn("sess-1", "hello").await.expect("turn");
     let mut events = Vec::new();
@@ -334,12 +426,71 @@ async fn client_resumes_turn_from_persisted_events_after_stream_eof() {
     assert!(matches!(events.first(), Some(SseEvent::Progress { .. })));
     assert!(matches!(events.get(1), Some(SseEvent::TokenDelta { delta }) if delta == "partial"));
     assert!(matches!(events.get(2), Some(SseEvent::Final { text }) if text == "resumed"));
-    assert_eq!(events.len(), 3);
+    assert!(matches!(
+        events.get(3),
+        Some(SseEvent::TurnStats {
+            completion_status: owo_agent_protocol::CompletionStatusV1::Accepted,
+            ..
+        })
+    ));
+    assert_eq!(events.len(), 4);
+}
+
+#[tokio::test]
+async fn client_continues_replay_when_final_and_turn_stats_are_on_separate_pages() {
+    let base_url = spawn_replay_daemon(false, false, true).await;
+    let client = AgentClient::new(ClientConfig::new(base_url, None)).expect("client");
+    let mut stream = client.open_turn("sess-1", "hello").await.expect("turn");
+    let mut events = Vec::new();
+    stream
+        .drive(|event| events.push(event))
+        .await
+        .expect("drive replay pages");
+    assert!(matches!(events.get(2), Some(SseEvent::Final { text }) if text == "resumed"));
+    assert!(matches!(
+        events.get(3),
+        Some(SseEvent::TurnStats {
+            completion_status: owo_agent_protocol::CompletionStatusV1::Accepted,
+            ..
+        })
+    ));
+    assert_eq!(events.len(), 4);
+}
+
+#[tokio::test]
+async fn client_delivers_replayed_turn_failure_without_losing_its_completion_status() {
+    let base_url = spawn_replay_daemon(false, true, false).await;
+    let client = AgentClient::new(ClientConfig::new(base_url, None)).expect("client");
+    let mut stream = client.open_turn("sess-1", "hello").await.expect("turn");
+    let mut events = Vec::new();
+    stream
+        .drive(|event| events.push(event))
+        .await
+        .expect("TurnFailed is a terminal event, not a missing-details protocol error");
+    assert!(matches!(
+        events.get(3),
+        Some(SseEvent::TurnStats {
+            completion_status: owo_agent_protocol::CompletionStatusV1::Accepted,
+            ..
+        })
+    ));
+    assert!(matches!(
+        events.get(4),
+        Some(SseEvent::TurnFailed {
+            completion_status: owo_agent_protocol::CompletionStatusV1::Unverified,
+            ..
+        })
+    ));
+    assert_eq!(
+        events.len(),
+        5,
+        "post-stats failure must not be hidden by early stream termination"
+    );
 }
 
 #[tokio::test]
 async fn client_reports_interrupted_turn_after_replaying_partial_output() {
-    let base_url = spawn_replay_daemon(true).await;
+    let base_url = spawn_replay_daemon(true, false, false).await;
     let client = AgentClient::new(ClientConfig::new(base_url, None)).expect("client");
     let mut stream = client.open_turn("sess-1", "hello").await.expect("turn");
     let mut events = Vec::new();
@@ -368,16 +519,31 @@ async fn client_round_trips_against_fake_daemon() {
     let mut stream = client.open_turn(&session.id, "hi").await.expect("turn");
     let mut deltas = Vec::new();
     let mut final_text = None;
+    let mut completion_status = None;
     stream
         .drive(|event| match event {
             SseEvent::TokenDelta { delta } => deltas.push(delta),
             SseEvent::Final { text } => final_text = Some(text),
+            SseEvent::TurnStats {
+                completion_status: status,
+                ..
+            } => completion_status = Some(status),
             _ => {}
         })
         .await
         .expect("drive");
     assert_eq!(deltas, vec!["你".to_string(), "好".to_string()]);
     assert_eq!(final_text.as_deref(), Some("你好"));
+    assert_eq!(
+        completion_status,
+        Some(owo_agent_protocol::CompletionStatusV1::Accepted)
+    );
+
+    let answer = client
+        .answer_question(&session.id, "q-1", "用户补充信息")
+        .await
+        .expect("answer question");
+    assert_eq!(answer["ok"], true);
 
     let cancelled = client.cancel_turn(&session.id).await.expect("cancel");
     assert_eq!(cancelled["ok"], true);

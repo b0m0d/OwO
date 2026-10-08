@@ -1,0 +1,38 @@
+{
+  "schema": "owo-agent-qa-evidence-v1",
+  "date": "2026-10-08",
+  "change": "Team delivery artifact lookup reuses resolved StepSpec and indexes reviewer dependencies by plan position.",
+  "scope": [
+    "owo-agent-core ArtifactCatalog",
+    "WorkSwarm review artifact lookup",
+    "DeliveryGate reviewer dependency resolution"
+  ],
+  "invariants": [
+    "current attempt identity remains required",
+    "artifact team/producer/version checks remain unchanged",
+    "string-based current lookup remains available for compatibility"
+  ],
+  "validation": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p owo-agent-core artifact_catalog --locked -j 2 -- --test-threads=2",
+      "exit_code": 0,
+      "passed": 9,
+      "failed": 0
+    },
+    {
+      "command": "cargo test -p owo-agent-core --test workswarm_tests --locked -j 2 -- --test-threads=2",
+      "exit_code": 0,
+      "passed": 50,
+      "failed": 0
+    }
+  ],
+  "limits": [
+    "No large-DAG benchmark was run; runtime speedup is not quantified.",
+    "No real-model Single-versus-Team paired evaluation was run.",
+    "This change does not unify the Durable Run Scheduler state authority."
+  ]
+}

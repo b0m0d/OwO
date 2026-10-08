@@ -1,0 +1,48 @@
+{
+  "change": "paired-eval-content-independence-preflight-and-v2-candidate",
+  "date": "2026-10-08",
+  "scope": [
+    "separate complete execution coverage, directional evidence floor, and independent-case policy sample",
+    "count unique category/instruction/input content clusters and reject relabeled duplicates before model calls",
+    "preflight suite-relative task paths and prevent path escape in the scheduled-runner entry point",
+    "add a separate v2 candidate with 30 independently validated code cases and cross-category directional coverage",
+    "execute every code reference implementation through the real sandbox command checker"
+  ],
+  "suite_plans": {
+    "v1_frozen_baseline": {
+      "tasks": 10,
+      "repetitions": 4,
+      "paired_cells": 40,
+      "independent_task_content_clusters": 10,
+      "policy_sample_sufficient": false
+    },
+    "v2_candidate": {
+      "tasks": 31,
+      "code_cases": 30,
+      "research_cases": 1,
+      "repetitions": 2,
+      "paired_cells": 62,
+      "unique_task_content_clusters": 31,
+      "code_group_clusters": 30,
+      "research_group_clusters": 1,
+      "policy_sample_sufficient_for_code_group_only": true,
+      "frozen": false
+    }
+  },
+  "validation": {
+    "product_eval_format": "cargo fmt --manifest-path devtools/product-eval/Cargo.toml --all -- --check passed",
+    "product_eval_live_target_tests": "6 passed; 1 live provider test ignored",
+    "v2_suite_static_validation": "31/31 tasks and checker reference outputs passed; 30 code plus 1 research; all content fingerprints unique",
+    "v2_reference_sandbox_commands": "30/30 code reference implementations passed real command_check",
+    "runner_v1_plan_only": "10 unique content clusters; 40 planned cells; policy sample insufficient",
+    "runner_v2_plan_only": "31 unique content clusters; 62 planned cells; policy floor met for overall sample",
+    "runner_parser_and_bom": "PowerShell parser and UTF-8 BOM passed",
+    "registrar_whatif": "Weekly 03:00 plan emitted previously; no task registered"
+  },
+  "limitations": [
+    "v2 is an unfrozen candidate, primarily isolated Python code repairs; it is not a representative full-stack or architecture-change suite",
+    "research subgroup has one independent case and cannot support its own policy admission",
+    "no live Single/Team provider comparison or scheduled task execution",
+    "no evidence yet that Team beats Single in speed, quality, delivery, or token use"
+  ]
+}

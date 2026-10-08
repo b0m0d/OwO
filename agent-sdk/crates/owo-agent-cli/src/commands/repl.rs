@@ -407,7 +407,7 @@ impl Repl {
         }
     }
 
-    /// `/goal [目标|status|clear]`：目标模式——未完成时持续自动推进，模型标记完成才停。
+    /// `/goal [目标|status|clear]`：目标模式——模型标记完成且宿主裁决允许交付时才停止。
     async fn handle_goal(&mut self, arg: &str) -> Result<(), Box<dyn std::error::Error>> {
         match arg {
             "" | "status" => {
@@ -416,7 +416,7 @@ impl Repl {
                         "目标：{}\n  轮次：{}/{}  状态：{}",
                         goal.objective,
                         goal.iterations,
-                        goal_max_iterations(),
+                        crate::support::goal_iteration_label(goal_max_iterations()),
                         if goal.done { "已完成" } else { "推进中" }
                     ),
                     None => println!("（未设定目标；用法：/goal <目标描述>）"),
@@ -436,9 +436,11 @@ impl Repl {
                     done: false,
                 });
                 println!(
-                    "{}（最多 {max} 轮；/goal clear 停止）",
-                    format!("目标已设定：{objective}").green()
+                    "{}（轮次上限：{}；/goal clear 停止）",
+                    format!("目标已设定：{objective}").green(),
+                    crate::support::goal_iteration_label(max)
                 );
+                let mut previous_status = None;
                 loop {
                     if self.abort.load(Ordering::Relaxed) {
                         println!("{}", "（目标推进已中止）".yellow());
@@ -450,7 +452,7 @@ impl Repl {
                     if goal.done {
                         break;
                     }
-                    if goal.iterations >= max {
+                    if crate::support::goal_iteration_limit_reached(goal.iterations, max) {
                         println!(
                             "{}",
                             format!("已达最大迭代 {max}，目标未标记完成（/goal status 查看）")
@@ -461,23 +463,49 @@ impl Repl {
                     let iteration = goal.iterations + 1;
                     let prompt = if iteration == 1 {
                         goal_first_prompt(objective)
+                    } else if let Some(status) = previous_status {
+                        crate::support::goal_continue_prompt_after_status(
+                            objective, iteration, status,
+                        )
                     } else {
                         goal_continue_prompt(objective, iteration)
                     };
-                    println!("{}", format!("── 目标推进 {iteration}/{max} ──").bold());
-                    let final_text = self.run_turn_capture(&prompt).await?;
+                    let limit = crate::support::goal_iteration_label(max);
+                    println!("{}", format!("── 目标推进 {iteration}/{limit} ──").bold());
+                    let turn = self.run_turn_capture(&prompt).await?;
                     if let Some(goal) = self.goal.as_mut() {
                         goal.iterations = iteration;
                     }
-                    if let Some(text) = final_text {
-                        if text.contains(GOAL_DONE_MARKER) {
-                            if let Some(goal) = self.goal.as_mut() {
-                                goal.done = true;
-                            }
-                            println!("{} 目标完成（第 {iteration} 轮）", "✓".green());
-                            break;
-                        }
+                    if turn.failed {
+                        println!(
+                            "{} 回合失败，目标未完成（/goal status 查看；修复问题后可重新提交）",
+                            "!".red()
+                        );
+                        break;
                     }
+                    if turn.completion_status == owo_agent_protocol::CompletionStatusV1::Aborted {
+                        println!("{} 目标推进已中止", "!".yellow());
+                        break;
+                    }
+                    if crate::support::goal_claim_is_accepted(&turn) {
+                        if let Some(goal) = self.goal.as_mut() {
+                            goal.done = true;
+                        }
+                        println!("{} 目标完成（第 {iteration} 轮）", "✓".green());
+                        break;
+                    }
+                    if turn
+                        .final_text
+                        .as_deref()
+                        .is_some_and(crate::support::goal_is_done)
+                    {
+                        println!(
+                            "{} 模型报告完成，但宿主状态为 {:?}，继续推进验收",
+                            "!".yellow(),
+                            turn.completion_status
+                        );
+                    }
+                    previous_status = Some(turn.completion_status);
                 }
                 Ok(())
             }
@@ -617,11 +645,11 @@ impl Repl {
         self.run_turn_capture(prompt).await.map(|_| ())
     }
 
-    /// 执行一回合并返回最终文本（`/goal` 依赖它判断完成标记）。
+    /// 执行一回合并返回最终文本与宿主完成状态（`/goal` 据此闭合任务）。
     async fn run_turn_capture(
         &mut self,
         prompt: &str,
-    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    ) -> Result<crate::support::GoalTurnResult, Box<dyn std::error::Error>> {
         if self.session.is_none() {
             self.new_session(None).await?;
         }
@@ -679,7 +707,16 @@ impl Repl {
             Err(error) => {
                 eprintln!("{} {error}", "回合失败：".red());
                 println!("（会话已保存；/status 查看状态，/diff 查看改动，/undo 回滚）");
-                return Ok(None);
+                let aborted = self.abort.load(Ordering::Relaxed);
+                return Ok(crate::support::GoalTurnResult {
+                    final_text: None,
+                    completion_status: if aborted {
+                        owo_agent_protocol::CompletionStatusV1::Aborted
+                    } else {
+                        owo_agent_protocol::CompletionStatusV1::Blocked
+                    },
+                    failed: !aborted,
+                });
             }
         };
         let trace =
@@ -698,7 +735,11 @@ impl Repl {
                 .unwrap_or(0),
             self.session.as_ref().map(|s| s.diff().len()).unwrap_or(0),
         );
-        Ok(outcome.final_text.clone())
+        Ok(crate::support::GoalTurnResult {
+            final_text: outcome.final_text.clone(),
+            completion_status: outcome.completion_status,
+            failed: false,
+        })
     }
 
     fn flush_audit(&mut self) {

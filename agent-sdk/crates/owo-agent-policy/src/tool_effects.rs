@@ -299,9 +299,8 @@ pub fn classify_mcp_annotations(
 pub fn builtin_class_for(tool: &str) -> Option<EffectClass> {
     let class = match tool {
         "read_file" | "list_dir" | "search_files" | "grep" | "read_image" | "shell_output"
-        | "kill_shell" | "todo" | "verification_plan" | "git_status" | "git_diff" | "git_log" | "ask_user" => {
-            EffectClass::Read
-        }
+        | "kill_shell" | "todo" | "verification_plan" | "git_status" | "git_diff" | "git_log"
+        | "ask_user" => EffectClass::Read,
         "write_file" | "edit_file" | "multi_edit" | "apply_patch" => EffectClass::Write,
         "run_command" | "web_fetch" | "web_search" => EffectClass::Execute,
         "text.inject" | "clipboard" => EffectClass::Inject,

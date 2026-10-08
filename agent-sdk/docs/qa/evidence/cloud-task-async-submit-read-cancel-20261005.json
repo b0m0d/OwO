@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-05",
+  "scope": "cloud task HTTP lifecycle, queue recovery and lock boundaries",
+  "source_changes": [
+    "POST /cloud/tasks validates transport configuration and durably inserts a task under a short submit lock independent from the long-lived execution queue lock, then returns task_id before remote work.",
+    "CloudTaskQueue::submit_persisted shares command/workspace validation and allocates the next persisted ID without loading or rewriting another active task record.",
+    "CLI cloud submit --run now executes its submitted task ID through the same retry-to-terminal path as the HTTP runner instead of one attempt on the first queued item.",
+    "GET status and result read a validated task JSON snapshot without waiting for the CloudTaskQueue execution lock.",
+    "Active cancellation uses watch::Sender::send_replace and returns cancel_requested; the runner owns remote cancellation, terminal persistence and SSE completion.",
+    "CloudTaskQueue checks a pre-existing cancellation signal before entering Running or starting remote submission.",
+    "HTTP queue initialization recovers persisted records, writes recovered Running tasks back as Queued and rejects unsafe or mismatched task identities.",
+    "Recovered and newly submitted queued tasks receive dispatch tokens; the runner snapshots token-backed queued IDs, executes each ID specifically and consumes its token so concurrent runner wakeups do not immediately rerun a retry.",
+    "Server OpenAPI and TypeScript OpenAPI/type descriptions reflect asynchronous submit and cancellation-request semantics.",
+    "Retryable remote failures now stay in one cancellable run_task_to_terminal_with_cancel lifecycle with backoff until a terminal state; the server consumes the dispatch token only after that lifecycle ends."
+  ],
+  "regression_test_source": [
+    "cloud_task_api_tests::status_and_result_reads_do_not_wait_for_queue_execution_lock",
+    "cloud_task_api_tests::active_cancel_only_signals_runner_and_does_not_wait_for_queue_lock",
+    "cloud_task_api_tests::submit_persists_and_returns_while_execution_queue_lock_is_held",
+    "cancellation_tests::cancellation_already_requested_before_runner_start_skips_remote_submission",
+    "queue_recovery_tests::specific_task_execution_does_not_consume_an_earlier_queued_task",
+    "queue_recovery_tests::detached_submit_allocates_next_id_without_rewriting_active_task_snapshot",
+    "queue_recovery_tests::dispatch_retry_runs_with_backoff_until_terminal_instead_of_stranding_queued",
+    "queue_recovery_tests::recovery_persists_running_as_queued_and_rejects_filename_identity_mismatch"
+  ],
+  "static_validation": {
+    "rustfmt_check": "passed for cloud_api.rs, cloud_task_api_tests.rs, server lib.rs, cloud_exec.rs and CLI cloud.rs",
+    "client_openapi_json": "parsed successfully; cloud submit/cancel descriptions match server semantics",
+    "source_encoding_and_whitespace": "UTF-8 and trailing-whitespace checks passed for reviewed changed sources; final git diff check passed for tracked changes",
+    "git_diff_check": "passed for tracked changed files"
+  },
+  "runtime_validation": {
+    "resource_snapshot": "2026-10-05 latest preflight: 4.19 GB available physical memory; 86.7 percent used; below repository gate (at least 6 GB available and below 80 percent used)",
+    "cargo_check": "not_run_resource_gate; no Cargo process started",
+    "rust_tests": "not_run_resource_gate; source regression tests have not executed",
+    "http_sse_smoke": "not_run"
+  },
+  "remaining_risks": [
+    "Remote execution remains serial under the CloudTaskQueue writer mutex; disk ID allocation and queue persistence are serialized separately with a short submit mutex.",
+    "Detached background runners are not yet joined by graceful shutdown.",
+    "Recovered queued work is dispatched when the HTTP queue is next initialized and a submit starts the runner; startup does not yet dispatch recovered work without a new request.",
+    "No runtime evidence yet confirms quick submit response, concurrent status reads, live SSE, cancellation terminal state or restart recovery."
+  ]
+}

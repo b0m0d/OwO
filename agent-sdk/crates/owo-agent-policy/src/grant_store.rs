@@ -128,6 +128,10 @@ impl Grant {
 
 /// 请求是否命中 Grant 的作用域（工具/工作区/路径/主机/参数指纹/有效期）。
 pub fn grant_matches(grant: &Grant, request: &PermissionRequest, workspace_id: &str) -> bool {
+    // Grant 只可复用只读请求。也拦截旧版落盘的写入/执行授权，避免升级后静默放宽。
+    if request.is_destructive() {
+        return false;
+    }
     if grant.tool_id != request.tool {
         return false;
     }
@@ -510,14 +514,14 @@ impl GrantStore {
         removed
     }
 
-    /// 由审批选项生成 Grant（scope=Once 返回 None，不生成）。
+    /// 由审批选项生成 Grant；Once 与非只读请求一律不生成。
     pub fn grant_from_scope(
         &self,
         request: &PermissionRequest,
         workspace_id: &str,
         scope: GrantScope,
     ) -> Option<Grant> {
-        if scope == GrantScope::Once {
+        if scope == GrantScope::Once || request.is_destructive() {
             return None;
         }
         let path_scope = request
@@ -627,7 +631,7 @@ mod tests {
     #[test]
     fn grant_respects_workspace_scope() {
         let store = GrantStore::new();
-        let req = request("write_file", json!({ "path": "a.txt" }), Level::Write);
+        let req = request("read_file", json!({ "path": "a.txt" }), Level::Read);
         let grant = store
             .grant_from_scope(&req, "ws-1", GrantScope::Session)
             .unwrap();
@@ -635,11 +639,10 @@ mod tests {
         assert!(store.consume(&req, "ws-2").is_none(), "异工作区不可复用");
         assert!(store.consume(&req, "ws-1").is_some());
     }
-
     #[test]
     fn consumed_uses_decrement_and_exhaust() {
         let store = GrantStore::new();
-        let mut req = request("run_command", json!({ "command": "ls" }), Level::Execute);
+        let req = request("read_file", json!({ "path": "a.txt" }), Level::Read);
         let mut grant = store
             .grant_from_scope(&req, "ws-1", GrantScope::Session)
             .unwrap();
@@ -647,10 +650,8 @@ mod tests {
         store.insert(grant);
         assert!(store.consume(&req, "ws-1").is_some());
         assert!(store.consume(&req, "ws-1").is_some());
-        req.args = json!({ "command": "ls" });
         assert!(store.consume(&req, "ws-1").is_none(), "用尽后不再放行");
     }
-
     #[test]
     fn expired_grant_is_not_consumed() {
         let store = GrantStore::new();
@@ -702,28 +703,39 @@ mod tests {
     }
 
     #[test]
-    fn host_scope_matches_url_prefix() {
+    fn destructive_requests_cannot_create_or_reuse_grants() {
+        let store = GrantStore::new();
+        for (tool, args, level) in [
+            ("write_file", json!({ "path": "a.txt" }), Level::Write),
+            (
+                "run_command",
+                json!({ "command": "rm -rf target" }),
+                Level::Execute,
+            ),
+            ("desktop_key", json!({ "key": "enter" }), Level::Inject),
+        ] {
+            let req = request(tool, args, level);
+            assert!(store
+                .grant_from_scope(&req, "ws-1", GrantScope::Task)
+                .is_none());
+            let legacy = Grant::test(tool, "ws-1", None, None);
+            store.insert(legacy);
+            assert!(store.consume(&req, "ws-1").is_none());
+        }
+    }
+
+    #[test]
+    fn destructive_network_request_cannot_get_a_grant() {
         let store = GrantStore::new();
         let req = request(
             "browser_navigate",
             json!({ "url": "https://example.com/page" }),
             Level::Execute,
         );
-        let grant = store
-            .grant_from_scope(&req, "ws-1", GrantScope::Session)
-            .unwrap();
-        assert_eq!(grant.host_scope.as_deref(), Some("example.com"));
-        let same = request(
-            "browser_navigate",
-            json!({ "url": "https://example.com/other" }),
-            Level::Execute,
-        );
-        assert!(
-            store.consume(&same, "ws-1").is_none(),
-            "同 host 不同参数（指纹不同）不命中"
-        );
+        assert!(store
+            .grant_from_scope(&req, "ws-1", GrantScope::Workspace)
+            .is_none());
     }
-
     #[test]
     fn grant_scope_parse_roundtrip() {
         assert_eq!(GrantScope::parse("once"), Some(GrantScope::Once));
@@ -768,7 +780,7 @@ mod tests {
         // 关键是它不得写进 grants.json——重启后还认得"本任务"就是假语义。
         let path = temp_path("task");
         let store = GrantStore::persisting(&path);
-        let req = request("write_file", json!({ "path": "a.txt" }), Level::Write);
+        let req = request("read_file", json!({ "path": "a.txt" }), Level::Read);
         let grant = store
             .grant_from_scope(&req, "ws-1", GrantScope::Task)
             .expect("task 生成 grant");
@@ -833,7 +845,7 @@ mod tests {
         for (tool, workspace) in [
             ("read_file", "ws-1"),
             ("read_file", "ws-2"),
-            ("write_file", "ws-1"),
+            ("search_files", "ws-1"),
         ] {
             let req = request(tool, json!({ "path": "a.txt" }), Level::Read);
             let grant = store
