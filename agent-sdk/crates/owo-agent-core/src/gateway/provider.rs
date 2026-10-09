@@ -11,6 +11,10 @@ const MAX_MODEL_OUTPUT_TOKENS: u64 = 1_000_000;
 /// 调用方据此自动提升预算并降低思考档后重试一次；不对外暴露。
 const REASONING_ONLY_LENGTH: &str = "__owo_reasoning_only_length__";
 
+/// 单条 SSE 行（未处理缓冲区）上限：异常端点可以不发换行地无界推送，
+/// 超出即显式失败，避免把内存吃满。
+const MAX_STREAM_LINE_BYTES: usize = 8 * 1024 * 1024;
+
 use super::config::*;
 use super::is_local_endpoint;
 use super::message::*;
@@ -802,6 +806,12 @@ impl OpenAiCompatibleProvider {
         {
             let chunk = chunk.map_err(|e| format!("流式读取失败：{e:?}"))?;
             append_utf8_chunk(&mut state.buffer, &mut state.utf8_pending, &chunk);
+            if state.buffer.len() > MAX_STREAM_LINE_BYTES {
+                return Err(format!(
+                    "模型流式响应单行超过上限（{} MiB），已拒绝解析",
+                    MAX_STREAM_LINE_BYTES / (1024 * 1024)
+                ));
+            }
             if let Some(usage) = consume_stream_buffer(&mut state, on_chunk) {
                 request_usage = Some(usage);
                 self.record_usage(&json!({

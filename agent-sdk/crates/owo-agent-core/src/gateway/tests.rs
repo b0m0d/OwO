@@ -437,6 +437,23 @@ fn rejects_malformed_tool_call_arguments_instead_of_silently_using_null() {
 }
 
 #[test]
+fn oversized_tool_call_arguments_are_rejected_before_parsing() {
+    let mut accumulators = HashMap::new();
+    let big = "x".repeat(5 * 1024 * 1024);
+    accumulate_tool_fragments(
+        &mut accumulators,
+        &[json!({
+            "index": 0,
+            "id": "call_big",
+            "function": { "name": "write_file", "arguments": big }
+        })],
+    );
+    let error = build_tool_calls(&mut accumulators).unwrap_err();
+    assert!(error.contains("超过上限"), "{error}");
+    assert!(error.contains("write_file"), "{error}");
+}
+
+#[test]
 fn rejects_invalid_and_unadvertised_non_stream_tool_calls() {
     let tools = vec![ToolSpec {
         name: "read_file".into(),
