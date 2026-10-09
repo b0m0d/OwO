@@ -517,6 +517,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             return Err(reason);
         }
         let body = self.request_body(model, messages, tools, false);
+        ensure_request_body_size(&body)?;
         let request_model = body
             .get("model")
             .and_then(Value::as_str)
@@ -702,6 +703,31 @@ fn max_non_stream_response_bytes() -> usize {
         .unwrap_or(16 * 1024 * 1024)
 }
 
+/// 模型请求体上限：防止上下文/附件病态膨胀把请求打成不可控大小。
+/// 可用 `OWO_MODEL_MAX_REQUEST_BYTES` 覆盖（1KB..=512MB），默认 64MB。
+fn max_request_body_bytes() -> usize {
+    std::env::var("OWO_MODEL_MAX_REQUEST_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (1024..=512 * 1024 * 1024).contains(value))
+        .unwrap_or(64 * 1024 * 1024)
+}
+
+pub(super) fn ensure_request_body_size(body: &Value) -> Result<(), String> {
+    let max = max_request_body_bytes();
+    let size = serde_json::to_vec(body)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    if size > max {
+        return Err(format!(
+            "模型请求体过大（{} KiB，上限 {} KiB）：请缩减上下文或附件",
+            size / 1024,
+            max / 1024
+        ));
+    }
+    Ok(())
+}
+
 impl OpenAiCompatibleProvider {
     /// 流式补全唯一实现：正文与思考通道统一经 `on_chunk` 回调（类型区分）。
     async fn stream_completion(
@@ -773,6 +799,7 @@ impl OpenAiCompatibleProvider {
             max_tokens_override,
             force_low_reasoning,
         );
+        ensure_request_body_size(&body)?;
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')

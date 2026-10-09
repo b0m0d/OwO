@@ -324,6 +324,22 @@ async fn oversized_non_stream_response_is_rejected_instead_of_buffering() {
 }
 
 #[tokio::test]
+async fn oversized_model_request_body_is_rejected_before_send() {
+    let _guard = ENV_LOCK.lock().await;
+    let saved = std::env::var("OWO_MODEL_MAX_REQUEST_BYTES").ok();
+    std::env::set_var("OWO_MODEL_MAX_REQUEST_BYTES", "1024");
+    let small = json!({"messages": [{"role": "user", "content": "hi"}]});
+    assert!(ensure_request_body_size(&small).is_ok());
+    let big = json!({"messages": [{"role": "user", "content": "x".repeat(4096)}]});
+    let error = ensure_request_body_size(&big).unwrap_err();
+    assert!(error.contains("过大"), "{error}");
+    match saved {
+        Some(value) => std::env::set_var("OWO_MODEL_MAX_REQUEST_BYTES", value),
+        None => std::env::remove_var("OWO_MODEL_MAX_REQUEST_BYTES"),
+    }
+}
+
+#[tokio::test]
 async fn resilient_provider_preserves_non_stream_request_metadata() {
     let provider = ResilientProvider::new(
         Arc::new(ObservedGatewayTestProvider),
