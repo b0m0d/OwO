@@ -559,7 +559,8 @@ use interaction::{AskUserTool, UseSkillTool};
 mod tests {
     use super::verification_tool::validate_single_request_coverage;
     use super::workspace_edit::{
-        apply_hunks, parse_patch, path_in_whitelist, write_file_body, PatchHunk, PatchOp,
+        align_new_lines, apply_hunks, match_edit_fragment, parse_patch, path_in_whitelist,
+        write_file_body, PatchHunk, PatchOp,
     };
     use super::*;
 
@@ -1587,6 +1588,30 @@ mod tests {
             strip_verbatim_prefix(Path::new("/home/ws/src/a.rs")),
             PathBuf::from("/home/ws/src/a.rs")
         );
+    }
+
+    #[test]
+    fn edit_fragment_tolerates_crlf_lf_mismatch_and_keeps_line_style() {
+        // 文件 CRLF、模型给 LF 片段 → 唯一命中，new 沿用 CRLF。
+        let original = "alpha\r\nbeta\r\ngamma\r\n";
+        let (matched, count) = match_edit_fragment(original, "beta\ngamma");
+        assert_eq!(count, 1);
+        assert_eq!(matched, "beta\r\ngamma");
+        assert_eq!(
+            align_new_lines(&matched, "beta2\ngamma2"),
+            "beta2\r\ngamma2"
+        );
+
+        // 文件 LF、模型给 CRLF 片段 → 命中且 new 归一为 LF。
+        let original_lf = "alpha\nbeta\ngamma\n";
+        let (matched_lf, count_lf) = match_edit_fragment(original_lf, "beta\r\ngamma");
+        assert_eq!(count_lf, 1);
+        assert_eq!(matched_lf, "beta\ngamma");
+        assert_eq!(align_new_lines(&matched_lf, "b\r\ng"), "b\ng");
+
+        // 精确命中保持原样；完全不存在仍为 0。
+        assert_eq!(match_edit_fragment(original, "beta\r\ngamma").1, 1);
+        assert_eq!(match_edit_fragment(original, "not-there").1, 0);
     }
 
     #[test]
