@@ -80,12 +80,13 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new(config: AnthropicConfig) -> Result<Self, String> {
-        let (client, has_proxy) = build_model_http_client(10, 180)?;
+        // 客户端不设总超时：SSE 流式响应不能被固定墙钟截断；非流式请求在
+        // post_messages 内按请求设置 180s 总超时，流式由逐块空闲超时守护。
+        let (client, has_proxy) = build_model_http_client(10, None)?;
         let direct_client = if has_proxy {
             Some(
                 reqwest::Client::builder()
                     .connect_timeout(std::time::Duration::from_secs(10))
-                    .timeout(std::time::Duration::from_secs(180))
                     .build()
                     .map_err(|e| format!("直连 HTTP 客户端创建失败：{e}"))?,
             )
@@ -152,7 +153,10 @@ impl AnthropicProvider {
     }
 
     /// 发送 `/v1/messages` 请求：代理优先、失败切直连重试一次（与 OpenAI 通道一致）。
-    async fn post_messages(&self, body: &Value) -> Result<reqwest::Response, String> {
+    ///
+    /// `stream=true` 时不设置请求级总超时：reqwest 的 `.timeout()` 覆盖整个响应体
+    /// 读取，SSE 长回答会被固定墙钟截断（长程任务实测 Body TimedOut）。
+    async fn post_messages(&self, body: &Value, stream: bool) -> Result<reqwest::Response, String> {
         let url = format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'));
         let mut last_error = String::new();
         let attempts: Vec<(&str, &reqwest::Client)> = {
@@ -163,12 +167,14 @@ impl AnthropicProvider {
             list
         };
         for (label, client) in attempts {
-            let request = client
+            let mut request = client
                 .post(&url)
                 .json(body)
-                .timeout(std::time::Duration::from_secs(180))
                 .header("x-api-key", &self.config.api_key)
                 .header("anthropic-version", api_version());
+            if !stream {
+                request = request.timeout(std::time::Duration::from_secs(180));
+            }
             match request.send().await {
                 Ok(response) if response.status().is_success() => return Ok(response),
                 Ok(response) => {
@@ -366,7 +372,7 @@ pub fn build_request_body(
 }
 
 /// 非流式响应 → ModelOutput：content blocks 拼接文本与 tool_use。
-fn parse_response_content(payload: &Value) -> Result<ModelOutput, String> {
+fn parse_response_content(payload: &Value, tools: &[ToolSpec]) -> Result<ModelOutput, String> {
     if payload.get("type").and_then(Value::as_str) == Some("error") {
         let detail = payload
             .pointer("/error/message")
@@ -391,14 +397,20 @@ fn parse_response_content(payload: &Value) -> Result<ModelOutput, String> {
                 let id = block
                     .get("id")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "Anthropic tool_use 缺少有效 id".to_string())?
                     .to_string();
                 let name = block
                     .get("name")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| format!("Anthropic tool_use {id} 缺少有效 name"))?
                     .to_string();
-                let arguments = block.get("input").cloned().unwrap_or(Value::Null);
+                let arguments = block
+                    .get("input")
+                    .filter(|value| value.is_object())
+                    .cloned()
+                    .ok_or_else(|| format!("Anthropic 工具 {name} input 必须是 JSON 对象"))?;
                 tool_calls.push(ToolCall {
                     id,
                     name,
@@ -409,7 +421,9 @@ fn parse_response_content(payload: &Value) -> Result<ModelOutput, String> {
         }
     }
     if !tool_calls.is_empty() {
-        Ok(ModelOutput::ToolCalls(tool_calls))
+        Ok(ModelOutput::ToolCalls(crate::gateway::validate_tool_calls(
+            tool_calls, tools,
+        )?))
     } else if payload.get("stop_reason").and_then(Value::as_str) == Some("max_tokens") {
         // 截断也要给出可见文本，而不是报「既无文本也无工具调用」。
         Ok(ModelOutput::Text(text))
@@ -506,27 +520,46 @@ impl AnthStreamState {
         }
     }
 
-    fn into_output(mut self) -> ModelOutput {
+    fn into_output(mut self, tools: &[ToolSpec]) -> Result<ModelOutput, String> {
         // tool_use 块按 index 排序输出。
         if !self.tool_blocks.is_empty() {
             let mut calls: Vec<(u64, ToolCall)> = self
                 .tool_blocks
                 .drain()
                 .map(|(index, (id, name, args))| {
-                    (
+                    if id.trim().is_empty() {
+                        return Err("Anthropic 流式 tool_use 缺少有效 id".to_string());
+                    }
+                    if name.trim().is_empty() {
+                        return Err(format!("Anthropic 流式 tool_use {id} 缺少有效 name"));
+                    }
+                    let arguments = if args.trim().is_empty() {
+                        Value::Object(serde_json::Map::new())
+                    } else {
+                        serde_json::from_str::<Value>(&args).map_err(|error| {
+                            format!("Anthropic 工具 {name} 参数 JSON 非法：{error}")
+                        })?
+                    };
+                    if !arguments.is_object() {
+                        return Err(format!("Anthropic 工具 {name} input 必须是 JSON 对象"));
+                    }
+                    Ok((
                         index,
                         ToolCall {
                             id,
                             name,
-                            arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
+                            arguments,
                         },
-                    )
+                    ))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>()?;
             calls.sort_by_key(|(index, _)| *index);
-            return ModelOutput::ToolCalls(calls.into_iter().map(|(_, call)| call).collect());
+            let calls = calls.into_iter().map(|(_, call)| call).collect();
+            return Ok(ModelOutput::ToolCalls(crate::gateway::validate_tool_calls(
+                calls, tools,
+            )?));
         }
-        ModelOutput::Text(std::mem::take(&mut self.content))
+        Ok(ModelOutput::Text(std::mem::take(&mut self.content)))
     }
 }
 
@@ -541,7 +574,7 @@ impl ModelProvider for AnthropicProvider {
             return Err("云端模型已禁用（数据出境开关关闭）".to_string());
         }
         let body = build_request_body(&self.config, messages, tools, false);
-        let response = self.post_messages(&body).await?;
+        let response = self.post_messages(&body, false).await?;
         let payload: Value = response
             .json()
             .await
@@ -549,7 +582,7 @@ impl ModelProvider for AnthropicProvider {
         if let Some(usage) = payload.get("usage") {
             self.record_usage(usage);
         }
-        parse_response_content(&payload)
+        parse_response_content(&payload, tools)
     }
 
     async fn complete_stream_with_reasoning(
@@ -562,7 +595,7 @@ impl ModelProvider for AnthropicProvider {
             return Err("云端模型已禁用（数据出境开关关闭）".to_string());
         }
         let body = build_request_body(&self.config, messages, tools, true);
-        let response = self.post_messages(&body).await?;
+        let response = self.post_messages(&body, true).await?;
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut utf8_pending = Vec::new();
@@ -630,7 +663,7 @@ impl ModelProvider for AnthropicProvider {
         if let Some(usage) = state.usage.clone() {
             self.record_usage(&usage);
         }
-        Ok(state.into_output())
+        state.into_output(tools)
     }
 
     fn usage_snapshot(&self) -> TokenUsage {
@@ -726,6 +759,44 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_request_uses_the_same_registry_tool_contracts() {
+        let specs = crate::tools::ToolRegistry::new().specs();
+        let body = build_request_body(&config(), &[], &specs, false);
+        let sent = body["tools"].as_array().unwrap();
+        assert_eq!(sent.len(), specs.len());
+        for (entry, spec) in sent.iter().zip(&specs) {
+            assert_eq!(entry["name"], spec.name);
+            assert_eq!(entry["description"], spec.description);
+            assert_eq!(entry["input_schema"], spec.input_schema);
+            assert_eq!(entry["input_schema"]["type"], "object");
+        }
+        let verification = sent
+            .iter()
+            .find(|entry| entry["name"] == "verification_plan")
+            .unwrap();
+        let requirement = &verification["input_schema"]["properties"]["plan"]["properties"]
+            ["requirements"]["items"];
+        let actual_validator_ids: std::collections::BTreeSet<_> = requirement["properties"]
+            ["validator_id"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let expected_validator_ids: std::collections::BTreeSet<_> =
+            crate::verification::workspace_validator_contracts()
+                .iter()
+                .map(|contract| contract.validator_id)
+                .chain(std::iter::once(
+                    crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID,
+                ))
+                .collect();
+        assert_eq!(actual_validator_ids, expected_validator_ids);
+        assert_eq!(requirement["properties"]["arguments"]["type"], "object");
+        assert!(requirement.get("anyOf").is_none());
+    }
+
+    #[test]
     fn images_convert_to_image_blocks() {
         let messages = vec![ChatMessage::user_with_images(
             "这是什么".to_string(),
@@ -755,7 +826,9 @@ mod tests {
         state.feed(r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"pa"}}"#);
         state.feed(r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ttern\":\"x\"}"}}"#);
         state.feed(r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}"#);
-        let output = state.into_output();
+        let output = state
+            .into_output(&crate::tools::ToolRegistry::new().specs())
+            .unwrap();
         match output {
             ModelOutput::ToolCalls(calls) => {
                 assert_eq!(calls.len(), 1);
@@ -776,7 +849,8 @@ mod tests {
             ],
             "stop_reason": "tool_use"
         });
-        let output = parse_response_content(&payload).unwrap();
+        let output =
+            parse_response_content(&payload, &crate::tools::ToolRegistry::new().specs()).unwrap();
         match output {
             ModelOutput::ToolCalls(calls) => {
                 assert_eq!(calls[0].name, "run_command");
@@ -787,10 +861,46 @@ mod tests {
     }
 
     #[test]
+    fn malformed_anthropic_tool_uses_are_rejected_instead_of_defaulted() {
+        let tools = crate::tools::ToolRegistry::new().specs();
+        let missing_id = json!({
+            "content": [{
+                "type": "tool_use",
+                "id": "",
+                "name": "read_file",
+                "input": {"path": "README.md"}
+            }],
+            "stop_reason": "tool_use"
+        });
+        assert!(parse_response_content(&missing_id, &tools)
+            .unwrap_err()
+            .contains("有效 id"));
+
+        let invalid_input = json!({
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "read_file",
+                "input": null
+            }],
+            "stop_reason": "tool_use"
+        });
+        assert!(parse_response_content(&invalid_input, &tools)
+            .unwrap_err()
+            .contains("JSON 对象"));
+
+        let mut state = AnthStreamState::default();
+        state.feed(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_2","name":"read_file"}}"#);
+        state.feed(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{bad"}}"#);
+        assert!(state.into_output(&tools).unwrap_err().contains("JSON 非法"));
+    }
+
+    #[test]
     fn error_payload_maps_to_message() {
         let payload =
             json!({ "type": "error", "error": { "type": "rate_limit_error", "message": "限流" } });
-        let error = parse_response_content(&payload).unwrap_err();
+        let error = parse_response_content(&payload, &crate::tools::ToolRegistry::new().specs())
+            .unwrap_err();
         assert!(error.contains("限流"), "{error}");
     }
 }

@@ -360,6 +360,7 @@ pub(super) async fn load_parent_core_specs(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // 测试模块历史位置靠前；移动会打乱同文件阅读顺序
 mod tests {
     use super::load_parent_core_specs;
     use crate::cas_store::CasStore;

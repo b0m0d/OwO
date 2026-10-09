@@ -77,7 +77,7 @@ window.OwoPanels.memory = (function () {
       '<div class="sub">从情景记忆挖掘技能包（观察动作序列 → 泛化 → 沉淀；需先有观察样本）</div>' +
       '<div class="owo-memory-row"><input id="owo-memory-mine-name" placeholder="技能名（如 send-file）" style="flex:1">' +
       '<select id="owo-memory-mine-sensitivity"><option value="low">低敏感</option><option value="medium">中敏感</option><option value="high">高敏感</option></select>' +
-      '<button class="primary" id="owo-memory-mine-btn">挖掘</button></div>' +
+      '<button class="primary" id="owo-memory-mine-btn" data-core-action>挖掘</button></div>' +
       '<div class="owo-memory-row"><input id="owo-memory-mine-apps" placeholder="目标应用，逗号分隔（如 qq）" style="flex:1">' +
       '<input id="owo-memory-mine-desc" placeholder="描述（可选）" style="flex:1"></div>' +
       '<div id="owo-memory-mine-result" class="sub"></div>' +
@@ -91,10 +91,12 @@ window.OwoPanels.memory = (function () {
       '<div class="owo-memory-row"><input id="owo-memory-rel-a" placeholder="实体A" style="flex:1">' +
       '<input id="owo-memory-rel-b" placeholder="实体B" style="flex:1">' +
       '<input id="owo-memory-rel-r" placeholder="关系（如：约定）" style="flex:1">' +
-      '<button id="owo-memory-rel-add">添加</button></div>' +
+      '<button id="owo-memory-rel-add" data-core-action>添加</button></div>' +
       '<div id="owo-memory-relations"></div>' +
       '<div class="sub">条目（app/时间过滤）</div>' +
-      '<div class="owo-memory-row"><input id="owo-memory-app" placeholder="app（如 qq）" style="flex:1">' +
+      '<div class="owo-memory-row"><input id="owo-memory-app" placeholder="app（如 qq）" aria-label="应用过滤" style="flex:1">' +
+      '<input id="owo-memory-from" type="date" aria-label="开始日期" title="开始日期（含当天）">' +
+      '<input id="owo-memory-to" type="date" aria-label="结束日期" title="结束日期（含当天）">' +
       '<button id="owo-memory-refresh">刷新</button></div>' +
       '<div id="owo-memory-entries" class="list"></div>' +
       "</div>"
@@ -296,10 +298,27 @@ window.OwoPanels.memory = (function () {
     var request = ++entriesGeneration;
     var owner = panelGeneration;
     var app = document.getElementById("owo-memory-app");
-    var query = (app && app.value.trim()) ? "?app=" + encodeURIComponent(app.value.trim()) : "";
+    var from = document.getElementById("owo-memory-from");
+    var to = document.getElementById("owo-memory-to");
+    var fromValue = (from && from.value.trim()) || "";
+    var toValue = (to && to.value.trim()) || "";
     var list = document.getElementById("owo-memory-entries");
+    if ((fromValue && !/^\d{4}-\d{2}-\d{2}$/.test(fromValue)) ||
+        (toValue && !/^\d{4}-\d{2}-\d{2}$/.test(toValue))) {
+      if (list) list.textContent = "日期格式无效，请重新选择日期";
+      return Promise.resolve();
+    }
+    if (fromValue && toValue && fromValue > toValue) {
+      if (list) list.textContent = "开始日期不能晚于结束日期";
+      return Promise.resolve();
+    }
+    var params = [];
+    if (app && app.value.trim()) params.push("app=" + encodeURIComponent(app.value.trim()));
+    if (fromValue) params.push("from=" + encodeURIComponent(fromValue));
+    if (toValue) params.push("to=" + encodeURIComponent(toValue));
+    params.push("limit=50");
     if (list) list.textContent = "正在加载条目…";
-    return H.get("/memory/graph/entries" + query + (query ? "&" : "?") + "limit=50")
+    return H.get("/memory/graph/entries?" + params.join("&"))
       .then(function (data) {
         if (request !== entriesGeneration || owner !== panelGeneration) return;
         var current = document.getElementById("owo-memory-entries");

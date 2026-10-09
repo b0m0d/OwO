@@ -10,8 +10,8 @@ pub(super) struct PreparedCall {
     pub(super) reason: String,
     /// 循环保护拦截原因（Some = 本调用被宿主拦截，不执行、不审批）。
     ///
-    /// Loop protection for a model that repeats the exact same failed tool call.
-    /// The host reports the repeated call back so the model can change strategy.
+    /// A host-side pre-execution rejection (loop guard, schema check, or hook).
+    /// The model receives the reason as a tool result and may repair its call.
     pub(super) guard_error: Option<String>,
 }
 

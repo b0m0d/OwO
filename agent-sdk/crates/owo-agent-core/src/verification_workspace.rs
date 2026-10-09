@@ -5,11 +5,15 @@ use crate::plan::{ValidationVerdictV1, VerificationRequirementV1, VerificationSc
 use crate::workspace_snapshot::{
     workspace_relative_key, MAX_FILE_BYTES, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_PATHS,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Shared path bounds used by the provider schema, plan gate, and workspace executor.
+pub const MIN_WORKSPACE_VALIDATION_PATHS: usize = 1;
+pub const MAX_WORKSPACE_VALIDATION_PATHS: usize = 16;
 
 #[derive(Debug, Clone)]
 enum WorkspaceReadFailure {
@@ -178,12 +182,16 @@ impl WorkspaceValidationBatch {
         let started = std::time::Instant::now();
         let paths = match &requirement.scope {
             VerificationScopeV1::WorkspacePaths { relative_paths }
-                if !relative_paths.is_empty() && relative_paths.len() <= 16 =>
+                if (MIN_WORKSPACE_VALIDATION_PATHS..=MAX_WORKSPACE_VALIDATION_PATHS)
+                    .contains(&relative_paths.len()) =>
             {
                 relative_paths
             }
             _ => {
-                return unsupported("workspace validator 要求 1..=16 个 WorkspacePaths".to_string())
+                return unsupported(format!(
+                    "workspace validator 要求 {}..={} 个 WorkspacePaths",
+                    MIN_WORKSPACE_VALIDATION_PATHS, MAX_WORKSPACE_VALIDATION_PATHS
+                ));
             }
         };
         if self.root.is_none() {
@@ -193,11 +201,11 @@ impl WorkspaceValidationBatch {
                 BTreeMap::new(),
             );
         }
-        if !workspace_validator_arguments_supported(
+        if let Err(error) = validate_workspace_validator_arguments(
             &requirement.validator_id,
             &requirement.arguments,
         ) {
-            return unsupported("workspace validator 参数不符合宿主注册契约".to_string());
+            return unsupported(error);
         }
         let expected_text = match requirement.validator_id.as_str() {
             "workspace-file-exists-v1" | "workspace-file-non-empty-v1" => {
@@ -254,12 +262,12 @@ impl WorkspaceValidationBatch {
             "workspace-command-success-v1" => {
                 return unsupported(
                     "workspace-command-success-v1 必须由 DeliveryGate 消费宿主命令回执".to_string(),
-                )
+                );
             }
             unknown => {
                 return unsupported(format!(
                     "workspace validator「{unknown}」未注册，当前为 unsupported/unverified"
-                ))
+                ));
             }
         };
 
@@ -325,42 +333,89 @@ impl WorkspaceValidationBatch {
     }
 }
 
-pub fn workspace_validator_arguments_supported(validator_id: &str, arguments: &Value) -> bool {
-    match validator_id {
-        "workspace-file-exists-v1" | "workspace-file-non-empty-v1" => arguments
-            .as_object()
-            .is_some_and(|object| object.is_empty()),
-        "workspace-file-contains-v1" => exact_string_argument(arguments, "text")
-            .is_some_and(|text| !text.is_empty() && text.len() <= 2_048),
-        "workspace-json-field-equals-v1" => arguments.as_object().is_some_and(|object| {
-            object.len() == 2
-                && object
-                    .get("field")
-                    .and_then(Value::as_str)
-                    .is_some_and(|field| {
-                        !field.is_empty() && field.len() <= 128 && !field.contains('.')
-                    })
-                && object
-                    .get("expected")
-                    .and_then(Value::as_str)
-                    .is_some_and(|expected| expected.len() <= 1_024)
-        }),
-        "workspace-command-success-v1" => {
-            exact_string_argument(arguments, "command").is_some_and(is_registered_behavior_command)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceValidatorArgumentKind {
+    Empty,
+    Text,
+    JsonFieldEquals,
+    RegisteredCommand,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceValidatorContract {
+    pub validator_id: &'static str,
+    pub arguments: WorkspaceValidatorArgumentKind,
+}
+impl WorkspaceValidatorContract {
+    pub fn arguments_schema(self) -> Value {
+        match self.arguments {
+            WorkspaceValidatorArgumentKind::Empty => {
+                json!({"type":"object","properties":{},"additionalProperties":false})
+            }
+            WorkspaceValidatorArgumentKind::Text => {
+                json!({"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":2048,"description":"文件中必须出现的精确文本"}},"required":["text"],"additionalProperties":false})
+            }
+            WorkspaceValidatorArgumentKind::JsonFieldEquals => {
+                json!({"type":"object","properties":{"field":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[^.]+$","description":"JSON 顶层字段名"},"expected":{"type":"string","maxLength":1024,"description":"该字段应有的字符串值"}},"required":["field","expected"],"additionalProperties":false})
+            }
+            WorkspaceValidatorArgumentKind::RegisteredCommand => {
+                json!({"type":"object","properties":{"command":{"type":"string","minLength":1,"maxLength":512,"description":"宿主允许的行为检查命令，如 cargo test、npm test 或 python -m pytest；禁止 shell 链接和绕过测试的参数"}},"required":["command"],"additionalProperties":false})
+            }
         }
-        _ => false,
     }
 }
+pub fn workspace_validator_contracts() -> &'static [WorkspaceValidatorContract] {
+    const CONTRACTS: &[WorkspaceValidatorContract] = &[
+        WorkspaceValidatorContract {
+            validator_id: "workspace-file-exists-v1",
+            arguments: WorkspaceValidatorArgumentKind::Empty,
+        },
+        WorkspaceValidatorContract {
+            validator_id: "workspace-file-non-empty-v1",
+            arguments: WorkspaceValidatorArgumentKind::Empty,
+        },
+        WorkspaceValidatorContract {
+            validator_id: "workspace-file-contains-v1",
+            arguments: WorkspaceValidatorArgumentKind::Text,
+        },
+        WorkspaceValidatorContract {
+            validator_id: "workspace-json-field-equals-v1",
+            arguments: WorkspaceValidatorArgumentKind::JsonFieldEquals,
+        },
+        WorkspaceValidatorContract {
+            validator_id: "workspace-command-success-v1",
+            arguments: WorkspaceValidatorArgumentKind::RegisteredCommand,
+        },
+    ];
+    CONTRACTS
+}
+pub fn validate_workspace_validator_arguments(
+    validator_id: &str,
+    arguments: &Value,
+) -> Result<(), String> {
+    let contract = workspace_validator_contracts()
+        .iter()
+        .find(|item| item.validator_id == validator_id)
+        .ok_or_else(|| format!("validator {validator_id} is not registered"))?;
+    crate::json_schema::validate(arguments, &contract.arguments_schema(), "arguments")
+        .map_err(|error| format!("validator {validator_id}: {error}"))?;
+    // A JSON Schema describes the command shape; the host registry controls execution.
+    if contract.arguments == WorkspaceValidatorArgumentKind::RegisteredCommand
+        && !exact_string_argument(arguments, "command").is_some_and(is_registered_behavior_command)
+    {
+        return Err(format!(
+            "validator {validator_id}: command is not in the host behavior-command registry"
+        ));
+    }
+    Ok(())
+}
 
+pub fn workspace_validator_arguments_supported(validator_id: &str, arguments: &Value) -> bool {
+    validate_workspace_validator_arguments(validator_id, arguments).is_ok()
+}
 pub fn is_registered_workspace_validator(validator_id: &str) -> bool {
-    matches!(
-        validator_id,
-        "workspace-file-exists-v1"
-            | "workspace-file-non-empty-v1"
-            | "workspace-file-contains-v1"
-            | "workspace-json-field-equals-v1"
-            | "workspace-command-success-v1"
-    )
+    workspace_validator_contracts()
+        .iter()
+        .any(|item| item.validator_id == validator_id)
 }
 
 /// Execute only the host-registered, read-only workspace validators. The scope is

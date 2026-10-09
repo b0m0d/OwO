@@ -98,10 +98,7 @@ pub trait Tool: Send + Sync {
 
 #[path = "tools/tool_host.rs"]
 mod tool_host;
-pub(crate) use tool_host::{
-    ToolApprovalGrant, ToolCapability, ToolCapabilityContext, ToolHostService, ToolReceipt,
-    ToolReceiptSink,
-};
+pub(crate) use tool_host::{ToolApprovalGrant, ToolCapabilityContext, ToolHostService};
 
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
@@ -272,12 +269,22 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: impl Tool + 'static) {
-        self.tools.push(Arc::new(tool));
+        self.register_arc(Arc::new(tool));
     }
 
-    /// 注册由宿主构造的共享工具实例；执行仍经 ToolHost 与审批/审计门控。
+    /// 注册由宿主构造的共享工具实例；同名时替换原实例，保证模型清单与
+    /// 按名称查找的执行器始终指向同一个定义（尤其是 MCP 热重连）。
     pub fn register_arc(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.push(tool);
+        let name = tool.spec().name;
+        if let Some(index) = self
+            .tools
+            .iter()
+            .position(|registered| registered.spec().name == name)
+        {
+            self.tools[index] = tool;
+        } else {
+            self.tools.push(tool);
+        }
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -315,10 +322,11 @@ impl ToolRegistry {
 
     /// 把 MCP 服务器暴露的工具注册为 Agent 工具（命名：`{server}_{tool}`）。
     ///
-    /// 延迟加载（M2）：单工具 schema 超过 `schema_budget_bytes` 时，注册为模型可见的
-    /// **压缩骨架**（仅保留 type/required/属性名+属性类型，剔除 description/enum/嵌套细节），
-    /// 完整 schema 保留在 `full_schemas` 供 `full_schema()` 按需查询——大 schema 服务不
-    /// 显著占用模型上下文；调用工具时仍以完整 schema 校验。
+    /// 延迟加载（M2）：单工具 schema 超过 `schema_budget_bytes` 时，从模型可见
+    /// schema 中只剥离说明性元数据（description/examples/default/title/$schema），
+    /// 保留 properties、items、required、enum、additionalProperties 等完整约束。
+    /// 完整原始 schema 仍保存在 `full_schemas` 供 `full_schema()` 查询。安全压缩后
+    /// 若仍超过预算，优先保证模型获得可执行的参数契约，不再删除校验语义。
     pub fn register_mcp_tools(
         &mut self,
         server_name: &str,
@@ -374,10 +382,11 @@ impl ToolRegistry {
                 input_schema,
                 effect: Some(effect),
             };
+            self.full_schemas.remove(&full_name);
             if let Some(full) = full_schema {
                 self.full_schemas.insert(full_name.clone(), full);
             }
-            self.tools.push(Arc::new(McpToolAdapter {
+            self.register_arc(Arc::new(McpToolAdapter {
                 full_name,
                 server_name: server_name.to_string(),
                 tool_name: tool.name,
@@ -416,7 +425,7 @@ impl ToolRegistry {
             let full_name = format!("{prefix}_read_resource");
             let effect =
                 crate::tool_effects::register_mcp_effect(server_name, "read_resource", None, false);
-            self.tools.push(Arc::new(McpResourceAdapter {
+            self.register_arc(Arc::new(McpResourceAdapter {
                 full_name: full_name.clone(),
                 server_name: server_name.to_string(),
                 spec: ToolSpec {
@@ -446,7 +455,7 @@ impl ToolRegistry {
             let full_name = format!("{prefix}_get_prompt");
             let effect =
                 crate::tool_effects::register_mcp_effect(server_name, "get_prompt", None, false);
-            self.tools.push(Arc::new(McpPromptAdapter {
+            self.register_arc(Arc::new(McpPromptAdapter {
                 full_name: full_name.clone(),
                 server_name: server_name.to_string(),
                 spec: ToolSpec {
@@ -522,33 +531,31 @@ pub fn schema_bytes(schema: &Value) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-/// 把 JSON Schema 压缩为模型可见的骨架：仅保留 `type`、`required` 与
-/// 属性名+属性类型（字符串属性类型；嵌套对象/数组仅保留层级 type）。
-/// 剔除 description / enum / pattern / 嵌套细节，体积大幅缩小。
-/// 非对象 schema 原样返回（按需加载不适用）。
+/// 安全压缩 JSON Schema：递归删除说明性元数据，完整保留类型、必填项、
+/// enum、数组/对象嵌套、additionalProperties 和其他校验关键字。
+/// 若校验语义本身超过预算，允许结果继续超预算，不能把错误契约发给模型。
 pub fn compact_schema(schema: &Value) -> Value {
-    let Value::Object(map) = schema else {
-        return schema.clone();
-    };
-    let mut compact = serde_json::Map::new();
-    if let Some(t) = map.get("type") {
-        compact.insert("type".to_string(), t.clone());
-    }
-    if let Some(required) = map.get("required") {
-        compact.insert("required".to_string(), required.clone());
-    }
-    if let Some(properties) = map.get("properties").and_then(Value::as_object) {
-        let mut props = serde_json::Map::new();
-        for (name, property) in properties {
-            let mut item = serde_json::Map::new();
-            if let Some(t) = property.get("type") {
-                item.insert("type".to_string(), t.clone());
+    fn strip_annotations(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut compact = serde_json::Map::new();
+                for (key, child) in map {
+                    if matches!(
+                        key.as_str(),
+                        "description" | "examples" | "default" | "title" | "$schema"
+                    ) {
+                        continue;
+                    }
+                    compact.insert(key.clone(), strip_annotations(child));
+                }
+                Value::Object(compact)
             }
-            props.insert(name.clone(), Value::Object(item));
+            Value::Array(items) => Value::Array(items.iter().map(strip_annotations).collect()),
+            other => other.clone(),
         }
-        compact.insert("properties".to_string(), Value::Object(props));
     }
-    Value::Object(compact)
+
+    strip_annotations(schema)
 }
 
 /// 以会话工作区为基座解析相对路径，并做策略工作区越界检查。
@@ -600,8 +607,7 @@ pub(crate) fn resolve_session_path(ctx: &ToolContext, path: &str) -> Result<Path
 #[path = "tools/workspace_edit.rs"]
 mod workspace_edit;
 use workspace_edit::{
-    apply_hunks, parse_patch, patch_op_path, path_in_whitelist, strip_verbatim_prefix,
-    write_file_body, ApplyPatchTool, EditFileTool, MultiEditTool, PatchHunk, PatchOp, ReadFileTool,
+    strip_verbatim_prefix, ApplyPatchTool, EditFileTool, MultiEditTool, ReadFileTool,
     WhitelistApplyPatchTool, WhitelistWriteFileTool, WriteFileTool,
 };
 
@@ -620,7 +626,7 @@ use image::ReadImageTool;
 #[path = "tools/verification_tool.rs"]
 mod verification_tool;
 pub(crate) use verification_tool::validate_single_verification_plan;
-use verification_tool::{validate_single_request_coverage, SingleVerificationPlanTool};
+use verification_tool::SingleVerificationPlanTool;
 
 #[path = "tools/todo.rs"]
 mod todo;
@@ -702,6 +708,10 @@ fn tool_sandbox_policy(ctx: &ToolContext<'_>, name: &str) -> crate::sandbox::San
 /// 回合会挂起直到用户答复或超时；无 UI 通道时明确报错，让模型改为书面提问。
 #[cfg(test)]
 mod tests {
+    use super::verification_tool::validate_single_request_coverage;
+    use super::workspace_edit::{
+        apply_hunks, parse_patch, path_in_whitelist, write_file_body, PatchHunk, PatchOp,
+    };
     use super::*;
 
     fn sample_single_plan(validator_id: &str, arguments: Value) -> crate::plan::VerificationPlanV1 {
@@ -1133,6 +1143,7 @@ mod tests {
 
     struct NamedTool {
         name: String,
+        description: String,
     }
 
     #[async_trait]
@@ -1140,7 +1151,7 @@ mod tests {
         fn spec(&self) -> ToolSpec {
             ToolSpec {
                 name: self.name.clone(),
-                description: String::new(),
+                description: self.description.clone(),
                 input_schema: serde_json::json!({}),
                 effect: None,
             }
@@ -1163,6 +1174,7 @@ mod tests {
         let registry = Arc::new(RwLock::new(ToolRegistry::empty()));
         registry.write().unwrap().register(NamedTool {
             name: "contract_probe".to_string(),
+            description: String::new(),
         });
         let audit = Arc::new(Mutex::new(crate::AuditLog::default()));
         let host = ToolHostService::new(Arc::clone(&registry), Arc::clone(&audit));
@@ -1546,16 +1558,42 @@ mod tests {
     }
 
     #[test]
+    fn same_name_registration_replaces_definition_without_duplicate_model_tools() {
+        let mut registry = ToolRegistry::empty();
+        registry.register(NamedTool {
+            name: "reloadable_tool".to_string(),
+            description: "old definition".to_string(),
+        });
+        registry.register(NamedTool {
+            name: "reloadable_tool".to_string(),
+            description: "new definition".to_string(),
+        });
+
+        let specs = registry.specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "reloadable_tool");
+        assert_eq!(specs[0].description, "new definition");
+        assert_eq!(
+            registry.get("reloadable_tool").unwrap().spec().description,
+            specs[0].description,
+            "模型看到的定义和执行器按名取到的定义必须一致"
+        );
+    }
+
+    #[test]
     fn remove_prefix_unregisters_only_matching_tools() {
         let mut registry = ToolRegistry::new();
         registry.register(NamedTool {
             name: "owo_plugin_demo_translate".to_string(),
+            description: String::new(),
         });
         registry.register(NamedTool {
             name: "owo_plugin_demo_clipboard".to_string(),
+            description: String::new(),
         });
         registry.register(NamedTool {
             name: "builtin_tool".to_string(),
+            description: String::new(),
         });
         let removed = registry.remove_prefix("owo_plugin_demo_");
         assert_eq!(removed, 2);
@@ -1757,6 +1795,62 @@ mod tests {
             }],
         );
         assert!(missing.is_err(), "未命中必须报错");
+    }
+
+    #[test]
+    fn compact_schema_preserves_nested_parameter_contracts() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["query"],
+            "additionalProperties": false,
+            "properties": {
+                "query": {
+                    "type": "object",
+                    "required": ["mode"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["exact", "fuzzy"],
+                            "description": "remove annotation"
+                        },
+                        "filters": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["field"],
+                                "properties": {
+                                    "field": {"type": "string", "minLength": 1}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let compact = compact_schema(&schema);
+        assert_eq!(compact["required"], serde_json::json!(["query"]));
+        assert_eq!(compact["additionalProperties"], false);
+        assert_eq!(
+            compact["properties"]["query"]["required"],
+            serde_json::json!(["mode"])
+        );
+        assert_eq!(
+            compact["properties"]["query"]["properties"]["mode"]["enum"],
+            serde_json::json!(["exact", "fuzzy"])
+        );
+        assert_eq!(
+            compact["properties"]["query"]["properties"]["filters"]["items"]["required"],
+            serde_json::json!(["field"])
+        );
+        assert_eq!(
+            compact["properties"]["query"]["properties"]["filters"]["items"]["properties"]["field"]
+                ["minLength"],
+            1
+        );
+        assert!(compact["properties"]["query"]["properties"]["mode"]
+            .get("description")
+            .is_none());
     }
 
     #[test]

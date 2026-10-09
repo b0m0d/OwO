@@ -227,6 +227,7 @@ fn review_rework_budget_exhausted(attempt: u64, max_retries_per_step: u32) -> bo
 
 /// Stable for replay of one review result, distinct when the source review or
 /// target attempt changes so a previously resolved issue cannot suppress recurrence.
+#[allow(clippy::too_many_arguments)] // 身份由全部来源字段共同构成，缺一不可
 fn delivery_issue_id(
     team_id: &str,
     source_review_artifact_id: &str,

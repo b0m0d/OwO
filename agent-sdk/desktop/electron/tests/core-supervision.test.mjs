@@ -53,6 +53,16 @@ test("core_fatal 只接受 layer/name 形状的稳定码", () => {
   assert.equal(sup.parseFatalLine('{"event":"core_fatal","message":"无码"}'), null, "缺 code 不得静默通过");
 });
 
+test("认证握手：只有 HTTP 200 且取得 bearer token 才算 ready", () => {
+  assert.deepEqual(sup.authenticationState(200, "token-value"), { state: "ready" });
+  for (const [status, token] of [[403, ""], [401, ""], [200, ""], [0, ""]]) {
+    const state = sup.authenticationState(status, token);
+    assert.equal(state.state, "failed", `status=${status} token=${Boolean(token)} 不得标成 ready`);
+    assert.equal(state.errorCode, "core/authentication_failed");
+    assert.match(state.message, /认证握手|认证凭据/);
+  }
+});
+
 test("健康检查：版本一致且身份一致才放行", () => {
   assert.equal(sup.evaluateHealth({ healthy: true, api_version: "0.7", instance_id: "i1" }, { instanceId: "i1" }).ok, true);
 });
@@ -128,13 +138,20 @@ test("配置校验：结构性错误被拦下", () => {
   assert.equal(range.ok, false);
 });
 
-test("模型默认输出上限按可支持范围拒绝超过 32k 的值", () => {
-  const result = sup.validateConfig({
+test("默认输出上限保持 32k，并允许用户配置更大的模型输出预算", () => {
+  assert.equal(sup.DEFAULT_MODEL_OUTPUT_TOKENS, 32000);
+  assert.equal(sup.MAX_MODEL_OUTPUT_TOKENS, 1000000);
+  const larger = sup.validateConfig({
     version: 1,
-    model: { provider: "bigmodel", max_output_tokens: 32001 },
+    model: { provider: "bigmodel", max_output_tokens: 64000 },
   }, {});
-  assert.equal(result.ok, false);
-  assert.ok(result.errors.some((item) => item.includes("max_output_tokens")));
+  assert.equal(larger.ok, true, larger.errors.join(";"));
+  const tooLarge = sup.validateConfig({
+    version: 1,
+    model: { provider: "bigmodel", max_output_tokens: 1000001 },
+  }, {});
+  assert.equal(tooLarge.ok, false);
+  assert.ok(tooLarge.errors.some((item) => item.includes("max_output_tokens")));
 });
 
 test("配置校验：合法配置放行，缺凭据只告警不阻断", () => {

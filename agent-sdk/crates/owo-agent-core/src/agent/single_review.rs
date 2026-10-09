@@ -111,6 +111,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 评审请求需要完整绑定宿主身份/候选/预算，拆参数结构体只增加噪音
 pub(super) async fn review_candidate(
     provider: &Arc<dyn ModelProvider>,
     model: Option<&str>,
@@ -329,6 +330,7 @@ pub(super) async fn review_candidate(
     }
 }
 
+#[allow(clippy::type_complexity)] // 元组同时表达「快照或缺失原因」，就地消费，无需额外类型
 fn read_review_snapshot(
     session: &Session,
     expected_paths: &BTreeMap<String, String>,

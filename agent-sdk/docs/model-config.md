@@ -48,8 +48,8 @@ OwO Agent 的模型配置写在**一个独立配置文件**里，风格对齐 co
 | `api_key` | **可选**。填了就用它；留空则去读 `api_key_env` 指向的环境变量 |
 | `api_key_env` | 凭据环境变量名，缺省 `OPENAI_API_KEY` |
 | `context_window` | **上下文窗口（token）**。核心据此设置压缩预算；留空 = 核心默认 60000 |
-| `max_output_tokens` | 默认单次回复最大输出 token；缺省为 32000（32k），有效范围 1–32000 |
-| `model_output_tokens` | 可选的模型名 → 输出 token 上限映射；精确匹配实际请求模型，未配置时回退到默认值 |
+| `max_output_tokens` | 默认单次回复最大输出 token；缺省为 32000（32k），有效范围 1–1,000,000 |
+| `model_output_tokens` | 可选的模型名 → 输出 token 上限映射（每项 1–1,000,000）；精确匹配实际请求模型，未配置时回退到默认值 |
 | `temperature` | 采样温度（0–2）；留空 = 核心默认 |
 | `timeout_secs` | 单次模型请求超时秒数；留空 = 核心默认 |
 | `keep_recent` | 压缩时保留最近多少条消息；留空 = 核心默认 20 |
@@ -78,7 +78,7 @@ OwO Agent 的模型配置写在**一个独立配置文件**里，风格对齐 co
 | `keep_recent` | `OWO_AGENT_KEEP_RECENT` |
 | `compaction` | `OWO_AGENT_COMPACTION` |
 
-桌面端默认输出上限为 32000（32k）；`model_output_tokens` 可为不同模型单独覆盖。未填写的单模型项回退到默认值。
+桌面端默认输出上限为 32000（32k）；`model_output_tokens` 可为不同模型单独覆盖，应用配置范围为 1–1,000,000。未填写的单模型项回退到默认值。实际可用上限仍取决于所选模型与服务商；若超出其限制，服务商可能拒绝请求。
 
 ## 凭据优先级
 

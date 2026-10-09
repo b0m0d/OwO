@@ -100,7 +100,7 @@
         pick(global).then(
           (result) => {
             if (result.ok) {
-              input.value = aliasFor(result.workspace);
+              input.value = opts.displayAlias === false ? result.workspace : aliasFor(result.workspace);
               input.title = "当前项目：" + result.workspace;
               input.dataset.path = result.workspace;
               if (typeof opts.onPicked === "function") opts.onPicked(result.workspace, result);

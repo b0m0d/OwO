@@ -169,6 +169,18 @@ async fn entries_filter_by_app_and_time() {
     .await;
     assert_eq!(ranged["count"].as_u64().unwrap(), 1);
     assert_eq!(ranged["entries"][0]["app_id"], "browser");
+
+    // 日期边界覆盖当天，不会遗漏结束日期内的记录。
+    let same_day = fixture_day(4);
+    let (_, day_range) = call(
+        &app,
+        "GET",
+        &format!("/memory/graph/entries?from={}&to={}", same_day, same_day),
+        None,
+    )
+    .await;
+    assert_eq!(day_range["count"].as_u64().unwrap(), 1);
+    assert_eq!(day_range["entries"][0]["app_id"], "browser");
 }
 
 #[tokio::test]

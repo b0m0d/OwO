@@ -1,8 +1,8 @@
 //! Phase claim, lock-free execution and epoch-checked result merge.
 use super::coord_strategy::is_auto_reviewer_role;
 use super::task_graph::{
-    PARALLEL_LEADER_HOST_MANIFEST_SKIP_REASON, host_manifest_can_replace_integration,
-    parallel_tasks_require_integration,
+    host_manifest_can_replace_integration, parallel_tasks_require_integration,
+    PARALLEL_LEADER_HOST_MANIFEST_SKIP_REASON,
 };
 use super::*;
 

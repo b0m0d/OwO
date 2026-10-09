@@ -98,7 +98,7 @@ async fn status_and_result_reads_do_not_wait_for_queue_execution_lock() {
 async fn active_cancel_only_signals_runner_and_does_not_wait_for_queue_lock() {
     let (state, temp) = test_state().await;
     let task_id = persisted_queued_task(&state, &temp).await;
-    let (signal, mut receiver) = tokio::sync::watch::channel(false);
+    let (signal, receiver) = tokio::sync::watch::channel(false);
     state
         .cloud_cancel_signals
         .lock()

@@ -15,12 +15,29 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 
+AUTH_TOKEN = ""
+
+
+def auth_headers():
+    headers = {"Content-Type": "application/json"}
+    if AUTH_TOKEN:
+        headers["Authorization"] = "Bearer " + AUTH_TOKEN
+    return headers
+
+
+def bootstrap_token(endpoint):
+    """R7 bearer 引导（/auth/token 公开）；业务 API 一律带 Authorization。"""
+    global AUTH_TOKEN
+    with urllib.request.urlopen(endpoint + "/auth/token", timeout=30) as response:
+        AUTH_TOKEN = json.loads(response.read().decode("utf-8"))["token"]
+
+
 def post_json(endpoint, path, payload=None):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(
         endpoint + path,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=auth_headers(),
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -39,7 +56,7 @@ def run_one(endpoint, workspace, target, prompt, timeout_s, log_path, func_name)
     request = urllib.request.Request(
         endpoint + f"/session/{session_id}/turn",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=auth_headers(),
         method="POST",
     )
     deadline = time.time() + timeout_s
@@ -90,6 +107,7 @@ def run_one(endpoint, workspace, target, prompt, timeout_s, log_path, func_name)
 def main() -> int:
     endpoint = os.environ["E2E_ENDPOINT"]
     workspace = os.environ["E2E_WORKSPACE"]
+    bootstrap_token(endpoint)
     target = os.environ["E2E_TARGET"]
     rounds = int(os.environ.get("E2E_ROUNDS", "10"))
     timeout_s = int(os.environ.get("E2E_TIMEOUT", "180"))

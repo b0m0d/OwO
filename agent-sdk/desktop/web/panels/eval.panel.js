@@ -77,7 +77,7 @@ window.OwoPanels.eval = (function () {
       '<div class="sub">eval 护栏（真实模型，缺 OPENAI_API_KEY 自动跳过）</div>' +
       '<div class="owo-eval-row">' +
       '<input id="owo-eval-suite" placeholder="套件（留空=内置 builtin；可填 .json 路径）" style="flex:1">' +
-      '<button class="primary" id="owo-eval-run">运行</button></div>' +
+      '<button class="primary" id="owo-eval-run" data-core-action>运行</button></div>' +
       '<div id="owo-eval-status" class="sub">—</div>' +
       '<div class="sub">历史报告</div>' +
       '<div id="owo-eval-list" class="list"></div>' +

@@ -22,6 +22,18 @@
     return true;
   }
 
+  const TOOL_GROUPS = ["workspace", "intelligence", "automation", "system"];
+
+  function clearGroupFilters(body, groups = TOOL_GROUPS) {
+    for (const group of groups) body.classList.remove(`tools-group-${group}`);
+    for (const button of body.querySelectorAll("[data-codex-group]")) {
+      button.classList.remove("active");
+    }
+    for (const button of body.querySelectorAll("[data-jump]")) {
+      button.classList.toggle("active", button.dataset.jump === "all");
+    }
+  }
+
   function create(options) {
     const body = options.body;
     const toggleButton = options.toggleButton;
@@ -70,5 +82,5 @@
     return Object.freeze({ showTools, showSettings, toggleTools, setRoute });
   }
 
-  root.OwoWorkbenchView = Object.freeze({ create, resolveInitialRoute, replaceRouteHash });
+  root.OwoWorkbenchView = Object.freeze({ create, resolveInitialRoute, replaceRouteHash, clearGroupFilters });
 })(window);

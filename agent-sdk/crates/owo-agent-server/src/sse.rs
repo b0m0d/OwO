@@ -284,6 +284,8 @@ impl CloudSseHub {
     }
 
     /// 将取消或其他无 CloudProgress 终态事件的任务标记为已结束，允许缓存逐步回收。
+    /// `cloud_api` 调用；以 `#[path]` 独立编译本模块的测试目标没有该调用方。
+    #[allow(dead_code)]
     pub fn mark_completed(&self, task_id: &str) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

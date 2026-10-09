@@ -11,6 +11,7 @@ window.OwoPanels.command = (function () {
   var auditGeneration = 0;
   var commandGeneration = 0;
   var commandBusy = false;
+  var activeRunButton = null;
   function notify(message, kind) {
     if (H && H.notify) H.notify(message, kind || "error");
     else if (window.OwoToast) window.OwoToast(message);
@@ -71,7 +72,7 @@ window.OwoPanels.command = (function () {
       '<select id="owo-command-mode" style="padding:4px"><option value="text">文本</option>' +
       '<option value="voice">语音</option><option value="region">区域（OCR）</option></select>' +
       '<input id="owo-command-text" placeholder="例如：创建目标：整理桌面 / 搜索记忆：张子豪 / 运行工作流：报告" style="flex:1;padding:6px">' +
-      '<button class="primary" id="owo-command-run">执行</button></div>' +
+      '<button class="primary" id="owo-command-run" data-core-action>执行</button></div>' +
       '<input type="file" id="owo-command-wav" accept="audio/wav" style="display:none">' +
       '<div class="sub">意图</div><div id="owo-command-intent"></div>' +
       '<div class="sub">结果</div><div id="owo-command-results"></div>' +
@@ -84,7 +85,14 @@ window.OwoPanels.command = (function () {
     dispose();
     H = helpers || defaultHelpers();
     root.innerHTML = nav();
-    root.querySelector("#owo-command-run").addEventListener("click", runCommand);
+    var runButton = root.querySelector("#owo-command-run");
+    if (commandBusy) {
+      activeRunButton = runButton;
+      runButton.disabled = true;
+      runButton.setAttribute("aria-busy", "true");
+      runButton.textContent = "执行中…";
+    }
+    runButton.addEventListener("click", runCommand);
     root.querySelector("#owo-command-text").addEventListener("keydown", function (e) {
       if (e.key === "Enter") runCommand();
     });
@@ -184,6 +192,7 @@ window.OwoPanels.command = (function () {
     var owner = panelGeneration;
     var request = ++commandGeneration;
     commandBusy = true;
+    activeRunButton = runButton;
     if (runButton) {
       runButton.disabled = true;
       runButton.setAttribute("aria-busy", "true");
@@ -191,12 +200,13 @@ window.OwoPanels.command = (function () {
     }
 
     function finish() {
-      if (request !== commandGeneration) return;
       commandBusy = false;
-      if (runButton) {
-        runButton.disabled = false;
-        runButton.removeAttribute("aria-busy");
-        runButton.textContent = "执行";
+      var buttonToRestore = activeRunButton || runButton;
+      activeRunButton = null;
+      if (buttonToRestore) {
+        buttonToRestore.disabled = false;
+        buttonToRestore.removeAttribute("aria-busy");
+        buttonToRestore.textContent = "执行";
       }
     }
     function execute(body) {
@@ -299,7 +309,7 @@ window.OwoPanels.command = (function () {
     panelGeneration += 1;
     auditGeneration += 1;
     commandGeneration += 1;
-    commandBusy = false;
+    // 命令请求无法随面板切换撤销；保持提交锁，防止重进页面重复执行。
   }
 
   return {

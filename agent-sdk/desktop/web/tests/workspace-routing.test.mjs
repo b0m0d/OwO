@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { createWorkspaceSelectionController, projectCreationFailureMessage } = require("../core/workspace-routing.js");
+const { createWorkspaceSelectionController, requireWorkspacePersistence, projectCreationFailureMessage } = require("../core/workspace-routing.js");
 const deferred = () => {
   let resolve;
   let reject;
@@ -83,4 +83,22 @@ test("project creation failures identify its completed stage", () => {
   assert.match(projectCreationFailureMessage("activate", new Error("service restart failed")), /最近目录重试/);
   assert.match(projectCreationFailureMessage("session", new Error("model unavailable")), /项目文件夹已创建并切换为当前工作区，但新建会话失败/);
   assert.match(projectCreationFailureMessage("session", new Error("model unavailable")), /新对话.*重试/);
+});
+
+
+test("workspace persistence rejects a missing desktop response before the active path can be applied", async () => {
+  const applied = [];
+  const controller = createWorkspaceSelectionController(
+    async () => requireWorkspacePersistence(null, "Electron bridge unavailable"),
+    path => applied.push(path),
+  );
+  await assert.rejects(controller.select("T:/preview-only"), /Electron bridge unavailable/);
+  assert.deepEqual(applied, []);
+});
+
+test("workspace persistence rejects an explicit host failure and accepts its success envelope", () => {
+  assert.throws(() => requireWorkspacePersistence({ ok: false, error: "access denied" }), /access denied/);
+  assert.throws(() => requireWorkspacePersistence({}), /not confirmed/);
+  const result = { ok: true, path: "T:/project" };
+  assert.equal(requireWorkspacePersistence(result), result);
 });

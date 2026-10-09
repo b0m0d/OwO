@@ -22,8 +22,10 @@ use tower::ServiceExt;
 /// 契约快照（权威）：agent-sdk/clients/ts/openapi.json。
 const CONTRACT_SNAPSHOT: &str = include_str!("../../../clients/ts/openapi.json");
 
-/// lib.rs 源码（用于提取实际注册路由，验证 openapi_spec 无漏登）。
+/// lib.rs / routes.rs 源码（用于提取实际注册路由，验证 openapi_spec 无漏登）。
+/// 路由装配表在 routes.rs；lib.rs 保留公开再导出与其他装配。
 const LIB_RS: &str = include_str!("../src/lib.rs");
+const ROUTES_RS: &str = include_str!("../src/routes.rs");
 
 /// 返回契约快照中的全部 (path, [method...])。
 fn contract_endpoints() -> Vec<(String, Vec<String>)> {
@@ -45,16 +47,18 @@ fn contract_endpoints() -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// 从 lib.rs 提取实际注册的路由路径。
+/// 从 lib.rs 与 routes.rs 提取实际注册的路由路径。
 fn registered_routes() -> Vec<String> {
     let mut routes = Vec::new();
-    for line in LIB_RS.lines() {
-        if let Some(start) = line.find(".route(") {
-            let rest = &line[start + ".route(".len()..];
-            if let Some(quote) = rest.find('"') {
-                let after = &rest[quote + 1..];
-                if let Some(end) = after.find('"') {
-                    routes.push(after[..end].to_string());
+    for source in [LIB_RS, ROUTES_RS] {
+        for line in source.lines() {
+            if let Some(start) = line.find(".route(") {
+                let rest = &line[start + ".route(".len()..];
+                if let Some(quote) = rest.find('"') {
+                    let after = &rest[quote + 1..];
+                    if let Some(end) = after.find('"') {
+                        routes.push(after[..end].to_string());
+                    }
                 }
             }
         }

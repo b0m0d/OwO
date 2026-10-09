@@ -35,7 +35,7 @@ const state = {
   selectedModel: "",
   pendingModelOverride: null,
   modelOutputTokens: {},
-  defaultModelOutputTokens: 32000,
+  defaultModelOutputTokens: window.OwoModelOutputBudget.DEFAULT,
   // 流式渲染：粘性滚动 + 当前回合的思考块/工具分组句柄
   autoScroll: true,
   thinking: null,
@@ -51,6 +51,21 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+// Markdown/LaTeX 渲染器唯一来源：core/markdown.js（须在 app.js 之前加载）。
+const {
+  escapeHtml,
+  escapeAttribute,
+  safeMarkdownHref,
+  texToReadable,
+  extractTex,
+  restoreTex,
+  inlineMarkdown,
+  splitMarkdownTableRow,
+  isMarkdownTableSeparator,
+  markdownTableAlignment,
+  renderMarkdown,
+} = window.OwoMarkdown || {};
 const ModelRouting = window.OwoModelRouting;
 const sessionModelUpdateQueue = ModelRouting.createSessionModelUpdateQueue((sessionId, request) =>
   api("/session/" + encodeURIComponent(sessionId) + "/model", {
@@ -356,6 +371,8 @@ window.owoSetShellBackground = window.owoSetBackground;
 
 function markConnectionUnavailable(error) {
   const status = Number(error && error.status);
+  window.OwoCoreActionAvailability?.update(false);
+  if (typeof updatePresetApplyAvailability === "function") updatePresetApplyAvailability();
   if (status === 401 || status === 403) {
     // A token/pairing rejection proves the HTTP service answered. Keep reachability
     // green, but hold a distinct authorization warning until an authenticated call works.
@@ -394,6 +411,8 @@ function markConnectionReady(authenticated) {
   if (authenticated !== false) authorizationUnavailable = false;
   connectionUnavailableUntil = 0;
   const authFailed = authorizationUnavailable;
+  window.OwoCoreActionAvailability?.update(authenticated !== false && !authFailed);
+  if (typeof updatePresetApplyAvailability === "function") updatePresetApplyAvailability();
   const health = $("health");
   if (health) {
     health.textContent = authFailed ? "本地服务在线，桌面授权失败" : "本地服务已连接";
@@ -453,7 +472,12 @@ const serviceWatch = (() => {
 
   function showBanner() {
     const text = $("serviceBannerText");
-    if (text) text.textContent = `本地服务未连接，正在重试（第 ${attempts} 次）…`;
+    const bridge = window.__TAURI__?.core?.invoke || window.__TAURI_INTERNALS__?.invoke;
+    if (text) {
+      text.textContent = typeof bridge === "function"
+        ? "本地核心未连接，正在后台低频重试。服务启动后会自动恢复；也可点“立即重试”。"
+        : "浏览器预览未连接本地核心。完整会话请在 OwO Agent Electron 工作台中使用；服务已启动时可点“立即重试”。";
+    }
     const banner = $("serviceBanner");
     if (banner) banner.classList.remove("hidden");
   }
@@ -1487,352 +1511,6 @@ function esc(text) {
   return div.innerHTML;
 }
 
-// ---------- 轻量 Markdown 渲染（对标 Codex 桌面：代码块/标题/列表/表格/行内样式） ----------
-
-function escapeHtml(text) {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function escapeAttribute(text) {
-  return escapeHtml(text).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-
-function safeMarkdownHref(raw) {
-  const href = raw.replace(/&amp;/g, "&").trim();
-  if (!href || /^(?:javascript|data|vbscript):/i.test(href)) return "";
-  try {
-    const url = new URL(href, window.location.href);
-    if (["http:", "https:", "mailto:"].includes(url.protocol)) return url.href;
-  } catch (_) {
-    // 无法解析的链接按普通文本显示。
-  }
-  return /^(?:\.|\/|#)/.test(href) ? href : "";
-}
-
-// ---------- 轻量 LaTeX 可读化（推理模型的输出习惯） ----------
-//
-// 接入深度思考（deepseek-reasoner / glm-z1 系）后暴露的新问题：这类模型写数学
-// 结论时习惯用 LaTeX（`\frac{1}{6}`、`\times`、`\approx`），轻量 Markdown 渲染器
-// 不认 LaTeX，原样吐给用户——一屏 `$\frac{24}{7}$` 看起来就像乱码。
-//
-// 这里不做完整 KaTeX（体积大、与 md 代码块冲突多），只做**可读化**：
-// 分隔符内的公式转成 `a/(b)` 形式并用等宽样式标出，分隔符外的裸符号做等价替换。
-// 代码块不经过这里（flushCode 直接转义），所以不会误伤代码。
-
-// 占位符用 NUL (NUL 不会出现在正常文本里，行内规则也不会跨它匹配)
-const TEX_MARK = "\u0000";
-
-const TEX_SYMBOLS = [
-  ["\\times", "×"],
-  ["\\cdot", "·"],
-  ["\\div", "÷"],
-  ["\\approx", "≈"],
-  ["\\neq", "≠"],
-  ["\\leq", "≤"],
-  ["\\geq", "≥"],
-  ["\\le", "≤"],
-  ["\\ge", "≥"],
-  ["\\pm", "±"],
-  ["\\mp", "∓"],
-  ["\\rightarrow", "→"],
-  ["\\Rightarrow", "⇒"],
-  ["\\to", "→"],
-  ["\\ldots", "…"],
-  ["\\cdots", "…"],
-  ["\\infty", "∞"],
-  ["\\pi", "π"],
-  ["\\alpha", "α"],
-  ["\\beta", "β"],
-  ["\\gamma", "γ"],
-  ["\\theta", "θ"],
-  ["\\lambda", "λ"],
-  ["\\mu", "μ"],
-  ["\\sigma", "σ"],
-  ["\\Delta", "Δ"],
-  ["\\%", "%"],
-];
-
-/// LaTeX 片段 → 可读文本（分数/根号做结构化简写，其余符号等价替换）。
-function texToReadable(tex) {
-  let out = String(tex || "");
-  out = out.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
-  out = out.replace(/\\[dt]?frac\s*(\d)\s*(\d)/g, "($1)/($2)");
-  out = out.replace(/\\sqrt\s*\{([^{}]*)\}/g, "√($1)");
-  out = out.replace(/\\sqrt\s*(\d)/g, "√$1");
-  for (const [command, symbol] of TEX_SYMBOLS) {
-    out = out.split(command).join(symbol);
-  }
-  out = out.replace(/\\(?:left|right|displaystyle|text|mathrm|mathbf|operatorname|mbox)\b/g, "");
-  out = out.replace(/\\\\/g, " ");
-  out = out.replace(/[{}]/g, "");
-  return out.replace(/\s+/g, " ").trim();
-}
-
-/// 公式表按"每次渲染"累积：占位符在整篇 html 拼好后统一还原，
-/// 这样行内渲染（标题/列表/表格/段落）无需各自关心公式。
-let TEX_STORE = [];
-
-/// 把 `\(…\)` / `$$…$$` / `$…$` 的公式抠成占位符（只对非代码行调用）。
-function extractTex(text) {
-  const hold = (match, body) => {
-    TEX_STORE.push(texToReadable(body));
-    return `${TEX_MARK}${TEX_STORE.length - 1}${TEX_MARK}`;
-  };
-  let out = String(text || "");
-  out = out.replace(/\\\[([\s\S]+?)\\\]/g, hold);
-  out = out.replace(/\$\$([\s\S]+?)\$\$/g, hold);
-  out = out.replace(/\$([^$\n]{1,400}?)\$/g, hold);
-  out = out.replace(/\\\(([\s\S]+?)\\\)/g, hold);
-  return out;
-}
-
-/// 占位符还原：公式渲染成等宽的 `<code class="md-tex">`。
-function restoreTex(html, store) {
-  if (!store.length) return html;
-  return html.replace(
-    new RegExp(`${TEX_MARK}(\\d+)${TEX_MARK}`, "g"),
-    (match, index) => {
-      const body = store[Number(index)];
-      if (!body) return match;
-      return `<code class="md-tex">${escapeHtml(body)}</code>`;
-    }
-  );
-}
-
-function inlineMarkdown(text) {
-  let out = escapeHtml(text);
-  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
-  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  out = out.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, rawHref) => {
-    const href = safeMarkdownHref(rawHref);
-    return href
-      ? `<a href="${escapeAttribute(href)}" target="_blank" rel="noopener">${label}</a>`
-      : label;
-  });
-  // 分隔符外的裸 LaTeX（模型常常不加 $…$）：符号表 + 花括号边界明确的 frac/sqrt。
-  // 取舍说明：行内代码里的 \frac 也会被化简（概率极低——没人会在代码片段里写
-  // 公式），换取正文中裸公式可读，这个交换是划算的。
-  out = out.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
-  out = out.replace(/\\[dt]?frac\s*(\d)\s*(\d)/g, "($1)/($2)");
-  out = out.replace(/\\sqrt\s*\{([^{}]*)\}/g, "√($1)");
-  for (const [command, symbol] of TEX_SYMBOLS) {
-    out = out.split(command).join(symbol);
-  }
-  return out;
-}
-
-// Markdown 表格按分隔行识别，保留空单元格和转义/代码中的竖线。
-function splitMarkdownTableRow(line) {
-  const source = String(line || "").trim();
-  if (!source.includes("|")) return null;
-  const cells = [];
-  let cell = "";
-  let codeTicks = 0;
-  for (let index = 0; index < source.length; index++) {
-    const char = source[index];
-    if (char === "\\" && source[index + 1] === "|") {
-      cell += "|";
-      index += 1;
-      continue;
-    }
-    if (char === "`") {
-      let end = index + 1;
-      while (source[end] === "`") end += 1;
-      const run = end - index;
-      if (!codeTicks) codeTicks = run;
-      else if (run === codeTicks) codeTicks = 0;
-      cell += source.slice(index, end);
-      index = end - 1;
-      continue;
-    }
-    if (char === "|" && !codeTicks) {
-      cells.push(cell.trim());
-      cell = "";
-      continue;
-    }
-    cell += char;
-  }
-  cells.push(cell.trim());
-  if (source.startsWith("|")) cells.shift();
-  if (source.endsWith("|") && !source.endsWith("\\|")) cells.pop();
-  return cells;
-}
-
-function isMarkdownTableSeparator(cells) {
-  return Array.isArray(cells) && cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
-}
-
-function markdownTableAlignment(separator) {
-  const left = separator.startsWith(":");
-  const right = separator.endsWith(":");
-  return left && right ? "center" : right ? "right" : "left";
-}
-
-// 把 markdown 文本渲染为 HTML。代码块保留原样（pre/code），行内元素转义。
-// 公式可读化只对**非代码行**做占位（代码块里的 $…$ 是代码不是公式），
-// 整篇 html 拼好后再统一还原占位符。
-function renderMarkdown(text) {
-  if (!text) return "";
-  TEX_STORE = [];
-  const lines = text.split("\n");
-  const html = [];
-  let inCode = false;
-  let codeLang = "";
-  let codeFenceChar = "";
-  let codeFenceLength = 0;
-  let codeLines = [];
-  let inList = "";
-  let inQuote = false;
-  let inTable = false;
-  let tableHeader = null;
-  let tableAlign = null;
-
-  const flushCode = () => {
-    if (codeLines.length) {
-      html.push(
-        `<pre class="md-code"><div class="md-code-head"><span>${escapeHtml(codeLang || "code")}</span><button class="md-copy" data-code="${encodeURIComponent(codeLines.join("\n"))}">复制</button></div><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`
-      );
-      codeLines = [];
-    }
-    inCode = false;
-    codeLang = "";
-    codeFenceChar = "";
-    codeFenceLength = 0;
-  };
-  const flushList = () => {
-    if (inList) {
-      html.push("</" + inList + ">");
-      inList = "";
-    }
-  };
-  const flushQuote = () => {
-    if (inQuote) {
-      html.push("</blockquote>");
-      inQuote = false;
-    }
-  };
-  const flushTable = () => {
-    if (inTable) {
-      html.push("</table>");
-      inTable = false;
-    }
-    tableHeader = null;
-    tableAlign = null;
-  };
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-    const rawLine = lines[lineIndex];
-    const fence = rawLine.match(/^\s*(`{3,}|~{3,})(.*)$/);
-    if (fence) {
-      const marker = fence[1];
-      const info = fence[2] || "";
-      if (inCode) {
-        const closes = marker[0] === codeFenceChar && marker.length >= codeFenceLength && /^\s*$/.test(info);
-        if (closes) {
-          flushCode();
-          continue;
-        }
-      } else {
-        flushList();
-        flushQuote();
-        flushTable();
-        inCode = true;
-        codeFenceChar = marker[0];
-        codeFenceLength = marker.length;
-        codeLang = (info.trim().split(/\s+/, 1)[0] || "").replace(/[^\w.+#-]/g, "");
-        continue;
-      }
-    }
-    if (inCode) {
-      codeLines.push(rawLine);
-      continue;
-    }
-    const line = extractTex(rawLine);
-    if (/^\s*$/.test(line)) {
-      flushList();
-      flushQuote();
-      flushTable();
-      html.push("");
-      continue;
-    }
-    const quote = line.match(/^\s*>\s?(.*)$/);
-    if (quote) {
-      flushList();
-      flushTable();
-      if (!inQuote) {
-        html.push('<blockquote class="md-quote">');
-        inQuote = true;
-      }
-      html.push('<div class="md-p">' + inlineMarkdown(quote[1]) + "</div>");
-      continue;
-    }
-    flushQuote();
-    const heading = line.match(/^(#{1,4})\s+(.*)$/);
-    if (heading) {
-      flushList();
-      flushTable();
-      const level = heading[1].length;
-      html.push(`<h${level} class="md-h${level}">${inlineMarkdown(heading[2])}</h${level}>`);
-      continue;
-    }
-    const hr = line.match(/^\s*(-{3,}|\*{3,})\s*$/);
-    if (hr) {
-      flushList();
-      flushTable();
-      html.push('<hr class="md-hr">');
-      continue;
-    }
-    const unorderedItem = line.match(/^\s*[-*+]\s+(.*)$/);
-    const orderedItem = line.match(/^\s*\d+\.\s+(.*)$/);
-    const listItem = unorderedItem || orderedItem;
-    if (listItem) {
-      flushTable();
-      const listTag = orderedItem ? "ol" : "ul";
-      if (inList && inList !== listTag) flushList();
-      if (!inList) {
-        html.push("<" + listTag + ' class="md-list">');
-        inList = listTag;
-      }
-      html.push("<li>" + inlineMarkdown(listItem[1]) + "</li>");
-      continue;
-    }
-    flushList();
-    const rowCells = splitMarkdownTableRow(line);
-    if (inTable) {
-      if (rowCells && rowCells.length) {
-        const paddedCells = rowCells.slice(0, tableHeader.length);
-        while (paddedCells.length < tableHeader.length) paddedCells.push("");
-        html.push("<tr>");
-        paddedCells.forEach((cell, index) => {
-          html.push(`<td style="text-align:${tableAlign[index] || "left"}">${inlineMarkdown(cell)}</td>`);
-        });
-        html.push("</tr>");
-        continue;
-      }
-      flushTable();
-    }
-    const separatorCells = splitMarkdownTableRow(lines[lineIndex + 1] || "");
-    if (rowCells && rowCells.length >= 2 && isMarkdownTableSeparator(separatorCells) && separatorCells.length === rowCells.length) {
-      tableHeader = rowCells;
-      tableAlign = separatorCells.map(markdownTableAlignment);
-      inTable = true;
-      html.push('<table class="md-table"><thead><tr>');
-      tableHeader.forEach((cell, index) => {
-        html.push(`<th style="text-align:${tableAlign[index]}">${inlineMarkdown(cell)}</th>`);
-      });
-      html.push("</tr></thead><tbody>");
-      lineIndex += 1;
-      continue;
-    }
-    html.push(`<div class="md-p">${inlineMarkdown(line)}</div>`);
-  }
-  flushCode();
-  flushList();
-  flushQuote();
-  flushTable();
-  return restoreTex(html.join("\n"), TEX_STORE);
-}
 
 // ---------- 头部状态 ----------
 
@@ -2017,7 +1695,7 @@ async function refreshPluginMarket() {
         `<span class="ps-tile ps-tile-sm" aria-hidden="true">${initial}</span>` +
         '<div class="ps-row-meta">' +
         `<strong>${esc(entry.name || entry.id)}</strong>` +
-        `<span class="sub">v${esc(entry.version || "?")} ｜ 最低支持 App ${esc(entry.description || "—")}</span>` +
+        `<span class="sub">v${esc(entry.version || "?")} ｜ 最低支持 App ${esc(entry.min_app_version || "—")}</span>` +
         "</div>";
       const button = document.createElement("button");
       button.type = "button";
@@ -2226,16 +1904,10 @@ async function refreshSettings() {
 // 本地偏好（仅存 localStorage，不进入服务端设置）
 const LOCAL_PREFS = {
   fileOpener: "system",
-  shell: "powershell",
-  language: "zh-CN",
   compact: false,
-  speed: "standard",
   theme: "light",
   speechLang: "zh-CN",
-  tone: "balanced",
-  reminder: true,
   sound: false,
-  approvalPin: true,
 };
 function loadLocalPrefs() {
   try {
@@ -2262,17 +1934,10 @@ function syncLocalPrefs() {
     if (el) el.value = value;
   };
   setSelect("prefFileOpener", prefs.fileOpener);
-  setSelect("prefShell", prefs.shell);
-  setSelect("prefLanguage", prefs.language);
-  setSelect("prefSpeed", prefs.speed);
   setSelect("prefSpeechLang", prefs.speechLang);
-  setSelect("prefTone", prefs.tone);
   setSelect("prefTheme", prefs.theme);
   setToggle("prefCompact", prefs.compact);
-  setToggle("prefCompactAppearance", prefs.compact);
-  setToggle("prefReminder", prefs.reminder);
   setToggle("prefSound", prefs.sound);
-  setToggle("prefApprovalPin", prefs.approvalPin);
 }
 
 // ---------- 桌面桌宠（A8-3：经引擎通道控制桌面端挂件） ----------
@@ -2637,6 +2302,56 @@ function stopRunStatus() {
   }
 }
 
+function attachTurnFailureActions(failure, reason, presentation) {
+  if (presentation && presentation.detail && presentation.detail !== presentation.message) {
+    const details = document.createElement("details");
+    details.className = "turn-error-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "技术详情";
+    const raw = document.createElement("code");
+    raw.textContent = presentation.detail;
+    details.append(summary, raw);
+    failure.appendChild(details);
+  }
+  if (window.OwoModelRecovery && window.OwoModelRecovery.shouldOfferOutputBudget(reason)) {
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "turn-model-recover turn-output-recover";
+    action.textContent = "调整输出上限…";
+    action.setAttribute("aria-label", "调整当前模型的输出 Token 上限");
+    action.addEventListener("click", () => {
+      setSettingsPageVisible(true);
+      setSettingsTab("models");
+      const model = getComposerModel() || getDefaultModel();
+      const modelInput = $("modelOutputModel");
+      if (modelInput && model) modelInput.value = model;
+      refreshModelOutputSettings().then(() => $("modelOutputLimit")?.focus());
+    });
+    failure.appendChild(action);
+  }
+  if (window.OwoModelRecovery && window.OwoModelRecovery.shouldOfferModelSwitch(reason)) {
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "turn-model-recover";
+    action.textContent = "切换模型…";
+    action.setAttribute("aria-label", "为当前会话切换模型");
+    action.addEventListener("click", () => openModelMenu());
+    failure.appendChild(action);
+  }
+}
+
+// 历史回放时复用实时失败卡，保留模型切换/输出上限恢复入口。
+function addHistoricalTurnFailure(storedText) {
+  const prefix = "回合未完成：";
+  const stored = String(storedText || "");
+  const reason = stored.startsWith(prefix) ? stored.slice(prefix.length) : stored;
+  const presentation = window.OwoModelRecovery && window.OwoModelRecovery.summarizeTurnFailure
+    ? window.OwoModelRecovery.summarizeTurnFailure(reason) : null;
+  const failure = addMessage("error", prefix + ((presentation && presentation.message) || reason));
+  if (presentation) attachTurnFailureActions(failure, reason, presentation);
+  return failure;
+}
+
 // 回合失败卡：每回合都必须有明确终态（失败原因 + 汇报卡），不能静默停住。
 function showTurnFailure(message) {
   finishThinking();
@@ -2652,32 +2367,10 @@ function showTurnFailure(message) {
   if (reason.includes("循环保护") || reason.includes("工具调用达到上限")) {
     showTurnLimitCard(reason);
   } else {
-    const failure = addMessage("error", "回合未完成：" + reason);
-    if (window.OwoModelRecovery && window.OwoModelRecovery.shouldOfferOutputBudget(reason)) {
-      const action = document.createElement("button");
-      action.type = "button";
-      action.className = "turn-model-recover turn-output-recover";
-      action.textContent = "调整输出上限…";
-      action.setAttribute("aria-label", "调整当前模型的输出 Token 上限");
-      action.addEventListener("click", () => {
-        setSettingsPageVisible(true);
-        setSettingsTab("models");
-        const model = getComposerModel() || getDefaultModel();
-        const modelInput = $("modelOutputModel");
-        if (modelInput && model) modelInput.value = model;
-        refreshModelOutputSettings().then(() => $("modelOutputLimit")?.focus());
-      });
-      failure.appendChild(action);
-    }
-    if (window.OwoModelRecovery && window.OwoModelRecovery.shouldOfferModelSwitch(reason)) {
-      const action = document.createElement("button");
-      action.type = "button";
-      action.className = "turn-model-recover";
-      action.textContent = "切换模型…";
-      action.setAttribute("aria-label", "为当前会话切换模型");
-      action.addEventListener("click", () => openModelMenu());
-      failure.appendChild(action);
-    }
+    const presentation = window.OwoModelRecovery && window.OwoModelRecovery.summarizeTurnFailure
+      ? window.OwoModelRecovery.summarizeTurnFailure(reason) : null;
+    const failure = addMessage("error", "回合未完成：" + ((presentation && presentation.message) || reason));
+    if (presentation) attachTurnFailureActions(failure, reason, presentation);
   }
   const turn = state.turn;
   // 只有真的跑过（有模型调用/工具）才补汇报卡；请求级失败（如鉴权）不打扰。
@@ -3500,11 +3193,7 @@ $("settingsModel").addEventListener("change", () => saveSettings());
 // 本地偏好：select / toggle → LOCAL_PREFS（仅本机生效）
 const PREF_SELECT_MAP = {
   prefFileOpener: "fileOpener",
-  prefShell: "shell",
-  prefLanguage: "language",
-  prefSpeed: "speed",
   prefSpeechLang: "speechLang",
-  prefTone: "tone",
   prefTheme: "theme",
 };
 for (const [id, key] of Object.entries(PREF_SELECT_MAP)) {
@@ -3523,17 +3212,20 @@ for (const [id, key] of Object.entries(PREF_SELECT_MAP)) {
 }
 const PREF_TOGGLE_MAP = {
   prefCompact: "compact",
-  prefCompactAppearance: "compact",
-  prefReminder: "reminder",
   prefSound: "sound",
-  prefApprovalPin: "approvalPin",
 };
+function unlockNotificationAudioIfEnabled() {
+  if (LOCAL_PREFS.sound) window.OwoNotificationSound?.unlock(true);
+}
+document.addEventListener("pointerdown", unlockNotificationAudioIfEnabled, { capture: true, passive: true });
+document.addEventListener("keydown", unlockNotificationAudioIfEnabled, { capture: true });
 for (const [id, key] of Object.entries(PREF_TOGGLE_MAP)) {
   $(id).addEventListener("click", () => {
     LOCAL_PREFS[key] = !LOCAL_PREFS[key];
     saveLocalPrefs();
     syncLocalPrefs();
     applyLocalPrefs();
+    if (key === "sound" && LOCAL_PREFS.sound) window.OwoNotificationSound?.unlock(true);
   });
 }
 // 桌面桌宠开关（A8-3）：走引擎通道控制桌面端挂件，不是本地偏好。
@@ -3651,6 +3343,14 @@ function findPreset(id) {
   return registry.presets().find((preset) => preset.id === id) || null;
 }
 
+function updatePresetApplyAvailability(presetOverride) {
+  const button = $("presetApplyModelBtn");
+  if (!button) return;
+  const preset = presetOverride || findPreset($("providerPreset")?.value);
+  const gate = window.OwoCoreActionAvailability;
+  button.disabled = !preset?.model || !gate || !gate.isAvailable();
+}
+
 function renderPresetInfo() {
   const info = $("presetInfo");
   if (!info) return;
@@ -3666,7 +3366,7 @@ function renderPresetInfo() {
   $("presetKeyEnv").textContent = preset.keyEnv || "（本地端点无需密钥）";
   $("presetCmdPreview").textContent = command || "（自定义端点无预设命令）";
   $("presetHint").textContent = `${preset.note} 选预设会填入上方端点与模型，密钥填在「API 密钥」后点「保存并连接」。`;
-  $("presetApplyModelBtn").disabled = !preset.model;
+  updatePresetApplyAvailability(preset);
   // 预设一键填入表单：端点 + 默认模型，用户只需补密钥。
   if (preset.baseUrl) $("providerBaseUrl").value = preset.baseUrl;
   syncProviderModels(preset);
@@ -3696,7 +3396,7 @@ async function refreshModelOutputSettings() {
     state.modelOutputTokens = status.modelOutputTokens && typeof status.modelOutputTokens === "object"
       ? status.modelOutputTokens
       : {};
-    state.defaultModelOutputTokens = Number(status.maxOutputTokens) || 32000;
+    state.defaultModelOutputTokens = Number(status.maxOutputTokens) || window.OwoModelOutputBudget.DEFAULT;
     const candidateList = $("modelOutputCandidates");
     if (candidateList) {
       const names = new Set([
@@ -3742,7 +3442,7 @@ async function resetModelOutputSettings() {
     const result = await shellCommand("set_model_config", { model_output_tokens: outputTokens });
     if (!result || !result.ok) throw new Error((result && result.error) || "恢复失败");
     state.modelOutputTokens = result.modelOutputTokens || outputTokens;
-    state.defaultModelOutputTokens = Number(result.maxOutputTokens) || 32000;
+    state.defaultModelOutputTokens = Number(result.maxOutputTokens) || window.OwoModelOutputBudget.DEFAULT;
     $("modelOutputLimit").value = String(state.defaultModelOutputTokens);
     if (window.OwoApi && typeof window.OwoApi.resetCoreConnection === "function") window.OwoApi.resetCoreConnection();
     if (typeof window.owoRecoverService === "function") window.owoRecoverService();
@@ -3766,8 +3466,8 @@ async function saveModelOutputSettings() {
     return;
   }
   const limit = Number(raw);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 32000) {
-    if (hint) hint.textContent = "输出上限必须是 1–32000 的整数 Tokens。";
+  if (!Number.isInteger(limit) || limit < 1 || limit > window.OwoModelOutputBudget.MAX) {
+    if (hint) hint.textContent = `输出上限必须是 1–${window.OwoModelOutputBudget.MAX.toLocaleString("zh-CN")} 的整数 Tokens。`;
     $("modelOutputLimit").focus();
     return;
   }
@@ -3779,7 +3479,7 @@ async function saveModelOutputSettings() {
     const result = await shellCommand("set_model_config", { model_output_tokens: outputTokens });
     if (!result || !result.ok) throw new Error((result && result.error) || "保存失败");
     state.modelOutputTokens = result.modelOutputTokens || outputTokens;
-    state.defaultModelOutputTokens = Number(result.maxOutputTokens) || 32000;
+    state.defaultModelOutputTokens = Number(result.maxOutputTokens) || window.OwoModelOutputBudget.DEFAULT;
     if (window.OwoApi && typeof window.OwoApi.resetCoreConnection === "function") window.OwoApi.resetCoreConnection();
     if (typeof window.owoRecoverService === "function") window.owoRecoverService();
     if (hint) hint.textContent = `${model} 的输出上限已设为 ${limit.toLocaleString("zh-CN")} Tokens，核心已重启。`;
@@ -4097,8 +3797,7 @@ function setSettingsPageVisible(visible) {
 $("toggleTools").addEventListener("click", () => workbenchView.toggleTools());
 const CODEX_GROUPS = ["workspace", "intelligence", "automation", "system"];
 function clearCodexGroup() {
-  for (const group of CODEX_GROUPS) document.body.classList.remove(`tools-group-${group}`);
-  document.querySelectorAll("[data-codex-group]").forEach((b) => b.classList.remove("active"));
+  window.OwoWorkbenchView.clearGroupFilters(document.body, CODEX_GROUPS);
   syncToolsJump();
 }
 
@@ -4123,10 +3822,10 @@ for (const button of document.querySelectorAll("[data-jump]")) {
     setToolsVisible(true);
     if (target === "system" || target === "all") void refreshPluginSkillOverview();
     syncToolsJump();
+    // #sidebar owns the tools-page scroll. Reset its own scroll offset when
+    // switching groups so the selected section starts below the sticky jump bar.
     const sidebar = $("sidebar");
-    if (sidebar && sidebar.scrollIntoView) {
-      sidebar.scrollIntoView({ block: "start", behavior: "smooth" });
-    }
+    if (sidebar) sidebar.scrollTop = 0;
   });
 }
 function refreshPluginSkillOverview() {
@@ -4322,9 +4021,10 @@ function shellInvoke(name, args) {
 
 const workspaceSelection = window.OwoWorkspaceRouting.createWorkspaceSelectionController(
   async (path) => {
-    const result = await shellInvoke("set_workspace", { path });
-    if (result && result.ok === false) throw new Error(result.error || "工作区保存失败");
-    return result;
+    return window.OwoWorkspaceRouting.requireWorkspacePersistence(
+      await shellInvoke("set_workspace", { path }),
+      "当前页面没有连接桌面工作区服务，未切换本地目录。请在 Electron 工作台中重试。",
+    );
   },
   (path) => {
     const input = $("workspace");
@@ -4363,54 +4063,44 @@ async function persistWorkspace(target, revision) {
 }
 
 async function pickDirectory() {
-  const revision = workspaceSelection.begin();
-  let result;
-  try {
-    result = await api("/fs/pick-directory", {
-      method: "POST",
-      body: JSON.stringify({
-        initial: $("workspace").value.trim() || null,
-        timeout_secs: 180,
-      }),
-    });
-  } catch (error) {
-    if (!workspaceSelection.isCurrent(revision)) return null;
-    showToast("打开文件夹选择器失败：当前核心服务版本暂不支持，请更新后使用", "error");
-    document.querySelector('[data-codex-group="workspace"]')?.click();
+  const result = await window.OwoFolderPicker.pick(window);
+  if (result.canceled) return null;
+  if (!result.ok) {
+    const message = result.unavailable
+      ? "浏览器预览无法访问本机目录，请在 OwO Agent Electron 工作台中选择。"
+      : (result.error || "选择器无响应");
+    showToast("打开文件夹选择器失败：" + message, "error");
     return null;
   }
-  if (!workspaceSelection.isCurrent(revision)) return null;
-  if (result && result.path) {
-    try {
-      const applied = await persistWorkspace(result.path, revision);
-      if (!applied) return null;
-      showToast("工作区已切换；当前会话仍保留原工作区", "ok");
-      return result.path;
-    } catch (error) {
-      if (workspaceSelection.isCurrent(revision)) {
-        showToast("工作区切换失败：" + friendlyError(error), "error");
-      }
-      return null;
-    }
-  }
-  showToast("已取消选择文件夹");
-  return null;
+  const workspace = result.workspace;
+  const input = $("workspace");
+  input.value = workspace;
+  input.dataset.path = workspace;
+  input.title = "当前项目：" + workspace;
+  localStorage.setItem("owo.workspace", workspace);
+  rememberWorkspace(workspace);
+  syncProjectChip();
+  showToast("工作区已切换；当前会话仍保留原工作区", "ok");
+  return workspace;
 }
-
 function openWorkspaceMenu(trigger) {
   const anchor = trigger || $("sidebarWorkspaceBtn") || $("composerProjectBtn");
   const current = $("workspace").value.trim();
+  const nativeWorkspace = Boolean(window.OwoFolderPicker?.isNativeAvailable(window));
+  const actionDisabled = nativeWorkspace ? "" : ' disabled aria-disabled="true"';
   const recent = recentWorkspaces().filter((item) => item.toLowerCase() !== current.toLowerCase());
   const currentName = current ? current.split(/[\\/]/).filter(Boolean).pop() : "未选择项目";
   let html = '<div class="composer-project-current"><strong>' + esc(currentName) +
     '</strong><small>' + esc(current || "尚未选择工作区") + '</small></div>' +
-    '<button type="button" class="composer-menu-item project-action" data-project-action="create">＋ 新建项目文件夹…</button>' +
-    '<button type="button" class="composer-menu-item project-action" data-project-action="switch">▱ 切换到已有文件夹…</button>' +
+    '<button type="button" class="composer-menu-item project-action" data-project-action="create"' + actionDisabled + '>＋ 新建项目文件夹…</button>' +
+    '<button type="button" class="composer-menu-item project-action" data-project-action="switch"' + actionDisabled + '>▱ 切换到已有文件夹…</button>' +
     '<div class="composer-menu-group">最近工作区</div>';
-  if (recent.length) {
+  if (!nativeWorkspace) {
+    html += '<div class="composer-project-note" role="status">浏览器预览不能访问本地目录；请在 OwO Agent Electron 工作台中选择或切换工作区。</div>';
+  } else if (recent.length) {
     html += recent.map((item) =>
-      '<button type="button" class="composer-menu-item project-recent" data-project-path="' + esc(item) +
-      '" title="' + esc(item) + '"><span>' + esc(item.split(/[\\/]/).filter(Boolean).pop() || item) + '</span></button>'
+      '<button type="button" class="composer-menu-item project-recent" data-project-path="' + esc(item) + '"' + actionDisabled +
+      ' title="' + esc(item) + '"><span>' + esc(item.split(/[\\/]/).filter(Boolean).pop() || item) + '</span></button>'
     ).join("");
   } else {
     html += '<div class="composer-project-note">新会话会在所选目录中运行；当前会话的工作区不会变更。</div>';
@@ -4687,8 +4377,32 @@ $("menubarTheme").addEventListener("click", () => {
   applyTheme(document.body.classList.contains("dark-theme") ? "light" : "dark");
 });
 
-// composer 项目 chip 与工作区「浏览…」：直接调原生文件夹选择器
-$("workspaceBrowseBtn").addEventListener("click", () => pickDirectory());
+// 工作区设置使用与侧栏/首启引导相同的原生选择器和 Electron IPC。
+const workspaceFolderPicker = window.OwoFolderPicker.attach(
+  $("workspace"),
+  $("workspaceBrowseBtn"),
+  {
+    displayAlias: false,
+    title: "选择项目工作区（Electron 原生目录选择器）",
+    onPicked(workspace) {
+      localStorage.setItem("owo.workspace", workspace);
+      rememberWorkspace(workspace);
+      syncProjectChip();
+      showToast("工作区已切换；当前会话仍保留原工作区", "ok");
+    },
+    onError(message) {
+      showToast("工作区选择失败：" + message, "error");
+    },
+  },
+);
+const workspacePickerHint = $("workspacePickerHint");
+if (workspacePickerHint) {
+  workspacePickerHint.textContent = workspaceFolderPicker.native
+    ? "使用 Electron 原生目录选择器设置；切换后会重启核心，新会话使用新目录。"
+    : "浏览器预览无法访问本机目录。请在 OwO Agent Electron 工作台中选择或切换工作区。";
+}
+// composer 项目 chip 与工作区菜单均复用同一个原生目录选择器。
+
 $("composerProjectBtn").addEventListener("click", () => {
   if (composerMenuEl && composerMenuEl.dataset.owner === "project") closeComposerMenu();
   else openWorkspaceMenu($("composerProjectBtn"));

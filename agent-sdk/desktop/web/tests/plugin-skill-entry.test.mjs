@@ -22,6 +22,40 @@ test("extension failures replace loading counts and explain the existing retry c
 });
 
 
+test("主工作台插件推荐显示最低支持版本字段，不把描述误当版本", async () => {
+  const refresh = /async function refreshPluginMarket\(\)\s*\{[\s\S]*?\n\}/.exec(app)?.[0];
+  assert.ok(refresh, "应能定位插件市场渲染函数");
+  const rows = [];
+  const box = { innerHTML: "", appendChild(row) { rows.push(row); } };
+  const sandbox = {
+    Promise,
+    $: id => id === "pluginPopular" ? box : null,
+    apiWithTimeout: async () => ({
+      plugins: [{ source: "market", id: "sample", name: "Sample", version: "1.2.0", min_app_version: "1.5.0", description: "人类可读的说明" }],
+    }),
+    esc: value => String(value),
+    document: {
+      createElement: tag => ({
+        tagName: tag,
+        className: "",
+        innerHTML: "",
+        textContent: "",
+        handlers: {},
+        children: [],
+        appendChild(child) { this.children.push(child); return child; },
+        addEventListener(name, callback) { this.handlers[name] = callback; },
+      }),
+    },
+    confirmModal() {},
+  };
+  vm.createContext(sandbox);
+  const pending = vm.runInContext(refresh + "\nrefreshPluginMarket()", sandbox);
+  await pending;
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].innerHTML, /最低支持 App 1\.5\.0/);
+  assert.doesNotMatch(rows[0].innerHTML, /最低支持 App 人类可读的说明/);
+});
+
 test("扩展请求在认证引导一直未返回时仍会超时并中止底层请求", async () => {
   const helper = /async function apiWithTimeout\(path, timeoutMs = 15000\) \{[\s\S]*?\n\}/.exec(app)?.[0];
   assert.ok(helper);

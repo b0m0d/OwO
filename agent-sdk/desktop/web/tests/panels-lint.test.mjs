@@ -61,7 +61,7 @@ for (const file of scripts) {
     const src = buf.toString("utf8");
     if (file.html) {
       // index.html：仅断言脚本引用都在 lint 覆盖面内（避免漏挂新脚本）。
-      const refs = [...src.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1]);
+      const refs = [...src.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1].split("?", 1)[0]);
       const covered = new Set(scripts.map((f) => f.rel));
       for (const ref of refs) {
         if (!covered.has(ref)) throw new Error(`index.html 引用的脚本未被 lint 覆盖：${ref}`);

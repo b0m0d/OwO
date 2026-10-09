@@ -26,7 +26,8 @@ test("工作台三态视图由单一控制器管理并在启动前加载", () =>
   const app = readFileSync(join(here, "../app.js"), "utf8");
   const index = readFileSync(join(here, "../index.html"), "utf8");
   assert.match(index, /core\/workbench-view\.js/);
-  assert.ok(index.indexOf('<script src="core/workbench-view.js"></script>') < index.indexOf('<script src="app.js"></script>'));
+  const viewScript = index.search(/<script src="core\/workbench-view\.js(?:\?[^"]*)?"><\/script>/);
+  assert.ok(viewScript >= 0 && viewScript < index.indexOf('<script src="app.js"></script>'));
   assert.match(app, /window\.OwoWorkbenchView\.create\(/);
   assert.match(app, /workbenchView\.showTools\(visible\)/);
   assert.match(app, /workbenchView\.showSettings\(visible\)/);
@@ -96,6 +97,28 @@ test("桌面配对门拒绝普通浏览器时显示可操作的原因", async ()
     });
   } finally {
     global.fetch = original;
+  }
+});
+
+test("浏览器预览的 token 引导 404 显示 Electron 连接指引并保留诊断", async () => {
+  const original = global.fetch;
+  const originalTauri = global.__TAURI_INTERNALS__;
+  delete global.__TAURI_INTERNALS__;
+  global.fetch = async (url) => String(url).endsWith("/auth/token")
+    ? new Response("static preview has no auth route", { status: 404 })
+    : new Response("unexpected route", { status: 404 });
+  try {
+    const client = new ApiClient("http://127.0.0.1:8766");
+    await assert.rejects(client.get("/sessions"), (error) => {
+      assert.equal(error.status, 404);
+      assert.equal(error.code, "auth/bootstrap_route_unavailable");
+      assert.match(error.message, /浏览器预览没有连接 Electron 核心/);
+      assert.equal(error.body, "static preview has no auth route");
+      return true;
+    });
+  } finally {
+    global.fetch = original;
+    if (originalTauri !== undefined) global.__TAURI_INTERNALS__ = originalTauri;
   }
 });
 
@@ -429,6 +452,44 @@ test("§8.2 第5条：core 重启换端口后，网络失败必须触发重查�
   }
 });
 
+test("§8.2：POST 网络失败必须上抛且不得自动重放（避免重复回合/写入副作用）", async () => {
+  const originalFetch = global.fetch;
+  const originalTauri = global.__TAURI_INTERNALS__;
+  const originalDiagnostics = global.__owoCoreDiagnostics;
+  let fetches = 0;
+  global.__TAURI_INTERNALS__ = {
+    invoke: async (command) => {
+      if (command === "get_core_connection") {
+        return {
+          port: 6410,
+          instanceId: "post-once",
+          pairing: "0123456789abcdef0123456789abcdef",
+          token: "tok-post",
+          state: "ready",
+        };
+      }
+      throw new Error("unexpected command " + command);
+    },
+  };
+  global.fetch = async () => {
+    fetches += 1;
+    throw new TypeError("Failed to fetch");
+  };
+  try {
+    const client = new ApiClient("http://127.0.0.1:4096");
+    await assert.rejects(
+      () => client.post("/session/s1/turn", { prompt: "重复副作用防护" }),
+      "POST 网络失败必须上抛由 UI 决定是否重发"
+    );
+    assert.equal(fetches, 1, "POST 网络失败不得自动重试（服务端可能已执行）");
+  } finally {
+    global.fetch = originalFetch;
+    global.__owoCoreDiagnostics = originalDiagnostics;
+    if (originalTauri === undefined) delete global.__TAURI_INTERNALS__;
+    else global.__TAURI_INTERNALS__ = originalTauri;
+  }
+});
+
 test("§8.2 第5条：核心始终不可达时网络失败只重试一次并受冷却约束（不得风暴重查）", async () => {
   const originalFetch = global.fetch;
   const originalTauri = global.__TAURI_INTERNALS__;
@@ -641,7 +702,7 @@ test("index.html 引入 core/api-client.js（认证头唯一实现）", () => {
   const index = readFileSync(join(here, "../index.html"), "utf8");
   // 契约测试「业务脚本不绕过统一 API 客户端」规定全站仅 core/api-client.js 可 fetch，
   // 它承担桌面壳的 pairing / instance 两道认证门；不引入则 token 永远拿不到。
-  assert.match(index, /<script src="core\/api-client\.js"><\/script>/);
+  assert.match(index, /<script src="core\/api-client\.js(?:\?[^"]*)?"><\/script>/);
 });
 
 test("index.html 不再按 __TAURI_INTERNALS__ 把 baseUrl 钉死到硬编码端口", () => {

@@ -60,7 +60,7 @@
         '<div class="inline">' +
         '<input class="owo-fleet-node-id" placeholder="node_id（如 node-a）">' +
         '<input class="owo-fleet-node-worker" placeholder="worker（如 shell）">' +
-        '<button class="owo-fleet-node-register">注册</button>' +
+        '<button class="owo-fleet-node-register" data-core-action>注册</button>' +
         "</div>" +
         '<div class="owo-fleet-node-result sub"></div>' +
         "</div>" +
@@ -77,7 +77,7 @@
         "</div>" +
         '<textarea class="owo-fleet-task-input" rows="3" spellcheck="false" placeholder=\'input JSON，如 {"q":1}\'></textarea>' +
         '<label class="inline"><input type="checkbox" class="owo-fleet-task-approval"> 需审批（approval_required）</label>' +
-        '<div class="inline"><button class="owo-fleet-task-submit primary">提交</button></div>' +
+        '<div class="inline"><button class="owo-fleet-task-submit primary" data-core-action>提交</button></div>' +
         '<div class="owo-fleet-task-submit-result sub"></div>' +
         "</div>" +
         '<div class="owo-fleet-tools">' +
@@ -85,7 +85,7 @@
         '<div class="inline">' +
         '<input class="owo-fleet-task-get-id" placeholder="task_id">' +
         '<button class="owo-fleet-task-get">查询</button>' +
-        '<button class="owo-fleet-task-cancel">取消</button>' +
+        '<button class="owo-fleet-task-cancel" data-core-action>取消</button>' +
         '<button class="owo-fleet-task-events">事件</button>' +
         "</div>" +
         '<div class="owo-fleet-task-view sub"></div>' +
@@ -96,7 +96,7 @@
         '<input class="owo-fleet-approval-id" placeholder="task_id（审批任务）">' +
         '<select class="owo-fleet-approval-decision"><option value="approve">approve</option><option value="reject">reject</option></select>' +
         '<input class="owo-fleet-approval-by" placeholder="approved_by（如 owner）">' +
-        '<button class="owo-fleet-approval-respond primary">裁决</button>' +
+        '<button class="owo-fleet-approval-respond primary" data-core-action>裁决</button>' +
         "</div>" +
         '<div class="owo-fleet-approval-result sub"></div>' +
         "</div>" +

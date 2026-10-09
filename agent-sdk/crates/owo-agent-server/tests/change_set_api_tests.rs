@@ -312,7 +312,9 @@ async fn accepting_pending_changeset_over_http_resumes_delivery_finalization() {
         role: role.to_string(),
         base_hashes: Vec::new(),
         result_hashes: Vec::new(),
-        changed_files: vec!["src/main.rs".to_string()],
+        // 本用例只验证「人工接受后续跑交付」，用非源码路径避免触发
+        // 源码变更必需的宿主行为命令校验（该契约另有专项测试）。
+        changed_files: vec!["docs/result.md".to_string()],
         diff_ref: Some("test.patch".to_string()),
         status: ChangeSetStatus::PendingReview,
         created_at: "2026-10-03T00:00:00Z".to_string(),

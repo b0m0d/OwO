@@ -57,6 +57,11 @@ window.OwoPanels.goal = (function () {
   var detailGeneration = 0;
   var statusGeneration = 0;
   var auditGeneration = 0;
+  var creatingGoal = false;
+  var activeCreateButton = null;
+  var savingPlans = Object.create(null);
+  var goalActionPending = Object.create(null);
+  var panelMounted = false;
   var state = {
     goals: [],
     current: null,
@@ -82,14 +87,14 @@ window.OwoPanels.goal = (function () {
       '<div class="stack">' +
       '<div class="sub">编排目标（Goal/Plan）</div>' +
       '<div class="owo-goal-row"><input id="owo-goal-objective" placeholder="目标描述（objective）" style="flex:1">' +
-      '<button class="primary" id="owo-goal-create">创建目标</button></div>' +
+      '<button class="primary" id="owo-goal-create" data-core-action>创建目标</button></div>' +
       '<div id="owo-goal-list" class="list"></div>' +
       '<hr>' +
       '<div id="owo-goal-detail"></div>' +
       '<hr>' +
       '<div class="sub">云端进度（SSE 订阅）</div>' +
       '<div class="owo-goal-row"><input id="owo-goal-cloud-task" placeholder="云端任务编号（如 cloud-0001）" style="flex:1">' +
-      '<button id="owo-goal-cloud-sub">订阅</button><button id="owo-goal-cloud-close">断开</button></div>' +
+      '<button id="owo-goal-cloud-sub" data-core-action>订阅</button><button id="owo-goal-cloud-close">断开</button></div>' +
       '<div class="owo-goal-cloudlog" id="owo-goal-cloudlog">（输入云端任务编号以查看实时进度）</div>' +
       '</div>'
     );
@@ -101,7 +106,13 @@ window.OwoPanels.goal = (function () {
     cloudReconnectNoticeShown = false;
     if (helpers) H = helpers;
     root.innerHTML = nav();
-    root.querySelector("#owo-goal-create").addEventListener("click", createGoal);
+    panelMounted = true;
+    var createButton = root.querySelector("#owo-goal-create");
+    if (creatingGoal) {
+      activeCreateButton = createButton;
+      setCreateButtonBusy(createButton, true);
+    }
+    createButton.addEventListener("click", createGoal);
     root.querySelector("#owo-goal-cloud-sub").addEventListener("click", subscribeCloud);
     root.querySelector("#owo-goal-cloud-close").addEventListener("click", closeCloud);
     refresh();
@@ -135,13 +146,17 @@ window.OwoPanels.goal = (function () {
     el.innerHTML = state.goals
       .map(function (g) {
         var badge = g.status === "Succeeded" ? "ok" : g.status === "Failed" || g.status === "Aborted" ? "bad" : "warn";
+        var pendingAction = goalActionPending[g.id];
+        var actionBusy = pendingAction ? ' disabled aria-busy="true"' : "";
         return (
           '<div class="owo-goal-row">' +
           '<span class="owo-goal-badge ' + badge + '">' + H.esc(g.status) + "</span>" +
           "<span>" + H.esc(g.objective) + "</span>" +
           '<button data-id="' + H.esc(g.id) + '" class="owo-goal-open">打开</button>' +
-          '<button data-id="' + H.esc(g.id) + '" class="owo-goal-run">运行</button>' +
-          '<button data-id="' + H.esc(g.id) + '" class="owo-goal-abort">中止</button>' +
+          '<button data-id="' + H.esc(g.id) + '" class="owo-goal-run" data-core-action' + actionBusy + '>' +
+          (pendingAction === "run" ? "正在运行…" : pendingAction ? "处理中…" : "运行") + "</button>" +
+          '<button data-id="' + H.esc(g.id) + '" class="owo-goal-abort" data-core-action' + actionBusy + '>' +
+          (pendingAction === "abort" ? "正在中止…" : pendingAction ? "处理中…" : "中止") + "</button>" +
           "</div>"
         );
       })
@@ -154,27 +169,53 @@ window.OwoPanels.goal = (function () {
     });
     Array.prototype.forEach.call(el.querySelectorAll(".owo-goal-run"), function (b) {
       b.addEventListener("click", function () {
-        runGoal(b.getAttribute("data-id"));
+        runGoal(b.getAttribute("data-id"), b, "运行");
       });
     });
     Array.prototype.forEach.call(el.querySelectorAll(".owo-goal-abort"), function (b) {
       b.addEventListener("click", function () {
-        abortGoal(b.getAttribute("data-id"));
+        abortGoal(b.getAttribute("data-id"), b, "中止");
       });
     });
   }
 
+  function setCreateButtonBusy(button, busy) {
+    if (!button) return;
+    button.disabled = busy;
+    button.textContent = busy ? "正在创建…" : "创建目标";
+    if (button.setAttribute && busy) button.setAttribute("aria-busy", "true");
+    else if (button.removeAttribute) button.removeAttribute("aria-busy");
+  }
+
   function createGoal() {
+    if (creatingGoal) return Promise.resolve(null);
     var input = document.getElementById("owo-goal-objective");
     var objective = (input && input.value.trim()) || "新目标";
-    H.post("/goal", { objective: objective })
+    var owner = panelGeneration;
+    creatingGoal = true;
+    activeCreateButton = document.getElementById("owo-goal-create");
+    setCreateButtonBusy(activeCreateButton, true);
+    return Promise.resolve()
+      .then(function () {
+        return H.post("/goal", { objective: objective });
+      })
       .then(function (data) {
-        input.value = "";
+        if (owner !== panelGeneration) return null;
+        if (input) input.value = "";
         state.current = data.goal.id;
         refresh();
+        return data;
       })
       .catch(function (e) {
-        notify(H.friendlyError(e), "error");
+        if (owner === panelGeneration) notify(H.friendlyError(e), "error");
+        return null;
+      })
+      .finally(function () {
+        creatingGoal = false;
+        var currentButton = document.getElementById("owo-goal-create");
+        setCreateButtonBusy(activeCreateButton, false);
+        if (currentButton !== activeCreateButton) setCreateButtonBusy(currentButton, false);
+        activeCreateButton = null;
       });
   }
 
@@ -203,6 +244,15 @@ window.OwoPanels.goal = (function () {
       });
   }
 
+  function renderWaves(waves) {
+    if (!Array.isArray(waves)) return "";
+    return waves.map(function (wave, index) {
+      var steps = Array.isArray(wave) ? wave : [];
+      return "wave" + (index + 1) + ": " +
+        steps.map(function (step) { return H.esc(step == null ? "" : step); }).join(", ");
+    }).join("<br>");
+  }
+
   function renderDetail(goal, planData) {
     var el = document.getElementById("owo-goal-detail");
     if (!el) return;
@@ -217,20 +267,16 @@ window.OwoPanels.goal = (function () {
           2
         )
       : '[{"id":"a","worker":"echo","input":{"text":"A"}},{"id":"b","worker":"sleep","input":{"ms":20},"deps":["a"]},{"id":"c","worker":"agent","input":{"prompt":"总结上一步","read_only":true},"deps":["b"]}]';
-    var wavesHtml = waves
-      ? waves
-          .map(function (w, i) {
-            return "wave" + (i + 1) + ": " + (w || []).join(", ");
-          })
-          .join("<br>")
-      : "（暂无计划）";
+    var wavesHtml = waves ? renderWaves(waves) : "（暂无计划）";
     el.innerHTML =
       '<div class="sub">目标：' + H.esc(goal.objective) + "（" + H.esc(goal.status) + "）</div>" +
       '<div class="owo-goal-row"><span>步骤定义（JSON）</span>' +
-      '<button id="owo-goal-save-plan">保存计划</button></div>' +
+      '<button id="owo-goal-save-plan" data-core-action' + (savingPlans[goal.id] ? ' disabled aria-busy="true"' : "") + '>' +
+      (savingPlans[goal.id] ? "正在保存…" : "保存计划") + "</button></div>" +
       '<textarea class="owo-goal-steps" id="owo-goal-steps">' + H.esc(stepsJson) + "</textarea>" +
       '<div class="owo-goal-row"><span>waves 预览</span>' +
-      '<button id="owo-goal-run-now">运行（parallelism=2）</button>' +
+      '<button id="owo-goal-run-now" data-core-action' + (goalActionPending[goal.id] ? ' disabled aria-busy="true"' : "") + '>' +
+      (goalActionPending[goal.id] === "run" ? "正在运行…" : goalActionPending[goal.id] ? "处理中…" : "运行（parallelism=2）") + "</button>" +
       '<button id="owo-goal-poll">刷新状态</button></div>' +
       '<div class="sub">' + wavesHtml + "</div>" +
       '<table class="owo-goal-table" id="owo-goal-status"><tr><th>步骤</th><th>状态</th><th>尝试</th><th>输出</th></tr></table>' +
@@ -240,7 +286,7 @@ window.OwoPanels.goal = (function () {
       savePlan(goal.id);
     });
     el.querySelector("#owo-goal-run-now").addEventListener("click", function () {
-      runGoal(goal.id);
+      runGoal(goal.id, el.querySelector("#owo-goal-run-now"), "运行（parallelism=2）");
     });
     el.querySelector("#owo-goal-poll").addEventListener("click", function () {
       pollStatus(goal.id);
@@ -251,16 +297,31 @@ window.OwoPanels.goal = (function () {
     pollStatus(goal.id);
   }
 
+  function setPlanSaveButtonBusy(button, busy) {
+    if (!button) return;
+    button.disabled = busy;
+    button.textContent = busy ? "正在保存…" : "保存计划";
+    if (button.setAttribute && busy) button.setAttribute("aria-busy", "true");
+    else if (button.removeAttribute) button.removeAttribute("aria-busy");
+  }
+
   function savePlan(goalId) {
+    if (savingPlans[goalId] || state.current !== goalId) return Promise.resolve(null);
     var textarea = document.getElementById("owo-goal-steps");
+    var saveButton = document.getElementById("owo-goal-save-plan");
+    if (!textarea) return Promise.resolve(null);
     var steps;
     try {
       steps = JSON.parse(textarea.value);
     } catch (e) {
       notify("steps JSON 非法：" + e.message, "error");
-      return;
+      return Promise.resolve(null);
     }
-    var normalized = (steps || []).map(function (s) {
+    if (!Array.isArray(steps)) {
+      notify("steps 必须是 JSON 数组", "error");
+      return Promise.resolve(null);
+    }
+    var normalized = steps.map(function (s) {
       return {
         id: s.id,
         worker: s.worker,
@@ -271,36 +332,74 @@ window.OwoPanels.goal = (function () {
         parallel: !!s.parallel,
       };
     });
-    H.post("/goal/" + encodeURIComponent(goalId) + "/plan", { steps: normalized })
+    var owner = panelGeneration;
+    savingPlans[goalId] = true;
+    setPlanSaveButtonBusy(saveButton, true);
+    return Promise.resolve()
+      .then(function () {
+        return H.post("/goal/" + encodeURIComponent(goalId) + "/plan", { steps: normalized });
+      })
       .then(function (data) {
-        var waves = data.waves || [];
-        var preview = waves.map(function (w, i) { return "wave" + (i + 1) + ": " + w.join(", "); }).join("<br>");
+        if (owner !== panelGeneration || state.current !== goalId) return null;
+        var waves = (data && data.waves) || [];
+        var preview = renderWaves(waves);
         var box = document.querySelector("#owo-goal-detail .sub:nth-of-type(3)");
         if (box) box.innerHTML = preview;
         loadGoal(goalId);
+        return data;
       })
       .catch(function (e) {
-        notify(H.friendlyError(e), "error");
+        if (owner === panelGeneration && state.current === goalId) notify(H.friendlyError(e), "error");
+        return null;
+      })
+      .finally(function () {
+        delete savingPlans[goalId];
+        setPlanSaveButtonBusy(saveButton, false);
+        if (owner === panelGeneration && state.current === goalId) {
+          setPlanSaveButtonBusy(document.getElementById("owo-goal-save-plan"), false);
+        }
       });
   }
 
-  function runGoal(goalId) {
-    H.post("/goal/" + encodeURIComponent(goalId) + "/run", { config: { parallelism: 2, allow_replan: true } })
-      .then(function () {
-        pollStatus(goalId);
-      })
-      .catch(function (e) {
-        notify(H.friendlyError(e), "error");
-      });
+  function setGoalActionButtonBusy(button, busy, idleText, busyText) {
+    if (!button) return;
+    button.disabled = busy;
+    button.textContent = busy ? busyText : idleText;
+    if (button.setAttribute && busy) button.setAttribute("aria-busy", "true");
+    else if (button.removeAttribute) button.removeAttribute("aria-busy");
   }
 
-  function abortGoal(goalId) {
-    H.post("/goal/" + encodeURIComponent(goalId) + "/abort", {})
+  function runGoal(goalId, button, idleText) {
+    return startGoalAction(goalId, "run", button, idleText || "运行", "正在运行…");
+  }
+
+  function abortGoal(goalId, button, idleText) {
+    return startGoalAction(goalId, "abort", button, idleText || "中止", "正在中止…");
+  }
+
+  function startGoalAction(goalId, action, button, idleText, busyText) {
+    if (goalActionPending[goalId]) return Promise.resolve(null);
+    var owner = panelGeneration;
+    goalActionPending[goalId] = action;
+    setGoalActionButtonBusy(button, true, idleText, busyText);
+    var path = "/goal/" + encodeURIComponent(goalId) + (action === "run" ? "/run" : "/abort");
+    var body = action === "run" ? { config: { parallelism: 2, allow_replan: true } } : {};
+    return Promise.resolve()
       .then(function () {
-        pollStatus(goalId);
+        return H.post(path, body);
+      })
+      .then(function (result) {
+        if (owner !== panelGeneration) return null;
+        return result;
       })
       .catch(function (e) {
-        notify(H.friendlyError(e), "error");
+        if (owner === panelGeneration) notify(H.friendlyError(e), "error");
+        return null;
+      })
+      .finally(function () {
+        delete goalActionPending[goalId];
+        setGoalActionButtonBusy(button, false, idleText, busyText);
+        if (panelMounted) refresh();
       });
   }
 
@@ -454,6 +553,7 @@ window.OwoPanels.goal = (function () {
   }
 
   function dispose() {
+    panelMounted = false;
     panelGeneration += 1;
     listGeneration += 1;
     detailGeneration += 1;
@@ -483,6 +583,6 @@ window.OwoPanels.goal = (function () {
     mount: mount,
     refresh: refresh,
     dispose: dispose,
-    _test: { loadGoal: loadGoal, pollStatus: pollStatus, showAudit: showAudit },
+    _test: { loadGoal: loadGoal, pollStatus: pollStatus, showAudit: showAudit, createGoal: createGoal, savePlan: savePlan, runGoal: runGoal, abortGoal: abortGoal, renderWaves: renderWaves },
   };
 })();

@@ -4,7 +4,7 @@ use super::stream::*;
 use super::*;
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -216,10 +216,90 @@ fn parses_tool_call_fragments_and_assembles() {
         .unwrap();
     accumulate_tool_fragments(&mut accumulators, &delta2.tool_call_fragments);
 
-    let calls = build_tool_calls(&mut accumulators).unwrap();
+    let calls = build_tool_calls(&mut accumulators).unwrap().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "read_file");
     assert_eq!(calls[0].arguments["path"], "a.txt");
+}
+
+#[test]
+fn rejects_malformed_tool_call_arguments_instead_of_silently_using_null() {
+    let mut accumulators = HashMap::new();
+    accumulate_tool_fragments(
+        &mut accumulators,
+        &[json!({
+            "index": 0,
+            "id": "call_bad",
+            "function": { "name": "read_file", "arguments": "{broken" }
+        })],
+    );
+
+    let error = build_tool_calls(&mut accumulators).unwrap_err();
+    assert!(error.contains("read_file"));
+    assert!(error.contains("不是有效 JSON"));
+}
+
+#[test]
+fn rejects_invalid_and_unadvertised_non_stream_tool_calls() {
+    let tools = vec![ToolSpec {
+        name: "read_file".into(),
+        description: "read a file".into(),
+        input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        effect: None,
+    }];
+    let malformed = json!({
+        "tool_calls": [{
+            "id": "call_1",
+            "function": {"name":"read_file","arguments":"{broken"}
+        }]
+    });
+    assert!(parse_tool_calls(&malformed, &tools)
+        .unwrap_err()
+        .contains("不是有效 JSON"));
+
+    let unadvertised = json!({
+        "tool_calls": [{
+            "id": "call_2",
+            "function": {"name":"delete_everything","arguments":"{}"}
+        }]
+    });
+    assert!(parse_tool_calls(&unadvertised, &tools)
+        .unwrap_err()
+        .contains("未提供的工具"));
+
+    let valid = json!({
+        "tool_calls": [{
+            "id": "call_3",
+            "function": {"name":"read_file","arguments":{"path":"README.md"}}
+        }]
+    });
+    let parsed = parse_tool_calls(&valid, &tools).unwrap().unwrap();
+    assert_eq!(parsed[0].name, "read_file");
+    assert_eq!(parsed[0].arguments["path"], "README.md");
+}
+
+#[test]
+fn canonical_tool_call_validation_rejects_empty_identity_fields() {
+    let tools = vec![ToolSpec {
+        name: "read_file".into(),
+        description: "read a file".into(),
+        input_schema: json!({"type":"object"}),
+        effect: None,
+    }];
+    for call in [
+        ToolCall {
+            id: String::new(),
+            name: "read_file".into(),
+            arguments: json!({}),
+        },
+        ToolCall {
+            id: "call_1".into(),
+            name: String::new(),
+            arguments: json!({}),
+        },
+    ] {
+        assert!(validate_tool_calls(vec![call], &tools).is_err());
+    }
 }
 
 #[test]
@@ -1230,17 +1310,23 @@ async fn request_body_applies_bounded_output_token_env() {
         provider.request_body(None, &[], &[], true)["max_tokens"],
         16000
     );
-    std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", "32001");
+    std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", "64000");
     assert_eq!(
         provider.request_body(None, &[], &[], false)["max_tokens"],
-        32000
+        64000
+    );
+    std::env::set_var("OWO_MODEL_MAX_OUTPUT_TOKENS", "1000001");
+    assert_eq!(
+        provider.request_body(None, &[], &[], false)["max_tokens"],
+        32000,
+        "超过应用保护上限时回退到 32k 默认值"
     );
 
-    std::env::set_var("OWO_MODEL_OUTPUT_TOKENS_BY_MODEL", r#"{"vision-x":8192}"#);
+    std::env::set_var("OWO_MODEL_OUTPUT_TOKENS_BY_MODEL", r#"{"vision-x":65536}"#);
     assert_eq!(
         provider.request_body(Some("vision-x"), &[], &[], false)["max_tokens"],
-        8192,
-        "每模型配置应覆盖全局默认值"
+        65536,
+        "每模型配置可独立超过默认值并覆盖全局默认值"
     );
     assert_eq!(
         provider.request_body(Some("other-model"), &[], &[], false)["max_tokens"],
@@ -1290,4 +1376,101 @@ async fn request_body_sends_reasoning_effort_only_for_known_levels() {
         Some(value) => std::env::set_var("OWO_REASONING_EFFORT", value),
         None => std::env::remove_var("OWO_REASONING_EFFORT"),
     }
+}
+
+#[test]
+fn validates_tool_arguments_against_the_registry_schema_sent_to_the_model() {
+    let specs = crate::tools::ToolRegistry::new().specs();
+    let spec = specs
+        .iter()
+        .find(|spec| spec.name == "verification_plan")
+        .expect("verification_plan must be registered in the standard tool registry");
+    let valid = json!({"plan": {
+        "plan_id": "verification-plan",
+        "requirements": [{
+            "requirement_id": "req-smoke",
+            "covers_requirement_ids": ["user-request:smoke check"],
+            "validator_id": "workspace-file-exists-v1",
+            "arguments": {},
+            "validator_version": "1",
+            "scope": {"kind": "workspace_paths", "relative_paths": ["src/lib.rs"]},
+            "required": true,
+            "resources": {
+                "cpu_slots": 1,
+                "memory_mb": 8,
+                "exclusive_workspace": false,
+                "timeout_ms": 1000
+            }
+        }]
+    }});
+    assert!(validate_tool_arguments(&valid, spec).is_ok());
+
+    let mut too_many_paths = valid.clone();
+    too_many_paths["plan"]["requirements"][0]["scope"]["relative_paths"] = Value::Array(
+        (0..=crate::verification::MAX_WORKSPACE_VALIDATION_PATHS)
+            .map(|index| Value::String(format!("file-{index}.rs")))
+            .collect(),
+    );
+    let error = validate_tool_arguments(&too_many_paths, spec).unwrap_err();
+    assert!(error.contains("relative_paths"));
+    assert!(error.contains("maxItems"));
+}
+
+#[test]
+fn openai_request_uses_one_standard_registry_backed_tool_list() {
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: "http://127.0.0.1:11434/v1".to_string(),
+        api_key: String::new(),
+        model: "local".to_string(),
+        cloud_enabled: false,
+    })
+    .unwrap();
+    let specs = crate::tools::ToolRegistry::new().specs();
+    let body = provider.request_body(None, &[], &specs, false);
+    let sent = body["tools"].as_array().unwrap();
+    assert_eq!(sent.len(), specs.len());
+    let mut names = std::collections::BTreeSet::new();
+    for (entry, spec) in sent.iter().zip(&specs) {
+        assert_eq!(entry["type"], "function");
+        assert_eq!(entry["function"]["name"], spec.name);
+        assert_eq!(entry["function"]["description"], spec.description);
+        assert_eq!(entry["function"]["parameters"], spec.input_schema);
+        assert_eq!(entry["function"]["parameters"]["type"], "object");
+        assert!(
+            names.insert(spec.name.as_str()),
+            "duplicate tool name: {}",
+            spec.name
+        );
+    }
+
+    let verification = sent
+        .iter()
+        .find(|entry| entry["function"]["name"] == "verification_plan")
+        .unwrap();
+    let requirement = &verification["function"]["parameters"]["properties"]["plan"]["properties"]
+        ["requirements"]["items"];
+    let actual_validator_ids: std::collections::BTreeSet<_> = requirement["properties"]
+        ["validator_id"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let expected_validator_ids: std::collections::BTreeSet<_> =
+        crate::verification::workspace_validator_contracts()
+            .iter()
+            .map(|contract| contract.validator_id)
+            .chain(std::iter::once(
+                crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID,
+            ))
+            .collect();
+    assert_eq!(actual_validator_ids, expected_validator_ids);
+    assert_eq!(requirement["properties"]["arguments"]["type"], "object");
+    assert_eq!(
+        requirement["properties"]["scope"]["properties"]["relative_paths"]["maxItems"],
+        crate::verification::MAX_WORKSPACE_VALIDATION_PATHS
+    );
+    let encoded = serde_json::to_string(&verification["function"]["parameters"]).unwrap();
+    assert!(!encoded.contains("anyOf"));
+    assert!(!encoded.contains("oneOf"));
 }

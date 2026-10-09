@@ -9,7 +9,7 @@ use crate::contract_worker::enforce_worker_output_contract_controlled;
 use crate::gateway::{ModelProvider, TokenUsage};
 use crate::permissions::{Approver, Policy};
 use crate::session::{Session, SessionStore};
-use crate::subagent::MAX_SUBAGENT_DEPTH;
+use crate::subagent::{TurnEventSink, MAX_SUBAGENT_DEPTH};
 use crate::tools::ToolRegistry;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -28,7 +28,7 @@ pub(crate) struct WorkerRuntime<'a> {
     pub config: AgentConfig,
     pub system_prompt: Option<String>,
     pub is_critic: bool,
-    pub event_sink: Option<Arc<dyn Fn(&TurnEvent) + Send + Sync + 'a>>,
+    pub event_sink: Option<TurnEventSink<'a>>,
     pub session_store: Option<Arc<dyn SessionStore>>,
     pub worker_session_id: Option<String>,
     pub parent_session_id: Option<String>,

@@ -785,7 +785,7 @@
               .map(function (pair) {
                 var b = busy[c.change_set_id + ":" + pair[0]];
                 return (
-                  '<button type="button" class="owo-ws-mini" data-cs-act="' + pair[0] +
+                  '<button type="button" class="owo-ws-mini" data-core-action data-cs-act="' + pair[0] +
                   '" data-cs-id="' + esc(c.change_set_id) + '"' + (b ? " disabled" : "") +
                   ">" + pair[1] + "</button>"
                 );
@@ -857,11 +857,11 @@
               esc(blockReason || "存在待审批/冲突的 ChangeSet，先在「ChangeSet 审批」区接受或拒绝") + "</div>"
             : "") +
           '<div class="owo-ws-review-actions">' +
-          '<button type="button" class="owo-ws-review-act ok" data-art-act="approve" data-art-id="' + esc(aid) + '"' +
+          '<button type="button" class="owo-ws-review-act ok" data-core-action data-art-act="approve" data-art-id="' + esc(aid) + '"' +
           (busy || block ? " disabled" : "") +
           (block ? ' title="ChangeSet 未处理：批准被门控阻断"' : "") + ">批准</button>" +
-          '<button type="button" class="owo-ws-review-act warn" data-art-act="request_changes" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">要求修改</button>" +
-          '<button type="button" class="owo-ws-review-act bad" data-art-act="reject" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">驳回</button>" +
+          '<button type="button" class="owo-ws-review-act warn" data-core-action data-art-act="request_changes" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">要求修改</button>" +
+          '<button type="button" class="owo-ws-review-act bad" data-core-action data-art-act="reject" data-art-id="' + esc(aid) + '"' + (busy ? " disabled" : "") + ">驳回</button>" +
           "</div>" +
           "</div></details>";
       }
@@ -876,7 +876,7 @@
           '<summary>根据评审意见返工（生成 v2 取代本版本）</summary>' +
           '<div class="owo-ws-rework-form" data-rework-form="' + esc(aid) + '">' +
           '<textarea class="owo-ws-rework-instruction" rows="2" placeholder="返工指令（展开时自动从最近一次「要求修改」评审意见预填，可修改）"></textarea>' +
-          '<div class="owo-ws-inline"><button type="button" class="owo-ws-rework-go primary" data-rework-go="' + esc(aid) + '"' + (rbusy ? " disabled" : "") + ">发起返工</button>" +
+          '<div class="owo-ws-inline"><button type="button" class="owo-ws-rework-go primary" data-core-action data-rework-go="' + esc(aid) + '"' + (rbusy ? " disabled" : "") + ">发起返工</button>" +
           '<span class="hint">POST /artifacts/{id}/rework —— 同一评审仅创建一个返工任务（重复提交幂等返回原任务）</span></div>' +
           "</div></details>";
       }
@@ -935,7 +935,7 @@
           return (
             '<span class="owo-ws-refrow"><span class="owo-ws-mono" title="' + esc(v) + '">' +
             esc(short(v)) + "</span>" +
-            '<button type="button" class="owo-ws-mini" data-ws-ref-del="' + esc(kind + ":" + v) +
+            '<button type="button" class="owo-ws-mini" data-core-action data-ws-ref-del="' + esc(kind + ":" + v) +
             '" title="移除该引用">×</button></span>'
           );
         }).join(" ")
@@ -943,7 +943,7 @@
     var sug = options
       .map(function (o) {
         return (
-          '<button type="button" class="owo-ws-mini" data-ws-ref-add="' + esc(kind + ":" + (o && o.value)) +
+          '<button type="button" class="owo-ws-mini" data-core-action data-ws-ref-add="' + esc(kind + ":" + (o && o.value)) +
           '" title="' + esc((o && o.label) || (o && o.value) || "") + '">' +
           esc(short((o && o.label) || (o && o.value) || "")) + "</button>"
         );

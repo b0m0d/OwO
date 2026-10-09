@@ -140,6 +140,18 @@ impl TeamCoordinator {
         self.loop_flag(team_id).store(alive, Ordering::SeqCst);
     }
 
+    /// 原子声明运行循环所有权：仅当当前无人持有时置真并返回 true。
+    ///
+    /// `submit_rework` 的「已有循环则跳过」检查与 `run_team_loop` 的启动之间
+    /// 存在窗口：两个并发返工/恢复请求都可能通过检查各自 spawn 一个循环，
+    /// 两个循环并发 `run_phase` 会把对方的 Claimed/Running 步骤当成死锁并终止
+    /// 团队。循环入口必须用本方法竞争所有权，落选者直接返回。
+    pub fn try_claim_loop(&self, team_id: &str) -> bool {
+        self.loop_flag(team_id)
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
     /// 该团队在当前进程中是否有存活的运行循环（磁盘 Running 但此值为假 → 中断候选）。
     pub fn is_loop_alive(&self, team_id: &str) -> bool {
         self.loop_flag(team_id).load(Ordering::SeqCst)

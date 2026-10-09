@@ -109,6 +109,17 @@ test("桌面壳内选定目录：输入框转只读、按钮走原生 IPC、回�
   assert.match(input.title, /当前项目：T:\\proj\\demo/);
 });
 
+test("工作区设置保留壳侧权威绝对路径，不用目录别名覆盖新会话路径", async () => {
+  const sandbox = loadPicker({ native: true });
+  const input = makeElement("input");
+  const button = makeElement("button");
+  sandbox.OwoFolderPicker.attach(input, button, { displayAlias: false });
+  button.click();
+  await flush();
+  assert.equal(input.value, "T:\\proj\\demo");
+  assert.equal(input.dataset.path, "T:\\proj\\demo");
+});
+
 test("取消是合法终态：不报错、不改值、按钮恢复可用", async () => {
   const sandbox = loadPicker({ native: true, result: { ok: false, canceled: true } });
   const input = makeElement("input");
@@ -192,14 +203,25 @@ test("接线：工具页的工作区选择与引导页均走原生选择器，�
   assert.match(indexHtml, /<div class="tool-actions">\s*<input id="workspace"[^>]*>[\s\S]*?<button type="button" id="workspaceBrowseBtn"/,
     "工作区输入与选择按钮必须同组");
   assert.match(indexHtml, /<script src="core\/folder-picker\.js"><\/script>/, "共享选择器必须被引入");
-  assert.match(appSource, /async function pickDirectory\(\)[\s\S]*api\("\/fs\/pick-directory"/,
-    "工具页通过统一 API 请求宿主原生选择对话框");
-  assert.match(appSource, /\$\("workspaceBrowseBtn"\)\.addEventListener\("click", \(\) => pickDirectory\(\)\)/,
-    "工作区浏览按钮必须有实际动作");
+  assert.match(appSource, /async function pickDirectory\(\)[\s\S]*OwoFolderPicker\.pick\(window\)/,
+    "工作区菜单和快捷键必须调用共享原生选择器");
+  assert.match(appSource, /OwoFolderPicker\.attach\([\s\S]*\$\("workspace"\),\s*\$\("workspaceBrowseBtn"\)/,
+    "工作区页必须将输入与按钮接入共享选择器");
+  assert.match(appSource, /displayAlias:\s*false/, "工作区路径输入需保留真实路径供会话使用");
+  assert.doesNotMatch(appSource, /api\("\/fs\/pick-directory"/,
+    "工作区选择不得再绕过 Electron IPC 走旧 HTTP 入口");
+  assert.match(indexHtml, /id="workspacePickerHint"/, "选择器需给浏览器预览说明明确状态");
   assert.match(appSource, /\$\("composerProjectBtn"\)\.addEventListener\("click",[\s\S]*openWorkspaceMenu/,
     "对话区项目入口打开统一工作区菜单");
   assert.match(appSource, /data-project-action="switch"[\s\S]*pickDirectory\(\)/,
     "工作区菜单继续提供原生目录选择入口");
+  const projectMenu = /function openWorkspaceMenu\(trigger\) \{([\s\S]*?)\n\}/.exec(appSource)?.[1];
+  assert.ok(projectMenu);
+  assert.match(projectMenu, /OwoFolderPicker\?\.isNativeAvailable\(window\)/,
+    "浏览器预览必须识别缺少本地目录能力的状态");
+  assert.match(projectMenu, /data-project-action="create"[^\n]*actionDisabled/);
+  assert.match(projectMenu, /data-project-action="switch"[^\n]*actionDisabled/);
+  assert.match(projectMenu, /浏览器预览不能访问本地目录/);
   assert.match(appDomainSource, /async function newSession\(\)[\s\S]*workspace,/, "新会话必须使用选定的工作区路径");
   assert.match(appSource, /\$\("workspace"\)\.addEventListener\("change", \(\) => \{[\s\S]*localStorage\.setItem\("owo\.workspace"/,
     "所选路径需持久为下次会话的默认值");

@@ -155,14 +155,19 @@ window.OwoPanels.about = (function () {
     return "—";
   }
 
+  function escapeHtml(value) {
+    if (H && typeof H.esc === "function") return H.esc(value);
+    return defaultHelpers().esc(value);
+  }
+
   function card(label, value, hint) {
     return (
       '<div class="owo-about-card"><span>' +
-      label +
+      escapeHtml(label) +
       "</span><b>" +
-      value +
+      escapeHtml(value) +
       "</b><span>" +
-      (hint || "") +
+      escapeHtml(hint || "") +
       "</span></div>"
     );
   }

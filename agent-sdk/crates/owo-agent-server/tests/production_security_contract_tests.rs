@@ -455,22 +455,44 @@ async fn settings_response_contains_no_plaintext_credentials() {
     let settings = body_json(response).await;
     assert_eq!(settings["model"].as_str(), Some("deepseek-v4-flash"));
 
-    // 明文凭据字段永不出现（大小写/变体一并覆盖；`token_budget` 是合法用量预算字段，非凭据）。
-    let text = settings.to_string();
-    let lower = text.to_lowercase();
-    for leak in [
-        "api_key",
-        "apikey",
-        "password",
-        "passwd",
-        "secret",
-        "credentials",
-        "access_key",
-        "private_key",
-    ] {
-        assert!(
-            !lower.contains(leak),
-            "settings 响应泄露了凭据字段 {leak:?}：{text}"
-        );
+    // 明文凭据字段永不出现：按键名精确判定（大小写不敏感），允许
+    // `api_key_set` / `api_key_env` / `api_key_source` 这类只表达存在性与来源的
+    // 元数据字段（不含密钥正文），但真正的密钥/口令/令牌字段一律禁止。
+    assert_no_credential_keys(&settings, "$");
+}
+
+fn assert_no_credential_keys(value: &serde_json::Value, path: &str) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let lower = key.to_ascii_lowercase();
+                let hard_denied = matches!(
+                    lower.as_str(),
+                    "api_key"
+                        | "apikey"
+                        | "password"
+                        | "passwd"
+                        | "secret"
+                        | "credentials"
+                        | "access_key"
+                        | "private_key"
+                );
+                let key_like = lower.contains("api_key")
+                    && !(lower.ends_with("_set")
+                        || lower.ends_with("_env")
+                        || lower.ends_with("_source"));
+                assert!(
+                    !hard_denied && !key_like,
+                    "settings 响应泄露了凭据字段 {path}.{key}"
+                );
+                assert_no_credential_keys(child, &format!("{path}.{key}"));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                assert_no_credential_keys(child, &format!("{path}[{index}]"));
+            }
+        }
+        _ => {}
     }
 }

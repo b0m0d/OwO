@@ -11,6 +11,7 @@ const sandbox = { window: {} };
 vm.runInNewContext(source, sandbox, { filename: "workbench-view.js" });
 const create = sandbox.window.OwoWorkbenchView.create;
 const replaceRouteHash = sandbox.window.OwoWorkbenchView.replaceRouteHash;
+const clearGroupFilters = sandbox.window.OwoWorkbenchView.clearGroupFilters;
 
 function harness() {
   const classes = new Set();
@@ -79,6 +80,40 @@ test("工具按钮可从工具视图和设置页回到会话，再从会话重�
   assert.equal(h.body.classList.contains("tools-open"), true);
 });
 
+
+test("打开扩展面板时清除侧栏分组筛选并恢复全部导航", () => {
+  const classes = new Set(["tools-group-automation"]);
+  const makeButton = (dataset, active) => ({
+    dataset,
+    classList: {
+      remove(name) { if (name === "active") active = false; },
+      toggle(name, force) { if (name === "active") active = Boolean(force); },
+      contains(name) { return name === "active" && active; },
+    },
+    active: () => active,
+  });
+  const groupButton = makeButton({ codexGroup: "automation" }, true);
+  const allButton = makeButton({ jump: "all" }, false);
+  const automationButton = makeButton({ jump: "automation" }, true);
+  const body = {
+    classList: {
+      remove(name) { classes.delete(name); },
+      contains(name) { return classes.has(name); },
+    },
+    querySelectorAll(selector) {
+      if (selector === "[data-codex-group]") return [groupButton];
+      if (selector === "[data-jump]") return [allButton, automationButton];
+      return [];
+    },
+  };
+
+  clearGroupFilters(body);
+  assert.equal(classes.has("tools-group-automation"), false);
+  assert.equal(groupButton.active(), false);
+  assert.equal(allButton.active(), true);
+  assert.equal(automationButton.active(), false);
+});
+
 test("有效初始深链进入指定页，无效 hash 回到会话页", () => {
   const resolve = sandbox.window.OwoWorkbenchView.resolveInitialRoute;
   const panel = resolve("#about", ["about", "team"]);
@@ -113,4 +148,8 @@ test("route hash follows chat, settings, and panel transitions while preserving 
   const domain = readFileSync(join(here, "../app-domain.js"), "utf8");
   assert.match(app, /replaceRoute: \(route\) => window\.OwoWorkbenchView\.replaceRouteHash/);
   assert.match(domain, /if \(writeHash\) workbenchView\.setRoute\(id\)/);
+  const openPanel = /function openPanelById\(id\) \{([\s\S]*?)\n\}/.exec(domain)?.[1];
+  assert.ok(openPanel, "panel route handler must exist");
+  assert.match(openPanel, /clearGroupFilters\(document\.body\)/);
+  assert.match(openPanel, /refreshPluginSkillOverview/, "deep-linked panels hydrate the shared settings overview");
 });

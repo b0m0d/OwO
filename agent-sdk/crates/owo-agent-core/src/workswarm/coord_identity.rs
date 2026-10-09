@@ -117,6 +117,24 @@ mod tests {
         assert_eq!(host.current_execution_epoch(&state.run_id), 1);
     }
     #[test]
+    fn loop_claim_is_exclusive_and_released_after_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = coordinator(dir.path());
+        assert!(host.try_claim_loop("team-atomic"), "首个循环必须取得所有权");
+        assert!(
+            !host.try_claim_loop("team-atomic"),
+            "已存活循环存在时并发 spawn 必须竞争失败（否则双循环会把 Claimed 判成死锁）"
+        );
+        assert!(host.is_loop_alive("team-atomic"));
+        host.set_loop_alive("team-atomic", false);
+        assert!(
+            host.try_claim_loop("team-atomic"),
+            "循环收尾释放后必须允许下一次声明"
+        );
+        host.set_loop_alive("team-atomic", false);
+    }
+
+    #[test]
     fn restart_claim_exceeds_persisted_records_and_new_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let host = coordinator(dir.path());

@@ -4,8 +4,8 @@
 //!   按名称排序后做 SHA-256。同一注册表内容跨进程/跨轮次稳定，是 provider
 //!   schema 缓存复用的 key 基础（effect 是宿主侧元数据，不参与指纹）。
 //! - **schema 预算**：工具面序列化总体积超过预算时按序压缩——description
-//!   截断 + input_schema 剥离噪声键（description/examples/default/title），
-//!   保留 type/properties/required/enum/items 等结构键；**不删除工具本身**。
+//!   截断 + input_schema 剥离说明性噪声键（examples/default/title/description），
+//!   保留所有校验语义键（包括 additionalProperties）；**不删除工具本身**。
 //! - 预算来自 `OWO_TOOL_SCHEMA_BUDGET_BYTES`（0 = 关闭；未设 = 默认
 //!   200_000 字节）。常规注册表远低于默认值，行为零变化。
 
@@ -80,12 +80,7 @@ fn strip_schema_noise(value: Value) -> Value {
             let mut cleaned = serde_json::Map::new();
             for (key, child) in map {
                 match key.as_str() {
-                    "description"
-                    | "examples"
-                    | "default"
-                    | "title"
-                    | "$schema"
-                    | "additionalProperties" => continue,
+                    "description" | "examples" | "default" | "title" | "$schema" => continue,
                     _ => {
                         cleaned.insert(key, strip_schema_noise(child));
                     }
@@ -224,6 +219,12 @@ mod tests {
             json!({
                 "type": "object",
                 "required": ["path"],
+                "additionalProperties": false,
+                "anyOf": [{
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {"path": {"type": "string", "description": "分支说明"}}
+                }],
                 "properties": {
                     "path": {
                         "type": "string",
@@ -236,6 +237,22 @@ mod tests {
         let (out, _) = enforce_budget(specs, Some(100));
         let schema = &out[0].input_schema;
         assert_eq!(schema["required"], json!(["path"]), "required 必须保留");
+        assert_eq!(
+            schema["anyOf"][0]["required"],
+            json!(["path"]),
+            "anyOf 子 schema 在压缩后必须保留"
+        );
+        assert!(
+            schema["anyOf"][0]["properties"]["path"]
+                .get("description")
+                .is_none(),
+            "anyOf 内说明性噪声同样应该剥离"
+        );
+        assert_eq!(
+            schema["additionalProperties"],
+            json!(false),
+            "additionalProperties 是校验语义，压缩时必须保留"
+        );
         assert_eq!(
             schema["properties"]["path"]["enum"],
             json!(["a", "b"]),

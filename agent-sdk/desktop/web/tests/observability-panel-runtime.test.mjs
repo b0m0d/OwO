@@ -110,5 +110,84 @@ test("observability report requests are fenced when the page is disposed", async
   h.panel.dispose();
   pending.resolve({ period_days: 7, slo: [{ name: "late report" }] });
   await report;
-  assert.equal(h.get("owo-mtr-report").innerHTML, "");
+  assert.doesNotMatch(h.get("owo-mtr-report").innerHTML, /late report/);
+});
+
+
+test("observability weekly report keeps an inline retry action after request failure", async () => {
+  let reportCalls = 0;
+  const h = harness({
+    get(path) {
+      if (path.includes("/report?")) {
+        reportCalls += 1;
+        return reportCalls === 1
+          ? Promise.reject(new Error("report service offline"))
+          : Promise.resolve({ period_days: 7, slo: [{ name: "availability", samples: 10, achieving: true }] });
+      }
+      return Promise.resolve(dataFor(path));
+    },
+    esc: value => String(value), friendlyError: error => String(error),
+  });
+
+  await h.panel._test.loadReport();
+  assert.match(h.get("owo-mtr-report").innerHTML, /report service offline/);
+  const retry = h.get("owo-mtr-report-refresh");
+  assert.equal(retry.textContent, "重试");
+  assert.equal(typeof retry.handlers.click, "function");
+  await retry.handlers.click();
+  assert.equal(reportCalls, 2);
+  assert.match(h.get("owo-mtr-report").innerHTML, /availability/);
+});
+
+test("observability weekly report prevents duplicate requests while loading", async () => {
+  const request = deferred();
+  let reportCalls = 0;
+  const h = harness({
+    get(path) {
+      if (path.includes("/report?")) { reportCalls += 1; return request.promise; }
+      return Promise.resolve(dataFor(path));
+    },
+    esc: value => String(value), friendlyError: error => String(error),
+  });
+
+  const first = h.panel._test.loadReport();
+  assert.match(h.get("owo-mtr-report").innerHTML, /正在加载周报/);
+  assert.equal(await h.panel._test.loadReport(), null);
+  assert.equal(reportCalls, 1);
+  request.resolve({ period_days: 7, slo: [] });
+  await first;
+  assert.match(h.get("owo-mtr-report").innerHTML, /重新加载/);
+});
+
+
+test("observability metrics escape labels and reject malformed numeric payloads", async () => {
+  const malicious = "<img src=x onerror=alert(1)>";
+  const h = harness({
+    get(path) {
+      if (path === "/metrics/overview") return Promise.resolve({ traces_count: 1, avg_turn_ms: 2 });
+      if (path === "/metrics/turns?limit=50") return Promise.resolve({ turns: [{ duration_ms: malicious }] });
+      if (path === "/metrics/tools") return Promise.resolve({ tools: [{ tool: malicious, calls: malicious, failures: malicious, failure_rate: malicious }] });
+      if (path === "/metrics/health") return Promise.resolve({ components: { plugins: { count: malicious }, notes: { count: 0 }, traces: { count: 0 } } });
+      if (path === "/metrics/runtime") return Promise.resolve({ queue_depth: malicious, sse: { active_connections: malicious } });
+      if (path === "/metrics/slo") return Promise.resolve({ slo: [{ name: malicious, target_ms: malicious, p95_ms: malicious, success_rate: malicious, samples: malicious, error_budget: { bad: malicious, allowed_bad: 0 } }] });
+      if (path === "/usage/summary") return Promise.resolve({ count: malicious, dimensions: [{ dimension: malicious, calls: malicious, total_tokens: malicious, cost_usd: malicious }] });
+      if (path === "/metrics/slo/alerts") return Promise.resolve({ count: malicious, rules: [{ name: malicious, slo_name: malicious, kind: "rate", threshold: malicious, consecutive: malicious, severity: malicious }] });
+      if (path === "/metrics/telemetry/status") return Promise.resolve({ enabled: false, counters: { [malicious]: malicious }, error_codes: {}, performance: {} });
+      if (path.includes("/metrics/slo/report?")) return Promise.resolve({ period_days: malicious, slo: [{ name: malicious, p95_ms: malicious, success_rate: malicious, samples: malicious, violations_in_window: malicious }] });
+      return Promise.resolve({});
+    },
+    esc: value => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;"),
+    friendlyError: error => String(error),
+  });
+
+  await h.panel.refresh();
+  await h.panel._test.loadReport();
+  const rendered = [
+    "owo-mtr-chart", "owo-mtr-tools", "owo-mtr-health", "owo-mtr-runtime",
+    "owo-mtr-slo", "owo-mtr-usage", "owo-mtr-alerts", "owo-mtr-telemetry", "owo-mtr-report",
+  ].map(id => h.get(id).innerHTML).join("\n");
+  assert.doesNotMatch(rendered, /<img|<script|<svg/);
+  assert.match(rendered, /&lt;img/);
+  assert.match(rendered, /—/);
+  assert.doesNotMatch(rendered, /NaN/);
 });

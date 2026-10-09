@@ -49,19 +49,6 @@ pub(super) async fn stream_cas_page(
     })
 }
 
-pub(super) async fn read_context_cas_page(
-    cas: &CasStore,
-    hash: &str,
-    max_bytes: usize,
-) -> WorkSwarmResult<CasTextPage> {
-    if max_bytes > 64 * 1024 {
-        return Err(WorkSwarmError::Validation(
-            "context CAS preview exceeds 65536 bytes".into(),
-        ));
-    }
-    stream_cas_page(cas.clone(), hash.to_string(), 0, max_bytes).await
-}
-
 pub(super) async fn read_context_cas_text(
     cas: &CasStore,
     hash: &str,
@@ -287,15 +274,6 @@ pub(super) struct ArtifactPreviewCache {
     shared: Option<Arc<Mutex<SharedArtifactPreviewCache>>>,
 }
 impl ArtifactPreviewCache {
-    pub(super) fn new(cas: &CasStore) -> Self {
-        Self {
-            cas: cas.clone(),
-            pages: HashMap::new(),
-            retained_bytes: 0,
-            shared: None,
-        }
-    }
-
     pub(super) fn with_shared(
         cas: &CasStore,
         shared: Arc<Mutex<SharedArtifactPreviewCache>>,
@@ -306,66 +284,6 @@ impl ArtifactPreviewCache {
             retained_bytes: 0,
             shared: Some(shared),
         }
-    }
-
-    pub(super) async fn read(
-        &mut self,
-        artifact: &Artifact,
-        max: usize,
-    ) -> WorkSwarmResult<Arc<CasTextPage>> {
-        let hash = artifact_hash(artifact)?.to_string();
-        let key = (hash.clone(), max);
-        if let Some(page) = self.pages.get(&key) {
-            let page = Arc::clone(page);
-            self.verify_cached_backing(&hash, artifact.size_bytes, &page)
-                .await?;
-            return Ok(page);
-        }
-        let read_max = if max == 0 { 0 } else { max.max(4) };
-        let mut verified = stream_cas_page(self.cas.clone(), hash, 0, read_max).await?;
-        if verified.content.len() > max {
-            let mut end = max;
-            while !verified.content.is_char_boundary(end) {
-                end -= 1;
-            }
-            verified.content.truncate(end);
-            verified.next_offset_bytes = end as u64;
-            verified.eof = verified.next_offset_bytes == verified.total_bytes;
-        }
-        let page = Arc::new(verified);
-        if page.total_bytes != artifact.size_bytes {
-            return Err(WorkSwarmError::Conflict(
-                "产物大小与已验证 CAS 字节不一致".into(),
-            ));
-        }
-        if page.content.len() <= (32 * 1024 * 1024usize).saturating_sub(self.retained_bytes) {
-            self.retained_bytes += page.content.len();
-            self.pages.insert(key, Arc::clone(&page));
-        }
-        Ok(page)
-    }
-
-    async fn verify_cached_backing(
-        &self,
-        hash: &str,
-        expected_size: u64,
-        cached: &CasTextPage,
-    ) -> WorkSwarmResult<()> {
-        if cached.sha256 != hash || cached.total_bytes != expected_size {
-            return Err(WorkSwarmError::Conflict(
-                "缓存预览身份与当前产物声明不一致".into(),
-            ));
-        }
-        // Preview pages are an optimization, never an integrity authority. Re-hash the
-        // backing CAS object before serving cached bytes so post-cache disk corruption
-        // cannot be hidden by an earlier successful read.
-        let current = stream_cas_page(self.cas.clone(), hash.to_string(), 0, 0).await?;
-        if current.sha256 != hash || current.total_bytes != expected_size {
-            return Err(WorkSwarmError::Conflict(
-                "CAS 正文与缓存预览身份不一致".into(),
-            ));
-        }
-        Ok(())
     }
 
     /// Read independent bounded previews concurrently while preserving request order.
@@ -702,19 +620,34 @@ mod preview_tests {
             "content_ref":format!("cas://sha256:{hash}"),"sha256":hash,"size_bytes":full.len()
         }))
         .unwrap();
-        let mut cache = ArtifactPreviewCache::new(&cas);
+        let mut cache = ArtifactPreviewCache::with_shared(
+            &cas,
+            Arc::new(Mutex::new(SharedArtifactPreviewCache::default())),
+        );
         for max in 0..7 {
-            let page = cache.read(&artifact, max).await.unwrap();
+            let page = cache
+                .read_many(vec![(&artifact, max)], 1)
+                .await
+                .unwrap()
+                .remove(0);
             assert!(page.content.len() <= max && full.starts_with(&page.content));
             assert_eq!(page.total_bytes, full.len() as u64);
             assert_eq!(page.sha256, artifact.sha256);
         }
-        let first = cache.read(&artifact, 6).await.unwrap();
-        let again = cache.read(&artifact, 6).await.unwrap();
+        let first = cache
+            .read_many(vec![(&artifact, 6)], 1)
+            .await
+            .unwrap()
+            .remove(0);
+        let again = cache
+            .read_many(vec![(&artifact, 6)], 1)
+            .await
+            .unwrap()
+            .remove(0);
         assert!(Arc::ptr_eq(&first, &again));
         let mut wrong = artifact;
         wrong.size_bytes += 1;
-        assert!(cache.read(&wrong, 6).await.is_err());
+        assert!(cache.read_many(vec![(&wrong, 6)], 1).await.is_err());
     }
 
     #[tokio::test]
@@ -811,7 +744,10 @@ mod preview_tests {
         };
         let first = artifact("first", first_body, &first_hash);
         let second = artifact("second", second_body, &second_hash);
-        let mut cache = ArtifactPreviewCache::new(&cas);
+        let mut cache = ArtifactPreviewCache::with_shared(
+            &cas,
+            Arc::new(Mutex::new(SharedArtifactPreviewCache::default())),
+        );
         let pages = cache
             .read_many(vec![(&second, 3), (&first, 4), (&second, 3)], 2)
             .await

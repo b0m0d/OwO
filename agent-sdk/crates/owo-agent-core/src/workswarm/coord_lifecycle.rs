@@ -591,13 +591,14 @@ mod validation_receipt_identity_tests {
             "workspace-path:src/lib.rs".to_string(),
             crate::CasStore::hash_of(b"pub fn ready() {}\n"),
         )]);
-        let matches =
-            super::super::delivery_gate_evidence::workspace_receipt_snapshot_matches_current;
-        assert!(matches(Some(workspace.path()), &subjects));
-        assert!(!matches(None, &subjects));
+        let matches = |root: Option<&std::path::Path>| {
+            crate::workspace_snapshot::WorkspaceSnapshotBatch::new(root).subjects_match(&subjects)
+        };
+        assert!(matches(Some(workspace.path())));
+        assert!(!matches(None));
 
         std::fs::write(&source, "pub fn changed() {}\n").unwrap();
-        assert!(!matches(Some(workspace.path()), &subjects));
+        assert!(!matches(Some(workspace.path())));
     }
 
     #[test]

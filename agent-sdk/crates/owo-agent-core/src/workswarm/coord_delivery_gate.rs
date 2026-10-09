@@ -170,25 +170,43 @@ impl TeamCoordinator {
             let has_behavior_command = verification_plan.requirements.iter().any(|requirement| {
                 requirement.required && requirement.validator_id == "workspace-command-success-v1"
             });
-            if changeset_contains_code && !has_behavior_command {
+            // 模板角色的 verify 只声明 non_empty（模板不写死仓库命令），但源码变更
+            // 仍需真实行为证据：接受宿主记录的成功行为命令回执作为兜底（回执必须
+            // 覆盖当前 ChangeSet 的全部最终源码哈希，模型自述不算证据）。
+            let host_behavior_evidence = if changeset_contains_code && !has_behavior_command {
+                super::delivery_gate_evidence::attempt_behavior_receipt_evidence(
+                    team_id,
+                    &runtime_command_receipts,
+                    &step.id,
+                    attempt_id,
+                    &change_sets,
+                )
+            } else {
+                None
+            };
+            if changeset_contains_code && !has_behavior_command && host_behavior_evidence.is_none()
+            {
                 return Err(WorkSwarmError::Conflict(format!(
-                    "任务 {} 的实际 ChangeSet 修改了源代码，但没有必需的宿主行为验证命令",
+                    "任务 {} 的实际 ChangeSet 修改了源代码，但没有宿主行为验证证据：请在写入后运行获准的行为命令（run_command），或在 VerificationPlan 声明 workspace-command-success-v1 验收要求",
                     step.id
                 )));
             }
-            let uncovered_source_paths = super::delivery_gate_evidence::uncovered_source_paths(
-                &change_sets,
-                team_id,
-                &step.id,
-                attempt_id,
-                verification_plan,
-            );
-            if !uncovered_source_paths.is_empty() {
-                return Err(WorkSwarmError::Conflict(format!(
-                    "任务 {} 的行为验证范围未覆盖所有已修改源码：{}",
-                    step.id,
-                    uncovered_source_paths.join(", ")
-                )));
+            if has_behavior_command {
+                // 计划声明了行为命令：逐一校验其 WorkspacePaths 覆盖全部已改源码。
+                let uncovered_source_paths = super::delivery_gate_evidence::uncovered_source_paths(
+                    &change_sets,
+                    team_id,
+                    &step.id,
+                    attempt_id,
+                    verification_plan,
+                );
+                if !uncovered_source_paths.is_empty() {
+                    return Err(WorkSwarmError::Conflict(format!(
+                        "任务 {} 的行为验证范围未覆盖所有已修改源码：{}",
+                        step.id,
+                        uncovered_source_paths.join(", ")
+                    )));
+                }
             }
             let input_snapshot = json!({
                 "task_input": &step.input,
@@ -207,7 +225,10 @@ impl TeamCoordinator {
                         artifact.artifact_id
                     )));
                 }
-                if (changeset_contains_code || code_artifact) && !has_behavior_command {
+                if (changeset_contains_code || code_artifact)
+                    && !has_behavior_command
+                    && host_behavior_evidence.is_none()
+                {
                     return Err(WorkSwarmError::Conflict(format!(
                         "代码任务 {} 缺少必需的宿主行为验证命令，静态文件检查不能通过交付门",
                         step.id
@@ -621,6 +642,42 @@ impl TeamCoordinator {
                             requirement.requirement_id,
                             detail.as_deref().unwrap_or("验证器未返回通过")
                         )));
+                    }
+                }
+                if changeset_contains_code && !has_behavior_command {
+                    if let Some(evidence_ref) = &host_behavior_evidence {
+                        // 兜底路径也要留下可追溯的宿主验收收据（审计面可见）。
+                        let started_at = now_ts();
+                        let receipt = make_validation_receipt(ValidationReceiptInput {
+                            team_id,
+                            step_id: &step.id,
+                            attempts: record.attempts,
+                            attempt_id,
+                            epoch,
+                            requirement_id: &format!("{}:host-behavior-receipt", step.id),
+                            scope: &crate::plan::VerificationScopeV1::ArtifactRefs {
+                                artifact_ids: vec![artifact.artifact_id.clone()],
+                            },
+                            validator_id: "workspace-command-success-v1",
+                            validator_version: "1",
+                            arguments_sha256: "",
+                            input_sha256: &input_sha256,
+                            artifact_id: &artifact.artifact_id,
+                            artifact_sha256: &actual_hash,
+                            changeset_sha256: changeset_sha256.clone(),
+                            changeset_refs: changeset_refs.clone(),
+                            evidence_ref: &artifact.content_ref,
+                            started_at: &started_at,
+                            verdict: crate::plan::ValidationVerdictV1::Passed,
+                            detail: Some(
+                                "模板未声明行为命令；宿主按真实成功命令回执接受该源码变更"
+                                    .to_string(),
+                            ),
+                            subject_hashes: std::collections::BTreeMap::new(),
+                            additional_evidence_refs: vec![evidence_ref.clone()],
+                        });
+                        store_validation_receipt(state, &step.id, &receipt);
+                        validation_receipts.push(receipt);
                     }
                 }
                 let required_validation_count = 1 + verification_plan

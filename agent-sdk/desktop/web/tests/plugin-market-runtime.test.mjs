@@ -95,6 +95,40 @@ test("remote plugin installation is single-flight and restores its button", asyn
   assert.match(h.root.querySelector(".owo-market-result").textContent, /远端安装完成/);
 });
 
+test("plugin action lock survives panel remount and clears when the request settles", async () => {
+  const pending = deferred();
+  const h = harness(null, () => pending.promise);
+  const button = { disabled: false, textContent: "安装", attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, removeAttribute(name) { delete this.attributes[name]; } };
+  const first = h.panel.doInstallRemote("sample", "1.0.0", "", button);
+  assert.equal(h.calls.filter(([method, path]) => method === "POST" && path === "/plugins/market/install-remote").length, 1);
+
+  h.panel.dispose();
+  h.panel.mount(h.root, {
+    root: h.root,
+    get(path) {
+      h.calls.push(["GET", path]);
+      if (path.includes("audit")) return Promise.resolve({ entries: [] });
+      return Promise.resolve({ app_version: "1.0.0", require_signature: true, plugins: [] });
+    },
+    post(path, body) {
+      h.calls.push(["POST", path, body]);
+      return Promise.resolve({ report: { id: body.id, version: body.version, state: "installed" } });
+    },
+    esc: value => String(value),
+    friendlyError: error => error.message || String(error),
+  });
+  await h.panel.doInstallRemote("sample", "1.0.0", "");
+  const postsWhilePending = h.calls.filter(([method, path]) => method === "POST" && path === "/plugins/market/install-remote");
+  assert.equal(postsWhilePending.length, 1, "重挂载后不能再次发起同一安装");
+  assert.match(h.root.querySelector(".owo-market-result").textContent, /仍在执行/);
+
+  pending.resolve({ report: { id: "sample", version: "1.0.0", state: "installed" } });
+  await first;
+  await h.panel.doInstallRemote("sample", "1.0.0", "");
+  const postsAfterSettlement = h.calls.filter(([method, path]) => method === "POST" && path === "/plugins/market/install-remote");
+  assert.equal(postsAfterSettlement.length, 2, "原请求完成后锁必须释放");
+});
+
 test("older catalog refresh responses cannot overwrite newer results or repaint after disposal", async () => {
   const requests = [];
   const h = harness(path => {

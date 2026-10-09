@@ -213,6 +213,12 @@
             message = "此浏览器未获得桌面授权，请在 Electron 工作台中打开会话。";
           } else if (code === "auth/instance_mismatch/not_retryable") {
             message = "当前核心属于另一个桌面实例，请在 Electron 工作台重启核心后重试。";
+          } else if (response.status === 404 || response.status === 405) {
+            const hasDesktopBridge = Boolean(ApiClient.tauriInvokeOwner(global));
+            message = hasDesktopBridge
+              ? "Electron 已连接，但核心认证接口不可用（HTTP " + response.status + "）。请重启核心；如果问题仍在，请确认桌面端与核心服务版本一致。"
+              : "当前浏览器预览没有连接 Electron 核心（HTTP " + response.status + "）。请通过 Electron 工作台启动完整服务后重试。";
+            code = code || "auth/bootstrap_route_unavailable";
           }
           throw new ApiError(message, { status: response.status, body: body, code: code });
         }
@@ -248,6 +254,12 @@
       const responseType = opts.responseType || "json";
       const retryAuth = opts.retryAuth !== false;
       const isPublic = opts.public === true;
+      // 网络错误自动重试仅限幂等方法：POST/PATCH 可能在服务端已执行、只是响应丢失，
+      // 盲目重放会重复发起回合/写入（POST /session/{id}/turn、/session 等）。401 重试
+      // 仍然安全（鉴权中间件先于 handler 拒绝，未产生副作用）。
+      const method = String(opts.method || "GET").toUpperCase();
+      const networkRetrySafe =
+        method === "GET" || method === "HEAD" || method === "PUT" || method === "DELETE";
       delete opts.responseType;
       delete opts.retryAuth;
       delete opts.public;
@@ -274,8 +286,8 @@
           response = await global.fetch(this.url(path), Object.assign({}, opts, { headers: requestHeaders }));
         } catch (error) {
           // 连接层失败（端口没了 / 连接被拒）：可能是壳刚重启了 core。
-          // 先整体重查连接再重试一次；重查冷却期内或已重试过则照常上抛。
-          if (this.handleNetworkFailure(allowRetry)) {
+          // 先整体重查连接再重试一次；非幂等方法不自动重放（见上）。
+          if (networkRetrySafe && this.handleNetworkFailure(allowRetry)) {
             headers.delete("Authorization");
             return execute(false);
           }
@@ -364,7 +376,9 @@
       let response = await connect();
       if (response.status === 401) {
         // §3.1：401 单次刷新 token 重试（与 request() 的 401 重试语义一致）。
-        this.token = null;
+        // 必须整体重查壳连接：只清 this.token 时，缓存的连接描述符会把旧
+        // injectedToken/端口/实例再注入一遍，重试必然二次 401（core 重启场景）。
+        this.resetCoreConnection();
         response = await connect();
       }
       if (!response.ok || !response.body) {

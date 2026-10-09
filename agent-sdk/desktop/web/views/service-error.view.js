@@ -14,6 +14,13 @@
     });
   }
 
+  function setCoreBusy(button, busy) {
+    if (!button) return;
+    const gate = global.OwoCoreActionAvailability;
+    if (gate && typeof gate.setBusy === "function") gate.setBusy(button, busy);
+    else button.disabled = !!busy;
+  }
+
   // 技术详情行：值为空则整行省略（折叠面板不留空洞）。
   function detailRow(label, value) {
     if (value === undefined || value === null || value === "") return "";
@@ -24,6 +31,10 @@
   // role：retry=重试（含终止并重试）/ logs=打开诊断位置 / settings=打开模型设置 /
   // test=测试连接 / data-dir=更换数据目录 / workspace=选择文件夹。
   const ERROR_ACTION_PRESETS = {
+    "core/authentication_failed": [
+      { id: "retry_core", label: "重启后台", role: "retry" },
+      { id: "open_diagnostics", label: "查看诊断日志", role: "logs" }
+    ],
     "core/binary_missing": [
       { id: "recheck_core", label: "重新检查", role: "retry" },
       { id: "open_diagnostics_location", label: "打开诊断位置", role: "logs" }
@@ -134,7 +145,8 @@
       const disabled = (a.role === "data-dir" && !hasInvoke)
         ? " disabled title=\"仅桌面环境可用\""
         : "";
-      return "<button type=\"button\"" + primary +
+      const coreAction = a.role === "test" ? ' data-core-action="true" data-core-busy="false"' : "";
+      return "<button type=\"button\"" + primary + coreAction +
         " data-action=\"" + esc(a.id) + "\" data-role=\"" + esc(a.role) + "\"" + disabled + ">" +
         esc(a.label) + "</button>";
     }).join("");
@@ -196,15 +208,14 @@
             if (testLine) { testLine.hidden = false; testLine.textContent = "更换数据目录失败：" + String((e && e.message) || e); }
           });
         } else if (role === "test") {
-          button.disabled = true;
+          setCoreBusy(button, true);
           const api = global.OwoApi;
           if (!api || typeof api.post !== "function") {
-            button.disabled = false;
+            setCoreBusy(button, false);
             if (testLine) { testLine.hidden = false; testLine.textContent = "测试连接不可用（API 客户端未就绪）"; }
             return;
           }
           api.post("/settings/provider-test", {}).then(function (result) {
-            button.disabled = false;
             if (testLine) {
               testLine.hidden = false;
               testLine.textContent = "测试结果：" + String((result && result.code) || "unknown") +
@@ -212,8 +223,9 @@
                 (result && typeof result.latency_ms === "number" ? " · " + result.latency_ms + "ms" : "");
             }
           }).catch(function (e) {
-            button.disabled = false;
             if (testLine) { testLine.hidden = false; testLine.textContent = "测试连接失败：" + String((e && e.message) || e); }
+          }).finally(function () {
+            setCoreBusy(button, false);
           });
         }
       });

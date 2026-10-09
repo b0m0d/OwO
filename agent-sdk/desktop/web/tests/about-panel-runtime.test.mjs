@@ -91,6 +91,35 @@ test("能力请求失败显示不可用和重试提示，不伪装成零项", as
 });
 
 
+test("MCP 服务器名称作为卡片文本转义，不能注入 HTML", async () => {
+  const panel = loadPanel();
+  const root = makeRoot();
+  const helpers = {
+    baseUrl: "",
+    esc(value) {
+      return String(value == null ? "" : value).replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[char]);
+    },
+    get(path) {
+      if (path === "/mcp") {
+        return Promise.resolve({ connected: ['<img src=x onerror=alert(1)>'], count: 1, servers: [] });
+      }
+      return Promise.resolve(responseFor(path, "online"));
+    },
+  };
+  panel.mount(root, helpers);
+  await flush();
+
+  const cards = root.element("owo-about-caps").innerHTML;
+  assert.match(cards, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(cards, /<img src=x onerror=/);
+});
+
 test("未知响应形状显示未知而不是空列表", async () => {
   const panel = loadPanel();
   const root = makeRoot();

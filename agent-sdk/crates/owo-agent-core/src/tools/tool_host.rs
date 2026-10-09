@@ -1,6 +1,6 @@
 //! Trusted tool capability issuance, execution, and receipt auditing.
 
-use super::{resolve_session_path, AuditLog, Tool, ToolContext, ToolRegistry, ToolSpec};
+use super::{resolve_session_path, AuditLog, ToolContext, ToolRegistry, ToolSpec};
 use crate::permissions::{Decision, PermissionRequest};
 use crate::tool_effects::EffectClass;
 use serde_json::{json, Value};

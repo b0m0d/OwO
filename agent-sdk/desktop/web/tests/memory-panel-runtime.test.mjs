@@ -112,3 +112,49 @@ test("manual memory relation rejects incomplete input and suppresses duplicate s
   assert.equal(button.disabled, false);
   assert.equal(a.value, "");
 });
+
+
+test("memory entries apply app and inclusive date filters", async () => {
+  const requested = [];
+  const h = harness({
+    get: async path => {
+      requested.push(path);
+      return { entries: [] };
+    },
+    post: async () => ({}), esc: value => String(value), friendlyError: error => String(error),
+  });
+  const app = h.document.getElementById("owo-memory-app");
+  const from = h.document.getElementById("owo-memory-from");
+  const to = h.document.getElementById("owo-memory-to");
+  app.value = "qq work";
+  from.value = "2026-10-01";
+  to.value = "2026-10-09";
+  await h.panel._test.loadEntries();
+  assert.equal(
+    requested.at(-1),
+    "/memory/graph/entries?app=qq%20work&from=2026-10-01&to=2026-10-09&limit=50",
+  );
+});
+
+test("memory entries reject reversed or malformed date filters without a request", async () => {
+  const requested = [];
+  const h = harness({
+    get: async path => {
+      requested.push(path);
+      return { entries: [] };
+    },
+    post: async () => ({}), esc: value => String(value), friendlyError: error => String(error),
+  });
+  requested.length = 0;
+  h.document.getElementById("owo-memory-from").value = "2026-10-10";
+  h.document.getElementById("owo-memory-to").value = "2026-10-09";
+  await h.panel._test.loadEntries();
+  assert.equal(requested.length, 0);
+  assert.equal(h.document.getElementById("owo-memory-entries").textContent, "开始日期不能晚于结束日期");
+
+  h.document.getElementById("owo-memory-from").value = "not-a-date";
+  h.document.getElementById("owo-memory-to").value = "";
+  await h.panel._test.loadEntries();
+  assert.equal(requested.length, 0);
+  assert.equal(h.document.getElementById("owo-memory-entries").textContent, "日期格式无效，请重新选择日期");
+});

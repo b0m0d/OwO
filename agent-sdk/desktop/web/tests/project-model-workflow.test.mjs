@@ -184,6 +184,13 @@ test("creating a project keeps the model explicitly selected for the next sessio
   assert.doesNotMatch(projectFlow, /state\.pendingModelOverride\s*=\s*null/);
 });
 
+test("workspace selection requires a desktop persistence result before updating the active workspace", () => {
+  const persist = /createWorkspaceSelectionController\(\s*async \(path\) => \{([\s\S]*?)\n  \},/.exec(app)?.[1];
+  assert.ok(persist);
+  assert.match(persist, /requireWorkspacePersistence\(/);
+  assert.match(persist, /未切换本地目录/);
+});
+
 test("workspace switches are serialized and new project activation is fenced", () => {
   const routing = readFileSync(join(here, "..", "core", "workspace-routing.js"), "utf8");
   const electronMain = readFileSync(join(here, "..", "..", "electron", "src", "main", "main.js"), "utf8");
@@ -207,7 +214,7 @@ test("first-run empty state makes workspace selection explicit and restores the 
   assert.match(index, /id="emptyStateWorkspaceBtn"[^>]*hidden/);
   assert.match(app, /emptyStateWorkspaceBtn.*openWorkspaceMenu\(\$\("composerProjectBtn"\)\)/);
   assert.match(app, /applyLocalPrefs\(\);\s*syncProjectChip\(\);\s*initGlobalStatusBar\(\)/);
-  assert.ok(app.includes('workspaceInput.value = workspaceConfigured ? workspacePath : "";\n    try { syncProjectChip(); }'));
+  assert.match(app, /if \(workspaceInput\) workspaceInput\.value = workspaceConfigured \? workspacePath : \"\";/);
   const match = /function syncProjectChip\(\) \{[\s\S]*?\n\}/.exec(app);
   assert.ok(match, "workspace synchronization must own the first-run empty-state copy");
   const classes = new Set();

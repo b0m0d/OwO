@@ -13,10 +13,21 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
-def post(base, path, body=None, timeout=60):
+def fetch_token(base):
+    """R7 bearer 引导：本地服务除公开端点外一律要 Authorization。"""
+    request = urllib.request.Request(base + "/auth/token")
+    token = json.loads(urllib.request.urlopen(request, timeout=30).read().decode("utf-8")).get("token")
+    if not token:
+        raise RuntimeError("GET /auth/token 未返回 token")
+    return token
+
+
+def post(base, path, body=None, timeout=60, token=None):
     data = b"{}" if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(base + path, data=data, method="POST")
     request.add_header("Content-Type", "application/json")
+    if token:
+        request.add_header("Authorization", "Bearer " + token)
     return json.loads(urllib.request.urlopen(request, timeout=timeout).read().decode("utf-8"))
 
 
@@ -25,7 +36,8 @@ def main():
     parser.add_argument("--base", default="http://127.0.0.1:4097")
     parser.add_argument("--prompt", default="用中文回复：你好")
     args = parser.parse_args()
-    session = post(args.base, "/session", {"workspace": os.getcwd(), "model": None})
+    token = fetch_token(args.base)
+    session = post(args.base, "/session", {"workspace": os.getcwd(), "model": None}, token=token)
     print("session:", session.get("id"), flush=True)
     request = urllib.request.Request(
         args.base + "/session/" + session["id"] + "/turn",
@@ -33,6 +45,7 @@ def main():
         method="POST",
     )
     request.add_header("Content-Type", "application/json")
+    request.add_header("Authorization", "Bearer " + token)
     started = time.time()
     events = 0
     final = None

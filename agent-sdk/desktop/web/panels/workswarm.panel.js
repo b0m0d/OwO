@@ -1733,23 +1733,28 @@
       return out;
     }
 
+    function taskStatusLabel(t) {
+      var status = t && t.status;
+      return esc(STEP_STATUS_CN[normStatus(status)] || status || "");
+    }
+
+    function taskOptionHtml(t) {
+      return (
+        '<option value="' + esc(t && t.task_id) + '">' +
+        esc((t && t.role) || (t && t.task_id)) +
+        "（" +
+        taskStatusLabel(t) +
+        "）</option>"
+      );
+    }
+
     function paintHumanSelect() {
       var sel = el("#ws-h-task");
       if (!sel) return;
       var prev = state.humanTask || "";
       var list = humanTasks();
       sel.innerHTML = list.length
-        ? list
-            .map(function (t) {
-              return (
-                '<option value="' + esc(t.task_id) + '">' +
-                esc(t.role || t.task_id) +
-                "（" +
-                (STEP_STATUS_CN[normStatus(t.status)] || t.status) +
-                "）</option>"
-              );
-            })
-            .join("")
+        ? list.map(taskOptionHtml).join("")
         : '<option value="">暂无未完成的人节点任务</option>';
       if (list.some(function (t) {
         return t.task_id === prev;
@@ -1764,17 +1769,7 @@
       var prev = sel.value;
       var tasks = state.tasks || [];
       sel.innerHTML = tasks.length
-        ? tasks
-            .map(function (t) {
-              return (
-                '<option value="' + esc(t.task_id) + '">' +
-                esc(t.role || t.task_id) +
-                "（" +
-                (STEP_STATUS_CN[normStatus(t.status)] || t.status) +
-                "）</option>"
-              );
-            })
-            .join("")
+        ? tasks.map(taskOptionHtml).join("")
         : '<option value="">暂无任务</option>';
       if (tasks.some(function (t) {
         return t.task_id === prev;
@@ -1940,7 +1935,7 @@
               '<option value="' + esc(t.task_id) + '">' +
               esc(t.role || t.task_id) +
               " · " +
-              (STEP_STATUS_CN[normStatus(t.status)] || t.status || "") +
+              taskStatusLabel(t) +
               "</option>"
             );
           })
@@ -2253,14 +2248,13 @@
           state.lastProgressSeq = 0;
           state.cancelling = false;
           state.artifacts = [];
-          state.reviewBusy = {};
+          // Reviews may still be in flight while this team's detail refreshes.
           state.reviewResult = null;
           state.reviewFlash = null;
           state.strategyDecision = strategyDecisionOf(d.team || d); // 五期：auto 判定理由
           state.metrics = null;
           state.deliverables = null;
           state.deliverablesOpen = false;
-          state.reworkBusy = {};
           state.reworkResult = null;
           state.historyReviews = {};
           state.diagnostic = null;
@@ -2817,7 +2811,7 @@
         '<div id="ws-roles-block"><label class="owo-ws-create-label" for="ws-roles">角色规格 <span class="hint">可选；留空时使用当前模式的默认流程</span></label>' +
         '<div id="ws-roles" class="owo-ws-role-list"></div>' +
         '<div class="owo-ws-inline owo-ws-create-role-actions"><button id="ws-role-add" class="owo-ws-mini" type="button">＋ 添加角色</button><span class="hint">DAG 模式可设置依赖；人工承接时请填写用户 ID。</span></div></div>' +
-        '<div class="owo-ws-inline owo-ws-create-submit"><button id="ws-create-go" class="primary" type="button">创建并启动</button><span class="hint">Agent 使用已连接的模型服务；echo、sleep、fail 可用于流程测试。</span></div>' +
+        '<div class="owo-ws-inline owo-ws-create-submit"><button id="ws-create-go" data-core-action class="primary" type="button">创建并启动</button><span class="hint">Agent 使用已连接的模型服务；echo、sleep、fail 可用于流程测试。</span></div>' +
         '<pre class="owo-ws-result sub" id="ws-create-result" role="status" aria-live="polite">—</pre>' +
         '</div>'
       );
@@ -3008,7 +3002,7 @@
         "</div>" +
         '<div class="hint">' + roleChips(p.template.roles) + "</div>" +
         (p.status === "proposed"
-          ? '<div class="owo-ws-inline"><button class="primary" data-adopt="' + esc(p.proposal_id) + '">采纳</button><button class="danger" data-reject="' + esc(p.proposal_id) + '">拒绝</button></div>'
+          ? '<div class="owo-ws-inline"><button class="primary" data-core-action data-adopt="' + esc(p.proposal_id) + '">采纳</button><button class="danger" data-core-action data-reject="' + esc(p.proposal_id) + '">拒绝</button></div>'
           : "") +
         '<pre class="owo-ws-result sub" data-proj-result="' + esc(p.proposal_id) + '">—</pre>' +
         "</div>"
@@ -3368,17 +3362,17 @@
         '<div class="owo-ws-sec">' +
         '<h3>运行操作 <span class="hint">继续 / 重试失败节点 / 转向 / 更换成员 / 取消</span></h3>' +
         '<div class="owo-ws-inline">' +
-        '<button id="ws-act-continue" class="owo-ws-mini">继续（continue）</button>' +
+        '<button id="ws-act-continue" data-core-action class="owo-ws-mini">继续（continue）</button>' +
         '<button id="ws-act-steer-toggle" class="owo-ws-mini">转向（steer）▾</button>' +
         '<button id="ws-act-replace-toggle" class="owo-ws-mini">换员（replace）▾</button>' +
-        '<button id="ws-act-cancel" class="danger">取消（cancel）</button>' +
+        '<button id="ws-act-cancel" data-core-action class="danger">取消（cancel）</button>' +
         "</div>" +
         '<div class="owo-ws-form" id="ws-act-steer-form" style="display:none">' +
         '<div class="owo-ws-inline"><label>目标任务 step_id</label><select id="ws-act-steer-step"></select>' +
         '<label>指令 note</label><input id="ws-act-steer-note" placeholder="转向指令（必填）" size="32"></div>' +
         '<label class="hint">新输入 new_input（可选 JSON，覆盖该任务输入）</label>' +
         '<textarea id="ws-act-steer-input" rows="2" spellcheck="false" placeholder="{&quot;prompt&quot;: &quot;改为…&quot;}"></textarea>' +
-        '<div class="owo-ws-inline"><button id="ws-act-steer-go" class="primary">发送转向</button></div>' +
+        '<div class="owo-ws-inline"><button id="ws-act-steer-go" data-core-action class="primary">发送转向</button></div>' +
         "</div>" +
         '<div class="owo-ws-form" id="ws-act-replace-form" style="display:none">' +
         '<div class="owo-ws-inline"><label>角色 role</label><select id="ws-act-replace-role"></select>' +
@@ -3393,7 +3387,7 @@
         '<input id="ws-act-replace-worker-custom" placeholder="自定义 worker 标识" size="14" hidden>' +
         '<label>承接用户（可选）</label><input id="ws-act-replace-user" placeholder="人节点换人时填写" size="12">' +
         '<label>note</label><input id="ws-act-replace-note" placeholder="换员原因（可选）" size="20"></div>' +
-        '<div class="owo-ws-inline"><button id="ws-act-replace-go" class="primary">提交换员</button></div>' +
+        '<div class="owo-ws-inline"><button id="ws-act-replace-go" data-core-action class="primary">提交换员</button></div>' +
         '<p class="hint" style="margin:0">新执行方式自该角色任务的下一轮尝试生效；人节点可指定承接用户。</p>' +
         "</div>" +
         '<pre class="owo-ws-result sub" id="ws-act-result">—</pre>' +
@@ -3413,7 +3407,7 @@
         "</div>" +
         '<label class="hint">结果内容 result（必填；将存为产物并注入下游任务输入）</label>' +
         '<textarea id="ws-h-text" rows="3" spellcheck="false" placeholder="人工完成的产物/结论，例如：验收意见 + 修订要求"></textarea>' +
-        '<div class="owo-ws-inline"><button id="ws-h-go" class="primary">提交结果</button><span class="hint" id="ws-h-gate-note"></span></div>' +
+        '<div class="owo-ws-inline"><button id="ws-h-go" data-core-action class="primary">提交结果</button><span class="hint" id="ws-h-gate-note"></span></div>' +
         '<pre class="owo-ws-result sub" id="ws-h-result">—</pre>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
@@ -3433,7 +3427,7 @@
         '<label title="建议下游执行的后续动作">下一步建议 <input id="ws-x-next" size="60"></label>' +
         '<label title="已知的风险与注意事项">已知风险 <input id="ws-x-risks" size="60"></label>' +
         "</div></details>" +
-        '<div class="owo-ws-inline"><button id="ws-x-go" class="primary">提交交接</button></div>' +
+        '<div class="owo-ws-inline"><button id="ws-x-go" data-core-action class="primary">提交交接</button></div>' +
         '<pre class="owo-ws-result sub" id="ws-x-result">—</pre>' +
         "</div>" +
         '<div class="owo-ws-sec">' +
@@ -3612,14 +3606,13 @@
       state.lastProgressSeq = 0;
       state.cancelling = false;
       state.artifacts = [];
-      state.reviewBusy = {};
+      // Artifact requests continue across team navigation; keep per-artifact locks until settled.
       state.reviewResult = null;
       state.reviewFlash = null;
       state.strategyDecision = null;
       state.metrics = null;
       state.deliverables = null;
       state.deliverablesOpen = false;
-      state.reworkBusy = {};
       state.reworkResult = null;
       state.historyReviews = {};
       state.diagnostic = null;
@@ -3846,6 +3839,8 @@
     // 只暴露纯逻辑与字符串构建器；state 引用供测试预置输入（不触发 DOM）。
     var TEST_API = {
       normStatus: normStatus,
+      taskStatusLabel: taskStatusLabel,
+      taskOptionHtml: taskOptionHtml,
       isTerminalTeam: isTerminalTeam,
       taskBlocked: taskBlocked,
       isRetryableStep: isRetryableStep,

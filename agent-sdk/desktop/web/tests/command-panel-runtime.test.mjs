@@ -38,7 +38,12 @@ function createHarness(helpers, windowOptions = {}) {
   runInNewContext(source, { window, document, Promise, String, JSON, Number, isFinite, FileReader: class {} });
   const panel = window.OwoPanels.command;
   panel.mount(root, helpers);
-  return { panel, document, elements };
+  return {
+    panel,
+    document,
+    elements,
+    remount() { elements.clear(); panel.mount(root, helpers); },
+  };
 }
 
 function deferred() {
@@ -72,6 +77,34 @@ test("command execution shares one submission lock and safely escapes array resu
   assert.match(rendered, /&lt;img/);
   assert.doesNotMatch(rendered, /<img/);
   assert.equal(run.disabled, false);
+});
+
+test("pending command stays locked across panel disposal and remount", async () => {
+  const pending = deferred();
+  const calls = [];
+  const h = createHarness({
+    get: async () => ({ audit: [] }),
+    post(path, body) { calls.push([path, body]); return pending.promise; },
+    esc: value => String(value),
+    friendlyError: error => String(error),
+    renderMarkdown: value => String(value),
+    notify() {},
+  });
+  h.document.getElementById("owo-command-mode").value = "text";
+  h.document.getElementById("owo-command-text").value = "run once";
+  const firstButton = h.document.getElementById("owo-command-run");
+  const first = firstButton.handlers.click();
+  h.panel.dispose();
+  h.remount();
+  const currentButton = h.document.getElementById("owo-command-run");
+  assert.notEqual(currentButton, firstButton);
+  assert.equal(currentButton.disabled, true, "重进页面时仍显示原命令正在执行");
+  await currentButton.handlers.click();
+  assert.equal(calls.length, 1, "旧请求结束前不能重复执行命令");
+
+  pending.resolve({ intent: "text", confidence: 1, text: "run once", results: {} });
+  await first;
+  assert.equal(currentButton.disabled, false, "原命令结束后当前页按钮解锁");
 });
 
 test("command requests resolving after panel disposal cannot repaint results", async () => {

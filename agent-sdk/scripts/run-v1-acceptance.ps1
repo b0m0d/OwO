@@ -165,9 +165,11 @@ if ($Smoke) {
     $smokeRoot = Join-Path $OutRoot "smoke-$stamp"
     Write-Host "== [smoke] development smoke (separate dirs; not counted in stats) ==" -ForegroundColor Cyan
     foreach ($task in $smokeTasks) {
+        # 每个任务独立 out 目录 + --fresh：product-eval 的 out 目录绑定任务指纹，
+        # 多任务共用同一目录会在第二个任务起被判指纹不一致而拒绝执行。
         Invoke-EvalRun ("agent single x1 - {0}" -f $task) @(
             "--exec", "agent", "--agents", "single", "--reps", "1",
-            "--only", $task, "--out", (Join-Path $smokeRoot "agent-single")
+            "--only", $task, "--out", (Join-Path $smokeRoot ("agent-single-" + $task)), "--fresh"
         ) | Out-Null
     }
     if ($script:failedRuns -gt 0) {
@@ -181,21 +183,35 @@ if ($Smoke) {
 if ($EstimateOnly) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $estRoot = Join-Path $OutRoot "estimate-$stamp"
-    $calibOut = Join-Path $estRoot "calib"
+    $calibRoot = Join-Path $estRoot "calib"
     Write-Host "== [estimate] calibration: 3 tasks x 2 reps single-agent (real model) ==" -ForegroundColor Cyan
+    $taskReports = @()
     foreach ($task in $smokeTasks) {
+        # 每个任务使用独立 out 目录：product-eval 会把「任务/权限/预算」指纹写入 out，
+        # 多任务共用同一目录会被判为指纹不一致而拒绝续跑（历史脚本缺陷）；
+        # `--fresh` 保证同一任务重复校准时是全新批次而非脏续跑。
+        $taskOut = Join-Path $calibRoot $task
         Invoke-EvalRun ("calibration agent single x2 - {0}" -f $task) @(
             "--exec", "agent", "--agents", "single", "--reps", "2",
-            "--only", $task, "--out", $calibOut
+            "--only", $task, "--out", $taskOut, "--fresh"
         ) | Out-Null
+        $taskReport = Join-Path $taskOut "report.json"
+        if (Test-Path $taskReport) { $taskReports += $taskReport }
     }
-    $report = Join-Path $calibOut "report.json"
-    if (Test-Path $report) {
-        $data = Get-Content $report -Raw | ConvertFrom-Json
-        $total = $data.metrics.runs_total
-        $calls = $data.metrics.total_model_calls
-        $tokens = $data.metrics.total_tokens
-        $meanWs = $data.metrics.mean_wall_ms
+    if ($taskReports.Count -eq $smokeTasks.Count) {
+        $total = 0
+        $calls = 0
+        $tokens = 0L
+        $wallWeighted = 0.0
+        foreach ($path in $taskReports) {
+            $data = Get-Content $path -Raw | ConvertFrom-Json
+            $runs = [int]$data.metrics.runs_total
+            $total += $runs
+            $calls += [int]$data.metrics.total_model_calls
+            $tokens += [long]$data.metrics.total_tokens
+            $wallWeighted += [double]$data.metrics.mean_wall_ms * $runs
+        }
+        $meanWs = if ($total -gt 0) { [Math]::Round($wallWeighted / $total, 1) } else { 0 }
         Write-Host ""
         Write-Host "=== CALIBRATION (n=$total, tokens=$tokens, calls=$calls, mean_wall_ms=$meanWs) ===" -ForegroundColor Cyan
         $perRun = if ($total -gt 0) { $calls / $total } else { 0 }

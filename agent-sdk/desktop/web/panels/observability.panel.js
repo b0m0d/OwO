@@ -14,6 +14,7 @@ window.OwoPanels.observability = (function () {
   var panelGeneration = 0;
   var refreshGeneration = 0;
   var reportGeneration = 0;
+  var reportPending = false;
   var sectionEl = null;
 
   function defaultHelpers() {
@@ -41,6 +42,22 @@ window.OwoPanels.observability = (function () {
 
   var H = defaultHelpers();
   var state = { overview: null, turns: [], tools: [], health: null, runtime: null, slo: null, usage: null, alerts: null, report: null, telemetry: null };
+
+  function finiteMetric(value) {
+    if (typeof value !== "number" && !(typeof value === "string" && value.trim())) return null;
+    var number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function metricText(value, fallback) {
+    var number = finiteMetric(value);
+    return number == null ? (fallback == null ? "—" : fallback) : H.esc(String(number));
+  }
+
+  function percentageText(value, digits) {
+    var number = finiteMetric(value);
+    return number == null ? "—" : H.esc((number * 100).toFixed(digits) + "%");
+  }
 
   function nav() {
     return (
@@ -95,8 +112,7 @@ window.OwoPanels.observability = (function () {
     root.innerHTML = nav();
     sectionEl = root.querySelector('[data-panel="observability"]');
     root.querySelector("#owo-mtr-refresh").addEventListener("click", refresh);
-    var reportBtn = root.querySelector("#owo-mtr-report-refresh");
-    if (reportBtn) reportBtn.addEventListener("click", loadReport);
+    bindReportReload(root.querySelector("#owo-mtr-report"));
     refresh();
   }
 
@@ -123,14 +139,14 @@ window.OwoPanels.observability = (function () {
     }
     var endpoints = [
       ["/metrics/overview", function (data) { state.overview = data; renderCards(); }, "#owo-mtr-cards"],
-      ["/metrics/turns?limit=50", function (data) { state.turns = (data && data.turns) || []; renderChart(); }, "#owo-mtr-chart"],
-      ["/metrics/tools", function (data) { state.tools = (data && data.tools) || []; renderTools(); }, "#owo-mtr-tools tbody"],
+      ["/metrics/turns?limit=50", function (data) { state.turns = Array.isArray(data && data.turns) ? data.turns : []; renderChart(); }, "#owo-mtr-chart"],
+      ["/metrics/tools", function (data) { state.tools = Array.isArray(data && data.tools) ? data.tools.filter(Boolean) : []; renderTools(); }, "#owo-mtr-tools tbody"],
       ["/metrics/health", function (data) { state.health = data; renderHealth(); }, "#owo-mtr-health"],
       ["/metrics/runtime", function (data) { state.runtime = data; renderRuntime(); }, "#owo-mtr-runtime"],
-      ["/metrics/slo", function (data) { state.slo = data; renderSlo(); }, "#owo-mtr-slo"],
+      ["/metrics/slo", function (data) { state.slo = data && typeof data === "object" ? data : {}; renderSlo(); }, "#owo-mtr-slo"],
       ["/usage/summary", function (data) { state.usage = data; renderUsage(); }, "#owo-mtr-usage"],
-      ["/metrics/slo/alerts", function (data) { state.alerts = data; renderAlerts(); }, "#owo-mtr-alerts"],
-      ["/metrics/telemetry/status", function (data) { state.telemetry = data; renderTelemetry(); }, "#owo-mtr-telemetry"],
+      ["/metrics/slo/alerts", function (data) { state.alerts = data && typeof data === "object" ? data : {}; renderAlerts(); }, "#owo-mtr-alerts"],
+      ["/metrics/telemetry/status", function (data) { state.telemetry = data && typeof data === "object" ? data : {}; renderTelemetry(); }, "#owo-mtr-telemetry"],
     ];
     return Promise.all(endpoints.map(function (endpoint) {
       return H.get(endpoint[0])
@@ -153,21 +169,51 @@ window.OwoPanels.observability = (function () {
     });
   }
 
+  function bindReportReload(container) {
+    if (!container) return;
+    var button = container.querySelector("#owo-mtr-report-refresh");
+    if (button) button.addEventListener("click", loadReport);
+  }
+
+  function renderReportError(error) {
+    var el = sectionEl && sectionEl.querySelector("#owo-mtr-report");
+    if (!el) return;
+    el.innerHTML = '<div role="alert" style="color:var(--red)">周报加载失败：' + H.esc(H.friendlyError(error)) +
+      '</div><button class="primary" id="owo-mtr-report-refresh">重试</button>';
+    bindReportReload(el);
+    var retry = el.querySelector("#owo-mtr-report-refresh");
+    if (retry) retry.textContent = "重试";
+  }
+
   function loadReport() {
+    if (reportPending) return Promise.resolve(null);
     var request = ++reportGeneration;
     var owner = panelGeneration;
     var reportEl = sectionEl && sectionEl.querySelector("#owo-mtr-report");
-    if (reportEl) reportEl.textContent = "正在加载周报…";
-    return H.get("/metrics/slo/report?days=7")
+    reportPending = true;
+    if (reportEl) {
+      reportEl.innerHTML = '<span role="status">正在加载周报…</span><button id="owo-mtr-report-refresh" disabled aria-busy="true">正在加载…</button>';
+    }
+    return Promise.resolve()
+      .then(function () { return H.get("/metrics/slo/report?days=7"); })
       .then(function (data) {
-        if (request !== reportGeneration || owner !== panelGeneration) return;
+        if (request !== reportGeneration || owner !== panelGeneration) return null;
         state.report = data || {};
         renderReport();
+        return data;
       })
       .catch(function (error) {
+        if (request === reportGeneration && owner === panelGeneration) renderReportError(error);
+        return null;
+      })
+      .finally(function () {
         if (request !== reportGeneration || owner !== panelGeneration) return;
-        var currentReport = sectionEl && sectionEl.querySelector("#owo-mtr-report");
-        if (currentReport) currentReport.innerHTML = '<span style="color:var(--red)">' + H.esc(H.friendlyError(error)) + "</span>";
+        reportPending = false;
+        var current = sectionEl && sectionEl.querySelector("#owo-mtr-report-refresh");
+        if (current) {
+          current.disabled = false;
+          current.removeAttribute("aria-busy");
+        }
       });
   }
 
@@ -185,7 +231,8 @@ window.OwoPanels.observability = (function () {
       card(o.denied, "拒绝") +
       card(o.failures, "失败");
     var updated = document.getElementById("owo-mtr-updated");
-    if (updated) updated.textContent = "更新于 " + H.esc((o.updated_at || "").slice(0, 19).replace("T", " "));
+    var updatedAt = typeof o.updated_at === "string" ? o.updated_at : "";
+    if (updated) updated.textContent = updatedAt ? "更新于 " + updatedAt.slice(0, 19).replace("T", " ") : "更新时间未知";
   }
 
   function card(value, label) {
@@ -200,7 +247,16 @@ window.OwoPanels.observability = (function () {
       el.textContent = "暂无回合数据";
       return;
     }
-    var values = data.map(function (t) { return t.duration_ms; }).slice(0, 50).reverse();
+    var values = data
+      .filter(function (turn) { return turn && typeof turn === "object"; })
+      .map(function (turn) { return finiteMetric(turn.duration_ms); })
+      .filter(function (duration) { return duration != null && duration >= 0; })
+      .slice(0, 50)
+      .reverse();
+    if (!values.length) {
+      el.textContent = "暂无有效回合耗时数据";
+      return;
+    }
     var width = 560;
     var height = 120;
     var max = Math.max.apply(null, values.concat([1]));
@@ -228,8 +284,8 @@ window.OwoPanels.observability = (function () {
     el.innerHTML = state.tools
       .map(function (t) {
         return (
-          "<tr><td>" + H.esc(t.tool) + "</td><td>" + t.calls + "</td><td>" + t.failures +
-          '</td><td>' + (t.failure_rate * 100).toFixed(1) + "%</td></tr>"
+          "<tr><td>" + H.esc(t.tool) + "</td><td>" + metricText(t.calls, "0") + "</td><td>" + metricText(t.failures, "0") +
+          "</td><td>" + percentageText(t.failure_rate, 1) + "</td></tr>"
         );
       })
       .join("");
@@ -243,9 +299,9 @@ window.OwoPanels.observability = (function () {
     el.innerHTML =
       "STT：<b class=\"" + (stt ? "ok" : "bad") + "\">" + (stt ? "就绪" : "未就绪") + "</b> ｜ " +
       "云端传输：<b class=\"ok\">" + H.esc((c.cloud_transport && c.cloud_transport.kind) || "?") + "</b> ｜ " +
-      "插件：" + ((c.plugins && c.plugins.count) || 0) + " ｜ " +
-      "笔记：" + ((c.notes && c.notes.count) || 0) + " ｜ " +
-      "traces：" + ((c.traces && c.traces.count) || 0);
+      "插件：" + metricText(c.plugins && c.plugins.count, "0") + " ｜ " +
+      "笔记：" + metricText(c.notes && c.notes.count, "0") + " ｜ " +
+      "traces：" + metricText(c.traces && c.traces.count, "0");
   }
 
   function renderRuntime() {
@@ -256,28 +312,26 @@ window.OwoPanels.observability = (function () {
     var approval = r.approval || {};
     var sse = r.sse || {};
     var events = r.events || {};
-    var pct = function (v) {
-      return v == null ? "—" : (v * 100).toFixed(1) + "%";
-    };
+    var pct = function (v) { return percentageText(v, 1); };
     var ms = function (v) {
       return v == null ? "—" : H.esc(String(v)) + " ms";
     };
     el.innerHTML =
       '<table class="owo-mtr-table">' +
-      "<tr><td>工具调度 p95 / p50</td><td>" + ms(tool.p95_ms) + " / " + ms(tool.p50_ms) + "（样本 " + (tool.samples || 0) + "）</td></tr>" +
+      "<tr><td>工具调度 p95 / p50</td><td>" + ms(tool.p95_ms) + " / " + ms(tool.p50_ms) + "（样本 " + metricText(tool.samples, "0") + "）</td></tr>" +
       "<tr><td>审批通过率</td><td>" + pct(approval.pass_rate) + "</td></tr>" +
-      "<tr><td>审批拦截率</td><td>" + pct(approval.intercept_rate) + "（通过 " + (approval.approved || 0) + " / 拦截 " + (approval.denied || 0) + " / 共 " + (approval.total || 0) + "）</td></tr>" +
-      "<tr><td>事件队列深度</td><td>" + (r.queue_depth == null ? 0 : r.queue_depth) + "</td></tr>" +
-      "<tr><td>SSE 活跃连接</td><td>" + (sse.active_connections || 0) + "（累计 " + (sse.total_connections || 0) + "，慢消费者断开 " + (sse.lagged_total || 0) + "）</td></tr>" +
-      "<tr><td>事件流发布/丢弃</td><td>" + (events.published || 0) + " / " + (events.dropped || 0) + "</td></tr>" +
+      "<tr><td>审批拦截率</td><td>" + pct(approval.intercept_rate) + "（通过 " + metricText(approval.approved, "0") + " / 拦截 " + metricText(approval.denied, "0") + " / 共 " + metricText(approval.total, "0") + "）</td></tr>" +
+      "<tr><td>事件队列深度</td><td>" + metricText(r.queue_depth, "0") + "</td></tr>" +
+      "<tr><td>SSE 活跃连接</td><td>" + metricText(sse.active_connections, "0") + "（累计 " + metricText(sse.total_connections, "0") + "，慢消费者断开 " + metricText(sse.lagged_total, "0") + "）</td></tr>" +
+      "<tr><td>事件流发布/丢弃</td><td>" + metricText(events.published, "0") + " / " + metricText(events.dropped, "0") + "</td></tr>" +
       "</table>";
   }
 
   function renderSlo() {
     var el = document.getElementById("owo-mtr-slo");
     if (!el || !state.slo) return;
-    var items = (state.slo.slo || []).slice().sort(function (a, b) {
-      return (a.name || "").localeCompare(b.name || "");
+    var items = (Array.isArray(state.slo.slo) ? state.slo.slo : []).filter(function (item) { return item && typeof item === "object"; }).slice().sort(function (a, b) {
+      return String(a.name || "").localeCompare(String(b.name || ""));
     });
     if (!items.length) {
       el.innerHTML = '<span class="sub">暂无 SLO 数据（服务端未注册报告探针）</span>';
@@ -285,12 +339,14 @@ window.OwoPanels.observability = (function () {
     }
     var rows = items
       .map(function (item) {
-        var budget = item.error_budget || {};
-        var target = item.target_ms == null ? (item.success_floor == null ? "—" : (item.success_floor * 100).toFixed(1) + "%") : item.target_ms + " ms";
-        var p95 = item.p95_ms == null ? "—" : item.p95_ms + " ms";
-        var rate = item.success_rate == null ? "—" : (item.success_rate * 100).toFixed(2) + "%";
+        var budget = item.error_budget && typeof item.error_budget === "object" ? item.error_budget : {};
+        var target = item.target_ms == null ? percentageText(item.success_floor, 1) : metricText(item.target_ms) + " ms";
+        var p95Value = finiteMetric(item.p95_ms);
+        var p95 = p95Value == null ? "—" : metricText(p95Value) + " ms";
+        var rate = percentageText(item.success_rate, 2);
         // 样本为 0 时不能报"达标"：没有观测数据就无达标可言，显示灰色"样本不足"避免误判。
-        var status = (item.samples || 0) === 0
+        var sampleCount = finiteMetric(item.samples);
+        var status = (sampleCount || 0) === 0
           ? '<b style="color:var(--text-3)">样本不足</b>'
           : item.achieving
             ? '<b class="ok">达标</b>'
@@ -298,8 +354,8 @@ window.OwoPanels.observability = (function () {
         return (
           "<tr><td>" + H.esc(item.name) + "</td><td>" + H.esc(target) +
           "</td><td>" + p95 + "</td><td>" + rate +
-          "</td><td>" + (item.samples || 0) +
-          "</td><td>" + (budget.bad || 0) + " / " + (budget.allowed_bad || 0) +
+          "</td><td>" + metricText(sampleCount, "0") +
+          "</td><td>" + metricText(budget.bad, "0") + " / " + metricText(budget.allowed_bad, "0") +
           "</td><td>" + status + "</td></tr>"
         );
       })
@@ -318,14 +374,14 @@ window.OwoPanels.observability = (function () {
       el.innerHTML = '<span class="sub">用量端点未就绪（主控接线后可用）</span>';
       return;
     }
-    var dims = u.dimensions || [];
+    var dims = Array.isArray(u.dimensions) ? u.dimensions.filter(function (item) { return item && typeof item === "object"; }) : [];
     var rows = dims
       .map(function (d) {
         var budget = d.budget ? "，预算 " + H.esc(String(d.budget.limit_usd)) + " USD" : "";
         var exceeded = d.budget && d.budget.exceeded ? ' <b class="bad">超限</b>' : "";
         return (
-          "<tr><td>" + H.esc(d.dimension) + "</td><td>" + (d.calls || 0) +
-          "</td><td>" + (d.total_tokens || 0) +
+          "<tr><td>" + H.esc(d.dimension) + "</td><td>" + metricText(d.calls, "0") +
+          "</td><td>" + metricText(d.total_tokens, "0") +
           "</td><td>" + H.esc(String(d.cost_usd)) + " USD" +
           "</td><td>" + H.esc(String(d.budget ? d.budget.spent_usd : 0)) + " / " +
           H.esc(String(d.budget ? d.budget.limit_usd : "—")) + budget + exceeded + "</td></tr>"
@@ -336,7 +392,7 @@ window.OwoPanels.observability = (function () {
       ? ' <b class="bad">硬熔断中</b>' + (u.hard_stop_reason ? "（" + H.esc(u.hard_stop_reason) + "）" : "")
       : "";
     el.innerHTML =
-      "<div class=\"owo-mtr-row\">记录 " + (u.count || 0) + " 条，单价 " + H.esc(String(u.price_per_mtok)) + " $/Mtok" + stop + "</div>" +
+      "<div class=\"owo-mtr-row\">记录 " + metricText(u.count, "0") + " 条，单价 " + metricText(u.price_per_mtok) + " $/Mtok" + stop + "</div>" +
       '<table class="owo-mtr-table">' +
       "<thead><tr><th>维度</th><th>调用</th><th>Token</th><th>成本</th><th>花费/预算</th></tr></thead>" +
       "<tbody>" + (rows || '<tr><td colspan="5" class="sub">暂无用量记录</td></tr>') + "</tbody></table>";
@@ -350,16 +406,16 @@ window.OwoPanels.observability = (function () {
       el.innerHTML = '<span class="sub">告警探针未注册（主控接线后可用）</span>';
       return;
     }
-    var rules = data.rules || [];
+    var rules = Array.isArray(data.rules) ? data.rules.filter(function (item) { return item && typeof item === "object"; }) : [];
     var ruleHtml = rules
       .map(function (r) {
         return "<tr><td>" + H.esc(r.name) + "</td><td>" + H.esc(r.slo_name) +
           "</td><td>" + H.esc(String(r.kind)) + " &gt; " + H.esc(String(r.threshold)) +
-          "</td><td>连续 " + (r.consecutive || 0) + " 次</td><td>" +
+          "</td><td>连续 " + metricText(r.consecutive, "0") + " 次</td><td>" +
           H.esc(r.severity || "") + "</td></tr>";
       })
       .join("");
-    var alerts = (data.alerts || []).slice(0, 8);
+    var alerts = (Array.isArray(data.alerts) ? data.alerts : []).filter(function (item) { return item && typeof item === "object"; }).slice(0, 8);
     var alertHtml = alerts
       .map(function (a) {
         var color = a.kind === "recovered" ? "var(--green)" : a.severity === "critical" ? "var(--red)" : "var(--yellow)";
@@ -373,7 +429,7 @@ window.OwoPanels.observability = (function () {
       '<table class="owo-mtr-table">' +
       "<thead><tr><th>规则</th><th>SLO</th><th>判定</th><th>连续</th><th>级别</th></tr></thead>" +
       "<tbody>" + (ruleHtml || '<tr><td colspan="5" class="sub">暂无规则</td></tr>') + "</tbody></table>" +
-      '<div class="sub">最近告警（' + (data.count || 0) + '）</div>' +
+      '<div class="sub">最近告警（' + metricText(data.count, "0") + '）</div>' +
       (alertHtml || '<div class="sub">暂无告警</div>');
   }
 
@@ -382,31 +438,34 @@ window.OwoPanels.observability = (function () {
     if (!el || !state.report) return;
     var data = state.report;
     if (data.note) {
-      el.innerHTML = '<span class="sub">周期报告探针未注册（主控接线后可用）</span>';
+      el.innerHTML = '<span class="sub">周期报告探针未注册（主控接线后可用）</span><button id="owo-mtr-report-refresh">重新检查</button>';
+      bindReportReload(el);
       return;
     }
-    var items = (data.slo || []).slice().sort(function (a, b) {
-      return (a.name || "").localeCompare(b.name || "");
+    var items = (Array.isArray(data.slo) ? data.slo : []).filter(function (item) { return item && typeof item === "object"; }).slice().sort(function (a, b) {
+      return String(a.name || "").localeCompare(String(b.name || ""));
     });
     var rows = items
       .map(function (item) {
-        var p95 = item.p95_ms == null ? "—" : item.p95_ms + " ms";
-        var rate = item.success_rate == null ? "—" : (item.success_rate * 100).toFixed(2) + "%";
+        var p95Value = finiteMetric(item.p95_ms);
+        var p95 = p95Value == null ? "—" : metricText(p95Value) + " ms";
+        var rate = percentageText(item.success_rate, 2);
         // 样本为 0 时不能报"达标"：没有观测数据就无达标可言，显示灰色"样本不足"避免误判。
-        var status = (item.samples || 0) === 0
+        var sampleCount = finiteMetric(item.samples);
+        var status = (sampleCount || 0) === 0
           ? '<b style="color:var(--text-3)">样本不足</b>'
           : item.achieving
             ? '<b class="ok">达标</b>'
             : '<b class="bad">未达标</b>';
         return (
           "<tr><td>" + H.esc(item.name) + "</td><td>" + p95 +
-          "</td><td>" + rate + "</td><td>" + (item.samples || 0) +
-          "</td><td>" + (item.violations_in_window || 0) + "</td><td>" + status + "</td></tr>"
+          "</td><td>" + rate + "</td><td>" + metricText(sampleCount, "0") +
+          "</td><td>" + metricText(item.violations_in_window, "0") + "</td><td>" + status + "</td></tr>"
         );
       })
       .join("");
     el.innerHTML =
-      '<div class="owo-mtr-row">周期 ' + (data.period_days || 7) + " 天，共 " + items.length + " 项</div>" +
+      '<div class="owo-mtr-row">周期 ' + metricText(data.period_days, "7") + " 天，共 " + items.length + " 项</div>" +
       '<table class="owo-mtr-table">' +
       "<thead><tr><th>SLO</th><th>p95</th><th>成功率</th><th>样本</th><th>违规</th><th>状态</th></tr></thead>" +
       "<tbody>" + (rows || '<tr><td colspan="6" class="sub">暂无周期数据</td></tr>') + "</tbody></table>" +
@@ -427,23 +486,23 @@ window.OwoPanels.observability = (function () {
     var status = enabled
       ? '<b style="color:var(--yellow)">开（仅聚合指标，不含内容）</b>'
       : '<b class="ok">关（默认）</b>';
-    var counters = t.counters || {};
-    var codes = t.error_codes || {};
-    var perf = t.performance || {};
+    var counters = t.counters && typeof t.counters === "object" ? t.counters : {};
+    var codes = t.error_codes && typeof t.error_codes === "object" ? t.error_codes : {};
+    var perf = t.performance && typeof t.performance === "object" ? t.performance : {};
     var counterSummary = Object.keys(counters)
-      .map(function (k) { return H.esc(k) + "=" + counters[k]; })
+      .map(function (k) { return H.esc(k) + "=" + metricText(counters[k]); })
       .join("，") || "无";
     var codeSummary = Object.keys(codes)
-      .map(function (k) { return H.esc(k) + "×" + codes[k]; })
+      .map(function (k) { return H.esc(k) + "×" + metricText(codes[k]); })
       .join("，") || "无";
-    var dict = t.data_dictionary || {};
+    var dict = t.data_dictionary && typeof t.data_dictionary === "object" ? t.data_dictionary : {};
     el.innerHTML =
       '<table class="owo-mtr-table">' +
       "<tr><td>开关</td><td>" + status + "</td></tr>" +
       "<tr><td>功能计数</td><td>" + counterSummary + "</td></tr>" +
       "<tr><td>错误码分布</td><td>" + codeSummary + "</td></tr>" +
-      "<tr><td>性能分位</td><td>工具 p50=" + (perf.tool_p50_ms == null ? "—" : H.esc(String(perf.tool_p50_ms)) + " ms") +
-      "，p95=" + (perf.tool_p95_ms == null ? "—" : H.esc(String(perf.tool_p95_ms)) + " ms") + "</td></tr>" +
+      "<tr><td>性能分位</td><td>工具 p50=" + metricText(perf.tool_p50_ms) +
+      " ms，p95=" + metricText(perf.tool_p95_ms) + " ms</td></tr>" +
       "<tr><td>数据字典</td><td class=\"sub\">" + H.esc(t.note || "") +
       (dict.note ? "；" + H.esc(dict.note) : "") + "</td></tr>" +
       "</table>";
@@ -453,6 +512,7 @@ window.OwoPanels.observability = (function () {
     panelGeneration += 1;
     refreshGeneration += 1;
     reportGeneration += 1;
+    reportPending = false;
     sectionEl = null;
   }
 

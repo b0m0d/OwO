@@ -72,6 +72,10 @@
       return (H.friendlyError && H.friendlyError(e)) || defaultFriendlyError(e);
     }
 
+    function isNotFound(e) {
+      return !!(e && Number(e.status) === 404) || /\b404\b/.test(String((e && e.message) || e || ""));
+    }
+
     // ---------- 状态 ----------
     var state = {
       loading: false,
@@ -80,7 +84,8 @@
       details: {},         // team_id -> 详情 payload（失败不写入）
       detailErrors: {},    // team_id -> 错误
       deliverables: {},    // pid -> { approved, pending, error }（404 → 空且 error=""）
-      workspaces: {},      // pid -> 绑定 payload（404 → null）
+      workspaces: {},      // pid -> 绑定 payload（仅明确 404 才记为 null）
+      workspaceErrors: {}, // pid -> 读取失败；未知状态不能等同于未绑定
       detailRequests: {},
       deliverableRequests: {},
       workspaceRequests: {},
@@ -101,6 +106,7 @@
       state.detailErrors = {};
       state.deliverables = {};
       state.workspaces = {};
+      state.workspaceErrors = {};
       state.detailRequests = {};
       state.deliverableRequests = {};
       state.workspaceRequests = {};
@@ -317,10 +323,12 @@
         "</div>" +
         '<div class="ph-row-actions">' +
         '<button type="button" class="owo-ac-mini" data-ph-open="' + esc(tid) + '">打开详情</button>' +
-        '<button type="button" class="owo-ac-mini ph-rerun" data-ph-rerun="' + esc(tid) + '"' +
+        '<button type="button" class="owo-ac-mini ph-rerun" data-core-action data-ph-rerun="' + esc(tid) + '"' +
         (busy ? " disabled" : "") + ">同配置复跑</button>" +
         '<span class="hint" data-ph-ws="' + esc(tid) + '">' +
-        (extras.workspace === null ? "工作区未绑定（复跑不带目录）" : "") +
+        (extras.workspaceError
+          ? "工作区读取失败（为避免错误目录，复跑已阻止）"
+          : extras.workspace === null ? "工作区未绑定（复跑不带目录）" : "") +
         "</span>" +
         "</div>" +
         '<div class="ph-result" data-ph-result="' + esc(tid) + '">' +
@@ -346,6 +354,7 @@
               return d && !d.error ? d : null;
             })(),
             workspace: st.workspaces[projectKeyOf(t)],
+            workspaceError: st.workspaceErrors[projectKeyOf(t)],
             objective: (function () {
               var d = st.details[tid];
               return d ? objectiveFromDetail(d) : null;
@@ -408,6 +417,9 @@
       Object.keys(state.deliverables || {}).forEach(function (pid) {
         var d = state.deliverables[pid];
         if (d && d.error) lines.push("项目 " + pid + " 交付物加载失败：" + d.error);
+      });
+      Object.keys(state.workspaceErrors || {}).forEach(function (pid) {
+        lines.push("项目 " + pid + " 工作区读取失败：" + state.workspaceErrors[pid]);
       });
       box.innerHTML = lines.map(function (x) { return '<div class="owo-ac-err">' + esc(x) + "</div>"; }).join("");
     }
@@ -510,7 +522,7 @@
     }
 
     function requestWorkspace(pid, generation) {
-      if (owns(state.workspaces, pid)) return Promise.resolve();
+      if (owns(state.workspaces, pid) || owns(state.workspaceErrors, pid)) return Promise.resolve();
       if (state.workspaceRequests[pid]) return state.workspaceRequests[pid];
       var request = Promise.resolve()
         .then(function () {
@@ -518,11 +530,21 @@
         })
         .then(
           function (w) {
-            if (generation === enrichmentGeneration) state.workspaces[pid] = w;
+            if (generation !== enrichmentGeneration) return;
+            if (w && typeof w.root === "string" && w.root.trim()) {
+              state.workspaces[pid] = w;
+            } else {
+              state.workspaceErrors[pid] = "服务端返回的工作区信息缺少有效 root";
+            }
           },
-          function () {
-            // 未绑定或暂不可读时均降级为未绑定；刷新历史会重新读取。
-            if (generation === enrichmentGeneration) state.workspaces[pid] = null;
+          function (e) {
+            if (generation !== enrichmentGeneration) return;
+            if (isNotFound(e)) {
+              // Only an explicit 404 means that this project has no workspace binding.
+              state.workspaces[pid] = null;
+            } else {
+              state.workspaceErrors[pid] = friendly(e);
+            }
           }
         )
         .then(function () {
@@ -616,10 +638,28 @@
               state.details[tid] = d;
               return d;
             });
-      return ensureDetail
-        .then(function (d) {
+      var workspaceGeneration = enrichmentGeneration;
+      var ensureWorkspace = pid && !owns(state.workspaces, pid) && !owns(state.workspaceErrors, pid)
+        ? requestWorkspace(pid, workspaceGeneration)
+        : Promise.resolve();
+      return Promise.all([ensureDetail, ensureWorkspace])
+        .then(function (results) {
+          var d = results[0];
+          if (pid && state.workspaceErrors[pid]) {
+            state.rerunResults[tid] = {
+              ok: false,
+              text: "无法确认原工作区（" + state.workspaceErrors[pid] + "）；为避免在错误目录启动，本次未创建运行。刷新历史后可重试。",
+            };
+            return null;
+          }
           var ws = pid ? state.workspaces[pid] : null;
-          if (ws === undefined) ws = null;
+          if (pid && ws === undefined) {
+            state.rerunResults[tid] = {
+              ok: false,
+              text: "原工作区状态尚未确认；为避免丢失工作区配置，本次未创建运行。请刷新后重试。",
+            };
+            return null;
+          }
           var body = rerunBody(d, ws);
           if (body && body.error === "missing_objective") {
             state.rerunResults[tid] = {

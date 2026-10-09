@@ -205,7 +205,7 @@
       '<form class="owo-pe-config"><label>执行方式<select name="execution"><option value="reference">参考回放（不调用模型）</option><option value="live">真实模型</option></select></label>' +
       '<label>每任务重复次数<input name="repetitions" type="number" min="1" max="20" value="1" required></label>' +
       '<label>分类<select name="category"><option value="">全部</option><option value="code">代码</option><option value="research">研究</option><option value="document">文档</option></select></label>' +
-      '<label>任务名称筛选<input name="only" placeholder="留空则运行所选分类"></label><button class="owo-pe-start" type="submit">创建对比</button></form>' +
+      '<label>任务名称筛选<input name="only" placeholder="留空则运行所选分类"></label><button class="owo-pe-start" type="submit" data-core-action>创建对比</button></form>' +
       '<div class="owo-pe-actions"><button type="button" class="owo-pe-list-refresh">刷新历史</button><button type="button" class="owo-pe-detail-refresh">刷新所选运行</button><button type="button" class="owo-pe-cancel" disabled>取消运行</button></div>' +
       '<p class="owo-pe-error" role="alert"></p><div class="owo-pe-history"></div><div class="owo-pe-report"></div></section>'; },
     mount(root, helpers = {}) {

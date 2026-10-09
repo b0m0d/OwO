@@ -330,7 +330,7 @@ mod batch_tests {
             ("review", vec!["b"]),
             ("sibling", vec![]),
         ] {
-            let mut step = StepSpec::new(id, &format!("m-{id}"));
+            let mut step = StepSpec::new(id, format!("m-{id}"));
             step.input = json!({"objective":id,"write_paths":[format!("{id}.rs")]});
             step.depends_on = deps.into_iter().map(str::to_string).collect();
             plan.add_step(step);

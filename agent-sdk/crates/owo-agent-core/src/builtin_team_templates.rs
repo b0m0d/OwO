@@ -1178,18 +1178,14 @@ mod tests {
     fn fullstack_producer_issues_are_scoped_to_owned_work() {
         for role in ["w1", "w2", "frontend_engineer", "backend_engineer"] {
             let sections = prompt_sections_for(FULLSTACK_WEB_V1, role).unwrap();
-            assert!(
-                sections
-                    .must_do
-                    .iter()
-                    .any(|line| line.contains("open_issues"))
-            );
-            assert!(
-                sections
-                    .must_do
-                    .iter()
-                    .any(|line| line.contains("其他角色负责"))
-            );
+            assert!(sections
+                .must_do
+                .iter()
+                .any(|line| line.contains("open_issues")));
+            assert!(sections
+                .must_do
+                .iter()
+                .any(|line| line.contains("其他角色负责")));
         }
     }
 
@@ -1243,26 +1239,21 @@ mod tests {
             let reviewer = prompt_sections_for(template, role).unwrap();
             assert!(reviewer.output_format.contains("省略 artifact"));
             assert!(reviewer.output_format.contains("review_result"));
-            assert!(
-                reviewer
-                    .must_do
-                    .iter()
-                    .chain(reviewer.must_not_do.iter())
-                    .all(|line| !line.contains("artifact.kind")
-                        && !line.contains("artifact.content"))
-            );
+            assert!(reviewer
+                .must_do
+                .iter()
+                .chain(reviewer.must_not_do.iter())
+                .all(|line| !line.contains("artifact.kind") && !line.contains("artifact.content")));
         }
     }
 
     #[test]
     fn code_template_sections_keep_single_writer_semantics() {
         let implementer = prompt_sections_for(CODE_CHANGE_V1, "implementer").unwrap();
-        assert!(
-            implementer
-                .must_do
-                .iter()
-                .any(|l| l.contains("单写者") || l.contains("write_file"))
-        );
+        assert!(implementer
+            .must_do
+            .iter()
+            .any(|l| l.contains("单写者") || l.contains("write_file")));
         let reviewer = prompt_sections_for(CODE_CHANGE_V1, "reviewer").unwrap();
         assert!(
             reviewer
@@ -1273,19 +1264,15 @@ mod tests {
         );
         assert!(reviewer.output_format.contains("省略 artifact"));
         assert!(reviewer.output_format.contains("review_result"));
-        assert!(
-            reviewer
-                .must_do
-                .iter()
-                .chain(reviewer.must_not_do.iter())
-                .all(|l| !l.contains("artifact.kind") && !l.contains("artifact.content"))
-        );
-        assert!(
-            reviewer
-                .must_do
-                .iter()
-                .chain(reviewer.must_not_do.iter())
-                .all(|l| !l.contains("唯一允许产出代码"))
-        );
+        assert!(reviewer
+            .must_do
+            .iter()
+            .chain(reviewer.must_not_do.iter())
+            .all(|l| !l.contains("artifact.kind") && !l.contains("artifact.content")));
+        assert!(reviewer
+            .must_do
+            .iter()
+            .chain(reviewer.must_not_do.iter())
+            .all(|l| !l.contains("唯一允许产出代码")));
     }
 }

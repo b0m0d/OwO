@@ -305,7 +305,14 @@ function sessionListFailureMessage(error) {
   const status = Number((error && error.status) || ((raw.match(/(?:HTTP )?(\d{3})/) || [])[1]) || 0);
   if (/此浏览器未获得桌面授权|当前核心属于另一个桌面实例/.test(raw)) return raw;
   if (status === 404 || status === 405) {
-    return `核心服务未找到会话接口（HTTP ${status}）。请重启 Electron 工作台；如果仍发生，请确认桌面端与核心服务版本一致。`;
+    const hasDesktopBridge = typeof window !== "undefined" && Boolean(
+      window.owo || window.__TAURI_INTERNALS__ ||
+      (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === "function")
+    );
+    if (!hasDesktopBridge) {
+      return "当前是浏览器预览，未通过 Electron 配对连接会话核心服务。请在 Electron 工作台中打开；如果你已在桌面端，请确认工作台服务已启动。";
+    }
+    return "核心服务未找到会话接口（HTTP " + status + "）。请重启 Electron 工作台；如果仍发生，请确认桌面端与核心服务版本一致。";
   }
   if (status === 401 || status === 403) return "本地授权暂不可用。请在 Electron 工作台重新连接后重试。";
   if (!status || /Failed to fetch|NetworkError|fetch failed|无法连接/i.test(raw)) {
@@ -799,7 +806,13 @@ async function selectSession(id) {
       } else if (!message.content) {
         continue;
       }
-      addMessage(message.role === "user" ? "user" : "assistant", message.content);
+      const storedContent = String(message.content || "");
+      if (message.role === "assistant" && storedContent.startsWith("回合未完成：") &&
+          typeof addHistoricalTurnFailure === "function") {
+        addHistoricalTurnFailure(storedContent);
+      } else {
+        addMessage(message.role === "user" ? "user" : "assistant", message.content);
+      }
       lastRole = message.role === "user" ? "user" : "assistant";
       historyToolRun = null;
       rendered += 1;
@@ -1012,6 +1025,7 @@ async function sendPrompt() {
           break;
         case "permission_request":
           setRunPhase("waiting");
+          window.OwoNotificationSound?.play(loadLocalPrefs().sound);
           showApproval(payload);
           break;
         case "permission_resolved":
@@ -1079,6 +1093,7 @@ async function sendPrompt() {
       ),
     });
     turn.completionStatus = result.completionStatus;
+    if (result.completionStatus !== "aborted") window.OwoNotificationSound?.play(loadLocalPrefs().sound);
     state.lastTurnOutcome = result.completionStatus === "aborted"
       ? "cancelled"
       : ["unverified", "blocked"].includes(result.completionStatus) ? "failed" : "completed";
@@ -1093,6 +1108,7 @@ async function sendPrompt() {
     writeTargetSid = turnSessionId;
     if (!assistantText && streaming) streaming.remove();
     if (error.name !== "AbortError") {
+      window.OwoNotificationSound?.play(loadLocalPrefs().sound);
       state.lastTurnOutcome = "failed";
       if (!failureDisplayed) showTurnFailure(error.message);
     } else {
@@ -1887,6 +1903,8 @@ async function runEval() {
   const suiteId = $("evalSuite").value;
   const button = $("evalRunBtn");
   const box = $("evalReport");
+  button.dataset.coreBusy = "true";
+  button.dataset.coreBusy = "true";
   button.disabled = true;
   button.textContent = "运行中…";
   box.className = "owo-result";
@@ -1923,8 +1941,11 @@ async function runEval() {
     box.className = "owo-result";
     box.innerHTML = `<span class="owo-result-empty">评估失败：${esc(error.message)}</span>`;
   } finally {
-    button.disabled = false;
     button.textContent = "运行评估";
+    delete button.dataset.coreBusy;
+    window.OwoCoreActionAvailability?.update(
+      window.OwoCoreActionAvailability?.isAvailable() === true,
+    );
   }
 }
 
@@ -2086,8 +2107,11 @@ async function runSubagent() {
     box.className = "owo-result";
     box.innerHTML = `<span class="owo-result-empty">子代理失败：${esc(error.message)}</span>`;
   } finally {
-    button.disabled = false;
     button.textContent = "运行子代理";
+    delete button.dataset.coreBusy;
+    window.OwoCoreActionAvailability?.update(
+      window.OwoCoreActionAvailability?.isAvailable() === true,
+    );
   }
 }
 
@@ -2116,6 +2140,10 @@ async function refreshProjectRules() {
 
 async function saveAgentsRules() {
   const content = $("agentsEditor").value;
+  const button = $("agentsSaveBtn");
+  button.dataset.coreBusy = "true";
+  button.disabled = true;
+  button.textContent = "保存中…";
   try {
     const result = await api("/project/rules", {
       method: "POST",
@@ -2125,6 +2153,12 @@ async function saveAgentsRules() {
     await refreshProjectRules();
   } catch (error) {
     addMessage("error", `保存失败：${error.message}`);
+  } finally {
+    button.textContent = "保存 AGENTS.md";
+    delete button.dataset.coreBusy;
+    window.OwoCoreActionAvailability?.update(
+      window.OwoCoreActionAvailability?.isAvailable() === true,
+    );
   }
 }
 
@@ -2720,7 +2754,12 @@ function panelFromHash() {
 function openPanelById(id) {
   if (!id || !window.OwoPanels || !window.OwoPanels[id]) return false;
   if (document.body.classList.contains("settings-open")) setSettingsPageVisible(false);
+  // Clear the sidebar group filter so the shared extension panel stays visible.
+  window.OwoWorkbenchView.clearGroupFilters(document.body);
   setToolsVisible(true);
+  // The settings overview is lazy-loaded on first entry into the tools view.
+  // A deep-linked extension panel enters that view too, so hydrate its shared overview.
+  if (typeof refreshPluginSkillOverview === "function") void refreshPluginSkillOverview();
   mountPanel(id);
   // 深链落到面板本身：扩展面板区在工具视图下方，需要滚动过去才算"打开"。
   const target = $("panelRoot");

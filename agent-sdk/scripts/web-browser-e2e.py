@@ -17,12 +17,24 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
+AUTH_TOKEN = ""
+
+
 def http_json(method, url, body=None, timeout=60):
     data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=data, method=method)
     request.add_header("Content-Type", "application/json")
+    if AUTH_TOKEN:
+        request.add_header("Authorization", "Bearer " + AUTH_TOKEN)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def bootstrap_token(base):
+    """R7 bearer 引导（/auth/token 公开）；业务 API 一律带 Authorization。"""
+    global AUTH_TOKEN
+    with urllib.request.urlopen(base + "/auth/token", timeout=30) as response:
+        AUTH_TOKEN = json.loads(response.read().decode("utf-8"))["token"]
 
 
 def preflight(base):
@@ -49,6 +61,7 @@ def main():
     args = parser.parse_args()
 
     preflight(args.base)
+    bootstrap_token(args.base)
 
     session = http_json(
         "POST",
@@ -83,6 +96,8 @@ def main():
         args.base + "/session/" + session_id + "/turn", data=body, method="POST"
     )
     request.add_header("Content-Type", "application/json")
+    if AUTH_TOKEN:
+        request.add_header("Authorization", "Bearer " + AUTH_TOKEN)
 
     tool_uses = []
     final_text = None

@@ -54,6 +54,11 @@ test("automation actions preserve reminder and read-only Agent task intent", () 
 });
 
 
+test("automation and reminder mutations explain the offline core requirement", () => {
+  assert.match(source, /data-core-action-hint>连接并授权本地核心后可创建自动化任务/);
+  assert.match(source, /data-core-action-hint>连接并授权本地核心后可管理工作台提醒/);
+});
+
 test("automation form exposes the supported read-only Agent action", () => {
   assert.match(source, /<option value="run_prompt">跑只读 Agent 任务<\/option>/);
   assert.match(source, /定时任务无人值守，只读模式/);
@@ -79,6 +84,7 @@ function makeAutomationHarness(overrides = {}) {
       removeAttribute(name) { delete this[name]; },
       parentElement: null,
       querySelector(selector) {
+        if (selector === 'button[type="submit"]') return submitButton;
         return this.children.find((child) => selector === ".automation-runs" && child.className === "list automation-runs") || null;
       },
       remove() {
@@ -87,6 +93,7 @@ function makeAutomationHarness(overrides = {}) {
       focus() {},
     };
   }
+  let submitButton = element("button");
   const document = {
     getElementById(id) {
       if (!nodes.has(id)) nodes.set(id, element());
@@ -130,9 +137,13 @@ function makeAutomationHarness(overrides = {}) {
       deleteButton: actions && actions.children[2] || element("button"),
       status: document.getElementById("owo-aut-status"),
       nodes,
-      submitButton: element("button"),
+      get submitButton() { return submitButton; },
       form: document.getElementById("owo-aut-form"),
-      remount() { panel.mount(element(), helpers); },
+      remount() {
+        nodes.delete("owo-aut-form");
+        submitButton = element("button");
+        panel.mount(element(), helpers);
+      },
     });
   }, 0));
 }
@@ -169,6 +180,32 @@ test("automation deletion requires confirmation and reports request failures", a
 });
 
 
+
+test("automation deletion stays locked across panel remounts until confirmation settles", async () => {
+  let resolveConfirm;
+  const h = await makeAutomationHarness({
+    confirm: () => new Promise((resolve) => { resolveConfirm = resolve; }),
+  });
+  const firstDelete = h.deleteButton;
+  const pending = firstDelete.handlers.click({ stopPropagation() {} });
+  assert.equal(firstDelete.disabled, true);
+
+  h.panel.dispose();
+  h.remount();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const currentDelete = h.taskList.children[0].children[0].children[2];
+  assert.equal(currentDelete.disabled, true, "页面重进后删除操作仍显示忙碌");
+  await currentDelete.handlers.click({ stopPropagation() {} });
+  assert.equal(h.calls.filter(([method]) => method === "CONFIRM").length, 1,
+    "旧确认结束前不能再发起一次删除确认");
+
+  resolveConfirm(true);
+  await pending;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(h.calls.filter(([method, path]) => method === "DELETE" && path === "/automations/daily%2F1").length, 1);
+  const refreshedDelete = h.taskList.children[0].children[0].children[2];
+  assert.equal(refreshedDelete.disabled, false);
+});
 
 test("native hidden controls stay hidden despite component display styles", () => {
   assert.match(stylesheet, /\.hidden,\s*\[hidden\]\s*\{\s*display:\s*none\s*!important/);
@@ -238,6 +275,40 @@ test("rapid automation form submissions create only one task and restore the sub
   resolvePost({});
   await first;
   assert.equal(h.submitButton.disabled, false);
+});
+
+test("pending task creation remains locked across panel disposal and remount", async () => {
+  let resolvePost;
+  const h = await makeAutomationHarness({
+    post: () => new Promise((resolve) => { resolvePost = resolve; }),
+  });
+  function node(id) {
+    if (!h.nodes.has(id)) h.nodes.set(id, { value: "", focus() {} });
+    return h.nodes.get(id);
+  }
+  node("owo-aut-name").value = "Every hour";
+  node("owo-aut-kind").value = "interval";
+  node("owo-aut-interval").value = "3600";
+  node("owo-aut-action").value = "reminder";
+  node("owo-aut-content").value = "Review updates";
+
+  const firstButton = h.submitButton;
+  const first = h.panel._test.createTask({ preventDefault() {}, submitter: firstButton });
+  assert.equal(firstButton.disabled, true);
+  h.panel.dispose();
+  h.remount();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const remountedButton = h.submitButton;
+  assert.notEqual(remountedButton, firstButton);
+  assert.equal(remountedButton.disabled, true, "重进页面时未完成的创建仍显示处理中");
+  await h.panel._test.createTask({ preventDefault() {}, submitter: remountedButton });
+  assert.equal(h.calls.filter(([method, path]) => method === "POST" && path === "/automations").length, 1,
+    "旧请求结束前不能重复创建任务");
+
+  resolvePost({});
+  await first;
+  assert.equal(remountedButton.disabled, false, "原请求结束后当前页提交按钮解锁");
 });
 
 test("late automation list responses cannot repaint after a newer refresh or disposal", async () => {

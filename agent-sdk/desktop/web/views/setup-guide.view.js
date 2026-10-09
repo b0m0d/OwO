@@ -25,6 +25,18 @@
     return Promise.resolve(owner.invoke.call(owner, command, args || {}));
   }
 
+  function setCoreBusy(button, busy) {
+    if (!button) return;
+    const gate = global.OwoCoreActionAvailability;
+    if (gate && typeof gate.setBusy === "function") gate.setBusy(button, busy);
+    else button.disabled = !!busy;
+  }
+
+  function markCoreAction(button) {
+    const gate = global.OwoCoreActionAvailability;
+    if (gate && typeof gate.mark === "function") gate.mark(button);
+  }
+
   function setBusy(form, busy) {
     if (!form) return;
     form.querySelectorAll("button, input, select").forEach(function (node) {
@@ -293,6 +305,7 @@
       });
     }
     const testBtn = card.querySelector('[data-role="test-connection"]');
+    markCoreAction(testBtn);
     if (testBtn) {
       testBtn.addEventListener("click", function () {
         const api = global.OwoApi;
@@ -300,7 +313,7 @@
           showMessage(form, "测试连接暂不可用（API 客户端未就绪）", false);
           return;
         }
-        testBtn.disabled = true;
+        setCoreBusy(testBtn, true);
         api.post("/settings/provider-test", {}).then(function (result) {
           showMessage(form, "测试结果：" + ((result && result.code) || "unknown") +
             (result && result.endpoint ? " · " + result.endpoint : "") +
@@ -309,7 +322,7 @@
         }).catch(function (error) {
           showMessage(form, "测试连接失败：" + String((error && error.message) || error), false);
         }).finally(function () {
-          testBtn.disabled = false;
+          setCoreBusy(testBtn, false);
         });
       });
     }

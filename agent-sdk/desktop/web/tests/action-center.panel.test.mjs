@@ -135,14 +135,18 @@ test("dispose：忽略离开面板前发出的待办处理结果", async () => {
   let gets = 0;
   T.state.inbox = T.inboxItemsOf({ items: [inboxItem("late-action", "step_retry", "open")] });
   T.state.inboxSource = "inbox";
+  let postCount = 0;
+  T.setRoot({ innerHTML: "", querySelector: () => null });
   T.setTransport({
     get() { gets++; return Promise.resolve({ items: [] }); },
-    post() { return new Promise((resolve) => { resolvePost = resolve; }); },
+    post() { postCount++; return new Promise((resolve) => { resolvePost = resolve; }); },
   });
-  T.setRoot({ innerHTML: "", querySelector: () => null });
   const pending = T.startInboxAction("late-action", "resolve");
   await Promise.resolve();
   panel.dispose();
+  const duplicate = T.startInboxAction("late-action", "resolve");
+  await duplicate;
+  assert.equal(postCount, 1, "卸载后原请求未完成时不能再次处理同一 Inbox 条目");
   resolvePost({ replayed: false });
   await pending;
   assert.equal(T.state.inboxResults["late-action"], undefined);
@@ -581,6 +585,27 @@ test("submitRetry：提交锁（快速双击只发一次）+ 冻结契约 + 失�
   await T.submitRetry("t-9", "s-2");
   assert.equal(posts.length, before + 1);
   assert.equal(posts[posts.length - 1].body.step_id, "s-2");
+});
+
+test("submitRetry：dispose 后原重试未结束前保留提交锁", async () => {
+  resetState();
+  let resolvePost;
+  let postCount = 0;
+  T.setTransport({
+    get() { return Promise.resolve({}); },
+    post() { postCount++; return new Promise((resolve) => { resolvePost = resolve; }); },
+  });
+
+  const pending = T.submitRetry("t-lock", "s-lock");
+  await Promise.resolve();
+  panel.dispose();
+  await T.submitRetry("t-lock", "s-lock");
+  assert.equal(postCount, 1, "页面离开后不能重复发送仍在途的 retry");
+  assert.equal(T.state.retryBusy["t-lock/s-lock"], true);
+
+  resolvePost({});
+  await pending;
+  assert.equal(T.state.retryBusy["t-lock/s-lock"], undefined, "旧请求结束后释放跨页面锁");
 });
 
 test("gotoWorkswarm：无 DOM 环境安全（Node 下不抛错）", () => {

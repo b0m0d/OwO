@@ -279,7 +279,7 @@ const DEFAULT_CONFIG = {
     api_key: "",
     api_key_env: "OPENAI_API_KEY",
     context_window: null,
-    max_output_tokens: 32000,
+    max_output_tokens: supervision.DEFAULT_MODEL_OUTPUT_TOKENS,
     model_output_tokens: {},
     temperature: null,
     timeout_secs: null,
@@ -689,8 +689,10 @@ async function startCore({ reason = "auto", userInitiated = false } = {}) {
     // 渲染层拿不到注入 token 就退回自己引导 → 配对门 403 → 全线 401 → 界面"服务未连接"。
     // 这里显式判状态码并记日志，否则这类失败没有任何痕迹。
     let token = "";
+    let authStatus = 0;
     try {
       const auth = await httpGet(ready.port, "/auth/token");
+      authStatus = auth.status;
       if (auth.status === 200 && auth.body) {
         token = JSON.parse(auth.body).token || "";
       } else {
@@ -703,10 +705,11 @@ async function startCore({ reason = "auto", userInitiated = false } = {}) {
     }
     if (myGeneration !== generation) return;
 
+    const authentication = supervision.authenticationState(authStatus, token);
     core = { proc, port: ready.port, token, pid: proc.pid, version: ready.api_version, buildId: ready.build_id, log: core && core.log };
-    restartAttempts = 0; // 真正 ready 了，清空失败预算
+    if (authentication.state === "ready") restartAttempts = 0; // 认证成功后清空失败预算
     coreState = {
-      state: "ready",
+      ...authentication,
       port: ready.port,
       token,
       pid: proc.pid,

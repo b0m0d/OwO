@@ -725,6 +725,23 @@ body.inspector-open #right, body.inspector-open #rightResize { display: block; }
   cursor: pointer;
 }
 .msg.error .turn-model-recover:hover { background: var(--red); color: var(--bg); }
+.msg.error .turn-error-details {
+  display: block;
+  flex-basis: 100%;
+  margin-top: 7px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.msg.error .turn-error-details summary { cursor: pointer; color: var(--text-3); }
+.msg.error .turn-error-details code {
+  display: block;
+  max-width: min(760px, 75vw);
+  margin-top: 5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+  font: 11px/1.5 Consolas, monospace;
+}
 /* 单回合工具预算耗尽：任务太大而不是失败——给原因 + 一键继续 */
 .msg.turn-limit {
   align-self: flex-start;
@@ -2280,6 +2297,16 @@ body.tools-open #sidebar > section.tool-card:has(.tool-form-grid),
 body.tools-open #sidebar > section.tool-card:has(table) {
   grid-column: 1 / -1;
 }
+/* 应用白名单铺满可用宽度并使用自适应卡片网格，减少空栏与内部滚动。 */
+body.tools-open #sidebar > section.tool-card-allowlist { grid-column: 1 / -1; }
+body.tools-open #sidebar #whitelistList.list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  align-content: start;
+  gap: 8px;
+}
+body.tools-open #sidebar #whitelistList.list li { margin: 0; min-width: 0; }
+body.tools-open #sidebar #whitelistList.list li .sub { overflow-wrap: anywhere; }
 /* 不强行等高：内容少的卡片不再被同行拉出大片留白 */
 body.tools-open #sidebar > section.tool-card { align-self: start; }
 /* 卡片内区块分隔：表单与列表之间细线断开，避免多个区块糊在一起 */
@@ -2991,6 +3018,7 @@ body.dark-theme #approvalBar { background: var(--surface-2); }
 
 /* Markdown body stays transparent in assistant messages; only user messages use a bubble. */
 .msg .message-body { display: block; width: 100%; min-width: 0; }
+.msg.assistant .message-body { font-size: 15px; line-height: 1.7; }
 .msg.assistant { max-width: min(880px, 92%); }
 .msg.user { max-width: min(760px, 84%); }
 .msg .md-quote {
@@ -3104,4 +3132,9 @@ body.dark-theme #approvalBar { background: var(--surface-2); }
 @media (max-width: 700px) {
   .codex-workspace-switcher { min-height: 44px; }
   .composer-menu.composer-menu-project { width: min(320px, calc(100vw - 24px)); }
+}
+
+/* Keep assistant answers comfortably readable on desktop without crowding phones. */
+@media (max-width: 700px) {
+  .msg.assistant .message-body { font-size: 14px; }
 }

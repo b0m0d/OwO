@@ -299,14 +299,23 @@ impl Agent {
                     break;
                 }
                 ModelOutput::Text(mut text) => {
-                    let mut completion_status = assess_single_turn_completion(
-                        session,
-                        prompt,
-                        &turn_id,
-                        &events,
-                        false,
-                        Some(&text),
-                    );
+                    // 单回合验收（Single completion）只属于面向用户的顶层回合：宿主登记
+                    // VerificationPlan、独立评审和人工验收都以用户请求为锚点。子代理 /
+                    // Team Worker（subagent_depth > 0）的完成语义由各自的输出契约决定，
+                    // 其工具面不含 verification_plan；若仍进入该门控，宿主要求的登记
+                    // 无法执行，模型只能报 blocked 并让整步失败（长任务实测）。
+                    let mut completion_status = if self.config.subagent_depth > 0 {
+                        owo_agent_protocol::CompletionStatusV1::Accepted
+                    } else {
+                        assess_single_turn_completion(
+                            session,
+                            prompt,
+                            &turn_id,
+                            &events,
+                            false,
+                            Some(&text),
+                        )
+                    };
                     if completion_status == owo_agent_protocol::CompletionStatusV1::Unverified {
                         let current_plan = session.single_verification_plan.clone().filter(|_| {
                             single_verification_plan_matches_turn(session, prompt, &turn_id)
@@ -330,7 +339,9 @@ impl Agent {
                             }
                         }
                     }
-                    if completion_status == owo_agent_protocol::CompletionStatusV1::Accepted {
+                    if completion_status == owo_agent_protocol::CompletionStatusV1::Accepted
+                        && self.config.subagent_depth == 0
+                    {
                         let candidate_paths =
                             single_review::accepted_candidate_paths(session, &turn_id);
                         if single_review::is_required(prompt, &candidate_paths) {
@@ -470,7 +481,11 @@ impl Agent {
                             !validation_feedback_fingerprints.insert(fingerprint.clone());
                         turn_completion_status = Some(completion_status);
                         messages.push(ChatMessage::assistant_text(text.clone()));
-                        if repeated_failure {
+                        if repeated_failure
+                            || validation_feedback_fingerprints.len()
+                                > MAX_HOST_VALIDATION_REPAIR_ROUNDS
+                        {
+                            // 指纹重复或修复轮次耗尽：带真实完成状态收口，绝不无限修复。
                             final_text = Some(text.clone());
                             emit(&mut events, &event_cell, TurnEvent::Final { text });
                             break;
@@ -487,6 +502,13 @@ impl Agent {
                     break;
                 }
                 ModelOutput::ToolCalls(calls) => {
+                    // 所有 Provider（含自定义/测试 Provider）统一校验结构不变量
+                    // （id/name/arguments 形态）。「工具不在本轮清单/已热卸载」不在此处
+                    // 终止回合：它属于工具级错误，必须回喂模型自修复（见下方 guard 分支）。
+                    if let Err(error) = crate::gateway::validate_tool_call_shapes(&calls) {
+                        commit_turn_messages(session, &messages);
+                        return Err(AgentError::Gateway(error));
+                    }
                     // 循环保护（对标 Codex/OpenCode）：先查总量上限，再逐调用查重复。
                     if self.config.max_tool_calls_per_turn > 0
                         && tool_calls_seen.saturating_add(calls.len())
@@ -522,6 +544,51 @@ impl Agent {
                                 approval: None,
                                 reason: reason.clone(),
                                 guard_error: Some(reason),
+                            });
+                            continue;
+                        }
+                        // 热卸载/未下发的工具：不终止回合，作为工具错误回喂模型换策略。
+                        if self.tool_disabled(&call.name) {
+                            let error = format!("工具已被禁用（插件热卸载）：{}", call.name);
+                            prepared.push(PreparedCall {
+                                approval: None,
+                                reason: error.clone(),
+                                guard_error: Some(error),
+                            });
+                            continue;
+                        }
+                        // Check against the exact schema sent in this model turn before
+                        // hooks, approval, or execution; feed failures back for model repair.
+                        let Some(schema_check) = tools.iter().find(|spec| spec.name == call.name)
+                        else {
+                            let error = format!(
+                                "工具 {} 不在本轮工具列表中（可能已禁用或名称错误）；本次未执行。",
+                                call.name
+                            );
+                            prepared.push(PreparedCall {
+                                approval: None,
+                                reason: error.clone(),
+                                guard_error: Some(error),
+                            });
+                            continue;
+                        };
+                        if let Err(error) =
+                            crate::gateway::validate_tool_arguments(&call.arguments, schema_check)
+                        {
+                            self.audit
+                                .lock()
+                                .map_err(|_| AgentError::Session("审计锁中毒".into()))?
+                                .record(
+                                    &session.id,
+                                    "tool_schema_rejected",
+                                    Some(call.name.clone()),
+                                    Some(false),
+                                    error.clone(),
+                                );
+                            prepared.push(PreparedCall {
+                                approval: None,
+                                reason: error.clone(),
+                                guard_error: Some(error),
                             });
                             continue;
                         }
@@ -863,7 +930,7 @@ impl Agent {
                             // —— 串行执行单个调用（与原实现逐字等价）——
                             let call = &calls[index];
                             let result = if let Some(guard) = prepared[index].guard_error.clone() {
-                                // 循环保护拦截：不执行，回灌可读原因（模型据此改策略）。
+                                // 宿主执行前拦截：不执行，回灌 schema/hook/循环保护原因供模型修复。
                                 emit(
                                     &mut events,
                                     &event_cell,
@@ -1238,7 +1305,10 @@ impl Agent {
             first_token_ms: None,
         });
         usage_known &= model_requests > 0;
-        let completion_status = if reached_model_turn_limit {
+        let completion_status = if self.config.subagent_depth > 0 {
+            // 子代理 / Team Worker 不进入 Single 验收门控（见 Text 分支说明）。
+            turn_completion_status.unwrap_or(owo_agent_protocol::CompletionStatusV1::Accepted)
+        } else if reached_model_turn_limit {
             assess_single_turn_completion(
                 session,
                 prompt,

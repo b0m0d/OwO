@@ -1002,6 +1002,7 @@ async fn finish_step(
 
 /// 步骤内 critic 评审循环：输出经只读门禁评审，意见回流 worker 重跑。
 /// 通过或轮数耗尽返回最终草稿；未通过返回 Err（视为步骤失败）。
+#[allow(clippy::too_many_arguments)] // 步骤身份/运行时/预算同源传入，打包结构体反而扩大生命周期面
 async fn run_step_critic(
     worker: &Arc<dyn Worker>,
     input: &serde_json::Value,

@@ -169,6 +169,100 @@ async fn failed_host_validation_is_fed_back_and_repaired_before_final() {
     assert_eq!(session.execution_receipts[1].status, "accepted");
 }
 
+#[tokio::test]
+async fn host_validation_repair_rounds_are_bounded_even_when_fingerprints_change() {
+    // 每次写入内容不同 → 验收失败的 subject hash / 指纹都不同，模拟"修一次、败一次"
+    // 永不重复的修复循环；回合必须在 MAX_HOST_VALIDATION_REPAIR_ROUNDS 后收敛。
+    let workspace = tempfile::tempdir().unwrap();
+    let call = |id: &str, name: &str, arguments: serde_json::Value| crate::gateway::ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
+    };
+    let mut script: Vec<ModelOutput> = vec![ModelOutput::ToolCalls(vec![call(
+        "plan",
+        "verification_plan",
+        serde_json::json!({
+            "plan": {
+                "plan_id": "bounded-repair",
+                "requirements": [{
+                    "requirement_id": "readme-ok",
+                    "covers_requirement_ids": ["user-request:包含验收通过"],
+                    "validator_id": "workspace-file-contains-v1",
+                    "validator_version": "1",
+                    "scope": {"kind": "workspace_paths", "relative_paths": ["README.md"]},
+                    "arguments": {"text": "验收通过"},
+                    "required": true,
+                    "resources": {
+                        "cpu_slots": 1,
+                        "memory_mb": 16,
+                        "exclusive_workspace": false,
+                        "timeout_ms": 10000
+                    }
+                }]
+            }
+        }),
+    )])];
+    for round in 0..=MAX_HOST_VALIDATION_REPAIR_ROUNDS {
+        script.push(ModelOutput::ToolCalls(vec![call(
+            &format!("write-{round}"),
+            "write_file",
+            serde_json::json!({"path":"README.md","content":format!("第{round}版")}),
+        )]));
+        script.push(ModelOutput::Text(format!("第{round}版完成")));
+    }
+    // 若上限失效，队列耗尽会以 Provider 错误结束，断言就不会看到收敛的 final。
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider {
+            outputs: Mutex::new(VecDeque::from(script)),
+        }),
+        ToolRegistry::new(),
+        Policy::new(workspace.path()),
+        AgentConfig::default(),
+    );
+    let mut session = Session::new(workspace.path(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "修改 README 并包含验收通过",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("修复轮次耗尽后必须收敛为可见结果，而不是继续请求模型");
+
+    assert!(
+        matches!(
+            outcome.completion_status,
+            owo_agent_protocol::CompletionStatusV1::Unverified
+                | owo_agent_protocol::CompletionStatusV1::Blocked
+        ),
+        "未通过宿主验收的候选必须如实标为未验证/阻断：{:?}",
+        outcome.completion_status
+    );
+    assert_eq!(
+        outcome.final_text.as_deref().map(|text| text.to_string()),
+        Some(format!("第{MAX_HOST_VALIDATION_REPAIR_ROUNDS}版完成")),
+        "达到修复上限时应交付最后一版可见结论"
+    );
+    let feedback_rounds = session
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == "system"
+                && message.content.as_deref().is_some_and(|content| {
+                    content.contains("宿主已按本回合冻结的 VerificationPlan")
+                })
+        })
+        .count();
+    assert_eq!(
+        feedback_rounds, MAX_HOST_VALIDATION_REPAIR_ROUNDS,
+        "恰好经历 MAX 次宿主反馈；第 MAX+1 次验收失败直接收口，不再追加反馈"
+    );
+}
+
 #[test]
 fn default_turn_and_tool_call_limits_allow_the_model_to_finish_naturally() {
     let config = AgentConfig::default();
@@ -215,6 +309,68 @@ fn stale_receipts_from_prior_turns_do_not_change_plain_answer_completion() {
     assert_eq!(
         status,
         owo_agent_protocol::CompletionStatusV1::ResponseComplete
+    );
+}
+
+/// 子代理 / Team Worker（`subagent_depth > 0`）不进入 Single 验收门控：
+/// 写源码后不应收到"调用 verification_plan"的宿主反馈（其工具面没有该工具，
+/// 模型只能报 blocked 导致整步失败）；完成语义由 WorkerOutputV1 契约承担。
+#[tokio::test]
+async fn subagent_turns_skip_single_completion_gate() {
+    let workspace = tempfile::tempdir().unwrap();
+    let call = |id: &str, name: &str, arguments: serde_json::Value| crate::gateway::ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
+    };
+    let script = vec![
+        ModelOutput::ToolCalls(vec![call(
+            "write",
+            "write_file",
+            serde_json::json!({
+                "path": "src/calc.py",
+                "content": "def divide(a, b):\n    return a / b\n"
+            }),
+        )]),
+        ModelOutput::Text("{\"status\":\"done\"}".to_string()),
+    ];
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider {
+            outputs: Mutex::new(VecDeque::from(script)),
+        }),
+        ToolRegistry::new(),
+        Policy::new(workspace.path()),
+        AgentConfig {
+            subagent_depth: 1,
+            ..Default::default()
+        },
+    );
+    let mut session = Session::new(workspace.path(), "test-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let outcome = agent
+        .run_turn(
+            &mut session,
+            "修复 divide",
+            &approver,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .await
+        .expect("子代理回合应正常结束");
+
+    assert_eq!(
+        outcome.completion_status,
+        owo_agent_protocol::CompletionStatusV1::Accepted,
+        "子代理不应被 Single 验收标为未验证"
+    );
+    assert!(
+        session.messages.iter().all(|message| {
+            !message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("verification_plan"))
+        }),
+        "子代理不应收到要求登记 VerificationPlan 的宿主反馈"
     );
 }
 

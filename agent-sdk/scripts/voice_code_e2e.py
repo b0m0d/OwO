@@ -10,12 +10,31 @@ import time
 import urllib.request
 
 
+AUTH_TOKEN = ""
+
+
+def auth_headers(content_type="application/json"):
+    headers = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    if AUTH_TOKEN:
+        headers["Authorization"] = "Bearer " + AUTH_TOKEN
+    return headers
+
+
+def bootstrap_token(endpoint):
+    """R7 bearer 引导（/auth/token 公开）；业务 API 一律带 Authorization。"""
+    global AUTH_TOKEN
+    with urllib.request.urlopen(endpoint + "/auth/token", timeout=30) as response:
+        AUTH_TOKEN = json.loads(response.read().decode("utf-8"))["token"]
+
+
 def post_json(endpoint, path, payload=None):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(
         endpoint + path,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=auth_headers(),
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -25,6 +44,7 @@ def post_json(endpoint, path, payload=None):
 def main() -> int:
     endpoint = os.environ["E2E_ENDPOINT"]
     workspace = os.environ["E2E_WORKSPACE"]
+    bootstrap_token(endpoint)
     stt_json = os.environ.get("E2E_STT_JSON")
     prompt = os.environ.get("E2E_PROMPT", "")
     if stt_json:
@@ -41,7 +61,7 @@ def main() -> int:
     request = urllib.request.Request(
         endpoint + f"/session/{session_id}/turn",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=auth_headers(),
         method="POST",
     )
     deadline = time.time() + timeout_s

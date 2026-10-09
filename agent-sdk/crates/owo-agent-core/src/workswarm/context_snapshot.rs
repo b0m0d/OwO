@@ -98,6 +98,7 @@ impl PhaseContextSnapshotCache {
 }
 
 impl TeamCoordinator {
+    #[allow(clippy::too_many_arguments)] // 快照安装是单点内部接口，字段来源彼此独立
     pub(super) fn install_phase_context_snapshot(
         &self,
         team_id: &str,

@@ -6,6 +6,9 @@
 // **本文件刻意不 import electron**，因此 `desktop/electron/tests/` 可直接 node --test。
 "use strict";
 
+const MODEL_OUTPUT_BUDGET = require("../../../web/core/model-output-budget.js");
+const DEFAULT_MODEL_OUTPUT_TOKENS = MODEL_OUTPUT_BUDGET.DEFAULT;
+const MAX_MODEL_OUTPUT_TOKENS = MODEL_OUTPUT_BUDGET.MAX;
 const CORE_API_VERSION = "0.7";
 // 桌面实例头名（服务端 auth_token.rs:41 同名常量）：壳拉起核心时注入实例身份，
 // 此后所有取 token 的请求都必须带同一个值，否则被 instance_gate_allows 判为
@@ -114,6 +117,22 @@ function shouldAutoRestart(state) {
   return (Number(s.attempts) || 0) < (Number(s.maxAttempts) || 0);
 }
 
+// 核心可服务健康检查不等于桌面 API 已可用：Bearer token 引导也必须成功，
+// 否则 UI 会显示“服务已连接”但所有会话请求都 401/403。
+function authenticationState(status, token) {
+  if (Number(status) === 200 && typeof token === "string" && token.trim().length > 0) {
+    return { state: "ready" };
+  }
+  const httpStatus = Number(status);
+  return {
+    state: "failed",
+    errorCode: "core/authentication_failed",
+    message: httpStatus > 0
+      ? `核心已启动，但桌面认证握手失败（HTTP ${httpStatus}）。请重启后台并查看诊断日志。`
+      : "核心已启动，但没有取得桌面认证凭据。请重启后台并查看诊断日志。",
+  };
+}
+
 // ---------- 复用已存活核心（M5） ----------
 
 // `<data_root>/runtime/daemon.json` 的端口字段（字段名按服务端实现做防御式取值）。
@@ -160,7 +179,7 @@ function isLocalProvider(value) {
 
 const NUMERIC_RULES = {
   context_window: [1, 10000000],
-  max_output_tokens: [1, 32000],
+  max_output_tokens: [1, MAX_MODEL_OUTPUT_TOKENS],
   timeout_secs: [1, 3600],
   keep_recent: [1, 100000],
 };
@@ -275,6 +294,8 @@ function safeStreamLogWrite(stream) {
 
 module.exports = {
   CORE_API_VERSION,
+  DEFAULT_MODEL_OUTPUT_TOKENS,
+  MAX_MODEL_OUTPUT_TOKENS,
   HEALTH_POLL_MS,
   RESTART_BACKOFF_MS,
   // 桌面实例头名：必须与服务端 auth_token.rs::DESKTOP_INSTANCE_HEADER 逐字一致，
@@ -285,6 +306,7 @@ module.exports = {
   parseReadyLine,
   parseFatalLine,
   evaluateHealth,
+  authenticationState,
   healthReasonText,
   pollDelayMs,
   nextBackoffMs,

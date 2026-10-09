@@ -484,7 +484,7 @@ impl SqliteSessionStore {
                 i64::from(session.pinned),
                 session.model_override,
                 serde_json::to_string(&session.validation_receipts).map_err(json_error)?,
-                session.single_verification_plan.as_ref().map(|plan| serde_json::to_string(plan)).transpose().map_err(json_error)?,
+                session.single_verification_plan.as_ref().map(serde_json::to_string).transpose().map_err(json_error)?,
                 session.single_verification_plan_input_sha256,
                 session.single_verification_plan_turn_id,
                 serde_json::to_string(&session.single_review_issues).map_err(json_error)?,

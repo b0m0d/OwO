@@ -445,21 +445,27 @@ async fn mcp_large_schema_is_compacted_and_full_schema_available() {
         "测试样例必须超过默认预算"
     );
 
-    // 压缩后体积显著缩小，且保留属性名与类型信息。
+    // 压缩只剥离说明性噪声，完整保留结构/类型/enum（安全契约见 compact_schema 文档）。
     let compact = compact_schema(&big_schema);
     let compact_bytes = owo_agent_core::tools::schema_bytes(&compact);
     assert!(
-        compact_bytes < owo_agent_core::tools::schema_bytes(&big_schema) / 4,
-        "压缩后体积应远小于原 schema：{compact_bytes}"
+        compact_bytes < owo_agent_core::tools::schema_bytes(&big_schema) / 2,
+        "剥离 description 后体积应显著缩小：{compact_bytes}"
     );
     assert_eq!(compact["type"], "object");
     assert_eq!(compact["required"], json!(["query", "filters"]));
     assert!(compact["properties"]["query"].get("type").is_some());
     assert!(compact["properties"]["nested"].get("type").is_some());
-    // description/enum/嵌套细节被剔除。
     assert!(compact["properties"]["query"].get("description").is_none());
-    assert!(compact["properties"]["filters"].get("properties").is_none());
-    assert!(compact["properties"]["b".repeat(20)].get("enum").is_none());
+    // 嵌套结构、字段名与校验关键字必须保留，否则模型会拿到错误参数契约。
+    assert!(compact["properties"]["filters"].get("properties").is_some());
+    assert_eq!(
+        compact["properties"]["filters"]["properties"]["b".repeat(40)]["enum"],
+        json!([1, 2, 3])
+    );
+    assert!(compact["properties"]["filters"]
+        .get("description")
+        .is_none());
 
     // 注册：大 schema 工具模型可见的是骨架，完整 schema 可从注册表按需取回。
     let client = Arc::new(tokio::sync::Mutex::new(
@@ -545,8 +551,9 @@ async fn mcp_compacted_tool_still_callable() {
     ));
     let workspace = std::env::temp_dir().join(format!("owo-mcp-compact-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&workspace).unwrap();
+    // 压缩 schema 保留 enum 校验：调用参数必须满足 `enum: ["a","b"]`。
     let agent = Agent::new(
-        scripted_tool_call("comp-test_echo", json!({ "text": "延迟加载" })),
+        scripted_tool_call("comp-test_echo", json!({ "text": "a" })),
         ToolRegistry::empty(),
         Policy::new(&workspace),
         AgentConfig::default(),

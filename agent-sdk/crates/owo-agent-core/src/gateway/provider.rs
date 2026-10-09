@@ -1,13 +1,116 @@
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::time::Duration;
+
+const DEFAULT_MODEL_OUTPUT_TOKENS: u64 = 32_000;
+const MAX_MODEL_OUTPUT_TOKENS: u64 = 1_000_000;
 
 use super::config::*;
 use super::is_local_endpoint;
 use super::message::*;
 use super::stream::*;
+
+pub(super) fn parse_tool_calls(
+    message: &Value,
+    tools: &[ToolSpec],
+) -> Result<Option<Vec<ToolCall>>, String> {
+    let Some(raw_calls) = message.get("tool_calls") else {
+        return Ok(None);
+    };
+    let calls = raw_calls
+        .as_array()
+        .ok_or_else(|| "模型响应的 tool_calls 必须是数组".to_string())?;
+    if calls.is_empty() {
+        return Ok(None);
+    }
+
+    let parsed = calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            let id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| format!("模型返回的第 {index} 个工具调用缺少有效 id"))?;
+            let name = call
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| format!("模型返回的第 {index} 个工具调用缺少有效 function.name"))?;
+            let raw_arguments = call
+                .pointer("/function/arguments")
+                .ok_or_else(|| format!("模型返回的工具 {name} 缺少 arguments"))?;
+            let arguments = match raw_arguments {
+                Value::String(raw) => serde_json::from_str::<Value>(raw)
+                    .map_err(|error| format!("模型返回的工具 {name} 参数不是有效 JSON：{error}"))?,
+                Value::Object(_) => raw_arguments.clone(),
+                _ => return Err(format!("模型返回的工具 {name} arguments 必须是 JSON 对象")),
+            };
+            if !arguments.is_object() {
+                return Err(format!("模型返回的工具 {name} arguments 必须是 JSON 对象"));
+            }
+            Ok(ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    validate_tool_calls(parsed, tools).map(Some)
+}
+
+/// 结构不变量：id 非空且唯一、name 非空、arguments 为 JSON 对象。
+///
+/// **不检查工具是否在本轮清单内**——「请求了未下发/已热卸载的工具」必须作为
+/// 工具错误回喂模型（turn 主循环的 guard 分支），而不是直接终止回合；只有
+/// 协议层解析（Provider 从线上响应组装调用）才需要额外核对清单一致性。
+pub(crate) fn validate_tool_call_shapes(calls: &[ToolCall]) -> Result<(), String> {
+    let mut ids = std::collections::HashSet::new();
+    for call in calls {
+        if call.id.trim().is_empty() {
+            return Err("模型返回的工具调用缺少有效 id".to_string());
+        }
+        if call.name.trim().is_empty() {
+            return Err(format!("模型返回的工具调用 {} 缺少有效名称", call.id));
+        }
+        if !ids.insert(call.id.as_str()) {
+            return Err(format!("模型返回重复的工具调用 id：{}", call.id));
+        }
+        if !call.arguments.is_object() {
+            return Err(format!(
+                "模型返回的工具 {} arguments 必须是 JSON 对象",
+                call.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_tool_calls(
+    calls: Vec<ToolCall>,
+    tools: &[ToolSpec],
+) -> Result<Vec<ToolCall>, String> {
+    validate_tool_call_shapes(&calls)?;
+    for call in &calls {
+        if !tools.iter().any(|spec| spec.name == call.name) {
+            return Err(format!(
+                "模型请求了本轮未提供的工具 {}；可用工具列表与响应不一致",
+                call.name
+            ));
+        }
+    }
+    Ok(calls)
+}
+
+/// Validate arguments against the exact schema sent to the model this turn.
+pub(crate) fn validate_tool_arguments(arguments: &Value, spec: &ToolSpec) -> Result<(), String> {
+    crate::json_schema::validate(arguments, &spec.input_schema, "$")
+        .map_err(|error| format!("工具 {} 参数不符合公开 schema：{error}", spec.name))
+}
+
 /// OpenAI-compatible `/chat/completions` 客户端（覆盖 OpenAI、DeepSeek、Ollama、多数代理）。
 pub struct OpenAiCompatibleProvider {
     pub(super) client: reqwest::Client,
@@ -18,9 +121,10 @@ pub struct OpenAiCompatibleProvider {
 
 impl OpenAiCompatibleProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, String> {
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(model_request_timeout());
+        // 客户端不设总超时：流式请求不能有"整个响应体"的墙钟上限，否则长回答
+        // 会在固定秒数处被 reqwest 腰斩（长程任务实测 Body TimedOut）。非流式
+        // 请求在 post_chat 内按请求设置总超时，流式由逐块空闲超时守护。
+        let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
         let mut has_proxy = false;
         // Local model endpoints are isolated from HTTP proxies; proxying loopback
         // breaks local inference and can turn localhost into a remote request.
@@ -50,7 +154,6 @@ impl OpenAiCompatibleProvider {
             Some(
                 reqwest::Client::builder()
                     .connect_timeout(Duration::from_secs(10))
-                    .timeout(model_request_timeout())
                     .build()
                     .map_err(|e| format!("直连 HTTP 客户端创建失败：{e}"))?,
             )
@@ -99,10 +202,14 @@ impl OpenAiCompatibleProvider {
     }
 
     /// 发送请求：优先代理客户端，失败自动切直连重试一次（多轮流式挂起时稳定）。
+    ///
+    /// `stream=true` 时不设置请求级总超时——reqwest 的 `.timeout()` 覆盖整个响应体
+    /// 读取，SSE 长回答会被固定墙钟截断；流式由调用方的逐块空闲超时守护。
     async fn post_chat(
         &self,
         url: &str,
         body: &serde_json::Value,
+        stream: bool,
     ) -> Result<reqwest::Response, String> {
         let mut last_error = String::new();
         let attempts: Vec<(&str, &reqwest::Client)> = {
@@ -129,7 +236,10 @@ impl OpenAiCompatibleProvider {
             list
         };
         for (label, client) in attempts {
-            let request = client.post(url).json(body).timeout(model_request_timeout());
+            let mut request = client.post(url).json(body);
+            if !stream {
+                request = request.timeout(model_request_timeout());
+            }
             let request = if self.config.api_key.is_empty() {
                 request
             } else {
@@ -317,15 +427,15 @@ fn max_output_tokens_for_model(model: &str) -> u64 {
         .ok()
         .and_then(|value| serde_json::from_str::<serde_json::Map<String, Value>>(&value).ok())
         .and_then(|values| values.get(model).and_then(Value::as_u64))
-        .filter(|value| (1..=32000).contains(value));
+        .filter(|value| (1..=MAX_MODEL_OUTPUT_TOKENS).contains(value));
     if let Some(value) = by_model {
         return value;
     }
     std::env::var("OWO_MODEL_MAX_OUTPUT_TOKENS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| (1..=32000).contains(value))
-        .unwrap_or(32000)
+        .filter(|value| (1..=MAX_MODEL_OUTPUT_TOKENS).contains(value))
+        .unwrap_or(DEFAULT_MODEL_OUTPUT_TOKENS)
 }
 
 #[async_trait]
@@ -371,7 +481,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches("/")
         );
-        let response = self.post_chat(&url, &body).await?;
+        let response = self.post_chat(&url, &body, false).await?;
         let request_id = ["x-request-id", "request-id", "openai-request-id"]
             .iter()
             .find_map(|name| response.headers().get(*name))
@@ -409,29 +519,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .get("content")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let tool_calls = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .map(|calls| {
-                calls
-                    .iter()
-                    .filter_map(|call| {
-                        let id = call.get("id")?.as_str()?.to_string();
-                        let name = call.pointer("/function/name")?.as_str()?.to_string();
-                        let arguments = call
-                            .pointer("/function/arguments")
-                            .and_then(Value::as_str)
-                            .and_then(|raw| serde_json::from_str(raw).ok())
-                            .unwrap_or(Value::Null);
-                        Some(ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .filter(|calls: &Vec<ToolCall>| !calls.is_empty());
+        let tool_calls = parse_tool_calls(message, tools)?;
         let output = if let Some(tool_calls) = tool_calls {
             ModelOutput::ToolCalls(tool_calls)
         } else if let Some(content) = content {
@@ -571,7 +659,7 @@ impl OpenAiCompatibleProvider {
             .get("model")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let response = self.post_chat(&url, &body).await?;
+        let response = self.post_chat(&url, &body, true).await?;
         let request_id = ["x-request-id", "request-id", "openai-request-id"]
             .iter()
             .find_map(|name| response.headers().get(*name))
@@ -645,8 +733,9 @@ impl OpenAiCompatibleProvider {
             return Err("模型流式响应未收到结束标记，且缺少正常 finish_reason".to_string());
         }
 
-        let output = if let Some(tool_calls) = build_tool_calls(&mut state.tool_call_accumulators) {
-            ModelOutput::ToolCalls(tool_calls)
+        let output = if let Some(tool_calls) = build_tool_calls(&mut state.tool_call_accumulators)?
+        {
+            ModelOutput::ToolCalls(validate_tool_calls(tool_calls, tools)?)
         } else {
             ModelOutput::Text(state.content)
         };

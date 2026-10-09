@@ -67,9 +67,12 @@ test("会话读取失败可从侧栏重试，错误安全显示，成功后替�
 });
 
 
-test("会话错误按状态给出可操作提示，原错误可单独展开", () => {
+test("会话错误按状态和桌面桥接来源给出可操作提示，原错误可单独展开", () => {
   const h = harness();
-  assert.match(h.failureMessage(Object.assign(new Error("token 引导失败（HTTP 404）"), { status: 404 })), /重启 Electron 工作台/);
+  const browserFailure = vm.runInNewContext(failureMessageBody + "\nsessionListFailureMessage", { window: {} });
+  const desktopFailure = vm.runInNewContext(failureMessageBody + "\nsessionListFailureMessage", { window: { owo: {} } });
+  assert.match(browserFailure(Object.assign(new Error("HTTP 404"), { status: 404 })), /浏览器预览/);
+  assert.match(desktopFailure(Object.assign(new Error("HTTP 404"), { status: 404 })), /重启 Electron 工作台/);
   assert.match(h.failureMessage(Object.assign(new Error("token 引导失败（HTTP 403）"), { status: 403 })), /重新连接后重试/);
   assert.match(h.failureMessage(new Error("Failed to fetch")), /无法连接本地核心服务/);
   assert.match(h.failureMessage(new Error("此浏览器未获得桌面授权，请在 Electron 工作台中打开会话。")), /此浏览器未获得桌面授权/);

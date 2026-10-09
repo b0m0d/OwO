@@ -31,10 +31,11 @@ mod tests;
 pub use types::*;
 
 use execution::{
-    run_step_attempts, run_worker_cancellable, step_validation_receipt_matches,
-    validate_host_command_validation, verify_step_output, ExecutionBudget, StepOutcome, StepResult,
+    run_step_attempts, step_validation_receipt_matches, ExecutionBudget, StepOutcome, StepResult,
     StepRuntime, StepStop,
 };
+#[cfg(test)]
+use execution::{validate_host_command_validation, verify_step_output};
 
 type StepSkipper = Arc<dyn Fn(&StepSpec) -> Option<String> + Send + Sync>;
 type WorkspaceCommandVerifier = Arc<
@@ -205,7 +206,7 @@ impl GoalRunner {
                 .step(step_id)
                 .map(|step| step.worker.clone())
                 .unwrap_or_default();
-            let _ = sender.send(StepProgressUpdate {
+            sender.send(StepProgressUpdate {
                 step_id: step_id.to_string(),
                 worker,
                 record: record.clone(),

@@ -33,10 +33,7 @@ pub fn explicit_acceptance_items(request: &str) -> Vec<String> {
             }
             continue;
         }
-        let plain_heading = trimmed
-            .trim_end_matches(|ch| ch == ':' || ch == '：')
-            .trim()
-            .to_lowercase();
+        let plain_heading = trimmed.trim_end_matches([':', '：']).trim().to_lowercase();
         if [
             "验收",
             "验收标准",

@@ -31,6 +31,7 @@ pub mod goal;
 /// Hooks 生命周期扩展点（A2-1，取优合并自远端 engine）：settings.json 的
 /// `hooks: [{event, matcher?, command}]`，exit 2 = 阻断。
 pub mod hooks;
+mod json_schema;
 pub mod node_agent;
 /// 用户提问通道（ask_user 工具；取优合并自远端 engine）。
 pub mod question;

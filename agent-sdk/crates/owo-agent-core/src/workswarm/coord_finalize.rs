@@ -2,6 +2,7 @@ use super::*;
 
 impl TeamCoordinator {
     /// Finalize one claimed phase under epoch fencing and the Team state lock.
+    #[allow(clippy::too_many_arguments)] // 阶段收尾需要原样接收 claim/运行态/结果，拆结构体只做搬运
     pub(super) async fn finalize_phase(
         &self,
         team_id: &str,

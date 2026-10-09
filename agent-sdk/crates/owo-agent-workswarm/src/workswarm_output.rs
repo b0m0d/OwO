@@ -218,10 +218,13 @@ impl WorkerOutputV1 {
 }
 
 /// 契约解析结果三态。
+///
+/// `Parsed` 装箱：`WorkerOutputV1` 有 200+ 字节，直接内联会让每次
+/// `parse_worker_output` 的返回与匹配都搬动整个结构（clippy::large_enum_variant）。
 #[derive(Debug, Clone)]
 pub enum WorkerOutputParse {
     /// 完全符合契约。
-    Parsed(WorkerOutputV1),
+    Parsed(Box<WorkerOutputV1>),
     /// 非契约输出（纯文本 legacy 语义，登记行为不变）。
     Legacy,
     /// 看起来想按契约输出但解析/校验失败（触发一次定向修复）。
@@ -254,8 +257,21 @@ pub fn parse_worker_output(text: &str) -> WorkerOutputParse {
         // 有结构但不是本契约（其他 JSON 用途）→ Legacy。
         return WorkerOutputParse::Legacy;
     }
+    // producer 常把 `review_result` 写成一句自检说明字符串。该字段只对 reviewer
+    // 有意义，非对象值不应把一份合法交付物判成契约非法（会白白浪费一次定点修复
+    // 调用，长任务里实测让 implementer 整步失败）。此处剥离畸形值，角色校验再决定
+    // 是否需要结构化 review_result（critic 缺失会被 validate_critic 明确拒绝）。
+    let mut value = value;
+    if value
+        .get("review_result")
+        .is_some_and(|review| !review.is_object() && !review.is_null())
+    {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("review_result");
+        }
+    }
     match serde_json::from_value::<WorkerOutputV1>(value) {
-        Ok(output) => WorkerOutputParse::Parsed(output),
+        Ok(output) => WorkerOutputParse::Parsed(Box::new(output)),
         Err(error) => WorkerOutputParse::Invalid {
             error: format!("WorkerOutputV1 字段校验失败：{error}"),
         },
@@ -285,7 +301,8 @@ review_result（reviewer必填）：对象含 verdict（approved/changes_request
         );
     } else {
         prompt.push_str(
-            "你是交付角色：status=done 时**必须**提交 artifact（content=交付物正文本体，\
+            "你是交付角色：**不得输出 review_result**（该字段仅供 reviewer 使用），\
+status=done 时**必须**提交 artifact（content=交付物正文本体，\
 不是你的过程描述）。代码分析与补丁/变更报告的 artifact.format 一律用 \"markdown\"、\
 kind 分别用 \"analysis\"/\"code\"。交付物内容必须**逐字满足**任务指令的字面要求（如指定必须出现的\
 映射行、签名行、字段值与文件路径）；若无法完成，用 status=failed/blocked 并在 \
@@ -325,7 +342,7 @@ pub fn contract_repair_prompt(is_critic: bool, violation: &str, broken: &str) ->
     let role_rule = if is_critic {
         "你是 review capability：禁止 artifact；status=done 必须提交 review_result={verdict,reviewed_requirement_ids,findings}，reviewed_requirement_ids 必须逐项复制宿主清单且不得重复，只报告有证据的问题；同一 owner 多任务时从上游上下文的宿主 Artifact 身份原样复制 target_task_id 或 target_artifact_id 精确定位；宿主绑定评审快照"
     } else {
-        "你是交付角色：status=done 必须携带 artifact（content=交付物正文本体；artifact.format 只能取 text|markdown|json|csv 之一，代码分析与补丁/变更报告一律用 \"markdown\"，kind 用 \"analysis\"/\"code\"）"
+        "你是交付角色：不得输出 review_result；status=done 必须携带 artifact（content=交付物正文本体；artifact.format 只能取 text|markdown|json|csv 之一，代码分析与补丁/变更报告一律用 \"markdown\"，kind 用 \"analysis\"/\"code\"）"
     };
     format!(
         "你的上一次回复不符合 WorkerOutputV1 输出契约（必须是合法 JSON：status/summary/artifact{{kind,format,content}}/evidence/open_issues/handoff/review_result）。\
@@ -363,6 +380,46 @@ mod tests {
         match parse_worker_output(&fenced) {
             WorkerOutputParse::Parsed(output) => assert!(output.validate().is_ok()),
             other => panic!("围栏内的合法契约应直接解析，不触发模型修复：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn producer_stray_review_result_string_is_ignored_not_invalid() {
+        // 长任务实测：implementer 把 `review_result` 写成一句自检说明字符串，
+        // 旧行为 serde 直接判整份交付物非法并触发一次浪费的定点修复；现在剥离
+        // 畸形值，由角色校验决定是否需要结构化评审结果。
+        let output = serde_json::json!({
+            "status": "done",
+            "summary": "修复完成",
+            "artifact": {"kind": "code", "format": "markdown", "content": "# 补丁"},
+            "evidence": [],
+            "open_issues": [],
+            "review_result": "自检通过（这不是结构化对象）",
+        });
+        match parse_worker_output(&output.to_string()) {
+            WorkerOutputParse::Parsed(parsed) => {
+                assert!(
+                    parsed.review_result.is_none(),
+                    "畸形 review_result 必须被剥离"
+                );
+                assert!(parsed.validate().is_ok(), "合法交付物不应因无关字段失败");
+            }
+            other => panic!("应为 Parsed：{other:?}"),
+        }
+        // critic 的字符串 review_result 同样先被剥离，随后由 validate_critic 明确拒绝。
+        let critic = serde_json::json!({
+            "status": "done",
+            "summary": "评审",
+            "evidence": [],
+            "open_issues": [],
+            "review_result": "approved",
+        });
+        match parse_worker_output(&critic.to_string()) {
+            WorkerOutputParse::Parsed(parsed) => {
+                assert!(parsed.review_result.is_none());
+                assert!(parsed.validate_critic().is_err(), "缺少结构化评审必须拒绝");
+            }
+            other => panic!("应为 Parsed（由角色校验拒绝）：{other:?}"),
         }
     }
 

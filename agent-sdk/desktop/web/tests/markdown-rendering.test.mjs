@@ -4,12 +4,13 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
-const start = app.indexOf("function escapeHtml(text)");
-const end = app.indexOf("// ---------- 头部状态 ----------", start);
-assert.ok(start >= 0 && end > start, "production markdown renderer must remain in the tested source boundary");
+// Markdown/LaTeX 渲染器唯一来源：core/markdown.js（§12.3 单文件单职责拆分后）。
+const markdownSource = readFileSync(new URL("../core/markdown.js", import.meta.url), "utf8");
 const sandbox = { window: { location: { href: "http://localhost/" } }, URL };
 vm.createContext(sandbox);
-const renderMarkdown = vm.runInContext(app.slice(start, end) + "\nrenderMarkdown", sandbox);
+vm.runInContext(markdownSource, sandbox);
+const renderMarkdown = sandbox.window.OwoMarkdown && sandbox.window.OwoMarkdown.renderMarkdown;
+assert.equal(typeof renderMarkdown, "function", "core/markdown.js 必须导出 renderMarkdown");
 
 test("ordinary prose containing pipes is not misclassified as a table", () => {
   const html = renderMarkdown("条件 a | b | c 仍是普通正文");

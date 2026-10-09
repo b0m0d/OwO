@@ -35,9 +35,9 @@
         '<details class="owo-market-advanced">' +
         "<summary>高级工具（扫描 / 校验 / 目录安装 / 更新 / 卸载）</summary>" +
         '<div class="stack">' +
-        '<div class="inline"><input class="owo-market-dir" placeholder="插件目录路径（相对 workspace 或绝对）"><button class="owo-market-scan">扫描</button><button class="owo-market-verify">校验</button></div>' +
-        '<div class="inline"><input class="owo-market-dir2" placeholder="插件目录（安装/更新源）"><input class="owo-market-id" placeholder="更新目标 id（update 时）"><button class="owo-market-install">安装</button><button class="owo-market-update">更新</button></div>' +
-        '<div class="inline"><input class="owo-market-uid" placeholder="卸载 id"><button class="owo-market-uninstall">卸载</button></div>' +
+        '<div class="inline"><input class="owo-market-dir" placeholder="插件目录路径（相对 workspace 或绝对）"><button class="owo-market-scan" data-core-action>扫描</button><button class="owo-market-verify" data-core-action>校验</button></div>' +
+        '<div class="inline"><input class="owo-market-dir2" placeholder="插件目录（安装/更新源）"><input class="owo-market-id" placeholder="更新目标 id（update 时）"><button class="owo-market-install" data-core-action>安装</button><button class="owo-market-update" data-core-action>更新</button></div>' +
+        '<div class="inline"><input class="owo-market-uid" placeholder="卸载 id"><button class="owo-market-uninstall" data-core-action>卸载</button></div>' +
         '<div class="owo-market-result sub"></div>' +
         "</div>" +
         "</details>" +
@@ -45,14 +45,14 @@
         "<summary>远端市场（registry）</summary>" +
         '<div class="stack">' +
         '<div class="inline"><input class="owo-market-url" placeholder="市场 URL（OWO_MARKET_URL 缺省）"><button class="owo-market-refreshremote">拉取 registry</button></div>' +
-        '<div class="inline"><input class="owo-market-rid" placeholder="远端插件 id"><input class="owo-market-rver" placeholder="版本（可选）"><button class="owo-market-installremote primary">下载并安装</button></div>' +
+        '<div class="inline"><input class="owo-market-rid" placeholder="远端插件 id"><input class="owo-market-rver" placeholder="版本（可选）"><button class="owo-market-installremote primary" data-core-action>下载并安装</button></div>' +
         "</div>" +
         "</details>" +
         '<details class="owo-market-advanced">' +
         "<summary>Seed 示例市场条目</summary>" +
         '<div class="stack">' +
         '<textarea class="owo-market-seed" rows="4" spellcheck="false" placeholder=\'{"entries":[{"id":"owo.plugin.demo","name":"Demo","version":"1.0.0","min_app_version":"0.5.0"}]}\'></textarea>' +
-        '<button class="owo-market-seedbtn">写入 seed</button>' +
+        '<button class="owo-market-seedbtn" data-core-action>写入 seed</button>' +
         "</div>" +
         "</details>" +
         '<details class="owo-market-advanced">' +
@@ -97,7 +97,6 @@
       this.dispose();
       var self = this;
       this.root = root;
-      actionBusy = Object.create(null);
       this.helpers = helpers || {};
       this.baseUrl =
         this.helpers.baseUrl ||
@@ -245,7 +244,7 @@
         '<span class="sub">' +
         this.esc(plugin.path || "") +
         "</span>" +
-        "<button type=\"button\">卸载</button>" +
+        "<button type=\"button\" data-core-action>卸载</button>" +
         "</div>";
       li.querySelector("button").addEventListener("click", function () {
         self.doUninstall(plugin.id);
@@ -275,6 +274,7 @@
       var button = document.createElement("button");
       button.type = "button";
       button.className = "owo-market-cat-install";
+      button.setAttribute("data-core-action", "true");
       button.textContent = "安装";
       button.addEventListener("click", function () {
         self.doInstallRemote(entry.id, entry.version || "", "", button);
@@ -284,9 +284,14 @@
     },
 
     _action: function (key, button, request, success, failure) {
-      if (actionBusy[key]) return Promise.resolve();
-      actionBusy[key] = true;
+      if (actionBusy[key]) {
+        this._result("同一插件操作仍在执行，请稍后再试。");
+        return Promise.resolve();
+      }
+      var actionToken = {};
+      actionBusy[key] = actionToken;
       var owner = panelGeneration;
+      var self = this;
       var idleText = button && button.textContent;
       if (button) {
         button.disabled = true;
@@ -297,15 +302,25 @@
       try { pending = request(); } catch (error) { pending = Promise.reject(error); }
       return Promise.resolve(pending)
         .then(function (data) {
-          if (owner === panelGeneration) success(data);
+          if (owner === panelGeneration) {
+            success(data);
+          } else if (self.root) {
+            self._result("上一页面发起的插件操作已完成，请刷新当前目录确认状态。");
+            self.refresh();
+            self.refreshAudit();
+          }
         })
         .catch(function (error) {
-          if (owner === panelGeneration) failure(error);
+          if (owner === panelGeneration) {
+            failure(error);
+          } else if (self.root) {
+            self._result("上一页面发起的插件操作失败：" + self.friendlyError(error));
+          }
         })
         .finally(function () {
-          if (owner !== panelGeneration) return;
+          if (actionBusy[key] !== actionToken) return;
           delete actionBusy[key];
-          if (button) {
+          if (owner === panelGeneration && button) {
             button.disabled = false;
             button.removeAttribute("aria-busy");
             button.textContent = idleText;
@@ -456,7 +471,6 @@
       panelGeneration += 1;
       catalogGeneration += 1;
       auditGeneration += 1;
-      actionBusy = Object.create(null);
       this.root = null;
     },
 

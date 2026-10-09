@@ -148,6 +148,23 @@ pub(crate) async fn run_turn(
                     printer.print_sse(&event);
                 }
             }
+            SseEvent::UserQuestion {
+                question_id,
+                question,
+                options,
+            } => {
+                emit_event(output, &event);
+                if human {
+                    printer.print_sse(&event);
+                }
+                let answer = decide_question(output, question, options)?;
+                if let Err(error) = client
+                    .answer_question(&session.id, question_id, &answer)
+                    .await
+                {
+                    eprintln!("回答提问失败：{error}");
+                }
+            }
             SseEvent::TurnFailed { message, .. } => {
                 emit_event(output, &event);
                 if human {
@@ -284,9 +301,56 @@ fn decide_permission(
     Ok(parse_approval_response(&line))
 }
 
+/// 提问决策：human 交互回答；plain/jsonl 非交互给确定性继续指令，
+/// 避免整轮回合在提问卡上空等 300s（与审批的 non-interactive 默认口径一致）。
+fn decide_question(
+    output: OutputMode,
+    question: &str,
+    options: &[String],
+) -> Result<String, Box<dyn std::error::Error>> {
+    const NON_INTERACTIVE: &str =
+        "请基于现有信息按最合理假设继续完成任务，不要再次提问；在最终回复中说明所做假设。";
+    if !matches!(output, OutputMode::Human) {
+        eprintln!("提问（非交互模式，自动继续）：{question}");
+        return Ok(NON_INTERACTIVE.to_string());
+    }
+    eprintln!("{} {question}", "提问".yellow());
+    for (index, option) in options.iter().enumerate() {
+        eprintln!("  [{}] {option}", index + 1);
+    }
+    eprint!("回答（回车使用默认：按最合理假设继续）：");
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let answer = line.trim();
+    if answer.is_empty() {
+        return Ok(NON_INTERACTIVE.to_string());
+    }
+    if let Ok(index) = answer.parse::<usize>() {
+        if let Some(option) = options.get(index.saturating_sub(1)) {
+            return Ok(option.clone());
+        }
+    }
+    Ok(answer.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_prompt_value;
+    use super::{decide_question, resolve_prompt_value};
+    use crate::ui_output::OutputMode;
+
+    /// plain/jsonl 非交互模式不能等待 300s 提问超时：直接给确定性继续指令。
+    #[test]
+    fn non_interactive_question_gets_deterministic_continue_answer() {
+        for mode in [OutputMode::Jsonl, OutputMode::Plain] {
+            let answer = decide_question(mode, "还缺一个字段名", &[]).expect("非交互回答不应失败");
+            assert!(
+                answer.contains("最合理假设"),
+                "回答应要求按假设继续：{answer}"
+            );
+        }
+    }
 
     /// B4：显式 `--prompt X` 优先，不触碰 stdin。
     #[test]

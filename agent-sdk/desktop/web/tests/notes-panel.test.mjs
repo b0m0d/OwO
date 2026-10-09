@@ -187,6 +187,16 @@ test("note list announces its loading state before data arrives", async () => {
   assert.match(list.innerHTML, /暂无笔记/);
 });
 
+test("note full-text search is gated and explained when the core is disconnected", () => {
+  const h = makeNotesPanel();
+  const markup = h.panel.nav();
+  const search = markup.match(/<input class="owo-notes-search"[^>]*>/)?.[0] || "";
+  assert.match(search, /data-core-action/);
+  assert.match(search, /aria-describedby="owo-notes-core-hint"/);
+  assert.match(markup, /id="owo-notes-core-hint" data-core-action-hint/);
+  assert.match(markup, /连接并授权本地核心后可搜索笔记全文和管理笔记/);
+});
+
 test("search uses latest-result-wins and exposes searching state", async () => {
   let resolveFirst;
   let resolveSecond;
@@ -247,6 +257,44 @@ test("slow create response does not close or replace a newer draft", async () =>
   assert.equal(h.detail.hidden, true);
 });
 
+
+test("pending note creation keeps the save lock across panel remounts", async () => {
+  let resolveCreate;
+  const h = makeNotesPanel((path) => path === "/notes"
+    ? Promise.resolve({ notes: [] })
+    : Promise.reject(new Error("unexpected GET: " + path)));
+  h.panel.post = (path, body) => {
+    h.posts.push([path, body]);
+    return new Promise((resolve) => { resolveCreate = resolve; });
+  };
+  h.section.selectors[".owo-notes-btn-new"].handlers.click();
+  h.section.selectors[".owo-notes-title"].value = "只创建一次";
+  const firstSave = h.section.selectors[".owo-notes-btn-save"].handlers.click();
+  await Promise.resolve();
+  assert.equal(h.posts.length, 1);
+
+  h.panel.dispose();
+  // Re-entering creates a fresh DOM button, which starts enabled unless the
+  // panel carries the outstanding request state across its lifecycle.
+  h.section.selectors[".owo-notes-btn-save"].disabled = false;
+  h.section.selectors[".owo-notes-btn-save"].textContent = "保存";
+  h.panel.mount(h.section, {
+    get(path) { return path === "/notes" ? Promise.resolve({ notes: [] }) : Promise.reject(new Error(path)); },
+    post(path, body) { h.posts.push([path, body]); return Promise.resolve({ ok: true }); },
+    notify() {}, esc: String, friendlyError: (error) => error.message,
+  });
+  const saveButton = h.section.selectors[".owo-notes-btn-save"];
+  assert.equal(saveButton.disabled, true);
+  assert.equal(saveButton.textContent, "保存中…");
+  h.section.selectors[".owo-notes-title"].value = "重复草稿";
+  await saveButton.handlers.click();
+  assert.equal(h.posts.length, 1, "新挂载页不能并发重复创建笔记");
+
+  resolveCreate({ ok: true });
+  await firstSave;
+  assert.equal(saveButton.disabled, false);
+  assert.equal(saveButton.textContent, "保存");
+});
 
 test("note list results are keyboard-focusable buttons with accessible names", async () => {
   const h = makeNotesPanel((path) => path === "/notes"

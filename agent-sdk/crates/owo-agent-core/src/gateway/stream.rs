@@ -109,14 +109,21 @@ pub(super) fn accumulate_tool_fragments(
 
 pub(super) fn build_tool_calls(
     accumulators: &mut HashMap<usize, ToolCallAccumulator>,
-) -> Option<Vec<ToolCall>> {
+) -> Result<Option<Vec<ToolCall>>, String> {
     if accumulators.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut calls: Vec<(usize, ToolCall)> = accumulators
         .drain()
         .map(|(index, accum)| {
-            (
+            let arguments = if accum.arguments.trim().is_empty() {
+                Value::Object(serde_json::Map::new())
+            } else {
+                serde_json::from_str(&accum.arguments).map_err(|error| {
+                    format!("模型返回的工具 {} 参数不是有效 JSON：{error}", accum.name)
+                })?
+            };
+            Ok((
                 index,
                 ToolCall {
                     id: if accum.id.is_empty() {
@@ -125,13 +132,13 @@ pub(super) fn build_tool_calls(
                         accum.id
                     },
                     name: accum.name,
-                    arguments: serde_json::from_str(&accum.arguments).unwrap_or(Value::Null),
+                    arguments,
                 },
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     calls.sort_by_key(|(index, _)| *index);
-    Some(calls.into_iter().map(|(_, call)| call).collect())
+    Ok(Some(calls.into_iter().map(|(_, call)| call).collect()))
 }
 
 pub(super) fn append_utf8_chunk(buffer: &mut String, pending: &mut Vec<u8>, chunk: &[u8]) {

@@ -568,8 +568,8 @@
           state.inboxResults[id] = { ok: false, text: "操作失败：" + friendly(e) };
         })
         .then(function () {
+          delete state.inboxBusy[key];
           if (!isCurrentRequest(lifecycle)) return;
-          state.inboxBusy[key] = false;
           if (state.inboxSource === "inbox") return refreshInbox();
           render();
         });
@@ -676,7 +676,7 @@
           "</div>" +
           (item.error ? '<div class="owo-ac-sub bad">' + esc(item.error) + "</div>" : "") +
           '<div class="owo-ac-actions">' +
-          '<button type="button" class="owo-ac-mini" data-ac-retry data-ac-key="' + esc(key) + '" data-team="' + esc(item.team_id) + '" data-step="' + esc(item.step_id) + '"' + (isBusy ? " disabled" : "") + ">" + (isBusy ? "重试中…" : "重试") + "</button>" +
+          '<button type="button" class="owo-ac-mini" data-core-action data-ac-retry data-ac-key="' + esc(key) + '" data-team="' + esc(item.team_id) + '" data-step="' + esc(item.step_id) + '"' + (isBusy ? " disabled" : "") + ">" + (isBusy ? "重试中…" : "重试") + "</button>" +
           '<button type="button" class="owo-ac-mini" data-ac-goto="' + esc(item.team_id) + '">进入团队</button>' +
           "</div>" +
           '<div class="owo-ac-result' + (res ? (res.ok ? " ok" : " bad") : "") + '" data-ac-result="' + esc(key) + '" aria-live="polite">' + (res ? esc(res.text) : "") + "</div>" +
@@ -822,8 +822,8 @@
           state.retryResults[key] = { ok: false, text: "重试失败：" + friendly(e) };
         })
         .then(function () {
-          if (!isCurrentRequest(lifecycle)) return;
           delete state.retryBusy[key];
+          if (!isCurrentRequest(lifecycle)) return;
           paintRetry(key);
           // 成功后重载聚合：失败步骤应随团队状态推进而消失。
           if (state.retryResults[key] && state.retryResults[key].ok) return load();
@@ -989,8 +989,6 @@
       loadGeneration++;
       inboxGeneration++;
       state.loading = false;
-      state.retryBusy = {};
-      state.inboxBusy = {};
       rootEl = root;
       H = helpers || {};
       H.baseUrl = H.baseUrl || (win.OwoPanels && win.OwoPanels.baseUrl) || "";
@@ -1013,8 +1011,7 @@
       inboxGeneration++;
       rootEl = null;
       state.loading = false;
-      state.retryBusy = {};
-      state.inboxBusy = {};
+      // In-flight actions continue in the service after unmount; keep their locks until settled.
     }
 
     // ---------- 测试挂钩 ----------

@@ -47,6 +47,7 @@ impl RequestReservationJournal {
         }
     }
 
+    #[allow(clippy::type_complexity)] // 快照三元组就地解构，命名类型只增加噪声
     fn reservation_snapshot(
         &self,
     ) -> Result<(u64, HashMap<String, u64>, HashMap<String, u64>), String> {

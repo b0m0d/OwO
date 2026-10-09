@@ -99,6 +99,18 @@ function fakeBtn(stepId) {
   };
 }
 
+test("切换 Team 时保留在途产物评审和返工提交锁", () => {
+  resetState();
+  T.state.reviewBusy["artifact-1"] = true;
+  T.state.reworkBusy["artifact-1"] = true;
+
+  panel.open("team-next");
+
+  assert.equal(T.state.current, "team-next");
+  assert.equal(T.state.reviewBusy["artifact-1"], true, "切换团队不能丢失评审中的提交锁");
+  assert.equal(T.state.reworkBusy["artifact-1"], true, "切换团队不能丢失返工中的提交锁");
+});
+
 test("模块导出与浏览器骨架完好", () => {
   assert.equal(panel.id, "workswarm");
   assert.equal(typeof panel.mount, "function");
@@ -159,6 +171,21 @@ test("normStatus / isTerminalTeam 状态归一化", () => {
   assert.equal(T.isTerminalTeam("Cancelled"), true);
   assert.equal(T.isTerminalTeam("Failed"), true);
   assert.equal(T.isTerminalTeam("Running"), false);
+});
+
+test("任务选择器将未知状态和所有动态字段作为文本转义", () => {
+  const task = {
+    task_id: 'task"><img src=x onerror=alert(1)>',
+    role: '<svg onload=alert(1)>',
+    status: '<img src=x onerror=alert(2)>',
+  };
+
+  const html = T.taskOptionHtml(task);
+  assert.equal(
+    html,
+    '<option value="task&quot;&gt;&lt;img src=x onerror=alert(1)&gt;">&lt;svg onload=alert(1)&gt;（&lt;img src=x onerror=alert(2)&gt;）</option>',
+  );
+  assert.equal(T.taskStatusLabel(task), "&lt;img src=x onerror=alert(2)&gt;");
 });
 
 test("computeRunSummary：混合 DAG 计数/失败步骤/累计尝试/阻塞", () => {

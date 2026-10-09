@@ -91,14 +91,36 @@ fn bad_request(detail: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": detail })))
 }
 
+fn is_date_only(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+}
+
 fn ts_in_range(ts: &str, from: &Option<String>, to: &Option<String>) -> bool {
+    let date = ts.get(..10);
     if let Some(from) = from {
-        if ts < from.as_str() {
+        let after_from = if is_date_only(from) {
+            date.map(|date| date >= from.as_str()).unwrap_or(false)
+        } else {
+            ts >= from.as_str()
+        };
+        if !after_from {
             return false;
         }
     }
     if let Some(to) = to {
-        if ts > to.as_str() {
+        let before_to = if is_date_only(to) {
+            date.map(|date| date <= to.as_str()).unwrap_or(false)
+        } else {
+            ts <= to.as_str()
+        };
+        if !before_to {
             return false;
         }
     }

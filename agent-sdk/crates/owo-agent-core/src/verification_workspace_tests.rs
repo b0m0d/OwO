@@ -229,3 +229,81 @@ fn behavioral_commands_still_require_host_receipts() {
     );
     assert!(batch.files.is_empty());
 }
+
+#[test]
+fn validator_argument_validation_uses_the_registered_json_schema() {
+    assert!(!workspace_validator_arguments_supported(
+        "workspace-file-contains-v1",
+        &json!({"text":""}),
+    ));
+    assert!(!workspace_validator_arguments_supported(
+        "workspace-file-contains-v1",
+        &json!({"text":7}),
+    ));
+    assert!(!workspace_validator_arguments_supported(
+        "workspace-json-field-equals-v1",
+        &json!({"field":"status.current","expected":"ready"}),
+    ));
+    assert!(!workspace_validator_arguments_supported(
+        "workspace-json-field-equals-v1",
+        &json!({"field":"x".repeat(129),"expected":"ready"}),
+    ));
+    assert!(!workspace_validator_arguments_supported(
+        "workspace-file-exists-v1",
+        &json!({"unexpected":true}),
+    ));
+}
+
+#[test]
+fn validator_argument_errors_preserve_the_registered_contract_reason() {
+    let schema_error =
+        validate_workspace_validator_arguments("workspace-file-contains-v1", &json!({"text":7}))
+            .unwrap_err();
+    assert!(schema_error.contains("workspace-file-contains-v1"));
+    assert!(schema_error.contains("type mismatch"));
+
+    let command_error = validate_workspace_validator_arguments(
+        "workspace-command-success-v1",
+        &json!({"command":"echo passed"}),
+    )
+    .unwrap_err();
+    assert!(command_error.contains("host behavior-command registry"));
+}
+
+#[test]
+fn validator_argument_contracts_match_host_acceptance() {
+    for contract in workspace_validator_contracts() {
+        let (valid, invalid) = match contract.arguments {
+            WorkspaceValidatorArgumentKind::Empty => (json!({}), json!({"unexpected":true})),
+            WorkspaceValidatorArgumentKind::Text => {
+                (json!({"text":"ready"}), json!({"value":"ready"}))
+            }
+            WorkspaceValidatorArgumentKind::JsonFieldEquals => (
+                json!({"field":"status","expected":"ready"}),
+                json!({"field":"status","expected":"ready","extra":true}),
+            ),
+            WorkspaceValidatorArgumentKind::RegisteredCommand => (
+                json!({"command":"cargo test"}),
+                json!({"command":"echo passed"}),
+            ),
+        };
+        assert!(
+            workspace_validator_arguments_supported(contract.validator_id, &valid),
+            "{} accepts its documented arguments",
+            contract.validator_id
+        );
+        assert!(
+            !workspace_validator_arguments_supported(contract.validator_id, &invalid),
+            "{} rejects mismatched or extra arguments",
+            contract.validator_id
+        );
+        let schema = contract.arguments_schema();
+        assert_eq!(schema["additionalProperties"], false);
+        let schema_fields = schema["properties"].as_object().unwrap();
+        let required_count = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        assert_eq!(schema_fields.len(), required_count);
+    }
+}

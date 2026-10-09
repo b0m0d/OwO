@@ -43,6 +43,13 @@ const catalog = name => ({
   capabilities: [{ user_name: name, maturity: "stable", summary: "ok" }],
 });
 
+test("unknown maturity labels are escaped before rendering into capability badges", () => {
+  const { panel } = harness();
+  const badge = panel._test.maturityBadge('<img src=x onerror=alert(1)>');
+  assert.match(badge, /&lt;img/);
+  assert.doesNotMatch(badge, /<img/);
+});
+
 test("latest capability refresh wins when responses arrive out of order", async () => {
   const { panel, root } = harness();
   const view = root();

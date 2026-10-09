@@ -14,7 +14,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function harness(request) {
+function harness(request, desktopBridge = false) {
   let nextTimer = 0;
   const timers = new Map();
   const banner = { hidden: true, classList: {
@@ -24,8 +24,10 @@ function harness(request) {
   const text = { textContent: "" };
   const retry = { addEventListener(_name, fn) { this.click = fn; } };
   let now = 1000;
+  const window = { OwoApi: { request } };
+  if (desktopBridge) window.__TAURI__ = { core: { invoke() {} } };
   const context = {
-    window: { OwoApi: { request } },
+    window,
     $: (id) => id === "serviceBannerText" ? text : id === "serviceBanner" ? banner : id === "serviceBannerRetry" ? retry : null,
     uiHidden: () => false,
     markConnectionReady: () => watch.markOnline(),
@@ -45,7 +47,7 @@ function harness(request) {
       assert.equal(first.done, false);
       const [id, timer] = first.value;
       timers.delete(id);
-      timer.fn();
+      await timer.fn();
       await new Promise((resolve) => setImmediate(resolve));
     },
   };
@@ -62,6 +64,28 @@ test("startup and manual recovery share one in-flight health probe", async () =>
   assert.deepEqual(await Promise.all([first, second]), [false, false]);
   assert.equal(probes, 1);
   assert.deepEqual([...h.timers.values()].map((timer) => timer.delay), [100]);
+});
+
+test("offline browser-preview banner explains the Electron session requirement", async () => {
+  const h = harness(() => Promise.reject(new Error("Failed to fetch")));
+  await h.watch.start();
+  h.advance(10001);
+  await h.fireNext();
+  assert.match(h.text.textContent, /浏览器预览未连接本地核心/);
+  assert.match(h.text.textContent, /Electron 工作台/);
+  assert.match(h.text.textContent, /立即重试/);
+  assert.doesNotMatch(h.text.textContent, /第 \d+ 次重试/);
+});
+
+test("offline desktop banner keeps the service retry guidance", async () => {
+  const h = harness(() => Promise.reject(new Error("Failed to fetch")), true);
+  await h.watch.start();
+  h.advance(10001);
+  await h.fireNext();
+  assert.match(h.text.textContent, /本地核心未连接，正在后台低频重试/);
+  assert.match(h.text.textContent, /立即重试/);
+  assert.doesNotMatch(h.text.textContent, /第 \d+ 次重试/);
+  assert.doesNotMatch(h.text.textContent, /浏览器预览/);
 });
 
 test("an older failed probe cannot undo a later successful API connection", async () => {

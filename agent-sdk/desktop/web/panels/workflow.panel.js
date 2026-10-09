@@ -12,12 +12,22 @@
   var flowRequestGeneration = 0;
   var runsRequestGeneration = 0;
   var auditRequestGeneration = 0;
+  var validationRequestGeneration = 0;
+  var validationPending = false;
+  var workflowStartPending = new Set();
+  var workflowRunActionPending = Object.create(null);
+  var workflowRunSnapshots = Object.create(null);
 
   function stopWorkflowRuntime() {
     workflowGeneration += 1;
     flowRequestGeneration += 1;
     runsRequestGeneration += 1;
     auditRequestGeneration += 1;
+    validationRequestGeneration += 1;
+    validationPending = false;
+    workflowStartPending = new Set();
+    workflowRunActionPending = Object.create(null);
+    workflowRunSnapshots = Object.create(null);
     workflowPollTimers.forEach(function (timer) { clearTimeout(timer); });
     workflowPollTimers.clear();
     if (window.OwoWorkflowEventSource) {
@@ -134,8 +144,9 @@
       '<div class="owo-workflow-section">' +
       '<h4>校验（内联 DSL）</h4>' +
       '<textarea id="owo-workflow-validate-dsl" class="owo-workflow-input" rows="6" placeholder="粘贴 .owflow JSON 定义…"></textarea>' +
-      '<button id="owo-workflow-validate-btn" class="owo-workflow-btn">校验</button>' +
-      '<span id="owo-workflow-validate-result"></span>' +
+      '<button id="owo-workflow-validate-btn" class="owo-workflow-btn" data-core-action>校验</button>' +
+      '<span id="owo-workflow-validate-result" role="status" aria-live="polite"></span>' +
+      '<p class="sub" data-core-action-hint>JSON 语法会在本地检查；流程结构校验需要连接并授权本地核心。</p>' +
       '</div>' +
       '<div class="owo-workflow-section">' +
       '<h4>Runs</h4>' +
@@ -171,7 +182,7 @@
           '<span class="owo-workflow-name">' + esc(f.name) + '</span>' +
           '<span class="sub"> — ' + esc(f.path) + '</span><br/>' +
           '<button class="owo-workflow-btn owo-workflow-load" data-name="' + esc(f.name) + '">加载</button>' +
-          '<button class="owo-workflow-btn owo-workflow-run" data-name="' + esc(f.name) + '">运行</button>' +
+          '<button class="owo-workflow-btn owo-workflow-run" data-core-action data-name="' + esc(f.name) + '">运行</button>' +
           '</div>'
         );
       })
@@ -290,10 +301,10 @@
           '<input id="owo-workflow-ctx" class="owo-workflow-input" placeholder=\'{"key": "value"}\' />' +
           '<label>执行后端：</label>' +
           '<select id="owo-workflow-backend" class="owo-workflow-input">' +
-          '<option value="mock" selected>mock（沙箱，默认）</option>' +
+          '<option value="mock" selected title="直接以 mock 沙箱运行，不执行真实桌面动作">运行（沙箱）/ mock（默认）</option>' +
           '<option value="real">real（真实后端，桌面动作需门禁）</option>' +
           "</select>" +
-          '<button id="owo-workflow-run-this" class="primary">运行</button>';
+          '<button id="owo-workflow-run-this" class="primary" data-core-action>运行</button>';
         document.getElementById("owo-workflow-run-this").addEventListener("click", function () {
           runFlow(name, document.getElementById("owo-workflow-ctx").value);
         });
@@ -305,23 +316,56 @@
       });
   }
   function runFlow(name, ctxText) {
+    var key = String(name || "");
+    if (workflowStartPending.has(key)) {
+      toast("该工作流正在启动，已避免重复提交", "info");
+      return Promise.resolve(null);
+    }
     var ctx = {};
     if (ctxText && ctxText.trim()) {
-      try { ctx = JSON.parse(ctxText); } catch (e) { toast("ctx 不是合法 JSON：" + e.message, "error"); return; }
+      try { ctx = JSON.parse(ctxText); } catch (e) { toast("ctx 不是合法 JSON：" + e.message, "error"); return Promise.resolve(null); }
+      if (!ctx || typeof ctx !== "object" || Array.isArray(ctx)) {
+        toast("ctx 必须是 JSON 对象", "error");
+        return Promise.resolve(null);
+      }
     }
     var backendEl = document.getElementById("owo-workflow-backend");
     var backend = (backendEl && backendEl.value) || "mock";
-    post("/workflow/" + encodeURIComponent(name) + "/run", { ctx: ctx, backend: backend })
+    var owner = workflowGeneration;
+    workflowStartPending.add(key);
+    var runButton = document.getElementById("owo-workflow-run-this");
+    if (runButton) {
+      runButton.disabled = true;
+      runButton.setAttribute("aria-busy", "true");
+      runButton.textContent = "正在启动…";
+    }
+    return post("/workflow/" + encodeURIComponent(key) + "/run", { ctx: ctx, backend: backend })
       .then(function (data) {
-        var runId = data.run_id;
+        if (owner !== workflowGeneration) return null;
+        var runId = data && data.run_id;
+        if (!runId) throw new Error("工作流服务未返回 run_id");
         var result = document.getElementById("owo-workflow-runner");
-        result.innerHTML += '<div class="sub">已启动 run：' + esc(runId) + "（backend=" + esc(backend) + "）</div>";
+        if (result) {
+          result.innerHTML += '<div class="sub">已启动 run：' + esc(runId) + "（backend=" + esc(backend) + "）</div>";
+        }
         connectEvents(runId);
-        pollRun(runId, 0);
-        refreshRuns(name);
+        pollRun(runId, 0, owner);
+        refreshRuns(key);
+        return data;
       })
       .catch(function (e) {
-        toast(friendlyError(e), "error");
+        if (owner === workflowGeneration) toast(friendlyError(e), "error");
+        return null;
+      })
+      .finally(function () {
+        workflowStartPending.delete(key);
+        if (owner !== workflowGeneration) return;
+        var currentButton = document.getElementById("owo-workflow-run-this");
+        if (currentButton) {
+          currentButton.disabled = false;
+          currentButton.removeAttribute("aria-busy");
+          currentButton.textContent = "运行";
+        }
       });
   }
 
@@ -375,6 +419,7 @@
     return get("/workflow/run/" + encodeURIComponent(runId))
       .then(function (snap) {
         if (owner !== workflowGeneration) return;
+        if (snap && snap.run_id) workflowRunSnapshots[snap.run_id] = snap;
         renderSnapshot(snap);
         if (snap.state === "running" || snap.state === "waiting_approval") {
           schedulePoll(runId, 1000, owner, 0);
@@ -400,6 +445,27 @@
       });
   }
 
+  function setRunActionUi(runId, action) {
+    ["owo-workflow-approve", "owo-workflow-reject", "owo-workflow-abort"].forEach(function (id) {
+      var button = document.getElementById(id);
+      if (!button) return;
+      var buttonRunId = button.getAttribute
+        ? button.getAttribute("data-run-id")
+        : (button.attributes && button.attributes["data-run-id"]);
+      if (buttonRunId && buttonRunId !== String(runId)) return;
+      button.disabled = Boolean(action);
+      if (action) button.setAttribute("aria-busy", "true");
+      else button.removeAttribute("aria-busy");
+      if (id === "owo-workflow-abort") {
+        button.textContent = action === "abort" ? "正在中止…" : "abort";
+      } else if (id === "owo-workflow-approve") {
+        button.textContent = action === "approve" ? "正在提交…" : "批准";
+      } else {
+        button.textContent = action === "reject" ? "正在提交…" : "拒绝";
+      }
+    });
+  }
+
   function renderApprovalCard(snap) {
     var el = document.getElementById("owo-workflow-approval");
     if (!el) { return; }
@@ -408,13 +474,14 @@
       el.innerHTML = '<span class="sub">等待审批的请求会显示在这里。</span>';
       return;
     }
+    var busy = Boolean(workflowRunActionPending[snap.run_id]);
     el.innerHTML =
       '<div class="owo-workflow-card">' +
       '<h4>等待审批：' + esc(snap.run_id) + "</h4>" +
       '<p style="margin:4px 0;white-space:pre-wrap">' + esc(pending.prompt || "") + "</p>" +
       '<div class="sub">' + esc(pending.created_at || "") + "</div>" +
-      '<button id="owo-workflow-approve" class="primary">批准</button>' +
-      '<button id="owo-workflow-reject" class="owo-workflow-btn">拒绝</button>' +
+      '<button id="owo-workflow-approve" data-core-action data-run-id="' + esc(snap.run_id) + '" class="primary"' + (busy ? ' disabled aria-busy="true"' : "") + ">" + (busy ? "操作处理中…" : "批准") + "</button>" +
+      '<button id="owo-workflow-reject" data-core-action data-run-id="' + esc(snap.run_id) + '" class="owo-workflow-btn"' + (busy ? ' disabled aria-busy="true"' : "") + ">拒绝</button>" +
       "</div>";
     document.getElementById("owo-workflow-approve").addEventListener("click", function () {
       decideApproval(snap.run_id, "approve");
@@ -424,18 +491,51 @@
     });
   }
 
-  function decideApproval(runId, decision) {
-    post("/workflow/run/" + encodeURIComponent(runId) + "/approval", { decision: decision })
-      .then(function () {
-        pollRun(runId, 0);
+  function startRunAction(runId, action, body) {
+    var key = String(runId || "");
+    if (!key || workflowRunActionPending[key]) return Promise.resolve(null);
+    if (action !== "approve" && action !== "reject" && action !== "abort") return Promise.resolve(null);
+    var snapshot = workflowRunSnapshots[key];
+    var canAbort = snapshot && (snapshot.state === "running" || snapshot.state === "waiting_approval");
+    var hasPendingApproval = snapshot && snapshot.state === "waiting_approval" &&
+      snapshot.pending_approval && snapshot.pending_approval.id;
+    if (action === "abort" && !canAbort) return Promise.resolve(null);
+    if ((action === "approve" || action === "reject") && !hasPendingApproval) return Promise.resolve(null);
+    var owner = workflowGeneration;
+    workflowRunActionPending[key] = action;
+    setRunActionUi(key, action);
+    var path = action === "abort"
+      ? "/workflow/run/" + encodeURIComponent(key) + "/abort"
+      : "/workflow/run/" + encodeURIComponent(key) + "/approval";
+    return post(path, body || {})
+      .then(function (result) {
+        if (owner !== workflowGeneration) return null;
+        return pollRun(key, 0, owner).then(function () { return result; });
       })
-      .catch(function (e) { toast(friendlyError(e), "error"); });
+      .catch(function (error) {
+        if (owner === workflowGeneration) toast(friendlyError(error), "error");
+        return null;
+      })
+      .finally(function () {
+        if (workflowRunActionPending[key] === action) delete workflowRunActionPending[key];
+        if (owner !== workflowGeneration) return;
+        var current = workflowRunSnapshots[key];
+        if (current) renderSnapshot(current);
+        else setRunActionUi(key, null);
+      });
+  }
+
+  function decideApproval(runId, decision) {
+    return startRunAction(runId, decision, { decision: decision });
   }
 
   function renderSnapshot(snap) {
+    if (!snap || !snap.run_id) return;
+    workflowRunSnapshots[snap.run_id] = snap;
     var el = document.getElementById("owo-workflow-runner");
     if (!el) { return; }
     renderApprovalCard(snap);
+    setRunActionUi(snap.run_id, workflowRunActionPending[snap.run_id] || null);
     var badge = "owo-workflow-badge-run";
     if (snap.state === "succeeded") { badge = "owo-workflow-badge-ok"; }
     if (snap.state === "failed" || snap.state === "aborted") { badge = "owo-workflow-badge-bad"; }
@@ -450,16 +550,17 @@
         );
       })
       .join("") || '<div class="sub">（无步骤）</div>';
+    var active = snap.state === "running" || snap.state === "waiting_approval";
+    var pendingAction = workflowRunActionPending[snap.run_id];
+    var abortLabel = pendingAction === "abort" ? "正在中止…" : (active ? "abort" : "运行已结束");
     el.innerHTML =
       "<h4>run " + esc(snap.run_id) + ' <span class="owo-workflow-badge ' + badge + '">' + esc(snap.state) + "</span></h4>" +
       (snap.rollback_to ? '<div class="owo-workflow-step owo-workflow-step-fail">已回滚到检查点：' + esc(snap.rollback_to) + "</div>" : "") +
       steps +
-      '<div><button id="owo-workflow-abort" class="owo-workflow-btn">abort</button>' +
+      '<div><button id="owo-workflow-abort" data-core-action data-run-id="' + esc(snap.run_id) + '" class="owo-workflow-btn"' + ((!active || pendingAction) ? ' disabled' : "") + (pendingAction === "abort" ? ' aria-busy="true"' : "") + ">" + abortLabel + "</button>" +
       '<button id="owo-workflow-audit-btn" class="owo-workflow-btn">审计尾部</button></div>';
     document.getElementById("owo-workflow-abort").addEventListener("click", function () {
-      post("/workflow/run/" + encodeURIComponent(snap.run_id) + "/abort", {})
-        .then(function () { pollRun(snap.run_id, 0); })
-        .catch(function (e) { toast(friendlyError(e), "error"); });
+      startRunAction(snap.run_id, "abort", {});
     });
     document.getElementById("owo-workflow-audit-btn").addEventListener("click", function () {
       loadAudit(snap.run_id);
@@ -520,24 +621,73 @@
         if (currentList) currentList.innerHTML = '<span class="owo-workflow-step owo-workflow-step-fail">' + esc(friendlyError(e)) + "</span>";
       });
   }
-  function bindValidate() {
-    var btn = document.getElementById("owo-workflow-validate-btn");
-    if (!btn) { return; }
+  function bindValidate(root) {
+    var scope = root || document;
+    function find(id) {
+      var current = document.getElementById(id);
+      return current || (scope.querySelector && scope.querySelector("#" + id));
+    }
+    var btn = find("owo-workflow-validate-btn");
+    var input = find("owo-workflow-validate-dsl");
+    var result = find("owo-workflow-validate-result");
+    if (!btn || !input || !result) { return; }
+    function parseAndRenderLocalSyntax() {
+      var dsl = String(input.value || "").trim();
+      if (!dsl) {
+        result.innerHTML = '<span class="sub">粘贴 .owflow JSON 后会在本地检查语法。</span>';
+        return { valid: false };
+      }
+      try {
+        return {
+          valid: true,
+          value: JSON.parse(dsl),
+        };
+      } catch (e) {
+        result.innerHTML = '<span class="owo-workflow-step-fail">JSON 解析失败：' + esc(e.message) + "</span>";
+        return { valid: false };
+      }
+    }
+    input.addEventListener("input", function () {
+      var parsed = parseAndRenderLocalSyntax();
+      if (parsed.valid) {
+        result.innerHTML = '<span class="owo-workflow-badge owo-workflow-badge-ok">JSON 语法有效；连接核心后可继续校验流程结构</span>';
+      }
+    });
+    result.setAttribute("role", "status");
+    result.setAttribute("aria-live", "polite");
     btn.addEventListener("click", function () {
-      var dsl = document.getElementById("owo-workflow-validate-dsl").value;
-      var result = document.getElementById("owo-workflow-validate-result");
-      var parsed;
-      try { parsed = JSON.parse(dsl); } catch (e) { result.innerHTML = '<span class="owo-workflow-step-fail">JSON 解析失败：' + esc(e.message) + "</span>"; return; }
-      post("/workflow/validate", parsed)
+      if (validationPending) return Promise.resolve(null);
+      var syntax = parseAndRenderLocalSyntax();
+      if (!syntax.valid) return Promise.resolve(null);
+      var parsed = syntax.value;
+      var owner = workflowGeneration;
+      var request = ++validationRequestGeneration;
+      validationPending = true;
+      btn.disabled = true;
+      btn.setAttribute("aria-busy", "true");
+      return post("/workflow/validate", parsed)
         .then(function (data) {
+          if (request !== validationRequestGeneration || owner !== workflowGeneration) return null;
           if (data.valid) {
             result.innerHTML = '<span class="owo-workflow-badge owo-workflow-badge-ok">valid</span>';
           } else {
             result.innerHTML = '<span class="owo-workflow-badge owo-workflow-badge-bad">invalid</span>' +
               (data.issues || []).map(function (i) { return "<div class='owo-workflow-step owo-workflow-step-fail'>" + esc(i) + "</div>"; }).join("");
           }
+          return data;
         })
-        .catch(function (e) { result.innerHTML = '<span class="owo-workflow-step-fail">' + esc(friendlyError(e)) + "</span>"; });
+        .catch(function (e) {
+          if (request === validationRequestGeneration && owner === workflowGeneration) {
+            result.innerHTML = '<span class="owo-workflow-step-fail">' + esc(friendlyError(e)) + "</span>";
+          }
+          return null;
+        })
+        .finally(function () {
+          if (request !== validationRequestGeneration || owner !== workflowGeneration) return;
+          validationPending = false;
+          btn.disabled = false;
+          btn.removeAttribute("aria-busy");
+        });
     });
   }
 
@@ -557,7 +707,7 @@
       this.helpers = helpers || {};
       root.innerHTML = style() + this.nav();
       this.refresh();
-      bindValidate();
+      bindValidate(root);
       bindRefresh();
     },
     dispose: stopWorkflowRuntime,
@@ -573,6 +723,15 @@
           if (el) { el.innerHTML = '<span class="owo-workflow-step owo-workflow-step-fail">' + esc(friendlyError(e)) + "</span>"; }
         });
     },
-    _test: { pollRun: pollRun, loadFlow: loadFlow, loadAudit: loadAudit, stopWorkflowRuntime: stopWorkflowRuntime },
+    _test: {
+      pollRun: pollRun,
+      loadFlow: loadFlow,
+      loadAudit: loadAudit,
+      runFlow: runFlow,
+      renderSnapshot: renderSnapshot,
+      decideApproval: decideApproval,
+      startRunAction: startRunAction,
+      stopWorkflowRuntime: stopWorkflowRuntime,
+    },
   };
 })();

@@ -498,7 +498,7 @@
           : '<span class="owo-pl-badge">候选</span>';
         var btn = t.installed
           ? '<button class="owo-ws-mini" data-pl-select="' + esc(t.id) + '">选用</button>'
-          : '<button class="owo-ws-mini primary" data-pl-install="' + esc(t.id) + '"' + (busy ? " disabled" : "") + ">安装</button>";
+          : '<button class="owo-ws-mini primary" data-core-action data-core-busy="' + (busy ? "true" : "false") + '" data-pl-install="' + esc(t.id) + '"' + (busy ? " disabled" : "") + ">安装</button>";
         var roles = t.roles.map(function (r) {
           return r.role;
         }).join("→");
@@ -674,6 +674,10 @@
         var btn = box.querySelector('[data-pl-install="' + id.replace(/"/g, '\\"') + '"]');
         if (btn) {
           btn.disabled = true;
+          if (btn.setAttribute) {
+            btn.setAttribute("data-core-busy", "true");
+            btn.setAttribute("aria-busy", "true");
+          }
           btn.textContent = "安装中…";
         }
       }
@@ -724,6 +728,10 @@
       var btn = el("#pl-create");
       if (btn) {
         btn.disabled = true;
+        if (btn.setAttribute) {
+          btn.setAttribute("data-core-busy", "true");
+          btn.setAttribute("aria-busy", "true");
+        }
         btn.textContent = "创建中…";
       }
       var body = buildCreateBody(state);
@@ -740,6 +748,9 @@
               go.onclick = function () {
                 gotoTeam(String(state.result.team_id));
               };
+            // 创建动作已由当前挂载页发起且成功：直接进入执行详情；结果卡仍保留
+            // 显式入口，方便用户稍后返回后再次打开。
+            if (state.result.team_id) gotoTeam(String(state.result.team_id));
           }
         }).catch(function (e) {
           state.error = friendly(e);
@@ -752,8 +763,16 @@
           // 创建锁属于共享面板状态；释放时可解锁当前挂载的按钮，但不能把旧请求结果写入新页面。
           var currentButton = el("#pl-create");
           if (currentButton) {
-            currentButton.disabled = false;
+            if (currentButton.removeAttribute) {
+              currentButton.removeAttribute("data-core-busy");
+              currentButton.removeAttribute("aria-busy");
+            }
             currentButton.textContent = "创建团队并开始执行";
+            if (win.OwoCoreActionAvailability) {
+              win.OwoCoreActionAvailability.update(win.OwoCoreActionAvailability.isAvailable());
+            } else {
+              currentButton.disabled = false;
+            }
           }
         });
     }
@@ -827,7 +846,7 @@
         '<div class="owo-pl-step"><label class="owo-pl-label">⑥ 预览（角色 / 预算 / 权限）</label>' +
         '<div id="pl-preview">' + previewHtml(buildPreview(state, state.catalog), state) + "</div></div>" +
         '<div class="owo-pl-step"><label class="owo-pl-label">⑦ 创建</label>' +
-        '<div class="owo-ws-inline"><button id="pl-create" class="primary"' + (state.creating ? " disabled" : "") + ">创建团队并开始执行</button></div>" +
+        '<div class="owo-ws-inline"><button id="pl-create" data-core-action data-core-busy="' + (state.creating ? "true" : "false") + '" class="primary"' + (state.creating ? ' disabled aria-busy="true"' : "") + ">创建团队并开始执行</button></div>" +
         '<div id="pl-errors" aria-live="polite"></div>' +
         '<div id="pl-result">' + resultHtml(state.result) + "</div></div>" +
         "</div>"

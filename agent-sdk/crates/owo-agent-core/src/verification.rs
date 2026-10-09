@@ -9,7 +9,9 @@ mod workspace;
 pub(crate) use workspace::WorkspaceValidationBatch;
 pub use workspace::{
     execute_workspace_requirement, is_registered_workspace_validator,
-    workspace_validator_arguments_supported,
+    workspace_validator_arguments_supported, workspace_validator_contracts,
+    WorkspaceValidatorArgumentKind, WorkspaceValidatorContract, MAX_WORKSPACE_VALIDATION_PATHS,
+    MIN_WORKSPACE_VALIDATION_PATHS,
 };
 
 /// Domain-separated digest used in receipt subject_sha256 when a changed workspace path is absent.
@@ -17,15 +19,6 @@ pub(crate) fn workspace_path_absence_sha256() -> String {
     crate::CasStore::hash_of(b"owo-agent:workspace-path-absence:v1")
 }
 
-/// Recheck every workspace file hash carried by a host validation receipt.
-/// A receipt with no workspace subjects is independent of the workspace snapshot.
-pub(crate) fn workspace_subjects_match_current(
-    workspace_root: &Path,
-    subjects: &std::collections::HashMap<String, String>,
-) -> bool {
-    crate::workspace_snapshot::WorkspaceSnapshotBatch::new(Some(workspace_root))
-        .subjects_match(subjects)
-}
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -127,7 +120,7 @@ pub fn execute_requirement(
                         Some(
                             "artifact-output-contains-v1 要求且仅接受字符串参数 value".to_string(),
                         ),
-                    )
+                    );
                 }
             }
         }
@@ -138,7 +131,7 @@ pub fn execute_requirement(
                     return (
                         ValidationVerdictV1::Unsupported,
                         Some("artifact-output-equals-v1 要求且仅接受字符串参数 value".to_string()),
-                    )
+                    );
                 }
             }
         }
@@ -148,7 +141,7 @@ pub fn execute_requirement(
                 Some(format!(
                     "validator「{unknown}」未注册，当前为 unsupported/unverified"
                 )),
-            )
+            );
         }
     };
     match verify_output(&spec, content) {
@@ -242,15 +235,22 @@ pub fn is_registered_behavior_command(command: &str) -> bool {
     }) {
         return false;
     }
-    match tokens.as_slice() {
-        ["cargo", "test", ..] => true,
-        ["npm", "test"] | ["npm", "run", "test", ..] => true,
-        ["pnpm", "test", ..] | ["yarn", "test", ..] | ["bun", "test", ..] => true,
-        ["pytest", ..] | ["python", "-m", "pytest", ..] => true,
-        ["dotnet", "test", ..] | ["go", "test", ..] | ["mvn", "test", ..] => true,
-        ["gradle", "test", ..] | ["ctest", ..] => true,
-        _ => false,
-    }
+    matches!(
+        tokens.as_slice(),
+        ["cargo", "test", ..]
+            | ["npm", "test"]
+            | ["npm", "run", "test", ..]
+            | ["pnpm", "test", ..]
+            | ["yarn", "test", ..]
+            | ["bun", "test", ..]
+            | ["pytest", ..]
+            | ["python", "-m", "pytest", ..]
+            | ["dotnet", "test", ..]
+            | ["go", "test", ..]
+            | ["mvn", "test", ..]
+            | ["gradle", "test", ..]
+            | ["ctest", ..]
+    )
 }
 
 fn exact_string_argument<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
@@ -472,24 +472,29 @@ mod tests {
             "workspace-path:src/lib.rs".to_string(),
             crate::CasStore::hash_of(b"pub fn ready() {}\n"),
         )]);
-        assert!(workspace_subjects_match_current(root.path(), &subjects));
+        let matches = |root: &std::path::Path,
+                       subjects: &std::collections::HashMap<String, String>| {
+            crate::workspace_snapshot::WorkspaceSnapshotBatch::new(Some(root))
+                .subjects_match(subjects)
+        };
+        assert!(matches(root.path(), &subjects));
 
         std::fs::write(&path, "pub fn broken() {}\n").unwrap();
-        assert!(!workspace_subjects_match_current(root.path(), &subjects));
+        assert!(!matches(root.path(), &subjects));
 
         std::fs::remove_file(&path).unwrap();
         let absent = std::collections::HashMap::from([(
             "workspace-path:src/lib.rs".to_string(),
             workspace_path_absence_sha256(),
         )]);
-        assert!(workspace_subjects_match_current(root.path(), &absent));
+        assert!(matches(root.path(), &absent));
         std::fs::write(&path, "recreated").unwrap();
-        assert!(!workspace_subjects_match_current(root.path(), &absent));
+        assert!(!matches(root.path(), &absent));
 
         let escaped = std::collections::HashMap::from([(
             "workspace-path:../outside".to_string(),
             "any-hash".to_string(),
         )]);
-        assert!(!workspace_subjects_match_current(root.path(), &escaped));
+        assert!(!matches(root.path(), &escaped));
     }
 }

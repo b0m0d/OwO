@@ -44,8 +44,7 @@ use crate::audit::AuditLog;
 use crate::cas_store::CasStore;
 use crate::fleet::{new_correlation_id, AgentBus, MessageKind, OverflowPolicy};
 use crate::goal::{
-    Goal, GoalRunState, GoalRunner, GoalStatus, RunnerConfig, StepProgressUpdate, Worker,
-    WorkerRegistry,
+    Goal, GoalRunState, GoalRunner, GoalStatus, RunnerConfig, Worker, WorkerRegistry,
 };
 use crate::plan::{verify_output, Plan, StepSpec, StepStatus};
 use crate::project_space_store::{ProjectSpaceStoreBackend, ProjectSpaceStoreError};

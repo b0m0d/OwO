@@ -131,7 +131,7 @@ test("§12-13 约束表单：自动化与 MCP 按类型显示有效字段", () =
   assert.match(app, /mcpTransport.*addEventListener\("change", syncMcpFields\)/);
   assert.match(app, /syncMcpFields\(\);/);
   assert.match(index, /id="providerBaseUrl"/);
-  assert.match(index, /id="providerApiKey" type="password"/);
+  assert.match(index, /id="providerApiKey"(?: data-core-action)? type="password"/);
   assert.match(index, /id="providerSaveBtn"/);
 });
 // §5.1.5 模块边界守卫：同一函数不得同时在 app.js 和 app-domain.js 定义，
@@ -160,6 +160,18 @@ test("工具和设置导航：按功能组进入工具页、按分类切换设�
   assert.match(css, /\.settings-layout/);
   assert.ok(!index.includes('id="toolsPanel"'), "工具页已由工作台视图状态机承载");
 });
+test("工具分组切换将专属滚动容器复位到分组起点", () => {
+  const app = read("../app.js");
+  const navLoop = 'for (const button of document.querySelectorAll("[data-jump]")) {';
+  const clickStart = app.indexOf('button.addEventListener("click", () => {', app.indexOf("function syncToolsJump"));
+  const handlerStart = app.lastIndexOf(navLoop, clickStart);
+  const handlerEnd = app.indexOf("function refreshPluginSkillOverview()", handlerStart);
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, "工具分组点击处理器必须存在");
+  const handler = app.slice(handlerStart, handlerEnd);
+  assert.match(handler, /sidebar\.scrollTop\s*=\s*0/, "切换分组必须重置 #sidebar 自身的滚动位置");
+  assert.doesNotMatch(handler, /sidebar\.scrollIntoView/, "外层滚动不能替代工具面板滚动容器");
+});
+
 test("R10 侧栏：复杂表单受工具/设置视图状态门控，不常驻会话导航", () => {
   const index = read("../index.html");
   const app = read("../app.js");
@@ -206,8 +218,8 @@ test("R13 模型接入：端点、密钥和模型选择从活动设置表单保�
   const index = read("../index.html");
   const app = read("../app.js");
   assert.match(index, /id="settingsModel"/);
-  assert.match(index, /id="providerBaseUrl" type="text"/);
-  assert.match(index, /id="providerApiKey" type="password"/);
+  assert.match(index, /id="providerBaseUrl"(?: data-core-action)? type="text"/);
+  assert.match(index, /id="providerApiKey"(?: data-core-action)? type="password"/);
   assert.match(index, /id="providerPreset"/);
   assert.match(index, /id="customModelAddBtn"/);
   assert.match(app, /async function saveProvider\(\)/);
@@ -217,7 +229,9 @@ test("R13 模型接入：端点、密钥和模型选择从活动设置表单保�
   assert.match(app, /async function saveSettings\(/);
   assert.ok(!index.includes('id="settingsContextWindow"'), "旧设置模型面板字段不属于当前活动页面");
   assert.match(index, /id="modelOutputModel"/);
-  assert.match(index, /id="modelOutputLimit" type="number" min="1" max="32000"/);
+  assert.match(index, /id="modelOutputLimit"(?: data-core-action)? type="number" min="1" max="1000000"/);
+  assert.ok(index.indexOf('<script src="core/model-output-budget.js"></script>') < index.indexOf('<script src="app.js"></script>'));
+  assert.match(app, /window\.OwoModelOutputBudget\.MAX/);
   assert.match(index, /id="modelOutputSaveBtn"/);
   assert.match(index, /id="modelOutputResetBtn"/);
   assert.match(app, /function refreshModelOutputSettings\(\)/);

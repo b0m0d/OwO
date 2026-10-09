@@ -42,7 +42,7 @@
         experimental: ["实验", "owo-cap-exp"],
       };
       var hit = map[String(m || "")] || [String(m || "—"), "owo-cap-exp"];
-      return '<span class="owo-cap-badge ' + hit[1] + '">' + hit[0] + "</span>";
+      return '<span class="owo-cap-badge ' + hit[1] + '">' + esc(hit[0]) + "</span>";
     }
 
     /// 影响范围文案映射（服务端 EffectClass 标签 → 用户语义）。

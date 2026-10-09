@@ -126,13 +126,21 @@ impl OpenAiCompatibleConfig {
 /// 模型 HTTP 客户端统一构造（取优合并自远端 engine；A1-4）：
 /// 代理按 OWO_HTTP_PROXY/HTTPS_PROXY/HTTP_PROXY 优先，`NO_PROXY` 排除列表
 /// （127.0.0.1/localhost 等本地端点必须直连）。返回 (client, has_proxy)。
+/// 构建模型 HTTP 客户端。
+///
+/// `total_timeout_secs` 只应覆盖非流式请求：reqwest 的客户端/请求级 timeout 会
+/// 限制**整个响应体**的读取时长，挂到 SSE 流上会把合法的长输出在固定秒数处腰斩
+/// （长程任务表现为 `Body TimedOut` 中断）。流式路径由逐块空闲超时守护，调用方
+/// 传 `None`。
 pub(crate) fn build_model_http_client(
     connect_timeout_secs: u64,
-    total_timeout_secs: u64,
+    total_timeout_secs: Option<u64>,
 ) -> Result<(reqwest::Client, bool), String> {
     let mut builder = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
-        .timeout(std::time::Duration::from_secs(total_timeout_secs));
+        .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs));
+    if let Some(total_timeout_secs) = total_timeout_secs {
+        builder = builder.timeout(std::time::Duration::from_secs(total_timeout_secs));
+    }
     let mut has_proxy = false;
     for name in [
         "OWO_HTTP_PROXY",

@@ -164,9 +164,9 @@ test("model output env clears inherited limits, sets 32k default and forwards pe
     OWO_MODEL_MAX_OUTPUT_TOKENS: "4096",
     OWO_MODEL_OUTPUT_TOKENS_BY_MODEL: "stale",
   };
-  applyModelOutputEnv(env, { model_output_tokens: { "glm-5.3-flash": 24000, bad: 50000 } });
+  applyModelOutputEnv(env, { model_output_tokens: { "glm-5.3-flash": 24000, "qwen3.8-max": 64000, bad: 1000001 } });
   assert.equal(env.OWO_MODEL_MAX_OUTPUT_TOKENS, "32000");
-  assert.deepEqual(JSON.parse(env.OWO_MODEL_OUTPUT_TOKENS_BY_MODEL), { "glm-5.3-flash": 24000 });
+  assert.deepEqual(JSON.parse(env.OWO_MODEL_OUTPUT_TOKENS_BY_MODEL), { "glm-5.3-flash": 24000, "qwen3.8-max": 64000 });
   applyModelOutputEnv(env, { max_output_tokens: 16000, model_output_tokens: {} });
   assert.equal(env.OWO_MODEL_MAX_OUTPUT_TOKENS, "16000");
   assert.deepEqual(JSON.parse(env.OWO_MODEL_OUTPUT_TOKENS_BY_MODEL), {});
@@ -175,19 +175,20 @@ test("model output env clears inherited limits, sets 32k default and forwards pe
 test("get_provider_status：每模型输出预算只回传合法整数，不暴露其他配置", () => {
   const status = providerStatusValue({
     provider: "bigmodel",
-    model_output_tokens: { "glm-5.3-flash": 24000, bad: 40000, "": 1200, other: "8192" },
+    model_output_tokens: { "glm-5.3-flash": 24000, "qwen3.8-max": 64000, bad: 1000001, "": 1200, other: "8192" },
   });
-  assert.deepEqual(status.modelOutputTokens, { "glm-5.3-flash": 24000, other: 8192 });
+  assert.deepEqual(status.modelOutputTokens, { "glm-5.3-flash": 24000, "qwen3.8-max": 64000, other: 8192 });
 });
 
 test("set_model_config：按模型输出上限可保存、校验并清除", () => {
   const patched = applyModelConfigPatch(
     { model: { provider: "bigmodel", max_output_tokens: 32000, model_output_tokens: { "glm-5.3-flash": 4096 } } },
-    { model_output_tokens: { " glm-5.3-flash ": 24000, "qwen3.8-max": 32000 } },
+    { model_output_tokens: { " glm-5.3-flash ": 24000, "qwen3.8-max": 64000 } },
   );
   assert.equal(patched.ok, true);
-  assert.deepEqual(patched.config.model.model_output_tokens, { "glm-5.3-flash": 24000, "qwen3.8-max": 32000 });
-  assert.equal(applyModelConfigPatch({ model: {} }, { model_output_tokens: { x: 32001 } }).ok, false);
+  assert.deepEqual(patched.config.model.model_output_tokens, { "glm-5.3-flash": 24000, "qwen3.8-max": 64000 });
+  assert.equal(applyModelConfigPatch({ model: { provider: "bigmodel" } }, { model_output_tokens: { x: 64000 } }).ok, true);
+  assert.equal(applyModelConfigPatch({ model: {} }, { model_output_tokens: { x: 1000001 } }).ok, false);
   const cleared = applyModelConfigPatch({ model: {} }, { model_output_tokens: {} });
   assert.deepEqual(cleared.config.model.model_output_tokens, {});
 });

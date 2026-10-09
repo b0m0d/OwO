@@ -72,6 +72,7 @@ function resetState() {
   T.state.detailErrors = {};
   T.state.deliverables = {};
   T.state.workspaces = {};
+  T.state.workspaceErrors = {};
   T.state.filters = { status: "", template: "", project: "", q: "" };
   T.state.rerunBusy = {};
   T.state.rerunResults = {};
@@ -510,6 +511,72 @@ test("startRerun()：成功路径（请求体含模板与工作区）+ 提交锁
   assert.equal(T.state.rerunResults["t1"].ok, true);
   assert.equal(T.state.rerunResults["t1"].new_team_id, "team-new");
   assert.equal(T.state.rerunBusy["t1"], false);
+});
+
+test("复跑会等待工作区读取，并复用确认过的工作区配置", async () => {
+  resetState();
+  T.state.teams = [team("t-ws", "Succeeded", { project_space_id: "project-ws" })];
+  T.state.details["t-ws"] = detail("t-ws", [], [{ detail: "目标 修复工作区" }]);
+  let resolveWorkspace;
+  const posts = [];
+  T.setTransport({
+    get(path) {
+      assert.equal(path, "/projects/project-ws/workspace");
+      return new Promise((resolve) => { resolveWorkspace = resolve; });
+    },
+    post(path, body) { posts.push([path, body]); return Promise.resolve({ team_id: "new-team" }); },
+  });
+
+  const rerun = T.startRerun("t-ws");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(posts.length, 0, "不得在工作区状态未确认时先行创建运行");
+  resolveWorkspace({ root: "T:/project", read_only: false, write_allowed_paths: ["src"] });
+  await rerun;
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0][0], "/teams");
+  assert.deepEqual(JSON.parse(JSON.stringify(posts[0][1].workspace)), {
+    root: "T:/project", read_only: false, write_allowed_paths: ["src"],
+  });
+  assert.equal(T.state.rerunResults["t-ws"].ok, true);
+});
+
+test("工作区读取失败时阻止无工作区复跑，并展示错误原因", async () => {
+  resetState();
+  T.state.teams = [team("t-ws-error", "Succeeded", { project_space_id: "project-ws-error" })];
+  T.state.details["t-ws-error"] = detail("t-ws-error", [], [{ detail: "目标 修复工作区" }]);
+  const posts = [];
+  const errorBox = { innerHTML: "" };
+  T.setRoot({ querySelector(selector) {
+    return selector === "#ph-errors" ? errorBox : null;
+  } });
+  T.setTransport({
+    get() { return Promise.reject(Object.assign(new Error("workspace service unavailable"), { status: 503 })); },
+    post(path, body) { posts.push([path, body]); return Promise.resolve({}); },
+  });
+
+  await T.startRerun("t-ws-error");
+  T.render();
+  assert.equal(posts.length, 0, "未知工作区状态不能静默降级为未绑定");
+  assert.match(errorBox.innerHTML, /项目 project-ws-error 工作区读取失败/);
+  assert.equal(T.state.workspaceErrors["project-ws-error"], "workspace service unavailable");
+  assert.match(T.state.rerunResults["t-ws-error"].text, /本次未创建运行/);
+  assert.match(T.state.rerunResults["t-ws-error"].text, /workspace service unavailable/);
+});
+
+test("无效工作区响应不会被当成未绑定并启动复跑", async () => {
+  resetState();
+  T.state.teams = [team("t-ws-invalid", "Succeeded", { project_space_id: "project-ws-invalid" })];
+  T.state.details["t-ws-invalid"] = detail("t-ws-invalid", [], [{ detail: "目标 修复工作区" }]);
+  const posts = [];
+  T.setTransport({
+    get() { return Promise.resolve({ read_only: true }); },
+    post(path, body) { posts.push([path, body]); return Promise.resolve({}); },
+  });
+
+  await T.startRerun("t-ws-invalid");
+  assert.equal(posts.length, 0);
+  assert.match(T.state.workspaceErrors["project-ws-invalid"], /缺少有效 root/);
+  assert.match(T.state.rerunResults["t-ws-invalid"].text, /本次未创建运行/);
 });
 
 test("startRerun()：失败兜底（friendly 文本，不抛错）", async () => {

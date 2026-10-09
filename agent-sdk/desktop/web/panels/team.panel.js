@@ -20,8 +20,8 @@
         "<h3>导入 / 评审</h3>" +
         '<textarea class="owo-team-import-b64" rows="4" spellcheck="false" placeholder="package_b64（base64 打包字节）"></textarea>' +
         '<div class="inline">' +
-        '<button class="owo-team-reviewbtn">只评审</button>' +
-        '<button class="owo-team-importbtn primary">导入（评审通过才落盘）</button>' +
+        '<button class="owo-team-reviewbtn" data-core-action>只评审</button>' +
+        '<button class="owo-team-importbtn primary" data-core-action>导入（评审通过才落盘）</button>' +
         "</div>" +
         '<div class="owo-team-findings sub"></div>' +
         "</div>" +

@@ -136,6 +136,7 @@
             <input id="workspace" placeholder="例如 D:\projects\my-app" spellcheck="false" autocomplete="off">
             <button type="button" id="workspaceBrowseBtn" title="打开系统文件夹选择器">浏览…</button>
           </div>
+          <p class="sub" id="workspacePickerHint">工作区选择由 Electron 桌面端管理。</p>
         </div>
       </div>
     </section>
@@ -171,10 +172,11 @@
             <select id="evalSuite">
               <option value="builtin">内置套件（builtin）</option>
             </select>
-            <button id="evalRunBtn" class="primary">运行评估</button>
+            <button id="evalRunBtn" class="primary" data-core-action>运行评估</button>
           </div>
+          <p class="sub" data-core-action-hint>连接并授权本地核心后可运行评估</p>
         </div>
-        <div id="evalReport" class="owo-result">尚未运行，点击「运行评估」开始</div>
+        <div id="evalReport" class="owo-result">尚未运行</div>
       </div>
     </section>
     <section class="tool-card" data-group="intelligence">
@@ -189,6 +191,7 @@
         <div class="tool-actions tool-actions-end">
           <button id="tracesRefreshBtn">刷新列表</button>
         </div>
+        <p class="sub" data-core-action-hint>连接并授权本地核心后可查看会话轨迹；服务状态恢复后点击“刷新列表”加载。</p>
         <ul id="traceList" class="list"></ul>
         <details><summary>轨迹回放</summary><div id="traceReplay" class="owo-result">点击上方轨迹查看</div></details>
       </div>
@@ -216,8 +219,9 @@
           <textarea id="subagentPrompt" rows="3" placeholder="例如：调查 crates 目录结构并汇报"></textarea>
         </div>
         <div class="tool-actions tool-actions-end">
-          <button id="subagentRunBtn" class="primary">运行子代理</button>
+          <button id="subagentRunBtn" class="primary" data-core-action>运行子代理</button>
         </div>
+        <p class="sub" data-core-action-hint>连接并授权本地核心后可运行子代理</p>
         <div id="subagentResult" class="owo-result">尚未运行</div>
       </div>
     </section>
@@ -236,8 +240,9 @@
           <textarea id="agentsEditor" rows="8" spellcheck="false" placeholder="# 项目规则&#10;&#10;- 工具调用必须经审批"></textarea>
         </div>
         <div class="tool-actions tool-actions-end">
-          <button id="agentsSaveBtn" class="primary">保存 AGENTS.md</button>
+          <button id="agentsSaveBtn" class="primary" data-core-action>保存 AGENTS.md</button>
         </div>
+        <p class="sub" data-core-action-hint>连接并授权本地核心后可保存项目规则</p>
       </div>
     </section>
 
@@ -269,12 +274,13 @@
       </div>
       <div class="tool-card-body">
         <div class="tool-actions">
-          <button id="learnStart" class="primary">开始录制</button>
-          <button id="learnPause">暂停</button>
-          <button id="learnResume">恢复</button>
-          <button id="learnStop">结束</button>
-          <button id="learnClear" class="danger">清空样本</button>
+          <button id="learnStart" class="primary" data-core-action>开始录制</button>
+          <button id="learnPause" data-core-action>暂停</button>
+          <button id="learnResume" data-core-action>恢复</button>
+          <button id="learnStop" data-core-action>结束</button>
+          <button id="learnClear" class="danger" data-core-action>清空样本</button>
         </div>
+        <p class="sub" data-core-action-hint>连接并授权本地核心后才能录制、清空样本或沉淀技能包。</p>
         <form id="sinkForm" class="tool-form-grid">
           <div class="tool-field">
             <label for="sinkName">技能名</label>
@@ -297,7 +303,7 @@
             <input id="sinkDesc" placeholder="这个技能包做什么">
           </div>
           <div class="tool-actions tool-actions-end tool-field-full">
-            <button type="submit" class="primary">沉淀为技能包</button>
+            <button type="submit" class="primary" data-core-action>沉淀为技能包</button>
           </div>
         </form>
         <ul id="packageList" class="list"></ul>
@@ -331,9 +337,10 @@
             <input id="cuActions" placeholder="click/type/scroll，逗号分隔（留空为全部）">
           </div>
           <div class="tool-actions tool-actions-end tool-field-full">
-            <button type="submit" class="primary">创建任务</button>
+            <button type="submit" class="primary" data-core-action>创建任务</button>
           </div>
         </form>
+        <p class="sub" data-core-action-hint>连接并授权本地核心后可创建任务；实际执行前仍需任务级审批。</p>
         <ul id="computerTaskList" class="list"></ul>
       </div>
     </section>
@@ -412,12 +419,13 @@
             <input id="mcpUrl" type="url" placeholder="如 http://127.0.0.1:8000/mcp" disabled>
           </div>
           <div class="tool-actions tool-actions-end tool-field-full">
-            <button type="submit" class="primary">添加并连接</button>
+            <button type="submit" class="primary" data-core-action>添加并连接</button>
           </div>
         </form>
+        <p class="sub" data-core-action-hint>连接并授权本地核心后可添加、连接或管理 MCP 服务器。</p>
       </div>
     </section>
-    <section class="tool-card" data-group="system">
+    <section class="tool-card tool-card-allowlist" data-group="system">
       <div class="tool-card-head">
         <span class="tool-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 1.9 3.3 3.7v3.5c0 3 2 5.4 4.7 6.4 2.7-1 4.7-3.4 4.7-6.4V3.7z"/><path d="M5.9 7.9 7.3 9.3 10 6.5"/></svg></span>
         <div class="tool-card-title">
@@ -429,8 +437,9 @@
         <ul id="whitelistList" class="list"></ul>
         <form id="whitelistForm" class="tool-actions">
           <input id="wlAppId" placeholder="app_id" required>
-          <button type="submit" class="primary">添加 P0</button>
+          <button type="submit" class="primary" data-core-action>添加 P0</button>
         </form>
+        <p class="sub" data-core-action-hint>连接并授权本地核心后可管理 P0 应用白名单；白名单会减少逐次审批，请只添加你信任的应用。</p>
       </div>
     </section>
 
@@ -467,10 +476,11 @@
               <span class="connection-summary" id="connectionSummary">检查中…</span>
             </div>
             <div class="settings-card-list">
+              <p class="sub" data-core-action-hint>连接并授权本地核心后才能更改云端模型的数据出境设置。</p>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>云端模型（数据出境）</strong><span>关闭后仅使用本地 / 自建端点，数据不出本机</span></div>
                 <div class="settings-row-control">
-                  <button type="button" class="toggle" id="egressToggle" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
+                  <button type="button" class="toggle" id="egressToggle" data-core-action role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
                 </div>
               </div>
               <div class="settings-row">
@@ -490,40 +500,15 @@
                   </select>
                 </div>
               </div>
-              <div class="settings-row">
-                <div class="settings-row-label"><strong>集成终端 Shell</strong><span>执行命令类工具时使用的 shell（本地偏好）</span></div>
-                <div class="settings-row-control">
-                  <select id="prefShell">
-                    <option value="powershell">PowerShell</option>
-                    <option value="cmd">命令提示符 (CMD)</option>
-                  </select>
-                </div>
-              </div>
-              <div class="settings-row">
-                <div class="settings-row-label"><strong>语言</strong><span>界面语言（本地偏好）</span></div>
-                <div class="settings-row-control">
-                  <select id="prefLanguage">
-                    <option value="zh-CN">中文（简体）</option>
-                    <option value="en-US">English</option>
-                  </select>
-                </div>
-              </div>
+
+
               <div class="settings-row">
                 <div class="settings-row-label"><strong>紧凑模式</strong><span>缩小间距，在同一屏展示更多内容（本地偏好）</span></div>
                 <div class="settings-row-control">
                   <button type="button" class="toggle" id="prefCompact" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
                 </div>
               </div>
-              <div class="settings-row">
-                <div class="settings-row-label"><strong>速度</strong><span>本地模型推理与界面动效的档位（本地偏好）</span></div>
-                <div class="settings-row-control">
-                  <select id="prefSpeed">
-                    <option value="standard">标准</option>
-                    <option value="fast">快速</option>
-                    <option value="eco">节能</option>
-                  </select>
-                </div>
-              </div>
+
             </div>
           </div>
 
@@ -533,10 +518,11 @@
               <div><strong>配置</strong><span>管理可用模型、服务商预设与自定义端点</span></div>
             </div>
             <div class="settings-card-list">
+              <p class="sub" data-core-action-hint>连接并授权本地核心后，才能切换默认模型、保存接口与加密密钥、修改模型输出上限。服务商预设命令可先复制到启动终端使用。</p>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>默认模型</strong><span>新回合使用的模型</span></div>
                 <div class="settings-row-control">
-                  <select id="settingsModel">
+                  <select id="settingsModel" data-core-action>
                     <option value="qwen3.8-max">qwen3.8-max</option>
                     <option value="qwen3.7-plus">qwen3.7-plus</option>
                     <option value="qwen3.7-max">qwen3.7-max</option>
@@ -549,14 +535,14 @@
                 </div>
               </div>
               <div class="settings-row">
-                <div class="settings-row-label"><strong>模型输出上限</strong><span>按模型分别设置；模型思考与答复共用额度，未单独设置时默认 32k</span></div>
+                <div class="settings-row-label"><strong>模型输出上限</strong><span>按模型分别设置；实际受服务商模型上限约束，未设置时默认 32k</span></div>
                 <div class="settings-row-control settings-output-control">
-                  <input id="modelOutputModel" type="text" list="modelOutputCandidates" placeholder="模型名称" autocomplete="off">
+                  <input id="modelOutputModel" data-core-action type="text" list="modelOutputCandidates" placeholder="模型名称" autocomplete="off">
                   <datalist id="modelOutputCandidates"></datalist>
-                  <input id="modelOutputLimit" type="number" min="1" max="32000" step="1" aria-label="模型输出 Token 上限" title="1–32000 Tokens">
+                  <input id="modelOutputLimit" data-core-action type="number" min="1" max="1000000" step="1" aria-label="模型输出 Token 上限" title="1–1,000,000 Tokens">
                   <span>Tokens</span>
-                  <button type="button" id="modelOutputSaveBtn">保存并重启核心</button>
-                  <button type="button" id="modelOutputResetBtn">恢复默认</button>
+                  <button type="button" id="modelOutputSaveBtn" data-core-action>保存并重启核心</button>
+                  <button type="button" id="modelOutputResetBtn" data-core-action>恢复默认</button>
                   <div id="modelOutputHint" class="sub settings-output-hint">读取模型输出上限…</div>
                 </div>
               </div>
@@ -571,20 +557,20 @@
               <div class="settings-row">
                 <div class="settings-row-label"><strong>API 端点</strong><span>OpenAI 兼容地址，留空则用启动终端的环境变量</span></div>
                 <div class="settings-row-control">
-                  <input id="providerBaseUrl" type="text" placeholder="https://api.deepseek.com/v1" spellcheck="false" autocomplete="off">
+                  <input id="providerBaseUrl" data-core-action type="text" placeholder="https://api.deepseek.com/v1" spellcheck="false" autocomplete="off">
                 </div>
               </div>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>API 密钥</strong><span>加密保存到本机（DPAPI 信封），不明文写入工作区</span></div>
                 <div class="settings-row-control">
-                  <input id="providerApiKey" type="password" placeholder="未保存" spellcheck="false" autocomplete="off">
+                  <input id="providerApiKey" data-core-action type="password" placeholder="未保存" spellcheck="false" autocomplete="off">
                 </div>
               </div>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>保存并连接</strong><span>写入本机设置，新回合即时生效</span></div>
                 <div class="settings-row-control">
                   <span class="pill" id="providerKeyState">未保存</span>
-                  <button type="button" id="providerSaveBtn" class="primary">保存并连接</button>
+                  <button type="button" id="providerSaveBtn" class="primary" data-core-action>保存并连接</button>
                 </div>
               </div>
             </div>
@@ -594,7 +580,7 @@
               <div class="preset-info-row"><span class="preset-info-key">密钥环境变量</span><code id="presetKeyEnv">—</code></div>
               <div class="preset-info-row preset-info-cmd"><span class="preset-info-key">启动命令</span><code id="presetCmdPreview">—</code></div>
               <div class="inline">
-                <button id="presetApplyModelBtn" type="button">使用默认模型并保存</button>
+                <button id="presetApplyModelBtn" type="button" data-core-action>使用默认模型并保存</button>
                 <button id="presetCopyCmdBtn" type="button">复制 PowerShell 环境变量命令</button>
               </div>
               <p class="sub" id="presetHint">选预设会自动填入上方端点与模型；密钥请在「API 密钥」填写后点「保存并连接」。</p>
@@ -631,12 +617,7 @@
                   </select>
                 </div>
               </div>
-              <div class="settings-row">
-                <div class="settings-row-label"><strong>界面密度</strong><span>紧凑模式会缩小列表与表单间距</span></div>
-                <div class="settings-row-control">
-                  <button type="button" class="toggle" id="prefCompactAppearance" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
-                </div>
-              </div>
+
               <div class="settings-row">
                 <div class="settings-row-label"><strong>会话栏宽度</strong><span>由拖拽分隔条调整；此处可恢复默认</span></div>
                 <div class="settings-row-control"><button type="button" id="resetLayoutBtn">恢复默认布局</button></div>
@@ -682,29 +663,21 @@
               <div><strong>个性化</strong><span>主动建议、记忆与语气</span></div>
             </div>
             <div class="settings-card-list">
+              <p class="sub" data-core-action-hint>主动建议和记忆检索需要连接并授权本地核心；主题、语气等本机偏好仍可离线调整。</p>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>主动建议</strong><span>根据情景感知在检查器中推送下一步操作建议</span></div>
                 <div class="settings-row-control">
-                  <button type="button" class="toggle" id="prefProactive" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
+                  <button type="button" class="toggle" id="prefProactive" data-core-action role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
                 </div>
               </div>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>情景记忆检索</strong><span>按语义检索历史观察与笔记</span></div>
                 <div class="settings-row-control settings-control-path">
                   <input id="recallQ" placeholder="语义检索关键词">
-                  <button type="button" id="recallBtn">检索</button>
+                  <button type="button" id="recallBtn" data-core-action>检索</button>
                 </div>
               </div>
-              <div class="settings-row">
-                <div class="settings-row-label"><strong>回复语气</strong><span>影响助手的表达风格（本地偏好）</span></div>
-                <div class="settings-row-control">
-                  <select id="prefTone">
-                    <option value="balanced">平衡</option>
-                    <option value="concise">简洁直接</option>
-                    <option value="detailed">详尽解释</option>
-                  </select>
-                </div>
-              </div>
+
             </div>
             <div class="settings-card-list" style="margin-top:10px">
               <ul id="recallList" class="list"></ul>
@@ -714,25 +687,13 @@
           <!-- 通知 -->
           <div class="settings-tab" data-settings-tab="notifications" hidden>
             <div class="settings-page-title">
-              <div><strong>通知</strong><span>提醒与提示方式（本地偏好）</span></div>
+              <div><strong>通知</strong><span>回合结束与审批请求的提示方式</span></div>
             </div>
             <div class="settings-card-list">
               <div class="settings-row">
-                <div class="settings-row-label"><strong>任务提醒</strong><span>自动化任务到期时在界面内提醒</span></div>
-                <div class="settings-row-control">
-                  <button type="button" class="toggle" id="prefReminder" role="switch" aria-checked="true"><span class="toggle-knob"></span></button>
-                </div>
-              </div>
-              <div class="settings-row">
-                <div class="settings-row-label"><strong>声音提示</strong><span>回合完成与审批请求时播放提示音</span></div>
+                <div class="settings-row-label"><strong>声音提示</strong><span>审批请求与回合结束时播放轻提示音</span></div>
                 <div class="settings-row-control">
                   <button type="button" class="toggle" id="prefSound" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
-                </div>
-              </div>
-              <div class="settings-row">
-                <div class="settings-row-label"><strong>审批请求置顶</strong><span>有待审批操作时，主界面优先显示审批条</span></div>
-                <div class="settings-row-control">
-                  <button type="button" class="toggle" id="prefApprovalPin" role="switch" aria-checked="true"><span class="toggle-knob"></span></button>
                 </div>
               </div>
             </div>
@@ -776,22 +737,23 @@
               <div><strong>导入</strong><span>从文件或模板恢复配置</span></div>
             </div>
             <div class="settings-card-list">
+              <p class="sub" data-core-action-hint>技能导入、项目模板写入和备份恢复需要连接并授权本地核心。</p>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>导入技能包（.owskill）</strong><span>导入流程技能包 zip，导入后在「技能」分组可见</span></div>
                 <div class="settings-row-control settings-control-path">
                   <input type="file" id="skillImport" accept=".owskill,application/zip">
-                  <button type="button" id="skillImportBtn">导入</button>
+                  <button type="button" id="skillImportBtn" data-core-action>导入</button>
                 </div>
               </div>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>生成 AGENTS.md 模板</strong><span>在工作区根目录生成项目规则模板（已存在则跳过）</span></div>
-                <div class="settings-row-control"><button type="button" id="agentsTemplateBtn">生成模板</button></div>
+                <div class="settings-row-control"><button type="button" id="agentsTemplateBtn" data-core-action>生成模板</button></div>
               </div>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>从备份恢复（.zip）</strong><span>恢复 settings/notes/skills/workflows，恢复前自动备份</span></div>
                 <div class="settings-row-control settings-control-path">
                   <input type="file" id="storageRestoreFile" accept=".zip,application/zip">
-                  <button type="button" id="storageRestoreBtn">恢复…</button>
+                  <button type="button" id="storageRestoreBtn" data-core-action>恢复…</button>
                 </div>
               </div>
             </div>
@@ -803,6 +765,7 @@
               <div><strong>账户</strong><span>本地账户、连接与数据管理</span></div>
             </div>
             <div class="settings-card-list">
+              <p class="sub" data-core-action-hint>数据备份、导出和恢复需要本地核心连接；清空数据会删除本机记录并需二次确认。</p>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>当前账户</strong><span>用户1 · 本地账户（数据保存在本机）</span></div>
                 <div class="settings-row-control">
@@ -817,13 +780,13 @@
               <div class="settings-row">
                 <div class="settings-row-label"><strong>数据备份与导出</strong><span>zip 备份 / 标准 JSON 全量导出</span></div>
                 <div class="settings-row-control">
-                  <button type="button" id="storageBackupBtn">备份</button>
-                  <button type="button" id="storageExportBtn">导出</button>
+                  <button type="button" id="storageBackupBtn" data-core-action>备份</button>
+                  <button type="button" id="storageExportBtn" data-core-action>导出</button>
                 </div>
               </div>
               <div class="settings-row">
                 <div class="settings-row-label"><strong>一键清空数据</strong><span>清空会话 / 审计 / 笔记 / 记忆 / 自动化（二次确认，不可恢复）</span></div>
-                <div class="settings-row-control"><button type="button" id="storageClearBtn" class="danger">一键清空数据…</button></div>
+                <div class="settings-row-control"><button type="button" id="storageClearBtn" data-core-action class="danger">一键清空数据…</button></div>
               </div>
               <div id="storageResult" class="settings-inline-result" hidden></div>
               <div class="settings-row">
@@ -994,7 +957,7 @@
   <!-- 统一 API 客户端：契约测试「业务脚本不绕过统一 API 客户端」规定全站只有它能 fetch。
        它承担桌面壳的两道认证门（x-owo-desktop-pairing 配对 + x-owo-desktop-instance 实例身份），
        必须在 app.js 与各面板之前加载，否则页面拿不到 token → 全线 401。 -->
-  <script src="core/api-client.js"></script>
+  <script src="core/api-client.js?v=20261009-4"></script>
   <script src="core/events.js"></script>
   <script src="config/provider-presets.js"></script>
   <script src="core/folder-picker.js"></script>
@@ -1030,13 +993,17 @@
   <script src="core/workbench-refresh.js"></script>
   <script src="core/turn-sse.js"></script>
   <script src="core/completion-record.js"></script>
-  <script src="core/workbench-view.js"></script>
+  <script src="core/workbench-view.js?v=20261009-2"></script>
   <script src="core/observer-scope.js"></script>
   <script src="core/model-routing.js"></script>
+  <script src="core/model-output-budget.js"></script>
   <script src="core/session-start.js"></script>
   <script src="core/workspace-routing.js"></script>
   <script src="core/model-recovery.js"></script>
   <script src="core/panel-runtime.js"></script>
+  <script src="core/notification-sound.js"></script>
+  <script src="core/core-action-availability.js"></script>
+  <script src="core/markdown.js"></script>
   <script src="app-domain.js"></script>
   <script src="app.js"></script>
 </body>

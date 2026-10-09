@@ -36,6 +36,14 @@
     return Object.freeze({ begin: begin, isCurrent: isCurrent, select: select });
   }
 
+  function requireWorkspacePersistence(result, missingMessage) {
+    if (!result || typeof result !== "object") {
+      throw new Error(missingMessage || "workspace persistence returned no result");
+    }
+    if (result.ok !== true) throw new Error(result.error || "workspace persistence was not confirmed");
+    return result;
+  }
+
   function projectCreationFailureMessage(stage, error) {
     var detail = String((error && error.message) || error || "未知错误");
     if (stage === "activate") {
@@ -49,6 +57,7 @@
 
   var api = {
     createWorkspaceSelectionController: createWorkspaceSelectionController,
+    requireWorkspacePersistence: requireWorkspacePersistence,
     projectCreationFailureMessage: projectCreationFailureMessage,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;

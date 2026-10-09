@@ -115,7 +115,7 @@ fn dir_entries(path: &std::path::Path) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn catalog_lists_five_builtins_as_candidates() {
+async fn catalog_lists_six_builtins_as_candidates() {
     let (state, _temp) = test_state().await;
     let catalog_router = team_template_catalog_api::team_template_catalog_router(state.clone());
     let (status, body) = call(
@@ -128,7 +128,7 @@ async fn catalog_lists_five_builtins_as_candidates() {
     .await;
     assert_eq!(status, 200, "目录应 200：{body}");
     let entries = body["catalog"].as_array().expect("catalog 数组");
-    assert_eq!(entries.len(), 5, "五类内置模板：{entries:?}");
+    assert_eq!(entries.len(), 6, "六类内置模板：{entries:?}");
     let ids: Vec<&str> = entries
         .iter()
         .map(|e| e["template"]["template_id"].as_str().unwrap())
@@ -137,6 +137,7 @@ async fn catalog_lists_five_builtins_as_candidates() {
         ids,
         vec![
             "code-change-v1",
+            "code-change-v2",
             "fullstack-web-v1",
             "research-brief-v1",
             "document-delivery-v1",
@@ -288,12 +289,13 @@ async fn install_is_idempotent_and_enables_auto_match_only_after_install() {
         json!("code-change-v1"),
         "安装后自动匹配应命中 code-change-v1"
     );
-    // 八期（一路自适应 DAG）：简单代码任务自动裁剪角色——analyzer + implementer
-    //（reviewer 仅在有实际变更或高风险时启用），模板角色数 3 → 2。
+    // 八期（一路自适应 DAG）：简单代码任务先保留 reviewer（变更状态未知时不得
+    // 提前跳过独立评审），运行期由宿主观测到"无实际变更"后才裁剪；建队时仍为
+    // analyzer + implementer + reviewer 三角色。
     assert_eq!(
         body["members"].as_array().unwrap().len(),
-        2,
-        "模板角色数（自适应裁剪后）"
+        3,
+        "模板角色数（reviewer 延迟到宿主观测后再裁剪）"
     );
 }
 

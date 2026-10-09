@@ -34,11 +34,17 @@ impl ModelProvider for IdleProvider {
 }
 
 async fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
+    test_state_with_provider(Arc::new(IdleProvider)).await
+}
+
+async fn test_state_with_provider(
+    provider: Arc<dyn owo_agent_core::ModelProvider>,
+) -> (Arc<AppState>, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
     let agent = Agent::new(
-        Arc::new(IdleProvider),
+        provider,
         ToolRegistry::new(),
         Policy::new(&workspace),
         Default::default(),
@@ -269,7 +275,7 @@ async fn run_persists_recovery_state_consistent() {
     let (app, goal_id) = setup_goal_with_plan(state).await;
     let body = r#"{"steps":[
         {"id":"a","worker":"echo","input":{"text":"A"}},
-        {"id":"b","worker":"echo","deps":["a"],"input":{"text":"B"}}
+        {"id":"b","worker":"echo","deps":["a"],"input":{"text":"B"},"verify":"B"}
     ]}"#;
     let (status, _) = call(&app, "POST", &format!("/goal/{goal_id}/plan"), Some(body)).await;
     assert_eq!(status, 201);
@@ -351,7 +357,10 @@ async fn r5_agent_worker_without_key_fails_readably() {
         .lock()
         .await;
     std::env::remove_var("OPENAI_API_KEY");
-    let (state, _temp) = test_state().await;
+    // 用生产同款 DeferredProvider：无凭据时调用点返回可读的 not_configured 指引
+    // （IdleProvider 会在凭据校验之前被调用，无法覆盖本契约）。
+    let (state, _temp) =
+        test_state_with_provider(Arc::new(owo_agent_core::gateway::DeferredProvider::new())).await;
     let steps = agent_step_json("做一个总结", true);
     let (app, goal_id) = setup_goal_with_steps(state.clone(), &steps).await;
     let (status, value) = call(
@@ -631,7 +640,9 @@ async fn pid_alive(pid: u32) -> bool {
 }
 
 /// P1 契约：worker_pool 模式下 echo/sleep 步骤经子进程执行，任务成功且审计含生命周期事件。
-#[tokio::test]
+/// 受控子进程 worker 会与 HTTP handler 在同一 runtime 交错；生产 axum 是多线程
+/// runtime，单线程测试 runtime 会被阻塞路径饿死（实测挂起），这里与生产对齐。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p1_worker_pool_mode_runs_steps_in_subprocess() {
     let (state, _temp) = test_state().await;
     let (app, goal_id) = setup_goal_with_plan(state.clone()).await;
@@ -930,7 +941,7 @@ async fn a2_in_process_explicit_target_runs_registry_worker() {
     let (state, _temp) = test_state().await;
     let (app, goal_id) = setup_goal_with_plan(state.clone()).await;
     let body = r#"{"steps":[
-        {"id":"e1","worker":"echo","input":{"text":"A"}}
+        {"id":"e1","worker":"echo","input":{"text":"A"},"verify":"A"}
     ]}"#;
     let (status, value) = call(&app, "POST", &format!("/goal/{goal_id}/plan"), Some(body)).await;
     assert_eq!(status, 201, "{value}");
@@ -957,7 +968,9 @@ async fn a2_in_process_explicit_target_runs_registry_worker() {
 }
 
 /// A2 契约：local_process 显式绑定经受控子进程执行（out- 协议前缀证明通道正确）。
-#[tokio::test]
+/// 同 `p1_worker_pool_mode_runs_steps_in_subprocess`：子进程 worker + HTTP handler
+/// 需要多线程 runtime，避免单线程测试 runtime 被阻塞路径饿死。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a2_local_process_explicit_target_completes_step() {
     let (state, _temp) = test_state().await;
     let (app, goal_id) = setup_goal_with_plan(state.clone()).await;
@@ -1019,7 +1032,7 @@ async fn a2_fleet_node_registered_node_completes_step_via_real_protocol() {
     assert_eq!(status, 201, "{created}");
     let goal_id = created["goal"]["id"].as_str().unwrap().to_string();
     let plan_body = r#"{"steps":[
-        {"id":"step1","worker":"capw","input":{"text":"F"}}
+        {"id":"step1","worker":"capw","input":{"text":"F"},"verify":"done-F"}
     ]}"#;
     let (status, value) = call(
         &app,

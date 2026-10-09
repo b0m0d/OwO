@@ -51,13 +51,15 @@ pub(super) struct LoopAliveGuard {
 }
 
 impl LoopAliveGuard {
-    fn new(coordinator: &Arc<TeamCoordinator>, team_id: &str) -> Self {
-        let guard = Self {
+    /// 竞争运行循环所有权：已有循环在世（或并发 spawn 竞争失败）返回 None。
+    fn try_acquire(coordinator: &Arc<TeamCoordinator>, team_id: &str) -> Option<Self> {
+        if !coordinator.try_claim_loop(team_id) {
+            return None;
+        }
+        Some(Self {
             coordinator: Arc::clone(coordinator),
             team_id: team_id.to_string(),
-        };
-        guard.coordinator.set_loop_alive(team_id, true);
-        guard
+        })
     }
 }
 
@@ -171,6 +173,7 @@ pub(super) async fn stop_if_budget_exhausted(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // 测试模块历史位置靠前；移动会打乱同文件阅读顺序
 mod budget_guard_tests {
     use super::{budget_guard_decision, BudgetGuardDecision};
     use std::time::Duration;
@@ -208,7 +211,12 @@ pub(crate) async fn run_team_loop(
     coordinator: Arc<TeamCoordinator>,
     team_id: String,
 ) {
-    let _alive = LoopAliveGuard::new(&coordinator, &team_id);
+    // 原子竞争循环所有权：并发 spawn（如「返工 + 幂等重放」）只能有一个循环运行，
+    // 否则第二个循环会把第一个循环 Claimed 的步骤判成死锁并终止团队。
+    let Some(_alive) = LoopAliveGuard::try_acquire(&coordinator, &team_id) else {
+        tracing::info!(team_id = %team_id, "已有团队运行循环，跳过重复启动");
+        return;
+    };
     // 七期（第二路）：团队取消令牌 → 运行中 Worker 的即时中断桥。`wait_cancel`
     // 只在真实取消（令牌值变 true）时置位共享 abort 标志（Worker 在回合边界协作
     // 中断）；发送端随团队收尾关闭返回 false，不置位（运行已结束，无需中断）。

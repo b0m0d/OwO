@@ -74,6 +74,7 @@ impl ContextAssemblyTimingStore {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 事件字段就是协议字段，一一对应避免中间层
 pub(super) fn context_assembly_event_detail(
     role: &str,
     step_id: &str,
@@ -99,6 +100,7 @@ pub(super) fn context_assembly_event_detail(
 
 impl TeamCoordinator {
     /// Record a content-free context timing and index it for O(1) Worker attribution.
+    #[allow(clippy::too_many_arguments)] // 与 context_assembly_event_detail 字段一一对应
     pub fn record_context_assembly_timing(
         &self,
         team_id: &str,

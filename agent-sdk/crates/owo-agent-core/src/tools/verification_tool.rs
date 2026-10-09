@@ -58,15 +58,30 @@ pub(crate) fn validate_single_verification_plan(
                 requirement.requirement_id
             ));
         };
-        if relative_paths.len() > 16
-            || !crate::verification::workspace_validator_arguments_supported(
-                &requirement.validator_id,
-                &requirement.arguments,
-            )
+        if !(crate::verification::MIN_WORKSPACE_VALIDATION_PATHS
+            ..=crate::verification::MAX_WORKSPACE_VALIDATION_PATHS)
+            .contains(&relative_paths.len())
         {
             return Err(format!(
-                "requirement {} 的路径数量或 validator 参数不符合宿主注册契约",
-                requirement.requirement_id
+                "requirement {} 声明了 {} 个路径；WorkspacePaths 必须提供 {}..={} 个工作区相对路径",
+                requirement.requirement_id,
+                relative_paths.len(),
+                crate::verification::MIN_WORKSPACE_VALIDATION_PATHS,
+                crate::verification::MAX_WORKSPACE_VALIDATION_PATHS
+            ));
+        }
+        if !crate::verification::workspace_validator_arguments_supported(
+            &requirement.validator_id,
+            &requirement.arguments,
+        ) {
+            let expected = crate::verification::workspace_validator_contracts()
+                .iter()
+                .find(|contract| contract.validator_id == requirement.validator_id)
+                .map(validator_arguments_hint)
+                .unwrap_or_else(|| "该 validator 未注册".to_string());
+            return Err(format!(
+                "requirement {} 的 validator {} 参数不符合宿主契约；arguments 应为 {}，不要添加额外字段",
+                requirement.requirement_id, requirement.validator_id, expected
             ));
         }
         let resources = &requirement.resources;
@@ -111,79 +126,210 @@ pub(super) fn validate_single_request_coverage(
     Ok(())
 }
 
+/// Render a concise model-facing hint from the same host contract schema used by
+/// argument validation. This keeps tool docs from drifting as validators evolve.
+fn validator_arguments_hint(contract: &crate::verification::WorkspaceValidatorContract) -> String {
+    let schema = contract.arguments_schema();
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return "{}".to_string();
+    };
+    if properties.is_empty() {
+        return "{}".to_string();
+    }
+    let required: std::collections::HashSet<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let fields = properties
+        .iter()
+        .map(|(name, field)| {
+            let kind = field.get("type").and_then(Value::as_str).unwrap_or("JSON");
+            let requirement = if required.contains(name.as_str()) {
+                "required"
+            } else {
+                "optional"
+            };
+            let description = field
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(|value| format!(", {value}"))
+                .unwrap_or_default();
+            format!("{name}: {kind} ({requirement}{description})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{fields}}}")
+}
+
+fn validator_contracts_hint() -> String {
+    let mut entries = crate::verification::workspace_validator_contracts()
+        .iter()
+        .map(|contract| {
+            format!(
+                "{} arguments={}",
+                contract.validator_id,
+                validator_arguments_hint(contract)
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.push(format!(
+        "{} arguments={{}} (人工验收)",
+        crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID
+    ));
+    entries.join("; ")
+}
+
+fn normalize_model_verification_plan(value: &Value) -> Result<Value, String> {
+    let requirements = value
+        .get("requirements")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "VerificationPlan.requirements 必须是数组".to_string())?;
+    for requirement in requirements {
+        let object = requirement
+            .as_object()
+            .ok_or_else(|| "VerificationPlan requirement 必须是对象".to_string())?;
+        if object.get("validator_id").and_then(Value::as_str).is_none() {
+            return Err("每项 requirement 必须包含 validator_id 字符串".to_string());
+        }
+        if object
+            .get("arguments")
+            .is_none_or(|arguments| !arguments.is_object())
+        {
+            return Err("每项 requirement 的 arguments 必须是 JSON 对象".to_string());
+        }
+        let scope = object
+            .get("scope")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "每项 requirement 的 scope 必须是对象".to_string())?;
+        match scope.get("kind").and_then(Value::as_str) {
+            Some("workspace_paths") if !scope.contains_key("relative_paths") => {
+                return Err("workspace_paths scope 必须提供 relative_paths".to_string());
+            }
+            Some("manual") if scope.contains_key("relative_paths") => {
+                return Err("manual scope 不接受 relative_paths".to_string());
+            }
+            Some("workspace_paths" | "manual") => {}
+            _ => return Err("scope.kind 必须是 workspace_paths 或 manual".to_string()),
+        }
+    }
+    Ok(value.clone())
+}
+
+fn verification_plan_requirement_schema() -> Value {
+    let validator_ids = crate::verification::workspace_validator_contracts()
+        .iter()
+        .map(|contract| contract.validator_id)
+        .chain(std::iter::once(
+            crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID,
+        ))
+        .collect::<Vec<_>>();
+    let common_properties = json!({
+        "requirement_id": {"type": "string", "minLength": 1},
+        "covers_requirement_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1, "description": "格式：user-request:<用户原文中的精确验收片段>。"}
+        },
+        "validator_id": {"type": "string", "enum": validator_ids},
+        "arguments": {
+            "type": "object",
+            "description": format!("参数按 validator_id 匹配：{}", validator_contracts_hint())
+        },
+        "validator_version": {"type": "string", "enum": ["1"]},
+        "required": {"type": "boolean"},
+        "resources": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "cpu_slots": {"type": "integer", "enum": [1]},
+                "memory_mb": {"type": "integer", "minimum": 8, "maximum": 128},
+                "exclusive_workspace": {"type": "boolean", "enum": [false]},
+                "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000}
+            },
+            "required": ["cpu_slots", "memory_mb", "exclusive_workspace", "timeout_ms"]
+        },
+        "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": format!(
+                "自动检查使用 kind=workspace_paths，并提供{}至{}个相对路径；人工验收使用 kind=manual 且不提供路径。",
+                crate::verification::MIN_WORKSPACE_VALIDATION_PATHS,
+                crate::verification::MAX_WORKSPACE_VALIDATION_PATHS
+            ),
+            "properties": {
+                "kind": {"type": "string", "enum": ["workspace_paths", "manual"]},
+                "relative_paths": {
+                    "type": "array",
+                    "minItems": crate::verification::MIN_WORKSPACE_VALIDATION_PATHS,
+                    "maxItems": crate::verification::MAX_WORKSPACE_VALIDATION_PATHS,
+                    "items": {"type": "string", "minLength": 1, "description": "工作区根目录下的相对文件路径，不得使用绝对路径或 ..。"}
+                }
+            },
+            "required": ["kind"]
+        }
+    });
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": common_properties,
+        "required": [
+            "requirement_id",
+            "covers_requirement_ids",
+            "validator_id",
+            "arguments",
+            "validator_version",
+            "scope",
+            "required",
+            "resources"
+        ]
+    })
+}
+
+fn verification_plan_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "plan": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "首次工作区写入前登记验收要求；登记后不可替换。",
+                "properties": {
+                    "plan_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "requirements": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "description": format!("每项覆盖用户原文验收点。自动检查仅列相关工作区相对文件路径，每项{}至{}个；人工验收使用 manual。", crate::verification::MIN_WORKSPACE_VALIDATION_PATHS, crate::verification::MAX_WORKSPACE_VALIDATION_PATHS),
+                        "items": verification_plan_requirement_schema()
+                    }
+                },
+                "required": ["plan_id", "requirements"]
+            }
+        },
+        "required": ["plan"]
+    })
+}
 #[async_trait]
 impl Tool for SingleVerificationPlanTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "verification_plan".into(),
-            description: "开始任何工作区写入前，先登记本次任务的宿主验收要求。计划首次写入后不可替换。每个必需 covers_requirement_ids 都必须写成 user-request:<用户原文中的精确验收片段>，宿主会核对它确实出现在本回合输入中。源码路径优先声明 workspace-command-success-v1；确实没有可运行自动验收时，才可声明 single-human-acceptance-v1 + manual scope，宿主会展示当前候选快照并等待用户明确验收。计划本身不是通过证据。resources 四个字段按 schema 显式填写；人工验收不消耗该资源配额。".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "plan": {
-                        "type": "object",
-                        "properties": {
-                            "plan_id": {"type": "string"},
-                            "requirements": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "requirement_id": {"type": "string"},
-                                        "covers_requirement_ids": {
-                                            "type": "array",
-                                            "items": {"type": "string", "description": "user-request:<用户原文中的精确验收片段>"},
-                                            "minItems": 1
-                                        },
-                                        "validator_id": {"type": "string", "enum": ["workspace-file-exists-v1", "workspace-file-non-empty-v1", "workspace-file-contains-v1", "workspace-json-field-equals-v1", "workspace-command-success-v1", "single-human-acceptance-v1"]},
-                                        "validator_version": {"type": "string", "enum": ["1"]},
-                                        "scope": {
-                                            "oneOf": [
-                                                {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "kind": {"type": "string", "enum": ["workspace_paths"]},
-                                                        "relative_paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 16}
-                                                    },
-                                                    "required": ["kind", "relative_paths"]
-                                                },
-                                                {
-                                                    "type": "object",
-                                                    "properties": {"kind": {"type": "string", "enum": ["manual"]}},
-                                                    "required": ["kind"]
-                                                }
-                                            ]
-                                        },
-                                        "arguments": {"type": "object"},
-                                        "required": {"type": "boolean"},
-                                        "resources": {
-                                            "type": "object",
-                                            "properties": {
-                                                "cpu_slots": {"type": "integer", "enum": [1]},
-                                                "memory_mb": {"type": "integer", "minimum": 8, "maximum": 128, "default": 16},
-                                                "exclusive_workspace": {"type": "boolean", "enum": [false]},
-                                                "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000, "default": 30000}
-                                            },
-                                            "required": ["cpu_slots", "memory_mb", "exclusive_workspace", "timeout_ms"]
-                                        }
-                                    },
-                                    "required": ["requirement_id", "covers_requirement_ids", "validator_id", "validator_version", "scope", "arguments", "required", "resources"]
-                                }
-                            }
-                        },
-                        "required": ["plan_id", "requirements"]
-                    }
-                },
-                "required": ["plan"]
-            }),
+            description: "开始任何工作区写入前，先登记本次任务的宿主验收要求。计划首次写入后不可替换。每个必需 covers_requirement_ids 都必须写成 user-request:<用户原文中的精确验收片段>，宿主会核对它确实出现在本回合输入中。选验证器按产物类型：源码/可运行工程用 workspace-command-success-v1（只接受宿主登记的行为命令，如 cargo test/npm test/python -m pytest，禁止 dir/echo 等普通命令）；文本或文档产物用静态校验 workspace-file-exists-v1 / workspace-file-non-empty-v1 / workspace-file-contains-v1 / workspace-json-field-equals-v1，不要为普通文本文件登记命令校验；确实没有可运行自动验收时，才可声明 single-human-acceptance-v1 + manual scope，宿主会展示当前候选快照并等待用户明确验收。计划本身不是通过证据。resources 四个字段按 schema 显式填写；人工验收不消耗该资源配额。".into(),
+            input_schema: verification_plan_input_schema(),
             effect: None,
         }
     }
 
     async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        let plan: crate::plan::VerificationPlanV1 =
-            serde_json::from_value(args.get("plan").cloned().ok_or("缺少 plan 对象")?)
-                .map_err(|error| format!("VerificationPlan 结构非法：{error}"))?;
+        let model_plan = args.get("plan").ok_or("缺少 plan 对象")?;
+        let normalized_plan = normalize_model_verification_plan(model_plan)?;
+        let plan: crate::plan::VerificationPlanV1 = serde_json::from_value(normalized_plan)
+            .map_err(|error| format!("VerificationPlan 结构非法：{error}"))?;
         validate_single_verification_plan(&plan)?;
         let task_context = ctx
             .session
@@ -231,5 +377,154 @@ impl Tool for SingleVerificationPlanTool {
         ctx.session.single_verification_plan_turn_id = Some(turn_id);
         ctx.session.active_task_context = Some(resolved_context);
         Ok(json!({"plan": plan, "status": "registered_pending_host_validation"}))
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn verification_plan_schema_is_derived_from_registered_validator_contracts() {
+        let schema = verification_plan_input_schema();
+        assert_eq!(schema["type"], "object");
+        let requirement = &schema["properties"]["plan"]["properties"]["requirements"]["items"];
+        let validator_ids = requirement["properties"]["validator_id"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_ids = crate::verification::workspace_validator_contracts()
+            .iter()
+            .map(|contract| contract.validator_id)
+            .chain(std::iter::once(
+                crate::completion::SINGLE_MANUAL_ACCEPTANCE_VALIDATOR_ID,
+            ))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(validator_ids, expected_ids);
+        assert_eq!(requirement["properties"]["arguments"]["type"], "object");
+        assert_eq!(
+            requirement["properties"]["scope"]["properties"]["kind"]["enum"],
+            json!(["workspace_paths", "manual"])
+        );
+        assert_eq!(
+            requirement["properties"]["scope"]["properties"]["relative_paths"]["minItems"],
+            crate::verification::MIN_WORKSPACE_VALIDATION_PATHS
+        );
+        assert_eq!(
+            requirement["properties"]["scope"]["properties"]["relative_paths"]["maxItems"],
+            crate::verification::MAX_WORKSPACE_VALIDATION_PATHS
+        );
+        assert!(requirement.get("anyOf").is_none());
+        assert!(requirement.get("oneOf").is_none());
+        for contract in crate::verification::workspace_validator_contracts() {
+            assert!(validator_contracts_hint().contains(contract.validator_id));
+        }
+    }
+
+    #[test]
+    fn model_plan_normalizer_accepts_generic_contract_and_rejects_invalid_scope_pairing() {
+        let input = json!({
+            "plan_id": "p",
+            "requirements": [{
+                "requirement_id": "r",
+                "validator_id": "workspace-file-contains-v1",
+                "arguments": {"text": "hello"},
+                "scope": {"kind": "workspace_paths", "relative_paths": ["README.md"]}
+            }]
+        });
+        let normalized = normalize_model_verification_plan(&input).unwrap();
+        assert_eq!(
+            normalized["requirements"][0]["validator_id"],
+            "workspace-file-contains-v1"
+        );
+        assert_eq!(
+            normalized["requirements"][0]["arguments"],
+            json!({"text": "hello"})
+        );
+
+        let missing_paths = json!({"requirements": [{"validator_id": "workspace-file-exists-v1", "arguments": {}, "scope": {"kind": "workspace_paths"}}]});
+        assert!(normalize_model_verification_plan(&missing_paths)
+            .unwrap_err()
+            .contains("relative_paths"));
+        let manual_with_paths = json!({"requirements": [{"validator_id": "single-human-acceptance-v1", "arguments": {}, "scope": {"kind": "manual", "relative_paths": ["README.md"]}}]});
+        assert!(normalize_model_verification_plan(&manual_with_paths)
+            .unwrap_err()
+            .contains("manual scope"));
+    }
+
+    #[test]
+    fn generic_model_schema_defers_validator_specific_arguments_to_host_contract() {
+        let schema = verification_plan_input_schema();
+        let requirement_schema =
+            &schema["properties"]["plan"]["properties"]["requirements"]["items"];
+        let make_requirement = |validator: &str, arguments: Value| {
+            json!({
+                "requirement_id": "r1",
+                "covers_requirement_ids": ["user-request:must work"],
+                "validator_id": validator,
+                "arguments": arguments,
+                "validator_version": "1",
+                "scope": {"kind":"workspace_paths","relative_paths":["README.md"]},
+                "required": true,
+                "resources": {
+                    "cpu_slots": 1,
+                    "memory_mb": 32,
+                    "exclusive_workspace": false,
+                    "timeout_ms": 5000
+                }
+            })
+        };
+        assert!(crate::json_schema::validate(
+            &make_requirement("workspace-file-contains-v1", json!({"text":"hello"})),
+            requirement_schema,
+            "requirement"
+        )
+        .is_ok());
+        // Provider-facing schema remains a portable generic function contract.
+        // Validator-specific shapes are enforced by the host's canonical registry.
+        assert!(crate::json_schema::validate(
+            &make_requirement("workspace-command-success-v1", json!({"text":"hello"})),
+            requirement_schema,
+            "requirement"
+        )
+        .is_ok());
+        assert!(crate::json_schema::validate(
+            &make_requirement("workspace-file-contains-v1", json!({})),
+            requirement_schema,
+            "requirement"
+        )
+        .is_ok());
+        assert!(
+            !crate::verification::workspace_validator_arguments_supported(
+                "workspace-command-success-v1",
+                &json!({"text":"hello"})
+            )
+        );
+        assert!(
+            !crate::verification::workspace_validator_arguments_supported(
+                "workspace-file-contains-v1",
+                &json!({})
+            )
+        );
+        assert!(
+            crate::verification::workspace_validator_arguments_supported(
+                "workspace-file-contains-v1",
+                &json!({"text":"hello"})
+            )
+        );
+        assert!(
+            !crate::verification::workspace_validator_arguments_supported(
+                "workspace-file-contains-v1",
+                &json!({"text":"hello","extra":true})
+            )
+        );
+        assert!(
+            !crate::verification::workspace_validator_arguments_supported(
+                "not-registered",
+                &json!({"text":"hello"})
+            )
+        );
     }
 }

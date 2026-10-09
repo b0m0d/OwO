@@ -139,7 +139,7 @@ function providerStatusValue(model, options = {}) {
     configPath: options.configPath || "",
     models: Array.isArray(source.models) ? source.models : [],
     contextWindow: numOrNull(source.context_window),
-    maxOutputTokens: numOrNull(source.max_output_tokens) || 32000,
+    maxOutputTokens: numOrNull(source.max_output_tokens) || supervision.DEFAULT_MODEL_OUTPUT_TOKENS,
     modelOutputTokens: normalizeModelOutputTokens(source.model_output_tokens || {}),
     temperature: numOrNull(source.temperature),
     timeoutSecs: numOrNull(source.timeout_secs),
@@ -160,7 +160,7 @@ function normalizeModelOutputTokens(value) {
   for (const [rawName, rawLimit] of Object.entries(value)) {
     const name = String(rawName).trim();
     const limit = Number(rawLimit);
-    if (name && Number.isInteger(limit) && limit >= 1 && limit <= 32000) normalized[name] = limit;
+    if (name && Number.isInteger(limit) && limit >= 1 && limit <= supervision.MAX_MODEL_OUTPUT_TOKENS) normalized[name] = limit;
   }
   return normalized;
 }
@@ -172,9 +172,9 @@ function applyModelOutputEnv(env, model) {
   delete target.OWO_MODEL_OUTPUT_TOKENS_BY_MODEL;
   const configuredDefault = Number(source.max_output_tokens);
   target.OWO_MODEL_MAX_OUTPUT_TOKENS = String(
-    Number.isInteger(configuredDefault) && configuredDefault >= 1 && configuredDefault <= 32000
+    Number.isInteger(configuredDefault) && configuredDefault >= 1 && configuredDefault <= supervision.MAX_MODEL_OUTPUT_TOKENS
       ? configuredDefault
-      : 32000,
+      : supervision.DEFAULT_MODEL_OUTPUT_TOKENS,
   );
   target.OWO_MODEL_OUTPUT_TOKENS_BY_MODEL = JSON.stringify(normalizeModelOutputTokens(source.model_output_tokens));
   return target;
@@ -270,8 +270,8 @@ function applyModelConfigPatch(config, args) {
       const name = String(rawName).trim();
       if (!name || rawLimit === null || rawLimit === "") continue;
       const limit = Number(rawLimit);
-      if (!Number.isInteger(limit) || limit < 1 || limit > 32000) {
-        return { ok: false, error: `模型 ${name} 的输出上限必须是 1–32000 的整数` };
+      if (!Number.isInteger(limit) || limit < 1 || limit > supervision.MAX_MODEL_OUTPUT_TOKENS) {
+        return { ok: false, error: `模型 ${name} 的输出上限必须是 1–${supervision.MAX_MODEL_OUTPUT_TOKENS.toLocaleString("en-US")} 的整数` };
       }
       normalized[name] = limit;
     }

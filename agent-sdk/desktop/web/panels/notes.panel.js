@@ -10,25 +10,26 @@
       return (
         '<section data-panel="notes" class="owo-notes-root">' +
         '<div class="owo-notes-bar">' +
-        '<input class="owo-notes-search" type="search" aria-label="搜索笔记全文" placeholder="全文搜索…">' +
-        '<button type="button" class="owo-notes-btn owo-notes-btn-new" aria-label="新建笔记">＋ 新建</button>' +
+        '<input class="owo-notes-search" type="search" aria-label="搜索笔记全文" aria-describedby="owo-notes-core-hint" data-core-action placeholder="全文搜索…">' +
+        '<button type="button" class="owo-notes-btn owo-notes-btn-new" data-core-action aria-label="新建笔记">＋ 新建</button>' +
         "</div>" +
+        '<p class="owo-notes-hint" id="owo-notes-core-hint" data-core-action-hint>连接并授权本地核心后可搜索笔记全文和管理笔记。</p>' +
         '<ul class="owo-notes-list"></ul>' +
         '<div class="owo-notes-editor" hidden>' +
         '<input class="owo-notes-title" type="text" aria-label="笔记标题" placeholder="标题" required>' +
         '<textarea class="owo-notes-md" aria-label="Markdown 正文" rows="8" placeholder="Markdown 正文"></textarea>' +
         '<div class="owo-notes-editor-actions">' +
-        '<button type="button" class="owo-notes-btn owo-notes-btn-save">保存</button>' +
+        '<button type="button" class="owo-notes-btn owo-notes-btn-save" data-core-action>保存</button>' +
         '<button type="button" class="owo-notes-btn owo-notes-btn-cancel">取消</button>' +
         "</div>" +
         "</div>" +
         '<div class="owo-notes-detail" hidden>' +
         '<div class="owo-notes-detail-head"><h3 class="owo-notes-detail-title"></h3>' +
-        '<button type="button" class="owo-notes-btn owo-notes-btn-rename">修改标题</button></div>' +
+        '<button type="button" class="owo-notes-btn owo-notes-btn-rename" data-core-action>修改标题</button></div>' +
         '<div class="owo-notes-detail-actions">' +
         '<button type="button" class="owo-notes-btn owo-notes-btn-export-md">导出 MD</button>' +
         '<button type="button" class="owo-notes-btn owo-notes-btn-export-html">导出 HTML</button>' +
-        '<button type="button" class="owo-notes-btn owo-notes-btn-del">删除</button>' +
+        '<button type="button" class="owo-notes-btn owo-notes-btn-del" data-core-action>删除</button>' +
         "</div>" +
         '<div class="owo-notes-detail-meta">' +
         '<span class="owo-notes-meta-item" id="owo-notes-detail-count"></span>' +
@@ -48,6 +49,7 @@
       this.editorGeneration = 0;
       this.root = root;
       root.innerHTML = this.nav();
+      this.setSaveBusy(root, !!this.saveInFlight);
       this.helpers = helpers || {};
       this.baseUrl = this.helpers.baseUrl || window.OwoPanels.baseUrl || window.location.origin;
       this.get = this.helpers.get || function (path) {
@@ -122,6 +124,22 @@
       this.styleElement = style;
       this.refresh();
       this.bind();
+    },
+
+    setSaveBusy: function (root, busy, fallbackButton) {
+      var button = root && root.querySelector ? root.querySelector(".owo-notes-btn-save") : null;
+      button = button || fallbackButton;
+      if (!button) return;
+      button.disabled = !!busy;
+      if (busy) {
+        if (!button.dataset.idleText) button.dataset.idleText = button.textContent || "保存";
+        button.setAttribute("aria-busy", "true");
+        button.textContent = "保存中…";
+      } else {
+        button.removeAttribute("aria-busy");
+        button.textContent = button.dataset.idleText || "保存";
+        delete button.dataset.idleText;
+      }
     },
 
     dispose: function () {
@@ -207,16 +225,14 @@
       on(".owo-notes-btn-save", "click", async function () {
         var editor = root.querySelector(".owo-notes-editor");
         var saveButton = root.querySelector(".owo-notes-btn-save");
-        if (saveButton.disabled) return;
+        if (saveButton.disabled || self.saveInFlight) return;
         var title = root.querySelector(".owo-notes-title").value.trim();
         var md = root.querySelector(".owo-notes-md").value;
         if (!title) { self.alert("标题不能为空"); return; }
         var editorGeneration = self.editorGeneration;
         var detailGeneration = self.detailGeneration;
-        saveButton.disabled = true;
-        saveButton.setAttribute("aria-busy", "true");
-        saveButton.dataset.idleText = saveButton.textContent;
-        saveButton.textContent = "保存中…";
+        self.saveInFlight = true;
+        self.setSaveBusy(root, true, saveButton);
         try {
           var created = await self.post("/notes", { title: title, markdown: md });
           if (!self.isCurrent(generation)) return;
@@ -241,12 +257,9 @@
         } catch (e) {
           if (self.isCurrent(generation)) self.alert("创建失败：" + self.friendlyError(e));
         } finally {
-          if (self.isCurrent(generation)) {
-            saveButton.disabled = false;
-            saveButton.removeAttribute("aria-busy");
-            saveButton.textContent = saveButton.dataset.idleText || "保存";
-            delete saveButton.dataset.idleText;
-          }
+          self.saveInFlight = false;
+          // 释放当前挂载页的按钮，即使请求发起后用户切走并重新进入了笔记页。
+          self.setSaveBusy(self.root, false, saveButton);
         }
       });
       on(".owo-notes-btn-cancel", "click", function () {

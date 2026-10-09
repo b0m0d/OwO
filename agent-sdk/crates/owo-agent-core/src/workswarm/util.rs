@@ -133,6 +133,7 @@ fn disable_auto_team(policy: &mut crate::team_benefit::TeamPolicy) {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // 测试模块历史位置靠前；移动会打乱同文件阅读顺序
 mod policy_fallback_tests {
     use super::disable_auto_team;
     use crate::team_benefit::TeamPolicy;

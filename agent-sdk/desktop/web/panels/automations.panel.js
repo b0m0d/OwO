@@ -68,9 +68,10 @@ window.OwoPanels.automations = (function () {
   var taskRefreshGeneration = 0;
   var reminderRefreshGeneration = 0;
   var creatingTask = false;
-  var taskSubmissionGeneration = 0;
+  var activeCreateButton = null;
   var clearingReminders = false;
   var taskToggleBusy = Object.create(null);
+  var taskDeleteBusy = Object.create(null);
   var panelMounted = false;
 
   function el(domId) {
@@ -135,13 +136,15 @@ window.OwoPanels.automations = (function () {
       '<option value="run_prompt">跑只读 Agent 任务</option>' +
       "</select></div>" +
       '<div class="tool-field tool-field-full"><label id="owo-aut-content-label" for="owo-aut-content">提醒内容</label><input id="owo-aut-content" placeholder="到点显示的提醒文案" required><div id="owo-aut-action-hint" class="sub">提醒只会推送到工作台，不会调用模型。</div></div>' +
-      '<div class="tool-actions tool-actions-end tool-field-full"><button type="submit" class="primary">创建任务</button></div>' +
+      '<div class="tool-actions tool-actions-end tool-field-full"><button type="submit" class="primary" data-core-action>创建任务</button></div>' +
       "</form>" +
+      '<p class="sub" data-core-action-hint>连接并授权本地核心后可创建自动化任务。</p>' +
       '<div id="owo-aut-status"></div>' +
       '<div class="sub">任务列表</div>' +
       '<ul id="owo-aut-list" class="list"><li class="sub" role="status">加载中…</li></ul>' +
       '<div class="sub">提醒</div>' +
-      '<div class="tool-actions"><button id="owo-aut-clear">清除提醒</button></div>' +
+      '<div class="tool-actions"><button id="owo-aut-clear" data-core-action>清除提醒</button></div>' +
+      '<p class="sub" data-core-action-hint>连接并授权本地核心后可管理工作台提醒。</p>' +
       '<ul id="owo-aut-reminders" class="list"><li class="sub" role="status">加载中…</li></ul>' +
       "</div>" +
       "</section>"
@@ -326,6 +329,7 @@ window.OwoPanels.automations = (function () {
         " ｜ " + H.esc(describeAction(task.action)) + " ｜ " + (task.enabled ? "启用" : "停用") + "</span>";
 
       var toggleBtn = document.createElement("button");
+      toggleBtn.setAttribute("data-core-action", "true");
       var toggleKey = String(task.id);
       var idleText = task.enabled ? "停用" : "启用";
       setButtonBusy(toggleBtn, !!taskToggleBusy[toggleKey], idleText, "处理中…");
@@ -413,9 +417,14 @@ window.OwoPanels.automations = (function () {
       });
 
       var deleteBtn = document.createElement("button");
-      deleteBtn.textContent = "删除";
+      deleteBtn.setAttribute("data-core-action", "true");
+      var deleteKey = String(task.id);
+      setButtonBusy(deleteBtn, !!taskDeleteBusy[deleteKey], "删除", "处理中…");
       deleteBtn.addEventListener("click", async function (event) {
         event.stopPropagation();
+        if (taskDeleteBusy[deleteKey]) return;
+        taskDeleteBusy[deleteKey] = true;
+        var owner = panelGeneration;
         setButtonBusy(deleteBtn, true, "删除", "等待确认…");
         try {
           var confirmed = await H.confirm({
@@ -425,14 +434,15 @@ window.OwoPanels.automations = (function () {
             kind: "danger",
           });
           if (!confirmed) return;
-          deleteBtn.textContent = "删除中…";
+          setButtonBusy(deleteBtn, true, "删除", "删除中…");
           await H.del("/automations/" + encodeURIComponent(task.id));
-          setStatus("已删除：" + task.name, false);
-          refresh();
+          if (owner === panelGeneration) setStatus("已删除：" + task.name, false);
         } catch (error) {
-          explainActionError("删除自动化", error);
+          if (owner === panelGeneration) explainActionError("删除自动化", error);
         } finally {
+          delete taskDeleteBusy[deleteKey];
           setButtonBusy(deleteBtn, false, "删除");
+          if (panelMounted) refreshTasks();
         }
       });
 
@@ -465,10 +475,10 @@ window.OwoPanels.automations = (function () {
     event.preventDefault();
     if (creatingTask) return;
     creatingTask = true;
-    var submission = ++taskSubmissionGeneration;
     var owner = panelGeneration;
     var form = el("owo-aut-form");
     var submitButton = event.submitter || (form && form.querySelector('button[type="submit"]'));
+    activeCreateButton = submitButton;
     setButtonBusy(submitButton, true, "创建任务", "正在创建…");
     try {
       var name = (el("owo-aut-name").value || "").trim();
@@ -506,10 +516,10 @@ window.OwoPanels.automations = (function () {
         if (owner === panelGeneration) setStatus("创建自动化失败：" + (error && error.message ? error.message : error), true);
       }
     } finally {
-      if (submission === taskSubmissionGeneration) {
-        creatingTask = false;
-        setButtonBusy(submitButton, false, "创建任务");
-      }
+      creatingTask = false;
+      var buttonToRestore = activeCreateButton || submitButton;
+      activeCreateButton = null;
+      setButtonBusy(buttonToRestore, false, "创建任务");
     }
   }
 
@@ -518,8 +528,7 @@ window.OwoPanels.automations = (function () {
     panelGeneration += 1;
     taskRefreshGeneration += 1;
     reminderRefreshGeneration += 1;
-    taskSubmissionGeneration += 1;
-    creatingTask = false;
+    // 创建请求不会因页面切换而取消；保留锁直到原 POST 真正结束，避免重进页面重复创建。
     clearingReminders = false;
   }
 
@@ -528,7 +537,13 @@ window.OwoPanels.automations = (function () {
     if (helpers) H = helpers;
     panelMounted = true;
     root.innerHTML = nav();
-    el("owo-aut-form").addEventListener("submit", createTask);
+    var form = el("owo-aut-form");
+    var submitButton = form && form.querySelector('button[type="submit"]');
+    if (creatingTask) {
+      activeCreateButton = submitButton;
+      setButtonBusy(submitButton, true, "创建任务", "正在创建…");
+    }
+    form.addEventListener("submit", createTask);
     bindListRetry("owo-aut-list", "tasks");
     bindListRetry("owo-aut-reminders", "reminders");
     el("owo-aut-kind").addEventListener("change", syncScheduleFields);

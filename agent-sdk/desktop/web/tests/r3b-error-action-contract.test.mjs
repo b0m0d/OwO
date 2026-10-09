@@ -60,6 +60,13 @@ const CONTRACT = {
   "core/spawn_failed": ["retry_core", "open_diagnostics"],
 };
 
+test("认证握手失败提供重启后台和查看日志入口", () => {
+  assert.deepEqual(
+    presets["core/authentication_failed"].map((action) => action.id),
+    ["retry_core", "open_diagnostics"],
+  );
+});
+
 test("§3.4：错误卡按稳定码渲染契约动作（八个码逐项锁定，不多不少）", () => {
   for (const [code, ids] of Object.entries(CONTRACT)) {
     assert.ok(presets[code], `缺少错误码动作预设：${code}`);

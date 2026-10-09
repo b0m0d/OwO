@@ -119,6 +119,10 @@ pub(super) fn uncovered_source_paths(
 /// Host-generated review binding for the exact ChangeSet lineage and workspace bytes
 /// visible when a reviewer context is assembled. ChangeSet decision status is omitted:
 /// accepting a reviewed change must not invalidate the source snapshot.
+///
+/// Production callers share one batch fence through
+/// [`review_source_snapshot_with_batch`]; this convenience wrapper exists for tests.
+#[cfg(test)]
 pub(super) fn review_source_snapshot(
     team_id: &str,
     step_id: &str,
@@ -251,20 +255,6 @@ pub(super) fn review_source_snapshot_with_batch(
         "changeset_source_consistent": changeset_source_consistent,
         "contains_source_code": paths.iter().any(|path| is_source_code_path(path)),
     })
-}
-
-pub(super) fn workspace_receipt_snapshot_matches_current(
-    workspace_root: Option<&std::path::Path>,
-    subjects: &std::collections::HashMap<String, String>,
-) -> bool {
-    if !subjects
-        .keys()
-        .any(|subject| subject.starts_with("workspace-path:"))
-    {
-        return true;
-    }
-    workspace_root
-        .is_some_and(|root| crate::verification::workspace_subjects_match_current(root, subjects))
 }
 
 pub(super) fn validate_review_artifact_kind(is_reviewer: bool, kind: &str) -> Result<(), String> {
@@ -544,6 +534,68 @@ pub(super) fn collect_attempt_changeset_evidence(
 /// Ensure workspace validation evidence for changed files describes the exact
 /// accepted ChangeSet result snapshot. This prevents a validator run before a
 /// later edit from being reused as proof for different delivered bytes.
+/// 模板角色（verify 只声明 non_empty）的宿主兜底：当前 attempt 是否存在真实、
+/// 成功且覆盖全部已修改源码的行为命令回执。
+///
+/// 与 [`evaluate_workspace_command_receipt`] 的区别：不依赖模型/模板声明的命令文本，
+/// 只信任宿主 `team.command.executed` 事件里由 ToolHost 生成的
+/// `CommandExecutionReceipt`（`validator_id=workspace-command-success-v1`、
+/// `exit_code=0`、工作区哈希完整），并要求回执快照与当前 ChangeSet 的最终源码哈希
+/// 逐一一致——写完源码后必须真的运行过行为命令，且之后不得再改写。
+pub(super) fn attempt_behavior_receipt_evidence(
+    team_id: &str,
+    event_details: &[String],
+    step_id: &str,
+    attempt_id: &str,
+    change_sets: &[owo_agent_protocol::ChangeSet],
+) -> Option<String> {
+    let mut source_hashes = std::collections::BTreeMap::new();
+    for change_set in change_sets.iter().filter(|change_set| {
+        change_set.team_id == team_id
+            && change_set.step_id == step_id
+            && change_set.attempt_id.as_deref() == Some(attempt_id)
+    }) {
+        for file in &change_set.result_hashes {
+            let path = file.path.replace('\\', "/");
+            if is_source_code_path(&path) {
+                source_hashes.insert(path, file.sha256.clone());
+            }
+        }
+        for path in &change_set.changed_files {
+            let path = path.replace('\\', "/");
+            if is_source_code_path(&path) {
+                source_hashes.entry(path).or_insert(None);
+            }
+        }
+    }
+    if source_hashes.is_empty() {
+        return None;
+    }
+    event_details.iter().rev().find_map(|detail| {
+        let event: Value = serde_json::from_str(detail).ok()?;
+        if event.get("step_id").and_then(Value::as_str) != Some(step_id)
+            || event.get("attempt_id").and_then(Value::as_str) != Some(attempt_id)
+        {
+            return None;
+        }
+        let receipt: crate::CommandExecutionReceipt =
+            serde_json::from_value(event.get("receipt")?.clone()).ok()?;
+        if receipt.exit_code != 0
+            || receipt.validator_id.as_deref() != Some("workspace-command-success-v1")
+            || !receipt.workspace_hashes_complete
+        {
+            return None;
+        }
+        let covers = source_hashes.iter().all(|(path, expected)| {
+            receipt
+                .workspace_hashes
+                .get(path)
+                .is_some_and(|actual| actual == expected)
+        });
+        covers.then(|| format!("command-result:sha256:{}", receipt.result_sha256))
+    })
+}
+
 pub(super) fn evaluate_workspace_command_receipt(
     team_id: &str,
     requirement: &crate::plan::VerificationRequirementV1,
@@ -961,5 +1013,117 @@ mod review_requirement_tests {
         assert!(ids.contains("step-a:user-request-quote:0"));
         assert!(ids.contains("step-a:acceptance-checklist:0"));
         assert!(ids.contains("step-a:behavior"));
+    }
+}
+
+#[cfg(test)]
+mod behavior_receipt_tests {
+    use super::*;
+
+    fn change_set() -> owo_agent_protocol::ChangeSet {
+        owo_agent_protocol::ChangeSet {
+            change_set_id: "cs-1".to_string(),
+            team_id: "team-1".to_string(),
+            step_id: "s-implementer".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            role: "implementer".to_string(),
+            base_hashes: Vec::new(),
+            result_hashes: vec![owo_agent_protocol::ChangeSetFileHash {
+                path: "src/calc.py".to_string(),
+                sha256: Some("abc123".to_string()),
+                content_available: true,
+            }],
+            changed_files: vec!["src/calc.py".to_string()],
+            diff_ref: None,
+            status: owo_agent_protocol::ChangeSetStatus::PendingReview,
+            created_at: "2026-10-09T00:00:00Z".to_string(),
+            decision: None,
+            conflicts: Vec::new(),
+        }
+    }
+
+    fn event_detail(exit_code: i32, validator: Option<&str>, complete: bool) -> String {
+        serde_json::json!({
+            "step_id": "s-implementer",
+            "task_id": "s-implementer",
+            "attempt_id": "attempt-1",
+            "receipt": {
+                "command_sha256": "cmd-sha",
+                "exit_code": exit_code,
+                "result_sha256": "result-sha",
+                "workspace_hashes_complete": complete,
+                "validator_id": validator,
+                "validator_version": "1",
+                "workspace_hashes": {"src/calc.py": "abc123"},
+                "workspace_hashes_before": {"src/calc.py": "old-sha"},
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn template_code_change_is_accepted_with_host_behavior_receipt() {
+        let change_sets = vec![change_set()];
+        // 成功 + 注册行为命令 + 快照覆盖最终源码哈希 → 接受并带证据引用。
+        let evidence = attempt_behavior_receipt_evidence(
+            "team-1",
+            &[event_detail(0, Some("workspace-command-success-v1"), true)],
+            "s-implementer",
+            "attempt-1",
+            &change_sets,
+        );
+        assert_eq!(
+            evidence.as_deref(),
+            Some("command-result:sha256:result-sha")
+        );
+    }
+
+    #[test]
+    fn template_code_change_rejects_untrusted_or_stale_receipts() {
+        let change_sets = vec![change_set()];
+        for detail in [
+            // 非零退出码。
+            event_detail(1, Some("workspace-command-success-v1"), true),
+            // 未注册行为命令（普通命令不算行为证据）。
+            event_detail(0, None, true),
+            // 快照不完整。
+            event_detail(0, Some("workspace-command-success-v1"), false),
+        ] {
+            assert!(
+                attempt_behavior_receipt_evidence(
+                    "team-1",
+                    &[detail],
+                    "s-implementer",
+                    "attempt-1",
+                    &change_sets,
+                )
+                .is_none(),
+                "不可信回执不得作为行为证据"
+            );
+        }
+        // 命令执行后源码又被改写（回执哈希 ≠ 最终 ChangeSet 哈希）→ 不接受。
+        let stale = serde_json::json!({
+            "step_id": "s-implementer",
+            "attempt_id": "attempt-1",
+            "receipt": {
+                "command_sha256": "cmd-sha",
+                "exit_code": 0,
+                "result_sha256": "result-sha",
+                "workspace_hashes_complete": true,
+                "validator_id": "workspace-command-success-v1",
+                "validator_version": "1",
+                "workspace_hashes": {"src/calc.py": "older-sha"},
+                "workspace_hashes_before": {"src/calc.py": "old-sha"},
+            }
+        })
+        .to_string();
+        assert!(attempt_behavior_receipt_evidence(
+            "team-1",
+            &[stale],
+            "s-implementer",
+            "attempt-1",
+            &change_sets,
+        )
+        .is_none());
     }
 }

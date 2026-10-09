@@ -48,7 +48,8 @@ test("runTurn replays durable events after an SSE disconnect and deduplicates by
  const urls: string[] = [];
  const delivered: string[] = [];
  globalThis.fetch = async (input, init) => {
-  const url = String(input); urls.push(url);
+  // openapi-fetch 的 replay 调用传入 Request 对象；URL 需从 Request.url 取。
+  const url = input instanceof Request ? input.url : String(input); urls.push(url);
   if (url.endsWith("/turn")) {
    let sent=false;
    const stream = new ReadableStream<Uint8Array>({

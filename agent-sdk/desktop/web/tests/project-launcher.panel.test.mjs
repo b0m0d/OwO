@@ -292,6 +292,10 @@ test("catalogHtml：候选徽标/安装按钮/选用按钮/角色与预算行", 
   ];
   const html = T.catalogHtml(catalog, {});
   assert.match(html, /data-pl-install="structured-extract-v1"/);
+  assert.match(html, /data-pl-install="structured-extract-v1"[^>]*data-core-action|data-core-action[^>]*data-pl-install="structured-extract-v1"/);
+  const busyHtml = T.catalogHtml(catalog, { "structured-extract-v1": true });
+  assert.match(busyHtml, /data-core-busy="true"[^>]*data-pl-install="structured-extract-v1"[^>]*disabled/);
+  assert.match(T.viewHtml(), /id="pl-create"[^>]*data-core-action/);
   assert.match(html, /data-pl-select="code-change-v1"/);
   assert.match(html, /已安装/);
   assert.match(html, /预算 10 次/);
@@ -403,6 +407,35 @@ test("doCreate：服务端 400 错误进入友好错误且解锁", async () => {
   assert.equal(T.state.creating, false);
 });
 
+test("doCreate：当前页面创建成功后自动打开团队详情", async () => {
+  resetState();
+  const clicks = [];
+  let opened = null;
+  globalThis.document = {
+    querySelector: (selector) => selector === '#panelNav button[data-panel="workswarm"]'
+      ? { click: () => clicks.push("nav") }
+      : null,
+  };
+  const panels = globalThis.OwoPanels;
+  const previousWorkswarm = panels.workswarm;
+  panels.workswarm = { open: (id) => { opened = id; } };
+  T.setRoot({ querySelector() { return null; } });
+  T.setTransport({
+    get() { return Promise.resolve({ catalog: [] }); },
+    post() { return Promise.resolve({ team_id: "team-created" }); },
+  });
+  T.state.objective = "创建并执行项目任务";
+  T.state.root = "C:\demo";
+  T.doCreate();
+  await drain();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(clicks, ["nav"]);
+  assert.equal(opened, "team-created");
+  delete globalThis.document;
+  if (previousWorkswarm === undefined) delete panels.workswarm;
+  else panels.workswarm = previousWorkswarm;
+});
+
 test("gotoTeam：切导航按钮并调 workswarm.open(team_id)", async () => {
   // 最小 document/OwoPanels shim
   const clicks = [];
@@ -433,7 +466,11 @@ test("viewHtml：七步骨架 + 错误区 aria-live + 预览区在场", () => {
   assert.match(html, /id="pl-strategy"/);
   assert.match(html, /id="pl-template"/);
   assert.match(html, /id="pl-preview"/);
-  assert.match(html, /id="pl-create" class="primary"/);
+  assert.match(html, /id="pl-create"[^>]*class="primary"/);
+  assert.match(html, /id="pl-create"[^>]*data-core-action/);
+  T.state.creating = true;
+  const busyHtml = T.viewHtml();
+  assert.match(busyHtml, /id="pl-create"[^>]*data-core-busy="true"[^>]*disabled[^>]*aria-busy="true"/);
   assert.match(html, /id="pl-errors" aria-live="polite"/);
   assert.match(html, /id="pl-catalog"/);
   assert.match(html, /id="pl-result"/);

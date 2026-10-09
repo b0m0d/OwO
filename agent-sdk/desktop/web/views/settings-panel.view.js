@@ -52,6 +52,18 @@
     return document.getElementById(id);
   }
 
+  function markCoreAction(button) {
+    var gate = global.OwoCoreActionAvailability;
+    if (gate && typeof gate.mark === "function") gate.mark(button);
+  }
+
+  function setCoreBusy(button, busy) {
+    if (!button) return;
+    var gate = global.OwoCoreActionAvailability;
+    if (gate && typeof gate.setBusy === "function") gate.setBusy(button, busy);
+    else button.disabled = !!busy;
+  }
+
   function renderPresets() {
     var root = $("modelPresets");
     if (!root) return;
@@ -383,7 +395,7 @@
       setHint("测试连接暂不可用（API 客户端未就绪）", false);
       return;
     }
-    if (button) button.disabled = true;
+    setCoreBusy(button, true);
     setHint("正在测试连接…", true);
     api.post("/settings/provider-test", {}).then(function (result) {
       setHint("测试结果：" + ((result && result.code) || "unknown") +
@@ -393,7 +405,7 @@
     }).catch(function (error) {
       setHint("测试连接失败：" + String((error && error.message) || error), false);
     }).finally(function () {
-      if (button) button.disabled = false;
+      setCoreBusy(button, false);
     });
   }
 
@@ -457,7 +469,7 @@
       return Promise.resolve(false);
     }
     var button = $("sessionModelApplyBtn");
-    if (button) button.disabled = true;
+    setCoreBusy(button, true);
     // 空字符串 = 清除 override（回到默认模型），后端 set_model_override 支持 None 语义。
     return Promise.resolve(api.post("/session/" + encodeURIComponent(sessionId) + "/model", { model: model }))
       .then(function () {
@@ -471,7 +483,7 @@
         return false;
       })
       .finally(function () {
-        if (button) button.disabled = false;
+        setCoreBusy(button, false);
       });
   }
 
@@ -484,6 +496,7 @@
     var applyButton = $("modelApplyBtn");
     if (applyButton) applyButton.addEventListener("click", apply);
     var testButton = $("modelTestBtn");
+    markCoreAction(testButton);
     if (testButton) testButton.addEventListener("click", testConnection);
     var reloadButton = $("modelReloadBtn");
     if (reloadButton) reloadButton.addEventListener("click", reloadFromFile);
@@ -503,12 +516,14 @@
       });
     }
     var sessionApply = $("sessionModelApplyBtn");
+    markCoreAction(sessionApply);
     if (sessionApply) {
       sessionApply.addEventListener("click", function () {
         applySessionModel($("sessionModelName").value.trim());
       });
     }
     var sessionClear = $("sessionModelClearBtn");
+    markCoreAction(sessionClear);
     if (sessionClear) {
       sessionClear.addEventListener("click", function () {
         applySessionModel("");
