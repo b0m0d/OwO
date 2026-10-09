@@ -17,7 +17,9 @@ pub(super) fn stores(
 }
 
 pub(super) fn store_for(data_root: &Path) -> Arc<tokio::sync::Mutex<NoteStore>> {
-    let mut map = stores().lock().unwrap();
+    let mut map = stores()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     map.entry(data_root.to_path_buf())
         .or_insert_with(|| {
             Arc::new(tokio::sync::Mutex::new(NoteStore::new(

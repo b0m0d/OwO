@@ -104,7 +104,9 @@ impl TeamStore {
 }
 
 fn store_for(data_root: &std::path::Path) -> Arc<Mutex<TeamStore>> {
-    let mut map = team_stores().lock().unwrap();
+    let mut map = team_stores()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     map.entry(data_root.to_path_buf())
         .or_insert_with(|| Arc::new(Mutex::new(TeamStore::new(data_root))))
         .clone()
