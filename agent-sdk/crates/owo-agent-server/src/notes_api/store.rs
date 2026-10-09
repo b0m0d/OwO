@@ -87,7 +87,17 @@ impl NoteStore {
 
     pub(super) fn write_index(&self, list: &[Value]) -> Result<(), String> {
         let content = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
-        std::fs::write(self.root.join("index.json"), content).map_err(|e| e.to_string())
+        // 原子写（tmp → rename）：崩溃不会留下半截 index.json（损坏虽可重建，
+        // 但会丢失排序与额外字段，且重建期间并发读会看到空索引）。
+        let path = self.root.join("index.json");
+        let tmp = self
+            .root
+            .join(format!(".index.json.tmp-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, content).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &path).map_err(|error| {
+            let _ = std::fs::remove_file(&tmp);
+            error.to_string()
+        })
     }
 
     pub(super) fn load(&self, id: &str) -> Result<NoteDoc, String> {
