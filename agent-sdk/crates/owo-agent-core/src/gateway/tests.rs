@@ -225,6 +225,57 @@ async fn reasoning_only_max_tokens_is_retried_with_boosted_budget_and_low_effort
 }
 
 #[tokio::test]
+async fn non_stream_length_finish_is_rejected_instead_of_returning_truncated_text() {
+    let _env_guard = ENV_LOCK.lock().await;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request)
+            .await
+            .unwrap();
+        let payload = json!({
+            "id": "truncated-id",
+            "model": "served-model",
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": "{\"partial\":"}
+            }],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
+            .await
+            .unwrap();
+    });
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: format!("http://{address}/v1"),
+        api_key: "test-only".to_string(),
+        model: "configured-model".to_string(),
+        cloud_enabled: false,
+    })
+    .unwrap();
+    let error = provider
+        .complete_with_model(
+            Some("requested-model"),
+            &[ChatMessage::user("hi".into())],
+            &[],
+        )
+        .await
+        .expect_err("finish_reason=length 的非流式响应必须报错，而不是返回截断文本");
+    assert!(error.contains("max_tokens"), "{error}");
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn resilient_provider_preserves_non_stream_request_metadata() {
     let provider = ResilientProvider::new(
         Arc::new(ObservedGatewayTestProvider),

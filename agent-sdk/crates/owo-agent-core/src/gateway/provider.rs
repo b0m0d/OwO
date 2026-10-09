@@ -555,6 +555,15 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let message = payload
             .pointer("/choices/0/message")
             .ok_or_else(|| "响应缺少 choices[0].message".to_string())?;
+        // 非流式同样要拒绝截断输出：finish_reason=length 时 content/tool_calls 都可能是
+        // 半截内容，静默当最终答案会把"被截断的 JSON/补丁"带进后续流程。
+        if payload
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            == Some("length")
+        {
+            return Err("模型输出达到 max_tokens 上限（finish_reason=length），请提高 OWO_MODEL_MAX_OUTPUT_TOKENS 或缩小单次任务".to_string());
+        }
         let content = message
             .get("content")
             .and_then(Value::as_str)
