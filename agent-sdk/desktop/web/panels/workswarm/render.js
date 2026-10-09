@@ -29,6 +29,22 @@
   if (!convo && typeof require !== "undefined") convo = require("./render_conversation.js");
   if (!convo) throw new Error("WorkSwarm conversation render helpers 未加载");
 
+  var changesMod = win.OwoWorkswarmRenderChanges;
+  if (!changesMod && typeof require !== "undefined") changesMod = require("./render_changes.js");
+  if (!changesMod) throw new Error("WorkSwarm changes render helpers 未加载");
+
+  /// 变更域渲染上下文：esc 为可绑定实现，fmt/reviewBadgeHtml/中文映射表来自本模块。
+  function changesCtx() {
+    return {
+      esc: esc,
+      fmt: fmt,
+      reviewBadgeHtml: reviewBadgeHtml,
+      CHG_STATE_CN: CHG_STATE_CN,
+      CHG_STATE_CLS: CHG_STATE_CLS,
+      CS_STATUS_CN: CS_STATUS_CN,
+    };
+  }
+
   // ---------- esc / short（面板注入；回退实现与面板一致） ----------
   function defaultEsc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -444,179 +460,44 @@
       );
     }
 
-    // —— 自面板迁入：changeStateBadge ——
+    // —— 自面板迁入：changeStateBadge（实现见 render_changes.js） ——
     function changeStateBadge(stateKey) {
-      var k = String(stateKey || "").toLowerCase();
-      return '<span class="owo-ws-badge ' + (CHG_STATE_CLS[k] || "") + '">' + esc(CHG_STATE_CN[k] || k || "—") + "</span>";
+      return changesMod.changeStateBadge(changesCtx(), stateKey);
     }
 
-    // —— 自面板迁入：changesListHtml ——
+    // —— 自面板迁入：changesListHtml（实现见 render_changes.js） ——
     function changesListHtml(changes) {
-      var list = (changes || []).filter(function (c) {
-        return c && typeof c === "object";
-      });
-      if (!list.length) {
-        return '<div class="hint">暂无文件变更（可写 Worker 执行前后采集 Git status/diff；只读任务无变更）。</div>';
-      }
-      var head = '<div class="hint">共 ' + list.length + " 个文件变更</div>";
-      var rows = list
-        .map(function (c) {
-          var delta =
-            c.added_lines == null && c.deleted_lines == null
-              ? ""
-              : '<span class="hint">+' + esc(String(c.added_lines == null ? 0 : c.added_lines)) + " / -" + esc(String(c.deleted_lines == null ? 0 : c.deleted_lines)) + "</span>";
-          var diff =
-            c.diff == null || c.diff === ""
-              ? ""
-              : '<details class="owo-ws-chg-diff"><summary>diff 预览</summary><pre class="owo-ws-diff">' + esc(String(c.diff)) + "</pre></details>";
-          return (
-            '<div class="owo-ws-chg-row">' +
-            changeStateBadge(c.state) +
-            "<b>" + esc(c.path || "—") + "</b>" +
-            delta +
-            "</div>" +
-            diff
-          );
-        })
-        .join("");
-      return head + '<div class="owo-ws-chg-list">' + rows + "</div>";
+      return changesMod.changesListHtml(changesCtx(), changes);
     }
 
-    // —— 自面板迁入：changesRemoteView ——
+    // —— 自面板迁入：changesRemoteView（实现见 render_changes.js） ——
     function changesRemoteView(payload) {
-      var p = payload && typeof payload === "object" ? payload : {};
-      var records = (Array.isArray(p.records) ? p.records : []).map(function (r) {
-        var rec = r && typeof r === "object" ? r : {};
-        return {
-          role: String(rec.role || "—"),
-          step: String(rec.step || "unknown"),
-          at: rec.at == null ? null : Number(rec.at),
-          git: !!rec.git,
-          changed_files: Array.isArray(rec.changed_files) ? rec.changed_files.map(String) : [],
-          diff_summary: String(rec.diff_summary || ""),
-          diff_ref: rec.diff_ref == null ? null : String(rec.diff_ref),
-          violation: rec.violation == null ? null : String(rec.violation),
-        };
-      });
-      return {
-        team_id: p.team_id == null ? "" : String(p.team_id),
-        git: !!p.git,
-        changed_files: Array.isArray(p.changed_files) ? p.changed_files.map(String) : [],
-        diff_summary: String(p.diff_summary || ""),
-        has_violation: !!p.has_violation,
-        records: records,
-      };
+      return changesMod.changesRemoteView(payload);
     }
 
-    // —— 自面板迁入：changeRecordsHtml ——
+    // —— 自面板迁入：changeRecordsHtml（实现见 render_changes.js） ——
     function changeRecordsHtml(records) {
-      var list = records || [];
-      if (!list.length) return "";
-      var rows = list
-        .map(function (r) {
-          var badge = r.violation
-            ? '<span class="owo-ws-badge rv-bad" title="' + esc(r.violation) + '">越界</span>'
-            : '<span class="owo-ws-badge rv-ok">通过</span>';
-          var files = r.changed_files.length
-            ? '<div class="hint">' + r.changed_files.map(esc).join("、") + "</div>"
-            : '<div class="hint">（本窗口无新增变更文件）</div>';
-          var diff = r.diff_summary
-            ? '<pre class="owo-ws-diff">' + esc(r.diff_summary) + "</pre>"
-            : "";
-          return (
-            '<div class="owo-ws-chg-row">' +
-            badge +
-            "<b>" + esc(r.role) + "</b>" +
-            '<span class="hint">步骤 ' + esc(r.step) + (r.at ? " · " + esc(fmtAbsTime(r.at)) : "") + (r.diff_ref ? " · patch " + esc(r.diff_ref) : "") + "</span>" +
-            "</div>" +
-            files +
-            diff
-          );
-        })
-        .join("");
-      return '<div class="owo-ws-chg-list">' + rows + "</div>";
+      return changesMod.changeRecordsHtml(changesCtx(), records);
     }
 
-    // —— 自面板迁入：changesRuntimeHtml ——
+    // —— 自面板迁入：changesRuntimeHtml（实现见 render_changes.js） ——
     function changesRuntimeHtml(remote, detailChanges) {
-      var parts = [];
-      var r = remote && typeof remote === "object" ? remote : null;
-      if (r && (r.records.length || r.has_violation || r.diff_summary)) {
-        if (r.has_violation) {
-          parts.push(
-            '<div class="owo-pl-failures"><div class="hint err">⚠ 存在白名单越界写记录（scope_violation）：越界变更不会被登记为成功产物，请核对写角色行为。</div></div>'
-          );
-        }
-        if (r.diff_summary) {
-          parts.push('<div class="hint">最近 diff 摘要（git diff --stat）：</div><pre class="owo-ws-diff">' + esc(r.diff_summary) + "</pre>");
-        }
-        parts.push(changeRecordsHtml(r.records));
-      }
-      var files = detailChanges || [];
-      if (files.length) parts.push(changesListHtml(files));
-      if (!parts.length) return changesListHtml([]);
-      return parts.join("");
+      return changesMod.changesRuntimeHtml(changesCtx(), remote, detailChanges);
     }
 
-    // —— 自面板迁入：changeSetBadge ——
+    // —— 自面板迁入：changeSetBadge（实现见 render_changes.js） ——
     function changeSetBadge(status) {
-      var st = normCsStatus(status);
-      var cls =
-        st === "accepted"
-          ? "rv-ok"
-          : st === "conflicted"
-            ? "rv-bad"
-            : st === "pending_review"
-              ? "rv-warn"
-              : "";
-      return '<span class="owo-ws-badge ' + cls + '">' + esc(CS_STATUS_CN[st] || st || "未知") + "</span>";
+      return changesMod.changeSetBadge(changesCtx(), status);
     }
 
-    // —— 自面板迁入：deliveryManifestText ——
+    // —— 自面板迁入：deliveryManifestText（实现见 render_changes.js） ——
     function deliveryManifestText(d) {
-      var payload = d && typeof d === "object" ? d : {};
-      var all = Array.isArray(payload.manifest) ? payload.manifest : [];
-      var items = all.filter(function (m) {
-        return m && typeof m === "object";
-      });
-      var lines = [
-        "project_id: " + String(payload.project_id || "—"),
-        "generated_at: " + String(payload.generated_at || "—"),
-        "artifacts: " + items.length,
-        "",
-      ];
-      items.forEach(function (m) {
-        lines.push(
-          "- " + String(m.artifact_id || "?") +
-            "  " + String(m.kind || "?") + "/" + String(m.format || "?") +
-            "  v" + String(m.version == null ? "?" : m.version) +
-            "  sha256:" + String(m.sha256 || "—") +
-            "  " + String(m.size_bytes == null ? "?" : m.size_bytes) + "B" +
-            "  " + (m.approved ? "已批准" : "未批准") +
-            "  " + String(m.content_url || "")
-        );
-      });
-      return lines.join("\n");
+      return changesMod.deliveryManifestText(d);
     }
 
-    // —— 自面板迁入：artifactHistoryHtml ——
+    // —— 自面板迁入：artifactHistoryHtml（实现见 render_changes.js） ——
     function artifactHistoryHtml(records) {
-      if (!records || !records.length) return '<div class="hint">暂无评审记录</div>';
-      return records
-        .map(function (r) {
-          var dec = String((r && r.decision) || "");
-          var cn = { approve: "批准", request_changes: "要求修改", reject: "驳回" }[dec] || dec;
-          var rid = r && (r.review_id || r.id) ? String(r.review_id || r.id) : "";
-          return (
-            '<div class="owo-ws-review-rec"' + (rid ? ' data-review-id="' + esc(rid) + '" data-review-decision="' + esc(dec) + '"' : "") + ">" +
-            reviewBadgeHtml(dec === "approve" ? "approved" : dec === "request_changes" ? "changes_requested" : "rejected") +
-            "<b>" + esc(r.reviewer || "—") + "</b>" +
-            '<span class="owo-ws-ellip" title="' + esc(r.comment || "") + '">' + esc(r.comment || "（无评语）") + "</span>" +
-            '<span class="hint">' + esc(r.created_at || "") + "</span>" +
-            "</div>"
-          );
-        })
-        .join("");
+      return changesMod.artifactHistoryHtml(changesCtx(), records);
     }
   // ---------- DAG / 实时进度渲染（第三轮自面板迁入） ----------
 
