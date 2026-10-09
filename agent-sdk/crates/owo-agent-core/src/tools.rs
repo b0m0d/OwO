@@ -562,6 +562,7 @@ mod tests {
         align_new_lines, apply_hunks, match_edit_fragment, parse_patch, path_in_whitelist,
         write_file_body, PatchHunk, PatchOp,
     };
+    use super::workspace_read::fallback_search_files;
     use super::*;
 
     fn sample_single_plan(validator_id: &str, arguments: Value) -> crate::plan::VerificationPlanV1 {
@@ -1612,6 +1613,30 @@ mod tests {
         // 精确命中保持原样；完全不存在仍为 0。
         assert_eq!(match_edit_fragment(original, "beta\r\ngamma").1, 1);
         assert_eq!(match_edit_fragment(original, "not-there").1, 0);
+    }
+
+    #[test]
+    fn fallback_search_files_matches_names_case_insensitively_and_skips_noise_dirs() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-fallback-search-{}", uuid::Uuid::new_v4()));
+        for dir in ["a", ".git", "node_modules", "target"] {
+            std::fs::create_dir_all(workspace.join(dir)).unwrap();
+        }
+        std::fs::write(workspace.join("a").join("Note.md"), "x").unwrap();
+        std::fs::write(workspace.join("b_notes.txt"), "x").unwrap();
+        std::fs::write(workspace.join(".git").join("notes.md"), "x").unwrap();
+        std::fs::write(workspace.join("node_modules").join("notes.js"), "x").unwrap();
+        std::fs::write(workspace.join("target").join("notes.rs"), "x").unwrap();
+
+        let mut matches = fallback_search_files(&workspace, "note");
+        matches.sort();
+        assert_eq!(
+            matches,
+            vec!["a/Note.md".to_string(), "b_notes.txt".to_string()],
+            "兜底搜索应大小写不敏感且跳过 .git/node_modules/target"
+        );
+        assert!(fallback_search_files(&workspace, "zzz-not-there").is_empty());
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
