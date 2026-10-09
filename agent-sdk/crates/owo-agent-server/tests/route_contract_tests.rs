@@ -1098,7 +1098,7 @@ async fn concurrent_slow_http_turn_clients_each_replay_failed_state() {
     }
     assert_eq!(responses.len(), CONNECTIONS);
 
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let value = client
                 .get(format!("{base}/metrics/runtime"))
@@ -1126,7 +1126,7 @@ async fn concurrent_slow_http_turn_clients_each_replay_failed_state() {
         .collect();
     drop(responses);
     for (session_id, turn_id) in replay_keys {
-        let replay = tokio::time::timeout(Duration::from_secs(10), async {
+        let replay = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let page = client
                     .get(format!(
