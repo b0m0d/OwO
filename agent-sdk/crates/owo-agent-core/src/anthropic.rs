@@ -435,6 +435,11 @@ fn parse_response_content(payload: &Value, tools: &[ToolSpec]) -> Result<ModelOu
 }
 
 /// 流式状态：正文 / 思考 / tool_use 块累积。
+/// Anthropic 流式缓冲上限：异常端点可无界推送增量，超出即标记并在产出时显式报错。
+const MAX_ANTHROPIC_TEXT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ANTHROPIC_REASONING_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ANTHROPIC_TOOL_ARGUMENT_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Default)]
 struct AnthStreamState {
     content: String,
@@ -442,6 +447,7 @@ struct AnthStreamState {
     /// index → (tool_use_id, name, arguments json 累积)。
     tool_blocks: HashMap<u64, (String, String, String)>,
     usage: Option<Value>,
+    truncated: bool,
 }
 
 impl AnthStreamState {
@@ -480,23 +486,34 @@ impl AnthStreamState {
                 match delta.get("type").and_then(Value::as_str)? {
                     "text_delta" => {
                         let piece = delta.get("text").and_then(Value::as_str)?;
+                        if self.content.len() + piece.len() > MAX_ANTHROPIC_TEXT_BYTES {
+                            self.truncated = true;
+                            return None;
+                        }
                         self.content.push_str(piece);
                         Some((Some(piece.to_string()), None))
                     }
                     "thinking_delta" => {
                         let piece = delta.get("thinking").and_then(Value::as_str)?;
+                        if self.reasoning.len() + piece.len() > MAX_ANTHROPIC_REASONING_BYTES {
+                            self.truncated = true;
+                            return None;
+                        }
                         self.reasoning.push_str(piece);
                         Some((None, Some(piece.to_string())))
                     }
                     "input_json_delta" => {
                         let index = value.get("index").and_then(Value::as_u64)?;
                         if let Some(entry) = self.tool_blocks.get_mut(&index) {
-                            entry.2.push_str(
-                                delta
-                                    .get("partial_json")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default(),
-                            );
+                            let partial = delta
+                                .get("partial_json")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            if entry.2.len() + partial.len() > MAX_ANTHROPIC_TOOL_ARGUMENT_BYTES {
+                                self.truncated = true;
+                            } else {
+                                entry.2.push_str(partial);
+                            }
                         }
                         None
                     }
@@ -521,6 +538,9 @@ impl AnthStreamState {
     }
 
     fn into_output(mut self, tools: &[ToolSpec]) -> Result<ModelOutput, String> {
+        if self.truncated {
+            return Err("Anthropic 流式响应超过缓冲上限，已拒绝解析".to_string());
+        }
         // tool_use 块按 index 排序输出。
         if !self.tool_blocks.is_empty() {
             let mut calls: Vec<(u64, ToolCall)> = self
@@ -838,6 +858,23 @@ mod tests {
             }
             other => panic!("应为 ToolCalls：{other:?}"),
         }
+    }
+
+    #[test]
+    fn oversized_anthropic_tool_arguments_are_rejected() {
+        let mut state = AnthStreamState::default();
+        state.feed(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_big","name":"write_file"}}"#);
+        let payload = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "x".repeat(5 * 1024 * 1024)}
+        })
+        .to_string();
+        state.feed(&payload);
+        let error = state
+            .into_output(&crate::tools::ToolRegistry::new().specs())
+            .unwrap_err();
+        assert!(error.contains("缓冲上限"), "{error}");
     }
 
     #[test]
