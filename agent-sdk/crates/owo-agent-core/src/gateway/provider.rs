@@ -527,10 +527,26 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .find_map(|name| response.headers().get(*name))
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let payload: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("模型响应解析失败：{e}"))?;
+        // 非流式响应也设硬上限：异常端点/代理返回超大 body 时不能整块读进内存。
+        let max_bytes = max_non_stream_response_bytes();
+        let mut bytes: Vec<u8> = Vec::with_capacity(64 * 1024);
+        let mut oversized = false;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("读取模型响应失败：{e}"))?;
+            if bytes.len() + chunk.len() > max_bytes {
+                oversized = true;
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if oversized {
+            return Err(format!(
+                "模型响应超过上限（{max_bytes} bytes），已拒绝解析；可用 OWO_MODEL_MAX_RESPONSE_BYTES 调整"
+            ));
+        }
+        let payload: Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("模型响应解析失败：{e}"))?;
         let usage_value = payload.get("usage");
         self.record_usage(usage_value.unwrap_or(&Value::Null));
         let usage = usage_value
@@ -670,6 +686,16 @@ fn model_request_timeout() -> Duration {
 
 fn model_stream_idle_timeout() -> Duration {
     duration_from_env("OWO_MODEL_STREAM_IDLE_TIMEOUT_SECS", 60)
+}
+
+/// 非流式模型响应体的硬上限（异常端点/本地代理可能返回超大 body）。
+/// 可用 `OWO_MODEL_MAX_RESPONSE_BYTES` 覆盖（1KB..=64MB），默认 16MB。
+fn max_non_stream_response_bytes() -> usize {
+    std::env::var("OWO_MODEL_MAX_RESPONSE_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (1024..=64 * 1024 * 1024).contains(value))
+        .unwrap_or(16 * 1024 * 1024)
 }
 
 impl OpenAiCompatibleProvider {
