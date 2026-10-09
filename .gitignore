@@ -97,3 +97,15 @@ tmp_path_keys.txt
 # 本机工作台记忆与验收产物：属于本机状态（含调试截图、会话记忆），不入库。
 /.workbuddy/
 /deliverables/
+
+# ==== Tauri 壳本地产物与签名密钥（2026-10；签名私钥/口令/构建产物永不入库） ====
+# `.secrets/` 含更新签名私钥与口令，`.pass` 为明文口令；`binaries/` 为 staged sidecar
+# 可执行体（*.exe 已被上面的规则覆盖，但目录级忽略更稳），`gen/` 为 Tauri 生成的
+# schema，`target/` 为 Rust 构建产物。以上均可由源码/密钥持有者再生，禁止入库。
+/agent-sdk/desktop/tauri/src-tauri/.secrets/
+/agent-sdk/desktop/tauri/src-tauri/binaries/
+/agent-sdk/desktop/tauri/src-tauri/gen/
+/agent-sdk/desktop/tauri/src-tauri/target/
+/agent-sdk/desktop/tauri/node_modules/
+# QA 截图产物（浏览器/Electron 自检生成，可再生）
+/agent-sdk/desktop/web/.qa-*.png
