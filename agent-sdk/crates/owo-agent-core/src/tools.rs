@@ -558,6 +558,7 @@ use interaction::{AskUserTool, UseSkillTool};
 #[cfg(test)]
 mod tests {
     use super::verification_tool::validate_single_request_coverage;
+    use super::web::append_capped;
     use super::workspace_edit::{
         align_new_lines, apply_hunks, match_edit_fragment, parse_patch, path_in_whitelist,
         write_file_body, PatchHunk, PatchOp,
@@ -1637,6 +1638,20 @@ mod tests {
         );
         assert!(fallback_search_files(&workspace, "zzz-not-there").is_empty());
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn web_fetch_byte_cap_never_exceeds_the_limit() {
+        let mut buffer = Vec::new();
+        assert!(append_capped(&mut buffer, b"12345", 4));
+        assert_eq!(buffer, b"1234");
+        assert!(append_capped(&mut buffer, b"6", 4));
+        assert_eq!(buffer, b"1234");
+
+        let mut exact = Vec::new();
+        assert!(!append_capped(&mut exact, b"abc", 3));
+        assert_eq!(exact, b"abc");
+        assert!(append_capped(&mut exact, b"d", 3));
     }
 
     #[test]
