@@ -133,7 +133,21 @@ pub(super) fn validate_single_request_coverage(
             }
         }
     }
-    crate::request_requirements::validate_exact_user_request_quotes(&quotes, request)?;
+    crate::request_requirements::validate_exact_user_request_quotes(&quotes, request).map_err(
+        |error| {
+            // 真实模型实测：模型常引用自己改写的句子而被拒，反复重试浪费回合。
+            // 错误里直接给出用户原文的可复制片段，帮助模型一次改对。
+            let suggestion = request
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.chars().take(60).collect::<String>())
+                .unwrap_or_default();
+            format!(
+                "{error}；请逐字复制用户原文中的连续片段（仅允许反引号差异），例如：{suggestion}"
+            )
+        },
+    )?;
     crate::request_requirements::validate_plan_covers_explicit_acceptance(plan, request)?;
     Ok(())
 }
@@ -591,5 +605,35 @@ mod schema_tests {
         assert!(!plan_is_superset(&base, &rewritten));
         // 完全一致（幂等重登记）视为不降低。
         assert!(plan_is_superset(&base, &base));
+    }
+
+    #[test]
+    fn coverage_error_suggests_a_copyable_user_excerpt() {
+        let plan = serde_json::from_value::<crate::plan::VerificationPlanV1>(json!({
+            "plan_id": "p",
+            "requirements": [{
+                "requirement_id": "r",
+                "covers_requirement_ids": ["user-request:并不存在的原文"],
+                "validator_id": "workspace-file-exists-v1",
+                "validator_version": "1",
+                "arguments": {},
+                "required": true,
+                "scope": {"kind": "workspace_paths", "relative_paths": ["README.md"]},
+                "resources": {
+                    "cpu_slots": 1,
+                    "memory_mb": 8,
+                    "exclusive_workspace": false,
+                    "timeout_ms": 1000
+                }
+            }]
+        }))
+        .unwrap();
+        let error =
+            validate_single_request_coverage(&plan, "构建坦克大战：支持本地双人并训练 AI 对手")
+                .unwrap_err();
+        assert!(
+            error.contains("例如：构建坦克大战"),
+            "覆盖率错误应附带可复制的用户原文片段：{error}"
+        );
     }
 }
