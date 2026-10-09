@@ -179,10 +179,11 @@ impl AnthropicProvider {
                 Ok(response) if response.status().is_success() => return Ok(response),
                 Ok(response) => {
                     let status = response.status();
-                    let text = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "无响应体".to_string());
+                    let bytes =
+                        read_body_capped(response, MAX_ANTHROPIC_ERROR_BYTES, "Anthropic 错误响应")
+                            .await
+                            .unwrap_or_default();
+                    let text = String::from_utf8_lossy(&bytes);
                     return Err(format!("Anthropic 返回 {status}：{text}"));
                 }
                 Err(error) => {
@@ -583,6 +584,29 @@ impl AnthStreamState {
     }
 }
 
+/// 非流式响应体上限（异常端点可能返回超大 body）。
+const MAX_ANTHROPIC_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// 错误响应体上限（错误文本只需可读预览）。
+const MAX_ANTHROPIC_ERROR_BYTES: usize = 64 * 1024;
+
+/// 流式读取响应体并在上限处截断。
+async fn read_body_capped(
+    response: reqwest::Response,
+    max: usize,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    let mut bytes: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("{context}读取失败：{e}"))?;
+        if bytes.len() + chunk.len() > max {
+            return Err(format!("{context}超过上限（{} KiB），已拒绝", max / 1024));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
     async fn complete(
@@ -595,10 +619,10 @@ impl ModelProvider for AnthropicProvider {
         }
         let body = build_request_body(&self.config, messages, tools, false);
         let response = self.post_messages(&body, false).await?;
-        let payload: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Anthropic 响应解析失败：{e}"))?;
+        let bytes =
+            read_body_capped(response, MAX_ANTHROPIC_RESPONSE_BYTES, "Anthropic 响应").await?;
+        let payload: Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Anthropic 响应解析失败：{e}"))?;
         if let Some(usage) = payload.get("usage") {
             self.record_usage(usage);
         }
