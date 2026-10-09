@@ -2728,7 +2728,7 @@ mod tests {
     /// 仅字面短语被反引号/ASCII 箭头打断"（rep 2/6/7 的产物内容原样收录）。
     #[test]
     fn contract_change_mapping_checker_tolerates_formatting() {
-        let task_text = include_str!("../../../evals/v1/tasks/code-contract-change.json");
+        let task_text = include_str!("../../../../evals/v1/tasks/code-contract-change.json");
         let task: serde_json::Value =
             serde_json::from_str(task_text).expect("任务 JSON 必须可解析");
         let mapping = task["checkers"]
