@@ -7,6 +7,10 @@ use std::time::Duration;
 const DEFAULT_MODEL_OUTPUT_TOKENS: u64 = 32_000;
 const MAX_MODEL_OUTPUT_TOKENS: u64 = 1_000_000;
 
+/// 内部哨兵：流式结束时 `finish_reason=length` 且只有思考、没有正文/工具调用。
+/// 调用方据此自动提升预算并降低思考档后重试一次；不对外暴露。
+const REASONING_ONLY_LENGTH: &str = "__owo_reasoning_only_length__";
+
 use super::config::*;
 use super::is_local_endpoint;
 use super::message::*;
@@ -323,6 +327,20 @@ impl OpenAiCompatibleProvider {
         tools: &[ToolSpec],
         stream: bool,
     ) -> Value {
+        self.request_body_with_options(model, messages, tools, stream, None, false)
+    }
+
+    /// 请求体构造（带内部重试用的覆盖项）：`max_tokens_override` 用于"仅思考触顶"
+    /// 后翻倍预算；`force_low_reasoning` 用于同时把 glm-5 系列降到最低思考档。
+    fn request_body_with_options(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        stream: bool,
+        max_tokens_override: Option<u64>,
+        force_low_reasoning: bool,
+    ) -> Value {
         let tool_payload: Vec<Value> = tools
             .iter()
             .map(|spec| {
@@ -396,9 +414,18 @@ impl OpenAiCompatibleProvider {
         if stream {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        body["max_tokens"] = Value::from(max_output_tokens_for_model(&effective_model));
-        // 推理档位只在用户显式选择时才下发（默认请求体与旧版完全一致）。
-        if let Some(effort) = reasoning_effort_from_env() {
+        body["max_tokens"] = Value::from(
+            max_tokens_override.unwrap_or_else(|| max_output_tokens_for_model(&effective_model)),
+        );
+        // 推理档位只在用户显式选择时才下发（默认请求体与旧版完全一致）；
+        // 按有效模型归一化，避免把端点不支持的档位发出去直接 400。
+        let effort =
+            if force_low_reasoning && effective_model.to_ascii_lowercase().contains("glm-5") {
+                Some("low".to_string())
+            } else {
+                reasoning_effort_for_model(&effective_model)
+            };
+        if let Some(effort) = effort {
             body["reasoning_effort"] = Value::String(effort);
         }
         body
@@ -406,13 +433,26 @@ impl OpenAiCompatibleProvider {
 }
 
 /// 推理档位（`reasoning_effort`，取优合并自远端 engine）：读运行时环境变量
-/// （设置页保存后即时生效）。只认 minimal/low/medium/high；未设置或取值非法
-/// 则返回 None = 不发送该参数，避免不支持它的 OpenAI 兼容端点因为未知字段 400。
-fn reasoning_effort_from_env() -> Option<String> {
+/// （设置页保存后即时生效），并按有效模型归一化到端点真正接受的取值。
+///
+/// 背景（真实模型实测）：`glm-5.x` 系列「始终思考」，只接受 `low`/`high`/`max`；
+/// 发送 `minimal`/`medium` 会被端点以 400 拒绝（错误码 1210），导致用户一旦在设置
+/// 里选 minimal 就每次请求必失败。这里把设置档位映射到模型支持的档位：
+/// minimal/low → low，medium/high → high。其他 OpenAI 兼容端点保持原值透传；
+/// 未设置或非法取值返回 None = 不发送该参数。
+fn reasoning_effort_for_model(model: &str) -> Option<String> {
     let value = std::env::var("OWO_REASONING_EFFORT")
         .ok()?
         .trim()
         .to_ascii_lowercase();
+    if model.to_ascii_lowercase().contains("glm-5") {
+        return match value.as_str() {
+            "minimal" | "low" => Some("low".to_string()),
+            "medium" | "high" => Some("high".to_string()),
+            "max" => Some("max".to_string()),
+            _ => None,
+        };
+    }
     if matches!(value.as_str(), "minimal" | "low" | "medium" | "high") {
         Some(value)
     } else {
@@ -650,7 +690,50 @@ impl OpenAiCompatibleProvider {
         if let Some(reason) = self.usage_budget_check() {
             return Err(reason);
         }
-        let body = self.request_body(model, messages, tools, true);
+        // 真实模型实测：glm-5.x「始终思考」，复杂任务会把整个输出预算烧在思考上
+        // （finish_reason=length 且正文为空），整轮直接失败。这里检测"仅思考触顶"并
+        // 自动重试一次：输出预算翻倍（封顶 MAX），同时把推理档位降到模型最低档，
+        // 让模型有机会真正产出正文/工具调用。正文未产生，重试不会重复用户可见内容。
+        match self
+            .stream_once(model, messages, tools, on_chunk, None, false)
+            .await
+        {
+            Err(error) if error == REASONING_ONLY_LENGTH => {
+                let base = max_output_tokens_for_model(&self.effective_model(model));
+                let boosted = base.saturating_mul(2).min(MAX_MODEL_OUTPUT_TOKENS);
+                match self
+                    .stream_once(model, messages, tools, on_chunk, Some(boosted), true)
+                    .await
+                {
+                    Err(error) if error == REASONING_ONLY_LENGTH => Err(format!(
+                        "模型输出达到 max_tokens 上限（finish_reason=length，仅思考、无正文/工具调用）；已自动把输出预算提升到 {boosted} 并降低推理档位后仍失败，请提高 OWO_MODEL_MAX_OUTPUT_TOKENS 或缩小单次任务"
+                    )),
+                    other => other,
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// 单次流式请求（含 finish_reason 检查）。仅思考触顶返回内部哨兵错误，
+    /// 由调用方决定是否提升预算重试；正文/工具调用触顶仍按原错误返回。
+    async fn stream_once(
+        &self,
+        model: Option<&str>,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
+        max_tokens_override: Option<u64>,
+        force_low_reasoning: bool,
+    ) -> Result<ObservedModelOutput, String> {
+        let body = self.request_body_with_options(
+            model,
+            messages,
+            tools,
+            true,
+            max_tokens_override,
+            force_low_reasoning,
+        );
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -722,6 +805,11 @@ impl OpenAiCompatibleProvider {
             return Err("模型流式响应为空或不是 SSE 格式".to_string());
         }
         if state.finish_reason.as_deref() == Some("length") {
+            let has_content = !state.content.trim().is_empty();
+            let has_tool_calls = !state.tool_call_accumulators.is_empty();
+            if !has_content && !has_tool_calls {
+                return Err(REASONING_ONLY_LENGTH.to_string());
+            }
             return Err("模型输出达到 max_tokens 上限（finish_reason=length），请提高 OWO_MODEL_MAX_OUTPUT_TOKENS 或缩小单次任务".to_string());
         }
         if !state.saw_done
