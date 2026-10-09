@@ -255,13 +255,27 @@ impl Tool for WebSearchTool {
                         attempts.push(format!("{endpoint} → HTTP {status}"));
                         continue;
                     }
-                    let body = match response.text().await {
-                        Ok(body) => body,
-                        Err(error) => {
-                            attempts.push(format!("{endpoint} → 读取响应失败：{error}"));
-                            continue;
+                    let mut bytes: Vec<u8> = Vec::with_capacity(64 * 1024);
+                    let mut stream = response.bytes_stream();
+                    let mut read_error = None;
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(chunk) => {
+                                if append_capped(&mut bytes, &chunk, 1_048_576) {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                read_error = Some(error);
+                                break;
+                            }
                         }
-                    };
+                    }
+                    if let Some(error) = read_error {
+                        attempts.push(format!("{endpoint} → 读取响应失败：{error}"));
+                        continue;
+                    }
+                    let body = decode_process_output(&bytes);
                     let results = parse_search_results(endpoint, &body);
                     if results.is_empty() {
                         attempts.push(format!("{endpoint} → 无结果（页面结构可能已变）"));
