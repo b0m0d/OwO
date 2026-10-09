@@ -361,10 +361,18 @@ fn find_email(text: &str) -> Option<String> {
 // ---------- 路由 ----------
 
 pub fn router(state: Arc<owo_agent_server::AppState>) -> axum::Router {
+    use axum::extract::DefaultBodyLimit;
     axum::Router::new()
         .route("/team/export", axum::routing::post(export_package))
-        .route("/team/review", axum::routing::post(review_package))
-        .route("/team/import", axum::routing::post(import_package))
+        // 技能包内联 base64（含 assets），真实包很容易超过全局 1 MiB；评审/导入单独放宽到 32 MiB。
+        .route(
+            "/team/review",
+            axum::routing::post(review_package).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route(
+            "/team/import",
+            axum::routing::post(import_package).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route("/team/versions", axum::routing::get(versions))
         .route("/team/audit", axum::routing::get(audit_tail))
         .with_state(state)
