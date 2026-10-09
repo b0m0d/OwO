@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::oneshot;
 
@@ -237,19 +237,42 @@ impl McpClient {
             let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
             let reader_pending = Arc::clone(&pending);
             tokio::spawn(async move {
-                let mut lines = BufReader::new(stdout).lines();
+                // 有界按行读取：不受信 MCP 服务器可能不发换行地推送超长数据，
+                // `lines()` 会整行分配导致内存无界增长。这里逐字节累积并在超限后
+                // 丢弃到下一个换行，只保留有界内存。
+                const MAX_MCP_LINE_BYTES: usize = 16 * 1024 * 1024;
+                let mut reader = BufReader::new(stdout);
+                let mut line: Vec<u8> = Vec::new();
+                let mut dropping = false;
+                let mut chunk = [0u8; 8192];
                 loop {
-                    let Ok(Some(line)) = lines.next_line().await else {
-                        break;
+                    let read = match AsyncReadExt::read(&mut reader, &mut chunk).await {
+                        Ok(0) => break,
+                        Ok(read) => read,
+                        Err(_) => break,
                     };
-                    let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                        continue;
-                    };
-                    if let Some(id) = value.get("id").and_then(Value::as_u64) {
-                        if let Ok(mut map) = reader_pending.lock() {
-                            if let Some(sender) = map.remove(&id) {
-                                let _ = sender.send(value);
+                    for &byte in &chunk[..read] {
+                        if byte == b'\n' {
+                            if !dropping {
+                                if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                                    if let Some(id) = value.get("id").and_then(Value::as_u64) {
+                                        if let Ok(mut map) = reader_pending.lock() {
+                                            if let Some(sender) = map.remove(&id) {
+                                                let _ = sender.send(value);
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                            line.clear();
+                            dropping = false;
+                        } else if dropping {
+                            continue;
+                        } else if line.len() < MAX_MCP_LINE_BYTES {
+                            line.push(byte);
+                        } else {
+                            line.clear();
+                            dropping = true;
                         }
                     }
                 }
