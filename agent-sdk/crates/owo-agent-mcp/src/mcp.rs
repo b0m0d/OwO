@@ -1,5 +1,6 @@
 //! MCP（Model Context Protocol）客户端：stdio 与 HTTP 双传输，JSON-RPC 2.0。
 
+use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -653,6 +654,32 @@ async fn request_stdio(
     extract_result(response)
 }
 
+/// MCP HTTP 响应体上限（不受信/异常服务器不整块读进内存）。
+const MAX_MCP_HTTP_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// MCP HTTP 错误响应体上限（错误文本只需可读预览）。
+const MAX_MCP_HTTP_ERROR_BYTES: usize = 64 * 1024;
+
+/// 流式读取响应体并在上限处截断。
+async fn read_body_capped(
+    response: reqwest::Response,
+    max: usize,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    let mut bytes: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("{context}读取失败：{error}"))?;
+        if bytes.len() + chunk.len() > max {
+            return Err(format!(
+                "{context}超过上限（{} MiB），已拒绝",
+                max / (1024 * 1024)
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 async fn request_http(
     client: &reqwest::Client,
     url: &str,
@@ -677,10 +704,10 @@ async fn request_http(
         .map_err(|error| format!("MCP HTTP 请求失败：{error}"))?;
     if !response.status().is_success() {
         let status = response.status();
-        let text = response
-            .text()
+        let bytes = read_body_capped(response, MAX_MCP_HTTP_ERROR_BYTES, "MCP HTTP 错误响应")
             .await
-            .unwrap_or_else(|_| "无响应体".to_string());
+            .unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes);
         return Err(format!("MCP HTTP 返回 {status}：{text}"));
     }
     let content_type = response
@@ -690,10 +717,8 @@ async fn request_http(
         .unwrap_or_default()
         .to_lowercase();
     if content_type.contains("text/event-stream") {
-        let text = response
-            .text()
-            .await
-            .map_err(|error| format!("MCP SSE 读取失败：{error}"))?;
+        let bytes = read_body_capped(response, MAX_MCP_HTTP_BODY_BYTES, "MCP SSE 响应").await?;
+        let text = String::from_utf8_lossy(&bytes);
         for line in text.lines() {
             if let Some(payload) = line.trim().strip_prefix("data:") {
                 if payload.trim() == "[DONE]" {
@@ -709,9 +734,8 @@ async fn request_http(
         }
         Err(format!("MCP SSE 无有效响应：{method}"))
     } else {
-        let value: Value = response
-            .json()
-            .await
+        let bytes = read_body_capped(response, MAX_MCP_HTTP_BODY_BYTES, "MCP HTTP 响应").await?;
+        let value: Value = serde_json::from_slice(&bytes)
             .map_err(|error| format!("MCP HTTP 响应解析失败：{error}"))?;
         extract_result(value)
     }
