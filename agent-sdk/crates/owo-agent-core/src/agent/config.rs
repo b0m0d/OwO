@@ -162,3 +162,11 @@ mod env_limit_tests {
         assert_eq!(parse_env_usize("unlimited"), None);
     }
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct TurnExecutionOptions {
+    /// A narrowing-only constraint; false never changes the host policy.
+    pub read_only: bool,
+    /// Host-validated identity shared by SSE, cancellation, traces and receipts.
+    pub turn_id: Option<String>,
+}

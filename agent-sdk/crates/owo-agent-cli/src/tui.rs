@@ -41,7 +41,10 @@ pub struct TuiArgs {
     pub data_dir: Option<PathBuf>,
 }
 
-pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    args: TuiArgs,
+    permissions: crate::ui_output::PermissionsProfile,
+) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -49,16 +52,19 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = ensure_data_root(args.data_dir.clone(), &workspace);
     let client = runtime.block_on(ensure_daemon_client(&root, &workspace))?;
     let settings = load_tui_settings(&root, &workspace);
-    let read_only = args.agent == "plan" || settings.read_only;
+    let read_only = args.agent == "plan"
+        || settings.read_only
+        || matches!(permissions, crate::ui_output::PermissionsProfile::ReadOnly);
     let mut app = TuiApp::new(
         client,
         workspace,
         args.model.clone(),
         read_only,
-        args.no_approval,
+        args.no_approval || matches!(permissions, crate::ui_output::PermissionsProfile::Trusted),
         settings.theme.as_deref(),
         &settings.keybinds,
     );
+    app.read_only_locked = matches!(permissions, crate::ui_output::PermissionsProfile::ReadOnly);
     let terminal = ratatui::init();
     let result = app.run(&runtime, terminal);
     ratatui::restore();
@@ -99,7 +105,13 @@ fn load_tui_settings(root: &Path, workspace: &Path) -> TuiSettings {
 }
 
 /// 待审批请求（来自 SSE `permission_request`）。
+#[derive(Default, Clone)]
 struct ApprovalInfo {
+    request_id: String,
+    args: serde_json::Value,
+    redacted_args: Option<serde_json::Value>,
+    risk_note: Option<String>,
+    explain: Option<serde_json::Value>,
     tool: String,
     reason: String,
     level: String,
@@ -113,8 +125,7 @@ struct QuestionInfo {
 
 /// 回合结束摘要。
 struct TurnSummary {
-    steps: usize,
-    final_text: Option<String>,
+    completed: crate::ui_output::CompletedTurn,
     diff_count: usize,
 }
 
@@ -129,6 +140,12 @@ enum TuiMsg {
         responder: tokio::sync::oneshot::Sender<String>,
     },
     QuestionResponseFailed(String),
+    ApprovalAcknowledged {
+        tool: String,
+        accepted: bool,
+        granted: bool,
+        error: Option<String>,
+    },
     Finished(Result<TurnSummary, String>),
 }
 
@@ -137,8 +154,10 @@ struct TuiApp {
     workspace: PathBuf,
     model: Option<String>,
     read_only: bool,
+    read_only_locked: bool,
     no_approval: bool,
     session_id: Option<String>,
+    turn_id: Option<String>,
     approval: Option<(
         ApprovalInfo,
         tokio::sync::oneshot::Sender<PermissionResponse>,
@@ -174,8 +193,10 @@ impl TuiApp {
             workspace,
             model,
             read_only,
+            read_only_locked: false,
             no_approval,
             session_id: None,
+            turn_id: None,
             approval: None,
             question: None,
             event_rx: None,
@@ -213,7 +234,11 @@ impl TuiApp {
                 }
             }
             self.drain_events();
-            if self.running && self.approval.is_none() {
+            if self.running
+                && self.approval.is_none()
+                && self.question.is_none()
+                && !self.abort.load(Ordering::Acquire)
+            {
                 self.status = "回合进行中（Ctrl+C 中止）".to_string();
             }
         }
@@ -222,8 +247,16 @@ impl TuiApp {
 
     fn shutdown(&mut self, runtime: &tokio::runtime::Runtime) {
         self.abort.store(true, Ordering::Relaxed);
-        if let Some(id) = self.session_id.clone() {
-            let _ = runtime.block_on(self.client.cancel_turn(&id));
+        if self.running {
+            if let (Some(id), Some(turn)) = (self.session_id.clone(), self.turn_id.clone()) {
+                let _ = runtime.block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.client.cancel_turn_id(&id, &turn),
+                    )
+                    .await
+                });
+            }
         }
     }
 
@@ -335,8 +368,15 @@ impl TuiApp {
 
         let status_text = if let Some((info, _)) = &self.approval {
             format!(
-                "审批：{}（{}）{}——y 仅本次 / t 本任务 / w 工作区长期 / n 拒绝",
-                info.tool, info.level, info.reason
+                "审批：{}（{}）{}——{} / Ctrl+C 取消",
+                info.tool,
+                info.level,
+                info.reason,
+                if info.level == "read" {
+                    "y 本次 / t 任务 / w 工作区 / n 拒绝"
+                } else {
+                    "y 本次 / n 拒绝（写和执行不创建长期授权）"
+                }
             )
         } else if self.question.is_some() {
             "回答 Agent 的问题：输入序号或补充说明，Enter 提交；Ctrl+C 中止".to_string()
@@ -377,6 +417,24 @@ impl TuiApp {
         if key.kind != KeyEventKind::Press {
             return Ok(false);
         }
+        if self.running && self.matches("abort", &key) {
+            self.abort.store(true, Ordering::Release);
+            self.approval = None;
+            self.question = None;
+            if let (Some(session), Some(turn)) = (self.session_id.clone(), self.turn_id.clone()) {
+                let client = self.client.clone();
+                runtime.spawn(async move {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        client.cancel_turn_id(&session, &turn),
+                    )
+                    .await;
+                });
+            }
+            self.status = "取消已请求，等待宿主确认…".into();
+            self.push_system("取消已请求，正在等待实际终态".into(), yellow());
+            return Ok(false);
+        }
         if self.approval.is_some() {
             match key.code {
                 KeyCode::Char('y' | 'Y') => self.respond_approval("once"),
@@ -388,13 +446,7 @@ impl TuiApp {
             return Ok(false);
         }
         if self.running {
-            if self.matches("abort", &key) {
-                self.abort.store(true, Ordering::Relaxed);
-                if let Some(id) = self.session_id.clone() {
-                    let _ = runtime.block_on(self.client.cancel_turn(&id));
-                }
-                self.push_system("正在中止当前回合…".to_string(), yellow());
-            } else if self.question.is_some() {
+            if self.question.is_some() {
                 self.handle_question_key(key);
             }
             return Ok(false);
@@ -504,12 +556,15 @@ impl TuiApp {
 
     fn respond_approval(&mut self, action: &str) {
         if let Some((info, responder)) = self.approval.take() {
-            let response = parse_approval_response(action);
+            let mut response = parse_approval_response(action);
+            if info.level != "read" && response.allow {
+                response.scope = Some("once".into());
+            }
             let message = match response.scope.as_deref() {
-                Some("once") => "已允许（仅本次）",
-                Some("task") => "已允许（本任务）",
-                Some("workspace") => "已允许（工作区长期）",
-                _ => "已拒绝",
+                Some("once") => "允许决定已提交（仅本次）",
+                Some("task") => "允许决定已提交（本任务，只读）",
+                Some("workspace") => "允许决定已提交（工作区，只读）",
+                _ => "拒绝决定已提交",
             };
             let style = if response.allow { green() } else { red() };
             let tool = info.tool;
@@ -520,6 +575,10 @@ impl TuiApp {
     }
 
     fn toggle_mode(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.read_only_locked {
+            self.push_system("本次 CLI 强制只读，不能切换到 build".to_string(), yellow());
+            return Ok(());
+        }
         self.read_only = !self.read_only;
         self.push_system(
             if self.read_only {
@@ -882,12 +941,27 @@ impl TuiApp {
 
         let client = self.client.clone();
         let no_approval = self.no_approval;
+        let read_only = self.read_only || self.read_only_locked;
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        self.turn_id = Some(turn_id.clone());
+        let abort = Arc::clone(&self.abort);
         let prompt_owned = prompt.to_string();
         let (tx, rx) = mpsc::channel::<TuiMsg>();
         self.event_rx = Some(rx);
         runtime.spawn(async move {
-            let result =
-                run_turn_task(client, session_id, prompt_owned, tx.clone(), no_approval).await;
+            let result = run_turn_task(
+                client,
+                TurnInvocation {
+                    session_id,
+                    prompt: prompt_owned,
+                    read_only,
+                    turn_id,
+                    abort,
+                },
+                tx.clone(),
+                no_approval,
+            )
+            .await;
             let _ = tx.send(TuiMsg::Finished(result));
         });
     }
@@ -898,6 +972,31 @@ impl TuiApp {
                 Some(TuiMsg::Event(event)) => self.push_event(event),
                 Some(TuiMsg::Approval { info, responder }) => {
                     self.status = format!("审批：{}", info.tool);
+                    self.flush_streaming();
+                    self.push_line(format!("审批 {}：{}", info.request_id, info.tool), yellow());
+                    if let Some(view) = &info.redacted_args {
+                        self.push_line(
+                            format!(
+                                "参数：{}",
+                                crate::ui_output::summarize_permission_args(view, 800)
+                            ),
+                            default(),
+                        );
+                    } else if !info.args.is_null() {
+                        self.push_line("未收到脱敏参数，原始值已隐藏".into(), yellow());
+                    }
+                    if let Some(risk) = &info.risk_note {
+                        self.push_line(format!("风险：{risk}"), yellow());
+                    }
+                    if let Some(explain) = &info.explain {
+                        self.push_line(
+                            format!(
+                                "影响：{}",
+                                crate::ui_output::summarize_permission_args(explain, 800)
+                            ),
+                            default(),
+                        );
+                    }
                     self.approval = Some((info, responder));
                 }
                 Some(TuiMsg::Question { info, responder }) => {
@@ -909,6 +1008,24 @@ impl TuiApp {
                     self.status = "输入选项序号或补充说明，按 Enter 提交".to_string();
                     self.question = Some((info, responder));
                 }
+
+                Some(TuiMsg::ApprovalAcknowledged {
+                    tool,
+                    accepted,
+                    granted,
+                    error,
+                }) => {
+                    let message = if let Some(error) = error {
+                        format!("审批决定未送达：{tool}，{error}")
+                    } else if accepted && granted {
+                        format!("宿主已接受决定并创建可复用授权：{tool}")
+                    } else if accepted {
+                        format!("宿主已接受本次审批决定：{tool}")
+                    } else {
+                        format!("宿主没有确认审批决定：{tool}")
+                    };
+                    self.push_system(message, if accepted { cyan() } else { red() });
+                }
                 Some(TuiMsg::QuestionResponseFailed(error)) => {
                     self.question = None;
                     self.input.clear();
@@ -917,24 +1034,38 @@ impl TuiApp {
                 Some(TuiMsg::Finished(result)) => {
                     self.running = false;
                     self.event_rx = None;
+                    self.turn_id = None;
                     self.approval = None;
                     self.question = None;
                     self.input.clear();
                     match result {
                         Ok(summary) => {
-                            self.flush_streaming();
-                            if let Some(text) = &summary.final_text {
+                            // Final is authoritative; do not append the streamed text a second time.
+                            self.streaming.clear();
+                            if let Some(text) = &summary.completed.final_text {
                                 self.push_line("── 结果 ──".to_string(), bold());
-                                self.push_line(text.clone(), default());
+                                self.push_line(crate::markdown::strip_markdown(text), default());
                             }
+                            let label = summary.completed.label();
+                            let style = if summary.completed.status
+                                == owo_agent_protocol::CompletionStatusV1::Accepted
+                                && summary.completed.failure.is_none()
+                            {
+                                green()
+                            } else {
+                                yellow()
+                            };
                             self.push_system(
                                 format!(
-                                    "✓ 完成：工具 {} 步，改动 {} 个文件（/diff 查看，/undo 回滚）",
-                                    summary.steps, summary.diff_count
+                                    "{label}：工具 {} 步，改动 {} 个文件（/diff 查看）",
+                                    summary.completed.steps, summary.diff_count
                                 ),
-                                green(),
+                                style,
                             );
-                            self.status = "就绪".to_string();
+                            if let Some(error) = &summary.completed.failure {
+                                self.push_system(error.clone(), red());
+                            }
+                            self.status = label.to_string();
                         }
                         Err(error) => {
                             self.push_system(format!("回合失败：{error}"), red());
@@ -1071,64 +1202,121 @@ impl TuiApp {
     }
 }
 
+/// Keeps the scoped identity, request restriction and cancellation token together.
+struct TurnInvocation {
+    session_id: String,
+    prompt: String,
+    read_only: bool,
+    turn_id: String,
+    abort: Arc<AtomicBool>,
+}
+
 /// 回合执行任务：消费 Daemon SSE，权限请求经 UI 决策后回传服务端。
 async fn run_turn_task(
     client: AgentClient,
-    session_id: String,
-    prompt: String,
+    invocation: TurnInvocation,
     tx: mpsc::Sender<TuiMsg>,
     no_approval: bool,
 ) -> Result<TurnSummary, String> {
-    let mut stream = client
-        .open_turn(&session_id, &prompt)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut steps = 0usize;
-    let mut final_text = None;
-    while let Some(event) = stream.next_event().await {
+    let TurnInvocation {
+        session_id,
+        prompt,
+        read_only,
+        turn_id,
+        abort,
+    } = invocation;
+    let mut stream = tokio::select! {
+        result = client.open_turn_with_id(&session_id, &prompt, read_only, &turn_id) =>
+            result.map_err(|error| error.to_string())?,
+        _ = crate::ui_output::wait_for_local_abort(&abort) => {
+            let _ = tokio::time::timeout(Duration::from_secs(5), client.cancel_turn_id(&session_id, &turn_id)).await;
+            return Err("turn/cancellation_unconfirmed: 已请求停止启动；请按回合 ID 查看宿主状态".into());
+        }
+    };
+    let mut completion = crate::ui_output::TurnCompletion::default();
+    let mut cancelling = false;
+    let mut cancel_deadline = tokio::time::Instant::now();
+    loop {
+        let event = tokio::select! {
+            event = stream.next_event() => event,
+            _ = crate::ui_output::wait_for_local_abort(&abort), if !cancelling => {
+                cancelling = true;
+                cancel_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                let _ = tokio::time::timeout(Duration::from_secs(5), client.cancel_turn_id(&session_id, &turn_id)).await;
+                continue;
+            }
+            _ = tokio::time::sleep_until(cancel_deadline), if cancelling => {
+                return Err("turn/cancellation_unconfirmed: 宿主尚未确认终止，不能声明已完成".into());
+            }
+        };
+        let Some(event) = event else { break };
         let event = event.map_err(|error| error.to_string())?;
+        completion.observe(&event);
         match &event {
-            SseEvent::TokenDelta { .. } => {
-                let _ = tx.send(TuiMsg::Event(event.clone()));
-            }
-            SseEvent::Final { text } => {
-                final_text = Some(text.clone());
-                let _ = tx.send(TuiMsg::Event(event.clone()));
-            }
             SseEvent::PermissionRequest {
                 request_id,
                 tool,
                 reason,
                 level,
-                ..
+                args,
+                redacted_args,
+                risk_note,
+                explain,
             } => {
-                let response = if no_approval {
-                    PermissionResponse {
-                        allow: true,
-                        remember: None,
-                        scope: Some("once".to_string()),
-                    }
-                } else {
-                    let (responder, receiver) = tokio::sync::oneshot::channel();
-                    let info = ApprovalInfo {
-                        tool: tool.clone(),
-                        reason: reason.clone(),
-                        level: level.clone().unwrap_or_else(|| "unknown".to_string()),
-                    };
-                    let _ = tx.send(TuiMsg::Approval { info, responder });
-                    tokio::time::timeout(Duration::from_secs(300), receiver)
-                        .await
-                        .ok()
-                        .and_then(|result| result.ok())
-                        .unwrap_or_else(|| parse_approval_response("deny"))
+                let info = ApprovalInfo {
+                    request_id: request_id.clone(),
+                    tool: tool.clone(),
+                    reason: reason.clone(),
+                    level: level.clone().unwrap_or_else(|| "unknown".into()),
+                    args: args.clone(),
+                    redacted_args: redacted_args.clone(),
+                    risk_note: risk_note.clone(),
+                    explain: explain.clone(),
                 };
-                let _ = client
-                    .respond_permission(&session_id, request_id, &response)
-                    .await;
-            }
-            SseEvent::ToolResult { .. } => {
-                steps += 1;
-                let _ = tx.send(TuiMsg::Event(event.clone()));
+                let (responder, receiver) = tokio::sync::oneshot::channel();
+                if no_approval {
+                    let _ = responder.send(parse_approval_response("once"));
+                } else {
+                    tx.send(TuiMsg::Approval {
+                        info: info.clone(),
+                        responder,
+                    })
+                    .map_err(|_| "TUI 审批界面已关闭")?;
+                }
+                let response_client = client.clone();
+                let response_session = session_id.clone();
+                let response_tx = tx.clone();
+                let response_abort = Arc::clone(&abort);
+                tokio::spawn(async move {
+                    let response = tokio::select! {
+                        result = tokio::time::timeout(Duration::from_secs(300), receiver) =>
+                            result.ok().and_then(|result| result.ok()),
+                        _ = crate::ui_output::wait_for_local_abort(&response_abort) => None,
+                    };
+                    let Some(response) = response else { return };
+                    let requested_allow = response.allow;
+                    let result = response_client
+                        .respond_permission(&response_session, &info.request_id, &response)
+                        .await;
+                    let (accepted, granted, error) = match result {
+                        Ok(value) => (
+                            value.get("allowed").and_then(serde_json::Value::as_bool)
+                                == Some(requested_allow),
+                            value
+                                .get("granted")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(false),
+                            None,
+                        ),
+                        Err(error) => (false, false, Some(error.to_string())),
+                    };
+                    let _ = response_tx.send(TuiMsg::ApprovalAcknowledged {
+                        tool: info.tool,
+                        accepted,
+                        granted,
+                        error,
+                    });
+                });
             }
             SseEvent::UserQuestion {
                 question_id,
@@ -1142,22 +1330,22 @@ async fn run_turn_task(
                     options: options.clone(),
                 };
                 tx.send(TuiMsg::Question { info, responder })
-                    .map_err(|_| "TUI 提问界面已关闭".to_string())?;
+                    .map_err(|_| "TUI 提问界面已关闭")?;
                 let answer_client = client.clone();
                 let answer_session = session_id.clone();
-                let answer_question_id = question_id.clone();
+                let question_id = question_id.clone();
                 let answer_tx = tx.clone();
+                let answer_turn = turn_id.clone();
                 tokio::spawn(async move {
-                    let Ok(answer) = receiver.await else {
-                        return;
-                    };
+                    let Ok(answer) = receiver.await else { return };
                     if let Err(error) = answer_client
-                        .answer_question(&answer_session, &answer_question_id, &answer)
+                        .answer_question(&answer_session, &question_id, &answer)
                         .await
                     {
-                        let message = error.to_string();
-                        let _ = answer_client.cancel_turn(&answer_session).await;
-                        let _ = answer_tx.send(TuiMsg::QuestionResponseFailed(message));
+                        let _ = answer_client
+                            .cancel_turn_id(&answer_session, &answer_turn)
+                            .await;
+                        let _ = answer_tx.send(TuiMsg::QuestionResponseFailed(error.to_string()));
                     }
                 });
             }
@@ -1166,14 +1354,14 @@ async fn run_turn_task(
             }
         }
     }
+    let completed = completion.finish()?;
     let diff_count = client
         .session_diff(&session_id)
         .await
         .map(|diffs| diffs.len())
         .unwrap_or(0);
     Ok(TurnSummary {
-        steps,
-        final_text,
+        completed,
         diff_count,
     })
 }
@@ -1258,6 +1446,7 @@ mod tests {
                 tool: "write_file".to_string(),
                 reason: "测试".to_string(),
                 level: "write".to_string(),
+                ..Default::default()
             },
             responder,
         ));
@@ -1267,7 +1456,7 @@ mod tests {
         assert!(app.approval.is_none());
         let response = receiver.try_recv().expect("应收到决策");
         assert!(response.allow);
-        assert_eq!(response.scope.as_deref(), Some("task"));
+        assert_eq!(response.scope.as_deref(), Some("once"));
     }
 
     #[test]
@@ -1276,9 +1465,10 @@ mod tests {
         let (responder, mut receiver) = tokio::sync::oneshot::channel();
         app.approval = Some((
             ApprovalInfo {
-                tool: "write_file".to_string(),
+                tool: "read_file".to_string(),
                 reason: "测试".to_string(),
-                level: "write".to_string(),
+                level: "read".to_string(),
+                ..Default::default()
             },
             responder,
         ));

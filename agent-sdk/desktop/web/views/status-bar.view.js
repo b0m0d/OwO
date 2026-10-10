@@ -121,7 +121,18 @@
     return "";
   }
 
-  function modelFromCache() {
+  function modelFromCache(source) {
+    const state = source || {};
+    const settings = state.settings || {};
+    const selected = String(state.selectedModel || state.pendingModelOverride || settings.model || "");
+    const custom = (Array.isArray(settings.custom_models) ? settings.custom_models : []).find((item) => item && item.id === selected);
+    if (custom) {
+      return {
+        text: (custom.apiFormat === "anthropic" ? "Anthropic" : "OpenAI 兼容") + " · " + custom.id,
+        tone: "muted",
+        detail: "当前自定义模型请求地址：" + String(custom.baseUrl || ""),
+      };
+    }
     // 两份真相不能混着说（R3-B 缺陷 23 的同族问题，真机截图抓到）：
     // 密钥由壳注入 sidecar 环境时，壳自己的 get_provider_status 仍会报
     // provider=unset/ready=false，而 core 实际已就绪并在用 glm-5.3-flash。
@@ -189,7 +200,7 @@
     const facts = {
       backend: backendFromDiagnostics(global.__owoCoreDiagnostics, streamState),
       workspace: workspaceFromFacts(source),
-      model: modelFromCache(),
+      model: modelFromCache(source),
       permission: permissionFromCache(source),
       task: taskFromFacts(source),
     };

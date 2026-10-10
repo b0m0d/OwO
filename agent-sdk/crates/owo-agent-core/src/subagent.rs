@@ -32,6 +32,7 @@ pub(crate) const READ_ONLY_SUBAGENT_PROMPT: &str =
 #[derive(Clone)]
 pub struct FanOutRunner {
     pub provider: Arc<dyn ModelProvider>,
+    pub parent_policy: Arc<Policy>,
     pub workspace: PathBuf,
     pub model: String,
     pub depth: usize,
@@ -52,8 +53,38 @@ pub async fn fan_out_subagents(
     depth: usize,
     max_turns: usize,
     prompts: Vec<String>,
+    out_config: crate::fleet::FanOutConfig,
+) -> Result<crate::fleet::FanOutReport, String> {
+    let parent_policy = Arc::new(Policy::read_only(workspace.clone()));
+    fan_out_subagents_with_policy(
+        FanOutRunner {
+            provider,
+            parent_policy,
+            workspace,
+            model,
+            depth,
+            max_turns,
+        },
+        prompts,
+        out_config,
+    )
+    .await
+}
+
+/// Host-bound fan-out; the legacy standalone API creates an explicit read-only root.
+pub async fn fan_out_subagents_with_policy(
+    runner: FanOutRunner,
+    prompts: Vec<String>,
     mut out_config: crate::fleet::FanOutConfig,
 ) -> Result<crate::fleet::FanOutReport, String> {
+    let FanOutRunner {
+        provider,
+        parent_policy,
+        workspace,
+        model,
+        depth,
+        max_turns,
+    } = runner;
     if depth >= MAX_SUBAGENT_DEPTH {
         return Err(format!("子代理深度超限（最多 {MAX_SUBAGENT_DEPTH} 层）"));
     }
@@ -74,6 +105,7 @@ pub async fn fan_out_subagents(
     let report =
         crate::fleet::fan_out_cfg(&workers, out_config, "subagent-fanout", move |worker| {
             let provider = Arc::clone(&provider);
+            let parent_policy = Arc::clone(&parent_policy);
             let workspace = workspace.clone();
             let model = model.clone();
             let prompts = Arc::clone(&prompts);
@@ -87,7 +119,9 @@ pub async fn fan_out_subagents(
                     .get(index)
                     .cloned()
                     .ok_or_else(|| format!("任务下标越界：{index}"))?;
-                let policy = Policy::read_only(workspace.clone());
+                let policy = parent_policy
+                    .for_workspace(workspace.clone())?
+                    .read_only_scope();
                 let registry = ToolRegistry::read_only();
                 let config = AgentConfig {
                     max_turns: if max_turns == 0 {
@@ -143,6 +177,8 @@ pub type TurnEventSink<'a> = Arc<dyn Fn(&TurnEvent) + Send + Sync + 'a>;
 /// 成功时返回契约合规的 JSON 本体。
 pub struct SubagentRunner<'a> {
     pub provider: Arc<dyn ModelProvider>,
+    /// Host restrictions are inherited live; role constraints may only narrow them.
+    pub parent_policy: &'a Policy,
     pub approver: &'a dyn Approver,
     pub abort: &'a AtomicBool,
     pub depth: usize,
@@ -166,6 +202,7 @@ impl SubagentRunner<'_> {
     ) -> Result<String, String> {
         let contract = crate::contract_worker::ContractSubagentRunner {
             provider: Arc::clone(&self.provider),
+            parent_policy: self.parent_policy,
             approver: self.approver,
             abort: self.abort,
             depth: self.depth,
@@ -201,8 +238,10 @@ mod tests {
     #[tokio::test]
     async fn depth_limit_blocks_nested_run() {
         let workspace = std::env::temp_dir();
+        let parent_policy = Policy::new(&workspace);
         let runner = SubagentRunner {
             provider: Arc::new(FixedProvider),
+            parent_policy: &parent_policy,
             approver: &AutoApprover { allow: true },
             abort: &AtomicBool::new(false),
             depth: MAX_SUBAGENT_DEPTH,

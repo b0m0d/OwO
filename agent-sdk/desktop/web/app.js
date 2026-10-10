@@ -74,6 +74,8 @@ const sessionModelUpdateQueue = ModelRouting.createSessionModelUpdateQueue((sess
   })
 );
 function getDefaultModel() {
+  const saved = String((state.settings && state.settings.model) || "").trim();
+  if (loadCustomModels().some((item) => item.id === saved)) return saved;
   return ModelRouting
     ? ModelRouting.effectiveDefaultModel(state.settings || {})
     : String((state.settings && state.settings.model) || "").trim();
@@ -87,6 +89,7 @@ function refreshComposerModelChip() {
   const text = $("modelChipText");
   if (text) text.textContent = getComposerModel() || "默认模型";
   updateModelChipMeta();
+  window.OwoStatusBar?.repaint();
 }
 // 由壳注入核心服务地址；经核心服务同源托管时为空字符串。
 // 桌面壳下会在拿到 get_core_connection 后改写成壳的真实端口（壳用 --port 0 随机分配）。
@@ -3052,6 +3055,9 @@ function renderCustomModels() {
         kind: "danger",
         onConfirm: async () => {
           saveCustomModels(loadCustomModels().filter((item) => item.id !== model.id));
+          const keys = customModelKeys();
+          delete keys[model.id];
+          localStorage.setItem("owo.model-keys", JSON.stringify(keys));
           renderCustomModels();
           showToast("已移除自定义模型", "ok");
         },
@@ -3166,6 +3172,8 @@ function openCustomModelDialog(existing) {
             ...(temperature !== "" ? { temperature: Number(temperature) } : {}),
             ...(timeoutSecs !== "" ? { timeoutSecs: Number(timeoutSecs) } : {}),
           };
+          try { ModelRouting.buildCustomModelConnection(id, [next], {}); }
+          catch (error) { showToast(error.message, "error"); return; }
           const keyInput = $("cmKey").value.trim();
           if (keyInput) {
             const allKeys = customModelKeys();
@@ -3637,6 +3645,7 @@ function initProviderPresets() {
 // 配置并保存模型，发送按钮永远禁用、提示条永远挂着**，且"测试连接通过"也不放行
 // （连接测试只做 TCP 探测，不落盘配置）。
 function modelGateMissing() {
+  if (loadCustomModels().some((item) => item.id === getComposerModel())) return false;
   const settings = state.settings || {};
   const runtime = settings.runtime || {};
   // 显式布尔优先（服务端若将来补上该字段）。

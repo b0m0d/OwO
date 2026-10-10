@@ -1,4 +1,6 @@
 mod config;
+mod custom;
+pub use custom::custom_model_provider;
 mod message;
 
 #[cfg(test)]
@@ -14,7 +16,7 @@ mod stream;
 pub use provider::*;
 pub use resilience::*;
 pub use stream::*;
-fn is_local_endpoint(base_url: &str) -> bool {
+pub(crate) fn is_local_endpoint(base_url: &str) -> bool {
     let authority = base_url
         .split_once("://")
         .map(|(_, rest)| rest)

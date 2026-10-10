@@ -212,7 +212,7 @@ function validateConfig(config, options) {
     if (raw === null || raw === undefined || raw === "") continue;
     const value = Number(raw);
     const [min, max] = NUMERIC_RULES[key];
-    if (!Number.isFinite(value) || value < min || value > max) {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < min || value > max) {
       errors.push(`${key} 超出范围（${min}~${max}）`);
     }
   }

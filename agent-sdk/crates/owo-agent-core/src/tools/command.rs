@@ -10,6 +10,57 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+const PROCESS_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Dropping an in-flight command future must terminate its process tree as well.
+struct CommandProcessGuard {
+    handle: crate::sandbox::SandboxHandle,
+    armed: bool,
+}
+
+impl CommandProcessGuard {
+    fn new(handle: crate::sandbox::SandboxHandle) -> Self {
+        Self {
+            handle,
+            armed: true,
+        }
+    }
+
+    fn terminate(&self) -> Result<(), crate::sandbox::SandboxError> {
+        let manager = crate::sandbox::default_manager();
+        let mut manager = manager.lock().unwrap_or_else(|error| error.into_inner());
+        manager.kill(&self.handle)
+    }
+}
+
+impl Drop for CommandProcessGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.terminate();
+        }
+    }
+}
+
+async fn wait_for_command_abort(abort: Option<&std::sync::atomic::AtomicBool>) {
+    let Some(abort) = abort else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !abort.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+fn read_log_tail(path: &std::path::Path, max_bytes: u64) -> Result<Vec<u8>, std::io::Error> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(max_bytes)))?;
+    let mut bytes = Vec::with_capacity(length.min(max_bytes) as usize);
+    file.take(max_bytes).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// 后台 shell 记录（`run_command background=true` 产生）。
 #[derive(Clone)]
 struct BackgroundShell {
@@ -52,13 +103,8 @@ impl Tool for ShellOutputTool {
             .get(&shell_id)
             .cloned()
             .ok_or_else(|| format!("未知 shell_id：{shell_id}"))?;
-        let log = std::fs::read(&shell.log_path).unwrap_or_default();
-        const TAIL_BYTES: usize = 32 * 1024;
-        let slice = if log.len() > TAIL_BYTES {
-            &log[log.len() - TAIL_BYTES..]
-        } else {
-            &log[..]
-        };
+        let tail = read_log_tail(&shell.log_path, 32 * 1024)
+            .map_err(|error| format!("executor/log_read_failed: {error}"))?;
         let done = shell.done.load(std::sync::atomic::Ordering::Relaxed);
         let exit_code = *shell
             .exit_code
@@ -69,7 +115,7 @@ impl Tool for ShellOutputTool {
             "running": !done,
             "exit_code": exit_code,
             "log_path": shell.log_path.display().to_string(),
-            "output": decode_process_output(slice),
+            "output": decode_process_output(&tail),
         }))
     }
 }
@@ -100,15 +146,30 @@ impl Tool for KillShellTool {
             .get(&shell_id)
             .cloned()
             .ok_or_else(|| format!("未知 shell_id：{shell_id}"))?;
-        let killed = {
-            let manager = crate::sandbox::default_manager();
-            let mut manager = manager
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            manager.kill(&shell.handle).is_ok()
+        if shell.done.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(json!({ "shell_id": shell_id, "killed": false, "already_finished": true }));
+        }
+        let manager = crate::sandbox::default_manager();
+        let termination = {
+            let mut manager = manager.lock().unwrap_or_else(|error| error.into_inner());
+            manager.kill(&shell.handle)
         };
-        shell.done.store(true, std::sync::atomic::Ordering::Relaxed);
-        Ok(json!({ "shell_id": shell_id, "killed": killed }))
+        let stopped = tokio::time::timeout(PROCESS_CLEANUP_TIMEOUT, async {
+            while !shell.done.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !stopped {
+            return Err(format!(
+                "executor/cleanup_failed: shell did not exit; termination={termination:?}"
+            ));
+        }
+        Ok(json!({
+            "shell_id": shell_id, "killed": termination.is_ok(),
+            "already_finished": termination.is_err(), "running": false
+        }))
     }
 }
 
@@ -216,12 +277,14 @@ impl Tool for RunCommandTool {
             let code_task = Arc::clone(&exit_code);
             tokio::task::spawn_blocking(move || {
                 let mut process = process;
-                if let Ok(info) = process.wait_output() {
+                let result = process.wait_output();
+                drop(process);
+                if let Ok(info) = result {
                     if let Ok(mut guard) = code_task.lock() {
                         *guard = Some(info.exit_code);
                     }
+                    done_task.store(true, std::sync::atomic::Ordering::Release);
                 }
-                done_task.store(true, std::sync::atomic::Ordering::Relaxed);
             });
             background_shells()
                 .lock()
@@ -256,38 +319,46 @@ impl Tool for RunCommandTool {
                 .map_err(|error| format!("沙箱拒绝执行（{}）：{error}", command))?
         };
 
-        // 同步等待放在 blocking 线程；超时仅报错，进程仍在 Job 内受限（CPU/内存上限兜底）。
+        // Waiting is blocking, but cancellation owns an independent Job handle.
         let process_handle = process.handle.clone();
+        let mut process_guard = CommandProcessGuard::new(process_handle);
         let command_started = std::time::Instant::now();
         let mut wait_task = tokio::task::spawn_blocking(move || {
             let mut process = process;
             process.wait_output()
         });
-        let output = match tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            &mut wait_task,
-        )
-        .await
-        {
-            Ok(joined) => joined
-                .map_err(|join_error| format!("命令等待失败：{join_error}"))?
-                .map_err(|error| format!("沙箱执行失败：{error}"))?,
-            Err(_) => {
-                let kill_result = {
-                    let manager = crate::sandbox::default_manager();
-                    let mut manager = manager
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    manager.kill(&process_handle)
-                };
-                let _ = wait_task.await;
-                return Err(match kill_result {
-                    Ok(()) => format!("命令执行超过宿主任务预算 {timeout_ms}ms，沙箱进程已终止"),
-                    Err(error) => format!(
-                        "命令执行超过宿主任务预算 {timeout_ms}ms，终止沙箱进程失败：{error}"
-                    ),
-                });
+        let stopped = tokio::select! {
+            joined = &mut wait_task => {
+                process_guard.armed = false;
+                Some(joined
+                    .map_err(|error| format!("executor/wait_failed: {error}"))?
+                    .map_err(|error| format!("executor/process_failed: {error}"))?)
             }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => None,
+            _ = wait_for_command_abort(ctx.abort) => None,
+        };
+        let output = if let Some(output) = stopped {
+            output
+        } else {
+            let cancelled = ctx
+                .abort
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+            let termination = process_guard.terminate();
+            let cleanup = tokio::time::timeout(PROCESS_CLEANUP_TIMEOUT, &mut wait_task).await;
+            if matches!(&cleanup, Ok(Ok(Ok(_)))) {
+                process_guard.armed = false;
+                let code = if cancelled {
+                    "executor/cancelled"
+                } else {
+                    "executor/process_timeout"
+                };
+                return Err(format!(
+                    "{code}: process tree stopped; task budget={timeout_ms}ms"
+                ));
+            }
+            return Err(format!(
+                "executor/cleanup_failed: process termination={termination:?}; wait={cleanup:?}"
+            ));
         };
 
         Ok(json!({

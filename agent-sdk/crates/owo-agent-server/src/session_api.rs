@@ -426,11 +426,64 @@ pub(super) async fn attachments_list(
 pub(super) async fn abort_turn(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
+    body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    if let Some(flag) = state.aborts.lock().map_err(poison)?.get(&id).cloned() {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    load_session(&state, &id)?;
+    if body.len() > 4096 {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "turn/cancel_body_too_large".into(),
+        ));
     }
-    Ok(Json(json!({ "ok": true })))
+    #[derive(Default, serde::Deserialize)]
+    struct CancelRequest {
+        turn_id: Option<String>,
+    }
+    let request: CancelRequest = if body.is_empty() {
+        CancelRequest::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "turn/invalid_cancel_request".to_string(),
+            )
+        })?
+    };
+    let expected = request
+        .turn_id
+        .as_deref()
+        .map(|id| {
+            owo_agent_protocol::canonical_turn_id(id)
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, "turn/invalid_id".to_string()))
+        })
+        .transpose()?;
+    let already_recorded = if let Some(expected) = &expected {
+        !state
+            .store
+            .turn_events_after(&id, Some(expected), 0, 1)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+            .is_empty()
+    } else {
+        false
+    };
+    let mut controls = state.turn_controls.lock().map_err(poison)?;
+    if already_recorded && expected.as_deref() != controls.active_id(&id).as_deref() {
+        return Ok(Json(
+            json!({ "ok":true, "state":"already_finished", "turn_id":expected }),
+        ));
+    }
+    let disposition = controls
+        .cancel(&id, expected.as_deref())
+        .map_err(|code| (StatusCode::SERVICE_UNAVAILABLE, code.to_string()))?;
+    Ok(Json(json!({
+        "ok":true,
+        "turn_id":expected,
+        "state":match disposition {
+            owo_agent_server::turn_control::CancelDisposition::Requested => "cancellation_requested",
+            owo_agent_server::turn_control::CancelDisposition::Queued => "cancellation_queued",
+            owo_agent_server::turn_control::CancelDisposition::NoActiveTurn => "no_active_turn",
+        }
+    })))
 }
 
 pub(super) async fn diff(

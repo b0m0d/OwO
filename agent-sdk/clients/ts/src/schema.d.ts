@@ -4614,13 +4614,13 @@ export interface components {
             /** @enum {string} */
             category: "code" | "research" | "document";
             mean_model_calls: number;
-            mean_tool_calls: ((number | null) | null) | null;
             mean_wall_ms: number;
             passed: number;
             runs_total: number;
             success_rate: number;
             /** Format: int64 */
             total_tokens: ((number | null) | null) | null;
+            mean_tool_calls: ((number | null) | null) | null;
         };
         CreateSessionRequest: {
             model?: string;
@@ -4688,13 +4688,12 @@ export interface components {
             /** Format: int64 */
             total_model_calls: number;
             /** Format: int64 */
-            total_tool_calls: ((number | null) | null) | null;
-            /** Format: int64 */
             total_tokens: ((number | null) | null) | null;
+            /** Format: int64 */
+            total_tool_calls: ((number | null) | null) | null;
         };
         /** @description ProductEvalReport 原样（core 序列化；聚合全部 journal 记录含失败 + 未完成单元格清单） */
         ProductEvalReport: {
-            comparison?: components["schemas"]["ModeComparison"] | null;
             /** @enum {string} */
             execution: "reference" | "live";
             generated_at: string;
@@ -4706,23 +4705,9 @@ export interface components {
             schema_version: number;
             suite_hash: string;
             suite_name: string;
+            comparison?: components["schemas"]["ModeComparison"];
         };
         /** @description 一次运行的完整记录（journal 最小单元；失败记录同样保留；Option 字段缺数据时序列化为 null） */
-        EnablementRule: { detail: string; name: string; satisfied: boolean; };
-        ModeComparison: {
-            enabled: boolean;
-            multi_calls_rel_change: number | null;
-            multi_cost_rel_change: number | null;
-            multi_success_rate_diff: number;
-            multi_tokens_rel_change: number | null;
-            multi_tool_calls_rel_change: number | null;
-            multi_wall_rel_change: number | null;
-            alignment_guardrails: components["schemas"]["EnablementRule"][];
-            quality_guardrails: components["schemas"]["EnablementRule"][];
-            resource_guardrails: components["schemas"]["EnablementRule"][];
-            rules: components["schemas"]["EnablementRule"][];
-            sample_sufficient: boolean;
-        };
         ProductEvalRun: {
             /** @description 最终 Artifact 引用（沙盒内相对路径） */
             artifact_refs: string[];
@@ -4739,7 +4724,6 @@ export interface components {
             key: components["schemas"]["MatrixKey"];
             model: ((string | null) | null) | null;
             model_calls: number;
-            tool_calls: ((number | null) | null) | null;
             /** Format: int64 */
             prompt_tokens: ((number | null) | null) | null;
             retries: number;
@@ -4755,6 +4739,8 @@ export interface components {
             total_tokens: ((number | null) | null) | null;
             /** Format: int64 */
             wall_ms: number;
+            /** @description 精确工具调用数；旧记录或执行器无法观测时为 null */
+            tool_calls: ((number | null) | null) | null;
         };
         /** @description ProductEval 运行摘要（列表元素与详情基底；六态：queued/running/cancelled/completed/failed/interrupted） */
         ProductEvalRunSummary: {
@@ -4815,6 +4801,46 @@ export interface components {
         TurnRequest: {
             attachments?: string[];
             prompt: string;
+            /** @description Narrow this turn to host-verified read operations; false never relaxes host policy */
+            read_only?: boolean;
+            /**
+             * Format: uuid
+             * @description Preallocated identity for scoped cancellation, replay and duplicate suppression
+             */
+            turn_id?: string;
+            model_connection?: components["schemas"]["CustomModelConnection"];
+        };
+        EnablementRule: {
+            name: string;
+            satisfied: boolean;
+            detail: string;
+        };
+        /** @description Shared Team auto-enablement verdict combining quality, sample, gain, and resource guardrails. */
+        ModeComparison: {
+            multi_success_rate_diff: number;
+            multi_wall_rel_change: ((number | null) | null) | null;
+            multi_calls_rel_change: ((number | null) | null) | null;
+            multi_tool_calls_rel_change: ((number | null) | null) | null;
+            multi_tokens_rel_change: ((number | null) | null) | null;
+            multi_cost_rel_change: ((number | null) | null) | null;
+            rules: components["schemas"]["EnablementRule"][];
+            resource_guardrails: components["schemas"]["EnablementRule"][];
+            enabled: boolean;
+            sample_sufficient: boolean;
+            quality_guardrails: components["schemas"]["EnablementRule"][];
+            alignment_guardrails: components["schemas"]["EnablementRule"][];
+        };
+        /** @description Explicit connection for this turn only; credentials are never persisted with sessions or traces. */
+        CustomModelConnection: {
+            model: string;
+            /** Format: uri */
+            base_url: string;
+            /** @enum {string} */
+            api_format?: "openai" | "anthropic";
+            use_full_url?: boolean;
+            api_key?: string;
+            temperature?: number;
+            timeout_secs?: number;
         };
     };
     responses: never;
@@ -4959,8 +4985,6 @@ export interface operations {
                 content: {
                     "application/json": {
                         artifact_id: string;
-                        task_id?: string | null;
-                        attempt_id?: string | null;
                         evidence_refs: string[];
                         /** @enum {string} */
                         format: "json" | "csv" | "research" | "markdown";
@@ -4978,6 +5002,8 @@ export interface operations {
                             valid: boolean;
                         };
                         version: number;
+                        task_id?: string | null;
+                        attempt_id?: string | null;
                     };
                 };
             };
@@ -5362,7 +5388,6 @@ export interface operations {
                 content: {
                     "application/json": {
                         change_set_id: string;
-                        attempt_id?: string | null;
                         changed_files?: string[];
                         created_at?: string;
                         diff_ref?: string | null;
@@ -5372,6 +5397,7 @@ export interface operations {
                         status: "pending_review" | "accepted" | "rejected" | "reverted" | "conflicted";
                         step_id?: string;
                         team_id?: string;
+                        attempt_id?: string | null;
                     } & {
                         [key: string]: unknown;
                     };
@@ -6606,7 +6632,7 @@ export interface operations {
     evalGateReport: {
         parameters: {
             query?: {
-                /** Report file name; omitted to return the latest report. */
+                /** @description 报告文件名；省略时返回最新报告 */
                 file?: string;
             };
             header?: never;
@@ -6615,8 +6641,22 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description latest eval report */
+            /** @description latest or selected eval report */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description invalid report file name */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description report not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9831,6 +9871,15 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
+            /** @description 已有评测矩阵运行或收尾中；为保证 Single/Team 测量隔离而拒绝并发运行 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             /** @description 结构校验失败（缺字段/类型错） */
             422: {
                 headers: {
@@ -10467,10 +10516,48 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * Format: uuid
+                     * @description Cancel only this turn. Omitted for legacy current-session cancellation.
+                     */
+                    turn_id?: string;
+                };
+            };
+        };
         responses: {
-            /** @description ok */
+            /** @description Cancellation request state, not proof of process termination */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        turn_id?: string | null;
+                        /** @enum {string} */
+                        state: "cancellation_requested" | "cancellation_queued" | "no_active_turn" | "already_finished";
+                    };
+                };
+            };
+            /** @description Invalid cancellation request or turn UUID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Cancellation body exceeds 4096 bytes */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Pending cancellation capacity reached */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10724,10 +10811,40 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    allow: boolean;
+                    /** @description Legacy compatibility field */
+                    remember?: boolean | null;
+                    /** @description Reusable scope applies only to eligible read operations; write and execution approval applies once. */
+                    scope?: string | null;
+                };
+            };
+        };
         responses: {
-            /** @description ok */
+            /** @description Decision delivered; granted describes actual reusable grant creation */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        allowed: boolean;
+                        granted: boolean;
+                    };
+                };
+            };
+            /** @description Request missing or belongs to another session */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Approval response channel closed; no reusable grant created */
+            410: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11751,7 +11868,6 @@ export interface operations {
                                 [key: string]: unknown;
                             };
                             change_set_id?: string;
-                            attempt_id?: string | null;
                             changed_files?: string[];
                             created_at?: string;
                             /** @description 幂等决定记录（accept/reject/revert 只增不改） */
@@ -11769,6 +11885,7 @@ export interface operations {
                             status?: "pending_review" | "accepted" | "rejected" | "reverted" | "conflicted";
                             step_id?: string;
                             team_id?: string;
+                            attempt_id?: string | null;
                         } & {
                             [key: string]: unknown;
                         })[];
@@ -11821,7 +11938,10 @@ export interface operations {
             query?: {
                 format?: "json";
             };
-            header?: never;
+            header?: {
+                /** @description 审计事件断线续传游标（时间戳 + 团队内序号）；缺省重放最近 50 条 */
+                "Last-Event-ID"?: string;
+            };
             path: {
                 id: string;
             };

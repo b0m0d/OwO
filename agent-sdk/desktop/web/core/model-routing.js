@@ -6,6 +6,35 @@
       : settings && settings.model;
     return String(value || "").trim();
   }
+  function buildCustomModelConnection(id, models, keys) {
+    const model = (Array.isArray(models) ? models : []).find((item) => item && item.id === id);
+    if (!model) return null;
+    const baseUrl = String(model.baseUrl || "").trim();
+    let url;
+    try { url = new URL(baseUrl); } catch (_) { throw new Error("请填写自定义模型的请求地址"); }
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      throw new Error("自定义模型地址必须为不含凭据、查询参数或片段的 HTTP(S) 地址");
+    }
+    const format = String(model.apiFormat || "openai");
+    if (!["openai", "anthropic"].includes(format)) throw new Error("不支持的自定义模型接口格式");
+    const request = {
+      model: String(model.id).trim(), base_url: baseUrl, api_format: format,
+      use_full_url: model.useFullUrl === true,
+    };
+    const key = String((keys && keys[model.id]) || "").trim();
+    if (key) request.api_key = key;
+    if (model.temperature !== undefined) {
+      const value = Number(model.temperature);
+      if (!Number.isFinite(value) || value < 0 || value > 2) throw new Error("温度必须在 0 到 2 之间");
+      request.temperature = value;
+    }
+    if (model.timeoutSecs !== undefined) {
+      const value = Number(model.timeoutSecs);
+      if (!Number.isInteger(value) || value < 1 || value > 3600) throw new Error("超时必须为 1 到 3600 秒");
+      request.timeout_secs = value;
+    }
+    return request;
+  }
   function buildSessionModelRequest(model) {
     const value = String(model || "").trim();
     return { model: value || null };
@@ -73,6 +102,7 @@
   }
   const api = {
     effectiveDefaultModel,
+    buildCustomModelConnection,
     buildSessionModelRequest,
     buildCreateSessionRequest,
     createSessionModelUpdateQueue,

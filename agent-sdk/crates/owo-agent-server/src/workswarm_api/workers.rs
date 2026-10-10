@@ -340,7 +340,7 @@ impl Worker for AgentSubagentWorker {
                     }
                 });
                 let runner = ProfileSubagentRunner {
-                    provider, approver, abort, depth: 0, model,
+                    provider, parent_policy: self.agent.policy(), approver, abort, depth: 0, model,
                     is_critic: self.is_critic,
                     write_allowed: effective_write_allowed,
                     profile: task_profile.clone(),
@@ -369,6 +369,7 @@ impl Worker for AgentSubagentWorker {
             None => {
                 let runner = SubagentRunner {
                     provider,
+                    parent_policy: self.agent.policy(),
                     approver,
                     abort,
                     depth: 0,

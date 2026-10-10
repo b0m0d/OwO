@@ -37,12 +37,28 @@ pub struct AgentClient {
 
 impl AgentClient {
     pub fn new(config: ClientConfig) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(config.timeout)
+        let local = reqwest::Url::parse(&config.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .is_some_and(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+        let mut http_builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(config.timeout);
+        let mut stream_builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(5));
+        if local {
+            http_builder = http_builder.no_proxy();
+            stream_builder = stream_builder.no_proxy();
+        }
+        let http = http_builder
             .build()
             .map_err(|error| ClientError::Transport(error.to_string()))?;
-        // Streaming requests have no total-body timeout; their caller owns cancellation.
-        let stream_http = reqwest::Client::builder()
+        // Long-running bodies have no total timeout. Header sends remain bounded separately.
+        let stream_http = stream_builder
             .build()
             .map_err(|error| ClientError::Transport(error.to_string()))?;
         Ok(Self {
@@ -142,10 +158,10 @@ impl AgentClient {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response> {
-        let response = request
-            .send()
+        let response = tokio::time::timeout(Duration::from_secs(30), request.send())
             .await
-            .map_err(|error| ClientError::Transport(error.to_string()))?;
+            .map_err(|_| ClientError::Transport("client/response_header_timeout".into()))?
+            .map_err(|error| ClientError::Transport(error.without_url().to_string()))?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();

@@ -408,3 +408,14 @@ test("接线：容器与脚本就位、boot 早期挂载、导航事件有接收
   assert.match(cssSource, /\.owo-status-item:focus-visible/, "键盘焦点样式必须存在（§4.10）");
   assert.match(cssSource, /\.owo-status-item \.owo-status-label \{ display: none; \}/, "860px 窄屏收起标签只留值");
 });
+
+test("selected custom model status uses its own endpoint instead of the cached default provider", () => {
+  const sandbox=makeSandbox({__owoCoreDiagnostics:{state:"ready"}});
+  sandbox.OwoStatusBar.reportModel({provider:"openai-compatible",model:"gpt-4o-mini"});
+  const source={selectedModel:"custom-x",settings:{custom_models:[{id:"custom-x",apiFormat:"anthropic",baseUrl:"http://localhost:7777/v1"}]}};
+  const selected=sandbox.OwoStatusBar.computeFacts(source,null)[2];
+  assert.equal(selected.text,"Anthropic · custom-x");
+  assert.match(selected.detail,/localhost:7777/);
+  assert.doesNotMatch(selected.text,/gpt-4o-mini/);
+  assert.equal(sandbox.OwoStatusBar.computeFacts({},null)[2].text,"openai-compatible · gpt-4o-mini");
+});

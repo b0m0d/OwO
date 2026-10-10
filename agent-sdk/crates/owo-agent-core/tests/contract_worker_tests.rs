@@ -58,7 +58,9 @@ async fn nested_subagent_forwards_permission_and_tool_events() {
     let sink: owo_agent_core::subagent::TurnEventSink<'_> = Arc::new(move |event: &TurnEvent| {
         sink_seen.lock().expect("事件锁中毒").push(event.clone());
     });
+    let parent_policy = owo_agent_core::Policy::new(&workspace);
     let runner = ContractSubagentRunner {
+        parent_policy: &parent_policy,
         provider: provider_arc(&provider),
         approver: &approver,
         abort: &abort,
@@ -270,7 +272,9 @@ async fn subagent_end_to_end_producer() {
     let provider = ScriptedProvider::new(&[PRODUCER_OK]);
     let abort = AtomicBool::new(false);
     let approver = AutoApprover { allow: true };
+    let parent_policy = owo_agent_core::Policy::new(&workspace);
     let runner = SubagentRunner {
+        parent_policy: &parent_policy,
         provider: provider_arc(&provider),
         approver: &approver,
         abort: &abort,
@@ -312,7 +316,9 @@ async fn subagent_end_to_end_critic() {
     let provider = ScriptedProvider::new(&[CRITIC_OK]);
     let abort = AtomicBool::new(false);
     let approver = AutoApprover { allow: true };
+    let parent_policy = owo_agent_core::Policy::new(&workspace);
     let runner = SubagentRunner {
+        parent_policy: &parent_policy,
         provider: provider_arc(&provider),
         approver: &approver,
         abort: &abort,
@@ -342,7 +348,9 @@ async fn subagent_free_text_path_is_closed() {
     let provider = ScriptedProvider::new(&[FREE_TEXT, "还是自由文本"]);
     let abort = AtomicBool::new(false);
     let approver = AutoApprover { allow: true };
+    let parent_policy = owo_agent_core::Policy::new(&workspace);
     let runner = SubagentRunner {
+        parent_policy: &parent_policy,
         provider: provider_arc(&provider),
         approver: &approver,
         abort: &abort,
@@ -374,7 +382,9 @@ async fn contract_runner_accepts_explicit_fields() {
     let provider = ScriptedProvider::new(&[CRITIC_OK]);
     let abort = AtomicBool::new(false);
     let approver = AutoApprover { allow: true };
+    let parent_policy = owo_agent_core::Policy::new(&workspace);
     let runner = ContractSubagentRunner {
+        parent_policy: &parent_policy,
         provider: provider_arc(&provider),
         approver: &approver,
         abort: &abort,

@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, Query, State};
@@ -70,11 +70,10 @@ pub(crate) async fn turn_events(
         events.truncate(page_limit);
     }
     let active_turn_id = state
-        .active_turn_ids
+        .turn_controls
         .lock()
         .map_err(poison)?
-        .get(&session_id)
-        .cloned();
+        .active_id(&session_id);
     let replay_state = turn_replay_state(
         &events,
         has_more,
@@ -93,6 +92,27 @@ pub(crate) async fn turn_events(
     })))
 }
 
+struct TurnLifecycleGuard {
+    state: Arc<AppState>,
+    session_id: String,
+    turn_id: String,
+    queue: Arc<TurnEventQueue>,
+}
+
+impl Drop for TurnLifecycleGuard {
+    fn drop(&mut self) {
+        let mut controls = self
+            .state
+            .turn_controls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        controls.finish(&self.session_id, &self.turn_id);
+        drop(controls);
+        crate::activity_api::end_activity(&self.state, &self.session_id);
+        self.queue.close();
+    }
+}
+
 pub(crate) async fn turn(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -101,6 +121,12 @@ pub(crate) async fn turn(
     // §13 批次六：遥测功能计数（默认关时零开销早退；仅数字，无内容）。
     crate::observability_api::record_telemetry_counter("turn", 1);
     let session = crate::session_api::load_session(&state, &id)?;
+    let turn_provider = request
+        .model_connection
+        .as_ref()
+        .map(owo_agent_core::gateway::custom_model_provider)
+        .transpose()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     let mut effective_prompt = request.prompt.clone();
     // A1-2 多模态（取优合并自远端 engine）：图片附件 → base64 data URL 进 images
     // （真正进视觉上下文）；文本类附件维持路径注入。
@@ -178,6 +204,8 @@ pub(crate) async fn turn(
     let turn_guard = turn_lock
         .try_lock_owned()
         .map_err(|_| (StatusCode::CONFLICT, "该会话已有回合正在运行".to_string()))?;
+    // Load the authoritative snapshot only after acquiring the per-session turn lock.
+    let session = crate::session_api::load_session(&state, &id)?;
     // R8：全局并发 turn 上限 + 关闭中拒绝新回合。
     let concurrency_permit = state.shutdown_gate.try_acquire_turn().map_err(|busy| {
         // R10：错误码表接入（domain/reason/retryable 统一前缀，见 error_codes.rs）。
@@ -205,22 +233,40 @@ pub(crate) async fn turn(
     }
 
     let event_queue = Arc::new(TurnEventQueue::new());
-    let turn_id = uuid::Uuid::new_v4().to_string();
+    let turn_id = request
+        .turn_id
+        .as_deref()
+        .map(|id| {
+            owo_agent_protocol::canonical_turn_id(id)
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, "turn/invalid_id".to_string()))
+        })
+        .transpose()?
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if !state
+        .store
+        .turn_events_after(&id, Some(&turn_id), 0, 1)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .is_empty()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("turn/already_accepted: {turn_id}; replay instead of resubmitting"),
+        ));
+    }
     let receiver_alive = Arc::new(());
     let receiver_weak = Arc::downgrade(&receiver_alive);
-    let abort_flag = {
-        let mut aborts = state.aborts.lock().map_err(poison)?;
-        aborts
-            .entry(id.clone())
-            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-            .clone()
-    };
-    state
-        .active_turn_ids
+    let abort_flag = state
+        .turn_controls
         .lock()
         .map_err(poison)?
-        .insert(id.clone(), turn_id.clone());
-    abort_flag.store(false, Ordering::Relaxed);
+        .register(&id, &turn_id)
+        .map_err(|code| (StatusCode::CONFLICT, code.to_string()))?;
+    let lifecycle = TurnLifecycleGuard {
+        state: Arc::clone(&state),
+        session_id: id.clone(),
+        turn_id: turn_id.clone(),
+        queue: Arc::clone(&event_queue),
+    };
     let approver = ChannelApprover {
         pending: Arc::clone(&state.pending_approvals),
         pending_sessions: Arc::clone(&state.pending_approval_sessions),
@@ -228,7 +274,15 @@ pub(crate) async fn turn(
         abort: Arc::clone(&abort_flag),
     };
 
-    let agent = Arc::clone(&state.agent);
+    let agent = match turn_provider {
+        Some(provider) => Arc::new(
+            state
+                .agent
+                .with_turn_provider(provider)
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?,
+        ),
+        None => Arc::clone(&state.agent),
+    };
     let store = Arc::clone(&state.store);
     let sessions = Arc::clone(&state.sessions);
     let traces_dir = state.traces_dir.clone();
@@ -244,8 +298,14 @@ pub(crate) async fn turn(
     let stream_queue = Arc::clone(&event_queue);
     tokio::spawn(async move {
         let _turn_guard = turn_guard;
+        let _lifecycle = lifecycle;
         let _concurrency_permit = concurrency_permit;
         let mut current = session;
+        let original_model = current.model.clone();
+        let original_override = current.model_override.clone();
+        if let Some(connection) = &request.model_connection {
+            current.set_model_override(Some(connection.model.clone()));
+        }
         let stream_abort = Arc::clone(&abort_flag);
         let mut tool_starts: std::collections::HashMap<String, std::time::Instant> =
             std::collections::HashMap::new();
@@ -300,8 +360,12 @@ pub(crate) async fn turn(
             receiver: producer_receiver.clone(),
         };
         let mut success_stats = None;
+        let options = owo_agent_core::TurnExecutionOptions {
+            read_only: request.read_only.unwrap_or(false),
+            turn_id: Some(producer_turn_id.clone()),
+        };
         match agent
-            .run_turn_with_images(
+            .run_turn_with_images_options(
                 &mut current,
                 &effective_prompt,
                 &attachment_images,
@@ -309,6 +373,7 @@ pub(crate) async fn turn(
                 Some(&questioner),
                 &abort_flag,
                 &mut on_event,
+                &options,
             )
             .await
         {
@@ -434,8 +499,10 @@ pub(crate) async fn turn(
                 );
             }
         }
+        current.model = original_model;
+        current.model_override = original_override;
         // A8-2：回合结束（成功/失败）一律从活跃快照移除。
-        crate::activity_api::end_activity(&state_for_activity, &current.id);
+        // The lifecycle guard removes activity only after persistence, audit and queue closure.
         if let Ok(mut sessions) = sessions.lock() {
             sessions.insert(current.id.clone(), current.clone());
         }
@@ -461,19 +528,6 @@ pub(crate) async fn turn(
                 &producer_receiver,
                 stats,
             );
-        }
-        if let Ok(mut aborts) = state_for_audit.aborts.lock() {
-            if aborts
-                .get(&current.id)
-                .is_some_and(|registered| Arc::ptr_eq(registered, &abort_flag))
-            {
-                aborts.remove(&current.id);
-            }
-        }
-        if let Ok(mut active_turn_ids) = state_for_audit.active_turn_ids.lock() {
-            if active_turn_ids.get(&current.id) == Some(&producer_turn_id) {
-                active_turn_ids.remove(&current.id);
-            }
         }
         crate::audit_api::flush_audit(&state_for_audit);
         producer_queue.close();
@@ -537,7 +591,13 @@ pub(crate) async fn respond_permission(
         .lock()
         .map_err(poison)?
         .remove(&request_id);
-    let mut grant_created = false;
+    let session_workspace = crate::session_api::load_session(&state, &session_id)?.workspace;
+    let approval_workspace_id = session_workspace
+        .canonicalize()
+        .unwrap_or(session_workspace)
+        .to_string_lossy()
+        .into_owned();
+    let mut staged_grant = None;
     let decision = if response.allow {
         // §5.4 只有只读动作可转换成可复用 Grant；写入/执行仅批准当前请求。
         // 破坏性/注入请求不允许生成 grant（scope 一律忽略，仅放行本次）。
@@ -548,10 +608,9 @@ pub(crate) async fn respond_permission(
                     if let Some(grant) =
                         state
                             .grants
-                            .grant_from_scope(&request, &state.workspace_id(), scope_enum)
+                            .grant_from_scope(&request, &approval_workspace_id, scope_enum)
                     {
-                        state.grants.insert(grant);
-                        grant_created = true;
+                        staged_grant = Some(grant);
                     }
                 }
             }
@@ -563,6 +622,11 @@ pub(crate) async fn respond_permission(
     sender
         .send(decision)
         .map_err(|_| (StatusCode::GONE, "审批通道已关闭".to_string()))?;
+    // A closed/expired responder must not create a reusable grant.
+    let grant_created = staged_grant.is_some();
+    if let Some(grant) = staged_grant {
+        state.grants.insert(grant);
+    }
     Ok(Json(json!({
         "ok": true,
         "allowed": response.allow,

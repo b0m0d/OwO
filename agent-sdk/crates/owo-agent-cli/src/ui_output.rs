@@ -100,6 +100,190 @@ pub(crate) fn completion_record_summary(
     Some(summary)
 }
 
+#[derive(Default)]
+pub(crate) struct TurnCompletion {
+    final_text: Option<String>,
+    status: Option<owo_agent_protocol::CompletionStatusV1>,
+    record: Option<owo_agent_protocol::TaskCompletionRecordV1>,
+    failure: Option<String>,
+    stats: Option<SseEvent>,
+    steps: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct CompletedTurn {
+    pub final_text: Option<String>,
+    pub status: owo_agent_protocol::CompletionStatusV1,
+    pub record: Option<owo_agent_protocol::TaskCompletionRecordV1>,
+    pub failure: Option<String>,
+    pub stats: Option<SseEvent>,
+    pub steps: usize,
+}
+
+impl TurnCompletion {
+    pub(crate) fn observe(&mut self, event: &SseEvent) {
+        match event {
+            SseEvent::Final { text } => self.final_text = Some(text.clone()),
+            SseEvent::ToolResult { .. } => self.steps = self.steps.saturating_add(1),
+            SseEvent::TurnStats {
+                completion_status,
+                completion_record,
+                ..
+            } => {
+                self.stats = Some(event.clone());
+                if self.failure.is_none() {
+                    self.status = Some(*completion_status);
+                    self.record = completion_record.clone();
+                }
+            }
+            SseEvent::TurnFailed {
+                message,
+                completion_status,
+                completion_record,
+            } => {
+                self.failure = Some(message.clone());
+                self.status = Some(*completion_status);
+                self.record = completion_record.clone();
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn finish(self) -> Result<CompletedTurn, String> {
+        let status = self
+            .status
+            .ok_or_else(|| "turn/missing_terminal: 缺少宿主终态，不能确认结果".to_string())?;
+        if self.failure.is_none() && self.final_text.is_none() {
+            return Err("turn/missing_final: 宿主结束但缺少最终回答".into());
+        }
+        Ok(CompletedTurn {
+            final_text: self.final_text,
+            status,
+            record: self.record,
+            failure: self.failure,
+            stats: self.stats,
+            steps: self.steps,
+        })
+    }
+}
+
+impl CompletedTurn {
+    pub(crate) fn exit_code(&self) -> u8 {
+        use owo_agent_protocol::CompletionStatusV1::*;
+        if self.status == Aborted {
+            return 130;
+        }
+        if self.failure.is_some() {
+            return 1;
+        }
+        match self.status {
+            ResponseComplete | Accepted => 0,
+            Candidate => 2,
+            Blocked => 3,
+            Unverified => 4,
+            Aborted => 130,
+        }
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        use owo_agent_protocol::CompletionStatusV1::*;
+        if self.status == Aborted {
+            return "已取消";
+        }
+        if self.failure.is_some() {
+            return "执行失败";
+        }
+        match self.status {
+            ResponseComplete => "回答结束（未声明交付验收）",
+            Accepted => "宿主验收通过",
+            Candidate => "候选结果待验收",
+            Blocked => "存在阻断问题",
+            Unverified => "结果未验证",
+            Aborted => "已取消",
+        }
+    }
+
+    pub(crate) fn render_jsonl(
+        &self,
+        session_id: &str,
+        turn_id: Option<&str>,
+        diffs: &[String],
+    ) -> String {
+        json!({
+            "type": "turn_result", "session_id": session_id, "turn_id": turn_id,
+            "final_text": self.final_text, "steps": self.steps, "diffs": diffs,
+            "completion_status": self.status, "completion_record": self.record,
+            "failure": self.failure, "stats": self.stats, "exit_code": self.exit_code(),
+        })
+        .to_string()
+    }
+}
+
+pub(crate) async fn wait_for_local_abort(abort: &std::sync::atomic::AtomicBool) {
+    while !abort.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(test)]
+mod completion_reducer_contract_tests {
+    use super::*;
+    use owo_agent_protocol::CompletionStatusV1 as Status;
+    fn stats(status: Status) -> SseEvent {
+        serde_json::from_value(json!({
+            "type":"turn_stats", "steps":1, "duration_ms":1, "prompt_tokens":0,
+            "completion_tokens":0, "total_tokens":0, "cost_usd":0, "completion_status":status,
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn final_without_persisted_terminal_is_never_successful() {
+        let mut result = TurnCompletion::default();
+        result.observe(&SseEvent::Final {
+            text: "fixture".into(),
+        });
+        assert!(result.finish().unwrap_err().contains("missing_terminal"));
+    }
+    #[test]
+    fn failure_wins_even_when_stats_arrive_later() {
+        let mut result = TurnCompletion::default();
+        result.observe(&SseEvent::Final {
+            text: "candidate".into(),
+        });
+        result.observe(&SseEvent::TurnFailed {
+            message: "save failed".into(),
+            completion_status: Status::Unverified,
+            completion_record: None,
+        });
+        result.observe(&stats(Status::Accepted));
+        let result = result.finish().unwrap();
+        assert_eq!(result.exit_code(), 1);
+        assert_eq!(result.label(), "执行失败");
+        assert_eq!(result.status, Status::Unverified);
+        let json: Value =
+            serde_json::from_str(&result.render_jsonl("session", Some("turn"), &[])).unwrap();
+        assert_eq!(json["completion_status"], "unverified");
+        assert_eq!(json["failure"], "save failed");
+    }
+    #[test]
+    fn nonaccepted_statuses_keep_distinct_exit_codes_and_labels() {
+        for (status, code) in [
+            (Status::Accepted, 0),
+            (Status::Candidate, 2),
+            (Status::Blocked, 3),
+            (Status::Unverified, 4),
+            (Status::Aborted, 130),
+        ] {
+            let mut result = TurnCompletion::default();
+            result.observe(&SseEvent::Final {
+                text: "fixture".into(),
+            });
+            result.observe(&stats(status));
+            assert_eq!(result.finish().unwrap().exit_code(), code);
+        }
+    }
+}
+
 // ---------- 协议渲染纯函数（协议稳定性由测试锁定） ----------
 
 /// jsonl：把任意可序列化事件包裹为稳定协议行（turn/repl 共用同一 schema）。

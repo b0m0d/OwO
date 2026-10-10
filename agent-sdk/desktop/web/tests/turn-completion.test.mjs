@@ -72,3 +72,43 @@ test("consumer failures cancel the unfinished browser SSE body", async () => {
  await assert.rejects(api.consumeResponse(response(body),{onEvent:()=>{throw new Error("consumer bug");}}),/consumer bug/);
  assert.equal(cancelled,true);
 });
+
+test("persisted terminal stats complete an open SSE without waiting for EOF", async () => {
+ let cancelled=false;
+ const body=new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(final+stats));},cancel(){cancelled=true;}});
+ const result=await api.consumeResponse(response(body,"turn"),{onEvent:()=>{},idleTimeoutMs:5});
+ assert.equal(result.completionStatus,"accepted");assert.equal(cancelled,true);
+});
+test("stalled open stream recovers durable stats and deduplicates final", async () => {
+ let reads=0,cancelled=false;const events=[];
+ const body=new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(final));},cancel(){cancelled=true;}});
+ const result=await api.consumeResponse(response(body,"turn"),{onEvent:t=>events.push(t),idleTimeoutMs:5,replay:async(id,cursor)=>{
+  reads++;assert.equal(cursor,1);
+  return {active:false,state:"completed",events:[{turn_id:id,seq:1,payload:{type:"final",text:"duplicate"}},{turn_id:id,seq:2,payload:{type:"turn_stats",completion_status:"accepted"}}]};
+ }});
+ assert.equal(result.completionStatus,"accepted");assert.equal(reads,1);assert.deepEqual(events,["final","turn_stats"]);assert.equal(cancelled,true);
+});
+test("active replay retains the original stream until it produces completion", async () => {
+ let replayed=false,cancelled=false,controller;
+ const body=new ReadableStream({start(c){controller=c;c.enqueue(new TextEncoder().encode(final));},cancel(){cancelled=true;}});
+ const result=await api.consumeResponse(response(body,"turn"),{onEvent:()=>{},idleTimeoutMs:5,replay:async()=>{
+  replayed=true;assert.equal(cancelled,false);controller.enqueue(new TextEncoder().encode(stats));return {active:true,events:[]};
+ }});
+ assert.equal(replayed,true);assert.equal(result.completionStatus,"accepted");assert.equal(cancelled,true);
+});
+test("abort interrupts a stalled stream without accepting provisional output", async () => {
+ const controller=new AbortController();let cancelled=false;
+ const body=new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(final));},cancel(){cancelled=true;}});
+ const timer=setTimeout(()=>controller.abort(),5);
+ try { await assert.rejects(api.consumeResponse(response(body,"turn"),{signal:controller.signal,onEvent:()=>{},idleTimeoutMs:100}),e=>e.name==="AbortError"); }
+ finally { clearTimeout(timer); }
+ assert.equal(cancelled,true);
+});
+
+test("replay timeout cancels its request and cannot accept provisional output", async () => {
+ let replaySignal;
+ await assert.rejects(api.consumeResponse(response(final,"turn"),{onEvent:()=>{},replayTimeoutMs:5,replay:async(id,cursor,signal)=>{
+  replaySignal=signal;return new Promise(()=>{});
+ }}),/turn\/replay_timeout/);
+ assert.equal(replaySignal.aborted,true);
+});

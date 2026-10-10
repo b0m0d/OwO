@@ -35,9 +35,9 @@ mod single_review;
 #[cfg(test)]
 mod tests;
 
-pub use config::AgentConfig;
 pub(crate) use config::DEFAULT_BOUNDED_TOOL_CALL_CAP;
 use config::*;
+pub use config::{AgentConfig, TurnExecutionOptions};
 
 /// 达到最大回合数后的收尾指令：不再调用工具，强制产出可见结论
 /// （审查/分析类任务据此给出结构化报告；信息不足时列出需要用户澄清的问题）。
@@ -387,6 +387,14 @@ impl Agent {
     /// `host_verified_readonly=true`）。MCP 自报 readOnlyHint 未经验证、
     /// 写/执行/注入、effect 缺失与未知工具一律 `false`（保持串行）。
     fn call_is_concurrent_eligible(&self, call: &crate::gateway::ToolCall) -> bool {
+        // These read-class tools update the live session or suspend for user input.
+        // Running them on discarded session clones loses plans/decisions.
+        if matches!(
+            call.name.as_str(),
+            "todo" | "verification_plan" | "ask_user" | "kill_shell"
+        ) {
+            return false;
+        }
         let Ok(registry) = self.registry.read() else {
             return false;
         };
@@ -432,6 +440,27 @@ impl Agent {
         self.config.clone()
     }
 
+    /// A turn-local provider view sharing the existing host, policy and audit.
+    /// Does not create a second registry or mutate the daemon's default provider.
+    pub fn with_turn_provider(&self, provider: Arc<dyn ModelProvider>) -> Result<Self, String> {
+        Ok(Self {
+            provider,
+            registry: Arc::clone(&self.registry),
+            tool_host: self.tool_host.clone(),
+            disabled_tool_prefixes: Arc::clone(&self.disabled_tool_prefixes),
+            mcp_clients: Arc::clone(&self.mcp_clients),
+            mcp_health: Arc::clone(&self.mcp_health),
+            reviewer: self.reviewer.clone(),
+            policy: self.policy.for_workspace(self.policy.workspace())?,
+            audit: Arc::clone(&self.audit),
+            config: self.config.clone(),
+            skills: self.skills.clone(),
+            elements: Arc::clone(&self.elements),
+            artifact_store: self.artifact_store.clone(),
+            hooks: RwLock::new(self.hooks.read().unwrap_or_else(|e| e.into_inner()).clone()),
+        })
+    }
+
     pub fn provider(&self) -> Arc<dyn ModelProvider> {
         Arc::clone(&self.provider)
     }
@@ -457,6 +486,7 @@ impl Agent {
         };
         let runner = SubagentRunner {
             provider: Arc::clone(&self.provider),
+            parent_policy: &self.policy,
             approver: &approver,
             abort: &abort,
             depth: self.config.subagent_depth,
@@ -529,8 +559,17 @@ impl Agent {
         on_event: &mut (dyn FnMut(&TurnEvent) + Send),
         questioner: Option<&dyn crate::question::Questioner>,
     ) -> Result<TurnOutcome, AgentError> {
-        self.run_turn_inner(session, prompt, &[], approver, abort, on_event, questioner)
-            .await
+        self.run_turn_inner(
+            session,
+            prompt,
+            &[],
+            approver,
+            abort,
+            on_event,
+            questioner,
+            &TurnExecutionOptions::default(),
+        )
+        .await
     }
 
     /// 带图片输入的回合（A1-2 多模态；取优合并自远端 engine）：`images` 为空时
@@ -550,7 +589,61 @@ impl Agent {
         on_event: &mut (dyn FnMut(&TurnEvent) + Send),
     ) -> Result<TurnOutcome, AgentError> {
         self.run_turn_inner(
-            session, prompt, images, approver, abort, on_event, questioner,
+            session,
+            prompt,
+            images,
+            approver,
+            abort,
+            on_event,
+            questioner,
+            &TurnExecutionOptions::default(),
+        )
+        .await
+    }
+
+    /// Run with request constraints. These can only restrict the host policy.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_turn_with_images_constrained(
+        &self,
+        session: &mut Session,
+        prompt: &str,
+        images: &[crate::gateway::MessageImage],
+        approver: &dyn Approver,
+        questioner: Option<&dyn crate::question::Questioner>,
+        abort: &AtomicBool,
+        on_event: &mut (dyn FnMut(&TurnEvent) + Send),
+        read_only: bool,
+    ) -> Result<TurnOutcome, AgentError> {
+        self.run_turn_with_images_options(
+            session,
+            prompt,
+            images,
+            approver,
+            questioner,
+            abort,
+            on_event,
+            &TurnExecutionOptions {
+                read_only,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_turn_with_images_options(
+        &self,
+        session: &mut Session,
+        prompt: &str,
+        images: &[crate::gateway::MessageImage],
+        approver: &dyn Approver,
+        questioner: Option<&dyn crate::question::Questioner>,
+        abort: &AtomicBool,
+        on_event: &mut (dyn FnMut(&TurnEvent) + Send),
+        options: &TurnExecutionOptions,
+    ) -> Result<TurnOutcome, AgentError> {
+        self.run_turn_inner(
+            session, prompt, images, approver, abort, on_event, questioner, options,
         )
         .await
     }

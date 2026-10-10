@@ -7,8 +7,8 @@
 
 use crate::support::*;
 use crate::ui_output::{
-    parse_approval_response, render_error_jsonl, render_event_jsonl, render_final_result_jsonl,
-    render_final_result_plain, OutputMode, PermissionsProfile, StreamPrinter,
+    parse_approval_response, render_error_jsonl, render_event_jsonl, render_final_result_plain,
+    OutputMode, PermissionsProfile, StreamPrinter,
 };
 use clap::Args;
 use colored::Colorize;
@@ -73,7 +73,8 @@ pub(crate) async fn run_turn(
     args: TurnArgs,
     output: OutputMode,
     permissions: PermissionsProfile,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<u8, Box<dyn std::error::Error>> {
+    let prompt = resolve_turn_prompt(args.prompt.clone())?;
     let workspace = args.workspace.canonicalize()?;
     let workspace_str = workspace.to_string_lossy().to_string();
     let root = ensure_data_root(args.data_dir.clone(), &workspace);
@@ -83,6 +84,8 @@ pub(crate) async fn run_turn(
         .await?;
 
     // Ctrl+C → 取消运行中的回合（贯穿网络与 Daemon 侧 abort 标志）。
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let cancel_turn_id = invocation_id.clone();
     let abort = Arc::new(AtomicBool::new(false));
     let cancel_client = client.clone();
     let cancel_session = session.id.clone();
@@ -90,7 +93,11 @@ pub(crate) async fn run_turn(
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             abort_flag.store(true, Ordering::Relaxed);
-            let _ = cancel_client.cancel_turn(&cancel_session).await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                cancel_client.cancel_turn_id(&cancel_session, &cancel_turn_id),
+            )
+            .await;
         }
     });
 
@@ -99,14 +106,32 @@ pub(crate) async fn run_turn(
         eprintln!("⚠ 已弃用：--no-approval 将在未来版本移除；兼容期等价 --permissions trusted（高风险：全部操作自动批准）");
     }
 
-    let prompt = resolve_turn_prompt(args.prompt.clone())?;
-    let mut stream = client.open_turn(&session.id, &prompt).await?;
-    let mut steps = 0usize;
-    let mut final_text: Option<String> = None;
+    let mut stream = client
+        .open_turn_with_id(
+            &session.id,
+            &prompt,
+            matches!(permissions, PermissionsProfile::ReadOnly),
+            &invocation_id,
+        )
+        .await?;
+    let turn_id = stream.turn_id().map(str::to_string);
+    let mut completion = crate::ui_output::TurnCompletion::default();
     let mut stream_error: Option<String> = None;
     let mut printer = StreamPrinter::new();
 
-    while let Some(event) = stream.next_event().await {
+    let mut cancelling = false;
+    let mut cancel_deadline = tokio::time::Instant::now();
+    loop {
+        let event = tokio::select! {
+            event=stream.next_event() => event,
+            _=crate::ui_output::wait_for_local_abort(&abort), if !cancelling => {
+                cancelling=true; cancel_deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(10); continue;
+            }
+            _=tokio::time::sleep_until(cancel_deadline), if cancelling => {
+                stream_error=Some("turn/cancellation_unconfirmed: 宿主尚未确认取消".into()); break;
+            }
+        };
+        let Some(event) = event else { break };
         let event = match event {
             Ok(event) => event,
             Err(error) => {
@@ -114,6 +139,7 @@ pub(crate) async fn run_turn(
                 break;
             }
         };
+        completion.observe(&event);
         let human = matches!(output, OutputMode::Human);
         match &event {
             SseEvent::TokenDelta { .. } => {
@@ -122,7 +148,7 @@ pub(crate) async fn run_turn(
                 }
             }
             SseEvent::Final { text } => {
-                final_text = Some(text.clone());
+                let _ = text;
                 if human {
                     printer.print_sse(&event);
                 }
@@ -142,7 +168,6 @@ pub(crate) async fn run_turn(
                 }
             }
             SseEvent::ToolResult { .. } => {
-                steps += 1;
                 emit_event(output, &event);
                 if human {
                     printer.print_sse(&event);
@@ -170,7 +195,7 @@ pub(crate) async fn run_turn(
                 if human {
                     printer.print_sse(&event);
                 }
-                stream_error = Some(message.clone());
+                let _ = message;
             }
             _ => {
                 emit_event(output, &event);
@@ -186,16 +211,22 @@ pub(crate) async fn run_turn(
         return Err(error.into());
     }
 
+    let completed = completion
+        .finish()
+        .inspect_err(|error| emit_error(output, error))?;
     let diffs = client.session_diff(&session.id).await.unwrap_or_default();
     let diff_paths: Vec<String> = diffs.iter().map(|diff| diff.path.clone()).collect();
     if matches!(output, OutputMode::Human) {
         printer.finish();
     }
-    render_final(output, final_text.as_deref(), steps, &diff_paths);
-    if abort.load(Ordering::Relaxed) {
-        eprintln!("{}", "（回合已被用户取消）".yellow());
-    }
-    Ok(())
+    render_completed(
+        output,
+        &completed,
+        &session.id,
+        turn_id.as_deref(),
+        &diff_paths,
+    );
+    Ok(completed.exit_code())
 }
 
 /// 非 human 模式的事件协议出口（jsonl 包裹为 `turn_event`；plain 只保留 stderr 提示）。
@@ -228,33 +259,43 @@ fn emit_error(output: OutputMode, message: &str) {
     }
 }
 
-fn render_final(output: OutputMode, text: Option<&str>, steps: usize, diff_paths: &[String]) {
+fn render_completed(
+    output: OutputMode,
+    completed: &crate::ui_output::CompletedTurn,
+    session_id: &str,
+    turn_id: Option<&str>,
+    diff_paths: &[String],
+) {
     match output {
         OutputMode::Human => {
-            println!(
-                "\n{} 工具步数：{}，最终文本：{}",
-                "[完成]".green(),
-                steps,
-                text.is_some()
-            );
-            if !diff_paths.is_empty() {
-                println!("[diff] 本次会话改动文件：");
-                for path in diff_paths {
-                    println!("  - {path}");
-                }
+            let label = completed.label();
+            if completed.exit_code() == 0
+                && completed.status == owo_agent_protocol::CompletionStatusV1::Accepted
+            {
+                println!("\n{} 工具 {} 步", label.green(), completed.steps);
+            } else {
+                println!("\n{} 工具 {} 步", label.yellow(), completed.steps);
+            }
+            if let Some(error) = &completed.failure {
+                eprintln!("{error}");
+            }
+            for path in diff_paths {
+                println!("  M {path}");
             }
         }
         OutputMode::Plain => {
-            for line in render_final_result_plain(text, diff_paths) {
+            for line in render_final_result_plain(completed.final_text.as_deref(), diff_paths) {
                 println!("{line}");
             }
+            eprintln!("{}", completed.label());
+            if let Some(error) = &completed.failure {
+                eprintln!("{error}");
+            }
         }
-        OutputMode::Jsonl => {
-            println!(
-                "{}",
-                render_final_result_jsonl(text, steps, diff_paths, None, 0)
-            );
-        }
+        OutputMode::Jsonl => println!(
+            "{}",
+            completed.render_jsonl(session_id, turn_id, diff_paths)
+        ),
     }
 }
 
@@ -280,7 +321,8 @@ fn decide_permission(
             scope: Some("once".to_string()),
         });
     }
-    if matches!(output, OutputMode::Jsonl) {
+    if !matches!(output, OutputMode::Human) || !std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
         eprintln!("需要审批（jsonl 非交互，默认拒绝）：{tool}（{reason}）");
         return Ok(parse_approval_response("deny"));
     }
@@ -310,7 +352,8 @@ fn decide_question(
 ) -> Result<String, Box<dyn std::error::Error>> {
     const NON_INTERACTIVE: &str =
         "请基于现有信息按最合理假设继续完成任务，不要再次提问；在最终回复中说明所做假设。";
-    if !matches!(output, OutputMode::Human) {
+    if !matches!(output, OutputMode::Human) || !std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
         eprintln!("提问（非交互模式，自动继续）：{question}");
         return Ok(NON_INTERACTIVE.to_string());
     }
@@ -328,7 +371,7 @@ fn decide_question(
         return Ok(NON_INTERACTIVE.to_string());
     }
     if let Ok(index) = answer.parse::<usize>() {
-        if let Some(option) = options.get(index.saturating_sub(1)) {
+        if let Some(option) = index.checked_sub(1).and_then(|index| options.get(index)) {
             return Ok(option.clone());
         }
     }

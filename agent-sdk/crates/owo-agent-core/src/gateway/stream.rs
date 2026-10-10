@@ -167,6 +167,30 @@ pub(super) struct StreamState {
     pub(super) response_model: Option<String>,
     pub(super) finish_reason: Option<String>,
     pub(super) saw_done: bool,
+    pub(super) semantic_progress: bool,
+}
+
+impl StreamState {
+    pub(super) fn validate_resource_bounds(&self) -> Result<(), String> {
+        if self.buffer.len().saturating_add(self.utf8_pending.len()) > 1024 * 1024 {
+            return Err("provider/stream_frame_too_large".into());
+        }
+        if self.content.len() > 32 * 1024 * 1024 {
+            return Err("provider/stream_content_too_large".into());
+        }
+        let argument_bytes = self
+            .tool_call_accumulators
+            .values()
+            .fold(0usize, |size, call| {
+                size.saturating_add(call.arguments.len())
+                    .saturating_add(call.id.len())
+                    .saturating_add(call.name.len())
+            });
+        if self.tool_call_accumulators.len() > 1024 || argument_bytes > 16 * 1024 * 1024 {
+            return Err("provider/stream_tool_arguments_too_large".into());
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn consume_stream_buffer(
@@ -183,9 +207,24 @@ pub(super) fn consume_stream_buffer(
         state.saw_sse = true;
         if payload.trim() == "[DONE]" {
             state.saw_done = true;
+            state.semantic_progress = true;
             continue;
         }
         if let Some(delta) = parse_sse_payload(payload) {
+            state.semantic_progress |= delta.content.is_some()
+                || delta.reasoning.is_some()
+                || delta.tool_call_fragments.iter().any(|fragment| {
+                    ["/id", "/function/name", "/function/arguments"]
+                        .iter()
+                        .any(|path| {
+                            fragment
+                                .pointer(path)
+                                .and_then(Value::as_str)
+                                .is_some_and(|text| !text.is_empty())
+                        })
+                })
+                || delta.usage.is_some()
+                || delta.finish_reason.is_some();
             if delta.request_id.is_some() {
                 state.request_id = delta.request_id;
             }
@@ -213,4 +252,42 @@ pub(super) fn consume_stream_buffer(
         }
     }
     usage
+}
+
+#[cfg(test)]
+mod progress_boundary_tests {
+    use super::*;
+    #[test]
+    fn heartbeat_and_metadata_do_not_count_as_model_progress() {
+        let mut state = StreamState {
+            buffer: ": keep-alive\ndata: {\"id\":\"request-1\",\"model\":\"fixture\"}\n".into(),
+            ..Default::default()
+        };
+        consume_stream_buffer(&mut state, &mut |_| {});
+        assert!(!state.semantic_progress);
+        state.buffer =
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n".into();
+        consume_stream_buffer(&mut state, &mut |_| {});
+        assert!(state.semantic_progress);
+    }
+    #[test]
+    fn unterminated_frames_invalid_utf8_and_accumulated_output_are_bounded() {
+        let mut state = StreamState {
+            buffer: "x".repeat(1024 * 1024 + 1),
+            ..Default::default()
+        };
+        assert_eq!(
+            state.validate_resource_bounds().unwrap_err(),
+            "provider/stream_frame_too_large"
+        );
+        state.buffer.clear();
+        state.utf8_pending = vec![255; 1024 * 1024 + 1];
+        assert!(state.validate_resource_bounds().is_err());
+        state.utf8_pending.clear();
+        state.content = "x".repeat(32 * 1024 * 1024 + 1);
+        assert_eq!(
+            state.validate_resource_bounds().unwrap_err(),
+            "provider/stream_content_too_large"
+        );
+    }
 }

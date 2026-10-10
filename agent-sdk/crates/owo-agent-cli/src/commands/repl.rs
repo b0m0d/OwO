@@ -66,11 +66,14 @@ pub(crate) struct Repl {
 }
 
 impl Repl {
-    pub(crate) async fn run(args: ReplArgs) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) async fn run(
+        args: ReplArgs,
+        permissions: crate::ui_output::PermissionsProfile,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // P1 §4.1：**默认**走唯一 Daemon 客户端（无本地 Agent/SQLite/MCP）；
         // `--local` 保留旧本地 REPL 一个发布周期，供未迁移命令对照。
         if !args.local {
-            return crate::commands::repl_daemon::run(args).await;
+            return crate::commands::repl_daemon::run(args, permissions).await;
         }
         let workspace = args.workspace.canonicalize()?;
         let settings = Settings::load(&workspace);

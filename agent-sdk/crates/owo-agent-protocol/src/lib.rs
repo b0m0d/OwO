@@ -695,9 +695,45 @@ pub struct SessionInfo {
     pub fork_point: Option<usize>,
 }
 
+/// Ephemeral, explicit connection for one turn. Never saved with the session.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomModelConnection {
+    pub model: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_format: String,
+    #[serde(default)]
+    pub use_full_url: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for CustomModelConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomModelConnection")
+            .field("model", &self.model)
+            .field("api_format", &self.api_format)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnRequest {
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_connection: Option<CustomModelConnection>,
+    /// Optional request restriction; false/omitted never relaxes the host policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    /// Optional preallocated UUID for scoped cancellation and safe recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     /// 附件 ID（由 `POST /session/{id}/attachments` 返回；发送时注入路径上下文）。
     #[serde(default)]
     pub attachments: Vec<String>,
@@ -1131,4 +1167,36 @@ mod turn_failed_completion_status_tests {
             _ => panic!("expected TurnFailed"),
         }
     }
+}
+
+#[cfg(test)]
+mod turn_request_constraint_tests {
+    use super::TurnRequest;
+    #[test]
+    fn old_payloads_remain_compatible_and_readonly_is_optional() {
+        let old: TurnRequest = serde_json::from_str(r#"{"prompt":"fixture"}"#).unwrap();
+        assert_eq!(old.read_only, None);
+        let value = serde_json::to_value(&old).unwrap();
+        assert!(value.get("read_only").is_none());
+        let read_only: TurnRequest =
+            serde_json::from_str(r#"{"prompt":"fixture","read_only":true}"#).unwrap();
+        assert_eq!(read_only.read_only, Some(true));
+    }
+}
+
+pub fn canonical_turn_id(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return None;
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        if [8, 13, 18, 23].contains(&index) {
+            if *byte != b'-' {
+                return None;
+            }
+        } else if !byte.is_ascii_hexdigit() {
+            return None;
+        }
+    }
+    Some(value.to_ascii_lowercase())
 }

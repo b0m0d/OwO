@@ -189,6 +189,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         })
                     }
+                    "write_then_hang" => {
+                        let path = arguments
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .ok_or("missing counter path")?;
+                        let count = std::fs::read_to_string(path)
+                            .ok()
+                            .and_then(|text| text.parse::<u64>().ok())
+                            .unwrap_or(0);
+                        std::fs::write(path, (count + 1).to_string())?;
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": "written" }] } })
+                    }
                     "hang" => {
                         let sleep_ms = arguments
                             .get("sleep_ms")

@@ -21,6 +21,8 @@ use std::sync::Arc;
 ///   只覆盖 critic，其余内置角色都是 producer，画像另管只读面）。
 pub struct ProfileSubagentRunner<'a> {
     pub provider: Arc<dyn ModelProvider>,
+    /// Host restrictions are inherited live; role constraints may only narrow them.
+    pub parent_policy: &'a Policy,
     pub approver: &'a dyn Approver,
     /// 中断标志：团队取消桥共享置位，`run_turn` 协作式检查。
     pub abort: &'a AtomicBool,
@@ -103,10 +105,11 @@ impl ProfileSubagentRunner<'_> {
         workspace: &Path,
         prompt: &str,
     ) -> Result<ProfileSubagentRunReport, ProfileSubagentRunError> {
-        let policy = if self.profile.read_only {
-            Policy::read_only(workspace.to_path_buf())
+        let policy = self.parent_policy.for_workspace(workspace.to_path_buf())?;
+        let policy = if self.profile.read_only || self.is_critic {
+            policy.read_only_scope()
         } else {
-            Policy::new(workspace.to_path_buf())
+            policy
         };
         let mut registry = self.profile.build_registry(self.write_allowed.clone());
         for tool in &self.extra_tools {

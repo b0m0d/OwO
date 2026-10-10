@@ -121,16 +121,77 @@ function resolveApiKey(model, envGet) {
 
 // get_provider_status 的返回形状（等价于 provider.rs::provider_status）。
 // 注意 keyMasked 只给掩码，keyConfigured 只给布尔——前端拿不到可用凭据。
-function providerStatusValue(model, options = {}) {
+
+function isLocalModelEndpoint(baseUrl) {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return host === "localhost" || host === "[::1]" || host === "::1" ||
+      /^127(?:\.\d{1,3}){3}$/.test(host);
+  } catch (_) { return false; }
+}
+
+// Presentation and child-process injection must resolve the same configuration.
+function resolveModelConfig(model, envGet = () => "") {
   const source = model && typeof model === "object" ? model : {};
   const provider = canonicalProvider(source);
-  const resolved = resolveApiKey(source, options.envGet);
-  const local = provider === "ollama";
-  const ready = provider === "unset" ? Boolean(resolved.key) : local || Boolean(resolved.key);
+  const envValue = (name) => String(envGet(name) || "").trim();
+  const baseUrl = provider === "unset"
+    ? envValue("OPENAI_BASE_URL") || PROVIDER_DEFAULTS.bigmodel.base_url
+    : effectiveBaseUrl(source);
+  const name = provider === "unset"
+    ? envValue("OPENAI_MODEL") || PROVIDER_DEFAULTS.bigmodel.model
+    : effectiveModel(source);
+  const credential = resolveApiKey(source, envGet);
+  const local = isLocalModelEndpoint(baseUrl);
+  return { provider, baseUrl, model: name, credential, local, ready: local || Boolean(credential.key) };
+}
+
+function applyModelEnvironment(env, model) {
+  const target = env && typeof env === "object" ? env : {};
+  const source = model && typeof model === "object" ? model : {};
+  const resolved = resolveModelConfig(source, (name) => target[name]);
+  if (resolved.provider !== "unset") {
+    target.OPENAI_BASE_URL = resolved.baseUrl;
+    target.OPENAI_MODEL = resolved.model;
+    // A UI selection of an OpenAI-compatible provider replaces inherited native routing.
+    target.OWO_PROVIDER = "openai";
+  }
+  const numbers = [
+    ["context_window", ["OWO_MODEL_CONTEXT_WINDOW"], 1, Infinity],
+    ["temperature", ["OWO_MODEL_TEMPERATURE"], 0, 2],
+    ["timeout_secs", ["OWO_MODEL_TIMEOUT_SECS", "OWO_MODEL_REQUEST_TIMEOUT_SECS"], 1, 3600],
+    ["keep_recent", ["OWO_AGENT_KEEP_RECENT"], 1, Infinity],
+  ];
+  for (const [field, names, min, max] of numbers) {
+    // Missing = inherit. Explicit null/blank = clear and use the core default.
+    if (!Object.prototype.hasOwnProperty.call(source, field)) continue;
+    const raw = source[field], value = Number(raw);
+    const valid = raw != null && String(raw).trim() !== "" && Number.isFinite(value) && (field === "temperature" || Number.isInteger(value)) && value >= min && value <= max;
+    for (const name of names) {
+      if (valid) target[name] = String(value);
+      else delete target[name];
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(source, "compaction")) {
+    if (source.compaction === true) target.OWO_AGENT_COMPACTION = "1";
+    else if (source.compaction === false) target.OWO_AGENT_COMPACTION = "0";
+    else delete target.OWO_AGENT_COMPACTION;
+  }
+  applyModelOutputEnv(target, source);
+  if (resolved.credential.key) target.OPENAI_API_KEY = resolved.credential.key;
+  return target;
+}
+
+function providerStatusValue(model, options = {}) {
+  const source = model && typeof model === "object" ? model : {};
+  const effective = resolveModelConfig(source, options.envGet);
+  const provider = effective.provider;
+  const resolved = effective.credential;
+  const ready = effective.ready;
   return {
     provider,
-    baseUrl: effectiveBaseUrl(source),
-    model: effectiveModel(source),
+    baseUrl: effective.baseUrl,
+    model: effective.model,
     keyConfigured: Boolean(resolved.key),
     keySource: resolved.source,
     keyMasked: resolved.key ? maskKey(resolved.key) : "",
@@ -299,6 +360,8 @@ module.exports = {
   resolveApiKey,
   providerStatusValue,
   applyModelOutputEnv,
+  applyModelEnvironment,
+  resolveModelConfig,
   applyModelConfigPatch,
   parsePositive,
   parseTemperature,

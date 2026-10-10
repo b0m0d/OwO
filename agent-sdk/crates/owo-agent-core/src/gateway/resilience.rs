@@ -92,7 +92,8 @@ pub struct CircuitBreaker {
     consecutive_failures: std::sync::atomic::AtomicUsize,
     state: std::sync::Mutex<BreakerState>,
     opened_at: std::sync::Mutex<Option<std::time::Instant>>,
-    half_open_probe: std::sync::atomic::AtomicBool,
+    half_open_probe: std::sync::atomic::AtomicU64,
+    next_probe: std::sync::atomic::AtomicU64,
 }
 
 impl Default for CircuitBreaker {
@@ -109,7 +110,8 @@ impl CircuitBreaker {
             consecutive_failures: std::sync::atomic::AtomicUsize::new(0),
             state: std::sync::Mutex::new(BreakerState::Closed),
             opened_at: std::sync::Mutex::new(None),
-            half_open_probe: std::sync::atomic::AtomicBool::new(false),
+            half_open_probe: std::sync::atomic::AtomicU64::new(0),
+            next_probe: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -156,26 +158,37 @@ impl CircuitBreaker {
 
     /// 是否放行请求；HalfOpen 仅放行一个探测请求。
     pub fn allow_request(&self) -> bool {
+        self.acquire_probe().is_some()
+    }
+
+    fn acquire_probe(&self) -> Option<u64> {
+        use std::sync::atomic::Ordering;
         match self.state() {
-            BreakerState::Closed => true,
-            BreakerState::Open => false,
-            BreakerState::HalfOpen => self
-                .half_open_probe
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_ok(),
+            BreakerState::Closed => Some(0),
+            BreakerState::Open => None,
+            BreakerState::HalfOpen => {
+                let token = self.next_probe.fetch_add(1, Ordering::Relaxed).max(1);
+                self.half_open_probe
+                    .compare_exchange(0, token, Ordering::AcqRel, Ordering::Acquire)
+                    .ok()
+                    .map(|_| token)
+            }
         }
+    }
+
+    fn acquire_request(&self) -> Option<BreakerPermit<'_>> {
+        self.acquire_probe().map(|token| BreakerPermit {
+            breaker: self,
+            token,
+            resolved: false,
+        })
     }
 
     pub fn record_success(&self) {
         self.consecutive_failures
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.half_open_probe
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+            .store(0, std::sync::atomic::Ordering::Release);
         *self
             .state
             .lock()
@@ -201,13 +214,42 @@ impl CircuitBreaker {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner()) = Some(std::time::Instant::now());
             self.half_open_probe
-                .store(false, std::sync::atomic::Ordering::Relaxed);
+                .store(0, std::sync::atomic::Ordering::Release);
         }
     }
 
     /// 强制复位（运维/测试）。
     pub fn reset(&self) {
         self.record_success();
+    }
+}
+
+/// A probe belongs to the request future; dropping an interrupted request releases only its token.
+struct BreakerPermit<'a> {
+    breaker: &'a CircuitBreaker,
+    token: u64,
+    resolved: bool,
+}
+impl BreakerPermit<'_> {
+    fn success(mut self) {
+        self.resolved = true;
+        self.breaker.record_success();
+    }
+    fn failure(mut self) {
+        self.resolved = true;
+        self.breaker.record_failure();
+    }
+}
+impl Drop for BreakerPermit<'_> {
+    fn drop(&mut self) {
+        if !self.resolved && self.token != 0 {
+            let _ = self.breaker.half_open_probe.compare_exchange(
+                self.token,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            );
+        }
     }
 }
 
@@ -253,6 +295,16 @@ pub(super) fn is_retriable(error: &str, policy: &RetryPolicy) -> bool {
         || error.contains("流式读取失败")
         || error.contains("连接")
         || error.contains("超时")
+    {
+        return policy.retry_network;
+    }
+    if [
+        "provider/response_header_timeout",
+        "provider/stream_progress_timeout",
+        "provider/error_body_timeout",
+    ]
+    .iter()
+    .any(|code| error.contains(code))
     {
         return policy.retry_network;
     }
@@ -433,19 +485,19 @@ impl ModelProvider for ResilientProvider {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> Result<ModelOutput, String> {
-        if !self.breaker.allow_request() {
-            return Err(format!(
+        let permit = self.breaker.acquire_request().ok_or_else(|| {
+            format!(
                 "模型网关熔断器打开（连续失败 {} 次），请稍后重试",
                 self.breaker.consecutive_failures()
-            ));
-        }
+            )
+        })?;
         let mut errors: Vec<String> = Vec::new();
         for provider in self.providers() {
             let (result, retriable) =
                 Self::call_with_retry(&provider, model, messages, tools, &self.retry).await;
             match result {
                 Ok(output) => {
-                    self.breaker.record_success();
+                    permit.success();
                     return Ok(output);
                 }
                 Err(error) => {
@@ -457,7 +509,7 @@ impl ModelProvider for ResilientProvider {
                 }
             }
         }
-        self.breaker.record_failure();
+        permit.failure();
         Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
 
@@ -467,14 +519,14 @@ impl ModelProvider for ResilientProvider {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> Result<ObservedModelOutput, String> {
-        if !self.breaker.allow_request() {
-            return Err(format!(
+        let permit = self.breaker.acquire_request().ok_or_else(|| {
+            format!(
                 "模型网关熔断器打开（连续失败 {} 次），请稍后重试",
                 self.breaker.consecutive_failures()
-            ));
-        }
+            )
+        })?;
         let mut errors = Vec::new();
-        for provider in self.providers() {
+        'providers: for provider in self.providers() {
             let mut attempt = 0;
             loop {
                 match provider
@@ -482,11 +534,16 @@ impl ModelProvider for ResilientProvider {
                     .await
                 {
                     Ok(observed) => {
-                        self.breaker.record_success();
+                        permit.success();
                         return Ok(observed);
                     }
                     Err(error) => {
-                        if !is_retriable(&error, &self.retry) || attempt >= self.retry.max_retries {
+                        let retriable = is_retriable(&error, &self.retry);
+                        if !retriable {
+                            errors.push(error);
+                            break 'providers;
+                        }
+                        if attempt >= self.retry.max_retries {
                             errors.push(error);
                             break;
                         }
@@ -496,7 +553,7 @@ impl ModelProvider for ResilientProvider {
                 }
             }
         }
-        self.breaker.record_failure();
+        permit.failure();
         Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
 
@@ -517,12 +574,12 @@ impl ModelProvider for ResilientProvider {
         tools: &[ToolSpec],
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelOutput, String> {
-        if !self.breaker.allow_request() {
-            return Err(format!(
+        let permit = self.breaker.acquire_request().ok_or_else(|| {
+            format!(
                 "模型网关熔断器打开（连续失败 {} 次），请稍后重试",
                 self.breaker.consecutive_failures()
-            ));
-        }
+            )
+        })?;
         let mut errors: Vec<String> = Vec::new();
         let mut retriable_seen = false;
         for provider in self.providers() {
@@ -543,7 +600,7 @@ impl ModelProvider for ResilientProvider {
                 };
                 match result {
                     Ok(output) => {
-                        self.breaker.record_success();
+                        permit.success();
                         return Ok(output);
                     }
                     Err(error) => {
@@ -574,7 +631,7 @@ impl ModelProvider for ResilientProvider {
             }
         }
         let _ = retriable_seen;
-        self.breaker.record_failure();
+        permit.failure();
         Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
 
@@ -609,14 +666,14 @@ impl ModelProvider for ResilientProvider {
         tools: &[ToolSpec],
         on_chunk: &mut (dyn FnMut(StreamChunk) + Send),
     ) -> Result<ObservedModelOutput, String> {
-        if !self.breaker.allow_request() {
-            return Err(format!(
+        let permit = self.breaker.acquire_request().ok_or_else(|| {
+            format!(
                 "模型网关熔断器打开（连续失败 {} 次），请稍后重试",
                 self.breaker.consecutive_failures()
-            ));
-        }
+            )
+        })?;
         let mut errors = Vec::new();
-        for provider in self.providers() {
+        'providers: for provider in self.providers() {
             let mut attempt = 0;
             loop {
                 let mut emitted = false;
@@ -636,17 +693,22 @@ impl ModelProvider for ResilientProvider {
                 };
                 match result {
                     Ok(observed) => {
-                        self.breaker.record_success();
+                        permit.success();
                         return Ok(observed);
                     }
                     Err(error) => {
                         if emitted {
-                            self.breaker.record_failure();
+                            permit.failure();
                             return Err(format!(
                                 "{error}（流式中断：已输出部分内容，不再重试以免重复）"
                             ));
                         }
-                        if !is_retriable(&error, &self.retry) || attempt >= self.retry.max_retries {
+                        let retriable = is_retriable(&error, &self.retry);
+                        if !retriable {
+                            errors.push(error);
+                            break 'providers;
+                        }
+                        if attempt >= self.retry.max_retries {
                             errors.push(error);
                             break;
                         }
@@ -656,7 +718,7 @@ impl ModelProvider for ResilientProvider {
                 }
             }
         }
-        self.breaker.record_failure();
+        permit.failure();
         Err(format!("模型网关全部失败：{}", errors.join("；")))
     }
 
@@ -712,44 +774,97 @@ impl Default for DeferredProvider {
     }
 }
 
+fn provider_fingerprint(
+    kind: &str,
+    base_url: &str,
+    key: &str,
+    model: &str,
+    cloud_enabled: bool,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    for part in [
+        kind,
+        base_url,
+        key,
+        model,
+        if cloud_enabled { "enabled" } else { "disabled" },
+    ] {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part.as_bytes());
+    }
+    for name in [
+        "OWO_HTTP_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "no_proxy",
+    ] {
+        let value = std::env::var(name).ok();
+        digest.update(name.as_bytes());
+        digest.update([u8::from(value.is_some())]);
+        if let Some(value) = value {
+            digest.update((value.len() as u64).to_le_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    format!("{:x}", digest.finalize())
+}
+
 impl DeferredProvider {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// 取当前配置对应的 provider；配置指纹变化则重建（设置保存后自动换新）。
-    fn resolve(&self) -> Result<Arc<dyn ModelProvider>, String> {
-        // 指纹 = provider 种类 + 配置摘要：种类或端点/密钥/模型任一变化即重建。
-        let (fingerprint, provider): (String, Arc<dyn ModelProvider>) = if wants_anthropic() {
-            let config =
-                crate::anthropic::AnthropicConfig::from_env().map_err(provider_not_configured)?;
-            let fingerprint = format!(
-                "anthropic|{}|{}|{}|{}",
-                config.base_url, config.api_key, config.model, config.cloud_enabled
-            );
-            let provider: Arc<dyn ModelProvider> =
-                Arc::new(crate::anthropic::AnthropicProvider::new(config)?);
-            (fingerprint, provider)
-        } else {
-            let config = OpenAiCompatibleConfig::from_env().map_err(provider_not_configured)?;
-            let fingerprint = format!(
-                "openai|{}|{}|{}|{}",
-                config.base_url, config.api_key, config.model, config.cloud_enabled
-            );
-            let provider: Arc<dyn ModelProvider> = Arc::new(OpenAiCompatibleProvider::new(config)?);
-            (fingerprint, provider)
-        };
+    fn resolve_cached(
+        &self,
+        fingerprint: String,
+        create: impl FnOnce() -> Result<Arc<dyn ModelProvider>, String>,
+    ) -> Result<Arc<dyn ModelProvider>, String> {
         let mut slot = self
             .cached
             .lock()
-            .map_err(|_| "provider 缓存锁中毒".to_string())?;
+            .map_err(|_| "provider/cache_poisoned".to_string())?;
         if let Some((cached_fingerprint, provider)) = slot.as_ref() {
             if *cached_fingerprint == fingerprint {
                 return Ok(Arc::clone(provider));
             }
         }
+        let provider = create()?;
         *slot = Some((fingerprint, Arc::clone(&provider)));
         Ok(provider)
+    }
+
+    fn resolve(&self) -> Result<Arc<dyn ModelProvider>, String> {
+        if wants_anthropic() {
+            let config =
+                crate::anthropic::AnthropicConfig::from_env().map_err(provider_not_configured)?;
+            let fingerprint = provider_fingerprint(
+                "anthropic",
+                &config.base_url,
+                &config.api_key,
+                &config.model,
+                config.cloud_enabled,
+            );
+            self.resolve_cached(fingerprint, || {
+                Ok(Arc::new(crate::anthropic::AnthropicProvider::new(config)?))
+            })
+        } else {
+            let config = OpenAiCompatibleConfig::from_env().map_err(provider_not_configured)?;
+            let fingerprint = provider_fingerprint(
+                "openai",
+                &config.base_url,
+                &config.api_key,
+                &config.model,
+                config.cloud_enabled,
+            );
+            self.resolve_cached(fingerprint, || {
+                Ok(Arc::new(OpenAiCompatibleProvider::new(config)?))
+            })
+        }
     }
 }
 
@@ -849,5 +964,112 @@ impl ModelProvider for DeferredProvider {
         self.resolve()
             .map(|provider| provider.usage_snapshot())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod probe_lifecycle_tests {
+    use super::*;
+    struct HungProvider;
+    #[async_trait]
+    impl ModelProvider for HungProvider {
+        async fn complete(&self, _: &[ChatMessage], _: &[ToolSpec]) -> Result<ModelOutput, String> {
+            std::future::pending().await
+        }
+    }
+    #[tokio::test]
+    async fn cancelling_each_gateway_entry_releases_the_half_open_probe() {
+        for entry in 0..4 {
+            let gateway = ResilientProvider::new(
+                Arc::new(HungProvider),
+                vec![],
+                CircuitBreaker::new(1, std::time::Duration::ZERO),
+                RetryPolicy::default(),
+            );
+            gateway.breaker.record_failure();
+            let result = tokio::time::timeout(std::time::Duration::from_millis(1), async {
+                match entry {
+                    0 => gateway.complete(&[], &[]).await.map(|_| ()),
+                    1 => gateway
+                        .complete_with_model_observed(None, &[], &[])
+                        .await
+                        .map(|_| ()),
+                    2 => gateway
+                        .complete_stream_with_model(None, &[], &[], &mut |_| {})
+                        .await
+                        .map(|_| ()),
+                    _ => gateway
+                        .complete_stream_with_reasoning_and_model_observed(
+                            None,
+                            &[],
+                            &[],
+                            &mut |_| {},
+                        )
+                        .await
+                        .map(|_| ()),
+                }
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(gateway.breaker.consecutive_failures(), 1);
+            assert!(
+                gateway.breaker.acquire_request().is_some(),
+                "entry {entry} leaked a probe"
+            );
+        }
+    }
+    #[test]
+    fn cancelled_probe_releases_its_slot_without_resetting_failures() {
+        let breaker = CircuitBreaker::new(1, std::time::Duration::ZERO);
+        breaker.record_failure();
+        let permit = breaker.acquire_request().unwrap();
+        assert!(breaker.acquire_request().is_none());
+        drop(permit);
+        assert_eq!(breaker.consecutive_failures(), 1);
+        let replacement = breaker.acquire_request().unwrap();
+        replacement.success();
+        assert_eq!(breaker.state(), BreakerState::Closed);
+    }
+    #[test]
+    fn old_cancelled_probe_does_not_release_a_new_probe_after_reset() {
+        let breaker = CircuitBreaker::new(1, std::time::Duration::ZERO);
+        breaker.record_failure();
+        let old = breaker.acquire_request().unwrap();
+        breaker.reset();
+        breaker.record_failure();
+        let next = breaker.acquire_request().unwrap();
+        drop(old);
+        assert!(breaker.acquire_request().is_none());
+        next.failure();
+        assert!(breaker.acquire_request().is_some());
+    }
+}
+
+#[cfg(test)]
+mod deferred_cache_tests {
+    use super::*;
+    struct Fixture;
+    #[async_trait]
+    impl ModelProvider for Fixture {
+        async fn complete(&self, _: &[ChatMessage], _: &[ToolSpec]) -> Result<ModelOutput, String> {
+            Ok(ModelOutput::Text("fixture".into()))
+        }
+    }
+    #[test]
+    fn cache_hit_does_not_construct_a_discarded_provider() {
+        let deferred = DeferredProvider::new();
+        let first = deferred
+            .resolve_cached("first".into(), || Ok(Arc::new(Fixture)))
+            .unwrap();
+        let again = deferred
+            .resolve_cached("first".into(), || {
+                panic!("cached provider was reconstructed")
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        let changed = deferred
+            .resolve_cached("changed".into(), || Ok(Arc::new(Fixture)))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
     }
 }

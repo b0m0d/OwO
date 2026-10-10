@@ -264,7 +264,7 @@ pub use owo_agent_kernel::{
 pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
 pub use agent::{
     estimate_tokens, Agent, AgentConfig, CommandExecutionReceipt, ModelCallRecord, TurnEvent,
-    TurnOutcome,
+    TurnExecutionOptions, TurnOutcome,
 };
 pub use audit::{AuditEntry, AuditLog};
 pub use audit_chain::{

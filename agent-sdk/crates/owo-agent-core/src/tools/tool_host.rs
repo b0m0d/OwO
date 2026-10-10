@@ -245,16 +245,22 @@ impl ToolHostService {
         capability: ToolCapability,
         ctx: &mut ToolContext<'_>,
     ) -> Result<Value, String> {
-        let (tool, current_tool_version) = self
+        let (tool, current_tool_version, current_effect) = self
             .registry
             .read()
             .map_err(|_| "工具注册表锁中毒".to_string())?
             .get(&capability.tool)
             .map(|registered| {
                 let spec = registered.spec();
-                (Some(registered), tool_spec_fingerprint(&spec))
+                (Some(registered), tool_spec_fingerprint(&spec), spec.effect)
             })
-            .unwrap_or((None, String::new()));
+            .unwrap_or((None, String::new(), None));
+        let live_request = ctx.policy.evaluate_with_effect(
+            &capability.tool,
+            current_effect.as_ref(),
+            &capability.args,
+        );
+        let live_denial = ctx.policy.execution_denial(&live_request);
         let started = std::time::Instant::now();
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -275,6 +281,22 @@ impl ToolHostService {
         } else if capability.tool_version != current_tool_version {
             Err(format!(
                 "capability tool version mismatch: {}",
+                capability.tool
+            ))
+        } else if ctx
+            .abort
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
+            Err(format!("executor/cancelled: {}", capability.tool))
+        } else if let Some(reason) = live_denial {
+            Err(format!("permission/revoked: {reason}"))
+        } else if ctx.policy.is_read_only()
+            && !current_effect.as_ref().is_some_and(|effect| {
+                effect.class == EffectClass::Read && effect.host_verified_readonly
+            })
+        {
+            Err(format!(
+                "permission/read_only: {} is not host-verified readonly",
                 capability.tool
             ))
         } else if now_unix >= capability.expires_at_unix {

@@ -71,9 +71,9 @@ pub(crate) fn builtin_skills_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("skills"))
 }
 
-pub(crate) fn run_async<F>(future: F) -> Result<(), Box<dyn std::error::Error>>
+pub(crate) fn run_async<F, T>(future: F) -> Result<T, Box<dyn std::error::Error>>
 where
-    F: Future<Output = Result<(), Box<dyn std::error::Error>>>,
+    F: Future<Output = Result<T, Box<dyn std::error::Error>>>,
 {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -479,8 +479,6 @@ fn spawn_daemon(
         .arg("serve")
         .arg("--port")
         .arg("0")
-        .arg("--output")
-        .arg("jsonl")
         .arg("--workspace")
         .arg(workspace)
         .env("OWO_AGENT_DATA", data_root)

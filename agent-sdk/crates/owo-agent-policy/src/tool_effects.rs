@@ -140,6 +140,22 @@ pub fn remove_prefix(prefix: &str) -> usize {
     before - guard.len()
 }
 
+/// Immutable declaration for a host-constructed builtin. Registering a foreign tool
+/// with the same name does not make it a trusted builtin.
+pub fn builtin_effect_for(tool: &str) -> Option<ToolEffect> {
+    builtin_effects()
+        .into_iter()
+        .find(|(name, _)| *name == tool)
+        .map(|(name, class)| ToolEffect {
+            tool: name.to_string(),
+            class,
+            source: "builtin".to_string(),
+            risk_note: None,
+            annotations: None,
+            host_verified_readonly: class == EffectClass::Read && name != "kill_shell",
+        })
+}
+
 /// 查询单个工具的副作用元数据（自动播种内置矩阵）。
 pub fn effect_for(tool: &str) -> Option<ToolEffect> {
     ensure_builtin_seeded();

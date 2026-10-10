@@ -1,0 +1,29 @@
+{
+  "scope": "2026-10-10 reliability repairs and custom model connection fix",
+  "evidence_policy": "Raw logs, profiles, authentication state, personal data and binaries remain local.",
+  "earlier_repair_batch": {
+    "targeted_rust_tests_passed": 203,
+    "electron_tests_passed": 47,
+    "web_tests_passed": 689,
+    "note": "Results cover the earlier source batch; subsequent changes are scoped below."
+  },
+  "custom_model_batch": {
+    "check_core_server_cli_tests_exit": 0,
+    "clippy_core_server_client_protocol_tests_exit": 0,
+    "workspace_fmt_exit": 0,
+    "http_tests_passed": 7,
+    "web_tests_passed": 694,
+    "typescript_tests_passed": 29,
+    "typescript_tests_skipped": 2,
+    "core_build_exit": 0,
+    "electron_package_exit": 0,
+    "packaged_visible_windows": true,
+    "default_endpoint_deliberately_unusable": true,
+    "custom_full_url_key_model_temperature_verified": true,
+    "actual_read_file_tool": true,
+    "durable_audit_and_terminal_verified": true,
+    "user_cloud_model_acceptance": false
+  },
+  "trial_core_sha256": "ef3ea05f1c017d2eaafca0fa75511f5b7587b048ba36068337ec132366ac33e9",
+  "remaining": "Original open audit items remain tracked; custom preference persistence across changing ports remains unresolved."
+}

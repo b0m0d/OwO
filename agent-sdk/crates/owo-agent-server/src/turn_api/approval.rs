@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
 use axum::Json;
-use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
+use owo_agent_core::permissions::{ApprovalOutcome, Approver, Decision, PermissionRequest};
 use serde_json::{json, Value};
 
 use owo_agent_server::PendingApproval;
@@ -112,49 +112,182 @@ pub(crate) struct ChannelApprover {
     pub(crate) abort: Arc<AtomicBool>,
 }
 
+struct PendingApprovalGuard<'a> {
+    approver: &'a ChannelApprover,
+    request_id: String,
+}
+impl Drop for PendingApprovalGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.approver.pending.lock() {
+            pending.remove(&self.request_id);
+        }
+        if let Ok(mut sessions) = self.approver.pending_sessions.lock() {
+            sessions.remove(&self.request_id);
+        }
+    }
+}
+
 impl ChannelApprover {
     fn spawn_request(
         &self,
         request: &PermissionRequest,
-    ) -> tokio::sync::oneshot::Receiver<Decision> {
+    ) -> Result<tokio::sync::oneshot::Receiver<Decision>, String> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.insert(request.request_id.clone(), (tx, request.clone()));
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| "approval/registry_poisoned")?;
+        let mut sessions = self
+            .pending_sessions
+            .lock()
+            .map_err(|_| "approval/session_registry_poisoned")?;
+        if pending.contains_key(&request.request_id) {
+            return Err("approval/duplicate_request".into());
         }
-        if let Ok(mut sessions) = self.pending_sessions.lock() {
-            sessions.insert(request.request_id.clone(), self.session_id.clone());
+        sessions.insert(request.request_id.clone(), self.session_id.clone());
+        pending.insert(request.request_id.clone(), (tx, request.clone()));
+        Ok(rx)
+    }
+
+    async fn decide_pending(
+        &self,
+        request: &PermissionRequest,
+        notify: &mut (dyn FnMut() + Send),
+        timeout: std::time::Duration,
+    ) -> ApprovalOutcome {
+        if self.abort.load(Ordering::Acquire) {
+            return ApprovalOutcome {
+                decision: Decision::Deny,
+                reason: Some("approval/cancelled".into()),
+            };
         }
-        rx
+        let mut rx = match self.spawn_request(request) {
+            Ok(rx) => rx,
+            Err(reason) => {
+                return ApprovalOutcome {
+                    decision: Decision::Deny,
+                    reason: Some(reason),
+                }
+            }
+        };
+        let _cleanup = PendingApprovalGuard {
+            approver: self,
+            request_id: request.request_id.clone(),
+        };
+        notify();
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                result = &mut rx => return match result {
+                    Ok(decision) => ApprovalOutcome { decision, reason: Some(if decision == Decision::Allow { "approval/allowed" } else { "approval/denied" }.into()) },
+                    Err(_) => ApprovalOutcome { decision: Decision::Deny, reason: Some("approval/channel_closed".into()) },
+                },
+                _ = &mut deadline => return ApprovalOutcome { decision: Decision::Deny, reason: Some("approval/timed_out".into()) },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    if self.abort.load(Ordering::Acquire) {
+                        return ApprovalOutcome { decision: Decision::Deny, reason: Some("approval/cancelled".into()) };
+                    }
+                }
+            }
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl Approver for ChannelApprover {
     async fn decide(&self, request: &PermissionRequest) -> Decision {
-        if auto_approve_enabled() {
-            return Decision::Allow;
+        self.decide_with_notification(request, &mut || {})
+            .await
+            .decision
+    }
+    async fn decide_with_notification(
+        &self,
+        request: &PermissionRequest,
+        notify: &mut (dyn FnMut() + Send),
+    ) -> ApprovalOutcome {
+        if auto_approve_enabled() && !self.abort.load(Ordering::Acquire) {
+            return ApprovalOutcome {
+                decision: Decision::Allow,
+                reason: Some("approval/runtime_auto_approve".into()),
+            };
         }
-        let rx = self.spawn_request(request);
-        let mut rx = rx;
-        let deadline = tokio::time::sleep(std::time::Duration::from_secs(300));
-        tokio::pin!(deadline);
-        let decision = loop {
-            tokio::select! {
-                result = &mut rx => break result.unwrap_or(Decision::Deny),
-                _ = &mut deadline => break Decision::Deny,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                    if self.abort.load(Ordering::Relaxed) {
-                        break Decision::Deny;
-                    }
-                }
-            }
+        self.decide_pending(request, notify, std::time::Duration::from_secs(300))
+            .await
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    fn approver() -> ChannelApprover {
+        ChannelApprover {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_sessions: Arc::new(Mutex::new(HashMap::new())),
+            session_id: "session".into(),
+            abort: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    #[tokio::test]
+    async fn immediate_response_on_notification_is_not_lost() {
+        let approver = approver();
+        let request = owo_agent_core::permissions::Policy::new(".")
+            .evaluate("write_file", &json!({"path":"file.txt"}));
+        let mut notify = || {
+            assert_eq!(
+                approver
+                    .pending_sessions
+                    .lock()
+                    .unwrap()
+                    .get(&request.request_id)
+                    .map(String::as_str),
+                Some("session")
+            );
+            let (sender, _) = approver
+                .pending
+                .lock()
+                .unwrap()
+                .remove(&request.request_id)
+                .unwrap();
+            sender.send(Decision::Allow).unwrap();
         };
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.remove(&request.request_id);
-        }
-        if let Ok(mut sessions) = self.pending_sessions.lock() {
-            sessions.remove(&request.request_id);
-        }
-        decision
+        let outcome = approver
+            .decide_pending(&request, &mut notify, std::time::Duration::from_millis(100))
+            .await;
+        assert_eq!(outcome.decision, Decision::Allow);
+        assert!(approver.pending.lock().unwrap().is_empty());
+        assert!(approver.pending_sessions.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn dropping_the_approval_future_cleans_published_pending_entries() {
+        let approver = approver();
+        let request = owo_agent_core::permissions::Policy::new(".")
+            .evaluate("write_file", &json!({"path":"file.txt"}));
+        let mut notified = false;
+        let mut notify = || {
+            notified = true;
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            approver.decide_pending(&request, &mut notify, std::time::Duration::from_secs(10)),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(notified);
+        assert!(approver.pending.lock().unwrap().is_empty());
+        assert!(approver.pending_sessions.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn timeout_is_explicit_and_removes_both_registries() {
+        let approver = approver();
+        let request = owo_agent_core::permissions::Policy::new(".")
+            .evaluate("write_file", &json!({"path":"file.txt"}));
+        let outcome = approver
+            .decide_pending(&request, &mut || {}, std::time::Duration::from_millis(1))
+            .await;
+        assert_eq!(outcome.decision, Decision::Deny);
+        assert_eq!(outcome.reason.as_deref(), Some("approval/timed_out"));
+        assert!(approver.pending.lock().unwrap().is_empty());
+        assert!(approver.pending_sessions.lock().unwrap().is_empty());
     }
 }

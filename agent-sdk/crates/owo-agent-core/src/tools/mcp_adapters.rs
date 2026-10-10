@@ -29,9 +29,18 @@ impl Tool for McpToolAdapter {
         }
         let mut client = self.client.lock().await;
         // §10.3：幂等重试仅对只读工具（写/执行/未知 effect 一律 0 次）。
-        let retries = self.health.as_ref().map_or(0, |health| {
-            health.retries_for(self.spec.effect.as_ref().map(|effect| &effect.class))
-        });
+        let retries = if self
+            .spec
+            .effect
+            .as_ref()
+            .is_some_and(|effect| effect.host_verified_readonly)
+        {
+            self.health.as_ref().map_or(0, |health| {
+                health.retries_for(self.spec.effect.as_ref().map(|effect| &effect.class))
+            })
+        } else {
+            0
+        };
         let mut attempt = 0u32;
         loop {
             // §10 服务状态：逐次尝试计时，喂给健康快照 p50/p95。

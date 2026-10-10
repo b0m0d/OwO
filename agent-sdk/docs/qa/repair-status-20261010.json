@@ -1,0 +1,807 @@
+{
+  "objective": "对审查出来的主要问题全量修改",
+  "source_baseline": "c45cd2575b2ceae0cc1b7875362398f17e39c7d0",
+  "updated_at_utc": "2026-10-10T09:58:09.578407+00:00",
+  "scope": "All 53 referenced audit entries remain tracked; shared fixes may satisfy overlapping entries but verification stays per requirement.",
+  "items": [
+    {
+      "id": "F-01",
+      "priority": "P0",
+      "problem": "Windows 管理器终止进程为空实现，超时仍可能无限等待",
+      "status": "implemented_pending_runtime_validation",
+      "code_changes": [
+        "agent-sdk/crates/owo-agent-tool-safety/src/sandbox/windows.rs",
+        "agent-sdk/crates/owo-agent-tool-safety/tests/windows_process_lifecycle.rs",
+        "agent-sdk/crates/owo-agent-core/src/tools/command.rs"
+      ],
+      "verification": [
+        "Rustfmt syntax/format completed; native lifecycle regression source added.",
+        "Windows lifecycle integration: 4 passed, 1 ignored controlled child helper; exit 0. Affected 8-package check --tests exit 0.",
+        "Windows lifecycle 5 passed including a retained process handle proving descendant termination; helper entry ignored. Strict affected clippy and workspace fmt exit 0."
+      ],
+      "remaining": "Run affected clippy and core command timeout/cancellation tests; verify process tree termination beyond the controlled direct child and real command receipts before closing full requirement.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-02",
+      "priority": "P0",
+      "problem": "默认 JobOnly 分支串行读取 stdout/stderr，可能管道死锁",
+      "status": "verified_fixed",
+      "code_changes": [
+        "agent-sdk/crates/owo-agent-tool-safety/src/sandbox/windows.rs",
+        "agent-sdk/crates/owo-agent-tool-safety/tests/windows_process_lifecycle.rs",
+        "agent-sdk/crates/owo-agent-core/src/tools/command.rs"
+      ],
+      "verification": [
+        "Rustfmt syntax/format completed; native lifecycle regression source added.",
+        "Windows lifecycle integration: 4 passed, 1 ignored controlled child helper; exit 0. Affected 8-package check --tests exit 0.",
+        "Windows lifecycle 5 passed including a retained process handle proving descendant termination; helper entry ignored. Strict affected clippy and workspace fmt exit 0."
+      ],
+      "remaining": "Original JobOnly sequential pipe deadlock reproduced by the controlled stderr-first payload and resolved; duplex draining and bounded capture runtime regressions pass.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-03",
+      "priority": "P0",
+      "problem": "Provider 展示默认值与核心环境注入不一致",
+      "status": "implemented_pending_end_to_end_validation",
+      "code_changes": [
+        "desktop/electron/src/main/main.js",
+        "desktop/electron/src/main/shell-commands.js",
+        "desktop/electron/tests/model-environment.test.mjs"
+      ],
+      "verification": [
+        "44/44 Electron Node tests passed, including actual coreEnv extraction and endpoint/model/environment-reset contracts."
+      ],
+      "remaining": "Verify live configured provider/model choice and desktop save/start/request identity; preserve legacy credential handling until the dedicated credentials migration fix.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-04",
+      "priority": "P1",
+      "problem": "超时/温度配置未接入主模型请求，清空值有残留",
+      "status": "implemented_pending_runtime_validation",
+      "code_changes": [
+        "desktop/electron/src/main/main.js",
+        "desktop/electron/src/main/shell-commands.js",
+        "crates/owo-agent-core/src/gateway/provider.rs"
+      ],
+      "verification": [
+        "44/44 Electron Node tests passed; gateway source syntax parsed by Rustfmt."
+      ],
+      "remaining": "Run gateway crate check/clippy and request-body/temperature/timeout capture tests; confirm values with the live desktop request path.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-05",
+      "priority": "P1",
+      "problem": "模型响应头、结束标记和流解析的等待边界不完整",
+      "status": "in_progress",
+      "code_changes": [
+        "crates/owo-agent-core/src/gateway/provider.rs",
+        "crates/owo-agent-core/src/gateway/stream.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate.",
+        "Gateway 49 passed including header deadline, DONE without EOF, semantic progress and bounded-buffer regressions; clippy passes. Multiline/malformed streaming acceptance still to complete."
+      ],
+      "remaining": "Header/error-body deadlines, DONE termination, semantic progress timeout and frame/content/tool argument bounds implemented. Run fake-HTTP streaming tests and verify malformed/multiline SSE and final usage semantics before closure.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-06",
+      "priority": "P1",
+      "problem": "Web 开放流无无进展恢复，收到终态仍等 EOF",
+      "status": "implemented_pending_end_to_end_validation",
+      "code_changes": [
+        "desktop/web/core/turn-sse.js",
+        "desktop/web/tests/turn-completion.test.mjs"
+      ],
+      "verification": [
+        "Related web stream/API 47 tests passed; full Web 688/688 passed. Tests prove terminal stats complete an open stream, journal recovery deduplicates, active recovery preserves the original connection, and cancellation interrupts a stalled read.",
+        "Latest full Web 689/689 passed including replay timeout aborting its request; earlier 688 count superseded."
+      ],
+      "remaining": "Verify current daemon plus real Electron stalled-connection recovery and terminal status presentation; unit/full JS behavior passed.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-07",
+      "priority": "P0",
+      "problem": "Policy 仍用启动工作区，文件执行用会话工作区",
+      "status": "implemented_pending_runtime_validation",
+      "code_changes": [
+        "crates/owo-agent-policy/src/permissions.rs",
+        "crates/owo-agent-core/src/agent/turn.rs",
+        "crates/owo-agent-server/src/turn_api/handlers.rs"
+      ],
+      "verification": [
+        "Session-scoped policy regression source added; formatting parsed.",
+        "Affected 8-package check --tests exit 0; policy 67 tests, protocol 4 and client 19 all passed. Request-scoped read-only and live workspace-policy tests passed in policy; core/HTTP enforcement tests remain pending.",
+        "Agent group 47 passed including request-scoped readonly cannot write or relax parent and does not affect the next turn; HTTP tests have not run due to resource guard.",
+        "Focused HTTP 3 passed: read-only cannot widen parent policy; pre-start and late scoped cancellation preserve exact-turn identity. In-process authenticated Router and SQLite, not live desktop transport acceptance."
+      ],
+      "remaining": "Run policy/core/server check and cross-session absolute/relative path, readonly/revocation/grant scope contracts and live two-workspace validation.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-08",
+      "priority": "P1",
+      "problem": "取消与 Deadline 未贯穿串行工具、压缩及审批模型",
+      "status": "in_progress",
+      "code_changes": [
+        "crates/owo-agent-core/src/tools/tool_host.rs",
+        "crates/owo-agent-server/src/turn_control.rs",
+        "crates/owo-agent-server/src/turn_api/handlers.rs",
+        "crates/owo-agent-cli/src/tui.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate.",
+        "Focused HTTP 3 passed: read-only cannot widen parent policy; pre-start and late scoped cancellation preserve exact-turn identity. In-process authenticated Router and SQLite, not live desktop transport acceptance."
+      ],
+      "remaining": "Pre-start cancellation retained, exact-turn cleanup/cancellation and live policy/abort checks added. Serial long-running tools, compaction and approval model deadlines remain to audit and fix.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-09",
+      "priority": "P1",
+      "problem": "命令固定资源/时间限制缺少任务级协商与诊断",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-10",
+      "priority": "P1",
+      "problem": "半开熔断探测取消后可能永远占用探测槽",
+      "status": "verified_fixed",
+      "code_changes": [
+        "crates/owo-agent-core/src/gateway/resilience.rs"
+      ],
+      "verification": [
+        "Rust regression source added; rustfmt syntax/format checked. No Rust check/clippy/test execution due to resource gate.",
+        "Actual gateway four-entry cancellation, slot recovery and stale ownership tests passed in 49-test gateway group; affected clippy -D warnings and fmt pass."
+      ],
+      "remaining": "No remaining work for the cancelled half-open probe slot defect; real cloud tests were not required and not invoked.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-11",
+      "priority": "P1",
+      "problem": "启发式安全审查对惰性代码/说明文字误拒绝",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-12",
+      "priority": "P1",
+      "problem": "审批先发布后登记，超时拒绝缺少明确原因",
+      "status": "verified_fixed",
+      "code_changes": [
+        "crates/owo-agent-policy/src/permissions.rs",
+        "crates/owo-agent-core/src/agent/turn.rs",
+        "crates/owo-agent-server/src/turn_api/approval.rs",
+        "crates/owo-agent-server/src/turn_api/handlers.rs",
+        "crates/owo-agent-server/tests/route_contract_tests.rs",
+        "crates/owo-agent-server/src/openapi.rs",
+        "clients/ts/openapi.json",
+        "clients/ts/src/schema.d.ts",
+        "crates/owo-agent-server/tests/major_repair_http_tests.rs"
+      ],
+      "verification": [
+        "Rust regression source added; rustfmt syntax/format checked. No Rust check/clippy/test execution due to resource gate.",
+        "OpenAPI/TS types regenerated; TS typecheck and test compilation exit 0; 28 passed, 2 live integrations skipped.",
+        "Server turn API 9 passed, including immediate reply, explicit timeout and dropped-future cleanup. Affected clippy passes. HTTP expired-channel/no-grant regression compilation stopped by resource guard before execution.",
+        "Focused HTTP 3/3 pass includes expired responder creates no grant; server tests strict clippy exit 0 and final fmt exit 0."
+      ],
+      "remaining": "Original notification-before-registration, timeout reason, cancelled pending cleanup and closed-channel grant defects verified fixed in actual handlers. General desktop acceptance remains tracked separately.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-13",
+      "priority": "P1",
+      "problem": "切项目/保存模型配置会重启核心并中断其他任务",
+      "status": "in_progress",
+      "code_changes": [
+        "desktop/electron/src/main/main.js",
+        "desktop/electron/tests/workspace-lifecycle.test.mjs"
+      ],
+      "verification": [
+        "Electron 47/47 Node tests passed; actual workspace selection and native picker preserve daemon/port/generation."
+      ],
+      "remaining": "Workspace selection no longer restarts the daemon. Model configuration still restarts the daemon: implement safe hot configuration or drain, and verify concurrent real Electron sessions.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-14",
+      "priority": "P1",
+      "problem": "无行动结果也可 response_complete，UI 混为完成",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-15",
+      "priority": "P1",
+      "problem": "断连、部分输出与 Session 恢复之间仍有断点",
+      "status": "in_progress",
+      "code_changes": [
+        "crates/owo-agent-server/src/turn_api/handlers.rs",
+        "crates/owo-agent-server/src/turn_control.rs",
+        "clients/ts/src/index.ts"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate.",
+        "TS production typecheck and test compilation exit 0; 28 passed, 2 integration tests skipped.",
+        "Focused HTTP 3 passed: read-only cannot widen parent policy; pre-start and late scoped cancellation preserve exact-turn identity. In-process authenticated Router and SQLite, not live desktop transport acceptance."
+      ],
+      "remaining": "Session reloaded after lock; supplied canonical turn identity preserved through core/SSE; duplicate recorded ID rejected and scoped cancellation guarded. Add end-to-end dropped-stream/recovery and restart acceptance.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-16",
+      "priority": "P1",
+      "problem": "MCP 写工具超时后盲目重连重试，可能重复副作用",
+      "status": "implemented_pending_runtime_validation",
+      "code_changes": [
+        "crates/owo-agent-mcp/src/mcp.rs",
+        "crates/owo-agent-core/src/tools/mcp_adapters.rs",
+        "crates/owo-agent-mcp/src/bin/mcp_test_server.rs",
+        "crates/owo-agent-mcp/tests/mcp_tests.rs"
+      ],
+      "verification": [
+        "Rust regression source added; rustfmt syntax/format checked. No Rust check/clippy/test execution due to resource gate."
+      ],
+      "remaining": "Run real stdio fixture write-counter/timeout/no-replay/reconnect regression and read-only retry contracts. Verify HTTP timeout behavior and host cancellation; outcome-unknown diagnostics are not execution success.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-17",
+      "priority": "P2",
+      "problem": "MCP/技能/工具快照与配置生命周期不统一",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "deferred_minor"
+    },
+    {
+      "id": "F-18",
+      "priority": "P2",
+      "problem": "每个增量同步写 SQLite，其他层仍可累积输出",
+      "status": "in_progress",
+      "code_changes": [
+        "agent-sdk/crates/owo-agent-tool-safety/src/sandbox/windows.rs",
+        "agent-sdk/crates/owo-agent-tool-safety/tests/windows_process_lifecycle.rs",
+        "agent-sdk/crates/owo-agent-core/src/tools/command.rs"
+      ],
+      "verification": [],
+      "remaining": "Command cancellation guard/bounded cleanup and bounded pipe/log capture implemented; other model/tool/event/store phases remain.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-19",
+      "priority": "P1",
+      "problem": "Provider 方法的 fallback 语义不一致，缓存先构造再查",
+      "status": "implemented_pending_runtime_validation",
+      "code_changes": [
+        "crates/owo-agent-core/src/gateway/resilience.rs",
+        "crates/owo-agent-core/src/gateway/tests.rs"
+      ],
+      "verification": [
+        "Rust regression source added; rustfmt syntax/format checked. No Rust check/clippy/test execution due to resource gate.",
+        "Gateway 49 passed, including observed permanent-failure no-fallback, no reconstruction on cache hit and configured deferred provider reuse. Affected clippy -D warnings passed."
+      ],
+      "remaining": "Cache/fallback local regressions pass; verify proxy-change cache identity and configured provider behavior during desktop configuration acceptance.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-20",
+      "priority": "P2",
+      "problem": "失败用量、未知 usage 与价格缺失的表达不完整",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "deferred_minor"
+    },
+    {
+      "id": "F-21",
+      "priority": "P1",
+      "problem": "Electron 明文落盘凭据，日志只脱敏 pairing",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-22",
+      "priority": "P2",
+      "problem": "Electron 构建身份比较口径错误，接管可见性不足",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "F-23",
+      "priority": "P2",
+      "problem": "Team 多处状态投影和注册表构建错误信息丢失",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "deferred_minor"
+    },
+    {
+      "id": "F-24",
+      "priority": "P2",
+      "problem": "Team 尚无稳定收益证据，增加额度不能替代质量闭环",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "deferred_minor"
+    },
+    {
+      "id": "F-25",
+      "priority": "P2",
+      "problem": "默认宿主仍携原生感知和评测依赖，验证成本高",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "deferred_minor"
+    },
+    {
+      "id": "F-26",
+      "priority": "P2",
+      "problem": "测试与诊断缺少关键故障场景，成熟度未形成验收闭环",
+      "status": "in_progress",
+      "code_changes": [
+        "clients/ts/tests/scoped-turn.test.ts",
+        "crates/owo-agent-server/tests/route_contract_tests.rs",
+        "crates/owo-agent-core/src/gateway/stream.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate.",
+        "TS production typecheck and test compilation exit 0; 28 passed, 2 integration tests skipped.",
+        "200 targeted Rust tests passed, affected check/clippy and workspace fmt passed; two resource-limited attempts preserved. No full workspace or real desktop/release acceptance.",
+        "Latest total 203 targeted Rust tests passed; full Web 689 and Electron 47 passed. HTTP regression scope preserved in original route suite and dedicated target."
+      ],
+      "remaining": "Fault regression sources added; TS typechecks and 28 tests passed, two live integrations skipped. Rust resource gate blocks compilation, and no live desktop/provider/release acceptance was performed.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-01",
+      "priority": "P0/P1",
+      "problem": "全局 permissions/output 未贯穿，read-only 在 turn 被忽略",
+      "status": "implemented_pending_runtime_validation",
+      "code_changes": [
+        "crates/owo-agent-cli/src/main.rs",
+        "crates/owo-agent-cli/src/commands/turn.rs",
+        "crates/owo-agent-client/src/turns.rs",
+        "crates/owo-agent-protocol/src/lib.rs",
+        "crates/owo-agent-server/src/turn_api/handlers.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate.",
+        "TS production typecheck and test compilation exit 0; 28 passed, 2 integration tests skipped.",
+        "Affected 8-package check --tests exit 0; policy 67 tests, protocol 4 and client 19 all passed. Request-scoped read-only and live workspace-policy tests passed in policy; core/HTTP enforcement tests remain pending.",
+        "Agent group 47 passed including request-scoped readonly cannot write or relax parent and does not affect the next turn; HTTP tests have not run due to resource guard.",
+        "Focused HTTP 3 passed: read-only cannot widen parent policy; pre-start and late scoped cancellation preserve exact-turn identity. In-process authenticated Router and SQLite, not live desktop transport acceptance."
+      ],
+      "remaining": "Run Rust check/clippy and CLI option contracts; verify supported output/permission paths and explicit rejection on unsupported commands against a live daemon.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-02",
+      "priority": "P0",
+      "problem": "REPL/TUI plan 是本地标志，缺宿主只读约束",
+      "status": "implemented_pending_runtime_validation",
+      "code_changes": [
+        "crates/owo-agent-cli/src/tui.rs",
+        "crates/owo-agent-cli/src/commands/repl_daemon.rs",
+        "crates/owo-agent-core/src/agent/turn.rs",
+        "crates/owo-agent-core/src/tools/tool_host.rs",
+        "crates/owo-agent-policy/src/permissions.rs",
+        "crates/owo-agent-server/tests/route_contract_tests.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate.",
+        "TS production typecheck and test compilation exit 0; 28 passed, 2 integration tests skipped.",
+        "Affected 8-package check --tests exit 0; policy 67 tests, protocol 4 and client 19 all passed. Request-scoped read-only and live workspace-policy tests passed in policy; core/HTTP enforcement tests remain pending.",
+        "Agent group 47 passed including request-scoped readonly cannot write or relax parent and does not affect the next turn; HTTP tests have not run due to resource guard.",
+        "Focused HTTP 3 passed: read-only cannot widen parent policy; pre-start and late scoped cancellation preserve exact-turn identity. In-process authenticated Router and SQLite, not live desktop transport acceptance."
+      ],
+      "remaining": "Run request-scoped read-only core/HTTP tests; verify TUI/REPL plan mode and locked read-only cannot widen a host policy.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-03",
+      "priority": "P1",
+      "problem": "TUI 审批界面拦住 Ctrl+C，读流又暂停等待",
+      "status": "implemented_pending_runtime_validation",
+      "code_changes": [
+        "crates/owo-agent-cli/src/tui.rs",
+        "crates/owo-agent-server/src/turn_control.rs",
+        "crates/owo-agent-server/src/session_api.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate."
+      ],
+      "remaining": "Run TUI cancellation/approval contracts, stalled opening/grace timeout checks and live terminal acceptance; scoped cancellation is a request, not confirmed process termination.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-04",
+      "priority": "P1",
+      "problem": "TUI 审批缺关键参数与确认反馈，授权范围文案不准确",
+      "status": "implemented_pending_runtime_validation",
+      "code_changes": [
+        "crates/owo-agent-cli/src/tui.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate."
+      ],
+      "remaining": "Run approval UI tests and live read/write/exec approvals; confirm actual granted scope, redacted arguments and denial/network error presentation.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-05",
+      "priority": "P1",
+      "problem": "CLI/TUI 完成摘要与宿主状态、退出码不一致",
+      "status": "in_progress",
+      "code_changes": [
+        "crates/owo-agent-cli/src/ui_output.rs",
+        "crates/owo-agent-cli/src/commands/turn.rs",
+        "crates/owo-agent-cli/src/commands/repl_daemon.rs",
+        "crates/owo-agent-cli/src/tui.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate."
+      ],
+      "remaining": "Shared host completion collector and one-shot exit codes implemented. Rust checks and CLI/TUI acceptance pending; review interactive/piped REPL error exit policy and all cancellation rendering.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-06",
+      "priority": "P1",
+      "problem": "最终文本与流式候选文本展示不一致或重复",
+      "status": "in_progress",
+      "code_changes": [
+        "crates/owo-agent-cli/src/tui.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate."
+      ],
+      "remaining": "TUI authoritative final handling improved, but streamed text already flushed into transcript still needs per-response reconciliation; check CLI StreamPrinter final replacement semantics.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-07",
+      "priority": "P1",
+      "problem": "stdin 同时承担任务和审批，管道任务可被吞掉",
+      "status": "in_progress",
+      "code_changes": [
+        "crates/owo-agent-cli/src/commands/turn.rs",
+        "crates/owo-agent-cli/src/commands/repl_daemon.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate."
+      ],
+      "remaining": "Piped/noninteractive approvals now deny without reading task stdin; input resolved before daemon/session creation. Blocking interactive input still needs ownership/cancellation design and runtime tests.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-08",
+      "priority": "P1/P2",
+      "problem": "Rust Client 的流等待与 SSE 解析仍有缺口",
+      "status": "in_progress",
+      "code_changes": [
+        "crates/owo-agent-client/src/http.rs",
+        "crates/owo-agent-client/src/turns.rs",
+        "crates/owo-agent-client/src/sse.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate."
+      ],
+      "remaining": "Loopback proxy bypass, connect/header bounds and fenced identity implemented. Add semantic idle/replay boundaries and strict SSE contracts; run Rust client integration tests.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-09",
+      "priority": "P1",
+      "problem": "connect 未验证服务 ready，token/端口重启后不刷新",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-10",
+      "priority": "P0",
+      "problem": "CLI 与 Electron 默认数据根不一致",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-11",
+      "priority": "P2",
+      "problem": "resume 只更新会话 ID，本地模型/工作区状态陈旧",
+      "status": "in_progress",
+      "code_changes": [
+        "crates/owo-agent-cli/src/commands/repl_daemon.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; no Rust typecheck or test run due to resource gate."
+      ],
+      "remaining": "Daemon REPL resume now restores canonical session workspace/model. Review TUI/local compatibility restore paths and run cross-workspace restore tests.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-12",
+      "priority": "P1",
+      "problem": "CLI Goal 内存循环缺持久恢复与阻断调度",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-13",
+      "priority": "P1",
+      "problem": "Goal API “最新 run”和 Goal 总状态源不可靠",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-14",
+      "priority": "P1",
+      "problem": "Goal Agent Worker 不传内部进度和父取消通道",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-15",
+      "priority": "P0/P1",
+      "problem": "子代理新 Policy 未继承父级收紧规则",
+      "status": "in_progress",
+      "code_changes": [],
+      "verification": [
+        "Parent policy inheritance wired for direct, contract, profile and fan-out workers; core/server check --tests exit 0. New inheritance runtime tests not yet run."
+      ],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-16",
+      "priority": "P1",
+      "problem": "Team 进度以 ID+status 去重，重试身份和等待原因丢失",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-17",
+      "priority": "P1",
+      "problem": "Team watch 超时/取消不覆盖建立 SSE 连接",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-18",
+      "priority": "P1/P2",
+      "problem": "Activity 缺阶段，Final 时过早从活跃表移除",
+      "status": "in_progress",
+      "code_changes": [
+        "crates/owo-agent-server/src/activity_api.rs",
+        "crates/owo-agent-server/src/turn_api/handlers.rs"
+      ],
+      "verification": [
+        "Rust syntax/format checked; activity projection regression added but not executed."
+      ],
+      "remaining": "Final transitions to persisting; lifecycle cleanup now follows persistence/audit/queue closure. Add waiting_question/cancelling/compaction-start phase wiring and runtime phase acceptance.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-19",
+      "priority": "P1/P2",
+      "problem": "Doctor 可能成为可写数据库调用方，诊断与真实实例脱节",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-20",
+      "priority": "P1",
+      "problem": "Cloud CLI 默认 PID 队列不能跨命令连续使用，无运行进度",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-21",
+      "priority": "P1",
+      "problem": "备份直接读取活跃 DB/WAL，范围与资源边界不足",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-22",
+      "priority": "P1",
+      "problem": "Workflow 未知 backend 静默变 mock，容易形成模拟成功",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-23",
+      "priority": "P0/P1",
+      "problem": "Workflow real 文件/MCP 路径没有统一 ToolHost 接线",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-24",
+      "priority": "P1",
+      "problem": "Workflow 成功未确认持久化，重启历史详情不可恢复",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-25",
+      "priority": "P1",
+      "problem": "Automation 触发与执行非持久事务，丢触发/重叠风险",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-26",
+      "priority": "P1",
+      "problem": "Settings 部分更新会重置其他字段，密钥与配置源仍分裂",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "major_or_required_validation"
+    },
+    {
+      "id": "C-27",
+      "priority": "P2",
+      "problem": "路由契约提取器漏跨行与子目录，测试范围不等于产品验收",
+      "status": "pending",
+      "code_changes": [],
+      "verification": [],
+      "remaining": "Implement and verify the audited behavior; static checks alone do not close this item.",
+      "execution_priority": "deferred_minor"
+    }
+  ],
+  "validation_resource_state": {
+    "status": "resource_limited",
+    "free_gb": 4.67,
+    "used_percent": 79.9,
+    "required_free_gb": 6,
+    "Rust_builds_started": 0,
+    "Cargo_exit_code": null
+  },
+  "checkpoint_evidence": {
+    "electron_tests": "44/44",
+    "rustfmt_files": 7,
+    "Rust_checks_and_tests": "not_run_resource_limited",
+    "complete_audit_entries": 0
+  },
+  "rust_resource_status": {
+    "status": "partial_validation_completed",
+    "free_gib_at_start": 7.44,
+    "used_percent_at_start": 68.1,
+    "required_free_gib": 6,
+    "cargo_started": true,
+    "check_first_exit_code": 101,
+    "check_after_fix_exit_code": 0,
+    "windows_lifecycle_exit_code": 0,
+    "policy_protocol_client_exit_code": 0,
+    "core_gateway_status": "passed_low_debug",
+    "core_gateway_session_id": null,
+    "core_gateway_first_exit_code": 137,
+    "test_profile_debug": 0,
+    "resource_guard_preserved": true,
+    "core_gateway_exit_code": 0,
+    "core_agent_exit_code": 0,
+    "server_turn_exit_code": 0,
+    "http_tests_exit_code": 137,
+    "http_tests_state": "resource_limited_before_execution",
+    "affected_clippy_exit_code": 0,
+    "fmt_exit_code": 0,
+    "http_focused_exit_code": 0,
+    "http_focused_state": "passed_3_in_process_http_tests",
+    "http_focused_clippy_exit_code": 0,
+    "fmt_final_exit_code": 0
+  },
+  "priority_plan": {
+    "updated_at": "2026-10-10T04:46:03.468092+00:00",
+    "user_instruction": "Prioritize major problems; non-serious items may be deferred.",
+    "primary_scope": "Execution hangs, task cancellation/deadlines, permissions, cross-client identity, truthful completion, recovery and reliable workflow/automation execution.",
+    "deferred_minor_ids": [
+      "C-27",
+      "F-17",
+      "F-20",
+      "F-23",
+      "F-24",
+      "F-25"
+    ],
+    "preserve_all_audit_entries": true
+  },
+  "execution_state": "paused_for_user_trial",
+  "trial_delivery": {
+    "created_at": "2026-10-10T06:26:12.026793+00:00",
+    "directory": "D:\\OwO-master\\agent-sdk\\dist\\OwO-Agent-Trial-20261010-134212\\win-unpacked",
+    "launcher": "D:\\OwO-master\\agent-sdk\\dist\\OwO-Agent-Trial-20261010-134212\\win-unpacked\\启动试用版.cmd",
+    "exe": "D:\\OwO-master\\agent-sdk\\dist\\OwO-Agent-Trial-20261010-134212\\win-unpacked\\OwO Agent.exe",
+    "zip": "D:\\OwO-master\\agent-sdk\\dist\\OwO-Agent-Trial-20261010-134212.zip",
+    "zip_size": 170944716,
+    "zip_sha256": "9fba0f2e69cc68b6d095b05213513636ae1ed45d863eb3117a53d6e59896ee65",
+    "smoke_passed": true
+  },
+  "custom_model_connection_fix": {
+    "status": "verified_local_and_packaged",
+    "delivery": {
+      "directory": "D:\\OwO-master\\agent-sdk\\dist\\OwO-Agent-CustomModel-20261010\\win-unpacked",
+      "launcher": "D:\\OwO-master\\agent-sdk\\dist\\OwO-Agent-CustomModel-20261010\\win-unpacked\\启动试用版.cmd",
+      "zip": "D:\\OwO-master\\agent-sdk\\dist\\OwO-Agent-CustomModel-20261010.zip",
+      "zip_size": 170962552,
+      "zip_sha256": "85e568ab9d95817c44833de93bb557dc6e49327935e790110e137f8a1a26935c",
+      "core_sha256": "ef3ea05f1c017d2eaafca0fa75511f5b7587b048ba36068337ec132366ac33e9",
+      "core_identity": "owo-agent 0.1.0 api=0.7 commit=c45cd2575b2ceae0cc1b7875362398f17e39c7d0 dirty=true built_at=2026-10-10T09:50:53Z source=compiled",
+      "smoke_passed": true
+    },
+    "tests": {
+      "http": 7,
+      "web": 694,
+      "typescript": 29
+    },
+    "remaining": "User cloud credentials/model acceptance; existing origin-bound custom preference persistence remains a separate deferred item."
+  }
+}

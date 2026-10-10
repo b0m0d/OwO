@@ -100,6 +100,25 @@ pub trait Tool: Send + Sync {
 mod tool_host;
 pub(crate) use tool_host::{ToolApprovalGrant, ToolCapabilityContext, ToolHostService};
 
+/// Metadata stays attached to the actual builtin instance through lookup and execution.
+struct DeclaredBuiltin<T> {
+    inner: T,
+    effect: Option<crate::tool_effects::ToolEffect>,
+}
+#[async_trait]
+impl<T: Tool> Tool for DeclaredBuiltin<T> {
+    fn spec(&self) -> ToolSpec {
+        let mut spec = self.inner.spec();
+        if spec.effect.is_none() {
+            spec.effect = self.effect.clone();
+        }
+        spec
+    }
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        self.inner.run(ctx, args).await
+    }
+}
+
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
     /// MCP 大 schema 的完整副本（注册时超预算被压缩为骨架；此处保留原始 schema 供按需查询）。
@@ -112,25 +131,25 @@ impl ToolRegistry {
     pub fn new() -> Self {
         let mut registry = Self::empty();
         // 保留历史基础工具顺序，避免不相关的模型提示变化。
-        registry.register(ReadFileTool);
-        registry.register(WriteFileTool);
-        registry.register(EditFileTool);
-        registry.register(MultiEditTool);
-        registry.register(ApplyPatchTool);
-        registry.register(ListDirTool);
-        registry.register(SearchFilesTool);
-        registry.register(GrepTool);
-        registry.register(crate::git_tools::GitStatusTool);
-        registry.register(crate::git_tools::GitDiffTool);
-        registry.register(crate::git_tools::GitLogTool);
+        registry.register_builtin(ReadFileTool);
+        registry.register_builtin(WriteFileTool);
+        registry.register_builtin(EditFileTool);
+        registry.register_builtin(MultiEditTool);
+        registry.register_builtin(ApplyPatchTool);
+        registry.register_builtin(ListDirTool);
+        registry.register_builtin(SearchFilesTool);
+        registry.register_builtin(GrepTool);
+        registry.register_builtin(crate::git_tools::GitStatusTool);
+        registry.register_builtin(crate::git_tools::GitDiffTool);
+        registry.register_builtin(crate::git_tools::GitLogTool);
         registry.register_run_command();
-        registry.register(ShellOutputTool);
-        registry.register(KillShellTool);
-        registry.register(TodoTool);
-        registry.register(SingleVerificationPlanTool);
-        registry.register(WebFetchTool);
-        registry.register(WebSearchTool);
-        registry.register(ReadImageTool);
+        registry.register_builtin(ShellOutputTool);
+        registry.register_builtin(KillShellTool);
+        registry.register_builtin(TodoTool);
+        registry.register_builtin(SingleVerificationPlanTool);
+        registry.register_builtin(WebFetchTool);
+        registry.register_builtin(WebSearchTool);
+        registry.register_builtin(ReadImageTool);
         registry.register_delegation_tools();
         registry
     }
@@ -158,14 +177,14 @@ impl ToolRegistry {
             tools: Vec::new(),
             full_schemas: HashMap::new(),
         };
-        registry.register(ReadFileTool);
-        registry.register(ListDirTool);
-        registry.register(SearchFilesTool);
-        registry.register(GrepTool);
-        registry.register(crate::git_tools::GitStatusTool);
-        registry.register(crate::git_tools::GitDiffTool);
-        registry.register(crate::git_tools::GitLogTool);
-        registry.register(ReadImageTool);
+        registry.register_builtin(ReadFileTool);
+        registry.register_builtin(ListDirTool);
+        registry.register_builtin(SearchFilesTool);
+        registry.register_builtin(GrepTool);
+        registry.register_builtin(crate::git_tools::GitStatusTool);
+        registry.register_builtin(crate::git_tools::GitDiffTool);
+        registry.register_builtin(crate::git_tools::GitLogTool);
+        registry.register_builtin(ReadImageTool);
         registry
     }
 
@@ -176,64 +195,64 @@ impl ToolRegistry {
 
     /// 文件读取组：`read_file` / `list_dir` / `search_files`（只读角色基线）。
     pub fn register_file_read_tools(&mut self) {
-        self.register(ReadFileTool);
-        self.register(ListDirTool);
-        self.register(SearchFilesTool);
+        self.register_builtin(ReadFileTool);
+        self.register_builtin(ListDirTool);
+        self.register_builtin(SearchFilesTool);
     }
 
     /// 文件写入（无白名单限制；受 `Policy` 审批约束）。
     pub fn register_write_file(&mut self) {
-        self.register(WriteFileTool);
+        self.register_builtin(WriteFileTool);
     }
 
     /// 白名单受限写入：写目标必须落在 `allowed` 绝对路径前缀内（见
     /// [`WhitelistWriteFileTool`]）；`allowed` 为空 = 工作区内可写。
     pub fn register_whitelist_write_file(&mut self, allowed: Vec<PathBuf>) {
-        self.register(WhitelistWriteFileTool { allowed });
+        self.register_builtin(WhitelistWriteFileTool { allowed });
     }
 
     /// 白名单受限精确补丁：每个补丁目标都必须落入同一授权路径前缀内。
     pub fn register_whitelist_apply_patch(&mut self, allowed: Vec<PathBuf>) {
-        self.register(WhitelistApplyPatchTool { allowed });
+        self.register_builtin(WhitelistApplyPatchTool { allowed });
     }
 
     /// 受控命令执行：`run_command`（实现族角色专用；沙箱 + 审批约束不变）。
     pub fn register_run_command(&mut self) {
-        self.register(RunCommandTool);
+        self.register_builtin(RunCommandTool);
     }
 
     /// 桌面观察/视觉组：截图 OCR、窗口信息与视觉 grounding/verify，不包含输入操作。
     pub fn register_desktop_observation_tools(&mut self) {
-        self.register(crate::computer_use::ScreenOcrTool);
-        self.register(crate::computer_use::OcrRegionTool);
-        self.register(crate::computer_use::DesktopWindowOcrTool);
-        self.register(crate::computer_use::DesktopForegroundTool);
-        self.register(crate::computer_use::DesktopWindowListTool);
-        self.register(crate::computer_use::ScreenVisionTool);
-        self.register(crate::computer_use::VisionVerifyTool);
-        self.register(crate::computer_use::VisionGroundTool);
+        self.register_builtin(crate::computer_use::ScreenOcrTool);
+        self.register_builtin(crate::computer_use::OcrRegionTool);
+        self.register_builtin(crate::computer_use::DesktopWindowOcrTool);
+        self.register_builtin(crate::computer_use::DesktopForegroundTool);
+        self.register_builtin(crate::computer_use::DesktopWindowListTool);
+        self.register_builtin(crate::computer_use::ScreenVisionTool);
+        self.register_builtin(crate::computer_use::VisionVerifyTool);
+        self.register_builtin(crate::computer_use::VisionGroundTool);
     }
 
     /// 桌面控制组：会激活窗口、注入键鼠或启动程序，默认不注册。
     pub fn register_desktop_control_tools(&mut self) {
-        self.register(crate::computer_use::DesktopActivateTool);
-        self.register(crate::computer_use::DesktopClickTool);
-        self.register(crate::computer_use::DesktopTypeTool);
-        self.register(crate::computer_use::DesktopKeyTool);
-        self.register(crate::computer_use::DesktopShortcutTool);
-        self.register(crate::computer_use::DesktopLaunchTool);
-        self.register(crate::computer_use::DesktopScrollTool);
-        self.register(crate::computer_use::DesktopWaitTool);
-        self.register(crate::computer_use::DesktopWaitUntilTool);
+        self.register_builtin(crate::computer_use::DesktopActivateTool);
+        self.register_builtin(crate::computer_use::DesktopClickTool);
+        self.register_builtin(crate::computer_use::DesktopTypeTool);
+        self.register_builtin(crate::computer_use::DesktopKeyTool);
+        self.register_builtin(crate::computer_use::DesktopShortcutTool);
+        self.register_builtin(crate::computer_use::DesktopLaunchTool);
+        self.register_builtin(crate::computer_use::DesktopScrollTool);
+        self.register_builtin(crate::computer_use::DesktopWaitTool);
+        self.register_builtin(crate::computer_use::DesktopWaitUntilTool);
     }
 
     /// 委派组：`explore` / `subagent` / `use_skill`。
     pub fn register_delegation_tools(&mut self) {
-        self.register(ExploreTool);
-        self.register(SubagentTool);
-        self.register(FanOutSubagentsTool);
-        self.register(AskUserTool);
-        self.register(UseSkillTool);
+        self.register_builtin(ExploreTool);
+        self.register_builtin(SubagentTool);
+        self.register_builtin(FanOutSubagentsTool);
+        self.register_builtin(AskUserTool);
+        self.register_builtin(UseSkillTool);
     }
 
     /// 浏览器组：导航/搜索/快照 + 交互与写工作区变体（含 `browser_screenshot` /
@@ -241,31 +260,39 @@ impl ToolRegistry {
     /// 应经 `retain_names` 裁掉写工作区变体。
     pub fn register_browser_tools(&mut self) {
         let browser = crate::computer_use::BrowserTools::new();
-        self.register(crate::computer_use::BrowserNavigateTool {
+        self.register_builtin(crate::computer_use::BrowserNavigateTool {
             tools: browser.clone(),
         });
-        self.register(crate::computer_use::BrowserSearchTool {
+        self.register_builtin(crate::computer_use::BrowserSearchTool {
             tools: browser.clone(),
         });
-        self.register(crate::computer_use::BrowserSnapshotTool {
+        self.register_builtin(crate::computer_use::BrowserSnapshotTool {
             tools: browser.clone(),
         });
-        self.register(crate::computer_use::BrowserClickTool {
+        self.register_builtin(crate::computer_use::BrowserClickTool {
             tools: browser.clone(),
         });
-        self.register(crate::computer_use::BrowserTypeTool {
+        self.register_builtin(crate::computer_use::BrowserTypeTool {
             tools: browser.clone(),
         });
-        self.register(crate::computer_use::BrowserPressTool {
+        self.register_builtin(crate::computer_use::BrowserPressTool {
             tools: browser.clone(),
         });
-        self.register(crate::computer_use::BrowserScreenshotWriteTool {
+        self.register_builtin(crate::computer_use::BrowserScreenshotWriteTool {
             tools: browser.clone(),
         });
-        self.register(crate::computer_use::BrowserDownloadImageWriteTool {
+        self.register_builtin(crate::computer_use::BrowserDownloadImageWriteTool {
             tools: browser.clone(),
         });
-        self.register(crate::computer_use::BrowserCloseTool { tools: browser });
+        self.register_builtin(crate::computer_use::BrowserCloseTool { tools: browser });
+    }
+
+    fn register_builtin(&mut self, tool: impl Tool + 'static) {
+        let effect = crate::tool_effects::builtin_effect_for(&tool.spec().name);
+        self.register(DeclaredBuiltin {
+            inner: tool,
+            effect,
+        });
     }
 
     pub fn register(&mut self, tool: impl Tool + 'static) {
@@ -988,6 +1015,42 @@ mod tests {
             mcp_tool_prefix("owo-plugin-clipboard"),
             "owo-plugin-clipboard_"
         );
+    }
+
+    #[test]
+    fn trusted_builtin_read_metadata_is_owned_by_the_registered_instance() {
+        let registry = ToolRegistry::read_only();
+        for spec in registry.specs() {
+            let effect = spec
+                .effect
+                .as_ref()
+                .expect("builtin readonly metadata must be exported");
+            assert_eq!(
+                effect.class,
+                crate::tool_effects::EffectClass::Read,
+                "{}",
+                spec.name
+            );
+            assert!(effect.host_verified_readonly, "{}", spec.name);
+            let lookup = registry.get(&spec.name).unwrap().spec();
+            assert!(lookup.effect.as_ref().unwrap().host_verified_readonly);
+        }
+    }
+
+    #[test]
+    fn a_foreign_tool_named_read_file_does_not_inherit_builtin_trust() {
+        let mut registry = ToolRegistry::read_only();
+        registry.register(NamedTool {
+            name: "read_file".into(),
+            description: "foreign fixture".into(),
+        });
+        let spec = registry
+            .specs()
+            .into_iter()
+            .find(|spec| spec.name == "read_file")
+            .unwrap();
+        assert!(spec.effect.is_none());
+        assert!(registry.get("read_file").unwrap().spec().effect.is_none());
     }
 
     struct NamedTool {

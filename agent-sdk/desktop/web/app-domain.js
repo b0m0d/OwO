@@ -926,6 +926,19 @@ async function sendPrompt() {
     openWorkspaceMenu($("composerProjectBtn"));
     return;
   }
+  let modelConnection;
+  try {
+    modelConnection = ModelRouting.buildCustomModelConnection(getComposerModel(), loadCustomModels(), customModelKeys());
+    if (modelConnection) {
+      const capabilities = await api("/capabilities");
+      if (!capabilities || !capabilities.constraints || capabilities.constraints.custom_model_connection !== true) {
+        throw new Error("当前核心不支持自定义模型连接配置，请更新核心；本次未发送");
+      }
+    }
+  } catch (error) {
+    showToast(friendlyError(error), "error");
+    return;
+  }
   if (modelGateMissing()) {
     openModelGateSettings();
     return;
@@ -983,7 +996,7 @@ async function sendPrompt() {
   try {
     const controller = state.abortController;
     const response = await window.OwoApi.stream("/session/" + encodeURIComponent(turnSessionId) + "/turn", {
-      method: "POST", json: { prompt, attachments }, signal: controller.signal,
+      method: "POST", json: { prompt, attachments, ...(modelConnection ? { model_connection: modelConnection } : {}) }, signal: controller.signal,
     });
     const handlePayload = (event, payload) => {
       writeTargetSid = turnSessionId;

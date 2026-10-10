@@ -344,6 +344,8 @@ pub(crate) async fn enforce_worker_output_contract_controlled(
 /// 字面量不受影响），区别只在返回的是**契约校验后的 JSON 本体**而非自由文本。
 pub struct ContractSubagentRunner<'a> {
     pub provider: Arc<dyn ModelProvider>,
+    /// Host restrictions are inherited live; role constraints may only narrow them.
+    pub parent_policy: &'a Policy,
     pub approver: &'a dyn Approver,
     pub abort: &'a AtomicBool,
     pub depth: usize,
@@ -364,10 +366,11 @@ impl ContractSubagentRunner<'_> {
         prompt: &str,
         read_only: bool,
     ) -> Result<String, String> {
+        let policy = self.parent_policy.for_workspace(workspace.to_path_buf())?;
         let policy = if read_only {
-            Policy::read_only(workspace.to_path_buf())
+            policy.read_only_scope()
         } else {
-            Policy::new(workspace.to_path_buf())
+            policy
         };
         let registry = if read_only {
             ToolRegistry::read_only()

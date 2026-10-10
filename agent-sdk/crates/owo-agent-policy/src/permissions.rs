@@ -263,6 +263,25 @@ pub fn describe_request(request: &PermissionRequest) -> serde_json::Value {
 #[async_trait]
 pub trait Approver: Send + Sync {
     async fn decide(&self, request: &PermissionRequest) -> Decision;
+
+    /// Interactive transports register their responder before publishing the notification.
+    async fn decide_with_notification(
+        &self,
+        request: &PermissionRequest,
+        notify: &mut (dyn FnMut() + Send),
+    ) -> ApprovalOutcome {
+        notify();
+        ApprovalOutcome {
+            decision: self.decide(request).await,
+            reason: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalOutcome {
+    pub decision: Decision,
+    pub reason: Option<String>,
 }
 
 /// 测试/自动化用：统一放行或拒绝。
@@ -386,11 +405,13 @@ pub struct Policy {
     /// 运行时追加的危险命令片段（热生效，与基础列表合并判断）。
     runtime_deny: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     read_only: Arc<AtomicBool>,
+    request_read_only: bool,
     /// §5.3 权限档位（默认 Workspace：工作区内只读默认允许，首次写入/执行/联网/
     /// UI 控制/越界/破坏性操作询问；审批后由有作用域 Grant 记忆）。
     profile: std::sync::Arc<std::sync::Mutex<PermissionProfile>>,
     /// §5.4 有作用域、可撤销的授权记忆（用户审批选项生成；命中即放行）。
-    grants: std::sync::RwLock<Option<std::sync::Arc<crate::grant_store::GrantStore>>>,
+    grants:
+        std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::grant_store::GrantStore>>>>,
     /// §4.5.3 结构化 profile（权限中心提交）。`None` = 没有显式结构化配置，
     /// 判定完全按档位走（保持既有行为，老调用点零改动）。
     ///
@@ -400,6 +421,25 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// Bind path and grant identity to a session while sharing the host's live
+    /// restrictions. This does not grant any capability or relax the policy.
+    pub fn for_workspace(&self, workspace: impl Into<PathBuf>) -> Result<Self, String> {
+        let _grants = self
+            .grants
+            .read()
+            .map_err(|_| "permission grant registry poisoned".to_string())?;
+        Ok(Self {
+            workspace: workspace.into(),
+            deny_command_fragments: self.deny_command_fragments.clone(),
+            runtime_deny: Arc::clone(&self.runtime_deny),
+            read_only: Arc::clone(&self.read_only),
+            request_read_only: self.request_read_only,
+            profile: Arc::clone(&self.profile),
+            grants: Arc::clone(&self.grants),
+            spec: Arc::clone(&self.spec),
+        })
+    }
+
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
@@ -416,8 +456,9 @@ impl Policy {
             ],
             runtime_deny: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             read_only: Arc::new(AtomicBool::new(false)),
+            request_read_only: false,
             profile: std::sync::Arc::new(std::sync::Mutex::new(PermissionProfile::Workspace)),
-            grants: std::sync::RwLock::new(None),
+            grants: Arc::new(std::sync::RwLock::new(None)),
             spec: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -433,8 +474,8 @@ impl Policy {
     }
 
     /// §5.3 注入授权记忆存储（审批卡选项持久化；重复注入覆盖引用）。
-    pub fn with_grants(mut self, grants: std::sync::Arc<crate::grant_store::GrantStore>) -> Self {
-        self.grants = std::sync::RwLock::new(Some(grants));
+    pub fn with_grants(self, grants: std::sync::Arc<crate::grant_store::GrantStore>) -> Self {
+        self.set_grants(grants);
         self
     }
 
@@ -484,6 +525,9 @@ impl Policy {
     }
 
     pub fn profile(&self) -> PermissionProfile {
+        if self.request_read_only {
+            return PermissionProfile::ReadOnly;
+        }
         self.profile
             .lock()
             .map(|guard| *guard)
@@ -558,7 +602,7 @@ impl Policy {
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.read_only.load(Ordering::Relaxed)
+        self.request_read_only || self.read_only.load(Ordering::Acquire)
     }
 
     pub fn workspace(&self) -> &Path {
@@ -701,6 +745,32 @@ impl Policy {
             .with_redacted_args(Some(redact_args(args)))
     }
 
+    /// Apply an immutable request restriction without changing the shared host policy.
+    pub fn read_only_scope(mut self) -> Self {
+        self.request_read_only = true;
+        self
+    }
+
+    /// Recheck only denials before executing an already approved capability.
+    /// This does not consume a reusable grant or replace a required approval.
+    pub fn execution_denial(&self, request: &PermissionRequest) -> Option<String> {
+        if request.reason.starts_with("拒绝") {
+            return Some(request.reason.clone());
+        }
+        if self
+            .spec()
+            .is_some_and(|spec| spec.extra_denial(request).is_some())
+        {
+            return Some("拒绝：当前权限维度禁止此操作".to_string());
+        }
+        if request.level != Level::Read
+            && (self.is_read_only() || self.profile() == PermissionProfile::ReadOnly)
+        {
+            return Some("拒绝：本次回合或宿主处于只读模式".to_string());
+        }
+        None
+    }
+
     /// 工具执行前的最终判定（拒绝原因通过 request.reason 表达）。
     ///
     /// §5.3/§5.4 判定顺序：deny 优先 → §4.5.3 维度收紧层 → 等级档位（profile）
@@ -708,16 +778,8 @@ impl Policy {
     /// grant 命中放行与 profile 档位叠加，但绝不越过 deny 规则（reason 以"拒绝"开头
     /// 恒为 Deny，false 优先）。
     pub fn decision(&self, request: &PermissionRequest) -> Decision {
-        if request.reason.starts_with("拒绝") {
+        if self.execution_denial(request).is_some() {
             return Decision::Deny;
-        }
-        // §4.5.3 维度收紧层：**必须**排在 Read 放行与 grant 命中之前——
-        // 用户在权限中心显式关掉某个维度时，"读操作默认放行"和"已授过的权限"
-        // 都不能把它绕回去，否则界面关了后端还在跑，就是假合规。
-        if let Some(spec) = self.spec() {
-            if spec.extra_denial(request).is_some() {
-                return Decision::Deny;
-            }
         }
         if request.level == Level::Read {
             return Decision::Allow;
@@ -947,6 +1009,105 @@ mod tests {
         let policy = Policy::read_only(".");
         let request = policy.evaluate("read_file", &json!({ "path": "a.txt" }));
         assert_eq!(policy.decision(&request), Decision::Allow);
+    }
+
+    #[test]
+    fn session_workspace_view_rebases_paths_and_keeps_parent_restrictions_live() {
+        let root = std::env::temp_dir().join(format!("owo-policy-view-{}", uuid::Uuid::new_v4()));
+        let launch = root.join("launch");
+        let session = root.join("session");
+        std::fs::create_dir_all(&launch).unwrap();
+        std::fs::create_dir_all(&session).unwrap();
+        let file = session.join("note.txt");
+        std::fs::write(&file, "fixture").unwrap();
+
+        let mut parent = Policy::new(&launch);
+        parent.add_deny_command("parent-denied".to_string());
+        let scoped = parent.for_workspace(&session).unwrap();
+        assert!(Arc::ptr_eq(&parent.grants, &scoped.grants));
+        let absolute = json!({ "path": file.to_string_lossy() });
+        assert_eq!(
+            parent.decision(&parent.evaluate("read_file", &absolute)),
+            Decision::Deny
+        );
+        assert_eq!(
+            scoped.decision(&scoped.evaluate("read_file", &absolute)),
+            Decision::Allow
+        );
+        assert_eq!(
+            scoped.decision(&scoped.evaluate(
+                "write_file",
+                &json!({ "path": "new.txt", "content": "fixture" })
+            )),
+            Decision::Ask
+        );
+        assert_eq!(
+            scoped.decision(&scoped.evaluate(
+                "read_file",
+                &json!({ "path": launch.join("outside.txt").to_string_lossy() })
+            )),
+            Decision::Deny
+        );
+        assert_eq!(
+            scoped
+                .decision(&scoped.evaluate("run_command", &json!({ "command": "parent-denied" }))),
+            Decision::Deny
+        );
+        assert_ne!(parent.workspace_id(), scoped.workspace_id());
+        parent.set_profile(PermissionProfile::ReadOnly);
+        assert_eq!(
+            scoped.decision(&scoped.evaluate("write_file", &json!({ "path": "new.txt" }))),
+            Decision::Deny
+        );
+
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir(session).unwrap();
+        std::fs::remove_dir(launch).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn request_read_only_is_immutable_and_does_not_change_the_host_profile() {
+        let parent = Policy::new(".");
+        let scoped = parent.for_workspace(".").unwrap().read_only_scope();
+        assert_eq!(parent.profile(), PermissionProfile::Workspace);
+        assert_eq!(scoped.profile(), PermissionProfile::ReadOnly);
+        assert_eq!(
+            scoped.decision(&scoped.evaluate("run_command", &json!({ "command": "echo fixture" }))),
+            Decision::Deny
+        );
+        parent.set_read_only_runtime(false);
+        assert!(scoped.is_read_only());
+        assert_eq!(
+            scoped.decision(&scoped.evaluate("write_file", &json!({ "path": "fixture.txt" }))),
+            Decision::Deny
+        );
+        assert_eq!(
+            parent.decision(&parent.evaluate("write_file", &json!({ "path": "fixture.txt" }))),
+            Decision::Ask
+        );
+        let inherited = scoped.for_workspace(".").unwrap();
+        assert!(inherited.is_read_only());
+    }
+
+    #[test]
+    fn live_denial_rechecks_runtime_rules_without_consuming_approval() {
+        let parent = Policy::new(".");
+        let scoped = parent.for_workspace(".").unwrap();
+        let args = json!({ "command": "echo fixture" });
+        assert!(scoped
+            .execution_denial(&scoped.evaluate("run_command", &args))
+            .is_none());
+        parent.add_runtime_deny("echo fixture");
+        assert!(scoped
+            .execution_denial(&scoped.evaluate("run_command", &args))
+            .is_some());
+        parent.set_profile(PermissionProfile::ReadOnly);
+        assert!(scoped
+            .execution_denial(
+                &scoped.evaluate("run_command", &json!({ "command": "another fixture" }))
+            )
+            .is_some());
     }
 
     #[test]

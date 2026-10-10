@@ -344,46 +344,13 @@ function writeConfig(config) {
 // ---------- 核心：环境变量注入 ----------
 
 function coreEnv(config, extra = {}) {
-  const model = config.model || {};
-  const env = {
+  return shellCommands.applyModelEnvironment({
     ...process.env,
     OWO_AGENT_DATA: agentDataDir(),
     OWO_DESKTOP_RELEASE: "1",
-    // 配对证明：核心据此收紧 /auth/token 引导（见 PAIRING_SECRET 的说明）。
     OWO_DESKTOP_PAIRING_SECRET: PAIRING_SECRET,
     ...extra,
-  };
-  const provider = String(model.provider || "unset");
-  if (provider !== "unset") {
-    if (model.base_url) env.OPENAI_BASE_URL = model.base_url;
-    if (model.name) env.OPENAI_MODEL = model.name;
-    // 上下文与采样参数：**未配置就不注入**，核心保留自己的默认值。
-    const numeric = {
-      OWO_MODEL_CONTEXT_WINDOW: model.context_window,
-      OWO_MODEL_TEMPERATURE: model.temperature,
-      OWO_MODEL_TIMEOUT_SECS: model.timeout_secs,
-      OWO_AGENT_KEEP_RECENT: model.keep_recent,
-    };
-    for (const [key, value] of Object.entries(numeric)) {
-      if (value !== null && value !== undefined && String(value).trim() !== "" && Number(value) > 0) {
-        env[key] = String(value);
-      }
-    }
-    if (model.compaction === true) env.OWO_AGENT_COMPACTION = "1";
-    if (model.compaction === false) env.OWO_AGENT_COMPACTION = "0";
-  }
-  // 输出预算由 config.json 单一管理；不要沿用桌面进程继承的旧环境值。
-  shellCommands.applyModelOutputEnv(env, model);
-  // 凭据：文件里的 key 优先，其次 api_key_env 指向的环境变量，再退 OPENAI_API_KEY.
-  const fileKey = typeof model.api_key === "string" ? model.api_key.trim() : "";
-  if (fileKey) {
-    env.OPENAI_API_KEY = fileKey;
-  } else {
-    const envName = String(model.api_key_env || "OPENAI_API_KEY").trim() || "OPENAI_API_KEY";
-    const fromEnv = process.env[envName] || process.env.OPENAI_API_KEY || "";
-    if (fromEnv) env.OPENAI_API_KEY = fromEnv;
-  }
-  return env;
+  }, config.model || {});
 }
 
 // ---------- HTTP（M2：壳侧请求统一带 ledger 来源标签） ----------
@@ -1141,9 +1108,7 @@ ipcMain.handle("workspace:choose", async () => {
     properties: ["openDirectory"],
   });
   if (result.canceled || !result.filePaths.length) return { ok: false, canceled: true };
-  const target = saveWorkspace(result.filePaths[0]);
-  await startCore({ reason: "manual", userInitiated: true });
-  return { ok: true, workspace: target };
+  return setWorkspaceTarget(result.filePaths[0]);
 });
 ipcMain.handle("app:openExternal", (_event, url) => {
   if (/^https?:\/\//.test(String(url))) shell.openExternal(url);
@@ -1271,8 +1236,8 @@ async function setWorkspaceTarget(target) {
   }
   if (!fs.statSync(canonical).isDirectory()) return { ok: false, error: "所选路径不是目录" };
   saveWorkspace(canonical);
-  restartAttempts = 0;
-  await startCore({ reason: "manual", userInitiated: true });
+  // Session workspace is selected when creating a session; the shared daemon keeps existing turns.
+
   return { ok: true, workspace: canonical, state: coreState.state, generation };
 }
 

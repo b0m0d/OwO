@@ -743,10 +743,11 @@ async fn turn_event_replay_filters_by_turn_and_resumes_after_session_seq() {
     assert_eq!(body["next_after_seq"], 2);
 
     state
-        .active_turn_ids
+        .turn_controls
         .lock()
         .unwrap()
-        .insert(session.id.clone(), "turn-live".to_string());
+        .register(&session.id, "turn-live")
+        .unwrap();
     let live_response = app
         .clone()
         .oneshot(request(
@@ -767,7 +768,11 @@ async fn turn_event_replay_filters_by_turn_and_resumes_after_session_seq() {
     assert_eq!(live["active"], true);
     assert_eq!(live["state"], "active");
 
-    state.active_turn_ids.lock().unwrap().remove(&session.id);
+    state
+        .turn_controls
+        .lock()
+        .unwrap()
+        .finish(&session.id, "turn-live");
     let interrupted_response = app
         .clone()
         .oneshot(request(
@@ -3791,3 +3796,7 @@ async fn team_create_rejects_parent_session_from_another_workspace() {
         .unwrap();
     assert_eq!(response.status().as_u16(), 400);
 }
+
+// Keep these cases in the complete route suite as well as the bounded focused target.
+#[path = "major_repair_http_tests.rs"]
+mod major_repair_http;

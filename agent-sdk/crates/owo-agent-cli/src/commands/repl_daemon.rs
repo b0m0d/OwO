@@ -35,7 +35,10 @@ impl Drop for TurnDoneGuard {
     }
 }
 
-pub(crate) async fn run(args: super::repl::ReplArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn run(
+    args: super::repl::ReplArgs,
+    permissions: crate::ui_output::PermissionsProfile,
+) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let root = ensure_data_root(args.data_dir.clone(), &workspace);
     let client = ensure_daemon_client(&root, &workspace).await?;
@@ -45,8 +48,11 @@ pub(crate) async fn run(args: super::repl::ReplArgs) -> Result<(), Box<dyn std::
         data_root: root,
         session: None,
         model: args.model.clone(),
-        read_only: args.agent == "plan",
-        no_approval: args.no_approval,
+        read_only: args.agent == "plan"
+            || matches!(permissions, crate::ui_output::PermissionsProfile::ReadOnly),
+        read_only_locked: matches!(permissions, crate::ui_output::PermissionsProfile::ReadOnly),
+        no_approval: args.no_approval
+            || matches!(permissions, crate::ui_output::PermissionsProfile::Trusted),
         abort: Arc::new(AtomicBool::new(false)),
         goal: None,
         team_id: None,
@@ -73,6 +79,7 @@ struct DaemonRepl {
     session: Option<String>,
     model: Option<String>,
     read_only: bool,
+    read_only_locked: bool,
     no_approval: bool,
     abort: Arc<AtomicBool>,
     goal: Option<crate::support::GoalState>,
@@ -179,6 +186,10 @@ impl DaemonRepl {
                 println!("{}", "已切换到 plan 模式（只读）".yellow());
             }
             "build" => {
+                if self.read_only_locked {
+                    println!("本次 CLI 强制只读，不能切换到 build");
+                    return Ok(false);
+                }
                 self.read_only = false;
                 println!("{}", "已切换到 build 模式".green());
             }
@@ -332,6 +343,9 @@ impl DaemonRepl {
     async fn resume(&mut self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let session = self.client.get_session(id).await?;
         println!("{} {}", "已恢复会话：".green(), session.id);
+        let workspace = PathBuf::from(&session.workspace).canonicalize()?;
+        self.workspace = workspace;
+        self.model = Some(session.model);
         self.session = Some(session.id);
         Ok(())
     }
@@ -620,7 +634,8 @@ impl DaemonRepl {
     ) -> Result<crate::support::GoalTurnResult, Box<dyn std::error::Error>> {
         let id = self.current_session().await?;
         self.abort.store(false, Ordering::Relaxed);
-        let mut stream = self.client.open_turn(&id, prompt).await?;
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let cancel_turn_id = turn_id.clone();
 
         // Ctrl+C 监听随回合结束而退出（旧实现每回合 spawn 一个永不结束的任务：
         // `/goal` 多轮会累积监听器，回合结束后按 Ctrl+C 还会误置 abort）。
@@ -633,20 +648,27 @@ impl DaemonRepl {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     abort_flag.store(true, Ordering::Relaxed);
-                    let _ = cancel_client.cancel_turn(&cancel_id).await;
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), cancel_client.cancel_turn_id(&cancel_id,&cancel_turn_id)).await;
                 }
                 _ = turn_done_rx => {}
             }
         });
 
         println!("{} {}", "▶".green(), prompt.dimmed());
-        let mut steps = 0usize;
-        let mut final_text: Option<String> = None;
-        let mut completion_status = owo_agent_protocol::CompletionStatusV1::Unverified;
-        let mut failed = false;
+        let mut stream = self
+            .client
+            .open_turn_with_id(
+                &id,
+                prompt,
+                self.read_only || self.read_only_locked,
+                &turn_id,
+            )
+            .await?;
+        let mut completion = crate::ui_output::TurnCompletion::default();
         let mut printer = StreamPrinter::new();
         while let Some(event) = stream.next_event().await {
             let event = event?;
+            completion.observe(&event);
             match &event {
                 SseEvent::PermissionRequest { request_id, .. } => {
                     printer.print_sse(&event);
@@ -663,50 +685,28 @@ impl DaemonRepl {
                         .answer_question(&id, question_id, &answer)
                         .await?;
                 }
-                SseEvent::Final { text } => {
-                    final_text = Some(text.clone());
-                    printer.print_sse(&event);
-                }
-                SseEvent::TurnStats {
-                    completion_status: status,
-                    ..
-                } => {
-                    completion_status = *status;
-                    printer.print_sse(&event);
-                }
-                SseEvent::TurnFailed {
-                    completion_status: status,
-                    ..
-                } => {
-                    completion_status = *status;
-                    failed = completion_status != owo_agent_protocol::CompletionStatusV1::Aborted;
-                    printer.print_sse(&event);
-                }
-                other => {
-                    if matches!(other, SseEvent::ToolResult { .. }) {
-                        steps += 1;
-                    }
-                    printer.print_sse(other);
-                }
+                other => printer.print_sse(other),
             }
         }
         printer.finish();
+        let completed = completion.finish()?;
         let diff_count = self
             .client
             .session_diff(&id)
             .await
-            .map(|d| d.len())
+            .map(|diffs| diffs.len())
             .unwrap_or(0);
         println!(
-            "{} 工具步数 {}，改动 {} 个文件（/diff 查看，/undo 回滚）",
-            "✓".green(),
-            steps,
+            "{} 工具 {} 步，改动 {} 个文件（/diff 查看）",
+            completed.label(),
+            completed.steps,
             diff_count
         );
         Ok(crate::support::GoalTurnResult {
-            final_text,
-            completion_status,
-            failed,
+            failed: completed.failure.is_some()
+                && completed.status != owo_agent_protocol::CompletionStatusV1::Aborted,
+            final_text: completed.final_text,
+            completion_status: completed.status,
         })
     }
 
@@ -1527,6 +1527,9 @@ impl DaemonRepl {
         else {
             return Err("无效的用户提问事件".into());
         };
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return Ok("请基于现有信息继续；缺失的信息保持未知，不要虚构授权或验收".into());
+        }
         use std::io::Write;
         loop {
             if options.is_empty() {
@@ -1569,6 +1572,10 @@ impl DaemonRepl {
                 remember: None,
                 scope: Some("once".to_string()),
             });
+        }
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            eprintln!("approval_required: 非交互任务未获得授权，本次拒绝且不消耗下一条任务输入");
+            return Ok(parse_approval_response("deny"));
         }
         print_permission_card(&PermissionCard {
             tool,

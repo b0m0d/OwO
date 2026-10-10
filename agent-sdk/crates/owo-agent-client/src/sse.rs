@@ -340,6 +340,10 @@ impl TurnStream {
         }
     }
 
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+
     /// 下一个事件：断线后按持久 session seq 补拉；Final 后继续消费 TurnStats/TurnFailed 终态。
     pub async fn next_event(&mut self) -> Option<Result<SseEvent>> {
         loop {

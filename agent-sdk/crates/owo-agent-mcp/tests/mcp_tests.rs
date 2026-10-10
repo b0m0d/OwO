@@ -749,3 +749,30 @@ async fn agent_connect_registers_mcp_extras_tools() {
     agent.shutdown_mcp_server("test").await.unwrap();
     let _ = std::fs::remove_dir_all(&workspace);
 }
+
+#[tokio::test]
+async fn timed_out_tool_side_effect_is_not_replayed_and_next_call_recovers() {
+    let counter =
+        std::env::temp_dir().join(format!("owo-mcp-sideeffect-{}.txt", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.timeout_ms = Some(2000);
+    let mut client = McpClient::connect(&config).await.unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.call_tool("write_then_hang", json!({"path":counter.to_string_lossy()})),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.contains("mcp/outcome_unknown"), "{error}");
+    assert!(error.contains("request_not_replayed"), "{error}");
+    assert_eq!(std::fs::read_to_string(&counter).unwrap(), "1");
+    let echo = client
+        .call_tool("echo", json!({"text":"recovered"}))
+        .await
+        .unwrap();
+    assert_eq!(echo["text"], "recovered");
+    assert_eq!(std::fs::read_to_string(&counter).unwrap(), "1");
+    client.shutdown().await.unwrap();
+    std::fs::remove_file(counter).unwrap();
+}

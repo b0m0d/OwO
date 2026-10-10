@@ -151,8 +151,11 @@ impl OwoHttpClient {
         prompt: &str,
     ) -> Result<reqwest::Response, BridgeError> {
         let body = TurnRequest {
+            model_connection: None,
             prompt: prompt.to_string(),
             attachments: Vec::new(),
+            read_only: None,
+            turn_id: None,
         };
         let response = self
             .authed(|http, token| {

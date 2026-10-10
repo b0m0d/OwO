@@ -10,7 +10,7 @@
  * ```
  */
 import createFetchClient, { type Middleware } from "openapi-fetch";
-import type { paths } from "./schema.js";
+import type { paths, components } from "./schema.js";
 
 export interface ClientOptions {
   baseUrl: string;
@@ -49,7 +49,7 @@ export type ApiClient = ReturnType<typeof createFetchClient<paths>> & {
   }>;
   /** 便捷方法：发起 Agent 回合（SSE 流式，逐事件回调）。 */
   runTurn(
-    input: { id: string; prompt: string },
+    input: { id: string; prompt: string; read_only?: boolean; turn_id?: string; model_connection?: components["schemas"]["CustomModelConnection"] },
     stream: TurnStreamOptions,
   ): Promise<TurnCompletion>;
   /** 便捷方法：健康检查。 */
@@ -90,12 +90,28 @@ export function createClient(options: ClientOptions): ApiClient {
     requestHeaders.set("Content-Type", "application/json");
     const sessionPath = "/session/" + encodeURIComponent(input.id);
     const abortUrl = baseUrl + sessionPath + "/abort";
+    const requestedTurnId = input.turn_id ?? (stream.signal && !stream.signal.aborted ? crypto.randomUUID() : undefined);
+    if (requestedTurnId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestedTurnId)) {
+      throw new Error("turn/invalid_id");
+    }
+    const canonicalTurnId = requestedTurnId?.toLowerCase();
+    let scopedCancellationSupported = false;
+    let turnSubmitted = false;
     const onAbort = () => {
-      void fetch(abortUrl, {
-        method: "POST",
-        headers: new Headers(requestHeaders),
-      }).catch(() => undefined);
+      if (turnSubmitted && scopedCancellationSupported && canonicalTurnId) {
+        void fetch(abortUrl, {
+          method: "POST",
+          headers: new Headers(requestHeaders),
+          body: JSON.stringify({ turn_id: canonicalTurnId }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => undefined);
+      }
       controller.abort();
+    };
+    const ensureNotAborted = () => {
+      if (controller.signal.aborted) {
+        const error = new Error("Aborted"); error.name = "AbortError"; throw error;
+      }
     };
     if (stream.signal) {
       if (stream.signal.aborted) {
@@ -133,10 +149,28 @@ export function createClient(options: ClientOptions): ApiClient {
     };
 
     try {
+      ensureNotAborted();
+      if (input.read_only === true || canonicalTurnId || input.model_connection) {
+        const capability = await client.GET("/capabilities", { signal: controller.signal });
+        const support = capability.data as { constraints?: { request_read_only?: boolean; scoped_turn_cancellation?: boolean; custom_model_connection?: boolean } } | undefined;
+        ensureNotAborted();
+        if (input.read_only === true && (!capability.response.ok || support?.constraints?.request_read_only !== true)) {
+          throw new Error("permission/read_only_unsupported: no turn was submitted");
+        }
+        if (input.model_connection && (!capability.response.ok || support?.constraints?.custom_model_connection !== true)) {
+          throw new Error("model_connection/unsupported: no turn was submitted");
+        }
+        scopedCancellationSupported = capability.response.ok && support?.constraints?.scoped_turn_cancellation === true;
+        if (canonicalTurnId && !scopedCancellationSupported) {
+          throw new Error("turn/scoped_cancellation_unsupported: no turn was submitted");
+        }
+      }
+      ensureNotAborted();
+      turnSubmitted = true;
       const response = await fetch(baseUrl + sessionPath + "/turn", {
         method: "POST",
         headers: requestHeaders,
-        body: JSON.stringify({ prompt: input.prompt }),
+        body: JSON.stringify({ prompt: input.prompt, read_only: input.read_only, turn_id: canonicalTurnId, model_connection: input.model_connection }),
         signal: controller.signal,
       });
       if (!response.ok || !response.body) {
@@ -144,6 +178,10 @@ export function createClient(options: ClientOptions): ApiClient {
       }
       turnId = response.headers.get("x-owo-turn-id");
       reader = response.body.getReader();
+      if (canonicalTurnId && turnId !== canonicalTurnId) {
+        throw new Error("turn/identity_mismatch");
+      }
+      ensureNotAborted();
       const decoder = new TextDecoder();
       while (true) {
         let chunk: ReadableStreamReadResult<Uint8Array>;

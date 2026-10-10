@@ -510,8 +510,10 @@ impl Worker for EvalAgentWorker {
         } else {
             Arc::clone(&self.provider)
         };
+        let parent_policy = owo_agent_core::Policy::new(&self.workspace);
         let runner = owo_agent_core::worker_profile::ProfileSubagentRunner {
             provider: worker_provider,
+            parent_policy: &parent_policy,
             approver: &approver,
             abort: &self.cancel,
             depth: 0,

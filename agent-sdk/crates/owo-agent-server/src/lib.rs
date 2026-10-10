@@ -29,6 +29,7 @@ pub mod artifact_review_api;
 mod assist_api;
 mod audit_api;
 mod auth_token;
+pub mod turn_control;
 
 // §12：flush_audit 移入 audit_api.rs，根部 re-export 保全 CLI 对
 // `owo_agent_server::flush_audit` 的既有依赖（外部契约不变）。
@@ -120,7 +121,6 @@ use owo_agent_protocol::{BuildInfo, HealthResponse};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -151,9 +151,7 @@ pub struct AppState {
     pub pending_approval_sessions: Arc<Mutex<HashMap<String, String>>>,
     /// §5.4 授权记忆（server 全局一份；Agent.Policy 注入同一引用）。
     pub grants: Arc<owo_agent_core::grant_store::GrantStore>,
-    pub aborts: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
-    /// Active turn identity, separate from the abort token so replay can distinguish sessions.
-    pub active_turn_ids: Arc<Mutex<HashMap<String, String>>>,
+    pub turn_controls: Arc<Mutex<turn_control::TurnControls>>,
     /// 每个会话一个运行锁，避免并发回合覆盖消息、快照和审计状态。
     pub turn_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     pub traces_dir: PathBuf,
@@ -298,8 +296,7 @@ impl AppState {
             pending_approvals: Arc::new(Mutex::new(HashMap::new())),
             pending_approval_sessions: Arc::new(Mutex::new(HashMap::new())),
             grants: Arc::clone(&grants),
-            aborts: Arc::new(Mutex::new(HashMap::new())),
-            active_turn_ids: Arc::new(Mutex::new(HashMap::new())),
+            turn_controls: Arc::new(Mutex::new(turn_control::TurnControls::default())),
             turn_locks: Arc::new(Mutex::new(HashMap::new())),
             traces_dir,
             perception: Arc::new(Mutex::new(SituationStore::new())),

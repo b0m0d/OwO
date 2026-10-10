@@ -66,10 +66,43 @@
       else signal?.addEventListener("abort", abort, { once: true });
     });
   }
-  async function consumeResponse(response, { onEvent, replay, signal, wait = delay }) {
+  const idleRead = Symbol("idle turn stream");
+  function readWithDeadline(pending, signal, milliseconds) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (value, error) => {
+        if (settled) return; settled = true;
+        clearTimeout(timer); signal?.removeEventListener("abort", abort);
+        if (error) reject(error); else resolve(value);
+      };
+      const abort = () => { const error = new Error("Aborted"); error.name = "AbortError"; finish(null, error); };
+      const timer = setTimeout(() => finish(idleRead), milliseconds);
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+      pending.then(value => finish(value), error => finish(null, error));
+    });
+  }
+  async function replayPage(replay, turnId, cursor, signal, timeout) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const page = await readWithDeadline(Promise.resolve().then(() => replay(turnId, cursor, controller.signal)), controller.signal, timeout);
+      if (page === idleRead) throw streamError("turn/replay_timeout: completion remains unconfirmed");
+      return page;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      controller.abort();
+    }
+  }
+  async function consumeResponse(response, { onEvent, replay, signal, wait = delay, idleTimeoutMs = 60000, replayTimeoutMs = 15000 }) {
     if (!response.body) throw streamError("服务未返回流式响应");
     const completion = createCompletion(), turnId = response.headers.get("x-owo-turn-id");
     let cursor = 0, buffer = "", streamEnded = false;
+    const idleMs = Number.isFinite(idleTimeoutMs) && idleTimeoutMs > 0 ? idleTimeoutMs : 60000;
+    let nextRecovery = Date.now() + idleMs;
+    let pendingRead = null;
+    const progressEvents = new Set(["token_delta", "reasoning_delta", "model_call", "tool_start", "tool_result", "permission_request", "user_question", "user_answered", "progress", "plan_update", "compaction", "final", "turn_stats", "turn_failed"]);
     const decoder = new TextDecoder(), encoder = new TextEncoder(), reader = response.body.getReader();
     const dispatch = (event, payload, id) => {
       const sequence = Number(id);
@@ -77,6 +110,7 @@
       if (!payload || typeof payload !== "object") throw streamError("无效的回合事件");
       const type = event === "message" ? payload.type : event;
       completion.observe(type, payload);
+      if (progressEvents.has(type)) nextRecovery = Date.now() + idleMs;
       onEvent(type, payload);
       if (id != null && Number.isSafeInteger(sequence) && sequence > cursor) cursor = sequence;
     };
@@ -96,22 +130,45 @@
     try {
       while (true) {
         let chunk;
-        try { chunk = await reader.read(); }
+        try {
+          pendingRead ||= reader.read();
+          chunk = await readWithDeadline(pendingRead, signal, Math.max(1, nextRecovery - Date.now()));
+        }
         catch (error) {
           if (signal?.aborted || error.name === "AbortError" || (!turnId && !completion.terminal)) throw error;
           break; // Recover transport failures only; protocol and callback errors propagate.
         }
+        if (chunk === idleRead) {
+          if (!turnId || !replay) throw streamError("turn/no_progress: stream stalled and durable recovery is unavailable");
+          while (!completion.terminal) {
+            const page = await replayPage(replay, turnId, cursor, signal, replayTimeoutMs);
+            let advanced = false;
+            for (const record of eventsAfterCursor(page, turnId, cursor)) {
+              if (Number(record.seq) <= cursor) continue;
+              dispatch(record.payload?.type, record.payload, record.seq); advanced = true;
+            }
+            if (completion.terminal) break;
+            if (advanced) continue;
+            if (!page?.active) throw streamError("turn/recovery_incomplete: host completion record is missing");
+            break;
+          }
+          if (completion.terminal) break;
+          nextRecovery = Date.now() + idleMs;
+          continue; // Keep the same outstanding read and the active turn connection.
+        }
+        pendingRead = null;
         if (chunk.done) { streamEnded = true; buffer += decoder.decode(); consume(true); break; }
         buffer += decoder.decode(chunk.value, { stream: true }); consume(false);
+        if (completion.terminal) break;
       }
     } finally {
-      if (!streamEnded) await reader.cancel().catch(() => undefined);
+      if (!streamEnded) await readWithDeadline(reader.cancel().catch(() => undefined), undefined, 1000);
       reader.releaseLock();
     }
     let emptyPages = 0;
     while (!completion.terminal && turnId && replay) {
       if (signal?.aborted) { const error = new Error("Aborted"); error.name = "AbortError"; throw error; }
-      const page = await replay(turnId, cursor, signal);
+      const page = await replayPage(replay, turnId, cursor, signal, replayTimeoutMs);
       let advanced = false;
       for (const record of eventsAfterCursor(page, turnId, cursor)) {
         if (Number(record.seq) <= cursor) continue;

@@ -531,9 +531,65 @@ pub fn probe_windows_support() -> PlatformSupport {
     }
 }
 
+// The Job is owned by the process. The executor keeps only weak references, so
+// completed jobs do not accumulate handles or authorize killing a reused PID.
+struct JobControl {
+    handle: Handle,
+}
+// Windows Job handles support concurrent terminate/wait; Arc keeps the handle
+// open through each operation and only the final owner closes it.
+unsafe impl Send for JobControl {}
+unsafe impl Sync for JobControl {}
+
+impl JobControl {
+    fn terminate(&self, exit_code: u32) -> Result<(), SandboxError> {
+        if unsafe { TerminateJobObject(self.handle, exit_code) } == FALSE {
+            return Err(SandboxError::Kill(format!(
+                "TerminateJobObject failed: {}",
+                last_error()
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for JobControl {
+    fn drop(&mut self) {
+        terminate_job(self.handle, 1);
+        close_handle(self.handle);
+    }
+}
+
+const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
+const CAPTURE_TRUNCATED: &[u8] = b"\n[output truncated: capture limit reached]\n";
+
+fn append_captured_output(out: &mut Vec<u8>, bytes: &[u8]) {
+    let remaining = MAX_CAPTURE_BYTES.saturating_sub(out.len());
+    out.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    if bytes.len() > remaining && !out.ends_with(CAPTURE_TRUNCATED) {
+        out.extend_from_slice(CAPTURE_TRUNCATED);
+    }
+}
+
+fn capture_reader<R: Read>(reader: Option<R>) -> Result<Vec<u8>, SandboxError> {
+    let mut out = Vec::new();
+    if let Some(mut reader) = reader {
+        let mut buffer = [0u8; 8192];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            append_captured_output(&mut out, &buffer[..count]);
+        }
+    }
+    Ok(out)
+}
+
 /// Windows 沙箱执行器：Job 基线 + LowIL/AppContainer 按策略升级。
 pub struct WindowsSandboxExecutor {
     support: PlatformSupport,
+    jobs: Mutex<std::collections::HashMap<String, std::sync::Weak<JobControl>>>,
 }
 
 impl WindowsSandboxExecutor {
@@ -543,6 +599,7 @@ impl WindowsSandboxExecutor {
         }
         Some(Self {
             support: support.clone(),
+            jobs: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -972,7 +1029,7 @@ pub fn read_pipe(handle: Handle) -> Vec<u8> {
         if ok == FALSE || read == 0 {
             break;
         }
-        out.extend_from_slice(&buffer[..read as usize]);
+        append_captured_output(&mut out, &buffer[..read as usize]);
     }
     out
 }
@@ -1012,14 +1069,18 @@ impl OsChild {
     pub fn wait(&mut self) -> Result<SandboxWaitInfo, SandboxError> {
         match self {
             OsChild::StdChild { child } => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_end(&mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_end(&mut stderr);
-                }
+                let stdout_pipe = child.stdout.take();
+                let stderr_pipe = child.stderr.take();
+                // Both pipes must keep draining even after the retained preview is full.
+                let (stdout, stderr) = std::thread::scope(|scope| {
+                    let out = scope.spawn(move || capture_reader(stdout_pipe));
+                    let err = scope.spawn(move || capture_reader(stderr_pipe));
+                    (out.join(), err.join())
+                });
+                let stdout = stdout
+                    .map_err(|_| SandboxError::Unhealthy("stdout reader panicked".into()))??;
+                let stderr = stderr
+                    .map_err(|_| SandboxError::Unhealthy("stderr reader panicked".into()))??;
                 let status = child.wait().map_err(SandboxError::Io)?;
                 Ok(SandboxWaitInfo {
                     exit_code: status.code().unwrap_or(-1),
@@ -1081,7 +1142,7 @@ impl Drop for OsChild {
                 stderr_read,
             } => unsafe {
                 TerminateProcess(pi.h_process, 1);
-                WaitForSingleObject(pi.h_process, INFINITE);
+                WaitForSingleObject(pi.h_process, 5_000);
                 close_handle(pi.h_process);
                 close_handle(pi.h_thread);
                 close_handle(*stdout_read);
@@ -1094,7 +1155,7 @@ impl Drop for OsChild {
 /// Windows 进程内部句柄（inner：进程 + Job）。
 pub struct WindowsProcess {
     pub os_child: OsChild,
-    pub job: Handle,
+    job: Arc<JobControl>,
 }
 
 // 句柄值可跨线程转移（进程/Job 句柄由 WindowsProcess 独占管理），标准 Windows 实践。
@@ -1107,16 +1168,14 @@ impl SandboxProcessInner for WindowsProcess {
     }
 
     fn kill(&mut self) -> Result<(), SandboxError> {
-        self.os_child.kill();
-        terminate_job(self.job, 1);
-        Ok(())
+        self.job.terminate(1)
     }
 }
 
 impl Drop for WindowsProcess {
     fn drop(&mut self) {
-        terminate_job(self.job, 1);
-        close_handle(self.job);
+        // Stop the whole tree before OsChild drops or waits on inherited pipes.
+        let _ = self.job.terminate(1);
     }
 }
 
@@ -1143,14 +1202,24 @@ impl SandboxExecutor for WindowsSandboxExecutor {
                 super::available_isolation(&self.support)
             )));
         }
-        let job = create_job(&command.policy).ok_or_else(|| {
-            SandboxError::Unsupported(format!("Job Object 创建失败（错误 {}）", last_error()))
-        })?;
-        let os_child = self.create_process(command, job)?;
+        let job = Arc::new(JobControl {
+            handle: create_job(&command.policy).ok_or_else(|| {
+                SandboxError::Unsupported(format!("Job Object creation failed: {}", last_error()))
+            })?,
+        });
+        let os_child = self.create_process(command, job.handle)?;
         let pid = os_child.pid().unwrap_or(0);
+        let id = format!("win-{pid}-{}", uuid::Uuid::new_v4());
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| SandboxError::Unhealthy("sandbox job registry poisoned".into()))?;
+        jobs.retain(|_, job| job.strong_count() > 0);
+        jobs.insert(id.clone(), Arc::downgrade(&job));
+        drop(jobs);
         Ok(SandboxProcess {
             handle: SandboxHandle {
-                id: format!("win-{pid}"),
+                id,
                 spawned_at: Utc::now().to_rfc3339(),
             },
             status: SandboxProcessStatus::Running,
@@ -1160,8 +1229,20 @@ impl SandboxExecutor for WindowsSandboxExecutor {
         })
     }
 
-    fn kill(&self, _handle: &SandboxHandle) -> Result<(), SandboxError> {
-        Ok(())
+    fn kill(&self, handle: &SandboxHandle) -> Result<(), SandboxError> {
+        let job = self
+            .jobs
+            .lock()
+            .map_err(|_| SandboxError::Kill("sandbox job registry poisoned".into()))?
+            .get(&handle.id)
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                SandboxError::Kill(format!(
+                    "unknown or completed sandbox handle: {}",
+                    handle.id
+                ))
+            })?;
+        job.terminate(1)
     }
 
     fn check_healthy(&self) -> SandboxHealth {

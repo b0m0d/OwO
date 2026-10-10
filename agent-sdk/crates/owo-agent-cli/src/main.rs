@@ -28,10 +28,10 @@ use ui_output::{OutputMode, PermissionsProfile};
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-    /// §11：输出模式（human|plain|jsonl）；jsonl 下 stdout 仅承载 JSONL 协议。
+    /// §11：输出模式（human|plain|jsonl）；plain/jsonl 支持 turn、capabilities。
     #[arg(long, value_enum, global = true, default_value = "human")]
     output: OutputMode,
-    /// §11：权限档案（default|read-only|trusted），对所有子命令生效。
+    /// §11：权限档案（default|read-only|trusted），支持 turn、默认 REPL 与 TUI。
     #[arg(long, value_enum, global = true, default_value = "default")]
     permissions: PermissionsProfile,
     /// 内部受控子进程协议入口（A1，主文档 §9.1）：stdout 仅承载 JSONL 协议。
@@ -80,6 +80,7 @@ enum Commands {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    validate_cli_options(&cli)?;
 
     // A1：受控子进程协议入口最先分流——在任何日志/运行时初始化之前进入协议循环，
     // 保证 stdout 只承载 JSONL（ready/task/pong/result），人类可读输出只走 stderr。
@@ -97,27 +98,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
     match cli.command {
-        None => run_async(commands::repl::Repl::run(commands::repl::ReplArgs {
-            workspace: PathBuf::from("."),
-            model: None,
-            agent: "build".to_string(),
-            no_approval: false,
-            data_dir: None,
-            local: false,
-        }))?,
+        None => run_async(commands::repl::Repl::run(
+            commands::repl::ReplArgs {
+                workspace: PathBuf::from("."),
+                model: None,
+                agent: "build".to_string(),
+                no_approval: false,
+                data_dir: None,
+                local: false,
+            },
+            cli.permissions,
+        ))?,
         Some(Commands::Turn(args)) => {
-            run_async(commands::turn::run_turn(args, cli.output, cli.permissions))?
+            let code = run_async(commands::turn::run_turn(args, cli.output, cli.permissions))?;
+            if code != 0 {
+                std::process::exit(i32::from(code));
+            }
         }
         Some(Commands::Serve(args)) => run_async(commands::serve::run_serve(args))?,
         Some(Commands::Daemon(args)) => run_async(commands::daemon::run_daemon_cmd(args))?,
-        Some(Commands::Repl(args)) => run_async(commands::repl::Repl::run(args))?,
-        Some(Commands::Tui(args)) => tui::run(args)?,
+        Some(Commands::Repl(args)) => run_async(commands::repl::Repl::run(args, cli.permissions))?,
+        Some(Commands::Tui(args)) => tui::run(args, cli.permissions)?,
         Some(Commands::Init(args)) => commands::serve::run_init(args)?,
         Some(Commands::Eval(args)) => run_async(commands::eval::run_eval(args))?,
         Some(Commands::ProductEval(args)) => run_async(product_eval_cmd::run(args))?,
@@ -197,5 +205,72 @@ mod tests {
             first.chars().next().is_some_and(|c| c.is_ascii_digit()),
             "首段应为版本号：{line}"
         );
+    }
+}
+
+fn validate_cli_options(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.owo_worker_child {
+        return Ok(());
+    }
+    if !matches!(cli.output, OutputMode::Human)
+        && !matches!(
+            cli.command.as_ref(),
+            Some(Commands::Turn(_)) | Some(Commands::Capabilities)
+        )
+    {
+        return Err(
+            "plain/jsonl 当前仅支持 turn 和 capabilities；该命令不支持机器输出，已拒绝执行".into(),
+        );
+    }
+    if !matches!(cli.permissions, PermissionsProfile::Default) {
+        match cli.command.as_ref() {
+            None | Some(Commands::Turn(_)) | Some(Commands::Tui(_)) => {}
+            Some(Commands::Repl(args)) if !args.local => {}
+            _ => {
+                return Err(
+                    "该命令不支持请求级 permissions；请使用默认 Daemon REPL、TUI 或 turn".into(),
+                )
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod cli_options_contract_tests {
+    use super::*;
+    #[test]
+    fn unsupported_global_modes_are_rejected_before_any_runtime_or_storage_access() {
+        for arguments in [
+            vec!["owo-agent", "--output", "jsonl", "tui"],
+            vec!["owo-agent", "--permissions", "read-only", "serve"],
+            vec!["owo-agent", "--permissions", "read-only", "repl", "--local"],
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(validate_cli_options(&cli).is_err());
+        }
+        for arguments in [
+            vec![
+                "owo-agent",
+                "--permissions",
+                "read-only",
+                "turn",
+                "--prompt",
+                "fixture",
+            ],
+            vec!["owo-agent", "--permissions", "read-only", "repl"],
+            vec!["owo-agent", "--permissions", "read-only", "tui"],
+            vec![
+                "owo-agent",
+                "--output",
+                "jsonl",
+                "turn",
+                "--prompt",
+                "fixture",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(validate_cli_options(&cli).is_ok());
+        }
     }
 }

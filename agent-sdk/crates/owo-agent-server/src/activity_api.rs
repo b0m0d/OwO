@@ -48,10 +48,18 @@ pub fn end_activity(state: &AppState, session_id: &str) {
 }
 
 pub fn update_activity(state: &AppState, session_id: &str, event: &owo_agent_core::TurnEvent) {
-    use owo_agent_core::TurnEvent;
     let Ok(mut activities) = state.activities.lock() else {
         return;
     };
+    update_activity_snapshot(&mut activities, session_id, event);
+}
+
+fn update_activity_snapshot(
+    activities: &mut std::collections::HashMap<String, Value>,
+    session_id: &str,
+    event: &owo_agent_core::TurnEvent,
+) {
+    use owo_agent_core::TurnEvent;
     let now = chrono::Utc::now().to_rfc3339();
     let touch = |activities: &mut std::collections::HashMap<String, Value>, phase: &str| {
         let entry = activities
@@ -59,32 +67,39 @@ pub fn update_activity(state: &AppState, session_id: &str, event: &owo_agent_cor
             .or_insert_with(|| json!({ "session_id": session_id, "tool": Value::Null }));
         entry["phase"] = json!(phase);
         entry["updated_at"] = json!(now);
+        entry["tool"] = Value::Null;
+        if let Some(object) = entry.as_object_mut() {
+            object.remove("request_id");
+            object.remove("reason");
+        }
         if entry.get("started_at").is_none() {
             entry["started_at"] = json!(now);
         }
     };
     match event {
-        TurnEvent::ModelCall => touch(&mut activities, "thinking"),
+        TurnEvent::ModelCall => touch(activities, "thinking"),
         TurnEvent::TokenDelta { .. } | TurnEvent::ReasoningDelta { .. } => {
-            touch(&mut activities, "speaking");
+            touch(activities, "speaking");
         }
         TurnEvent::ToolStart { tool, .. } => {
-            touch(&mut activities, "tool");
+            touch(activities, "tool");
             if let Some(entry) = activities.get_mut(session_id) {
                 entry["tool"] = json!(tool);
             }
         }
         TurnEvent::PermissionRequest(request) => {
-            touch(&mut activities, "waiting_approval");
+            touch(activities, "waiting_approval");
             if let Some(entry) = activities.get_mut(session_id) {
                 entry["tool"] = json!(request.tool);
                 entry["request_id"] = json!(request.request_id);
                 entry["reason"] = json!(request.reason);
             }
         }
-        TurnEvent::Final { .. } => {
-            activities.remove(session_id);
+        TurnEvent::ToolResult { .. } | TurnEvent::Compaction { .. } => {
+            touch(activities, "thinking");
         }
+        // Final is model output; persistence/audit and host completion are still running.
+        TurnEvent::Final { .. } => touch(activities, "persisting"),
         _ => {}
     }
 }
@@ -236,4 +251,37 @@ pub(super) async fn pending_approvals_list(
         })
         .collect();
     Ok(Json(json!({ "count": items.len(), "pending": items })))
+}
+
+#[cfg(test)]
+mod activity_progress_tests {
+    use super::*;
+    #[test]
+    fn model_final_stays_active_and_clears_stale_tool_details() {
+        let mut activities = std::collections::HashMap::new();
+        update_activity_snapshot(
+            &mut activities,
+            "session",
+            &owo_agent_core::TurnEvent::ToolStart {
+                id: "tool-1".into(),
+                tool: "read_file".into(),
+                args_preview: None,
+            },
+        );
+        assert_eq!(activities["session"]["phase"], "tool");
+        activities.get_mut("session").unwrap()["request_id"] = json!("old-approval");
+        activities.get_mut("session").unwrap()["reason"] = json!("old-reason");
+        update_activity_snapshot(
+            &mut activities,
+            "session",
+            &owo_agent_core::TurnEvent::Final {
+                text: "output".into(),
+            },
+        );
+        assert_eq!(activities["session"]["phase"], "persisting");
+        assert!(activities["session"]["tool"].is_null());
+        assert!(activities["session"].get("request_id").is_none());
+        assert!(activities["session"].get("reason").is_none());
+        assert!(activities["session"].get("started_at").is_some());
+    }
 }

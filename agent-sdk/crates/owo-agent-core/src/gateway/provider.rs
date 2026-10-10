@@ -116,6 +116,7 @@ pub struct OpenAiCompatibleProvider {
     pub(super) client: reqwest::Client,
     pub(super) direct_client: Option<reqwest::Client>,
     config: OpenAiCompatibleConfig,
+    connection_options: Option<owo_agent_protocol::CustomModelConnection>,
     usage: std::sync::Mutex<TokenUsage>,
 }
 
@@ -126,6 +127,9 @@ impl OpenAiCompatibleProvider {
         // 请求在 post_chat 内按请求设置总超时，流式由逐块空闲超时守护。
         let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
         let mut has_proxy = false;
+        if is_local_endpoint(&config.base_url) {
+            builder = builder.no_proxy();
+        }
         // Local model endpoints are isolated from HTTP proxies; proxying loopback
         // breaks local inference and can turn localhost into a remote request.
         if !is_local_endpoint(&config.base_url) {
@@ -153,6 +157,7 @@ impl OpenAiCompatibleProvider {
         let direct_client = if has_proxy {
             Some(
                 reqwest::Client::builder()
+                    .no_proxy()
                     .connect_timeout(Duration::from_secs(10))
                     .build()
                     .map_err(|e| format!("直连 HTTP 客户端创建失败：{e}"))?,
@@ -164,8 +169,42 @@ impl OpenAiCompatibleProvider {
             client,
             direct_client,
             config,
+            connection_options: None,
             usage: std::sync::Mutex::new(TokenUsage::default()),
         })
+    }
+
+    pub fn with_connection_options(
+        mut self,
+        options: &owo_agent_protocol::CustomModelConnection,
+    ) -> Self {
+        let mut safe = options.clone();
+        safe.api_key = None;
+        self.connection_options = Some(safe);
+        self
+    }
+
+    fn request_url(&self) -> String {
+        if self
+            .connection_options
+            .as_ref()
+            .is_some_and(|o| o.use_full_url)
+        {
+            self.config.base_url.clone()
+        } else {
+            format!(
+                "{}/chat/completions",
+                self.config.base_url.trim_end_matches('/')
+            )
+        }
+    }
+
+    fn request_timeout(&self) -> Duration {
+        self.connection_options
+            .as_ref()
+            .and_then(|o| o.timeout_secs)
+            .map(Duration::from_secs)
+            .unwrap_or_else(model_request_timeout)
     }
 
     fn record_usage(&self, usage: &Value) {
@@ -238,7 +277,7 @@ impl OpenAiCompatibleProvider {
         for (label, client) in attempts {
             let mut request = client.post(url).json(body);
             if !stream {
-                request = request.timeout(model_request_timeout());
+                request = request.timeout(self.request_timeout());
             }
             let request = if self.config.api_key.is_empty() {
                 request
@@ -265,15 +304,15 @@ impl OpenAiCompatibleProvider {
                 channel = label,
                 "模型网关请求"
             );
-            match request.send().await {
+            match send_response_headers(request, self.request_timeout()).await {
                 Ok(response) if response.status().is_success() => return Ok(response),
                 Ok(response) => {
                     let status = response.status();
-                    let text = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "无响应体".to_string());
-                    tracing::debug!(target: "owo_gateway", status = %status, raw_error = %text, "模型网关原始错误");
+                    let mut text = bounded_error_body(response).await;
+                    if !self.config.api_key.is_empty() {
+                        text = text.replace(&self.config.api_key, "[REDACTED]");
+                    }
+                    tracing::debug!(target: "owo_gateway", status = %status, error_body_bytes = text.len(), "model request rejected");
                     return Err(format!("模型返回 {status}：{text}"));
                 }
                 Err(error) => {
@@ -297,6 +336,9 @@ impl OpenAiCompatibleProvider {
 
     /// 当前模型：优先读运行时环境变量（支持设置页热切换），缺省用启动配置。
     fn model(&self) -> String {
+        if self.connection_options.is_some() {
+            return self.config.model.clone();
+        }
         std::env::var("OPENAI_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -397,6 +439,14 @@ impl OpenAiCompatibleProvider {
             body["stream_options"] = json!({ "include_usage": true });
         }
         body["max_tokens"] = Value::from(max_output_tokens_for_model(&effective_model));
+        if let Some(temperature) = self
+            .connection_options
+            .as_ref()
+            .and_then(|o| o.temperature)
+            .or_else(temperature_from_env)
+        {
+            body["temperature"] = json!(temperature);
+        }
         // 推理档位只在用户显式选择时才下发（默认请求体与旧版完全一致）。
         if let Some(effort) = reasoning_effort_from_env() {
             body["reasoning_effort"] = Value::String(effort);
@@ -477,10 +527,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .get("model")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let url = format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches("/")
-        );
+        let url = self.request_url();
         let response = self.post_chat(&url, &body, false).await?;
         let request_id = ["x-request-id", "request-id", "openai-request-id"]
             .iter()
@@ -602,6 +649,53 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 }
 
+async fn send_response_headers(
+    request: reqwest::RequestBuilder,
+    deadline: Duration,
+) -> Result<reqwest::Response, String> {
+    match tokio::time::timeout(deadline, request.send()).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => Err(format!("model transport failed: {}", error.without_url())),
+        Err(_) => Err(format!(
+            "模型响应头超时（provider/response_header_timeout，{}s）",
+            deadline.as_secs()
+        )),
+    }
+}
+
+async fn bounded_error_body(mut response: reqwest::Response) -> String {
+    const MAX_ERROR_BODY: usize = 64 * 1024;
+    let body = tokio::time::timeout(model_request_timeout(), async move {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| error.without_url())?
+        {
+            let remaining = MAX_ERROR_BODY.saturating_sub(bytes.len());
+            bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            if chunk.len() > remaining {
+                bytes.extend_from_slice(b"\n[error body truncated]");
+                break;
+            }
+        }
+        Ok::<_, reqwest::Error>(String::from_utf8_lossy(&bytes).into_owned())
+    })
+    .await;
+    match body {
+        Ok(Ok(text)) => text,
+        Ok(Err(_)) => "provider/error_body_read_failed".to_string(),
+        Err(_) => "provider/error_body_timeout".to_string(),
+    }
+}
+
+fn temperature_from_env() -> Option<f64> {
+    std::env::var("OWO_MODEL_TEMPERATURE")
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && (0.0..=2.0).contains(value))
+}
+
 fn parse_timeout_secs(raw: Option<&str>, default_secs: u64) -> u64 {
     raw.and_then(|value| value.parse::<u64>().ok())
         .filter(|value| (1..=600).contains(value))
@@ -616,7 +710,16 @@ fn duration_from_env(name: &str, default_secs: u64) -> Duration {
 }
 
 fn model_request_timeout() -> Duration {
-    duration_from_env("OWO_MODEL_REQUEST_TIMEOUT_SECS", 240)
+    let value = std::env::var("OWO_MODEL_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .or_else(|| std::env::var("OWO_MODEL_TIMEOUT_SECS").ok());
+    Duration::from_secs(
+        value
+            .as_deref()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (1..=3600).contains(value))
+            .unwrap_or(240),
+    )
 }
 
 fn model_stream_idle_timeout() -> Duration {
@@ -651,10 +754,7 @@ impl OpenAiCompatibleProvider {
             return Err(reason);
         }
         let body = self.request_body(model, messages, tools, true);
-        let url = format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        );
+        let url = self.request_url();
         let request_model = body
             .get("model")
             .and_then(Value::as_str)
@@ -673,17 +773,37 @@ impl OpenAiCompatibleProvider {
             ..StreamState::default()
         };
 
-        while let Some(chunk) = tokio::time::timeout(model_stream_idle_timeout(), stream.next())
-            .await
-            .map_err(|_| {
-                format!(
-                    "模型流式输出空闲超时（{}s 无数据）",
-                    model_stream_idle_timeout().as_secs()
-                )
-            })?
-        {
+        let idle_timeout = self
+            .connection_options
+            .as_ref()
+            .and_then(|o| o.timeout_secs)
+            .map(Duration::from_secs)
+            .unwrap_or_else(model_stream_idle_timeout);
+        let mut last_progress = tokio::time::Instant::now();
+        while let Some(chunk) = tokio::time::timeout(
+            idle_timeout.saturating_sub(last_progress.elapsed()),
+            stream.next(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "provider/stream_progress_timeout: no model progress for {}s",
+                idle_timeout.as_secs()
+            )
+        })? {
             let chunk = chunk.map_err(|e| format!("流式读取失败：{e:?}"))?;
+            if chunk.len() > 8 * 1024 * 1024 {
+                return Err("provider/stream_chunk_too_large".into());
+            }
+            state.semantic_progress = false;
             append_utf8_chunk(&mut state.buffer, &mut state.utf8_pending, &chunk);
+            if state
+                .buffer
+                .split('\n')
+                .any(|line| line.len() > 1024 * 1024)
+            {
+                return Err("provider/stream_frame_too_large".into());
+            }
             if let Some(usage) = consume_stream_buffer(&mut state, on_chunk) {
                 request_usage = Some(usage);
                 self.record_usage(&json!({
@@ -695,6 +815,13 @@ impl OpenAiCompatibleProvider {
                 if let Some(reason) = self.usage_budget_check() {
                     return Err(reason);
                 }
+            }
+            state.validate_resource_bounds()?;
+            if state.semantic_progress {
+                last_progress = tokio::time::Instant::now();
+            }
+            if state.saw_done {
+                break;
             }
         }
 
@@ -762,5 +889,78 @@ mod timeout_config_tests {
         assert_eq!(parse_timeout_secs(Some("0"), 240), 240);
         assert_eq!(parse_timeout_secs(Some("601"), 240), 240);
         assert_eq!(parse_timeout_secs(Some("invalid"), 240), 240);
+    }
+}
+
+#[cfg(test)]
+mod stream_wait_contract_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn response_header_timeout_is_independent_of_stream_body() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            std::future::pending::<()>().await;
+        });
+        let request = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/chat/completions"))
+            .json(&json!({}));
+        let result = send_response_headers(request, Duration::from_millis(50)).await;
+        server.abort();
+        assert!(result
+            .unwrap_err()
+            .contains("provider/response_header_timeout"));
+    }
+
+    #[tokio::test]
+    async fn done_marker_completes_without_waiting_for_connection_eof() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n{}\r\n",
+                body.len(), body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            model: "fixture-model".into(),
+            cloud_enabled: false,
+        })
+        .unwrap();
+        let mut chunks = Vec::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            provider.stream_completion_observed(
+                None,
+                &[ChatMessage::user("fixture".to_string())],
+                &[],
+                &mut |chunk| chunks.push(chunk),
+            ),
+        )
+        .await;
+        server.abort();
+        let result = result.expect("DONE must not require EOF").unwrap();
+        assert!(matches!(result.output, ModelOutput::Text(ref text) if text == "ok"));
+        assert!(!chunks.is_empty());
     }
 }

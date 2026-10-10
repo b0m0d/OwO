@@ -295,6 +295,7 @@ pub async fn capabilities_list(State(_state): State<Arc<AppState>>) -> Json<Valu
         "count": CAPABILITIES.len(),
         "maturity": { "stable": stable, "beta": beta, "experimental": experimental },
         "capabilities": items,
+        "constraints": { "request_read_only": true, "scoped_turn_cancellation": true, "custom_model_connection": true },
     }))
 }
 

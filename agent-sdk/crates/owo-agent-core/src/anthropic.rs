@@ -73,6 +73,7 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     direct_client: Option<reqwest::Client>,
     config: AnthropicConfig,
+    connection_options: Option<owo_agent_protocol::CustomModelConnection>,
     usage: Mutex<TokenUsage>,
     /// 最近一次请求的缓存命中（token 数）：仅用于日志/诊断，验证 caching 生效。
     last_cache_read: Mutex<u64>,
@@ -82,10 +83,22 @@ impl AnthropicProvider {
     pub fn new(config: AnthropicConfig) -> Result<Self, String> {
         // 客户端不设总超时：SSE 流式响应不能被固定墙钟截断；非流式请求在
         // post_messages 内按请求设置 180s 总超时，流式由逐块空闲超时守护。
-        let (client, has_proxy) = build_model_http_client(10, None)?;
+        let (client, has_proxy) = if crate::gateway::is_local_endpoint(&config.base_url) {
+            (
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .map_err(|e| e.to_string())?,
+                false,
+            )
+        } else {
+            build_model_http_client(10, None)?
+        };
         let direct_client = if has_proxy {
             Some(
                 reqwest::Client::builder()
+                    .no_proxy()
                     .connect_timeout(std::time::Duration::from_secs(10))
                     .build()
                     .map_err(|e| format!("直连 HTTP 客户端创建失败：{e}"))?,
@@ -97,9 +110,29 @@ impl AnthropicProvider {
             client,
             direct_client,
             config,
+            connection_options: None,
             usage: Mutex::new(TokenUsage::default()),
             last_cache_read: Mutex::new(0),
         })
+    }
+
+    pub fn with_connection_options(
+        mut self,
+        options: &owo_agent_protocol::CustomModelConnection,
+    ) -> Self {
+        let mut safe = options.clone();
+        safe.api_key = None;
+        self.connection_options = Some(safe);
+        self
+    }
+
+    fn request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.connection_options
+                .as_ref()
+                .and_then(|o| o.timeout_secs)
+                .unwrap_or(180),
+        )
     }
 
     fn max_tokens() -> u64 {
@@ -111,6 +144,9 @@ impl AnthropicProvider {
     }
 
     fn cloud_enabled(&self) -> bool {
+        if crate::gateway::is_local_endpoint(&self.config.base_url) {
+            return true;
+        }
         std::env::var("OWO_CLOUD_ENABLED")
             .ok()
             .and_then(|value| value.parse::<bool>().ok())
@@ -157,7 +193,24 @@ impl AnthropicProvider {
     /// `stream=true` 时不设置请求级总超时：reqwest 的 `.timeout()` 覆盖整个响应体
     /// 读取，SSE 长回答会被固定墙钟截断（长程任务实测 Body TimedOut）。
     async fn post_messages(&self, body: &Value, stream: bool) -> Result<reqwest::Response, String> {
-        let url = format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'));
+        let url = if self
+            .connection_options
+            .as_ref()
+            .is_some_and(|o| o.use_full_url)
+        {
+            self.config.base_url.clone()
+        } else {
+            let base = self.config.base_url.trim_end_matches('/');
+            if base.ends_with("/v1") {
+                format!("{base}/messages")
+            } else {
+                format!("{base}/v1/messages")
+            }
+        };
+        let mut body = body.clone();
+        if let Some(temperature) = self.connection_options.as_ref().and_then(|o| o.temperature) {
+            body["temperature"] = json!(temperature);
+        }
         let mut last_error = String::new();
         let attempts: Vec<(&str, &reqwest::Client)> = {
             let mut list = vec![("proxy", &self.client)];
@@ -169,24 +222,33 @@ impl AnthropicProvider {
         for (label, client) in attempts {
             let mut request = client
                 .post(&url)
-                .json(body)
+                .json(&body)
                 .header("x-api-key", &self.config.api_key)
                 .header("anthropic-version", api_version());
             if !stream {
-                request = request.timeout(std::time::Duration::from_secs(180));
+                request = request.timeout(self.request_timeout());
             }
-            match request.send().await {
+            match tokio::time::timeout(self.request_timeout(), request.send())
+                .await
+                .map_err(|_| "provider/response_header_timeout".to_string())?
+            {
                 Ok(response) if response.status().is_success() => return Ok(response),
                 Ok(response) => {
                     let status = response.status();
-                    let text = response
-                        .text()
+                    let text = tokio::time::timeout(self.request_timeout(), response.text())
                         .await
-                        .unwrap_or_else(|_| "无响应体".to_string());
+                        .ok()
+                        .and_then(Result::ok)
+                        .unwrap_or_else(|| "provider/error_body_timeout".to_string());
+                    let text = if self.config.api_key.is_empty() {
+                        text
+                    } else {
+                        text.replace(&self.config.api_key, "[REDACTED]")
+                    };
                     return Err(format!("Anthropic 返回 {status}：{text}"));
                 }
                 Err(error) => {
-                    last_error = format!("{label}: {error}");
+                    last_error = format!("{label}: {}", error.without_url());
                 }
             }
         }
@@ -602,10 +664,16 @@ impl ModelProvider for AnthropicProvider {
         let mut state = AnthStreamState::default();
         let mut saw_event = false;
 
-        while let Some(chunk) =
-            tokio::time::timeout(std::time::Duration::from_secs(60), stream.next())
-                .await
-                .map_err(|_| "Anthropic 流式输出空闲超时（60s 无数据）".to_string())?
+        while let Some(chunk) = tokio::time::timeout(
+            self.connection_options
+                .as_ref()
+                .and_then(|o| o.timeout_secs)
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(std::time::Duration::from_secs(60)),
+            stream.next(),
+        )
+        .await
+        .map_err(|_| "Anthropic 流式输出空闲超时（60s 无数据）".to_string())?
         {
             let chunk = chunk.map_err(|e| format!("流式读取失败：{e}"))?;
             // UTF-8 分片拼接（与 gateway 同策略）。

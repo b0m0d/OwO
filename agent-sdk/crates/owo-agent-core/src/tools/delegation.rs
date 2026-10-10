@@ -228,15 +228,7 @@ impl Tool for FanOutSubagentsTool {
             cancelled: Some(std::sync::Arc::clone(&cancelled)),
             ..Default::default()
         };
-        let future = crate::subagent::fan_out_subagents(
-            fanout.provider,
-            fanout.workspace,
-            fanout.model,
-            fanout.depth,
-            fanout.max_turns,
-            tasks.clone(),
-            config,
-        );
+        let future = crate::subagent::fan_out_subagents_with_policy(fanout, tasks.clone(), config);
         tokio::pin!(future);
         let report = loop {
             tokio::select! {

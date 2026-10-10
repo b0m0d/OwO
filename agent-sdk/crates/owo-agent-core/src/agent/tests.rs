@@ -2060,3 +2060,87 @@ fn behavior_command_without_before_snapshot_cannot_invent_verified_source() {
     assert!(receipt.workspace_hashes_before.is_empty());
     assert!(receipt.workspace_hashes.is_empty());
 }
+
+#[tokio::test]
+async fn readonly_request_cannot_write_or_relax_a_parent_and_does_not_affect_next_turn() {
+    let workspace = tempfile::tempdir().unwrap();
+    let write = |id: &str| {
+        ModelOutput::ToolCalls(vec![crate::gateway::ToolCall {
+            id: id.into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "path": "scope-fixture.txt", "content": "fixture" }),
+        }])
+    };
+    let outputs = VecDeque::from(vec![
+        write("readonly"),
+        ModelOutput::Text("readonly finished".into()),
+        write("normal"),
+        ModelOutput::Text("normal finished".into()),
+        write("parent-readonly"),
+        ModelOutput::Text("parent restriction retained".into()),
+    ]);
+    let agent = Agent::new(
+        Arc::new(ScriptedTestProvider {
+            outputs: Mutex::new(outputs),
+        }),
+        ToolRegistry::new(),
+        Policy::new(workspace.path()),
+        AgentConfig::default(),
+    );
+    let mut session = Session::new(workspace.path(), "fixture-model", None);
+    let approver = crate::permissions::AutoApprover { allow: true };
+    let abort = AtomicBool::new(false);
+    agent
+        .run_turn_with_images_constrained(
+            &mut session,
+            "read only",
+            &[],
+            &approver,
+            None,
+            &abort,
+            &mut |_| {},
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(!workspace.path().join("scope-fixture.txt").exists());
+    assert_eq!(
+        agent.policy().profile(),
+        crate::permissions::PermissionProfile::Workspace
+    );
+    agent
+        .run_turn_with_images_constrained(
+            &mut session,
+            "normal write",
+            &[],
+            &approver,
+            None,
+            &abort,
+            &mut |_| {},
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("scope-fixture.txt")).unwrap(),
+        "fixture"
+    );
+    std::fs::remove_file(workspace.path().join("scope-fixture.txt")).unwrap();
+    agent
+        .policy()
+        .set_profile(crate::permissions::PermissionProfile::ReadOnly);
+    agent
+        .run_turn_with_images_constrained(
+            &mut session,
+            "false must not widen the parent",
+            &[],
+            &approver,
+            None,
+            &abort,
+            &mut |_| {},
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(!workspace.path().join("scope-fixture.txt").exists());
+}

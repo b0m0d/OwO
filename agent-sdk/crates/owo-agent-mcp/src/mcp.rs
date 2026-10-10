@@ -452,25 +452,27 @@ impl McpClient {
         &self.config.name
     }
 
+    /// One tool request per call. Recovery never implies that a timed-out side effect did not happen.
     pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
-        let mut result = self
+        let result = self
             .request(
                 "tools/call",
-                json!({ "name": name, "arguments": arguments.clone() }),
+                json!({ "name": name, "arguments": arguments }),
             )
             .await;
         if let Err(error) = &result {
-            // stdio 超时：杀掉挂死子进程并自动重连，然后重试一次。
             if error.starts_with(TIMEOUT_ERROR_PREFIX)
                 && matches!(self.transport, Transport::Stdio(_))
             {
-                self.reconnect().await?;
-                result = self
-                    .request(
-                        "tools/call",
-                        json!({ "name": name, "arguments": arguments }),
-                    )
-                    .await;
+                // Restore the transport for future calls, but never replay this unknown-outcome request.
+                if let Err(recovery_error) = self.reconnect().await {
+                    return Err(format!(
+                        "{error}; mcp/outcome_unknown; recovery_failed: {recovery_error}"
+                    ));
+                }
+                return Err(format!(
+                    "{error}; mcp/outcome_unknown; transport_recovered; request_not_replayed"
+                ));
             }
         }
         let result = result?;

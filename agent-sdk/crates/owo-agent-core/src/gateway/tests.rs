@@ -1474,3 +1474,33 @@ fn openai_request_uses_one_standard_registry_backed_tool_list() {
     assert!(!encoded.contains("anyOf"));
     assert!(!encoded.contains("oneOf"));
 }
+
+#[tokio::test]
+async fn observed_methods_do_not_fallback_after_permanent_failure() {
+    for streaming in [false, true] {
+        let primary = Arc::new(AlwaysFailProvider {
+            error: "provider/not_configured".into(),
+            calls: StdMutex::new(0),
+        });
+        let fallback = Arc::new(AlwaysFailProvider {
+            error: "fallback must not run".into(),
+            calls: StdMutex::new(0),
+        });
+        let gateway = ResilientProvider::new(
+            primary.clone(),
+            vec![fallback.clone()],
+            CircuitBreaker::default(),
+            fast_retry(3),
+        );
+        let result = if streaming {
+            gateway
+                .complete_stream_with_reasoning_and_model_observed(None, &[], &[], &mut |_| {})
+                .await
+        } else {
+            gateway.complete_with_model_observed(None, &[], &[]).await
+        };
+        assert!(result.is_err());
+        assert_eq!(*primary.calls.lock().unwrap(), 1);
+        assert_eq!(*fallback.calls.lock().unwrap(), 0);
+    }
+}

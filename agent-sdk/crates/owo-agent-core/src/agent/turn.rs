@@ -17,16 +17,33 @@ impl Agent {
         abort: &AtomicBool,
         on_event: &mut (dyn FnMut(&TurnEvent) + Send),
         questioner: Option<&dyn crate::question::Questioner>,
+        options: &TurnExecutionOptions,
     ) -> Result<TurnOutcome, AgentError> {
         let started_at = Utc::now().to_rfc3339();
         let started = std::time::Instant::now();
-        let turn_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = match options.turn_id.as_deref() {
+            Some(id) => owo_agent_protocol::canonical_turn_id(id)
+                .ok_or_else(|| AgentError::Session("turn/invalid_id".into()))?,
+            None => uuid::Uuid::new_v4().to_string(),
+        };
         let mut usage = TokenUsage::default();
         let mut model_calls = Vec::new();
         session.transient_model_calls.clear();
         session.active_task_context = Some(
             crate::task_context::ResolvedTaskContext::for_single_turn(&turn_id, prompt),
         );
+        if abort.load(Ordering::Acquire) {
+            return Err(AgentError::Aborted);
+        }
+        let turn_policy = self
+            .policy
+            .for_workspace(session.workspace.clone())
+            .map_err(AgentError::Session)?;
+        let turn_policy = if options.read_only {
+            turn_policy.read_only_scope()
+        } else {
+            turn_policy
+        };
         let mut usage_known = true;
         let mut model_requests = 0usize;
         // §9.2：turn 入口建立统一预算（None = 不限时，仅记账不强制）；
@@ -82,7 +99,16 @@ impl Agent {
                 return Err(AgentError::HookBlocked(stderr));
             }
         }
-        let tools = self.visible_tool_specs();
+        let tools = self
+            .visible_tool_specs()
+            .into_iter()
+            .filter(|spec| {
+                !turn_policy.is_read_only()
+                    || spec.effect.as_ref().is_some_and(|effect| {
+                        effect.class == EffectClass::Read && effect.host_verified_readonly
+                    })
+            })
+            .collect();
         // §9.3：schema 预算——超限时压缩描述/剥离噪声键（不删工具），
         // 并计算稳定指纹（provider schema 缓存复用的 key 基础）。
         let (tools, schema_report) =
@@ -633,12 +659,13 @@ impl Agent {
                             .map_err(|_| AgentError::Session("工具注册表锁中毒".into()))?
                             .get(&call.name)
                             .map(|tool| tool.spec());
-                        let request = self.policy.evaluate_with_effect(
+                        let request = turn_policy.evaluate_with_effect(
                             &call.name,
                             call_spec.as_ref().and_then(|spec| spec.effect.as_ref()),
                             &call.arguments,
                         );
-                        let decision = match self.policy.decision(&request) {
+                        let mut decision_reason = request.reason.clone();
+                        let decision = match turn_policy.decision(&request) {
                             Decision::Ask => {
                                 // 独立审批模型先于打扰用户（Auto-review）。
                                 let approval_started = std::time::Instant::now();
@@ -687,13 +714,24 @@ impl Agent {
                                         Decision::Allow
                                     }
                                     ReviewVerdict::Unknown => {
-                                        emit(
-                                            &mut events,
-                                            &event_cell,
-                                            TurnEvent::PermissionRequest(request.clone()),
-                                        );
                                         let decide_started = std::time::Instant::now();
-                                        let decided = approver.decide(&request).await;
+                                        let outcome = {
+                                            let mut notify = || {
+                                                emit(
+                                                    &mut events,
+                                                    &event_cell,
+                                                    TurnEvent::PermissionRequest(request.clone()),
+                                                )
+                                            };
+                                            approver
+                                                .decide_with_notification(&request, &mut notify)
+                                                .await
+                                        };
+                                        if let Some(reason) = outcome.reason {
+                                            decision_reason =
+                                                format!("{}; {reason}", request.reason);
+                                        }
+                                        let decided = outcome.decision;
                                         phase_timings.push(PhaseTiming {
                                             phase: Phase::Approval.as_str().to_string(),
                                             elapsed_ms: decide_started.elapsed().as_millis() as u64,
@@ -716,11 +754,11 @@ impl Agent {
                                 "permission",
                                 Some(call.name.clone()),
                                 Some(approved),
-                                request.reason.clone(),
+                                decision_reason.clone(),
                             );
                         prepared.push(PreparedCall {
                             approval,
-                            reason: request.reason.clone(),
+                            reason: decision_reason.clone(),
                             guard_error: None,
                         });
                     }
@@ -774,6 +812,7 @@ impl Agent {
                                 let mut session_view = session.clone();
                                 let subagent = SubagentRunner {
                                     provider: Arc::clone(&self.provider),
+                                    parent_policy: &turn_policy,
                                     approver,
                                     abort,
                                     depth: self.config.subagent_depth,
@@ -784,6 +823,11 @@ impl Agent {
                                 // A5-1：fan-out 通道（owned，'static 闭包约束）。
                                 let fanout = crate::subagent::FanOutRunner {
                                     provider: Arc::clone(&self.provider),
+                                    parent_policy: Arc::new(
+                                        turn_policy
+                                            .for_workspace(workspace.clone())
+                                            .map_err(AgentError::Session)?,
+                                    ),
                                     workspace: workspace.clone(),
                                     model: session_view.model_override.clone().unwrap_or_default(),
                                     depth: self.config.subagent_depth,
@@ -805,10 +849,11 @@ impl Agent {
                                         args_preview: tool_args_preview(&call.arguments),
                                     },
                                 );
+                                let call_policy = &turn_policy;
                                 futures.push(async move {
                                     let mut ctx = ToolContext {
                                         workspace: &workspace,
-                                        policy: &self.policy,
+                                        policy: call_policy,
                                         session: &mut session_view,
                                         audit: &self.audit,
                                         subagent: Some(subagent),
@@ -966,6 +1011,7 @@ impl Agent {
                                 );
                                 let subagent = SubagentRunner {
                                     provider: Arc::clone(&self.provider),
+                                    parent_policy: &turn_policy,
                                     approver,
                                     abort,
                                     depth: self.config.subagent_depth,
@@ -975,6 +1021,11 @@ impl Agent {
                                 };
                                 let fanout = crate::subagent::FanOutRunner {
                                     provider: Arc::clone(&self.provider),
+                                    parent_policy: Arc::new(
+                                        turn_policy
+                                            .for_workspace(workspace.clone())
+                                            .map_err(AgentError::Session)?,
+                                    ),
                                     workspace: workspace.clone(),
                                     model: session.model_override.clone().unwrap_or_default(),
                                     depth: self.config.subagent_depth,
@@ -985,7 +1036,7 @@ impl Agent {
                                 let plan_before = session.todos.clone();
                                 let mut ctx = ToolContext {
                                     workspace: &workspace,
-                                    policy: &self.policy,
+                                    policy: &turn_policy,
                                     session,
                                     audit: &self.audit,
                                     subagent: Some(subagent),

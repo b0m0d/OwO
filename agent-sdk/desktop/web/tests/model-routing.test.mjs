@@ -210,3 +210,21 @@ test("composer menu labels unsupported current model separately instead of as pr
   assert.match(menuHtml, /qwen3.8-max/);
   assert.match(menuHtml, /自定义模型/);
 });
+
+test("custom selection carries its own connection instead of only the model id", () => {
+  const models = [{ id: "custom-x", baseUrl: "http://127.0.0.1:9876/complete",
+    apiFormat: "openai", useFullUrl: true, temperature: 0, timeoutSecs: 9 }];
+  assert.deepEqual(routing.buildCustomModelConnection("custom-x", models, { "custom-x": "fixture-key" }), {
+    model: "custom-x", base_url: "http://127.0.0.1:9876/complete", api_format: "openai",
+    use_full_url: true, api_key: "fixture-key", temperature: 0, timeout_secs: 9,
+  });
+  assert.equal(routing.buildCustomModelConnection("ordinary", models, {}), null);
+  assert.equal(routing.buildCustomModelConnection("alt", [{id:"alt",baseUrl:"http://localhost:7777/v1",apiFormat:"anthropic"}], {}).api_format, "anthropic");
+  assert.equal(models[0].api_key, undefined);
+});
+test("invalid custom configuration fails before submitting a turn", () => {
+  for (const patch of [{baseUrl:""}, {baseUrl:"file:///tmp"}, {baseUrl:"https://user:secret@example.com"},
+    {baseUrl:"https://example.com/?api_key=secret"}, {temperature:NaN}, {timeoutSecs:0}, {apiFormat:"unknown"}]) {
+    assert.throws(() => routing.buildCustomModelConnection("x", [{id:"x",baseUrl:"https://example.com/v1", ...patch}], {}));
+  }
+});
