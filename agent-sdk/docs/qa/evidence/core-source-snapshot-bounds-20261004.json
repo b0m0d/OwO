@@ -1,0 +1,91 @@
+{
+  "date": "2026-10-04",
+  "source_head": "3d2b03ac7f04443984cef20f0c00c3bdf7b5e7eb",
+  "dirty_worktree": true,
+  "scope": "shared source snapshot engine and command evidence execution cost",
+  "source_sha256": {
+    "crates/owo-agent-core/src/workspace_snapshot.rs": "26213b7b792a85543e5c2ef298338807b7b603bd8d3a9aea0e65872a9793d991",
+    "crates/owo-agent-core/src/command_evidence.rs": "d6c8cd47e140eb807db9d1a015b45229985ce7969ef8f3612cdac4377e741130",
+    "crates/owo-agent-core/src/verification.rs": "abc461b911f74a03e65756888b1a317de7b0abca26315606f290eafeda375bd6",
+    "crates/owo-agent-core/src/agent/mod.rs": "9900d1eaac0bed347251eaf88fe728f747bc13b18f20c08d05bbf6f70ed1cf7c",
+    "crates/owo-agent-core/src/agent/tests.rs": "d1b1daac52b143c18ea206c0554c4a79833a6902fcf4438772b3c1a04166d9f3",
+    "crates/owo-agent-core/src/lib.rs": "270daf050c489da68b66763529d8b615605f5faa674591ceb465254e72e82c6d"
+  },
+  "changes": [
+    "canonical workspace root once per snapshot batch",
+    "64KiB streaming SHA256 rather than whole-file Vec",
+    "32MiB aggregate byte budget, existing 256 path / 8MiB per-file caps retained",
+    "registered behavior commands only capture source before/after; navigation keeps execution metadata without source-test claim",
+    "final workspace subject acceptance reuses same bounded reader"
+  ],
+  "theoretical_bounds": {
+    "previous_per_snapshot_bytes": 2147483648,
+    "current_per_snapshot_bytes": 33554432,
+    "hash_buffer_bytes": 65536,
+    "note": "source limits only, not measured speed gain; each batch separately bounded"
+  },
+  "rustfmt": [
+    {
+      "path": "crates/owo-agent-core/src/workspace_snapshot.rs",
+      "parse_exit_code": 0,
+      "format_matches": true
+    },
+    {
+      "path": "crates/owo-agent-core/src/command_evidence.rs",
+      "parse_exit_code": 0,
+      "format_matches": true
+    },
+    {
+      "path": "crates/owo-agent-core/src/verification.rs",
+      "parse_exit_code": 0,
+      "format_matches": true
+    },
+    {
+      "path": "crates/owo-agent-core/src/agent/mod.rs",
+      "parse_exit_code": 0,
+      "format_matches": true
+    },
+    {
+      "path": "crates/owo-agent-core/src/agent/tests.rs",
+      "parse_exit_code": 0,
+      "format_matches": true
+    },
+    {
+      "path": "crates/owo-agent-core/src/lib.rs",
+      "parse_exit_code": 0,
+      "format_matches": true
+    }
+  ],
+  "cargo_check": {
+    "command": "Invoke-CiCargo check -p owo-agent-core --locked -j 1, strict",
+    "session_id": 63916,
+    "status": "resource_limited",
+    "exit_code": 137,
+    "observed_guard_free_gib": 5.51,
+    "observed_guard_used_percent": 82.6,
+    "duration_seconds": 32,
+    "compile_passed": false,
+    "note": "guard admitted initial run; memory crossed threshold while checking core and terminated process tree"
+  },
+  "new_regressions": {
+    "executed": false,
+    "coverage": [
+      "empty/multi-chunk SHA256 matches CAS",
+      "aggregate and exact byte budget",
+      "zero-budget empty file",
+      "path escape/directory/oversize root refusal",
+      "Unix symlink ancestor escape",
+      "navigation skips snapshot but registered behavior captures",
+      "ordinary command receipt keeps metadata without source proof",
+      "registered command missing before snapshot cannot invent proof"
+    ]
+  },
+  "cloud_model_calls": 0,
+  "matched_live_comparison": false,
+  "goal_complete": false,
+  "remaining": [
+    "current-source core check and targeted snapshot/verification/Agent tests",
+    "Team identity/recovery/responsiveness tests and actual ToolHost golden path",
+    "real frozen repeated Single/Team comparison and requested final scheduling"
+  ]
+}

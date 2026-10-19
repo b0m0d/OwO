@@ -1,0 +1,234 @@
+{
+  "session_id": "eb3e5614-69c5-47ab-9d13-beb13532399a",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-read-100kb\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请使用 read_file 工具读取工作区中的 perf-100kb.txt，不要只凭猜测；然后用一句话说明文件大小和开头内容。",
+  "started_at": "2026-09-22T04:41:07.948671300+00:00",
+  "duration_ms": 11611,
+  "steps": 1,
+  "final_text": "文件大小为 102400 字节（即 100 KB，正好 100×1024），开头内容是连续重复的大写字母 \"A\"（整个文件都是 A 组成的长串）。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_da7f42c714a74979b2f90a38",
+      "tool": "read_file"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_da7f42c714a74979b2f90a38",
+      "tool": "read_file",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "大小"
+    },
+    {
+      "type": "token_delta",
+      "delta": "为"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "102"
+    },
+    {
+      "type": "token_delta",
+      "delta": "400"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 字"
+    },
+    {
+      "type": "token_delta",
+      "delta": "节"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "即"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "100"
+    },
+    {
+      "type": "token_delta",
+      "delta": " KB"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "正好"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "100"
+    },
+    {
+      "type": "token_delta",
+      "delta": "×"
+    },
+    {
+      "type": "token_delta",
+      "delta": "102"
+    },
+    {
+      "type": "token_delta",
+      "delta": "4"
+    },
+    {
+      "type": "token_delta",
+      "delta": "），"
+    },
+    {
+      "type": "token_delta",
+      "delta": "开头"
+    },
+    {
+      "type": "token_delta",
+      "delta": "内容"
+    },
+    {
+      "type": "token_delta",
+      "delta": "是"
+    },
+    {
+      "type": "token_delta",
+      "delta": "连续"
+    },
+    {
+      "type": "token_delta",
+      "delta": "重复"
+    },
+    {
+      "type": "token_delta",
+      "delta": "的大"
+    },
+    {
+      "type": "token_delta",
+      "delta": "写"
+    },
+    {
+      "type": "token_delta",
+      "delta": "字母"
+    },
+    {
+      "type": "token_delta",
+      "delta": " \""
+    },
+    {
+      "type": "token_delta",
+      "delta": "A"
+    },
+    {
+      "type": "token_delta",
+      "delta": "\""
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "整个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "都是"
+    },
+    {
+      "type": "token_delta",
+      "delta": " A"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 组"
+    },
+    {
+      "type": "token_delta",
+      "delta": "成的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "长"
+    },
+    {
+      "type": "token_delta",
+      "delta": "串"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）。"
+    },
+    {
+      "type": "final",
+      "text": "文件大小为 102400 字节（即 100 KB，正好 100×1024），开头内容是连续重复的大写字母 \"A\"（整个文件都是 A 组成的长串）。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 7845,
+    "completion_tokens": 142,
+    "total_tokens": 7987
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 5463,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 1,
+      "target": "read_file",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 6139,
+      "target": "",
+      "first_token_ms": 4758
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "read_100kb_file"
+}

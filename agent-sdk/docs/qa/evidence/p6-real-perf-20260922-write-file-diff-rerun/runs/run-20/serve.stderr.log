@@ -1,0 +1,5 @@
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-22T06:01:05.035225500+00:00"}
+{"duration_ms":2,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"4ca5f9f9ed35469dab8fa2c3","ts":"2026-09-22T06:01:05.171004+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/turn","source":"other","status":200,"target":"http","trace_id":"b2528dfa20f94a309e33e2d0","ts":"2026-09-22T06:01:05.184281200+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/permission/{request_id}","source":"other","status":200,"target":"http","trace_id":"3faa3ae60fff49ebad021d04","ts":"2026-09-22T06:01:11.282907100+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/session/{id}/diff","source":"other","status":200,"target":"http","trace_id":"87f634e616034464a8e62d91","ts":"2026-09-22T06:01:15.784307+00:00"}

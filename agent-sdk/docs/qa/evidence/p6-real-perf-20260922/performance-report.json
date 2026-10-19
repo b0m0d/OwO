@@ -1,0 +1,133 @@
+{
+    "schema":  "owo-performance-report/1",
+    "status":  "complete",
+    "traces_dir":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922\\traces",
+    "generated_at":  "2026-09-22T10:08:50.1857198Z",
+    "machine":  {
+                    "name":  "ASUSROG",
+                    "os":  "Microsoft Windows 11 企业版",
+                    "architecture":  "X64"
+                },
+    "source":  {
+                   "git_commit":  "fc8251d42aa192715fa9f3208585802fa87d88ef",
+                   "git_dirty":  true
+               },
+    "provider":  {
+                     "endpoint":  "https://open.bigmodel.cn/api/paas/v4",
+                     "endpoint_source":  "source_default",
+                     "models":  [
+                                    "glm-5.3-flash"
+                                ]
+                 },
+    "sample_policy":  {
+                          "min_per_fixed_task":  20,
+                          "unclassified_traces":  0
+                      },
+    "samples":  160,
+    "fixed_tasks":  [
+                        {
+                            "task_id":  "daemon_start_session",
+                            "task":  "启动 Daemon 并创建会话",
+                            "samples":  20,
+                            "p50_ms":  4452,
+                            "p95_ms":  4854,
+                            "status":  "measured"
+                        },
+                        {
+                            "task_id":  "short_text_conversation",
+                            "task":  "纯文本短对话（首 token）",
+                            "samples":  20,
+                            "p50_ms":  7080,
+                            "p95_ms":  10741,
+                            "status":  "measured"
+                        },
+                        {
+                            "task_id":  "read_100kb_file",
+                            "task":  "读取 100 KB 文件",
+                            "samples":  20,
+                            "p50_ms":  11794,
+                            "p95_ms":  15899,
+                            "status":  "measured"
+                        },
+                        {
+                            "task_id":  "search_1000_files",
+                            "task":  "搜索 1,000 文件工作区",
+                            "samples":  20,
+                            "p50_ms":  11456,
+                            "p95_ms":  20201,
+                            "status":  "measured"
+                        },
+                        {
+                            "task_id":  "write_file_and_diff",
+                            "task":  "写入小文件并生成 diff",
+                            "samples":  20,
+                            "p50_ms":  11857,
+                            "p95_ms":  16253,
+                            "status":  "measured"
+                        },
+                        {
+                            "task_id":  "approval_command",
+                            "task":  "一次需要审批的命令",
+                            "samples":  20,
+                            "p50_ms":  34216,
+                            "p95_ms":  131105,
+                            "status":  "measured"
+                        },
+                        {
+                            "task_id":  "invalid_mcp_startup",
+                            "task":  "坏 MCP 存在时启动并对话",
+                            "samples":  20,
+                            "p50_ms":  4085,
+                            "p95_ms":  12718,
+                            "status":  "measured"
+                        },
+                        {
+                            "task_id":  "disconnect_reconnect_cancel",
+                            "task":  "客户端断开、重连与取消",
+                            "samples":  20,
+                            "p50_ms":  76,
+                            "p95_ms":  90,
+                            "status":  "measured"
+                        }
+                    ],
+    "token_usage":  {
+                        "prompt":  383381,
+                        "completion":  40462,
+                        "total":  423843
+                    },
+    "turn_duration_ms":  {
+                             "p50":  9275,
+                             "p95":  39623,
+                             "max":  164754
+                         },
+    "phases":  {
+                   "approval":  {
+                                    "samples":  140,
+                                    "elapsed_p50_ms":  0,
+                                    "elapsed_p95_ms":  25,
+                                    "first_token_p50_ms":  0,
+                                    "first_token_p95_ms":  0
+                                },
+                   "model":  {
+                                 "samples":  297,
+                                 "elapsed_p50_ms":  5310,
+                                 "elapsed_p95_ms":  18300,
+                                 "first_token_p50_ms":  4844,
+                                 "first_token_p95_ms":  15857
+                             },
+                   "persistence":  {
+                                       "samples":  140,
+                                       "elapsed_p50_ms":  0,
+                                       "elapsed_p95_ms":  0,
+                                       "first_token_p50_ms":  0,
+                                       "first_token_p95_ms":  0
+                                   },
+                   "tool":  {
+                                "samples":  170,
+                                "elapsed_p50_ms":  23,
+                                "elapsed_p95_ms":  44,
+                                "first_token_p50_ms":  0,
+                                "first_token_p95_ms":  0
+                            }
+               }
+}

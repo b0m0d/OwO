@@ -1,0 +1,6 @@
+{"event":{"message":"模型调用","type":"progress"},"type":"turn_event"}
+{"event":{"args":null,"id":"mock-write-call","tool":"write_file","type":"tool_use"},"type":"turn_event"}
+{"event":{"id":"mock-write-call","ok":true,"tool":"write_file","type":"tool_result"},"type":"turn_event"}
+{"event":{"message":"模型调用","type":"progress"},"type":"turn_event"}
+{"event":{"text":"golden path complete","type":"final"},"type":"turn_event"}
+{"audit_count":0,"diffs":["cli-golden-output.txt"],"final_text":"golden path complete","steps":1,"trace_path":null,"type":"turn_result"}

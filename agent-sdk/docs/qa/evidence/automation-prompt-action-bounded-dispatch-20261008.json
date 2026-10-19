@@ -1,0 +1,22 @@
+{
+  "change": "automation-prompt-action-bounded-dispatch",
+  "date": "2026-10-08",
+  "scope": [
+    "desktop automation form can create reminder and run_prompt actions",
+    "run_prompt content is labeled read-only and serialized to the supported backend tag",
+    "automation scheduler caps concurrent unattended Agent prompts at two",
+    "saturated triggers persist a skipped run record"
+  ],
+  "validation": {
+    "node_test": "node --test desktop/web/tests/automations-schedule.test.mjs",
+    "node_result": "5 passed",
+    "rust_test": "cargo test -p owo-agent-server --lib automation_scheduler_tests::automation_prompt_slots_are_bounded_and_released --locked -j 2 -- --test-threads=2",
+    "rust_result": "1 passed",
+    "rust_format": "cargo fmt --all -- --check passed"
+  },
+  "not_verified": [
+    "live scheduled trigger through running Daemon and desktop UI",
+    "real provider invocation",
+    "Team versus Single paired task delivery or performance"
+  ]
+}

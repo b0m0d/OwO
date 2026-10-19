@@ -1,0 +1,4 @@
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-22T09:17:27.398040400+00:00"}
+{"duration_ms":2,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"74dcf065da2747eab5d5a3d0","ts":"2026-09-22T09:17:27.516743700+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/turn","source":"other","status":200,"target":"http","trace_id":"789a5511a9484f9da82a2a45","ts":"2026-09-22T09:17:27.529039300+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/permission/{request_id}","source":"other","status":200,"target":"http","trace_id":"15a55adbcac24b23ac23bfed","ts":"2026-09-22T09:17:32.446630+00:00"}

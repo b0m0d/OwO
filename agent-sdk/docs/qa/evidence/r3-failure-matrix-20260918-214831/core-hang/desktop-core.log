@@ -1,0 +1,5 @@
+[runtime] launching core: C:\Users\23843\AppData\Local\Temp\owo-desktop-acceptance\20260918-214831\core-hang\owo-agent.exe (acceptance=true)
+[provider] 未选择模型提供商（Unset）：core 就绪但模型调用暂不可用，请在设置中选择云端或本地 Ollama
+[runtime] 未观察到 core_ready 行，走固定端口兼容回退
+[provider] 未选择模型提供商（Unset）：core 就绪但模型调用暂不可用，请在设置中选择云端或本地 Ollama
+[runtime] 兼容回退实例校验失败：核心服务连接失败：connection timed out

@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-05",
+  "scope": "Unify automatic Single/Team enablement across WorkSwarm policy, ProductEval report, API schema and desktop comparison panel.",
+  "changes": {
+    "resource_guardrails": {
+      "token_ratio_max": 1.5,
+      "model_call_ratio_max": 1.5,
+      "tool_call_ratio_max": 2.0,
+      "cost_ratio_max_when_both_priced": 1.5,
+      "missing_required_usage": "fail_closed"
+    },
+    "quality_gate": "delivery success and checker quality must not regress; asymmetric checker coverage is not comparable",
+    "primary_gain": "success_rate_plus_5pp OR checker_quality_plus_10_percent OR wall_time_minus_30_percent",
+    "report_field": "ProductEvalReport.comparison (optional for older report compatibility)",
+    "strategy_version": "ten-4-composite",
+    "alignment_gate": "Every (case_id, repetition) must have exactly one Single and one Team record; pending matrix entries block automatic enablement."
+  },
+  "validation": {
+    "rustfmt_check": {
+      "status": "passed",
+      "files": [
+        "crates/owo-agent-workswarm/src/team_benefit.rs",
+        "devtools/product-eval/src/product_eval.rs",
+        "devtools/product-eval/tests/product_eval_tests.rs",
+        "devtools/product-eval/tests/product_eval_statistics_tests.rs"
+      ],
+      "scope": "Rust parser and formatting only"
+    },
+    "web_targeted_tests": {
+      "status": "passed",
+      "passed": 15,
+      "failed": 0,
+      "command": "node --test desktop/web/tests/product-comparison.test.mjs"
+    },
+    "web_script_syntax": {
+      "status": "passed",
+      "command": "node --check desktop/web/panels/product-comparison.panel.js"
+    },
+    "openapi_json_parse": {
+      "status": "passed"
+    },
+    "git_diff_check": {
+      "status": "passed"
+    }
+  },
+  "cargo": {
+    "status": "resource_limited",
+    "available_memory_gb": 4.54,
+    "memory_used_percent": 85.7,
+    "required_available_memory_gb": 6,
+    "required_memory_used_percent_below": 80,
+    "compile": "not_run",
+    "rust_tests": "not_run",
+    "exit_code": null,
+    "note": "Cargo was not started because the repository resource gate was not satisfied. Do not interpret rustfmt parsing as compilation.",
+    "attempted_this_turn": false
+  }
+}

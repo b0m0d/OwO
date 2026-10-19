@@ -1,0 +1,27 @@
+[package]
+name = "owo-agent-workflow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 工作流/动作程序内核（M15）。
+#
+# 边界（见 docs/ARCH-MICROKERNEL.md §19）：三个模块整体同迁，内部互相引用不跨 crate：
+#   * `workflow`      → `action_program`、`assert`（同迁）+ kernel::audit / memory::learn /
+#                       contracts::skill_health（都已是绝对路径）
+#   * `action_program`→ `assert`（同迁）+ executor / memory / perception
+#   * `assert`        → perception（ocr / perception / scene / UiNode）
+# 因此本步是**零倒置**搬迁：只需把相对路径改成绝对路径（20 处）。
+#
+# **不得依赖 owo-agent-core**：core 依赖本 crate（server 的 workflow_api、
+# workflow_backend 与集成测试仍走 `owo_agent_core::workflow::*` 别名）。
+
+[dependencies]
+owo-agent-executor.workspace = true
+owo-agent-memory.workspace = true
+owo-agent-perception.workspace = true
+owo-agent-kernel.workspace = true
+owo-agent-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true

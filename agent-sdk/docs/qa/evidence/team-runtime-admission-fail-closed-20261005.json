@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-05",
+  "scope": "Team startup admission, request-budget metadata, and workspace binding",
+  "findings": [
+    "TeamRun read errors could be collapsed into absent data and remove the configured team-wide max_model_calls ceiling.",
+    "Missing, unreadable, and malformed workspace sidecars shared the same Option result and could be interpreted as an intentional unbound workspace.",
+    "A failed worker registry build could exit the loop without cancelling the still-running TeamRun."
+  ],
+  "changes": [
+    "Added checked workspace binding loading with missing-vs-invalid semantics, identity checks, canonical root and write-scope revalidation, and run_dir/team_id-scoped cache keys.",
+    "Made TeamRun retrieval required for registry construction so global request budgets cannot disappear on read failure.",
+    "Invalid binding or registry startup failure now emits a specific audit event, requests cancellation, and closes pending rework.",
+    "Validated bindings are cached by canonical run_dir plus team_id; trusted hits avoid repeated filesystem canonicalization per phase."
+  ],
+  "regression_tests_added": [
+    "missing binding remains an explicit unbound result",
+    "corrupt and wrong-team-id sidecars are rejected",
+    "tampered canonical write paths are rejected",
+    "same team ID in different run directories does not share cached binding"
+  ],
+  "static_checks": {
+    "rustfmt": "passed for project_workspace_api.rs, workswarm_api/registry_builder.rs, and workswarm_api/runtime.rs",
+    "git_diff_check": "passed for the three changed Rust files"
+  },
+  "rust_test": {
+    "command": "Invoke-CiCargo cargo test -p owo-agent-server --lib --locked -j 2 -- --test-threads=2",
+    "status": "resource_limited",
+    "wrapper_exit_code": 2,
+    "cargo_started": false,
+    "available_memory_gb": 5.22,
+    "memory_used_percent": 83.5,
+    "required": "at least 6 GB available and less than 80% used"
+  },
+  "limitations": "Rust compilation, unit-test execution, full cancellation persistence, and runtime recovery behavior remain unverified."
+}

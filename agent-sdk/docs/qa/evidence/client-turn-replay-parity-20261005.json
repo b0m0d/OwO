@@ -1,0 +1,27 @@
+{
+  "evidence_id": "client-turn-replay-parity-20261005",
+  "scope": "source-only",
+  "claim": "The TypeScript SDK now resumes a turn from the existing durable replay endpoint through its generated typed OpenAPI client, using x-owo-turn-id and SSE id sequence cursors when the original stream ends before a terminal event; replay duplicates are filtered. SDK and desktop browser clients cancel unfinished response streams on early exit.",
+  "source_facts": [
+    "Server sets x-owo-turn-id on turn responses and SSE ids from persisted event sequence numbers.",
+    "The generated TS schema describes GET /session/{id}/turn/events and its cursor query.",
+    "The existing replay endpoint returns bounded pages and active/completed/failed/interrupted state."
+  ],
+  "limits": [
+    "No TypeScript compilation/typecheck, Node tests, server runtime, desktop runtime, or real network interruption test was run.",
+    "Source inspection and added test cases do not prove implementation correctness at runtime.",
+    "No end-to-end latency, model cost, tool-call, or delivery-quality improvement is claimed."
+  ],
+  "verification": [
+    "Python source assertions checked typed replay routing, cursor use, bounded page handling, duplicate filtering, abort propagation, and reader cancellation on both clients.",
+    "git diff --check passed for the four changed client files and documentation."
+  ],
+  "files_sha256": {
+    "clients/ts/src/index.ts": "31551a4f45154ce0ea5af5544a9e0a4cc060087903456e592bca7a2a29dc191b",
+    "clients/ts/tests/turn-completion.test.ts": "a5214e2abc2b8462faf298b6c5f7e87943aa9e43b7cb9321a32e4a42cf8edc7e",
+    "desktop/web/core/turn-sse.js": "49aae5846dbba2ae6201c6229d23e7683e28a7c3e86a3f9a60fef3c05f4a7172",
+    "desktop/web/tests/turn-completion.test.mjs": "820b0a6989565d7a4a5367ad54af6dcdca81e7cf80a0d1f528a5b12856823d72",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "aaaa153fee530163ace08f66062d9fa1db981536fc2bb52bd66d566524ac5bae"
+  }
+}

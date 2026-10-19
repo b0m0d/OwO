@@ -1,0 +1,214 @@
+{
+    "stamp":  "20260918-005249",
+    "run_root":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-coldboot-20260918-005249",
+    "evidence_dir":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-cold-boot-20260918-005249",
+    "hidden_minutes":  5,
+    "skipped_hidden":  false,
+    "failure_notes":  [
+
+                      ],
+    "checks":  [
+                   {
+                       "name":  "壳在 45s 内拉起 sidecar 并报 core_ready",
+                       "pass":  true,
+                       "detail":  "pid=42872 port=43696 build_id=cec606583d1280af4f6e3ddf506dce84ee5b10be"
+                   },
+                   {
+                       "name":  "/health 报告 healthy 且 api_version 与壳期望一致",
+                       "pass":  true,
+                       "detail":  "healthy=True api=0.7 stage=ready build_id=cec606583d1280af4f6e3ddf506dce84ee5b10be"
+                   },
+                   {
+                       "name":  "ready 行 build_id = /health.build_id = sidecar --version commit",
+                       "pass":  true,
+                       "detail":  "ready=cec606583d1280af4f6e3ddf506dce84ee5b10be health=cec606583d1280af4f6e3ddf506dce84ee5b10be"
+                   },
+                   {
+                       "name":  "/health.instance_id 非空（壳注入实例身份，握手闭环）",
+                       "pass":  true,
+                       "detail":  "instance_id=6cf2c12e054148e486618d055f6be319"
+                   },
+                   {
+                       "name":  "桌面主窗口在 20s 内出现（非空白壳/非永久 loading）",
+                       "pass":  true,
+                       "detail":  "hwnd=40044930"
+                   },
+                   {
+                       "name":  "DOM 事实通道（WebView2 CDP）建立",
+                       "pass":  true,
+                       "detail":  "requested=43695 effective=43695"
+                   },
+                   {
+                       "name":  "token 文件落在本次私有数据根（未污染真实目录）",
+                       "pass":  true,
+                       "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-coldboot-20260918-005249\\LocalAppData\\OwO\\Agent\\data\\auth\\token"
+                   },
+                   {
+                       "name":  "WebView2 CDP 可达（DOM 事实通道建立）",
+                       "pass":  true,
+                       "detail":  "port=43695"
+                   },
+                   {
+                       "name":  "首屏 20s 内出现可输入任务框（无永久 loading）",
+                       "pass":  true,
+                       "detail":  "composerVisible=True health=\"本地服务已连接\""
+                   },
+                   {
+                       "name":  "首屏不得停在统一错误卡上（正常冷启动）",
+                       "pass":  true,
+                       "detail":  "errorCard=\"\""
+                   },
+                   {
+                       "name":  "首屏不得误落 provider 引导页（密钥已注入）",
+                       "pass":  true,
+                       "detail":  "setupGuide=0 字"
+                   },
+                   {
+                       "name":  "ledger 分桶自洽（cold-boot：health+auth+events+business = web_total）",
+                       "pass":  true,
+                       "detail":  "buckets_sum=7 web_total=7 business=4"
+                   },
+                   {
+                       "name":  "WebView 首次可输入前业务请求 ≤5（服务端 ledger 权威口径）",
+                       "pass":  true,
+                       "detail":  "web_business=4 routes=GET /sessions,GET /skills,GET /whitelist,GET /project/rules"
+                   },
+                   {
+                       "name":  "WebView 零 /auth/token（壳注入 token 生效，未回落到引导端点）",
+                       "pass":  true,
+                       "detail":  "web_auth=0 shell_auth=1"
+                   },
+                   {
+                       "name":  "壳侧配对引导恰好一次（/auth/token source=shell）",
+                       "pass":  true,
+                       "detail":  "shell_auth=1"
+                   },
+                   {
+                       "name":  "事件连接唯一（/events/stream ≤1，无双重 SSE）",
+                       "pass":  true,
+                       "detail":  "web_events=1"
+                   },
+                   {
+                       "name":  "首屏无同路由重复请求（水合未被跑两遍）",
+                       "pass":  true,
+                       "detail":  "repeats="
+                   },
+                   {
+                       "name":  "ledger source 归类含 web/shell（来源标签链路可用）",
+                       "pass":  true,
+                       "detail":  "sources=probe,shell,web"
+                   },
+                   {
+                       "name":  "截图 900x600",
+                       "pass":  true,
+                       "detail":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-cold-boot-20260918-005249\\desktop-900x600.png（900 x 600）"
+                   },
+                   {
+                       "name":  "截图 1280x720",
+                       "pass":  true,
+                       "detail":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-cold-boot-20260918-005249\\desktop-1280x720.png（1280 x 720）"
+                   },
+                   {
+                       "name":  "截图 1707x1067",
+                       "pass":  true,
+                       "detail":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-cold-boot-20260918-005249\\desktop-1707x1067.png（1707 x 1067）"
+                   },
+                   {
+                       "name":  "core 意外退出后壳自动受控重启并再次 ready",
+                       "pass":  true,
+                       "detail":  "new pid=41532 port=34705"
+                   },
+                   {
+                       "name":  "重启后窗口身份保持稳定（instance 属壳，不随 core 代际漂移）",
+                       "pass":  true,
+                       "detail":  "old=6cf2c12e054148e486618d055f6be319 new=6cf2c12e054148e486618d055f6be319"
+                   },
+                   {
+                       "name":  "重启后 core 进程身份确实变化（pid 不同）",
+                       "pass":  true,
+                       "detail":  "old_pid=42872 new_pid=41532"
+                   },
+                   {
+                       "name":  "core 重启后 bearer 已换发（token 文件随代际更新）",
+                       "pass":  true,
+                       "detail":  "old_len=64 new_len=64"
+                   },
+                   {
+                       "name":  "上一代 bearer 在新核心上被拒（401）",
+                       "pass":  true,
+                       "detail":  "status=401"
+                   },
+                   {
+                       "name":  "新一代 bearer 立即可用（200）",
+                       "pass":  true,
+                       "detail":  "status=200"
+                   },
+                   {
+                       "name":  "ledger 分桶自洽（after-core-restart：health+auth+events+business = web_total）",
+                       "pass":  true,
+                       "detail":  "buckets_sum=2 web_total=2 business=1"
+                   },
+                   {
+                       "name":  "重启后界面自动恢复可输入（不停留在错误卡/loading）",
+                       "pass":  true,
+                       "detail":  "composerVisible=True errorCard=0 字"
+                   },
+                   {
+                       "name":  "重启后壳只重新引导一次（shell /auth/token ≤1）",
+                       "pass":  true,
+                       "detail":  "shell_auth=1"
+                   },
+                   {
+                       "name":  "重启后 WebView 不回落引导端点（web /auth/token = 0）",
+                       "pass":  true,
+                       "detail":  "web_auth=0"
+                   },
+                   {
+                       "name":  "重启后不形成双事件连接（/events/stream ≤1）",
+                       "pass":  true,
+                       "detail":  "web_events=1"
+                   },
+                   {
+                       "name":  "重启后重新引导的首屏业务请求仍 ≤5",
+                       "pass":  true,
+                       "detail":  "business=1 routes=GET /automations"
+                   },
+                   {
+                       "name":  "重启后无同路由重复请求",
+                       "pass":  true,
+                       "detail":  "repeats="
+                   },
+                   {
+                       "name":  "关闭窗口=隐藏到托盘，且 WebView 可见性真的翻转为 hidden",
+                       "pass":  false,
+                       "detail":  "visibilityState=visible 进程存活=True"
+                   },
+                   {
+                       "name":  "窗口隐藏 5 分钟：业务请求为 0（只允许 health）",
+                       "pass":  false,
+                       "detail":  "可见性态未翻转，本项测量无意义（产品需按自身隐藏路径进入后台）"
+                   },
+                   {
+                       "name":  "第二实例只唤回不另起（§4.1 单实例锁有效）",
+                       "pass":  false,
+                       "detail":  "wake pid=45800 10s 内未退出"
+                   },
+                   {
+                       "name":  "第二实例唤回后窗口恢复 visible（托盘/快捷键同源路径）",
+                       "pass":  true,
+                       "detail":  "visibilityState=visible wake_exit=-1"
+                   },
+                   {
+                       "name":  "恢复显示后截图（无永久 loading）",
+                       "pass":  true,
+                       "detail":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-cold-boot-20260918-005249\\desktop-restored.png（1707 x 1067）"
+                   },
+                   {
+                       "name":  "唤回后界面仍可操作（隐藏期未把 UI 拖成错误态）",
+                       "pass":  true,
+                       "detail":  "actionable=True errorCard=0 字"
+                   }
+               ],
+    "passed":  37,
+    "failed":  3
+}

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-03T17:27:02Z",
+  "repository": "T:/创新创业/OwO-master/agent-sdk",
+  "git": {
+    "head": "60e24a1",
+    "branch": "agent-frame",
+    "worktree": "clean except pre-existing untracked desktop/tauri preserved",
+    "commits": [
+      {
+        "id": "fe65acb",
+        "summary": "require behavior checks for observed source changes"
+      },
+      {
+        "id": "0e397d3",
+        "summary": "scope review snapshots to their team"
+      },
+      {
+        "id": "60e24a1",
+        "summary": "classify more source and build paths for team gates"
+      }
+    ]
+  },
+  "iteration": {
+    "area": "Team source behavior gate and review snapshot identity",
+    "changes": [
+      "Team delivery detects source changes from host-observed ChangeSet paths, independently of model-declared Artifact.kind.",
+      "Every changed source path must be covered by a required host-registered workspace behavior command; code artifacts without a matching source ChangeSet are rejected.",
+      "Reviewer evidence now identifies source-bearing ChangeSets and the delivery gate requires final source evidence for them.",
+      "Review source snapshots filter ChangeSets by team_id, task_id, and attempt_id to prevent cross-team evidence mixing.",
+      "Expanded host source-path recognition for additional language, infrastructure, project, and build files; added corresponding regression test source."
+    ],
+    "validation": {
+      "git_diff_check": "passed",
+      "cargo_or_tests": "not run; deferred for the single final verification pass",
+      "exit_code": null,
+      "cargo_processes": 0
+    },
+    "resources": {
+      "free_physical_memory_gb_approx": 11.27,
+      "free_T_drive_gb_approx": 34.91
+    },
+    "remaining": [
+      "Converge duplicate ContractSubagentRunner and ProfileSubagentRunner execution assembly without changing their different tool permissions, budgets, and session-recovery behavior.",
+      "Finish source and compatibility review of task/attempt repair lifecycle and shared Single/Team completion semantics.",
+      "Run one final policy-compliant Rust verification pass after implementation stabilizes; do not claim Team superiority without matched live evidence."
+    ]
+  }
+}

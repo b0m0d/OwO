@@ -1,0 +1,44 @@
+[
+    {
+        "scenario":  "example-mcp-off",
+        "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+        "pass":  true,
+        "detail":  "hwnd=11602068 owner=38540 t=0.5s fail="
+    },
+    {
+        "scenario":  "example-mcp-off",
+        "name":  "DOM 事实通道（WebView2 CDP）建立",
+        "pass":  true,
+        "detail":  "requested=26332 effective=26332"
+    },
+    {
+        "scenario":  "example-mcp-off",
+        "name":  "10s 内界面可操作（无永久 loading）",
+        "pass":  true,
+        "detail":  "t=1.2s health=\"连接中…\""
+    },
+    {
+        "scenario":  "example-mcp-off",
+        "name":  "示例 MCP（owo.plugin.example-hello）未在生产 profile 启用",
+        "pass":  true,
+        "detail":  "enabled=False"
+    },
+    {
+        "scenario":  "example-mcp-off",
+        "name":  "故障面截图（重获窗口 + 五重有效性）",
+        "pass":  true,
+        "detail":  "size=1280x720 bytes=94970 non_black_ratio=0.998183 variance=1623.3636 samples=36864"
+    },
+    {
+        "scenario":  "example-mcp-off",
+        "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+        "pass":  true,
+        "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-140540\\example-mcp-off\\owo-agent.exe sha256=7DC82D6456FBB440011D5C1A93B55AE53C6119170F6EAAE8043D167EF53F98C1"
+    },
+    {
+        "scenario":  "example-mcp-off",
+        "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+        "pass":  true,
+        "detail":  "stages=ok"
+    }
+]

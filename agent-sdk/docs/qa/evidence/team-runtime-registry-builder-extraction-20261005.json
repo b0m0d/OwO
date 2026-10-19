@@ -1,0 +1,37 @@
+{
+  "evidence_id": "team-runtime-registry-builder-extraction-20261005",
+  "scope": "source-only",
+  "claim": "Team worker registry construction and its budget/provider fallback tests reside in registry_builder.rs; runtime.rs retains lifecycle orchestration and consumes the same registry API.",
+  "verification": [
+    "Python source assertions confirmed extracted entrypoints, preserved source tests, runtime call site, module registration, and documentation.",
+    "rustfmt --edition 2021 --check --config skip_children=true passed for runtime.rs, registry_builder.rs, and workswarm_api/mod.rs.",
+    "git diff --check passed.",
+    "Current source hashes refreshed after later WorkSwarm telemetry changes; this evidence still concerns the registry-builder extraction."
+  ],
+  "limits": [
+    "No Rust compilation or tests were run per user instruction.",
+    "The extraction preserves source code but runtime behavior and privacy/type correctness remain unverified until later targeted tests.",
+    "No real-model benchmark, UI validation, or Single-versus-Team delivery comparison was run."
+  ],
+  "source_assertions": {
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs::use super::registry_builder::build_run_registry;": true,
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs::async fn fail_pending_rework_tasks": true,
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs::pub(crate) async fn run_team_loop": true,
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs::phase_orchestration": true,
+    "crates/owo-agent-server/src/workswarm_api/registry_builder.rs::fn resolved_worker_budget": true,
+    "crates/owo-agent-server/src/workswarm_api/registry_builder.rs::pub(super) fn inner_worker_for": true,
+    "crates/owo-agent-server/src/workswarm_api/registry_builder.rs::fn worker_kind_uses_agent_provider": true,
+    "crates/owo-agent-server/src/workswarm_api/registry_builder.rs::pub(super) async fn build_run_registry": true,
+    "crates/owo-agent-server/src/workswarm_api/registry_builder.rs::fn every_fallback_agent_worker_is_metered_and_budgeted": true,
+    "crates/owo-agent-server/src/workswarm_api/mod.rs::mod registry_builder;": true,
+    "docs/工程代码结构说明.md::## 49. Team 运行循环与 Worker 装配拆分": true,
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md::## 49. Team Worker 执行面装配从生命周期状态机拆出": true
+  },
+  "files_sha256": {
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs": "f72935c2539f9e45127c77bb9387b575b1d2ad063e15e7b42cf4d7b123241dd7",
+    "crates/owo-agent-server/src/workswarm_api/registry_builder.rs": "b3604e22342f5f2124e328f368b2f9ff76d4dd692918494defd9c3b0aec961d6",
+    "crates/owo-agent-server/src/workswarm_api/mod.rs": "50746126802a8905cb22f9d29faaf430ca044f1ff67b23e0b3f4f311b975919c",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "6cdb56e96b2985df27fc40dd7ebece4dd0f6fc9c4d981aca144d5f0e81621bc8"
+  }
+}

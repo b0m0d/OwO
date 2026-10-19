@@ -1,0 +1,46 @@
+{
+  "date": "2026-10-06",
+  "scope": "Team strategy risk profile input coverage and bounded evaluation",
+  "finding": "Automatic reviewer planning previously scanned the user objective and declared write paths only; sensitive operations expressed solely in role contracts, verification declarations, or extra_input could be missed.",
+  "change": {
+    "source": "crates/owo-agent-core/src/workswarm/task_profile.rs",
+    "inputs": [
+      "user objective",
+      "role name",
+      "handoff_contract",
+      "verify",
+      "write_paths",
+      "string values and keys in extra_input"
+    ],
+    "max_evidence_bytes": 262144,
+    "overflow": "fail closed to High risk and request independent review when byte or node budget is exceeded",
+    "markers_added": [
+      "patient/medical records",
+      "customer/user data",
+      "production environment/data",
+      "truncate/drop-table",
+      "database migration"
+    ],
+    "module_boundary": "coord_create.rs consumes derive_task_profile; risk derivation and its tests live in task_profile.rs",
+    "max_evidence_items": 16384
+  },
+  "regression_tests_added": [
+    "sensitive role contract enables independent review when objective is generic",
+    "structured extra_input sensitive task enables independent review",
+    "oversized declared task evidence fails closed to independent review",
+    "scalar-heavy structured extra_input over the node budget fails closed to independent review"
+  ],
+  "verification": {
+    "cargo_fmt_all_check": "passed",
+    "git_diff_check": "passed (Git printed existing CRLF-to-LF advisory warnings)",
+    "cargo_test": "not run; Invoke-CiCargo rejected startup with resource_limited at 4.22 GB free and 86.7 percent used; cargo did not start",
+    "typecheck": "not run; current memory snapshot is below project gate",
+    "memory_at_last_check": {
+      "free_gb": 4.22,
+      "used_percent": 86.7,
+      "required_free_gb": 6.0,
+      "required_used_percent_exclusive": 80.0
+    }
+  },
+  "limits": "Keyword screening is conservative and cannot prove that unmatched text is safe; policy and execution permissions remain the authoritative security boundary."
+}

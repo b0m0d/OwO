@@ -1,0 +1,52 @@
+{
+  "schema": "owo-release-manifest/2",
+  "generated_at": "2026-09-22T01:20:11Z",
+  "identity": {
+    "version": "0.1.0",
+    "api_version": "0.7",
+    "commit": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+    "dirty": true,
+    "built_at": "2026-09-21T23:32:43Z",
+    "source": "artifact --version"
+  },
+  "git": {
+    "commit": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+    "dirty": true,
+    "head_committed_at": "2026-09-20T20:59:44+08:00"
+  },
+  "dirty_override": true,
+  "dependencies": {
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "rust_target": "x86_64-pc-windows-msvc",
+    "onnx_runtime": {
+      "version": "1.13.5",
+      "asset": "sherpa-onnx-v1.13.5-win-x64-static-MT-Release-lib",
+      "crt": "static-MT",
+      "archive_sha256": "b7080b6f470bac96ef0afe56b25ae9b2f9f0ca82d10dad19bf3a2fc5ffd6cffc",
+      "resolved_from": "machine-cache"
+    }
+  },
+  "artifacts": [
+    {
+      "name": "owo-agent.exe",
+      "bytes": 61810176,
+      "sha256": "b44ff5a74b1b2a3428e1f0724cc67196432c7a4f7a9103b1d8cd601aed50fb3f"
+    },
+    {
+      "name": "owo-agent-desktop.exe",
+      "bytes": 12760576,
+      "sha256": "43191df273f2b81556aa63b1403e08f03f7431a755f0817330c1e97225f3d991"
+    },
+    {
+      "name": "OwO-Agent-0.1.0-x64-setup.exe",
+      "bytes": 16879883,
+      "sha256": "89c1ca99d4e3406a9332d766e1e5789d7f562ca104d392cbdad3e0d8dc95a1cb"
+    },
+    {
+      "name": "owo-agent-x86_64-pc-windows-msvc.exe",
+      "bytes": 61810176,
+      "sha256": "b44ff5a74b1b2a3428e1f0724cc67196432c7a4f7a9103b1d8cd601aed50fb3f"
+    }
+  ]
+}

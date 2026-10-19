@@ -1,0 +1,2 @@
+{"ts":"2026-09-22T09:19:49.175260+00:00","app_id":"msedge","kind":"desktop_event","summary":"窗口标题变化（内容掩码）","detail":{"title_hash":4825704694930399404},"state_hash":11184711989130831459}
+{"ts":"2026-09-22T09:19:53.194722700+00:00","app_id":"chatgpt","kind":"desktop_event","summary":"前台应用：chatgpt；窗口标题变化（内容掩码）","detail":{"title_hash":2627592160953406870},"state_hash":10931080529282003142}

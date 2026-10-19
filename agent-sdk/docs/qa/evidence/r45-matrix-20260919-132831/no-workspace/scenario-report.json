@@ -1,0 +1,58 @@
+{
+    "id":  "no-workspace",
+    "note":  "§3.4：未选工作区 → 工作区引导（workspace/required），动作=选择文件夹",
+    "kind":  "healthy",
+    "expected_codes":  [
+                           "workspace/required"
+                       ],
+    "required_actions":  [
+                             "选择项目工作区"
+                         ],
+    "final_budget_sec":  20,
+    "known_gap":  "",
+    "executed":  true,
+    "failed_stage":  "",
+    "error_type":  "",
+    "error_message":  "",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132842\\no-workspace",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132842\\no-workspace\\owo-agent.exe",
+    "sidecar_sha256":  "7DC82D6456FBB440011D5C1A93B55AE53C6119170F6EAAE8043D167EF53F98C1",
+    "launched_core":  "",
+    "shell_pid":  55724,
+    "window_at_sec":  0.5,
+    "actionable_at_sec":  1.9,
+    "error_at_sec":  -1,
+    "error_code":  "",
+    "error_card":  "",
+    "setup_guide_len":  320,
+    "details_folded":  false,
+    "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132831\\no-workspace\\fault-no-workspace-1280x720.png",
+    "screenshot_metric":  {
+                              "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132831\\no-workspace\\fault-no-workspace-1280x720.png",
+                              "bytes":  84522,
+                              "width":  1280,
+                              "height":  720,
+                              "non_black_ratio":  0.998183,
+                              "variance":  901.3071,
+                              "samples":  36864,
+                              "ok":  true,
+                              "fail_reasons":  [
+
+                                               ]
+                          },
+    "ui_final":  {
+                     "healthText":  "连接中…",
+                     "routeText":  "1 · 选择项目工作区 选择存放项目文件的目录。没有工作区时不会启用任何文件工具；核心程序安装目录只用于运行，不与你的项目混在一起。 尚未选择项目工作区：请选择目录后启用文件工具 项目目录 选择目录… 由原生目录选择器设定，不需要手输完整路径。 使用此目录 2 · 选择模型提供商 核心就绪前先确认模型连接：选择云端、本地 Ollama 或稍后配置。密钥始终只存在于系统环境变量，应用不会读取或保存密钥本身。 云端端点（缺省 BigModel） 模型名（缺省按提供商） 云端（OpenAI 兼容） 本地 Ollama 稍后配置 当前：未显式选择（OPENAI_API_KEY + 内置云端端点） · 就绪 打开模型设置 测试连接 保存并应用",
+                     "errorCard":  "",
+                     "setupGuide":  "1 · 选择项目工作区 选择存放项目文件的目录。没有工作区时不会启用任何文件工具；核心程序安装目录只用于运行，不与你的项目混在一起。 尚未选择项目工作区：请选择目录后启用文件工具 项目目录 选择目录… 由原生目录选择器设定，不需要手输完整路径。 使用此目录 2 · 选择模型提供商 核心就绪前先确认模型连接：选择云端、本地 Ollama 或稍后配置。密钥始终只存在于系统环境变量，应用不会读取或保存密钥本身。 云端端点（缺省 BigModel） 模型名（缺省按提供商） 云端（OpenAI 兼容） 本地 Ollama 稍后配置 当前：未显式选择（OPENAI_API_KEY + 内置云端端点） · 就绪 打开模型设置 测试连接 保存并应用",
+                     "composerVisible":  false,
+                     "actionable":  true,
+                     "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 连接中… 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 检查中 工作区 未选择 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 首次配置 选择项目工作区与模型提供商后即可开始使用。 1 · 选择项目工作区 选择存放项目文件的目录。没有工作区时不会启用任何文件工具；核心程序安装目录只用于运行，不与你的项目混在一起。 尚未选择项目工作区：请选择目录后启用文件工具 项目目录 选择目录… 由原生目录选择器设定，不需要手输完整路径。 使用此目录 2 · 选择模型提供商 核心就绪前先确认模型连接：选择云端、本地 Ollama 或稍后配置。密钥始终只存在于系统环境变量，应用不会读取或保存密钥本身。 云端端点（缺省 BigModel） 模型名（缺省按提供商） 云端（OpenAI 兼容） 本地 Ollama 稍后配置 当前：未显式选择（OPENAI_API_KEY + 内置云端端点） · 就绪 打开模型设置 测试连接 保存并应用"
+                 },
+    "cleanup":  {
+                    "shell_pid":  55724,
+                    "residual_procs":  0,
+                    "notes":  "Stop-OwoShellTree 已执行"
+                },
+    "terminal_budget_hit":  false
+}

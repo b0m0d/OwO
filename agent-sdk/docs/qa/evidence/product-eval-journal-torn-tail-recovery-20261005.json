@@ -1,0 +1,29 @@
+{
+  "date": "2026-10-05",
+  "area": "devtools/product-eval",
+  "change": "ProductEval matrix journal crash-tail recovery",
+  "source_files": [
+    "devtools/product-eval/src/product_eval/matrix_runner.rs",
+    "devtools/product-eval/tests/product_eval_tests.rs"
+  ],
+  "behavior": {
+    "journal_read": "Parse JSONL from bytes so an incomplete UTF-8 tail does not prevent recovery of earlier valid rows.",
+    "repair": "Only an invalid final record without a terminating newline is treated as a torn write; truncate to the last valid prefix and sync the file.",
+    "delimiter": "Append and sync a missing newline when the final JSON record is valid but lacks its delimiter.",
+    "fail_closed": "Malformed newline-terminated records and malformed middle records remain fatal."
+  },
+  "regression_source_added": [
+    "UTF-8 multi-byte truncation at final tail",
+    "Resume a second time after tail repair",
+    "Reject malformed newline-terminated final record",
+    "Retain fatal handling for middle corruption"
+  ],
+  "verification": {
+    "rustfmt_check": "passed for all 129 changed or untracked Rust files",
+    "git_diff_check": "passed",
+    "cargo_check": "not_run",
+    "rust_tests": "not_run",
+    "reason": "Memory gate not met: 4.75 GiB physically available and 85% used; repository requires at least 6 GiB free and less than 80% used before Cargo."
+  },
+  "status": "source and static checks only; compilation and test execution remain pending"
+}

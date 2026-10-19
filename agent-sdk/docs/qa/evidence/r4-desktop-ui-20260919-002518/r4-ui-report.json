@@ -1,0 +1,169 @@
+{
+    "scenario":  "r4-desktop-ui",
+    "stamp":  "20260919-002518",
+    "identity":  "owo-agent 0.1.0 api=0.7 commit=0b6fb641d362f3482aca2f1281e48e947f1523fc dirty=true built_at=2026-09-18T15:36:31Z source=compiled",
+    "checks":  31,
+    "passed":  28,
+    "failed":  3,
+    "boot_business":  4,
+    "ledger_returned":  0,
+    "ok":  false,
+    "run_root":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-002518\\r4-ui",
+    "items":  [
+                  {
+                      "name":  "壳在 45s 内拉起 sidecar 并报 core_ready",
+                      "pass":  true,
+                      "detail":  "pid=47220 port=17818"
+                  },
+                  {
+                      "name":  "DOM 事实通道（WebView2 CDP）建立",
+                      "pass":  true,
+                      "detail":  "requested=30987 effective=30987"
+                  },
+                  {
+                      "name":  "首屏 20s 内出现可输入任务框（§4.10 基线）",
+                      "pass":  true,
+                      "detail":  "composerVisible=True health=\"本地服务已连接\""
+                  },
+                  {
+                      "name":  "状态条上线不改首屏口径：首次可输入前业务请求 ≤5",
+                      "pass":  true,
+                      "detail":  "web_business=4 routes=GET /sessions,GET /whitelist,GET /skills,GET /project/rules"
+                  },
+                  {
+                      "name":  "首屏无同路由重复请求（状态条 1s 定时器不得发 HTTP）",
+                      "pass":  true,
+                      "detail":  "repeats="
+                  },
+                  {
+                      "name":  "状态条容器存在且五段齐全（§4.3）",
+                      "pass":  true,
+                      "detail":  "count=5 present=True bar_height=39"
+                  },
+                  {
+                      "name":  "五段 key 与 §4.3 列举一致（顺序即呈现顺序）",
+                      "pass":  true,
+                      "detail":  "keys=backend,workspace,model,permission,task"
+                  },
+                  {
+                      "name":  "每段都是真 button 且键盘可聚焦（不是不可交互的文字灯）",
+                      "pass":  true,
+                      "detail":  "tags=BUTTON,BUTTON,BUTTON,BUTTON,BUTTON tabbable=True,True,True,True,True"
+                  },
+                  {
+                      "name":  "每段都有非空事实值（无占位破洞）",
+                      "pass":  true,
+                      "detail":  "empty="
+                  },
+                  {
+                      "name":  "每段都带中文用途提示（aria-label 非空）",
+                      "pass":  true,
+                      "detail":  "aria_lengths=25,39,31,47,22"
+                  },
+                  {
+                      "name":  "后台段反映核心就绪（ready → 可用）",
+                      "pass":  true,
+                      "detail":  "backend=\"可用\" tone=ok"
+                  },
+                  {
+                      "name":  "工作区段显示已选项目名（预置工作区生效）",
+                      "pass":  false,
+                      "detail":  "workspace=\"未选择\""
+                  },
+                  {
+                      "name":  "工作区段只给名称+路径摘要，不回显绝对路径",
+                      "pass":  true,
+                      "detail":  "hits="
+                  },
+                  {
+                      "name":  "点击工作区段真的换页（活动导航切到 projects）",
+                      "pass":  true,
+                      "detail":  "rail=projects header=\"项目 选择工作区、查看项目历史，并预览权限范围。\""
+                  },
+                  {
+                      "name":  "状态条段可用键盘聚焦（focus 后 activeElement 即该段）",
+                      "pass":  true,
+                      "detail":  "active=True key=permission tag=BUTTON"
+                  },
+                  {
+                      "name":  "设置页诊断台账已加载（不是静态占位/空白）",
+                      "pass":  true,
+                      "detail":  "returned=0 note=\"加载中…\""
+                  },
+                  {
+                      "name":  "§4.6 八项条目齐备（数量/四类/慢请求/P50-P95/来源/重启/SSE/导出）",
+                      "pass":  true,
+                      "detail":  "slow=True p50p95=True src=True restart=True sse=True export=True refresh=True"
+                  },
+                  {
+                      "name":  "四类计数自洽：health+auth+events+business = 窗口返回条数",
+                      "pass":  true,
+                      "detail":  "health=0 auth=0 events=0 business=0 returned=0"
+                  },
+                  {
+                      "name":  "台账窗口口径与服务端一致（returned ≤ total，cap=512）",
+                      "pass":  false,
+                      "detail":  "returned=0 total=0 cap=0"
+                  },
+                  {
+                      "name":  "台账真的聚合出数据行（慢请求/聚合表非空）",
+                      "pass":  false,
+                      "detail":  "rows=0"
+                  },
+                  {
+                      "name":  "台账页面文本不回显绝对路径/授权头/原始 query",
+                      "pass":  true,
+                      "detail":  "hits="
+                  },
+                  {
+                      "name":  "一键导出的脱敏诊断包结构齐备（含重启近似与 SSE 计数）",
+                      "pass":  true,
+                      "detail":  "missing= head={\"schema\":\"owo-diagnostic-bundle/1\",\"generated_at\":\"2026-09-"
+                  },
+                  {
+                      "name":  "导出包同样不回显禁止项（路径/授权头/query/instance 全文）",
+                      "pass":  true,
+                      "detail":  "hits="
+                  },
+                  {
+                      "name":  "「生成脱敏诊断包」一键出包并在页面展开（按钮不是装饰）",
+                      "pass":  true,
+                      "detail":  "note=\"已生成脱敏诊断包（4209 字节，已在页面展开；可复制或下载）。\" visible=True len=4209"
+                  },
+                  {
+                      "name":  "「刷新台账」可重复取数（returned 不小于上一次）",
+                      "pass":  true,
+                      "detail":  "before=0 after=16"
+                  },
+                  {
+                      "name":  "状态条在 900x600 下不横向溢出且仍五段",
+                      "pass":  true,
+                      "detail":  "bar_right=886 inner_width=886 count=5"
+                  },
+                  {
+                      "name":  "截图 900x600（可解码/尺寸/字节/像素比例/方差全检）",
+                      "pass":  true,
+                      "detail":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r4-desktop-ui-20260919-002518\\r4-ui-900x600.png（900x600） size=900x600 bytes=183124 non_black_ratio=0.998844 variance=2604.8432 samples=33750"
+                  },
+                  {
+                      "name":  "状态条在 1280x720 下不横向溢出且仍五段",
+                      "pass":  true,
+                      "detail":  "bar_right=1266 inner_width=1266 count=5"
+                  },
+                  {
+                      "name":  "截图 1280x720（可解码/尺寸/字节/像素比例/方差全检）",
+                      "pass":  true,
+                      "detail":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r4-desktop-ui-20260919-002518\\r4-ui-1280x720.png（1280x720） size=1280x720 bytes=163687 non_black_ratio=0.999105 variance=1950.8648 samples=36864"
+                  },
+                  {
+                      "name":  "状态条在 1920x1080 下不横向溢出且仍五段",
+                      "pass":  true,
+                      "detail":  "bar_right=1693 inner_width=1693 count=5"
+                  },
+                  {
+                      "name":  "截图 1920x1080（可解码/尺寸/字节/像素比例/方差全检）",
+                      "pass":  true,
+                      "detail":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r4-desktop-ui-20260919-002518\\r4-ui-1920x1080.png（1707x1067） size=1707x1067 bytes=81939 non_black_ratio=0.999759 variance=709.242 samples=37332"
+                  }
+              ]
+}

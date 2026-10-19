@@ -1,0 +1,37 @@
+{
+  "evidence_id": "team-budget-reservation-wait-metrics-20261005",
+  "scope": "source-only",
+  "claim": "Team durable request-budget wait is reported independently from provider latency, through the dedicated request-budget module, span/aggregate metrics, and desktop workbench.",
+  "verification": [
+    "Python source assertions verified request wait collection, legacy-compatible span storage, team/role aggregates, workbench display, and module re-exports.",
+    "rustfmt --edition 2021 --check passed for affected Rust files.",
+    "node --check passed for affected workbench files in the implementation turn.",
+    "git diff --check passed."
+  ],
+  "limits": [
+    "No Rust compilation, Rust tests, or JavaScript tests were run per user instruction.",
+    "Wait includes the batching window, blocking-pool queueing, journal-lock contention, append, and sync_data; it is not fsync-only time.",
+    "Concurrent accumulated waits may exceed a worker wall-time interval.",
+    "No real Team-vs-Single speed, token, or delivery-quality comparison was performed."
+  ],
+  "source_assertions": {
+    "request_budget_records_and_drains_wait": true,
+    "span_summary_role_keep_wait_fields": true,
+    "legacy_jsonl_wait_field_defaults": true,
+    "wait_tests_cover_aggregate_and_pending_block": true,
+    "workbench_maps_and_renders_wait": true,
+    "workbench_test_source_covers_wait": true,
+    "docs_explain_overlap_sum_and_no_speed_claim": true
+  },
+  "files_sha256": {
+    "crates/owo-agent-server/src/workswarm_metrics/metrics.rs": "eff6d20b3d7f738a9fee8c244b54c7604a0dc2d8fd85beb79d3734090302df79",
+    "crates/owo-agent-server/src/workswarm_metrics/request_budget.rs": "851b27d3f02d80fca77aa7d3e84fc6c690c88c0f8cbdec689f59296eb1dd2ef0",
+    "crates/owo-agent-server/src/workswarm_metrics/mod.rs": "f930b058610e69fcb2177b0be271014dc4675e6698ce5bdc00eb1cb1ea4eea40",
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs": "61441b2f016e870c0ddba8ac24705a623908b6c5fb17566169594d31761a1f94",
+    "desktop/web/panels/workswarm/format.js": "5b6f418ca5c69a334872483ef7e18ddba443ecfb3f27a2ec41bcdb90f217c7d8",
+    "desktop/web/panels/workswarm/render.js": "888856e082801df66ea1a327e4215d33e44e887a42ffddd582e5f0152909d984",
+    "desktop/web/tests/workswarm.panel.test.mjs": "e5b852e5d380c338a2e923d62a9e3cd1e37ed7d5b2e080706e4e33ef525d9914",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "0fa609a9541f065a829a2f1683c583478467adbfcb47ae6691b385045d7edbb9"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "date": "2026-10-05",
+  "scope": "WorkSwarm shared-fact context CAS reads",
+  "source_changes": [
+    "assemble_context_slice filters latest keys, file-hash-bound facts, task scope and status before reading eligible facts in bounded batches.",
+    "Each batch uses at most four independent CAS page reads and preserves newest-first output order.",
+    "A single page is capped at 2.4 KiB, aggregate inline values stay within the existing 8 KiB context budget, and short values leave budget for later facts.",
+    "The shared helper rejects preview requests above 64 KiB and deduplicates identical hash and page-size reads."
+  ],
+  "regression_test_source": "shared_fact_context_parallel_reads_keep_newest_first_and_exact_byte_budget covers newest-first order, UTF-8-safe truncation and an exact 8192-byte aggregate value budget.",
+  "validation": {
+    "rustfmt_check": "passed for artifact_read.rs, coord_context_slice.rs and workswarm_tests.rs",
+    "git_diff_check": "passed for tracked working-tree changes; newly added files were checked separately for UTF-8 and trailing whitespace",
+    "cargo_check_and_test": {
+      "status": "not_run_resource_gate",
+      "reason": "Repository ci-shared.ps1 policy requires at least 6 GB available physical memory and under 80 percent usage; Cargo was not started."
+    }
+  },
+  "performance_evidence": "No wall-clock benchmark or paired ProductEval run was performed. The change removes per-fact serial awaits when multiple eligible facts are available, with fan-out capped at four; overall Team speedup is unmeasured.",
+  "remaining_risks": [
+    "Rust type-check and integration-test execution remain pending a compliant resource window.",
+    "Core integration behavior and CAS cancellation/error fan-out have only source-level review in this run.",
+    "Single-vs-Team latency, token usage, completion quality, retries and human rework have not been measured in a new paired evaluation."
+  ]
+}

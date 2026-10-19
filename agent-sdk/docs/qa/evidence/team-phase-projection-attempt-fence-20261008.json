@@ -1,0 +1,51 @@
+{
+  "title": "Team phase projection attempt fencing",
+  "date": "2026-10-08",
+  "scope": "owo-agent-core WorkSwarm durable phase projection reducer",
+  "change": "Require matching phase execution epoch and per-step attempt identity before projecting runner state into durable state.",
+  "invariants": [
+    "stale same-epoch attempts cannot replace current status or output",
+    "current attempt results still project successfully",
+    "durable admission attempt count remains a high-water mark",
+    "phase projection does not mutate durable run-wide budget counters"
+  ],
+  "validation": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p owo-agent-core --lib phase_projection --locked -j 1 -- --test-threads=1",
+      "exit_code": 0,
+      "passed": 3
+    },
+    {
+      "command": "cargo test -p owo-agent-core --test workswarm_tests --locked -j 1 -- --test-threads=1",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test -p owo-agent-core --test workswarm_recovery_tests --locked -j 1 -- --test-threads=1",
+      "exit_code": 0,
+      "passed": 8
+    },
+    {
+      "command": "cargo check -p owo-agent-core --all-targets --locked -j 1",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo clippy -p owo-agent-core --all-targets --locked -j 1",
+      "exit_code": 0,
+      "warnings": "existing unused-code/style warnings"
+    },
+    {
+      "command": "cargo build -p owo-agent-cli --locked -j 1",
+      "exit_code": 0,
+      "artifact": "target/debug/owo-agent.exe"
+    }
+  ],
+  "not_verified": [
+    "real provider execution",
+    "Single/Team paired speed or token advantage",
+    "full workspace tests"
+  ]
+}

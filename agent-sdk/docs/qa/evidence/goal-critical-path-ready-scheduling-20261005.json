@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-05",
+  "area": "owo-agent-core GoalRunner scheduler",
+  "source_files": [
+    "crates/owo-agent-core/src/goal/scheduler.rs",
+    "crates/owo-agent-core/src/goal/mod.rs",
+    "crates/owo-agent-core/src/goal/tests.rs"
+  ],
+  "change": "Replace FIFO backlog selection with deterministic critical-path-first dispatch across all currently ready Goal DAG steps.",
+  "algorithm": {
+    "score": "Weighted longest root-to-sink path containing each task. TaskGraph estimated_effort is host-validated; non-TaskGraph Goal steps default to effort 1, and all weights are capped at 1000000 before scheduling.",
+    "tie_break": "Stable input order, preserving existing plan order among equal scores.",
+    "selection": "Seed currently ready nodes once; when a step succeeds or is host-skipped, inspect only its direct successors and enqueue those whose full dependency set is satisfied. A binary heap selects by criticality and stable plan order.",
+    "complexity_per_selection": "O(V+E) graph and score build once per dispatch wave; O(out-degree * readiness-check + log V) per completion/skip event; O(log V) heap pop per worker slot."
+  },
+  "invariants_preserved": [
+    "max_parallel",
+    "request and step budgets",
+    "cancellation cleanup",
+    "attempt identity and epoch",
+    "DeliveryGate final acceptance"
+  ],
+  "regression_source_added": [
+    "Scheduler unit case for critical-path priority and stable ties",
+    "GoalRunner concurrency-gate case with A -> A2 -> A3, blocked independent B, and queued C",
+    "Effort-weighted case where a high-effort independent task outranks a shorter unit-effort chain"
+  ],
+  "verification": {
+    "rustfmt_check": "passed for all 130 changed or untracked Rust files",
+    "cargo_check": "not_run",
+    "rust_tests": "not_run",
+    "performance_measurement": "not_run; a paired ProductEval comparison remains required",
+    "git_diff_check": "passed",
+    "resource_snapshot": {
+      "free_physical_memory_gib": 4.86,
+      "physical_memory_used_percent": 84.6,
+      "cargo_gate": "not_met; requires at least 6 GiB free and below 80% used"
+    },
+    "reason": "Cargo remains unrun under the repository resource gate; source-level checks do not establish type correctness or runtime behavior."
+  },
+  "status": "event-driven implementation and regression source added; runtime correctness and measured speedup remain unverified"
+}

@@ -1,0 +1,55 @@
+{
+  "date": "2026-10-06",
+  "scope": "current desktop web suite and requested Rust test gate after Team architecture work",
+  "web_tests": {
+    "command": "node --test --test-reporter=tap desktop/web/tests/*.test.mjs",
+    "passed": 441,
+    "failed": 9,
+    "total": 450,
+    "duration_ms": 1809.935,
+    "failing_contracts": [
+      "unified disconnected-service card wiring",
+      "absolute OpenAPI URL wiring",
+      "legacy narrow rail CSS selectors",
+      "approval explanation helper name in app-domain",
+      "legacy automation/MCP/chips control ids",
+      "legacy toolsPanel/developer-mode route structure",
+      "legacy sidebar section selectors",
+      "legacy settings model fields in index.html",
+      "legacy model rail route contract"
+    ],
+    "interpretation": "The suite is not green. Remaining failures are in ui-ia-fixes.test.mjs and mostly assert DOM ids, CSS selectors, helper names, or routing from an older workbench structure; migrate them to observable contracts for the live UI and restore any missing behavior they uncover. The previously identified R12 session-card issue is fixed: session title is the primary open action and less-frequent operations are in a keyboard-accessible overflow menu.",
+    "session_menu_fix": {
+      "changed": [
+        "desktop/web/app-domain.js",
+        "desktop/web/style.css"
+      ],
+      "behavior": [
+        "title button opens session",
+        "overflow actions include rename/pin/archive/fork/rewind/redo/delete",
+        "Escape closes and restores focus",
+        "outside click closes",
+        "only one menu opens at a time",
+        "ArrowDown/ArrowUp wrap through menu items; Home/End jump to first/last"
+      ],
+      "verification": [
+        "R12 targeted Node contract test passed",
+        "node --check desktop/web/app-domain.js passed",
+        "full web suite rerun: 441/450 passed; 9 legacy-contract failures remain"
+      ]
+    }
+  },
+  "rust": {
+    "format_check": "cargo fmt --all -- --check passed",
+    "test_command": "Invoke-CiCargo -Arguments @('test', '-p', 'owo-agent-workswarm', '--lib', '--locked', '-j', '2', '--', '--test-threads=2') -PolicyMode normal",
+    "status": "resource_limited",
+    "cargo_started": false,
+    "tests_run": false,
+    "memory_at_gate": {
+      "free_gb": 4.45,
+      "used_percent": 85.9,
+      "required_free_gb": 6.0,
+      "required_used_percent_exclusive": 80.0
+    }
+  }
+}

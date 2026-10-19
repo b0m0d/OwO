@@ -1,0 +1,59 @@
+{
+    "id":  "provider-unset",
+    "note":  "§3.4：provider 未配置 → core 正常运行 + 模型配置引导（R3-BUG-05 错误归因已修）",
+    "kind":  "healthy",
+    "expected_codes":  [
+                           "provider/not_configured"
+                       ],
+    "required_actions":  [
+                             "打开模型设置",
+                             "测试连接"
+                         ],
+    "final_budget_sec":  20,
+    "known_gap":  "",
+    "executed":  true,
+    "failed_stage":  "",
+    "error_type":  "",
+    "error_message":  "",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-014955\\provider-unset",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-014955\\provider-unset\\owo-agent.exe",
+    "sidecar_sha256":  "4CB2BD6DAC0635B3CEBE28620D19AC8EBBFA3AEB55C557908EF5EDC88014FF66",
+    "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-014955\\provider-unset\\owo-agent.exe",
+    "shell_pid":  15400,
+    "window_at_sec":  0.5,
+    "actionable_at_sec":  1.1,
+    "error_at_sec":  -1,
+    "error_code":  "",
+    "error_card":  "",
+    "setup_guide_len":  0,
+    "details_folded":  false,
+    "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-failure-matrix-20260919-014955\\provider-unset\\fault-provider-unset-1280x720.png",
+    "screenshot_metric":  {
+                              "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-failure-matrix-20260919-014955\\provider-unset\\fault-provider-unset-1280x720.png",
+                              "bytes":  170465,
+                              "width":  1280,
+                              "height":  720,
+                              "non_black_ratio":  0.999105,
+                              "variance":  2293.6954,
+                              "samples":  36864,
+                              "ok":  true,
+                              "fail_reasons":  [
+
+                                               ]
+                          },
+    "ui_final":  {
+                     "healthText":  "本地服务已连接",
+                     "routeText":  "",
+                     "errorCard":  "",
+                     "setupGuide":  "",
+                     "composerVisible":  true,
+                     "actionable":  true,
+                     "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务已连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⚙ 设置 工作区 选择目录… 桌面版由原生目录选择器设定，不需要手输完整路径。 任务 ＋ 新建会话 显示归档 暂无会话 显示工具与设置 开发者模式 设置与诊断 模型与连接 管理当前工作区的模型与运行偏好 服务已连接 模型 读取实际运行模型… 提供商 读取中… OpenAI 兼容接口 凭据来源 读取中… 密钥不写入工作区或设置文件 云端模型（数据出境） … 模型用量与预算 — 保存模型与设置 存储与恢复 — 备份 导出 恢复… — 一键清空数据… 诊断请求台账 进入本页自动加载；也可手动刷新。 OpenAPI 3.1 隐私声明（数据字典/一键关闭/保留期） 后台 可用 工作区 project 模型 unset · 壳侧未配置 权限 点按查看 当前任务 空闲 📎 添加文件 🎤 语音 ⏹ 停止 发送 Ctrl ↵ 情景感知 — 主动建议 情景记忆 检索 最近观察（observations） 检索结果（recall） 审计日志 应用 DIFF 审阅 回滚全部改动 导出 MD 导出 HTML"
+                 },
+    "cleanup":  {
+                    "shell_pid":  15400,
+                    "residual_procs":  0,
+                    "notes":  "Stop-OwoShellTree 已执行"
+                },
+    "terminal_budget_hit":  true
+}

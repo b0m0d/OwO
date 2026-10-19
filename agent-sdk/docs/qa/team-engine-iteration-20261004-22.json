@@ -1,0 +1,30 @@
+{
+  "iteration": "2026-10-04-22",
+  "scope": "Persist one typed completion record across Single traces, GoalRunState, and Team delivery manifests",
+  "changes": [
+    "Added the protocol-level TaskCompletionRecordV1 with task and attempt identity, shared CompletionStatusV1, deduplicated host evidence receipt IDs, candidate version SHA-256, and decision time.",
+    "Single traces now persist the completion record for normal and error turns, including the attempt-scoped execution/validation receipt IDs and a digest of changed path hashes; old traces remain readable.",
+    "GoalRunState now persists the same typed record for accepted, blocked, and cancelled terminal runs; Team success publishes that record in its delivery manifest and stores it in the run snapshot.",
+    "Added regression-test source for stable receipt normalization, trace persistence/backward compatibility, and GoalRunState disk persistence."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Cargo, formatting, clippy, and tests are deferred until implementation convergence as requested.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 15.99,
+    "memory_used_percent": 49.4,
+    "free_workspace_volume_gb": 34.28,
+    "workspace_volume_status": "T: available; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Manual acceptance remains unsupported by Single VerificationPlan; ordinary ask_user answers are not verification receipts.",
+    "Single and Team now share the durable terminal record shape, but their in-memory lifecycle transitions and receipt collectors still have separate adapters.",
+    "The independent reviewer uses the configured Provider/model; semantic requirement completeness is not a formal proof.",
+    "Final Cargo validation, formatting, and clippy checks.",
+    "Paired live Single/Team evaluation; no Team advantage is claimed."
+  ]
+}

@@ -1,0 +1,50 @@
+{
+    "schema":  "owo-cross-client/1",
+    "tag":  "cross-client",
+    "finished_at":  "2026-09-21T13:29:31.8526440Z",
+    "work_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-cross-client-20260921-212925",
+    "evidence":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\cross-client-20260921-212925",
+    "checks":  [
+                   {
+                       "check":  "daemon.core_ready",
+                       "pass":  true,
+                       "detail":  "core_ready 已输出"
+                   },
+                   {
+                       "check":  "http.create_session_A",
+                       "pass":  true,
+                       "detail":  "id=831155b4-5ddc-464d-b56c-21a7d3e228a1"
+                   },
+                   {
+                       "check":  "cli.turn_reused_same_daemon",
+                       "pass":  true,
+                       "detail":  "sessions 1 -\u003e 2（CLI turn exit=0，模型未配置不影响会话创建）"
+                   },
+                   {
+                       "check":  "shared.sessions_visible_to_both",
+                       "pass":  true,
+                       "detail":  "HTTP 会话 831155b4-5ddc-464d-b56c-21a7d3e228a1 在共享会话列表中"
+                   },
+                   {
+                       "check":  "client.example_connects",
+                       "pass":  true,
+                       "detail":  "client 输出：connected base_url=http://127.0.0.1:50409 healthy=true api_version=0.7 build_id=fc8251d42aa192715fa9f3208585802fa87d88ef pid=Some(25612) port=Some(50409)\r"
+                   },
+                   {
+                       "check":  "client.sees_same_sessions",
+                       "pass":  true,
+                       "detail":  "client sessions=2 daemon sessions=2"
+                   },
+                   {
+                       "check":  "daemon.status_matches",
+                       "pass":  true,
+                       "detail":  "status 行：Daemon 运行中：pid=25612 port=50409 api=0.7 build=fc8251d42aa192715fa9f3208585802fa87d88ef instance=\u0027\u0027 data_root=data-198b3cc449e5 started_at=2026-09-21T13:29:25Z\r"
+                   },
+                   {
+                       "check":  "daemon.stop_graceful",
+                       "pass":  true,
+                       "detail":  "pid=25612 存活=False"
+                   }
+               ],
+    "ok":  true
+}

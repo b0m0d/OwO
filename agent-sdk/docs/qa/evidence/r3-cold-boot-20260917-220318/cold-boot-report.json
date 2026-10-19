@@ -1,0 +1,19 @@
+﻿{
+    "stamp":  "20260917-220318",
+    "run_root":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-coldboot-20260917-220318",
+    "evidence_dir":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-cold-boot-20260917-220318",
+    "hidden_minutes":  5,
+    "skipped_hidden":  true,
+    "failure_notes":  [
+                          "sidecar 未就绪，终止后续断言"
+                      ],
+    "checks":  [
+                   {
+                       "name":  "壳在 45s 内拉起 sidecar 并报 core_ready",
+                       "pass":  false,
+                       "detail":  "未读到 core_ready 行"
+                   }
+               ],
+    "passed":  0,
+    "failed":  1
+}

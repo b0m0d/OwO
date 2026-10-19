@@ -1,0 +1,45 @@
+[package]
+name = "owo-agent-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "OwO Agent 环境内核（M5）：可编程桌面环境（DesktopEnv 协议 + 确定性状态机 + 租约/快照/故障注入）+ TaskSurface 兼容适配"
+
+# 边界声明（微内核重构 · 顺序 5）：
+#
+# 本 crate 承载 `desktop_env`（2,442 行）：DesktopEnv 协议、S1 可编程环境（同 seed 可复现）、
+# 快照/恢复、单写租约 fencing、故障注入、VLM-free judge，以及把既有
+# `computer_use::TaskSurface` 适配成 DesktopEnv 的兼容层。
+#
+# 指南相关性：§2.3 把「OCR/STT/视觉/UIA」定为按需 Perception Worker，而 E0/DesktopEnv
+# 属同族的**桌面世界模型/仿真**能力——依赖重、变化快，不应与基础聊天启动链绑定。
+# 本 crate 是这一步的落地形态（同进程 crate，而非独立进程；按需启动留到 §9 A3/A4）。
+#
+# ## M5 与之前三步的关键差别：这一步做了真正的**依赖倒置**
+#
+# 迁移前 `desktop_env` 的唯一出边是 `crate::computer_use::TaskSurface`。
+# 按 ARCH §4 判据，`desktop_env` 与 `computer_use` **不同迁**，因此这条边必须倒置，
+# 否则外迁后 `desktop_env → computer_use`（经本 crate）与 `core → desktop_env`
+# 会构成 crate 环。
+#
+# 倒置方式：把 `TaskSurface` 这个**纯 I/O 契约**下沉到内核 `owo-agent-kernel::task_surface`。
+# 该 trait 只用到 `&str` / `i32` / `serde_json::Value`，不绑定任何业务类型，因此不会把
+# "某个执行器的数据类型"带进内核（这正是 ADR-001 里被否决的那种做法）。实现体
+# （`SimTaskSurface` / `RealTaskSurface`）仍留在 `owo-agent-core::computer_use`。
+#
+# 倒置后本 crate 对 core 的依赖为**零**：`crate::` 引用实测为空集。
+[dependencies]
+owo-agent-kernel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+# 注意：chrono / uuid 在 desktop_env.rs 里是以**全限定内联路径**（`chrono::Utc::now()`、
+# `uuid::Uuid::new_v4()`）使用的，基于 `use` 行扫描的依赖清单会漏掉它们 ——
+# 首次编译即报 E0433。搬模块时这两类依赖都要按内联路径再核一遍。
+chrono.workspace = true
+uuid.workspace = true

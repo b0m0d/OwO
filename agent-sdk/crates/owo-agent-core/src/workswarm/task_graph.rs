@@ -1,0 +1,740 @@
+//! Host validation and worker placement for untrusted TaskGraph inputs.
+use super::RoleSpec;
+use serde_json::Value;
+
+/// `w<数字>`（并行 writer 角色名；lead/leader 不在其列）。
+#[derive(Debug)]
+pub(super) struct TaskGraphV1 {
+    pub(super) version: u32,
+    pub(super) tasks: Vec<ParallelTaskAssignment>,
+}
+
+const MIN_TASK_MODEL_CALLS_PER_ATTEMPT: usize = 4;
+
+/// Assign a bounded per-attempt request budget from host role limits and task effort.
+/// One request is reserved for WorkerOutputV1 correction; effort only raises the cap,
+/// never grants more than the resolved writer role's ceiling.
+pub(super) fn assign_task_model_call_budgets(
+    tasks: &mut [ParallelTaskAssignment],
+    role_budgets: &std::collections::BTreeMap<String, usize>,
+) -> Result<(), String> {
+    for task in tasks {
+        let declared_budget = role_budgets.get(&task.worker).copied().unwrap_or(0);
+        let role_budget = if declared_budget == 0 {
+            crate::worker_profile::DEFAULT_PROFILE_MAX_TURNS
+        } else {
+            declared_budget
+        }
+        .clamp(1, crate::worker_profile::PROFILE_MAX_TURNS_CAP);
+        if role_budget < MIN_TASK_MODEL_CALLS_PER_ATTEMPT {
+            return Err(format!(
+                "TaskGraph worker {} budget is below the {}-request minimum needed for a task attempt and one output repair",
+                task.worker, MIN_TASK_MODEL_CALLS_PER_ATTEMPT
+            ));
+        }
+        let effort = task.estimated_effort.max(1);
+        let effort_turns = u64::BITS.saturating_sub((effort - 1).leading_zeros()) as usize;
+        task.model_calls_per_attempt = MIN_TASK_MODEL_CALLS_PER_ATTEMPT
+            .saturating_add(effort_turns)
+            .min(role_budget);
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(super) struct ParallelTaskAssignment {
+    pub(super) task_id: String,
+    pub(super) worker: String,
+    pub(super) worker_explicit: bool,
+    pub(super) task: String,
+    pub(super) acceptance: String,
+    pub(super) user_requirement_quotes: Vec<String>,
+    pub(super) depends_on: Vec<String>,
+    pub(super) effective_paths: Vec<String>,
+    pub(super) read_refs: Vec<String>,
+    pub(super) contract_refs: Vec<String>,
+    pub(super) required_capabilities: Vec<String>,
+    pub(super) estimated_effort: u64,
+    /// Host-computed total model-request ceiling for one task attempt, including one output repair.
+    pub(super) model_calls_per_attempt: usize,
+    pub(super) verification: Option<String>,
+    pub(super) verification_plan: Option<crate::plan::VerificationPlanV1>,
+    pub(super) risk: String,
+    pub(super) priority: u8,
+}
+
+pub(super) use super::task_graph_policy::{
+    bind_dynamic_follow_up_dependencies, host_manifest_can_replace_integration,
+    is_independent_reviewer_role, parallel_tasks_require_integration,
+    should_enable_parallel_assignment, PARALLEL_LEADER_HOST_MANIFEST_SKIP_REASON,
+};
+
+fn validate_task_quote_scope(
+    quotes: &[String],
+    task: &str,
+    acceptance: &str,
+) -> Result<(), String> {
+    let normalize = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let task_contract = normalize(&format!("{task}\n{acceptance}"));
+    for quote in quotes {
+        let normalized_quote = normalize(quote);
+        if !task_contract.contains(&normalized_quote) {
+            return Err(format!(
+                "用户原文要求未逐字体现在该任务目标或验收中：{quote}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_task_requirement_coverage(
+    task_quote_sets: &[Vec<String>],
+    user_request: &str,
+) -> Result<(), String> {
+    let normalize = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut covered = std::collections::BTreeSet::new();
+    for (index, quotes) in task_quote_sets.iter().enumerate() {
+        crate::request_requirements::validate_exact_user_request_quotes(quotes, user_request)
+            .map_err(|error| format!("task at index {index}: {error}"))?;
+        covered.extend(quotes.iter().map(|quote| normalize(quote)));
+    }
+    for item in crate::request_requirements::explicit_acceptance_items(user_request) {
+        let normalized = normalize(&item);
+        if !covered.contains(&normalized) {
+            return Err(format!(
+                "显式用户验收项没有精确分配给任何 TaskGraph 任务：{item}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_parallel_subtasks(
+    roles: &[RoleSpec],
+    subtasks: &[Value],
+    versioned: bool,
+) -> Result<TaskGraphV1, String> {
+    let writers: Vec<&RoleSpec> = roles
+        .iter()
+        .filter(|role| is_parallel_writer_name(&role.role))
+        .collect();
+    if writers.is_empty() {
+        return Err("RunMeta contains no parallel writer roles".into());
+    }
+    if subtasks.is_empty() || subtasks.len() > 128 {
+        return Err(format!(
+            "task count must be 1..=128, got {}",
+            subtasks.len()
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut tasks = Vec::with_capacity(subtasks.len());
+    for (index, item) in subtasks.iter().enumerate() {
+        let task_id = item
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| (!versioned).then(|| format!("task-{}", index + 1)))
+            .ok_or_else(|| format!("task at index {index} requires task_id"))?;
+        if task_id.len() > 120
+            || !task_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!("invalid task_id {task_id}"));
+        }
+        if !ids.insert(task_id.clone()) {
+            return Err(format!("duplicate task_id {task_id}"));
+        }
+        let estimated_effort = item
+            .get("estimated_effort")
+            .and_then(Value::as_u64)
+            .or_else(|| (!versioned).then_some(1))
+            .filter(|effort| (1..=1_000_000).contains(effort))
+            .ok_or_else(|| format!("task {task_id} requires estimated_effort in 1..=1000000"))?;
+        let (worker, worker_explicit) = match item.get("worker") {
+            Some(Value::String(worker)) => {
+                if !writers
+                    .iter()
+                    .any(|role| role.role.as_str() == worker.as_str())
+                {
+                    return Err(format!("task {task_id} refers to unknown worker {worker}"));
+                }
+                (worker.clone(), true)
+            }
+            None => (String::new(), false),
+            Some(_) => return Err(format!("task {task_id} worker must be a string")),
+        };
+        let task = item
+            .get("task")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("task {task_id} has empty goal"))?
+            .to_owned();
+        if task.chars().count() > 4_000 {
+            return Err(format!("task {task_id} goal exceeds 4000 characters"));
+        }
+        let acceptance = item
+            .get("acceptance")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("task {task_id} has empty acceptance"))?
+            .to_owned();
+        if acceptance.chars().count() > 2_000 {
+            return Err(format!("task {task_id} acceptance exceeds 2000 characters"));
+        }
+        let user_requirement_quotes = match item.get("requirement_quotes") {
+            Some(Value::Array(values)) if values.len() <= 32 => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|quote| !quote.is_empty() && quote.len() <= 2_048)
+                        .map(str::to_string)
+                        .ok_or_else(|| format!("task {task_id} has invalid requirement quote"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+            _ => {
+                return Err(format!(
+                    "task {task_id} requirement_quotes must be an array of at most 32 strings"
+                ))
+            }
+        };
+        validate_task_quote_scope(&user_requirement_quotes, &task, &acceptance)
+            .map_err(|error| format!("task {task_id}: {error}"))?;
+        let raw = item
+            .get("write_paths")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("task {task_id} has no write_paths array"))?;
+        if raw.len() > 64 {
+            return Err(format!("task {task_id} has more than 64 write paths"));
+        }
+        let paths: Vec<String> = raw
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && s.len() <= 512)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        format!("task {task_id} has invalid write path (empty or over 512 bytes)")
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        if paths
+            .iter()
+            .any(|path| normalized_write_path(path).is_empty())
+        {
+            return Err(format!(
+                "task {task_id} write_paths cannot target the workspace root"
+            ));
+        }
+        let string_refs = |key: &str| -> Result<Vec<String>, String> {
+            match item.get(key) {
+                Some(Value::Array(values)) if values.len() <= 64 => values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty() && value.len() <= 512)
+                            .map(str::to_owned)
+                            .ok_or_else(|| format!("task {task_id} has invalid {key} entry"))
+                    })
+                    .collect(),
+                None if !versioned => Ok(Vec::new()),
+                _ => Err(format!("task {task_id} requires {key} string array")),
+            }
+        };
+        let read_refs = string_refs("read_refs")?;
+        let contract_refs = string_refs("contract_refs")?;
+        let required_capabilities = string_refs("required_capabilities")?;
+        const TASK_CAPABILITIES: &[&str] = &[
+            "read_file",
+            "list_dir",
+            "search_files",
+            "write_file",
+            "apply_patch",
+            "run_command",
+        ];
+        if required_capabilities.len() > 8 {
+            return Err(format!(
+                "task {task_id} has more than 8 required capabilities"
+            ));
+        }
+        if let Some(unsupported) = required_capabilities
+            .iter()
+            .find(|cap| !TASK_CAPABILITIES.contains(&cap.as_str()))
+        {
+            return Err(format!(
+                "task {task_id} requires unsupported scoped capability {unsupported}"
+            ));
+        }
+        if versioned
+            && paths.is_empty()
+            && required_capabilities
+                .iter()
+                .any(|cap| matches!(cap.as_str(), "write_file" | "apply_patch"))
+        {
+            return Err(format!(
+                "task {task_id} requires a write capability but declares no write_paths"
+            ));
+        }
+        let (verification, verification_plan) = match item.get("verification") {
+            Some(Value::String(value)) => {
+                let value = value.trim();
+                let valid = value.len() <= 2_048
+                    && (value == "non_empty"
+                        || value
+                            .strip_prefix("contains:")
+                            .is_some_and(|expected| !expected.is_empty())
+                        || value
+                            .strip_prefix("equals:")
+                            .is_some_and(|expected| !expected.is_empty()));
+                if !valid {
+                    return Err(format!("task {task_id} has invalid legacy verification"));
+                }
+                (Some(value.to_string()), None)
+            }
+            Some(value @ Value::Object(_)) => {
+                let mut plan: crate::plan::VerificationPlanV1 =
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        format!("task {task_id} has invalid VerificationPlan: {error}")
+                    })?;
+                plan.plan_id = format!("verify-{task_id}");
+                if plan.requirements.len() > 16 {
+                    return Err(format!("task {task_id} has more than 16 verification requirements"));
+                }
+                plan.validate()
+                    .map_err(|error| format!("task {task_id} has invalid VerificationPlan: {error}"))?;
+                for (index, requirement) in plan.requirements.iter_mut().enumerate() {
+                    let crate::plan::VerificationScopeV1::WorkspacePaths { relative_paths } =
+                        &mut requirement.scope
+                    else {
+                        return Err(format!(
+                            "task {task_id} dynamic VerificationPlan only permits WorkspacePaths"
+                        ));
+                    };
+                    if !requirement.required
+                        || requirement.resources.cpu_slots != 1
+                        || !(8..=128).contains(&requirement.resources.memory_mb)
+                        || requirement.resources.exclusive_workspace
+                        || requirement.resources.timeout_ms == 0
+                        || requirement.resources.timeout_ms > 30_000
+                    {
+                        return Err(format!(
+                            "task {task_id} verification requirements must be required and stay within the host resource budget"
+                        ));
+                    }
+                    if !crate::verification::is_registered_workspace_validator(
+                        &requirement.validator_id,
+                    ) || !crate::verification::workspace_validator_arguments_supported(
+                        &requirement.validator_id,
+                        &requirement.arguments,
+                    ) {
+                        return Err(format!(
+                            "task {task_id} uses unregistered workspace validator {}",
+                            requirement.validator_id
+                        ));
+                    }
+                    if relative_paths.iter().any(|path| path.len() > 512) {
+                        return Err(format!(
+                            "task {task_id} VerificationPlan path exceeds 512 bytes"
+                        ));
+                    }
+                    super::roles::validate_role_write_paths(
+                        &format!("task-{task_id}-validator"),
+                        relative_paths,
+                    )?;
+                    if relative_paths.iter().any(|path| {
+                        !paths.iter().any(|write_scope| write_path_is_within(path, write_scope))
+                    }) {
+                        return Err(format!(
+                            "task {task_id} VerificationPlan scope exceeds its assigned write_paths"
+                        ));
+                    }
+                    requirement.requirement_id =
+                        format!("{task_id}:requirement:{index}");
+                    requirement.covers_requirement_ids.clear();
+                }
+                plan.validate()
+                    .map_err(|error| format!("task {task_id} has invalid VerificationPlan: {error}"))?;
+                (None, Some(plan))
+            }
+            None if !versioned => (Some("non_empty".to_string()), None),
+            _ => {
+                return Err(format!(
+                    "task {task_id} requires verification: a registered WorkspacePaths VerificationPlan or legacy non_empty|contains:<text>|equals:<text>"
+                ))
+            }
+        };
+        let has_command_validator = verification_plan.as_ref().is_some_and(|plan| {
+            plan.requirements
+                .iter()
+                .any(|requirement| requirement.validator_id == "workspace-command-success-v1")
+        });
+        let requires_command_capability = required_capabilities
+            .iter()
+            .any(|capability| capability == "run_command");
+        let declared_source_code = paths
+            .iter()
+            .any(|path| super::delivery_gate_evidence::is_source_code_path(path));
+        if declared_source_code && !has_command_validator {
+            return Err(format!(
+                "task {task_id} declares a source-code write scope but no registered behavior command"
+            ));
+        }
+        if has_command_validator != requires_command_capability {
+            return Err(format!(
+                "task {task_id} must request run_command exactly when its VerificationPlan includes workspace-command-success-v1"
+            ));
+        }
+        let risk = item
+            .get("risk")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| matches!(*value, "low" | "normal" | "high" | "critical"))
+            .map(str::to_owned)
+            .or_else(|| (!versioned).then(|| "normal".to_string()))
+            .ok_or_else(|| format!("task {task_id} requires risk: low|normal|high|critical"))?;
+        if matches!(risk.as_str(), "high" | "critical")
+            && !roles.iter().any(is_independent_reviewer_role)
+        {
+            return Err(format!(
+                "high-risk task {task_id} requires an independent reviewer role",
+            ));
+        }
+        let priority = item
+            .get("priority")
+            .and_then(Value::as_u64)
+            .or_else(|| (!versioned).then_some(50))
+            .filter(|priority| *priority <= 100)
+            .map(|priority| priority as u8)
+            .ok_or_else(|| format!("task {task_id} requires priority in 0..=100"))?;
+        let depends_on = match item.get("depends_on") {
+            Some(Value::Array(values)) => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|dependency| !dependency.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("task {task_id} has invalid dependency"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            None if !versioned => Vec::new(),
+            _ => return Err(format!("task {task_id} requires a depends_on string array")),
+        };
+        if depends_on.len() > 128 {
+            return Err(format!("task {task_id} has more than 128 dependencies"));
+        }
+        let unique_dependencies: std::collections::BTreeSet<_> = depends_on.iter().collect();
+        if unique_dependencies.len() != depends_on.len() {
+            return Err(format!("task {task_id} has duplicate dependencies"));
+        }
+        tasks.push(ParallelTaskAssignment {
+            task_id,
+            worker,
+            worker_explicit,
+            task,
+            acceptance,
+            user_requirement_quotes,
+            depends_on,
+            effective_paths: paths,
+            read_refs,
+            contract_refs,
+            required_capabilities,
+            estimated_effort,
+            model_calls_per_attempt: 0,
+            verification,
+            verification_plan,
+            risk,
+            priority,
+        });
+    }
+    for task in &tasks {
+        for dep in &task.depends_on {
+            if dep == &task.task_id || !ids.contains(dep) {
+                return Err(format!(
+                    "task {} has invalid dependency {dep}",
+                    task.task_id
+                ));
+            }
+        }
+    }
+    fn visit(
+        id: &str,
+        tasks: &[ParallelTaskAssignment],
+        path: &mut std::collections::BTreeSet<String>,
+        done: &mut std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        if done.contains(id) {
+            return Ok(());
+        }
+        if !path.insert(id.to_owned()) {
+            return Err(format!("task graph cycle at {id}"));
+        }
+        if let Some(task) = tasks.iter().find(|task| task.task_id == id) {
+            for dep in &task.depends_on {
+                visit(dep, tasks, path, done)?;
+            }
+        }
+        path.remove(id);
+        done.insert(id.to_owned());
+        Ok(())
+    }
+    let mut path = std::collections::BTreeSet::new();
+    let mut done = std::collections::BTreeSet::new();
+    for id in &ids {
+        visit(id, &tasks, &mut path, &mut done)?;
+    }
+    let mut critical_paths = std::collections::BTreeMap::new();
+    for id in &ids {
+        let effort = task_critical_path_effort(id, &tasks, &mut critical_paths);
+        critical_paths.insert(id.clone(), effort);
+    }
+
+    // Respect explicit worker commitments first, then place implicit tasks largest/longest
+    // first onto the currently lightest worker. This avoids JSON input order bias and keeps
+    // declared work in the load estimate before assigning the remaining queue.
+    let mut assigned_effort = std::collections::BTreeMap::<String, u64>::new();
+    for task in tasks.iter().filter(|task| task.worker_explicit) {
+        let load = assigned_effort.entry(task.worker.clone()).or_default();
+        *load = load.saturating_add(task.estimated_effort);
+    }
+    let mut implicit_indices: Vec<usize> = tasks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, task)| (!task.worker_explicit).then_some(index))
+        .collect();
+    implicit_indices.sort_by(|left, right| {
+        let left_task = &tasks[*left];
+        let right_task = &tasks[*right];
+        let left_path = critical_paths
+            .get(&left_task.task_id)
+            .copied()
+            .unwrap_or(left_task.estimated_effort);
+        let right_path = critical_paths
+            .get(&right_task.task_id)
+            .copied()
+            .unwrap_or(right_task.estimated_effort);
+        (
+            right_path,
+            right_task.priority,
+            right_task.estimated_effort,
+            &right_task.task_id,
+        )
+            .cmp(&(
+                left_path,
+                left_task.priority,
+                left_task.estimated_effort,
+                &left_task.task_id,
+            ))
+    });
+    for index in implicit_indices {
+        let worker = writers
+            .iter()
+            .min_by_key(|role| {
+                (
+                    assigned_effort.get(&role.role).copied().unwrap_or(0),
+                    role.role.as_str(),
+                )
+            })
+            .expect("writer roles are non-empty")
+            .role
+            .clone();
+        let task = &mut tasks[index];
+        task.worker = worker.clone();
+        let load = assigned_effort.entry(worker).or_default();
+        *load = load.saturating_add(task.estimated_effort);
+    }
+    for task in &tasks {
+        let role = writers
+            .iter()
+            .find(|role| role.role == task.worker)
+            .expect("all tasks are assigned to a writer");
+        super::roles::validate_role_write_paths(&task.worker, &task.effective_paths)?;
+        if !role.write_paths.is_empty() {
+            for path in &task.effective_paths {
+                let inside = role
+                    .write_paths
+                    .iter()
+                    .any(|base| write_path_is_within(path, base));
+                if !inside {
+                    return Err(format!(
+                        "task {} exceeds pre-authorized writer scope: {path}",
+                        task.task_id
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(tasks.len());
+    let mut remaining = tasks;
+    while !remaining.is_empty() {
+        let ready = remaining
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| {
+                task.depends_on.iter().all(|dependency| {
+                    ordered
+                        .iter()
+                        .any(|done: &ParallelTaskAssignment| done.task_id == *dependency)
+                })
+            })
+            .max_by_key(|(_, task)| {
+                (
+                    critical_paths
+                        .get(&task.task_id)
+                        .copied()
+                        .unwrap_or(task.estimated_effort),
+                    task.priority,
+                    task.estimated_effort,
+                )
+            })
+            .map(|(index, _)| index);
+        let Some(index) = ready else {
+            return Err("task graph has no topological order".into());
+        };
+        ordered.push(remaining.remove(index));
+    }
+    let tasks = ordered;
+    for left in 0..tasks.len() {
+        for right in left + 1..tasks.len() {
+            if tasks[left].effective_paths.iter().any(|a| {
+                tasks[right]
+                    .effective_paths
+                    .iter()
+                    .any(|b| write_paths_overlap(a, b))
+            }) {
+                let ordered = depends_on(&tasks[left].task_id, &tasks[right].task_id, &tasks)
+                    || depends_on(&tasks[right].task_id, &tasks[left].task_id, &tasks);
+                if !ordered {
+                    return Err(format!(
+                        "overlapping task write scopes need a dependency: {} / {}",
+                        tasks[left].task_id, tasks[right].task_id
+                    ));
+                }
+            }
+        }
+    }
+    Ok(TaskGraphV1 { version: 1, tasks })
+}
+
+fn task_critical_path_effort(
+    task_id: &str,
+    tasks: &[ParallelTaskAssignment],
+    memo: &mut std::collections::BTreeMap<String, u64>,
+) -> u64 {
+    if let Some(effort) = memo.get(task_id) {
+        return *effort;
+    }
+    let Some(task) = tasks.iter().find(|task| task.task_id == task_id) else {
+        return 0;
+    };
+    let longest_child = tasks
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .depends_on
+                .iter()
+                .any(|dependency| dependency == task_id)
+        })
+        .map(|child| task_critical_path_effort(&child.task_id, tasks, memo))
+        .max()
+        .unwrap_or(0);
+    let effort = task.estimated_effort.saturating_add(longest_child);
+    memo.insert(task_id.to_string(), effort);
+    effort
+}
+
+fn depends_on(before: &str, after: &str, tasks: &[ParallelTaskAssignment]) -> bool {
+    let mut pending = vec![after.to_owned()];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if id == before {
+            return true;
+        }
+        if seen.insert(id.clone()) {
+            if let Some(task) = tasks.iter().find(|task| task.task_id == id) {
+                pending.extend(task.depends_on.iter().cloned());
+            }
+        }
+    }
+    false
+}
+
+fn normalized_write_path(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_lowercase()
+}
+
+fn write_path_is_within(path: &str, base: &str) -> bool {
+    let path = normalized_write_path(path);
+    let base = normalized_write_path(base);
+    base.is_empty() || path == base || path.starts_with(&format!("{base}/"))
+}
+
+pub(super) fn write_paths_overlap(left: &str, right: &str) -> bool {
+    let left = normalized_write_path(left);
+    let right = normalized_write_path(right);
+    left.is_empty()
+        || right.is_empty()
+        || left == right
+        || left.starts_with(&format!("{right}/"))
+        || right.starts_with(&format!("{left}/"))
+}
+
+pub(super) fn is_parallel_writer_name(role: &str) -> bool {
+    crate::worker_profile::is_parallel_writer_name(role)
+}
+
+/// 解析 lead 产物的 TaskGraphV1：裸 JSON / 围栏 / 前后缀文本取首个 `{...}`；
+/// 兼容旧裸数组与 subtasks 对象。解析失败返回 None，由调用方终止团队，避免虚假成功。
+pub(super) fn parse_parallel_subtasks(output: &str) -> Option<(Vec<Value>, bool)> {
+    let text = crate::workswarm_output::strip_code_fences(output);
+    let parsed: Value = serde_json::from_str(text.trim()).ok().or_else(|| {
+        let start = text.find('{')?;
+        let end = text.rfind('}')?;
+        (end > start).then(|| serde_json::from_str(&text[start..=end]).ok())?
+    })?;
+    match parsed {
+        Value::Array(items) => Some((items, false)),
+        Value::Object(obj) => {
+            let versioned = obj.contains_key("tasks");
+            if versioned && obj.get("version").and_then(Value::as_u64) != Some(1) {
+                return None;
+            }
+            if obj
+                .get("version")
+                .and_then(Value::as_u64)
+                .is_some_and(|version| version != 1)
+            {
+                return None;
+            }
+            obj.get("tasks")
+                .or_else(|| obj.get("subtasks"))
+                .and_then(Value::as_array)
+                .cloned()
+                .map(|items| (items, versioned))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "task_graph_tests.rs"]
+mod tests;

@@ -1,0 +1,42 @@
+[package]
+name = "owo-agent-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "OwO Agent 插件内核（M7）：插件清单/签名校验/风险扫描/安装生命周期/市场目录，以及插件声明的 MCP 服务器配置"
+
+# 边界声明（微内核重构 · 顺序 7）：
+#
+# 本 crate 承载 core 的 `plugin`（1,158 行）+ 从 `mcp` 下沉的 `McpServerConfig`：
+# 插件清单（`PluginManifest`）、签名校验、风险扫描（含 zip-slip 变体拦截）、
+# 安装/启用/回滚生命周期、插件状态存储、市场目录与版本解析，
+# 以及插件入口与 MCP 服务器统一经沙箱门卫授权（X01）。
+#
+# 指南相关性：§2.3 把「插件」定为 **Daemon 插件**（“插件接口足够，不必微服务化”），
+# §5.4 规定“插件可注册工具、Hook、Provider、Memory、Context Engine、UI tab 和后台任务，
+# 但不能修改核心稳定提示前缀、绕过 Tool Host、直接写其他插件数据库”。
+# 因此本 crate 是插件契约与生命周期的事实源，而**执行授权仍归 Tool-Safety**
+# （它依赖 owo-agent-tool-safety 的沙箱门卫，不自己造一套）。
+#
+# ## 本步的依赖倒置：`McpServerConfig` 随插件走
+#
+# 迁移前 `plugin` 的唯一出边是 `crate::mcp::McpServerConfig`。`mcp`（MCP 运行时客户端）
+# 留在 core，因此这条边必须倒置；但方向不是"把配置类型塞进内核"，而是**它本来就属于插件**：
+# `McpServerConfig` 是**插件清单里的 mcp 字段**（`PluginManifest.mcp: Option<McpServerConfig>`），
+# 由插件 manifest 解析而来。所以正确做法是随插件一起外迁，再让 core 的 `mcp.rs`
+# 反向引用它（实测：`mcp.rs` 对 `plugin` **没有**反向依赖，倒置后无环）。
+#
+# 依赖方向：
+#     owo-agent-core ──► owo-agent-plugins ──► owo-agent-tool-safety ──► owo-agent-kernel
+# 本 crate 不依赖 core / server / ONNX / Sherpa。
+[dependencies]
+owo-agent-tool-safety.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+base64.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+ed25519-dalek.workspace = true

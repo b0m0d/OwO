@@ -1,0 +1,58 @@
+{
+    "id":  "core-hang",
+    "note":  "§3.4：sidecar 挂死 → core/handshake_timeout；动作=终止并重试",
+    "kind":  "hang",
+    "expected_codes":  [
+                           "core/handshake_timeout"
+                       ],
+    "required_actions":  [
+                             "终止并重试"
+                         ],
+    "final_budget_sec":  45,
+    "known_gap":  "",
+    "executed":  true,
+    "failed_stage":  "",
+    "error_type":  "",
+    "error_message":  "",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132842\\core-hang",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132842\\core-hang\\owo-agent.exe",
+    "sidecar_sha256":  "FEFB3CFA8C6E7358994700B37236C3AB55D7E0D2BB453E1935819AD337553940",
+    "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132842\\core-hang\\owo-agent.exe",
+    "shell_pid":  53600,
+    "window_at_sec":  0.5,
+    "actionable_at_sec":  1.7,
+    "error_at_sec":  43.9,
+    "error_code":  "core/handshake_timeout",
+    "error_card":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 终止并重试 技术详情",
+    "setup_guide_len":  0,
+    "details_folded":  true,
+    "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132831\\core-hang\\fault-core-hang-1280x720.png",
+    "screenshot_metric":  {
+                              "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132831\\core-hang\\fault-core-hang-1280x720.png",
+                              "bytes":  175590,
+                              "width":  1280,
+                              "height":  720,
+                              "non_black_ratio":  0.998535,
+                              "variance":  2180.5671,
+                              "samples":  36864,
+                              "ok":  true,
+                              "fail_reasons":  [
+
+                                               ]
+                          },
+    "ui_final":  {
+                     "healthText":  "本地服务未连接",
+                     "routeText":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 终止并重试 技术详情",
+                     "errorCard":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 终止并重试 技术详情",
+                     "setupGuide":  "",
+                     "composerVisible":  false,
+                     "actionable":  true,
+                     "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务未连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 启动超时 工作区 project 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 服务连接 正在等待本地核心服务恢复。 本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 终止并重试 技术详情"
+                 },
+    "cleanup":  {
+                    "shell_pid":  53600,
+                    "residual_procs":  0,
+                    "notes":  "Stop-OwoShellTree 已执行"
+                },
+    "terminal_budget_hit":  false
+}

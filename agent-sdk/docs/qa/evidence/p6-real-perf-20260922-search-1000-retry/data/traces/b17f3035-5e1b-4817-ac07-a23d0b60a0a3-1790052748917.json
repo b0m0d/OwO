@@ -1,0 +1,174 @@
+{
+  "session_id": "b17f3035-5e1b-4817-ac07-a23d0b60a0a3",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-search-1000-retry\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请使用 search_files 工具按文件名关键字搜索工作区，pattern 使用 file-0777；工作区共有 1,000 个文件。必须实际调用 search_files，然后只报告命中的相对路径。",
+  "started_at": "2026-09-22T04:52:20.377341300+00:00",
+  "duration_ms": 8540,
+  "steps": 1,
+  "final_text": "搜索完成。pattern `file-0777` 命中 1 个文件：\n\n- `file-0777.txt`",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_37d6c5f4bcbd489e9dc0c801",
+      "tool": "search_files"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_37d6c5f4bcbd489e9dc0c801",
+      "tool": "search_files",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "pattern"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "命"
+    },
+    {
+      "type": "token_delta",
+      "delta": "中"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "：\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": ".txt`"
+    },
+    {
+      "type": "final",
+      "text": "搜索完成。pattern `file-0777` 命中 1 个文件：\n\n- `file-0777.txt`"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1540,
+    "completion_tokens": 98,
+    "total_tokens": 1638
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 4062,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 0,
+      "target": "search_files",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 4470,
+      "target": "",
+      "first_token_ms": 4190
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "search_1000_files"
+}

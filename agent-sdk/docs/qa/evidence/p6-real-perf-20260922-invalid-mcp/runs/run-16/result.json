@@ -1,0 +1,47 @@
+{
+  "run": 16,
+  "task": "invalid_mcp_startup",
+  "core_ready": {
+    "api_version": "0.7",
+    "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+    "event": "core_ready",
+    "instance_id": "",
+    "pid": 30000,
+    "port": 46297,
+    "startup_ms": 224.28
+  },
+  "session_create_ms": 18.14,
+  "turn_duration_ms": 4687.39,
+  "session_id": "27102834-4342-4835-98ac-2de96a187df0",
+  "events": [
+    {
+      "message": "模型调用",
+      "type": "progress",
+      "v": 1
+    },
+    {
+      "delta": "服务",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "已",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "启动。",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "text": "服务已启动。",
+      "type": "final",
+      "v": 1
+    }
+  ],
+  "tool_names": [],
+  "final_received": true,
+  "final_text_length": 6,
+  "diff": null
+}

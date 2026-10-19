@@ -1,0 +1,28 @@
+{
+  "iteration": "2026-10-04-30",
+  "scope": "Make the ignored live Single/Team benchmark reproducible and budget-auditable",
+  "changes": [
+    "Replaced the historical one-case/one-repetition live test setup with a suite-driven paired run; task filter, repetition count, batch label, model, Team worker-turn cap, and retry cap are explicit inputs.",
+    "Paired benchmark refuses the Single unbounded-call override and records the shared task call/time budget alongside Team-specific caps.",
+    "Persists Single, Team, and paired JSON reports under a fresh output root; emits per-cell status, wall-time breakdown, calls, tokens, checker counts, retries, and errors without discarding failed samples."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "User requested one final verification after implementation converges; no Cargo, test, format, or clippy command was run.",
+    "static_review": "git diff --check passed; JSON parsed; paired harness inputs/report path confirmed by source inspection. No Rust compilation or test execution."
+  },
+  "resources": {
+    "free_memory_gb": 16.08,
+    "memory_used_percent": 49.1,
+    "free_workspace_volume_gb": 34.28,
+    "workspace_volume_status": "Measured on T:; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "The paired benchmark has not been compiled or executed; no comparative quality, speed, or Team advantage is established.",
+    "The live suite and repetition count still need to be selected for a final matched run with a clean source/evaluator identity.",
+    "Single, GoalRunner, and Team retain separate evidence-collection/lifecycle adapters over the shared completion contract.",
+    "Final resource-gated Cargo, format, clippy, route-contract, and focused tests remain deferred until implementation convergence."
+  ]
+}

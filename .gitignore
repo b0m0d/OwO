@@ -1,6 +1,11 @@
 /build/
 /out/
 /artifacts/
+target/
+/agent-sdk/dist/
+/.owo-agent/
+# 代理运行期数据目录（shell 会话/临时态；每次运行可再生，永不入库）
+/.owo/
 /.vs/
 /.vscode/
 CMakeUserPresets.json
@@ -12,9 +17,101 @@ __pycache__/
 *.py[cod]
 **/bin/
 **/obj/
+# Rust 仓库豁免：crates/*/src/bin 是 Cargo 二进制源码目录（core 的 MCP 测试
+# server），曾被上面的 **/bin/ 误吞导致任何干净 checkout 无法构建整个
+# workspace（2026-09-16 R1 C1 worktree 验证暴露）。VS/Python bin 仍排除。
+!agent-sdk/crates/*/src/bin/
 *.appx
 *.msix
 *.msixbundle
-/.private/
-.D:\0program\OwO\OwO输入法_Codex项目总控提示词.md
-.D:\0program\OwO\项目计划.md
+/agent-sdk/models/
+
+# ==== agent-sdk 本地运行数据 / 基线与门禁产物 / 并行收口日临时物（2026-08-27 A2 收口新增；不删既有规则与已跟踪文件） ====
+# 运行时认证、SQLite/WAL 索引库、PID：属用户本机数据，永不入库
+/agent-sdk/.owo-agent/
+# 本地基线与门禁日志（精确模式避免误伤既有已跟踪 log）
+/agent-sdk/baseline_*.log
+/agent-sdk/gate-results-*.log
+/agent-sdk/.check_err.log
+# §2.4/§3.6 门禁与验收脚本的分步流式日志（可再生的运行产物；**归档证据**只入
+# docs/qa/evidence/**，那里按 §8 有意入库，见 ci-gate forbidden-files 的 evidence 放行）
+/agent-sdk/docs/qa/logs/
+# 历史误入库的构建/门禁日志（2026-09 已从索引移除；工作区副本保留自查）
+/agent-sdk/cargo_check.log
+/agent-sdk/clippy.log
+/agent-sdk/crypto_tests.log
+/agent-sdk/fmt.log
+/agent-sdk/fmt_check.log
+/agent-sdk/fmtc.log
+/agent-sdk/full_core_tests.log
+# 并行验证草稿目录
+scratch-*/
+# CI web 步骤的流式日志（可再生运行产物；web-tests.stream.log 单文件可近 2 MB）
+/agent-sdk/.ci-webstep-logs/
+# 临时路径清单（门禁辅助产物）
+tmp_path_keys.txt
+# 本机个人启动变体（凭据依旧只走环境变量，永不入库）
+/agent-sdk/scripts/dev-glm.local.ps1
+
+# v1 收尾（十期一路）：统一初始化生成的构建信息（版本/commit/dirty），运行时产物不入库
+/agent-sdk/build-info.json
+
+# 评测运行产物（验收/自检批次目录，非源码）
+/agent-sdk/evals/v1/results/
+
+# ==== 本机产物与归档二进制（2026-09-22 收口；均为可再生，不入库） ====
+# Electron 壳的依赖与本机运行数据（273 MB，npm install 可再生）
+/agent-sdk/desktop/electron/node_modules/
+/agent-sdk/desktop/electron/.owo/
+# 根目录本地日志与构建残留
+/log/
+/rc-err.txt
+# 验收归档里**构建出来的二进制**与 SQLite 运行数据：体积大且可由源码重编。
+# 归档证据的报告/日志/截图仍按 §8 入库（report.json、*.log、*.png 等）。
+/agent-sdk/docs/qa/evidence/**/artifacts/
+/agent-sdk/docs/qa/evidence/**/installed/
+/agent-sdk/docs/qa/evidence/**/*.db
+/agent-sdk/docs/qa/evidence/**/*.db-wal
+/agent-sdk/docs/qa/evidence/**/*.db-shm
+/agent-sdk/docs/qa/evidence/**/*.sqlite
+/agent-sdk/docs/qa/evidence/**/*.sqlite3
+# 构建出的可执行体一律不入库（含安装目录副本与卸载器）
+*.exe
+# 例外：随包 ripgrep 是**固定版本 + 哈希校验的第三方随包件**，不是本仓库构建产物。
+# core 的 external_tools.rs 固定 14.1.1 与 SHA256，tools.rs 的 search_files 找不到它
+# 就直接报错（"随包 ripgrep 不可用"），因此必须入库，否则干净 checkout 搜索功能不可用。
+!/agent-sdk/tools/rg/*
+!agent-sdk/tools/rg/**
+# docs/qa 下两份安装目录快照与独立 rg 副本（安装产物，非证据）
+/agent-sdk/docs/qa/p6-current-install-*/
+/agent-sdk/docs/qa/p6-ripgrep-install-*/
+/agent-sdk/docs/qa/tools-ripgrep-14.1.1/
+
+# 运行期配置产物（可能含用户 API 密钥，绝不入库）。
+# desktop/electron/settings.json 是 `Settings::load(&workspace)` 落到工作区的文件——
+# 桌面壳启动时 cwd=desktop/electron，于是模型接入配置会落在这里。
+# 仓库红线：凭据只经环境变量 / 本机信封，任何配置文件都不得进版本库。
+/agent-sdk/desktop/electron/settings.json
+/agent-sdk/desktop/electron/config.json
+
+# 本机工作台记忆与验收产物：属于本机状态（含调试截图、会话记忆），不入库。
+/.workbuddy/
+/deliverables/
+
+# ==== Tauri 壳本地产物与签名密钥（2026-10；签名私钥/口令/构建产物永不入库） ====
+# `.secrets/` 含更新签名私钥与口令，`.pass` 为明文口令；`binaries/` 为 staged sidecar
+# 可执行体（*.exe 已被上面的规则覆盖，但目录级忽略更稳），`gen/` 为 Tauri 生成的
+# schema，`target/` 为 Rust 构建产物。以上均可由源码/密钥持有者再生，禁止入库。
+/agent-sdk/desktop/tauri/src-tauri/.secrets/
+/agent-sdk/desktop/tauri/src-tauri/binaries/
+/agent-sdk/desktop/tauri/src-tauri/gen/
+/agent-sdk/desktop/tauri/src-tauri/target/
+/agent-sdk/desktop/tauri/node_modules/
+# QA 截图产物（浏览器/Electron 自检生成，可再生）
+/agent-sdk/desktop/web/.qa-*.png
+
+# 个人文件
+/env/.work-logs/
+
+# Local integration runs, transcripts and binaries; never part of delivery.
+/.work-logs/

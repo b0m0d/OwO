@@ -1,0 +1,28 @@
+{
+  "iteration": "2026-10-04-32",
+  "scope": "Add matched Single/Team outcome and cost-latency deltas to paired reports",
+  "changes": [
+    "Overall paired report now aligns each Single and Team cell by case_id and repetition, counts discordant pass outcomes, and computes the net pass-rate difference.",
+    "Added matched Team-minus-Single wall-time distributions (all cells and both-passed cells), model-call, token, cost, and checker-quality deltas.",
+    "Overall report contains per-cell matched details; category and per-task groups keep compact summaries. Missing or duplicate pair keys are explicitly marked invalid.",
+    "Extended paired-report regression-test source with matched wall, call, token, cost, quality, and mismatch assertions."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Rust verification remains reserved for the single final round after architecture convergence.",
+    "static_review": "git diff --check passed; output fields and paired-key paths were reviewed. No compilation or tests were run."
+  },
+  "resources": {
+    "free_memory_gb": 16.01,
+    "memory_used_percent": 49.4,
+    "free_workspace_volume_gb": 34.32,
+    "workspace_volume_status": "Measured on T:; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Matched metrics are descriptive; no paired confidence interval or significance test is implemented yet.",
+    "The live benchmark remains unexecuted; no Single/Team quality, latency, cost, or advantage claim is supported.",
+    "Shared completion lifecycle/evidence adapters and final resource-gated Rust verification remain outstanding."
+  ]
+}

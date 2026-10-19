@@ -1,0 +1,20 @@
+{
+  "evidence_id": "team-context-source-freshness-streaming-20261006",
+  "scope": "static-source-review-and-rust-format-check",
+  "claim": "TeamContextRead validates file-hash-bound workspace facts with streaming SHA-256 on Tokio blocking workers, using a 64 KiB buffer and a 64 MiB per-file limit. Oversized, unreadable, or blocking-join-failed sources remain unverifiable and are not supplied as current facts. Once the requested fact count or body-byte budget is satisfied, later candidates are not hashed.",
+  "verification": [
+    "rustfmt --edition 2021 --check passed for the touched WorkSwarm Rust files.",
+    "Added tests for correct streamed hashing, changed hash results, and limit-based unverifiable status; converted freshness integration coverage to async. Tests are authored but not run.",
+    "git diff --check passed for scoped source and documentation edits."
+  ],
+  "limits": [
+    "Cargo check, Rust unit tests, and WorkSwarm API tests were not run: latest sample showed 4.73 GB free RAM and 85.06% used, below the repository Cargo gate.",
+    "No live Team execution or paired Team-vs-Single benchmark was run."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-server/src/workswarm_api/worker_context_tool.rs": "2774ec72ca8dda684d7758f4561da05a2a9bd7989b4e726dcbc2c83dff49b947",
+    "crates/owo-agent-server/src/workswarm_api/workers.rs": "8d31ab25b0f73d218815f3bfe9d102c294d940440524f4ec58510d68703a639a",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team架构综合审查与改造方案-2026-10-06.md": "576165577f0798187302b86a7c8342b6ffc91ed5c2943729744a7f4f955e5170"
+  }
+}

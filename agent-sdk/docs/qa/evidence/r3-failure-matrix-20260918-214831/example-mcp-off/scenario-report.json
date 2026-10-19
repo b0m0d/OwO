@@ -1,0 +1,58 @@
+{
+    "id":  "example-mcp-off",
+    "note":  "§3.4：示例 MCP 关闭 → 正常主界面 + 工具状态 disabled（可查看禁用原因）",
+    "kind":  "healthy",
+    "expected_codes":  [
+
+                       ],
+    "required_actions":  [
+
+                         ],
+    "final_budget_sec":  45,
+    "known_gap":  "",
+    "executed":  true,
+    "failed_stage":  "",
+    "error_type":  "",
+    "error_message":  "",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260918-214831\\example-mcp-off",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260918-214831\\example-mcp-off\\owo-agent.exe",
+    "sidecar_sha256":  "536D2B4212D0D28A8DD35A151112A7C1B9CA27F77770518C2EAF1C98E3DA6A11",
+    "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260918-214831\\example-mcp-off\\owo-agent.exe",
+    "shell_pid":  39724,
+    "window_at_sec":  0.6,
+    "actionable_at_sec":  1.5,
+    "error_at_sec":  -1,
+    "error_code":  "",
+    "error_card":  "",
+    "setup_guide_len":  0,
+    "details_folded":  false,
+    "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-failure-matrix-20260918-214831\\example-mcp-off\\fault-example-mcp-off-1280x720.png",
+    "screenshot_metric":  {
+                              "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r3-failure-matrix-20260918-214831\\example-mcp-off\\fault-example-mcp-off-1280x720.png",
+                              "bytes":  1806832,
+                              "width":  1280,
+                              "height":  720,
+                              "non_black_ratio":  0.999403,
+                              "variance":  1246.3725,
+                              "samples":  36864,
+                              "ok":  true,
+                              "fail_reasons":  [
+
+                                               ]
+                          },
+    "ui_final":  {
+                     "healthText":  "本地服务已连接",
+                     "routeText":  "",
+                     "errorCard":  "",
+                     "setupGuide":  "",
+                     "composerVisible":  true,
+                     "actionable":  true,
+                     "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务已连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⚙ 设置 工作区 任务 ＋ 新建会话 显示归档 暂无会话 显示工具与设置 开发者模式 设置与诊断 模型与连接 管理当前工作区的模型与运行偏好 服务已连接 模型 读取实际运行模型… 提供商 读取中… OpenAI 兼容接口 凭据来源 读取中… 密钥不写入工作区或设置文件 云端模型（数据出境） … 模型用量与预算 — 保存模型与设置 存储与恢复 — 备份 导出 恢复… — 一键清空数据… OpenAPI 3.1 隐私声明（数据字典/一键关闭/保留期） 📎 添加文件 🎤 语音 ⏹ 停止 发送 Ctrl ↵ 情景感知 — 主动建议 情景记忆 检索 最近观察（observations） 检索结果（recall） 审计日志 应用 DIFF 审阅 回滚全部改动 导出 MD 导出 HTML"
+                 },
+    "cleanup":  {
+                    "shell_pid":  39724,
+                    "residual_procs":  0,
+                    "notes":  "Stop-OwoShellTree 已执行"
+                },
+    "terminal_budget_hit":  false
+}

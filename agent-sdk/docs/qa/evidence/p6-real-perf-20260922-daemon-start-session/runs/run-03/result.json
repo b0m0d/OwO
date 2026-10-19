@@ -1,0 +1,36 @@
+{
+  "run": 3,
+  "task": "daemon_start_session",
+  "core_ready": {
+    "api_version": "0.7",
+    "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+    "event": "core_ready",
+    "instance_id": "",
+    "pid": 30552,
+    "port": 34565,
+    "startup_ms": 221.23
+  },
+  "session_create_ms": 27.03,
+  "turn_duration_ms": 4125.53,
+  "session_id": "6c46d3f2-ce85-422b-b23a-af032a5dc4b5",
+  "events": [
+    {
+      "message": "模型调用",
+      "type": "progress",
+      "v": 1
+    },
+    {
+      "delta": "好的",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "text": "好的",
+      "type": "final",
+      "v": 1
+    }
+  ],
+  "tool_names": [],
+  "final_received": true,
+  "final_text_length": 2
+}

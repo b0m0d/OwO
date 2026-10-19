@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-06",
+  "finding": "Goal subscribed to EventSource.onmessage while cloud task endpoint emits named progress events; named events were not rendered. CloudSseHub Lagged errors were also silently ignored.",
+  "changes": [
+    "Goal panel listens for both default message and named progress events.",
+    "Cloud event receiver emits stream_gap with task_id, skipped_events, and recovery guidance, then closes the stream.",
+    "Extracted the per-task broadcast ring capacity into a named constant.",
+    "CloudSseHub assigns a monotonic per-task sequence and emits standard SSE id fields.",
+    "GET cloud task events honors Last-Event-ID and replays only later retained frames; bounded-history gaps and unknown task IDs are explicit.",
+    "Goal EventSource stays open across transient errors for native cursor-based reconnect and closes on terminal/not-found frames.",
+    "Cloud task SSE hub registration occurs synchronously after persistence and before HTTP exposes task_id, allowing early subscribers to wait for first progress.",
+    "Completed cursors receive stream_complete to prevent an empty-stream EventSource reconnect loop."
+  ],
+  "verification": {
+    "node_test": "passed: node --test agent-sdk/desktop/web/tests/goal-cloud-sse.test.mjs (2/2; named progress, retry retention, terminal and stream_complete closure)",
+    "rustfmt": "passed for Server SSE/cloud API sources and contract tests",
+    "server_rust_contract_test": "source added; not run resource gate pending",
+    "browser_plugin": "not_available",
+    "playwright": "not_configured; pnpm exec playwright --version failed because the workspace has no package",
+    "rendered_browser_qa": "not_run"
+  },
+  "resource_snapshot": {
+    "available_gb": 4.53,
+    "used_percent": 85.7,
+    "cargo_status": "not_started_resource_gate_below_6_gb_and_at_or_above_80_percent"
+  },
+  "known_limits": [
+    "Events outside the bounded history cannot be recovered; the stream reports the count and replays only the retained suffix.",
+    "Server Rust contract tests and a real browser/network-interruption test remain unrun."
+  ]
+}

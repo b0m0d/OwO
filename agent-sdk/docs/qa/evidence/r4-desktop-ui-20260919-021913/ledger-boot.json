@@ -1,0 +1,105 @@
+{
+    "label":  "r4-ui-boot",
+    "captured_at":  "2026-09-18T18:19:16.9038419Z",
+    "server_total":  9,
+    "returned":  9,
+    "web_total":  7,
+    "web_health":  2,
+    "web_auth":  0,
+    "web_events":  1,
+    "web_business":  4,
+    "web_business_routes":  [
+                                "GET /sessions",
+                                "GET /whitelist",
+                                "GET /skills",
+                                "GET /project/rules"
+                            ],
+    "web_route_repeats":  [
+
+                          ],
+    "shell_total":  2,
+    "shell_auth":  1,
+    "shell_health":  1,
+    "other_total":  0,
+    "probe_total":  0,
+    "sources":  [
+                    "shell",
+                    "web"
+                ],
+    "records":  [
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "shell",
+                        "started_at":  "2026-09-18T18:19:15.238Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/auth/token",
+                        "source":  "shell",
+                        "started_at":  "2026-09-18T18:19:15.243Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T18:19:15.500Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T18:19:15.506Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/events/stream",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T18:19:15.510Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/sessions",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T18:19:15.516Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/whitelist",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T18:19:15.517Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/skills",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T18:19:15.519Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/project/rules",
+                        "source":  "web",
+                        "started_at":  "2026-09-18T18:19:15.519Z",
+                        "status":  200
+                    }
+                ],
+    "web_buckets_sum":  7,
+    "web_buckets_ok":  true
+}

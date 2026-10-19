@@ -1,0 +1,38 @@
+{
+    "id":  "data-dir-unwritable",
+    "note":  "§3.4：数据目录不可写 → 启动失败并报 storage/not_writable（core_fatal 协议行）",
+    "kind":  "healthy",
+    "expected_codes":  [
+                           "storage/not_writable"
+                       ],
+    "required_actions":  [
+                             "更换数据目录",
+                             "重试"
+                         ],
+    "final_budget_sec":  20,
+    "known_gap":  "",
+    "executed":  false,
+    "failed_stage":  "inject",
+    "error_type":  "ItemNotFoundException",
+    "error_message":  "Cannot find path \u0027psdrive\u0027 because it does not exist.",
+    "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\data-dir-unwritable",
+    "injected_sidecar":  "",
+    "sidecar_sha256":  "",
+    "launched_core":  "",
+    "shell_pid":  0,
+    "window_at_sec":  -1,
+    "actionable_at_sec":  -1,
+    "error_at_sec":  -1,
+    "error_code":  "",
+    "error_card":  "",
+    "setup_guide_len":  0,
+    "details_folded":  false,
+    "screenshot":  "",
+    "screenshot_metric":  null,
+    "ui_final":  null,
+    "cleanup":  {
+                    "shell_pid":  0,
+                    "residual_procs":  0,
+                    "notes":  ""
+                }
+}

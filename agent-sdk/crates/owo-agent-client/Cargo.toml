@@ -1,0 +1,19 @@
+[package]
+name = "owo-agent-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 指南 §3.1/§7.1：客户端只能依赖 protocol（契约源）。**禁止**依赖
+# core/server/sqlite/mcp/perception/executor/policy——由 tests/dependency_guard_tests.rs
+# 作为契约测试强制（CI 拒绝反向依赖）。
+[dependencies]
+owo-agent-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

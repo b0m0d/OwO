@@ -1,0 +1,32 @@
+{
+  "run": 19,
+  "task": "approval_command",
+  "core_ready": {
+    "api_version": "0.7",
+    "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+    "event": "core_ready",
+    "instance_id": "",
+    "pid": 45604,
+    "port": 55859,
+    "startup_ms": 219.11
+  },
+  "session_create_ms": 14.41,
+  "turn_duration_ms": 43821.68,
+  "session_id": "00599881-ae21-48c9-b1fd-a83171ada350",
+  "events": [
+    {
+      "message": "模型调用",
+      "type": "progress",
+      "v": 1
+    },
+    {
+      "message": "turn failed: gateway error: 模型网关全部失败：模型请求失败：direct: error sending request for url (https://open.bigmodel.cn/api/paas/v4/chat/completions)",
+      "type": "progress",
+      "v": 1
+    }
+  ],
+  "tool_names": [],
+  "final_received": false,
+  "final_text_length": 0,
+  "diff": null
+}

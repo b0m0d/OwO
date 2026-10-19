@@ -1,0 +1,351 @@
+{
+  "session_id": "141ecf70-757e-4f5e-9308-880b34b4aa56",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-short-text\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请用大约 60 个字介绍你自己，并说明你能做什么。",
+  "started_at": "2026-09-22T04:36:46.949441800+00:00",
+  "duration_ms": 6798,
+  "steps": 0,
+  "final_text": "你好！我是由 OwO Agent SDK 驱动的智能助手。我能读写和搜索工作区文件、执行 shell 命令、委派子代理协同完成任务，还掌握多项技能：自动化浏览器操作、创建编辑 Word 文档、处理 PDF（读取、生成、填表）、以及制作和分析 Excel 表格与 CSV 数据。告诉我你的需求，我来帮你高效完成！",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "你好"
+    },
+    {
+      "type": "token_delta",
+      "delta": "！"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我是"
+    },
+    {
+      "type": "token_delta",
+      "delta": "由"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Ow"
+    },
+    {
+      "type": "token_delta",
+      "delta": "O"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Agent"
+    },
+    {
+      "type": "token_delta",
+      "delta": " SDK"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "驱"
+    },
+    {
+      "type": "token_delta",
+      "delta": "动的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "智能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "助手"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "读写"
+    },
+    {
+      "type": "token_delta",
+      "delta": "和"
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "工作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "区"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "执行"
+    },
+    {
+      "type": "token_delta",
+      "delta": " shell"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "命"
+    },
+    {
+      "type": "token_delta",
+      "delta": "令"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "委"
+    },
+    {
+      "type": "token_delta",
+      "delta": "派"
+    },
+    {
+      "type": "token_delta",
+      "delta": "子"
+    },
+    {
+      "type": "token_delta",
+      "delta": "代理"
+    },
+    {
+      "type": "token_delta",
+      "delta": "协同"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成任务"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "还"
+    },
+    {
+      "type": "token_delta",
+      "delta": "掌握"
+    },
+    {
+      "type": "token_delta",
+      "delta": "多项"
+    },
+    {
+      "type": "token_delta",
+      "delta": "技能"
+    },
+    {
+      "type": "token_delta",
+      "delta": "："
+    },
+    {
+      "type": "token_delta",
+      "delta": "自动化"
+    },
+    {
+      "type": "token_delta",
+      "delta": "浏览器"
+    },
+    {
+      "type": "token_delta",
+      "delta": "操作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "创建"
+    },
+    {
+      "type": "token_delta",
+      "delta": "编辑"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Word"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 文"
+    },
+    {
+      "type": "token_delta",
+      "delta": "档"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "处理"
+    },
+    {
+      "type": "token_delta",
+      "delta": " PDF"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "读取"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "生成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "填"
+    },
+    {
+      "type": "token_delta",
+      "delta": "表"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）、"
+    },
+    {
+      "type": "token_delta",
+      "delta": "以及"
+    },
+    {
+      "type": "token_delta",
+      "delta": "制作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "和分析"
+    },
+    {
+      "type": "token_delta",
+      "delta": " Excel"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 表"
+    },
+    {
+      "type": "token_delta",
+      "delta": "格"
+    },
+    {
+      "type": "token_delta",
+      "delta": "与"
+    },
+    {
+      "type": "token_delta",
+      "delta": " CSV"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 数据"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "告诉我"
+    },
+    {
+      "type": "token_delta",
+      "delta": "你的"
+    },
+    {
+      "type": "token_delta",
+      "delta": "需求"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "我来"
+    },
+    {
+      "type": "token_delta",
+      "delta": "帮你"
+    },
+    {
+      "type": "token_delta",
+      "delta": "高效"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成！"
+    },
+    {
+      "type": "final",
+      "text": "你好！我是由 OwO Agent SDK 驱动的智能助手。我能读写和搜索工作区文件、执行 shell 命令、委派子代理协同完成任务，还掌握多项技能：自动化浏览器操作、创建编辑 Word 文档、处理 PDF（读取、生成、填表）、以及制作和分析 Excel 表格与 CSV 数据。告诉我你的需求，我来帮你高效完成！"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 719,
+    "completion_tokens": 128,
+    "total_tokens": 847
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 6796,
+      "target": "",
+      "first_token_ms": 4656
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "short_text_conversation"
+}

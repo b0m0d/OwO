@@ -1,0 +1,43 @@
+{
+  "session_id": "06690ee9-c640-4f87-abbb-eb7b9a204b75",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-daemon-start-session\\runs\\run-12\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请只回答：好的",
+  "started_at": "2026-09-22T05:46:28.149832700+00:00",
+  "duration_ms": 4514,
+  "steps": 0,
+  "final_text": "好的",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "好的"
+    },
+    {
+      "type": "final",
+      "text": "好的"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 720,
+    "completion_tokens": 33,
+    "total_tokens": 753
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 4511,
+      "target": "",
+      "first_token_ms": 4503
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "daemon_start_session"
+}

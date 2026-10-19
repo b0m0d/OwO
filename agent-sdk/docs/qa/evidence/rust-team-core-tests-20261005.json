@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-05",
+  "scope": "Rust Core compile and focused Team/CAS tests",
+  "build": {
+    "core_check": "passed",
+    "ort": "resolved via scripts/resolve-ort.ps1; passed SHERPA_ONNX_LIB_DIR to cargo child",
+    "cargo_guard": "Invoke-CiCargo; complete Core rerun used -j 1 and --test-threads=1",
+    "resource_limited_attempt": {
+      "exit_code": 137,
+      "status": "resource_limited",
+      "reason": "memory crossed 80% threshold during first full lib test; rerun passed after recovery"
+    },
+    "initial_native_failure": "First sherpa-onnx-sys attempt hit TLS EOF; rerun with the resolved local library path passed; cause of first miss is unconfirmed."
+  },
+  "tests": {
+    "owo-agent-kernel cas_store::text::tests": {
+      "passed": 9,
+      "failed": 0
+    },
+    "owo-agent-core --lib": {
+      "passed": 518,
+      "failed": 0,
+      "ignored": 3
+    },
+    "owo-agent-core --test workswarm_tests": {
+      "passed": 49,
+      "failed": 0
+    },
+    "owo-agent-core --test workswarm_recovery_tests": {
+      "passed": 8,
+      "failed": 0
+    },
+    "owo-agent-core --test workswarm_responsiveness_tests": {
+      "passed": 5,
+      "failed": 0
+    }
+  },
+  "checks": {
+    "rustfmt_check": "passed for affected Rust files",
+    "git_diff_check": "passed",
+    "clippy": "passed with warnings: 12 Core lib warnings, 10 Core lib-test warnings (duplicates included), 1 ProductEval unused_mut warning"
+  },
+  "warnings": [
+    "Core cargo check reported four unused-item warnings.",
+    "Core Clippy exited 0 but reported 12 lib warnings and 10 lib-test warnings, including duplicate warnings.",
+    "ProductEval reported one unused_mut warning."
+  ],
+  "not_run": [
+    "workspace-wide tests",
+    "Clippy",
+    "Server/CLI/Tauri full package tests",
+    "real-model paired benchmark",
+    "desktop GUI acceptance"
+  ],
+  "interpretation": "Compilation and focused regressions pass; this is not evidence that Team beats Single on real task speed or quality."
+}

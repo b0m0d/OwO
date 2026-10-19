@@ -1,0 +1,56 @@
+[
+    {
+        "scenario":  "provider-unset",
+        "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+        "pass":  true,
+        "detail":  "hwnd=1511172 owner=52528 t=0.7s fail="
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "DOM 事实通道（WebView2 CDP）建立",
+        "pass":  true,
+        "detail":  "requested=12624 effective=12624"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "10s 内界面可操作（无永久 loading）",
+        "pass":  true,
+        "detail":  "t=1.5s health=\"本地服务未连接\""
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "业务引导终态：配置引导页可见（非错误卡、非白屏）",
+        "pass":  false,
+        "detail":  "setupGuide=0 字 errorCard=0 字 actionable=True t=1.5s"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "引导页提供全部契约动作（打开模型设置/测试连接)",
+        "pass":  false,
+        "detail":  "missing=打开模型设置/测试连接"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "引导页提供可操作动作",
+        "pass":  true,
+        "detail":  "body=O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务已连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⚙ 设置 工作区 选择目录… 桌面版由原生目录选择器设定，不需要手输完整路径。 任务 ＋ 新建会话 显示归档 暂无会话 显示工具与设置 开发者模式 设置与诊断 模型与连接 管理当前工作区的模型与运行偏好 服务已连接 模型 读取实际运行模型… 提供商 读取中… OpenAI 兼容接口 凭据来源 读取中… 密钥不写入工作区或设置文件 云端模型（数据出境） … 模型用量与预算 — 保存模型与设置 存储与恢复 — 备份 导出 恢复… — 一键清空数据… 诊断请求台账 进入本页自动加载；也可手动刷新。 OpenAPI 3.1 隐私声明（数据字典/一键关闭/保留期） 后台 可用 工作区 project 模型 unset · 壳侧未配置 权限 点按查看 当前任务 空闲 📎 添加文件 🎤 语音 ⏹ 停止 发送 Ctrl ↵ 情景感知 — 主动建议 情景记忆 检索 最近观察（observations） 检索结果（recall） 审计日志 应用 DIFF 审阅 回滚全部改动 导出 MD 导出 HTML"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "引导页呈现稳定错误码（provider/not_configured)",
+        "pass":  false,
+        "detail":  "guide_has_code=False"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+        "pass":  true,
+        "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-015511\\provider-unset\\owo-agent.exe sha256=4CB2BD6DAC0635B3CEBE28620D19AC8EBBFA3AEB55C557908EF5EDC88014FF66"
+    },
+    {
+        "scenario":  "provider-unset",
+        "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+        "pass":  true,
+        "detail":  "stages=ok"
+    }
+]

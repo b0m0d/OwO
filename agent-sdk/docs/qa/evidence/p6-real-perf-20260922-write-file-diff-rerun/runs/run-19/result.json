@@ -1,0 +1,301 @@
+{
+  "run": 19,
+  "task": "write_file_and_diff",
+  "core_ready": {
+    "api_version": "0.7",
+    "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+    "event": "core_ready",
+    "instance_id": "",
+    "pid": 24444,
+    "port": 59764,
+    "startup_ms": 221.23
+  },
+  "session_create_ms": 5.46,
+  "turn_duration_ms": 6069.23,
+  "session_id": "09c8b154-a6ab-4ed0-9252-553c26d15fd0",
+  "events": [
+    {
+      "message": "模型调用",
+      "type": "progress",
+      "v": 1
+    },
+    {
+      "args": {
+        "content": "performance write proof\n",
+        "path": "perf-write.txt"
+      },
+      "explain": {
+        "action": "写入文件",
+        "risk": "该工具未声明风险信息（未提供 MCP annotations）",
+        "target": "perf-write.txt",
+        "undoable": true
+      },
+      "level": "write",
+      "reason": "write 文件操作（工作区内）",
+      "redacted_args": {
+        "content": "performance write proof\n",
+        "path": "perf-write.txt"
+      },
+      "request_id": "27b80ef8-59c5-4d97-82b3-9b3a25d2b418",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "tool": "write_file",
+      "type": "permission_request",
+      "v": 1
+    },
+    {
+      "args": null,
+      "id": "call_453b7a8d3f424931b1b75486",
+      "tool": "write_file",
+      "type": "tool_use",
+      "v": 1
+    },
+    {
+      "id": "call_453b7a8d3f424931b1b75486",
+      "ok": true,
+      "tool": "write_file",
+      "type": "tool_result",
+      "v": 1
+    },
+    {
+      "message": "模型调用",
+      "type": "progress",
+      "v": 1
+    },
+    {
+      "args": null,
+      "id": "call_bf291606fa0f49fc9c1d6464",
+      "tool": "read_file",
+      "type": "tool_use",
+      "v": 1
+    },
+    {
+      "id": "call_bf291606fa0f49fc9c1d6464",
+      "ok": true,
+      "tool": "read_file",
+      "type": "tool_result",
+      "v": 1
+    },
+    {
+      "message": "模型调用",
+      "type": "progress",
+      "v": 1
+    },
+    {
+      "delta": "已完成",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " ",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "✅",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "\n\n",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "-",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " 文",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "件",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " `",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "perf",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "-write",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": ".txt",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "`",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " 已",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "创建",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "并",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "写入",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "内容",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "：",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "`",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "performance",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " write",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " proof",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "`\n",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "-",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " 已",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "回",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "读",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "确认",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "，",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "内容",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "与",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "要求",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "一致",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "（",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "共",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " ",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "24",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " 字",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "节",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "）",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "text": "已完成 ✅\n\n- 文件 `perf-write.txt` 已创建并写入内容：`performance write proof`\n- 已回读确认，内容与要求一致（共 24 字节）",
+      "type": "final",
+      "v": 1
+    }
+  ],
+  "tool_names": [
+    "read_file",
+    "write_file"
+  ],
+  "final_received": true,
+  "final_text_length": 88,
+  "diff": [
+    {
+      "path": "perf-write.txt",
+      "after": "performance write proof\n"
+    }
+  ]
+}

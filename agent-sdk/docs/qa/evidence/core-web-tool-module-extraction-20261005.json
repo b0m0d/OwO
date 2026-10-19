@@ -1,0 +1,22 @@
+{
+  "evidence_id": "core-web-tool-module-extraction-20261005",
+  "scope": "source-only",
+  "claim": "The WebFetchTool/WebSearchTool family, HTTP client and proxy setup, HTML conversion, and Bing/DDG parsing live in tools/web.rs. The process-wide reqwest Client and connection pool are reused while OWO_HTTP_PROXY is unchanged, then rebuilt on configuration changes. Invalid proxy errors never echo the proxy URL, which may contain credentials. ToolSpec/ToolContext/ToolRegistry and original registration remain in tools.rs.",
+  "limits": [
+    "No Cargo compilation or Rust tests were run; rustfmt and source assertions do not prove type correctness.",
+    "No live web request or configured-provider Agent turn was run; reachability and runtime client reuse are not verified.",
+    "No latency, token, tool-call, or delivery-quality gain is claimed; connection reuse is implemented but not benchmarked."
+  ],
+  "verification": [
+    "rustfmt --check --edition 2021 --config skip_children=true passed for tools.rs and tools/web.rs.",
+    "Python source assertions passed for registry wiring, configuration-keyed Client reuse, proxy-error redaction, shared output decoder, and retained tests.",
+    "A regression test source asserts malformed proxy configuration errors do not expose proxy credentials; it has not been run.",
+    "git diff --check exited 0; line-ending normalization warnings for unrelated dirty files may remain."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/tools.rs": "6cc1192a6bc11fd3184459f6b40122f8871d9a628c56f1a1a7c8ef175be15dc3",
+    "crates/owo-agent-core/src/tools/web.rs": "de77b6f2db99eac38f9be063ba0992d70d132dbee7b0d0d510b1ab8fc58dfd48",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "094732325413d1aa575e45a144585a28e829394e88702889e5ef081360929215"
+  }
+}

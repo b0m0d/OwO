@@ -1,0 +1,5 @@
+﻿{
+    "sidecar_version_line":  "owo-agent 0.1.0 api=0.7 commit=cec606583d1280af4f6e3ddf506dce84ee5b10be dirty=false built_at=2026-09-17T13:40:02Z source=compiled",
+    "sidecar_exe":  "T:\\创新创业\\OwO-master\\agent-sdk\\target\\debug\\owo-agent.exe",
+    "shell_exe":  "T:\\创新创业\\OwO-master\\agent-sdk\\desktop\\tauri\\src-tauri\\target\\debug\\owo-agent-desktop.exe"
+}

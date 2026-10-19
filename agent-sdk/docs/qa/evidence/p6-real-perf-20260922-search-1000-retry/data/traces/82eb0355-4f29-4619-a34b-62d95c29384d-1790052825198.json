@@ -1,0 +1,246 @@
+{
+  "session_id": "82eb0355-4f29-4619-a34b-62d95c29384d",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-search-1000-retry\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请使用 search_files 工具按文件名关键字搜索工作区，pattern 使用 file-0777；工作区共有 1,000 个文件。必须实际调用 search_files，然后只报告命中的相对路径。",
+  "started_at": "2026-09-22T04:53:35.792041300+00:00",
+  "duration_ms": 9406,
+  "steps": 1,
+  "final_text": "搜索完成。使用关键字 `file-0777` 在工作区（共 1,000 个文件）中进行文件名搜索，命中结果如下：\n\n- `file-0777.txt`\n\n共命中 1 个文件。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_c7e8aa11f75f4338ac4c8528",
+      "tool": "search_files"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_c7e8aa11f75f4338ac4c8528",
+      "tool": "search_files",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "使用"
+    },
+    {
+      "type": "token_delta",
+      "delta": "关键字"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 在"
+    },
+    {
+      "type": "token_delta",
+      "delta": "工作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "区"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "共"
+    },
+    {
+      "type": "token_delta",
+      "delta": " "
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": ","
+    },
+    {
+      "type": "token_delta",
+      "delta": "000"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）"
+    },
+    {
+      "type": "token_delta",
+      "delta": "中进行"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "名"
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命中"
+    },
+    {
+      "type": "token_delta",
+      "delta": "结果"
+    },
+    {
+      "type": "token_delta",
+      "delta": "如下"
+    },
+    {
+      "type": "token_delta",
+      "delta": "：\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": ".txt"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "共"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命中"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 1 个文件。"
+    },
+    {
+      "type": "final",
+      "text": "搜索完成。使用关键字 `file-0777` 在工作区（共 1,000 个文件）中进行文件名搜索，命中结果如下：\n\n- `file-0777.txt`\n\n共命中 1 个文件。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1540,
+    "completion_tokens": 120,
+    "total_tokens": 1660
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 4524,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 0,
+      "target": "search_files",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 4875,
+      "target": "",
+      "first_token_ms": 4148
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "search_1000_files"
+}

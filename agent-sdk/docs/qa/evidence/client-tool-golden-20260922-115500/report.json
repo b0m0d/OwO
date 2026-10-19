@@ -1,0 +1,35 @@
+{
+  "kind": "client-tool-golden",
+  "status": "passed_with_boundary",
+  "provider": "local deterministic OpenAI-compatible mock",
+  "cli": {
+    "status": "passed",
+    "turn_exit_code": 0,
+    "tool": "write_file",
+    "file": "cli-golden-output.txt",
+    "diff_contains_file": true,
+    "final_text": "golden path complete",
+    "daemon_repl": {
+      "resume_diff_undo": "passed",
+      "file_absent_after_undo": true
+    }
+  },
+  "desktop": {
+    "status": "passed",
+    "release_shell_and_sidecar": true,
+    "session_created": true,
+    "turn_route_200": true,
+    "tool_result": "write_file ok",
+    "file_created": true,
+    "diff_route_200": true,
+    "diff_ui_contains_file": true,
+    "revert_route_200": true,
+    "file_absent_after_revert": true,
+    "approval_visible": false,
+    "permission_boundary": "this isolated run auto-approved write_file; no approval click claimed"
+  },
+  "evidence_root": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\client-tool-golden-20260922-115500",
+  "desktop_run_root": "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-115500\\tool-golden",
+  "release_core_sha256": "47858164D1A4D9A2D7BB1E79D977376AA824F96FCD88DDC7F1DA1A013A7A8607",
+  "release_shell_sha256": "FF63CCD70E8516672D65C75610B59157D0AE32071FFB1C4110EAE29CE8DC2B58"
+}

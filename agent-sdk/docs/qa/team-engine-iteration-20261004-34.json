@@ -1,0 +1,27 @@
+{
+  "iteration": "2026-10-04-34",
+  "scope": "Bind GoalRunner step acceptance to the active task attempt and output version",
+  "changes": [
+    "GoalRunner no longer counts a step validation receipt by requirement_id alone; it requires matching step/task, active attempt_id, phase epoch, accepted output SHA-256, validator ID/version, and arguments SHA-256.",
+    "The latest receipt matching the active requirement contract is used; a prior attempt receipt cannot satisfy a current attempt even when its output bytes are identical.",
+    "Added regression-test source for an identical-output retry whose prior attempt passed but whose current attempt has no receipt."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Final Rust verification is deferred until the architecture implementation converges, as requested.",
+    "static_review": "git diff --check passed; source binding fields and the regression fixture were reviewed. No compilation, tests, formatting, clippy, or model calls were run."
+  },
+  "resources": {
+    "free_memory_gb": 15.96,
+    "memory_used_percent": 49.5,
+    "free_workspace_volume_gb": 34.32,
+    "workspace_volume_status": "Measured on T:; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "GoalRunner step receipts are now version-bound, but task attempt identity and lifecycle persistence still need a full Single/Goal/Team path audit.",
+    "Behavioral verification and independent review coverage must be audited across every legacy and production entrypoint before final acceptance.",
+    "Final resource-gated Rust verification and paired live Single/Team evaluation remain unexecuted; no Team advantage claim is supported."
+  ]
+}

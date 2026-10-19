@@ -1,0 +1,21 @@
+{
+  "evidence_id": "team-phase-subplan-pruning-20261006",
+  "scope": "static-source-review-and-rust-format-check",
+  "claim": "WorkSwarm phase subplans now include only work reachable from the ready frontier plus direct succeeded dependency anchors. Construction uses reverse adjacency and a dependency counter in O(V+E); successful anchors drop historical edges only in the phase-local clone.",
+  "verification": [
+    "rustfmt --edition 2021 --check passed for touched WorkSwarm Rust files.",
+    "Added unit tests for reachable closure, successful-anchor validation, deferred parallel lead fan-out, multi-dependency joins, Human-gated branches, and a 512-step linear chain; tests were authored but not run.",
+    "git diff --check passed for the scoped source and documentation edits."
+  ],
+  "limits": [
+    "Cargo check and Rust tests were not run: latest sample showed 4.73 GB free RAM and 85.06% used, below the repository Cargo gate.",
+    "No live Team execution or paired Team-vs-Single benchmark was performed; no measured speed or quality gain is claimed."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/phase_subplan.rs": "3aa29f2efe36b16d85e94d21c1a8d7a8805e1de25cdfcae48778c24bfe3db53a",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs": "67b1bc70f114bf4a751db2ad2d99d5ab5509d39c7e4f4fc7c3e195c1232ddb70",
+    "crates/owo-agent-core/src/workswarm/mod.rs": "4eddaed9fe9450c916448327b6548d6ae27b46a227a787ddb64fe588b01730d9",
+    "docs/Team架构综合审查与改造方案-2026-10-06.md": "576165577f0798187302b86a7c8342b6ffc91ed5c2943729744a7f4f955e5170",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3"
+  }
+}

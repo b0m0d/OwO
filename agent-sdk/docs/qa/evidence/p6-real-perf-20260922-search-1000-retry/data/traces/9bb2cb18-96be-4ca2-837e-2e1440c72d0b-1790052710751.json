@@ -1,0 +1,266 @@
+{
+  "session_id": "9bb2cb18-96be-4ca2-837e-2e1440c72d0b",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-search-1000-retry\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请使用 search_files 工具按文件名关键字搜索工作区，pattern 使用 file-0777；工作区共有 1,000 个文件。必须实际调用 search_files，然后只报告命中的相对路径。",
+  "started_at": "2026-09-22T04:51:37.351829700+00:00",
+  "duration_ms": 13399,
+  "steps": 1,
+  "final_text": "搜索完成。使用 pattern `file-0777` 在工作区中实际调用 `search_files` 后，命中结果如下：\n\n**命中文件（1 个）：**\n- `file-0777.txt`\n\n以上即为全部命中的相对路径。",
+  "events": [
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "tool_start",
+      "id": "call_698deabed0c64305aec72692",
+      "tool": "search_files"
+    },
+    {
+      "type": "tool_result",
+      "id": "call_698deabed0c64305aec72692",
+      "tool": "search_files",
+      "ok": true,
+      "error": null
+    },
+    {
+      "type": "model_call"
+    },
+    {
+      "type": "token_delta",
+      "delta": "搜索"
+    },
+    {
+      "type": "token_delta",
+      "delta": "完成"
+    },
+    {
+      "type": "token_delta",
+      "delta": "。"
+    },
+    {
+      "type": "token_delta",
+      "delta": "使用"
+    },
+    {
+      "type": "token_delta",
+      "delta": " pattern"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 在"
+    },
+    {
+      "type": "token_delta",
+      "delta": "工作"
+    },
+    {
+      "type": "token_delta",
+      "delta": "区"
+    },
+    {
+      "type": "token_delta",
+      "delta": "中"
+    },
+    {
+      "type": "token_delta",
+      "delta": "实际"
+    },
+    {
+      "type": "token_delta",
+      "delta": "调用"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "search"
+    },
+    {
+      "type": "token_delta",
+      "delta": "_files"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 后"
+    },
+    {
+      "type": "token_delta",
+      "delta": "，"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命中"
+    },
+    {
+      "type": "token_delta",
+      "delta": "结果"
+    },
+    {
+      "type": "token_delta",
+      "delta": "如下"
+    },
+    {
+      "type": "token_delta",
+      "delta": "：\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "**"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命中"
+    },
+    {
+      "type": "token_delta",
+      "delta": "文件"
+    },
+    {
+      "type": "token_delta",
+      "delta": "（"
+    },
+    {
+      "type": "token_delta",
+      "delta": "1"
+    },
+    {
+      "type": "token_delta",
+      "delta": " 个"
+    },
+    {
+      "type": "token_delta",
+      "delta": "）："
+    },
+    {
+      "type": "token_delta",
+      "delta": "**\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": " `"
+    },
+    {
+      "type": "token_delta",
+      "delta": "file"
+    },
+    {
+      "type": "token_delta",
+      "delta": "-"
+    },
+    {
+      "type": "token_delta",
+      "delta": "07"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": "7"
+    },
+    {
+      "type": "token_delta",
+      "delta": ".txt"
+    },
+    {
+      "type": "token_delta",
+      "delta": "`\n\n"
+    },
+    {
+      "type": "token_delta",
+      "delta": "以上"
+    },
+    {
+      "type": "token_delta",
+      "delta": "即为"
+    },
+    {
+      "type": "token_delta",
+      "delta": "全部"
+    },
+    {
+      "type": "token_delta",
+      "delta": "命"
+    },
+    {
+      "type": "token_delta",
+      "delta": "中的相对路径。"
+    },
+    {
+      "type": "final",
+      "text": "搜索完成。使用 pattern `file-0777` 在工作区中实际调用 `search_files` 后，命中结果如下：\n\n**命中文件（1 个）：**\n- `file-0777.txt`\n\n以上即为全部命中的相对路径。"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1540,
+    "completion_tokens": 122,
+    "total_tokens": 1662
+  },
+  "phase_timings": [
+    {
+      "phase": "model",
+      "elapsed_ms": 7865,
+      "target": "",
+      "first_token_ms": null
+    },
+    {
+      "phase": "tool",
+      "elapsed_ms": 0,
+      "target": "search_files",
+      "first_token_ms": null
+    },
+    {
+      "phase": "model",
+      "elapsed_ms": 5526,
+      "target": "",
+      "first_token_ms": 4131
+    },
+    {
+      "phase": "persistence",
+      "elapsed_ms": 0,
+      "target": "",
+      "first_token_ms": null
+    }
+  ],
+  "performance_task": "search_1000_files"
+}

@@ -1,0 +1,50 @@
+{
+    "schema":  "owo-mk-smoke/2",
+    "tag":  "p0-neg",
+    "mode":  "basic",
+    "identity_only":  true,
+    "started_at":  "2026-09-21T12:31:00.0770390Z",
+    "finished_at":  "2026-09-21T12:31:00.4148018Z",
+    "source":  {
+                   "commit":  "fc8251d42aa192715fa9f3208585802fa87d88ef",
+                   "dirty":  true
+               },
+    "binary":  {
+                   "path":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-mk-smoke-identity-20260921-203100\\owo-agent-old.cmd",
+                   "sha256":  "5e94ed095577dcf8e82eb6bf7de3721c1a8c5228aa230f96fa5463781e930fe7",
+                   "bytes":  147,
+                   "mtime":  "2026-09-21T12:31:00.0228115Z",
+                   "version":  "0.1.0",
+                   "commit":  "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                   "dirty":  "false",
+                   "built_at":  "2026-01-01T00:00:00Z",
+                   "api_version":  "0.7",
+                   "version_line":  "owo-agent 0.1.0 api=0.7 commit=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef dirty=false built_at=2026-01-01T00:00:00Z source=compiled"
+               },
+    "build":  {
+                  "performed":  false,
+                  "policy":  "normal",
+                  "exit_code":  null
+              },
+    "identity":  {
+                     "ok":  false,
+                     "reason":  "产物过期/来源不符：exe commit=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef，当前 HEAD=fc8251d42aa192715fa9f3208585802fa87d88ef（先构建当前源码，禁止复用旧产物）"
+                 },
+    "checks":  [
+                   {
+                       "check":  "binary.identity_matches_head",
+                       "pass":  false,
+                       "detail":  "产物过期/来源不符：exe commit=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef，当前 HEAD=fc8251d42aa192715fa9f3208585802fa87d88ef（先构建当前源码，禁止复用旧产物）",
+                       "evidence":  "identity"
+                   }
+               ],
+    "real_turn":  {
+                      "requested":  false,
+                      "status":  "not_requested"
+                  },
+    "started":  false,
+    "work_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-mk-smoke-p0-neg-20260921-203100",
+    "evidence_dir":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\mk-smoke-p0-neg-20260921-203100",
+    "ok":  false,
+    "exit_code":  3
+}

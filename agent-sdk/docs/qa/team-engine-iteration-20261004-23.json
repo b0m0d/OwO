@@ -1,0 +1,28 @@
+{
+  "iteration": "2026-10-04-23",
+  "scope": "Bind the shared completion record candidate digest to the accepted candidate snapshot, not the evidence bundle",
+  "changes": [
+    "Added a shared candidate snapshot hashing helper used by Single, Goal, and Team record adapters.",
+    "Team hashes the sorted accepted artifact identity, attempt, and content SHA-256 set; Goal hashes accepted outputs only; validation receipt IDs remain separate evidence references.",
+    "Added regression-test source for deterministic map order and changed-candidate digest behavior, and documented the digest boundary."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Cargo, formatting, clippy, and tests remain deferred until implementation convergence as requested.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 16.07,
+    "memory_used_percent": 49.2,
+    "free_workspace_volume_gb": 34.28,
+    "workspace_volume_status": "T: available; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Manual acceptance still lacks a host-issued acceptance receipt path in Single.",
+    "Single and Team lifecycle transitions and receipt collectors remain separate adapters around the shared terminal contract.",
+    "Final Cargo validation, formatting, clippy, and focused tests.",
+    "Matched live Single/Team evaluation; no Team advantage is claimed."
+  ]
+}

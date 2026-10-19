@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-05",
+  "scope": "Desktop web completion/replay/workbench regressions and requested Rust test attempt",
+  "web_tests": {
+    "command": "node --test desktop/web/tests/completion-record.test.mjs desktop/web/tests/r3b-terminal-state-contract.test.mjs desktop/web/tests/transport-integration.test.mjs desktop/web/tests/turn-completion.test.mjs desktop/web/tests/turn-sse.test.mjs desktop/web/tests/workbench-refresh.test.mjs desktop/web/tests/workswarm.panel.test.mjs",
+    "passed": 103,
+    "failed": 0,
+    "duration_ms": 1167.4649,
+    "finding": "One stale expected summary label was updated to match the existing durable completion-record UI contract; no product source change was required."
+  },
+  "rust_test_attempt": {
+    "command": "Invoke-CiCargo -Arguments @('test', '-p', 'owo-agent-core', '--lib', '--locked', '-j', '2', '--', '--test-threads=2') -PolicyMode normal",
+    "ort_resolution": "passed using scripts/resolve-ort.ps1; resolved local ONNX Runtime library",
+    "status": "resource_limited",
+    "exit_code": 137,
+    "memory_at_gate": {
+      "free_gb": 5.65,
+      "used_percent": 82.1,
+      "required_free_gb": 6.0,
+      "required_max_used_percent_exclusive": 80.0
+    },
+    "cargo_started": false,
+    "tests_run": false
+  },
+  "interpretation": "The requested Rust tests were attempted through the mandatory gate but not executed. Prior test results do not verify the current dirty Rust working tree."
+}

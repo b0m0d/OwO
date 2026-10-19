@@ -1,0 +1,26 @@
+{
+  "evidence_id": "completion-evidence-surfaces-20261005",
+  "scope": "source-only",
+  "claim": "CLI human output, TUI and desktop turn summary now display the host TaskCompletionRecordV1 decision binding (task/attempt, evidence receipt identifiers, candidate hash) when present; absence stays absent and machine JSONL protocol is unchanged.",
+  "verification": [
+    "Rust formatting check is run separately for the two edited CLI source files.",
+    "Python source assertions verify both SSE terminal paths, desktop rendering, script registration and tests are wired.",
+    "git diff --check is run separately."
+  ],
+  "limits": [
+    "No Rust/Node tests, compilation or typecheck were run per current user instruction.",
+    "No visible TUI or desktop window acceptance was performed.",
+    "This improves evidence visibility only; runtime speed, task success and delivery quality remain unmeasured."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-cli/src/ui_output.rs": "6012ecb49251edaf6973a88ba162d00c9249d25c845a5653fbb065f5e5f2111f",
+    "crates/owo-agent-cli/src/tui.rs": "6fb3d88050d7525eaad9f14b8e790ec36c464e9cd7a33cd31d05d9c8c88cfb7d",
+    "desktop/web/app.js": "440b61d4b4935e521b76795da65a7814d81a8080193b4f7c35281788d972e638",
+    "desktop/web/core/completion-record.js": "adeed53686f0c07cb53cf29a3172454d57f171a35661a920e9a3f8a0927717f1",
+    "desktop/web/index.html": "c11dda8aec42f7730d34ed4da1d46a18083f4dd4c25b5c393ab7c063b274e4ef",
+    "desktop/web/style.css": "dbebbb1a7886887b7f7ca34e218aa583a19c332712fb7feabbbe347558a12a3b",
+    "desktop/web/tests/completion-record.test.mjs": "a41164a1617a26b7818e4e0ad654f429ec2b0a37a7d47daa25926e2d34bf0eed",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "1dc7974979b62ac44a8ea4594bcebb2cb111bcc10102a49b8f9bd840bf66c5a2"
+  }
+}

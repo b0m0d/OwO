@@ -1,0 +1,30 @@
+{
+  "evidence_id": "desktop-first-use-setup-fallback-20261005",
+  "scope": "source-and-js-test",
+  "claim": "The active desktop boot gate renders a bounded IPC-derived first-use setup view and displays an actionable alert if its view module is missing or throws.",
+  "verification": [
+    "Targeted setup and boot Node tests: 24 passed, 0 failed.",
+    "node --check desktop/web/app.js passed.",
+    "Full desktop web Node suite: 440 tests, 411 passed, 29 failed; remaining failures include obsolete static architecture contracts and a browser-global import failure in product-eval.panel.test.mjs.",
+    "git diff --check passed for focused source and test files."
+  ],
+  "limits": [
+    "No Rust compilation or Rust tests were run per the user's instruction.",
+    "No Electron/Tauri GUI smoke test, real model task, or paired Single/Team benchmark was performed.",
+    "The full web test suite is not green; failures require source-by-source migration before they can be treated as stale tests.",
+    "No speed or delivery-quality improvement is claimed."
+  ],
+  "files_sha256": {
+    "desktop/web/app.js": "a30faecd30b35adb4272f7862389c753d6a4366b2ba31cb286d60a5f2cc58488",
+    "desktop/web/views/setup-guide.view.js": "1ed65ff7c30bdda6bba3ad2704319d86bd9b3058433179ca8d22be4cc5d516dd",
+    "desktop/web/core/folder-picker.js": "f8a68945f59eed5f955937e65c32c901e475c66d69f3318866e54fe09fe64b1c",
+    "desktop/web/tests/r4-setup-gate.test.mjs": "8fac13763255f45afc911b87f9708d915c615c512bd98b39fc649c57d34e8427",
+    "desktop/web/tests/setup-guide-fallback.test.mjs": "38f1d0ed2776dbfce25e4ef5d817abb2e783eb9fe67cc83258de634ff7c7f6b6",
+    "desktop/web/tests/r3b-script-scope-hygiene.test.mjs": "7b72cba87b4a0376b6f212794baa84141843a35c6e45998d732d644310c4268e",
+    "desktop/web/tests/r3b-terminal-state-contract.test.mjs": "e02d450c651cbcb61523d992e7f6255205f52db498c1f156abd56667e5f5e808",
+    "desktop/web/tests/workbench-refresh.test.mjs": "727822a2c825de2bd7e0159049a0016929ec6dc450c32f10473f64909b2a9188",
+    "desktop/web/tests/ui-ia-fixes.test.mjs": "a8624659db355a9fd120b5f27ddd05460e4f868f55f880c00ba0d232a85674fc",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "4f041b7a6e4d4b1aa3adcf6e3c537af4a2a59bb1838897caf342a1365ca1e13d"
+  }
+}

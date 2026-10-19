@@ -1,0 +1,31 @@
+{
+  "iteration": "2026-10-04-24",
+  "scope": "Complete the host-issued Single manual acceptance path for explicitly untestable requirements",
+  "changes": [
+    "Single VerificationPlan accepts only the host-registered single-human-acceptance-v1 validator with Manual scope and empty arguments.",
+    "When all other required checks pass, the host asks the user to accept or decline the exact current candidate and user-request excerpts; a host receipt records question/answer hashes and candidate path hashes.",
+    "The host rechecks candidate bytes after the answer, ties accepted historical candidate writes to the current attempt, and lets the independent source reviewer run after human acceptance.",
+    "Missing question channel, timeout, malformed/old answer, decline, mutation while waiting, or cancellation cannot produce Accepted; regression-test source covers explicit answer and stale snapshot paths.",
+    "Single traces now include an earlier-turn candidate only when the current attempt has an Accepted validation receipt bound to that exact write; validation receipt snapshots also preserve candidate identity when review later blocks delivery.",
+    "Accepted Single responses explicitly distinguish human acceptance from automatic behavior-test success."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Cargo, formatting, clippy, and tests remain deferred until implementation convergence as requested.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 16.12,
+    "memory_used_percent": 49.0,
+    "free_workspace_volume_gb": 34.28,
+    "workspace_volume_status": "Measured on T:; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Shared CompletionStatus and durable result contract exist, but Single and Team in-memory lifecycle transitions and evidence collectors remain separate adapters.",
+    "Manual acceptance lives on the Single host Questioner path; clients without a question channel remain Unverified.",
+    "Final Cargo validation, formatting, clippy, and focused tests.",
+    "Matched live Single/Team evaluation; no Team advantage is claimed."
+  ]
+}

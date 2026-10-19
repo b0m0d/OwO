@@ -1,0 +1,21 @@
+{
+  "evidence_id": "team-single-routing-topology-20261005",
+  "scope": "source-only",
+  "claim": "WorkSwarm single mode now resolves to ForceSingle, ignores explicit and automatically matched templates, rejects conflicting ForceTeam selection, and does not append an automatic Reviewer. ForceSingle overrides an explicit template. Auto single trims only system-default or automatically selected topologies; explicit role graphs and templates remain intact.",
+  "limits": [
+    "No Cargo compilation or Rust tests were run; rustfmt and source assertions do not prove type correctness or creation behavior.",
+    "No ProductEval or live model task was run; realized member counts, model calls, tokens, latency, and delivery quality remain unverified.",
+    "Source candidates still require the existing DeliveryGate evidence; this change does not bypass acceptance rules."
+  ],
+  "verification": [
+    "rustfmt --check --edition 2021 --config skip_children=true passed for coord_create.rs and workswarm_tests.rs.",
+    "Python source assertions confirmed selection resolution, both Single template bypass paths, topology trimming rules, reviewer guard, and creation regression source.",
+    "git diff --check is evaluated separately."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/coord_create.rs": "637c17beba21f5efee4e15e92631daa9b1ab5b96cae0f9c7155da566a6f79510",
+    "crates/owo-agent-core/tests/workswarm_tests.rs": "0300e996a8bd5dcfea344e97c47b7d4736d04dfb41139be96c0d36e25fe563fd",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "0113878714fba4709464c8f481d9897b39d03c82770c197be40a863e61dcdf1d"
+  }
+}

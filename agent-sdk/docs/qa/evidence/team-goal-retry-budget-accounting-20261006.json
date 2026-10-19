@@ -1,0 +1,28 @@
+{
+  "evidence_id": "team-goal-retry-budget-accounting-20261006",
+  "scope": "static-source-review-and-rust-format-check",
+  "claim": "ExecutionBudget enforces run-wide step/retry limits at concurrent call admission, first executions never consume retry capacity, and Team phase-local runners inherit persisted run usage.",
+  "verification": [
+    "rustfmt --edition 2021 --check passed for goal/execution.rs, goal/mod.rs, goal/tests.rs, and workswarm/coord_run.rs.",
+    "Scoped git diff --check passed; Git emits only existing CRLF normalization warnings.",
+    "Regression tests cover an initial call at max_total_retries=0/exact max_steps, refusal of only the additional call at retry limit zero, max_steps enforcement across three parallel tasks, phase usage seeding, and StepOutcome retry accounting. Rust tests are authored but not run.",
+    "Goal 检查点写入错误现在会阻止 run() 返回成功；关联的持久化失败回归用例已添加，尚未运行。",
+    "Durable Team admission transaction is isolated in coord_admission.rs; the phase runner only drives request handling."
+  ],
+  "limits": [
+    "No Cargo type check or Rust tests ran because the current user instruction is to continue static checks.",
+    "No live Team execution, resource/cost measurement, or paired Team-vs-Single benchmark was performed."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/goal/execution.rs": "17ca890746d6aef525dd3bca80033126259c0612f7fcdb7c2a50cc0464069b3c",
+    "crates/owo-agent-core/src/goal/mod.rs": "b03be7e71a60dc7fbd738fc26a5341bb342471440152e5d6517385c3f323d31d",
+    "crates/owo-agent-core/src/goal/tests.rs": "337dfe0a0803142784f702982948c7d7bdcbb8be35c88437a7d4aea885439053",
+    "crates/owo-agent-core/src/workswarm/coord_run.rs": "77f75a41726dbc83bba2e5124531023aab612fab698ad98274bf4ba3f76c3951",
+    "docs/工程代码结构说明.md": "555abc98c3bda123d89f82b93136fc1c3ed600a3d67fd04a85686f9f1d2c87a4",
+    "docs/Team架构综合审查与改造方案-2026-10-06.md": "af2b588fa57d19a15cc4893e4ca5baae8a798d4b41ce4596300a8aa9ed4ca9dc",
+    "crates/owo-agent-core/src/goal/acceptance.rs": "2a9167792144ea2eb7dc2ee3fd4de2821ffdaf1307b55305033a134c370b0f1e",
+    "crates/owo-agent-core/src/workswarm/coord_admission.rs": "b0e48854ad8a08436ffcd5d93b29bbe618effe726302b1a8fe4ebc806ecee5e5",
+    "crates/owo-agent-core/src/workswarm/mod.rs": "80247b99be013b217ec664bc7eef6f0860d42ad00063b891a8d91149ac5e55df",
+    "crates/owo-agent-core/src/workswarm/coord_finalize.rs": "caac1dadc7db72893a9e908caf98c879da60dfa498b5569284b8c2d70ffcf06c"
+  }
+}

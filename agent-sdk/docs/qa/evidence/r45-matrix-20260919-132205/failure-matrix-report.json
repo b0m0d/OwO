@@ -1,0 +1,701 @@
+{
+    "started_at":  "2026-09-19T05:23:42.2199490Z",
+    "run_root":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342",
+    "evidence":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205",
+    "scenarios":  [
+                      {
+                          "id":  "binary-missing",
+                          "note":  "§3.4：后台组件缺失 → core/binary_missing；动作=重新检查/打开诊断位置",
+                          "kind":  "missing",
+                          "expected_codes":  [
+                                                 "core/binary_missing"
+                                             ],
+                          "required_actions":  [
+                                                   "重新检查",
+                                                   "打开诊断位置"
+                                               ],
+                          "final_budget_sec":  15,
+                          "known_gap":  "",
+                          "executed":  true,
+                          "failed_stage":  "",
+                          "error_type":  "",
+                          "error_message":  "",
+                          "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\binary-missing",
+                          "injected_sidecar":  "\u003cnone: 场景目录刻意不放 sidecar\u003e",
+                          "sidecar_sha256":  "",
+                          "launched_core":  "",
+                          "shell_pid":  48400,
+                          "window_at_sec":  0.7,
+                          "actionable_at_sec":  1.9,
+                          "error_at_sec":  12.6,
+                          "error_code":  "core/binary_missing",
+                          "error_card":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新检查 打开诊断位置 技术详情",
+                          "setup_guide_len":  0,
+                          "details_folded":  true,
+                          "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\binary-missing\\fault-binary-missing-1280x720.png",
+                          "screenshot_metric":  {
+                                                    "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\binary-missing\\fault-binary-missing-1280x720.png",
+                                                    "bytes":  87655,
+                                                    "width":  1280,
+                                                    "height":  720,
+                                                    "non_black_ratio":  0.993435,
+                                                    "variance":  994.0055,
+                                                    "samples":  36864,
+                                                    "ok":  true,
+                                                    "fail_reasons":  [
+
+                                                                     ]
+                                                },
+                          "ui_final":  {
+                                           "healthText":  "本地服务未连接",
+                                           "routeText":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新检查 打开诊断位置 技术详情",
+                                           "errorCard":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新检查 打开诊断位置 技术详情",
+                                           "setupGuide":  "",
+                                           "composerVisible":  false,
+                                           "actionable":  true,
+                                           "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务未连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 不可用 工作区 project 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 服务连接 正在等待本地核心服务恢复。 本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新检查 打开诊断位置 技术详情"
+                                       },
+                          "cleanup":  {
+                                          "shell_pid":  48400,
+                                          "residual_procs":  0,
+                                          "notes":  "Stop-OwoShellTree 已执行"
+                                      },
+                          "terminal_budget_hit":  false
+                      },
+                      {
+                          "id":  "identity-mismatch",
+                          "note":  "§3.4：伪造别窗口 core_ready → core/identity_mismatch；动作=重新安装或重建",
+                          "kind":  "identity",
+                          "expected_codes":  [
+                                                 "core/identity_mismatch"
+                                             ],
+                          "required_actions":  [
+                                                   "重新安装或重建"
+                                               ],
+                          "final_budget_sec":  20,
+                          "known_gap":  "",
+                          "executed":  true,
+                          "failed_stage":  "",
+                          "error_type":  "",
+                          "error_message":  "",
+                          "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\identity-mismatch",
+                          "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\identity-mismatch\\owo-agent.exe",
+                          "sidecar_sha256":  "06AF05D593B8DCFE6FDDBF6087A8A67E75387FADDD6B070FC2062F9228B74B68",
+                          "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\identity-mismatch\\owo-agent.exe",
+                          "shell_pid":  4172,
+                          "window_at_sec":  0.5,
+                          "actionable_at_sec":  1.4,
+                          "error_at_sec":  12.7,
+                          "error_code":  "core/identity_mismatch",
+                          "error_card":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/identity_mismatch · 组件身份不一致：检测到不属于本窗口的旧服务 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新安装或重建 技术详情",
+                          "setup_guide_len":  0,
+                          "details_folded":  true,
+                          "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\identity-mismatch\\fault-identity-mismatch-1280x720.png",
+                          "screenshot_metric":  {
+                                                    "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\identity-mismatch\\fault-identity-mismatch-1280x720.png",
+                                                    "bytes":  189561,
+                                                    "width":  1280,
+                                                    "height":  720,
+                                                    "non_black_ratio":  0.997233,
+                                                    "variance":  1767.817,
+                                                    "samples":  36864,
+                                                    "ok":  true,
+                                                    "fail_reasons":  [
+
+                                                                     ]
+                                                },
+                          "ui_final":  {
+                                           "healthText":  "本地服务未连接",
+                                           "routeText":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/identity_mismatch · 组件身份不一致：检测到不属于本窗口的旧服务 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新安装或重建 技术详情",
+                                           "errorCard":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/identity_mismatch · 组件身份不一致：检测到不属于本窗口的旧服务 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新安装或重建 技术详情",
+                                           "setupGuide":  "",
+                                           "composerVisible":  false,
+                                           "actionable":  true,
+                                           "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务未连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 不可用 工作区 project 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 服务连接 正在等待本地核心服务恢复。 本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/identity_mismatch · 组件身份不一致：检测到不属于本窗口的旧服务 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重新安装或重建 技术详情"
+                                       },
+                          "cleanup":  {
+                                          "shell_pid":  4172,
+                                          "residual_procs":  0,
+                                          "notes":  "Stop-OwoShellTree 已执行"
+                                      },
+                          "terminal_budget_hit":  false
+                      },
+                      {
+                          "id":  "no-workspace",
+                          "note":  "§3.4：未选工作区 → 工作区引导（workspace/required），动作=选择文件夹",
+                          "kind":  "healthy",
+                          "expected_codes":  [
+                                                 "workspace/required"
+                                             ],
+                          "required_actions":  [
+                                                   "选择项目工作区"
+                                               ],
+                          "final_budget_sec":  20,
+                          "known_gap":  "",
+                          "executed":  false,
+                          "failed_stage":  "inject",
+                          "error_type":  "ItemNotFoundException",
+                          "error_message":  "Cannot find path \u0027psdrive\u0027 because it does not exist.",
+                          "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\no-workspace",
+                          "injected_sidecar":  "",
+                          "sidecar_sha256":  "",
+                          "launched_core":  "",
+                          "shell_pid":  0,
+                          "window_at_sec":  -1,
+                          "actionable_at_sec":  -1,
+                          "error_at_sec":  -1,
+                          "error_code":  "",
+                          "error_card":  "",
+                          "setup_guide_len":  0,
+                          "details_folded":  false,
+                          "screenshot":  "",
+                          "screenshot_metric":  null,
+                          "ui_final":  null,
+                          "cleanup":  {
+                                          "shell_pid":  0,
+                                          "residual_procs":  0,
+                                          "notes":  ""
+                                      }
+                      },
+                      {
+                          "id":  "provider-unset",
+                          "note":  "§3.4：provider 未配置 → core 正常运行 + 模型配置引导（R3-BUG-05 错误归因已修）",
+                          "kind":  "healthy",
+                          "expected_codes":  [
+                                                 "provider/not_configured"
+                                             ],
+                          "required_actions":  [
+                                                   "打开模型设置",
+                                                   "测试连接"
+                                               ],
+                          "final_budget_sec":  20,
+                          "known_gap":  "",
+                          "executed":  false,
+                          "failed_stage":  "inject",
+                          "error_type":  "ItemNotFoundException",
+                          "error_message":  "Cannot find path \u0027psdrive\u0027 because it does not exist.",
+                          "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\provider-unset",
+                          "injected_sidecar":  "",
+                          "sidecar_sha256":  "",
+                          "launched_core":  "",
+                          "shell_pid":  0,
+                          "window_at_sec":  -1,
+                          "actionable_at_sec":  -1,
+                          "error_at_sec":  -1,
+                          "error_code":  "",
+                          "error_card":  "",
+                          "setup_guide_len":  0,
+                          "details_folded":  false,
+                          "screenshot":  "",
+                          "screenshot_metric":  null,
+                          "ui_final":  null,
+                          "cleanup":  {
+                                          "shell_pid":  0,
+                                          "residual_procs":  0,
+                                          "notes":  ""
+                                      }
+                      },
+                      {
+                          "id":  "data-dir-unwritable",
+                          "note":  "§3.4：数据目录不可写 → 启动失败并报 storage/not_writable（core_fatal 协议行）",
+                          "kind":  "healthy",
+                          "expected_codes":  [
+                                                 "storage/not_writable"
+                                             ],
+                          "required_actions":  [
+                                                   "更换数据目录",
+                                                   "重试"
+                                               ],
+                          "final_budget_sec":  20,
+                          "known_gap":  "",
+                          "executed":  false,
+                          "failed_stage":  "inject",
+                          "error_type":  "ItemNotFoundException",
+                          "error_message":  "Cannot find path \u0027psdrive\u0027 because it does not exist.",
+                          "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\data-dir-unwritable",
+                          "injected_sidecar":  "",
+                          "sidecar_sha256":  "",
+                          "launched_core":  "",
+                          "shell_pid":  0,
+                          "window_at_sec":  -1,
+                          "actionable_at_sec":  -1,
+                          "error_at_sec":  -1,
+                          "error_code":  "",
+                          "error_card":  "",
+                          "setup_guide_len":  0,
+                          "details_folded":  false,
+                          "screenshot":  "",
+                          "screenshot_metric":  null,
+                          "ui_final":  null,
+                          "cleanup":  {
+                                          "shell_pid":  0,
+                                          "residual_procs":  0,
+                                          "notes":  ""
+                                      }
+                      },
+                      {
+                          "id":  "example-mcp-off",
+                          "note":  "§3.4：示例 MCP 关闭 → 正常主界面 + 工具状态 disabled（可查看禁用原因）",
+                          "kind":  "healthy",
+                          "expected_codes":  [
+
+                                             ],
+                          "required_actions":  [
+
+                                               ],
+                          "final_budget_sec":  45,
+                          "known_gap":  "",
+                          "executed":  false,
+                          "failed_stage":  "inject",
+                          "error_type":  "ItemNotFoundException",
+                          "error_message":  "Cannot find path \u0027psdrive\u0027 because it does not exist.",
+                          "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\example-mcp-off",
+                          "injected_sidecar":  "",
+                          "sidecar_sha256":  "",
+                          "launched_core":  "",
+                          "shell_pid":  0,
+                          "window_at_sec":  -1,
+                          "actionable_at_sec":  -1,
+                          "error_at_sec":  -1,
+                          "error_code":  "",
+                          "error_card":  "",
+                          "setup_guide_len":  0,
+                          "details_folded":  false,
+                          "screenshot":  "",
+                          "screenshot_metric":  null,
+                          "ui_final":  null,
+                          "cleanup":  {
+                                          "shell_pid":  0,
+                                          "residual_procs":  0,
+                                          "notes":  ""
+                                      }
+                      },
+                      {
+                          "id":  "core-exit",
+                          "note":  "§3.4：sidecar 早退 → core/exited（协议行之前退出即判早退，不再烧成超时）",
+                          "kind":  "exit",
+                          "expected_codes":  [
+                                                 "core/exited"
+                                             ],
+                          "required_actions":  [
+                                                   "重启后台",
+                                                   "查看诊断"
+                                               ],
+                          "final_budget_sec":  15,
+                          "known_gap":  "",
+                          "executed":  true,
+                          "failed_stage":  "",
+                          "error_type":  "",
+                          "error_message":  "",
+                          "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-exit",
+                          "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-exit\\owo-agent.exe",
+                          "sidecar_sha256":  "06AF05D593B8DCFE6FDDBF6087A8A67E75387FADDD6B070FC2062F9228B74B68",
+                          "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-exit\\owo-agent.exe",
+                          "shell_pid":  28048,
+                          "window_at_sec":  0.5,
+                          "actionable_at_sec":  1.8,
+                          "error_at_sec":  11.6,
+                          "error_code":  "core/exited",
+                          "error_card":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重启后台 查看诊断 技术详情",
+                          "setup_guide_len":  0,
+                          "details_folded":  true,
+                          "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\core-exit\\fault-core-exit-1280x720.png",
+                          "screenshot_metric":  {
+                                                    "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\core-exit\\fault-core-exit-1280x720.png",
+                                                    "bytes":  77649,
+                                                    "width":  1280,
+                                                    "height":  720,
+                                                    "non_black_ratio":  0.998183,
+                                                    "variance":  912.7399,
+                                                    "samples":  36864,
+                                                    "ok":  true,
+                                                    "fail_reasons":  [
+
+                                                                     ]
+                                                },
+                          "ui_final":  {
+                                           "healthText":  "本地服务未连接",
+                                           "routeText":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重启后台 查看诊断 技术详情",
+                                           "errorCard":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重启后台 查看诊断 技术详情",
+                                           "setupGuide":  "",
+                                           "composerVisible":  false,
+                                           "actionable":  true,
+                                           "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务未连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 失败 工作区 project 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 服务连接 正在等待本地核心服务恢复。 本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重启后台 查看诊断 技术详情"
+                                       },
+                          "cleanup":  {
+                                          "shell_pid":  28048,
+                                          "residual_procs":  0,
+                                          "notes":  "Stop-OwoShellTree 已执行"
+                                      },
+                          "terminal_budget_hit":  false
+                      },
+                      {
+                          "id":  "core-hang",
+                          "note":  "§3.4：sidecar 挂死 → core/handshake_timeout；动作=终止并重试",
+                          "kind":  "hang",
+                          "expected_codes":  [
+                                                 "core/handshake_timeout"
+                                             ],
+                          "required_actions":  [
+                                                   "终止并重试"
+                                               ],
+                          "final_budget_sec":  45,
+                          "known_gap":  "",
+                          "executed":  true,
+                          "failed_stage":  "",
+                          "error_type":  "",
+                          "error_message":  "",
+                          "scenario_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-hang",
+                          "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-hang\\owo-agent.exe",
+                          "sidecar_sha256":  "06AF05D593B8DCFE6FDDBF6087A8A67E75387FADDD6B070FC2062F9228B74B68",
+                          "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-hang\\owo-agent.exe",
+                          "shell_pid":  25572,
+                          "window_at_sec":  0.5,
+                          "actionable_at_sec":  1.7,
+                          "error_at_sec":  44.1,
+                          "error_code":  "core/handshake_timeout",
+                          "error_card":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 终止并重试 技术详情",
+                          "setup_guide_len":  0,
+                          "details_folded":  true,
+                          "screenshot":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\core-hang\\fault-core-hang-1280x720.png",
+                          "screenshot_metric":  {
+                                                    "path":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\r45-matrix-20260919-132205\\core-hang\\fault-core-hang-1280x720.png",
+                                                    "bytes":  80376,
+                                                    "width":  1280,
+                                                    "height":  720,
+                                                    "non_black_ratio":  0.998183,
+                                                    "variance":  931.8902,
+                                                    "samples":  36864,
+                                                    "ok":  true,
+                                                    "fail_reasons":  [
+
+                                                                     ]
+                                                },
+                          "ui_final":  {
+                                           "healthText":  "本地服务未连接",
+                                           "routeText":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 终止并重试 技术详情",
+                                           "errorCard":  "本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 终止并重试 技术详情",
+                                           "setupGuide":  "",
+                                           "composerVisible":  false,
+                                           "actionable":  true,
+                                           "bodyText":  "O OwO Agent 本地优先 当前工作区 本地项目 ☾ 本地服务未连接 感知：— 学习：— ☰ 任务 ⌘ 项目 ◎ 团队 ◇ 产物 ⛨ 权限 ⚙ 设置 后台 启动超时 工作区 project 模型 环境变量凭据 · 内置端点 权限 点按查看 当前任务 空闲 服务连接 正在等待本地核心服务恢复。 本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 终止并重试 技术详情"
+                                       },
+                          "cleanup":  {
+                                          "shell_pid":  25572,
+                                          "residual_procs":  0,
+                                          "notes":  "Stop-OwoShellTree 已执行"
+                                      },
+                          "terminal_budget_hit":  false
+                      }
+                  ],
+    "finished_at":  "2026-09-19T05:25:21.8054939Z",
+    "scenarios_selected":  [
+                               "binary-missing",
+                               "identity-mismatch",
+                               "no-workspace",
+                               "provider-unset",
+                               "data-dir-unwritable",
+                               "example-mcp-off",
+                               "core-exit",
+                               "core-hang"
+                           ],
+    "checks_total":  49,
+    "checks_failed":  4,
+    "scenarios_not_executed":  4,
+    "checks":  [
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+                       "pass":  true,
+                       "detail":  "hwnd=4132564 owner=48400 t=0.7s fail="
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "DOM 事实通道（WebView2 CDP）建立",
+                       "pass":  true,
+                       "detail":  "requested=50755 effective=50755"
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "10s 内界面可操作（无永久 loading）",
+                       "pass":  true,
+                       "detail":  "t=1.9s health=\"连接中…\""
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "出现统一错误卡（含发生/已自动/下一步三段）",
+                       "pass":  true,
+                       "detail":  "t=12.6s（时限 15s 内）"
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "错误终态在 15s 时限内到达（§3.4）",
+                       "pass":  true,
+                       "detail":  "error_at_sec=12.6 budget=15"
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "错误码在期望集合内（不得含糊报错）",
+                       "pass":  true,
+                       "detail":  "found=core/binary_missing allowed=core/binary_missing"
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "错误卡提供全部契约动作（重新检查/打开诊断位置)",
+                       "pass":  true,
+                       "detail":  "missing=; card=本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/binary_missing · 后台组件缺失：核心服务文件缺失，安装可能不完整 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后"
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "技术详情以折叠区呈现（不糊在正文里）",
+                       "pass":  true,
+                       "detail":  "details=True"
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "故障面截图（重获窗口 + 五重有效性）",
+                       "pass":  true,
+                       "detail":  "size=1280x720 bytes=87655 non_black_ratio=0.993435 variance=994.0055 samples=36864"
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "sidecar 缺失场景确实未拉起任何 core（日志无 launching 行）",
+                       "pass":  true,
+                       "detail":  "launched_core=\u003cnone\u003e"
+                   },
+                   {
+                       "scenario":  "binary-missing",
+                       "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+                       "pass":  true,
+                       "detail":  "stages=ok"
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+                       "pass":  true,
+                       "detail":  "hwnd=4459774 owner=4172 t=0.5s fail="
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "DOM 事实通道（WebView2 CDP）建立",
+                       "pass":  true,
+                       "detail":  "requested=19467 effective=19467"
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "10s 内界面可操作（无永久 loading）",
+                       "pass":  true,
+                       "detail":  "t=1.4s health=\"连接中…\""
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "出现统一错误卡（含发生/已自动/下一步三段）",
+                       "pass":  true,
+                       "detail":  "t=12.7s（时限 20s 内）"
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "错误终态在 20s 时限内到达（§3.4）",
+                       "pass":  true,
+                       "detail":  "error_at_sec=12.7 budget=20"
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "错误码在期望集合内（不得含糊报错）",
+                       "pass":  true,
+                       "detail":  "found=core/identity_mismatch allowed=core/identity_mismatch"
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "错误卡提供全部契约动作（重新安装或重建)",
+                       "pass":  true,
+                       "detail":  "missing=; card=本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/identity_mismatch · 组件身份不一致：检测到不属于本窗口的旧服务 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止"
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "技术详情以折叠区呈现（不糊在正文里）",
+                       "pass":  true,
+                       "detail":  "details=True"
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "故障面截图（重获窗口 + 五重有效性）",
+                       "pass":  true,
+                       "detail":  "size=1280x720 bytes=189561 non_black_ratio=0.997233 variance=1767.817 samples=36864"
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+                       "pass":  true,
+                       "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\identity-mismatch\\owo-agent.exe sha256=06AF05D593B8DCFE6FDDBF6087A8A67E75387FADDD6B070FC2062F9228B74B68"
+                   },
+                   {
+                       "scenario":  "identity-mismatch",
+                       "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+                       "pass":  true,
+                       "detail":  "stages=ok"
+                   },
+                   {
+                       "scenario":  "no-workspace",
+                       "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+                       "pass":  false,
+                       "detail":  "executed=false failed_stage=inject error_type=ItemNotFoundException message=Cannot find path \u0027psdrive\u0027 because it does not exist."
+                   },
+                   {
+                       "scenario":  "provider-unset",
+                       "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+                       "pass":  false,
+                       "detail":  "executed=false failed_stage=inject error_type=ItemNotFoundException message=Cannot find path \u0027psdrive\u0027 because it does not exist."
+                   },
+                   {
+                       "scenario":  "data-dir-unwritable",
+                       "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+                       "pass":  false,
+                       "detail":  "executed=false failed_stage=inject error_type=ItemNotFoundException message=Cannot find path \u0027psdrive\u0027 because it does not exist."
+                   },
+                   {
+                       "scenario":  "example-mcp-off",
+                       "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+                       "pass":  false,
+                       "detail":  "executed=false failed_stage=inject error_type=ItemNotFoundException message=Cannot find path \u0027psdrive\u0027 because it does not exist."
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+                       "pass":  true,
+                       "detail":  "hwnd=5637798 owner=28048 t=0.5s fail="
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "DOM 事实通道（WebView2 CDP）建立",
+                       "pass":  true,
+                       "detail":  "requested=48950 effective=48950"
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "10s 内界面可操作（无永久 loading）",
+                       "pass":  true,
+                       "detail":  "t=1.8s health=\"连接中…\""
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "出现统一错误卡（含发生/已自动/下一步三段）",
+                       "pass":  true,
+                       "detail":  "t=11.6s（时限 15s 内）"
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "错误终态在 15s 时限内到达（§3.4）",
+                       "pass":  true,
+                       "detail":  "error_at_sec=11.6 budget=15"
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "错误码在期望集合内（不得含糊报错）",
+                       "pass":  true,
+                       "detail":  "found=core/exited allowed=core/exited"
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "错误卡提供全部契约动作（重启后台/查看诊断)",
+                       "pass":  true,
+                       "detail":  "missing=; card=本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重"
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "技术详情以折叠区呈现（不糊在正文里）",
+                       "pass":  true,
+                       "detail":  "details=True"
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "故障面截图（重获窗口 + 五重有效性）",
+                       "pass":  true,
+                       "detail":  "size=1280x720 bytes=77649 non_black_ratio=0.998183 variance=912.7399 samples=36864"
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+                       "pass":  true,
+                       "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-exit\\owo-agent.exe sha256=06AF05D593B8DCFE6FDDBF6087A8A67E75387FADDD6B070FC2062F9228B74B68"
+                   },
+                   {
+                       "scenario":  "core-exit",
+                       "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+                       "pass":  true,
+                       "detail":  "stages=ok"
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+                       "pass":  true,
+                       "detail":  "hwnd=14681056 owner=25572 t=0.5s fail="
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "DOM 事实通道（WebView2 CDP）建立",
+                       "pass":  true,
+                       "detail":  "requested=38260 effective=38260"
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "10s 内界面可操作（无永久 loading）",
+                       "pass":  true,
+                       "detail":  "t=1.7s health=\"连接中…\""
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "出现统一错误卡（含发生/已自动/下一步三段）",
+                       "pass":  true,
+                       "detail":  "t=44.1s（时限 45s 内）"
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "错误终态在 45s 时限内到达（§3.4）",
+                       "pass":  true,
+                       "detail":  "error_at_sec=44.1 budget=45"
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "错误码在期望集合内（不得含糊报错）",
+                       "pass":  true,
+                       "detail":  "found=core/handshake_timeout allowed=core/handshake_timeout"
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "错误卡提供全部契约动作（终止并重试)",
+                       "pass":  true,
+                       "detail":  "missing=; card=本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/handshake_timeout · 启动超时：服务已启动但未完成初始化 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新"
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "技术详情以折叠区呈现（不糊在正文里）",
+                       "pass":  true,
+                       "detail":  "details=True"
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "故障面截图（重获窗口 + 五重有效性）",
+                       "pass":  true,
+                       "detail":  "size=1280x720 bytes=80376 non_black_ratio=0.998183 variance=931.8902 samples=36864"
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+                       "pass":  true,
+                       "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132342\\core-hang\\owo-agent.exe sha256=06AF05D593B8DCFE6FDDBF6087A8A67E75387FADDD6B070FC2062F9228B74B68"
+                   },
+                   {
+                       "scenario":  "core-hang",
+                       "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+                       "pass":  true,
+                       "detail":  "stages=ok"
+                   },
+                   {
+                       "scenario":  "ALL",
+                       "name":  "真实 debug core 未被改动（哈希前后一致，R3-BUG-03）",
+                       "pass":  true,
+                       "detail":  "hash_before=7DC82D6456FB hash_after=7DC82D6456FB rename_residue=0"
+                   }
+               ]
+}

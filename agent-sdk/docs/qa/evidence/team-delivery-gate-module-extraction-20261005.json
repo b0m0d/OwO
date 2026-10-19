@@ -1,0 +1,33 @@
+{
+  "evidence_id": "team-delivery-gate-module-extraction-20261005",
+  "scope": "source-only",
+  "claim": "Team delivery validation was extracted into a dedicated module without changing its validation sequence. Complete CAS text reads, hash verification, and UTF-8 conversion used by DeliveryGate and review now run on Tokio's blocking pool; the same verified complete text is passed to existing validators.",
+  "limits": [
+    "No Cargo compilation, Rust tests, clippy, runtime tasks, or model calls were run.",
+    "The organizational extraction and blocking-pool I/O change do not establish improvements in end-to-end latency, tool calls, token usage, or delivery quality.",
+    "An individual artifact still requires full-body allocation for current validators; the cache's 32 MiB limit applies to retained reuse, not to the largest single-body allocation.",
+    "Blocking-pool execution prevents synchronous CAS reads from occupying Tokio worker threads but does not reduce the bytes read or hash work."
+  ],
+  "source_observations": {
+    "moved_method_lines": 753,
+    "lifecycle_lines_after_extraction": 1375,
+    "new_module_lines": 761,
+    "cache_retention_limit_bytes": 33554432,
+    "acceptance_boundary": [
+      "DeliveryGateAcceptance.receipts",
+      "DeliveryGateAcceptance.workspace_receipts"
+    ]
+  },
+  "verification": [
+    "rustfmt --check --edition 2021 --config skip_children=true passed for the five affected Rust files.",
+    "git diff --check passed for tracked modified Rust files; Python whitespace and source-hash scan covered changed Rust, documentation, and evidence."
+  ],
+  "files": {
+    "crates/owo-agent-core/src/workswarm/coord_delivery_gate.rs": "43f9a17d265026667e1f43c07470a86f5adb4930213d069fff52be6e72fee8e8",
+    "crates/owo-agent-core/src/workswarm/coord_lifecycle.rs": "1d538742c61eb62d95f386a3b13aab3a2425d377172dcbb3ff22ee675cec9177",
+    "crates/owo-agent-core/src/workswarm/artifact_catalog.rs": "b4a2bf4e71aebe44371d24481fb83874ca2382e9bed6ef7f8196ebacafd3dd0e",
+    "crates/owo-agent-core/src/workswarm/coord_review.rs": "46d56b6a03253ddd611c8d53c435460d571b2377fab984ba6d21f3683bfcf915",
+    "crates/owo-agent-core/src/workswarm/mod.rs": "c310ee15a32862679b6a531dcc3e1ed38ef4daa4ea11db56b9e60c0b22399f24",
+    "docs/工程代码结构说明.md": "f89a73742f4ab58a19ff357f1734e6e8fad2dcea43862eba20d14337e55ba16a"
+  }
+}

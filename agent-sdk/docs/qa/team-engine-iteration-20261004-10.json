@@ -1,0 +1,33 @@
+{
+  "iteration": "2026-10-04-10",
+  "scope": "Single host-validation repair loop",
+  "changes": [
+    "Moved Single completion assessment into the final-text branch so host validators run before the model response is emitted as final.",
+    "Returned required failed, stale, or unverified host receipts as hidden system context and continued the same user turn for repair.",
+    "Added evidence-fingerprint stagnation detection to stop repeated identical validation failure without a fixed extra-turn cap.",
+    "Marked superseded write receipts stale when a later accepted write replaced their path version.",
+    "Added scripted regression test source for static validation failure, same-turn repair, revalidation, and final acceptance.",
+    "Updated the architecture document; ordinary conversation and uncapped model/tool behavior remain unchanged.",
+    "Normalized workspace-path-prefixed hashes from the shared static validator before comparing them with Single write receipts; the static acceptance regression asserts the final receipt binds the raw workspace-relative path.",
+    "Assigned a distinct monotonic validation epoch to each host recheck within a single user turn and asserted failed-then-passed epochs in the scripted regression."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Final Cargo validation, formatting, and clippy remain deferred until implementation is sufficiently complete.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 10.92,
+    "memory_used_percent": 65.5,
+    "free_workspace_volume_gb": 34.29,
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Final Cargo validation and formatting/clippy checks.",
+    "Single user requirement-to-plan mapping still depends on model declarations; independent semantic review and manual acceptance are not wired into Single.",
+    "WorkerRuntime API and task-scoped persistence convergence across Single and Team.",
+    "Dynamic task-pool migration and removal of avoidable serial integration work.",
+    "Matched live Single/Team paired evaluation; no Team advantage is claimed."
+  ]
+}

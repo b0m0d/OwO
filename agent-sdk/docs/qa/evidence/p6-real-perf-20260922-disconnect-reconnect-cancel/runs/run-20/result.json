@@ -1,0 +1,57 @@
+{
+  "run": 20,
+  "task": "disconnect_reconnect_cancel",
+  "core_ready": {
+    "api_version": "0.7",
+    "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+    "event": "core_ready",
+    "instance_id": "",
+    "pid": 36124,
+    "port": 34452,
+    "startup_ms": 210.17
+  },
+  "session_status": 200,
+  "session_create_ms": 27.04,
+  "turn_duration_ms": 329.17,
+  "disconnect_after_ms": 30.49,
+  "session_id": "b967f1b9-d179-4bcc-ab03-c27e375efa8b",
+  "turn_id": "2db414d6-2c00-4b9a-ab39-6be7aaeeb0cc",
+  "first_event": {
+    "message": "模型调用",
+    "type": "progress",
+    "v": 1
+  },
+  "reader_error": null,
+  "abort_status": 200,
+  "abort_body": {
+    "ok": true
+  },
+  "reconnect_status": 200,
+  "replayed_event_count": 2,
+  "reconnect_state": "failed",
+  "reconnect_active": false,
+  "cancel_to_stop_ms": 298.43,
+  "success": true,
+  "replayed_events": [
+    {
+      "created_at": "2026-09-22T09:38:32.964241500+00:00",
+      "payload": {
+        "message": "模型调用",
+        "type": "progress"
+      },
+      "seq": 1,
+      "session_id": "b967f1b9-d179-4bcc-ab03-c27e375efa8b",
+      "turn_id": "2db414d6-2c00-4b9a-ab39-6be7aaeeb0cc"
+    },
+    {
+      "created_at": "2026-09-22T09:38:33.031518900+00:00",
+      "payload": {
+        "message": "turn failed: agent aborted by user",
+        "type": "progress"
+      },
+      "seq": 2,
+      "session_id": "b967f1b9-d179-4bcc-ab03-c27e375efa8b",
+      "turn_id": "2db414d6-2c00-4b9a-ab39-6be7aaeeb0cc"
+    }
+  ]
+}

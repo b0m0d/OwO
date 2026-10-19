@@ -1,0 +1,3 @@
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-22T05:47:08.879054900+00:00"}
+{"duration_ms":2,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"73963f15dd984322a0f4dbb2","ts":"2026-09-22T05:47:09.004335900+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/turn","source":"other","status":200,"target":"http","trace_id":"be3216fcf4f44e4cb47a8c21","ts":"2026-09-22T05:47:09.006776400+00:00"}

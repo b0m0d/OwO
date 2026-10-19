@@ -1,0 +1,87 @@
+{
+  "date": "2026-10-05",
+  "scope": "Team artifact identity catalog, current handoff binding, verified CAS text reuse and cumulative body budget",
+  "compilation": {
+    "status": "not_run",
+    "reason": "user requested code/architecture work without compilation"
+  },
+  "checks": {
+    "rustfmt_parse_format_files": 10,
+    "declarations_and_sibling_imports_present": true,
+    "git_diff_check_exit_code": 0,
+    "new_test_cases_declared": 12,
+    "existing_selection_regression_moved_to_catalog": true,
+    "rust_tests_executed": false
+  },
+  "runtime_acceptance": "unverified",
+  "live_model_calls": 0,
+  "team_benefit_proven": false,
+  "goal_status": "active",
+  "changes": [
+    "one operation-local metadata catalog for publication/context/review/handoff/delivery",
+    "select by published project membership, team, producer, task, attempt and highest unique version",
+    "current handoff requires exact current artifact refs, rejects stale or mixed versions",
+    "CAS reads verify full content hash, size and UTF-8; request-local text cache capacity 32 MiB",
+    "context inline previews 2400 bytes per artifact / 8000 body bytes total; complete identity/refs retained",
+    "prompt compiler applies total body budget to small artifacts and hydrated previews too",
+    "context and dependency reads enforce member/step ownership; context hydration extracted to dedicated module"
+  ],
+  "limits": [
+    "cache capacity does not bound full CAS allocation, aggregate I/O, or project history metadata size",
+    "body budget excludes reference headers, source manifests, shared facts and final prompt protocol overhead",
+    "metadata snapshot and Goal/CAS/store reads do not form one database transaction",
+    "no measured wall clock/token/tool-call improvement; real repeated Single/Team comparison remains outstanding"
+  ],
+  "source_files": [
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/artifact_catalog.rs",
+      "lines": 412,
+      "sha256": "cda572e6dd88371fdb45b4f1bb550af298a1a050266f73648455bd2d959e7af1"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_context_slice.rs",
+      "lines": 279,
+      "sha256": "6157122a4248990c0f04d90770bcc660ac131b2fa32aa9ef5d113a0e57a6439a"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_artifacts.rs",
+      "lines": 1125,
+      "sha256": "51644003f7f92ea12b5d115e5a7f384017cb4b63b50d75fb91fefcace1541258"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_review.rs",
+      "lines": 842,
+      "sha256": "2e73927cdc2a4768e82e6b4f3b3821102671773f96579f26ea38b514d2cf50a4"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_run.rs",
+      "lines": 879,
+      "sha256": "1870b76ce00203574438ee4bb8351059cdda3abdd151d5745700aa6d4ec3283e"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_lifecycle.rs",
+      "lines": 2056,
+      "sha256": "d694114b2f3e7fb3369aea51f43f98dfb077d891155c5019293bae1f026cf2e5"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_handoff.rs",
+      "lines": 183,
+      "sha256": "357f6c6acad89fb7d13664e3d2b96bb13fc53cf706112d725a169f4ba811d248"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/mod.rs",
+      "lines": 165,
+      "sha256": "1bbd5f19c10f1444a9d7d96c97b4827f3caf1397d9376399f03be3462faaf4cb"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/team_prompt.rs",
+      "lines": 715,
+      "sha256": "150386111e272004aabe574f24006240784509b4eccf85389bf818e573ba1c46"
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/tests/workswarm_tests.rs",
+      "lines": 3605,
+      "sha256": "642941747f06a98506026319cba00654b69d18f536342a3861b2938a216f72ea"
+    }
+  ]
+}

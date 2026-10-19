@@ -1,0 +1,68 @@
+[
+    {
+        "scenario":  "core-exit",
+        "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+        "pass":  true,
+        "detail":  "hwnd=6358698 owner=14876 t=0.6s fail="
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "DOM 事实通道（WebView2 CDP）建立",
+        "pass":  true,
+        "detail":  "requested=15301 effective=15301"
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "10s 内界面可操作（无永久 loading）",
+        "pass":  true,
+        "detail":  "t=1.5s health=\"本地服务未连接\""
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "出现统一错误卡（含发生/已自动/下一步三段）",
+        "pass":  true,
+        "detail":  "t=11.5s（时限 15s 内）"
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "错误终态在 15s 时限内到达（§3.4）",
+        "pass":  true,
+        "detail":  "error_at_sec=11.5 budget=15"
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "错误码在期望集合内（不得含糊报错）",
+        "pass":  true,
+        "detail":  "found=core/exited allowed=core/exited"
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "错误卡提供全部契约动作（重启后台/查看诊断)",
+        "pass":  true,
+        "detail":  "missing=; card=本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/exited · 后台意外退出：可重启后台或查看诊断日志 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止后台刷新，不重复请求。 重"
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "技术详情以折叠区呈现（不糊在正文里）",
+        "pass":  true,
+        "detail":  "details=True"
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "故障面截图（重获窗口 + 五重有效性）",
+        "pass":  true,
+        "detail":  "size=1280x720 bytes=1903487 non_black_ratio=0.997233 variance=948.1816 samples=36864"
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+        "pass":  true,
+        "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260918-214831\\core-exit\\owo-agent.exe sha256=7E690D95F7D25F8291D5CA10ECCD92C5D2A1932D8FBBF5264A8184928E20D43A"
+    },
+    {
+        "scenario":  "core-exit",
+        "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+        "pass":  true,
+        "detail":  "stages=ok"
+    }
+]

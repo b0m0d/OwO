@@ -1,0 +1,4 @@
+[runtime] launching core: C:\Users\23843\AppData\Local\Temp\owo-desktop-acceptance\20260919-140540\data-dir-unwritable\owo-agent.exe (acceptance=true)
+[provider] 未选择模型提供商（Unset）：core 就绪但模型调用暂不可用，请在设置中选择云端或本地 Ollama
+{"code":"storage/not_writable","event":"core_fatal","message":"数据目录不可写：C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-140540\\data-dir-unwritable\\data\\LocalAppData\\OwO\\Agent\\data（当文件已存在时，无法创建该文件。 (os error 183)）"}
+[runtime] core 上报致命错误：code=storage/not_writable message=数据目录不可写：C:\Users\23843\AppData\Local\Temp\owo-desktop-acceptance\20260919-140540\data-dir-unwritable\data\LocalAppData\OwO\Agent\data（当文件已存在时，无法创建该文件。 (os error 183)）

@@ -1,0 +1,25 @@
+{
+    "schema":  "owo-cross-client/1",
+    "tag":  "cross-client",
+    "finished_at":  "2026-09-21T13:28:48.8324781Z",
+    "work_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-cross-client-20260921-212848",
+    "evidence":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\cross-client-20260921-212848",
+    "checks":  [
+                   {
+                       "check":  "daemon.core_ready",
+                       "pass":  true,
+                       "detail":  "core_ready 已输出"
+                   },
+                   {
+                       "check":  "http.create_session_A",
+                       "pass":  true,
+                       "detail":  "id=f939a7ef-f0c8-4fbf-ac7b-ace6982e0f62"
+                   },
+                   {
+                       "check":  "verify.aborted",
+                       "pass":  false,
+                       "detail":  "⚠ 已弃用：--no-approval 将在未来版本移除；兼容期等价 --permissions trusted（高风险：全部操作自动批准）"
+                   }
+               ],
+    "ok":  false
+}

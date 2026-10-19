@@ -1,0 +1,729 @@
+{
+  "task": "daemon_start_session",
+  "runs": 20,
+  "success": 20,
+  "restart_each": true,
+  "invalid_mcp": false,
+  "results": [
+    {
+      "run": 1,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 29804,
+        "port": 34469,
+        "startup_ms": 226.66
+      },
+      "session_create_ms": 77.81,
+      "turn_duration_ms": 4580.76,
+      "session_id": "ed591784-09ce-4337-b39f-cd143b6d45b3",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 2,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 7720,
+        "port": 34525,
+        "startup_ms": 226.14
+      },
+      "session_create_ms": 18.89,
+      "turn_duration_ms": 4363.45,
+      "session_id": "33a71938-a598-49c9-a96d-e8410aed0b55",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 3,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 30552,
+        "port": 34565,
+        "startup_ms": 221.23
+      },
+      "session_create_ms": 27.03,
+      "turn_duration_ms": 4125.53,
+      "session_id": "6c46d3f2-ce85-422b-b23a-af032a5dc4b5",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 4,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 42200,
+        "port": 34622,
+        "startup_ms": 222.17
+      },
+      "session_create_ms": 27.67,
+      "turn_duration_ms": 4465.66,
+      "session_id": "de66e3ef-014e-43fa-a007-121888a39709",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 5,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 27500,
+        "port": 34660,
+        "startup_ms": 221.79
+      },
+      "session_create_ms": 5.93,
+      "turn_duration_ms": 4728.18,
+      "session_id": "027c13e7-b709-4221-995f-d69998b6a245",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 6,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 31368,
+        "port": 34712,
+        "startup_ms": 221.43
+      },
+      "session_create_ms": 18.8,
+      "turn_duration_ms": 4634.02,
+      "session_id": "952c05e7-87d5-41c8-a328-31afbb126228",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 7,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 27368,
+        "port": 34750,
+        "startup_ms": 224.63
+      },
+      "session_create_ms": 19.53,
+      "turn_duration_ms": 4175.15,
+      "session_id": "1a53a02a-7064-4790-b3b4-bcb6d6f7550b",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 8,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 29972,
+        "port": 34774,
+        "startup_ms": 222.0
+      },
+      "session_create_ms": 5.2,
+      "turn_duration_ms": 4310.44,
+      "session_id": "1b920bc5-e1b2-417d-b88b-c5eedc34235f",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 9,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 29600,
+        "port": 34810,
+        "startup_ms": 223.04
+      },
+      "session_create_ms": 10.3,
+      "turn_duration_ms": 4531.42,
+      "session_id": "c1e2ed8c-6426-4f0d-bae8-b64729cdc428",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 10,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 43952,
+        "port": 34876,
+        "startup_ms": 224.0
+      },
+      "session_create_ms": 26.06,
+      "turn_duration_ms": 4355.64,
+      "session_id": "72380b56-5582-4bfd-87f1-8ca1791b6460",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 11,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 34892,
+        "port": 34928,
+        "startup_ms": 223.38
+      },
+      "session_create_ms": 26.66,
+      "turn_duration_ms": 3878.91,
+      "session_id": "1f195812-5f1f-4753-8921-0e854597e522",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 12,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 14884,
+        "port": 34964,
+        "startup_ms": 225.79
+      },
+      "session_create_ms": 16.41,
+      "turn_duration_ms": 4530.34,
+      "session_id": "06690ee9-c640-4f87-abbb-eb7b9a204b75",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 13,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 37004,
+        "port": 34994,
+        "startup_ms": 224.54
+      },
+      "session_create_ms": 18.73,
+      "turn_duration_ms": 983.83,
+      "session_id": "9070682e-b017-4760-ac01-21ee568ed13a",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 14,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 37124,
+        "port": 35016,
+        "startup_ms": 222.9
+      },
+      "session_create_ms": 5.33,
+      "turn_duration_ms": 4486.45,
+      "session_id": "255b1618-1d07-4532-9c22-7d504470d3e1",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 15,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 38404,
+        "port": 35066,
+        "startup_ms": 223.02
+      },
+      "session_create_ms": 14.69,
+      "turn_duration_ms": 4617.38,
+      "session_id": "337c55f8-ba00-413c-b648-c397530e2180",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 16,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 22092,
+        "port": 35113,
+        "startup_ms": 224.1
+      },
+      "session_create_ms": 16.08,
+      "turn_duration_ms": 5085.23,
+      "session_id": "a902605b-aaab-4fce-b76b-30e304d2e0fc",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 17,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 28376,
+        "port": 35147,
+        "startup_ms": 223.72
+      },
+      "session_create_ms": 5.78,
+      "turn_duration_ms": 4036.91,
+      "session_id": "7ac838cc-9166-4db1-b4c8-9a6610c9eb5a",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 18,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 18252,
+        "port": 35221,
+        "startup_ms": 226.58
+      },
+      "session_create_ms": 5.24,
+      "turn_duration_ms": 4517.66,
+      "session_id": "edb2a3eb-15c7-4bcb-9e79-0877e4a63ccd",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 19,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 41684,
+        "port": 35265,
+        "startup_ms": 221.94
+      },
+      "session_create_ms": 24.2,
+      "turn_duration_ms": 4869.15,
+      "session_id": "27cdfacb-9679-4eb9-8eb3-3d41d0fb7548",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    },
+    {
+      "run": 20,
+      "task": "daemon_start_session",
+      "core_ready": {
+        "api_version": "0.7",
+        "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+        "event": "core_ready",
+        "instance_id": "",
+        "pid": 15400,
+        "port": 35299,
+        "startup_ms": 222.3
+      },
+      "session_create_ms": 23.39,
+      "turn_duration_ms": 4458.06,
+      "session_id": "73b5975f-58ee-4a0d-af4d-e07c364db470",
+      "events": [
+        {
+          "message": "模型调用",
+          "type": "progress",
+          "v": 1
+        },
+        {
+          "delta": "好的",
+          "type": "token_delta",
+          "v": 1
+        },
+        {
+          "text": "好的",
+          "type": "final",
+          "v": 1
+        }
+      ],
+      "tool_names": [],
+      "final_received": true,
+      "final_text_length": 2
+    }
+  ]
+}

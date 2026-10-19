@@ -1,0 +1,25 @@
+{
+  "date": "2026-10-05",
+  "scope": "Team metric budget gate fail-closed semantics",
+  "finding": "A budget metric read error was treated as no exhaustion and the loop continued dispatching.",
+  "changes": [
+    "Introduced explicit Continue, Exhausted, and Unavailable decisions.",
+    "Unavailable now requests team cancellation, audits team.budget_check_failed, stops dispatch, and marks pending rework failed.",
+    "Added a pure regression test covering all three decisions."
+  ],
+  "static_checks": {
+    "rustfmt": "passed: rustfmt --check --edition 2021 crates/owo-agent-server/src/workswarm_api/runtime.rs",
+    "git_diff_check": "passed for runtime.rs",
+    "test_source": "added but not executed"
+  },
+  "rust_test": {
+    "command": "cargo test -p owo-agent-server --lib --locked -j 2 -- budget_guard_distinguishes_continue_exhausted_and_unavailable --test-threads=2 via Invoke-CiCargo",
+    "status": "resource_limited",
+    "wrapper_exit_code": 2,
+    "cargo_started": false,
+    "available_memory_gb": 4.73,
+    "memory_used_percent": 85.0,
+    "required": "at least 6 GB available and less than 80% used"
+  },
+  "limitations": "Rust type-check, unit test execution, cancellation side effects, and server integration behavior remain unverified."
+}

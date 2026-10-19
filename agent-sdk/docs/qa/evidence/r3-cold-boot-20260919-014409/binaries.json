@@ -1,0 +1,10 @@
+{
+    "bin_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-014409\\coldboot\\bin",
+    "launched_sha256":  "4CB2BD6DAC0635B3CEBE28620D19AC8EBBFA3AEB55C557908EF5EDC88014FF66",
+    "acceptance_mode":  true,
+    "sidecar_version_line":  "owo-agent 0.1.0 api=0.7 commit=4eb73ea65f4f3ee4c6286c384e4487f732de83ec dirty=true built_at=2026-09-18T16:31:07Z source=compiled",
+    "staged_sha256":  "4CB2BD6DAC0635B3CEBE28620D19AC8EBBFA3AEB55C557908EF5EDC88014FF66",
+    "launched_core":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-014409\\coldboot\\bin\\owo-agent.exe",
+    "sidecar_exe":  "T:\\创新创业\\OwO-master\\agent-sdk\\target\\debug\\owo-agent.exe",
+    "shell_exe":  "T:\\创新创业\\OwO-master\\agent-sdk\\desktop\\tauri\\src-tauri\\target\\debug\\owo-agent-desktop.exe"
+}

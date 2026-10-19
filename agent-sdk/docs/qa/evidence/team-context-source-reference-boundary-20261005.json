@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-05",
+  "scope": "WorkSwarm worker shared-context publish source-reference boundary",
+  "change": "TeamContextPublishTool now restricts source_refs to host-assigned task read_refs/contract_refs; file_hash facts require one safe workspace-relative path.",
+  "static_checks": {
+    "rustfmt_check": "passed for all 141 changed or newly added Rust files (rustfmt --check --edition 2021)",
+    "git_diff_check": "passed (git diff --check exit code 0; Git emitted line-ending normalization warnings only)",
+    "evidence_json": "self-describing static evidence; not runtime validation"
+  },
+  "cargo_check": "not_run",
+  "rust_tests": "not_run",
+  "reason": "User selected static inspection. Current resource snapshot from this turn was 4.81 GiB available and 84.8% memory use; AGENTS.md Cargo gate requires at least 6 GiB available and below 80% usage.",
+  "limitations": "Static inspection does not establish Rust type correctness or runtime behavior."
+}

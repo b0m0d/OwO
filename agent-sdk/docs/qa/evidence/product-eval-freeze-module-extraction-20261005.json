@@ -1,0 +1,45 @@
+{
+  "date": "2026-10-05",
+  "scope": "devtools/product-eval freeze input contract",
+  "module": "devtools/product-eval/src/product_eval/freeze.rs",
+  "parent_module": "devtools/product-eval/src/product_eval.rs",
+  "parent_lines_after_extraction": 4117,
+  "freeze_module_lines": 217,
+  "responsibilities": [
+    "task file sha256",
+    "suite revision sha256",
+    "per-task permission digest",
+    "effective repetition and timeout budgets",
+    "model and git revision binding",
+    "freeze parsing and drift validation"
+  ],
+  "compatibility": "Public freeze functions and FREEZE_SCHEMA_VERSION remain re-exported through product_eval; CLI and test import paths are preserved.",
+  "static_validation": {
+    "rustfmt_check": "passed for extracted modules",
+    "source_boundary": "freeze implementation exists only in freeze.rs; parent retains public re-exports and matrix permission-hash call"
+  },
+  "cargo_validation": {
+    "status": "not run",
+    "resource_limited": true,
+    "free_physical_gib": 6.18,
+    "memory_used_percent": 80.5,
+    "gate": "requires at least 6 GiB free and memory use below 80%",
+    "resource_snapshots_gib": [
+      {
+        "free_physical_gib": 6.25,
+        "memory_used_percent": 80.2,
+        "observation": "start of current continuation"
+      },
+      {
+        "free_physical_gib": 6.18,
+        "memory_used_percent": 80.5,
+        "observation": "latest static validation check"
+      }
+    ]
+  },
+  "required_follow_up": [
+    "cargo check independent devtools/product-eval workspace",
+    "run freeze and paired report contract tests",
+    "verify Core and CLI facade consumers"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-05",
+  "scope": "Cloud task SSE replay boundary, terminal lifecycle, and cache resource bounds",
+  "finding": "The hub used separate locks for sender registration and history replay, permitting a publish to appear in both replay and live delivery. Completed tasks retained up to 512 events and a broadcast sender indefinitely, and terminal streams did not close.",
+  "change": "A shared hub-state mutex makes subscribe and publish atomic across history/live boundaries. Replay is bounded to 512 events and 256 KiB per task; frames above 64 KiB are rejected and untrusted error/remote identifiers are shortened before serialization. Completed cache is capped at 128 tasks and 30 minutes, terminal senders are released, submit/cancel terminal paths close streams, and the HTTP SSE handler ends after replaying a terminal event.",
+  "regression_test_source": [
+    "300 concurrent subscribe/publish handoff iterations assert a frame is delivered exactly once",
+    "completed-task capacity, per-task history byte cap, and oversized frame rejection",
+    "live receiver closure and late HTTP replay stream closure after terminal event",
+    "unknown task ids return a closed receiver without allocating a retained sender"
+  ],
+  "static_checks": {
+    "cargo_fmt": "passed",
+    "git_diff_check": "passed",
+    "evidence_json_parse": "passed"
+  },
+  "rust_tests": {
+    "status": "resource_limited",
+    "command": "Invoke-CiCargo cargo test -p owo-agent-server --test cloud_sse_tests --locked -j 2 -- --test-threads=2",
+    "cargo_started": false,
+    "available_memory_gb": 4.85,
+    "memory_used_percent": 84.7,
+    "required": "at least 6 GB available and memory use strictly below 80%"
+  },
+  "limitations": "The new concurrency tests, cache eviction logic, Cloud HTTP lifecycle wiring, and real SSE disconnect behavior have not been type-checked or executed by Rust."
+}

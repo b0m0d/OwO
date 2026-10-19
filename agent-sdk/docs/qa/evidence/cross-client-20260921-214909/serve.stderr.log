@@ -1,0 +1,12 @@
+{"action":"server_start","detail":"len=16 hash=efe8da97","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-21T13:49:18.828954200+00:00"}
+{"duration_ms":5,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"768d856a4cf44e7c9afb4202","ts":"2026-09-21T13:49:19.113774500+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"9811cc58596149bfa77fe086","ts":"2026-09-21T13:49:19.172489100+00:00"}
+{"duration_ms":2,"level":"info","method":"POST","msg":"request","route_template":"/session","source":"other","status":200,"target":"http","trace_id":"6ae33593aa564746ba03b52a","ts":"2026-09-21T13:49:19.277754700+00:00"}
+{"duration_ms":0,"level":"info","method":"POST","msg":"request","route_template":"/session/{id}/turn","source":"other","status":200,"target":"http","trace_id":"a7b46876b6fe4413819982f8","ts":"2026-09-21T13:49:19.280393400+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/session/{id}/diff","source":"other","status":200,"target":"http","trace_id":"0a6f3fcf61854493b4996d5c","ts":"2026-09-21T13:49:23.531598600+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"b06f1aca92a84a7f9b542a55","ts":"2026-09-21T13:49:23.545323300+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/health","source":"other","status":200,"target":"http","trace_id":"d3aa596c673e48f9bcae0efb","ts":"2026-09-21T13:49:24.173579600+00:00"}
+{"duration_ms":0,"level":"info","method":"GET","msg":"request","route_template":"/sessions","source":"other","status":200,"target":"http","trace_id":"c1a1509155c847268ffb8ba4","ts":"2026-09-21T13:49:24.177125400+00:00"}
+{"active_turns":0,"level":"warn","msg":"收到优雅关闭请求（需二次确认）","target":"server","trace_id":"93f0c50952ad44dd89bb076e","ts":"2026-09-21T13:49:24.341850900+00:00"}
+{"duration_ms":1,"level":"info","method":"POST","msg":"request","route_template":"/server/shutdown","source":"other","status":200,"target":"http","trace_id":"93f0c50952ad44dd89bb076e","ts":"2026-09-21T13:49:24.342923200+00:00"}
+{"action":"server_stop","detail":"len=16 hash=8c8ef0e0","level":"info","msg":"audit_event","target":"audit","ts":"2026-09-21T13:49:24.346686200+00:00"}

@@ -1,0 +1,39 @@
+{
+  "status": "built_identity_verified_and_coldboot_passed",
+  "configuration": "release",
+  "commit": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+  "dirty": true,
+  "api_version": "0.7",
+  "core": {
+    "path": "T:\\创新创业\\OwO-master\\agent-sdk\\target\\release\\owo-agent.exe",
+    "sha256": "14E10DE780EE00C298ECD493F508248966CD19C78FC3732E9341775FA5929128",
+    "bytes": 62261760,
+    "version": "owo-agent 0.1.0 api=0.7 commit=fc8251d42aa192715fa9f3208585802fa87d88ef dirty=true built_at=2026-09-21T23:32:43Z source=compiled"
+  },
+  "shell": {
+    "path": "T:\\创新创业\\OwO-master\\agent-sdk\\desktop\\tauri\\src-tauri\\target\\release\\owo-agent-desktop.exe",
+    "sha256": "BE619FAC9F6C4F594EF2FB4480BF2A393D04B065D846B9DB0E2B7937E17A9977",
+    "bytes": 12760576
+  },
+  "installer": {
+    "path": "T:\\创新创业\\OwO-master\\agent-sdk\\desktop\\tauri\\src-tauri\\target\\release\\bundle\\nsis\\OwO Agent_0.1.0_x64-setup.exe",
+    "sha256": "F0F661448F1E5BF05DB6FE580BD5F73E53A8D44BEF438A9E6B2EBBFABE3015DE",
+    "bytes": 16971389
+  },
+  "desktop_tool_approval_evidence": "T:\\\\创新创业\\\\OwO-master\\\\agent-sdk\\\\docs\\\\qa\\\\evidence\\\\desktop-tool-approval-20260922-122500",
+  "desktop_coldboot_evidence": "agent-sdk/docs/qa/evidence/p6-release-20260922-122500/coldboot",
+  "desktop_coldboot_assertions": 38,
+  "desktop_coldboot_exit_code": 0,
+  "installer_smoke": {
+    "installer_exit_code": 0,
+    "install_root": "agent-sdk/docs/qa/evidence/p6-release-20260922-122500/installed",
+    "installed_core_sha256": "14E10DE780EE00C298ECD493F508248966CD19C78FC3732E9341775FA5929128",
+    "installed_core_matches_release": true,
+    "installed_shell_sha256": "EFBAE52120179343FDD58519D98D486DD21A33D94C21D078DED0FDB39CF14814",
+    "installed_shell_bytes_differ_from_build_shell": 3,
+    "installed_shell_difference_note": "NSIS-installed shell differs at three bundle-type marker bytes (UNK -> NSS); file size and product/file version remain identical.",
+    "installed_coldboot_evidence": "agent-sdk/docs/qa/evidence/p6-release-20260922-122500/installed-coldboot-release-core",
+    "installed_coldboot_assertions": 38,
+    "installed_coldboot_exit_code": 0
+  }
+}

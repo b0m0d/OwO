@@ -1,0 +1,23 @@
+{
+  "evidence_id": "team-shared-artifact-preview-cache-20261006",
+  "scope": "static-source-review-and-rust-format-check",
+  "claim": "WorkSwarm artifact preview pages are reused across Worker context assemblies through a coordinator-owned FIFO cache keyed by CAS hash and preview limit. Concurrent misses for the same key share a bounded per-key async lock, so one caller performs the verified disk read while other contexts reuse its result. The page cache is bounded to 32 MiB and 4096 entries; each hit validates the Artifact declared size.",
+  "verification": [
+    "rustfmt --edition 2021 --check passed for the touched WorkSwarm Rust files.",
+    "Added Rust tests for concurrent cross-context reuse, byte/entry eviction, and declared-size mismatch rejection; tests are authored but have not run.",
+    "git diff --check passed for scoped source and documentation edits."
+  ],
+  "limits": [
+    "Cargo check and Rust tests were not run: latest sample showed 4.73 GB free RAM and 85.06% used, below the repository Cargo gate.",
+    "No cache hit-rate or context assembly timing benchmark was run; reduced duplicate CAS reads are an implementation expectation, not a measured result.",
+    "No live Team execution or paired Team-vs-Single benchmark was performed."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/workswarm/artifact_read.rs": "529e42dc6406670529ec5881037acaea42db8537e3706212e930a5ea11816967",
+    "crates/owo-agent-core/src/workswarm/mod.rs": "4eddaed9fe9450c916448327b6548d6ae27b46a227a787ddb64fe588b01730d9",
+    "crates/owo-agent-core/src/workswarm/coord_accessors.rs": "e5e56af63c6d69056a96e473af3c88e2aac264fa0780909c9ca4865822ff8dec",
+    "crates/owo-agent-core/src/workswarm/coord_context_slice.rs": "66993e195ab3442c9c2e93041a2fcad838ddfd1d92f5633f70300a0d69962c03",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team架构综合审查与改造方案-2026-10-06.md": "576165577f0798187302b86a7c8342b6ffc91ed5c2943729744a7f4f955e5170"
+  }
+}

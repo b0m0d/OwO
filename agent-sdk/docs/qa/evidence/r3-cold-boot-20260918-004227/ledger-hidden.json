@@ -1,0 +1,179 @@
+{
+    "label":  "hidden-window",
+    "captured_at":  "2026-09-17T16:47:54.3983037Z",
+    "server_total":  30,
+    "returned":  30,
+    "web_total":  16,
+    "web_health":  10,
+    "web_auth":  0,
+    "web_events":  1,
+    "web_business":  5,
+    "web_business_routes":  [
+                                "GET /automations",
+                                "GET /context/snapshot",
+                                "GET /proactive/suggestions",
+                                "GET /audit",
+                                "GET /automations/reminders"
+                            ],
+    "web_route_repeats":  [
+
+                          ],
+    "shell_total":  2,
+    "shell_auth":  1,
+    "shell_health":  1,
+    "other_total":  0,
+    "probe_total":  12,
+    "sources":  [
+                    "probe",
+                    "shell",
+                    "web"
+                ],
+    "records":  [
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "shell",
+                        "started_at":  "2026-09-17T16:42:34.756Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/auth/token",
+                        "source":  "shell",
+                        "started_at":  "2026-09-17T16:42:34.759Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/automations",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:42:50.315Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/events/stream",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:42:50.319Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:42:59.621Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:43:29.623Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:43:59.617Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:44:29.621Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:44:59.622Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:45:29.620Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  17,
+                        "method":  "GET",
+                        "route_template":  "/context/snapshot",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:45:29.622Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:45:59.617Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:46:29.624Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:46:59.630Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:47:29.615Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/proactive/suggestions",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:47:29.619Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/audit",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:47:29.620Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/automations/reminders",
+                        "source":  "web",
+                        "started_at":  "2026-09-17T16:47:29.622Z",
+                        "status":  200
+                    }
+                ],
+    "web_buckets_sum":  16,
+    "web_buckets_ok":  true
+}

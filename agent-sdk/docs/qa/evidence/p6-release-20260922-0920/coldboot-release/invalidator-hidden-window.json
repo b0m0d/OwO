@@ -1,0 +1,4 @@
+{
+    "after_hidden":  "{\"eventRefreshes\":0,\"coalescedInvalidations\":0,\"duplicateInvalidations\":0,\"pollFallbackRefreshes\":0,\"hiddenWindowRefreshes\":0,\"state\":\"live\",\"reconnectAttempts\":0,\"lastEventId\":null,\"url\":\"http://127.0.0.1:30517/events/stream\"}",
+    "before_hide":  "{\"eventRefreshes\":0,\"coalescedInvalidations\":0,\"duplicateInvalidations\":0,\"pollFallbackRefreshes\":0,\"hiddenWindowRefreshes\":0,\"state\":\"live\",\"reconnectAttempts\":0,\"lastEventId\":null,\"url\":\"http://127.0.0.1:30517/events/stream\"}"
+}

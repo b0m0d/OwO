@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-05",
+  "scope": "Bound AgentClient Turn SSE parser memory and stop the current turn stream on malformed or oversized frames.",
+  "implementation": {
+    "buffer_limit_bytes": 1048576,
+    "overflow_behavior": "clear partial bytes and emit a protocol error",
+    "turn_stream_behavior": "mark terminal on SSE parsing errors to avoid presenting a stream after possible event loss",
+    "recovery": "standalone buffer can accept a fresh valid frame after the overflow error; a live TurnStream requires a new request/replay cursor"
+  },
+  "validation": {
+    "rustfmt_check": {
+      "status": "passed",
+      "files": [
+        "crates/owo-agent-client/src/sse.rs",
+        "crates/owo-agent-client/tests/client_contract_tests.rs"
+      ],
+      "scope": "Rust parser and formatting only"
+    },
+    "git_diff_check": {
+      "status": "passed",
+      "scope": "affected source and test files"
+    }
+  },
+  "cargo": {
+    "status": "resource_limited_not_run",
+    "attempted": false,
+    "available_memory_gb": 4.72,
+    "memory_used_percent": 85.1,
+    "required_available_memory_gb": 6,
+    "required_memory_used_percent_below": 80,
+    "compile": "not_run",
+    "rust_tests": "not_run"
+  },
+  "limitation": "The byte cap applies to currently unparsed buffered bytes; a single unusually large HTTP chunk with many small frames can fail closed even if each individual frame is small."
+}

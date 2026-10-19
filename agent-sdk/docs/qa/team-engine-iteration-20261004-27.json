@@ -1,0 +1,27 @@
+{
+  "iteration": "2026-10-04-27",
+  "scope": "Lock transitive successful dependent invalidation after Team task rework",
+  "changes": [
+    "Audited rework_step_with_actor and confirmed full downstream_recheck_closure resets successful dependent tasks and marks their validation receipts stale.",
+    "Added regression-test source for transitive integration and review invalidation while preserving an independent branch."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Cargo, formatting, clippy, and tests remain deferred until implementation convergence as requested.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 16.22,
+    "memory_used_percent": 48.7,
+    "free_workspace_volume_gb": 34.28,
+    "workspace_volume_status": "Measured on T:; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Single and Team evidence collection still uses separate adapters over the shared completion contract.",
+    "Final-version acceptance needs final cross-path verification for source edits, artifacts, and resumed runs.",
+    "Final Cargo validation, formatting, clippy, and focused tests.",
+    "Matched live Single/Team evaluation; no Team advantage is claimed."
+  ]
+}

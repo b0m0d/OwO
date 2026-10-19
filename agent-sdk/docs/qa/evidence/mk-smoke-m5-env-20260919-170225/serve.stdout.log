@@ -1,0 +1,23 @@
+2026-09-19T09:02:26.291599Z  INFO owo_agent::commands::serve: owo-agent server listening on http://127.0.0.1:47070
+{"api_version":"0.7","build_id":"3f4bb0310d07606dd484556a453c8cdbca056963","event":"core_ready","instance_id":"","pid":25664,"port":47070}
+2026-09-19T09:02:27.025430Z  INFO owo_agent_product_eval::product_eval: product-eval 矩阵开始 suite=v1-r1-product-suite planned=20 done=0 todo=20 execution="reference"
+2026-09-19T09:02:27.056032Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=code-repo-audit#single#0 status=Some(Passed) wall_ms=13
+2026-09-19T09:02:27.078678Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=code-repo-audit#multi#0 status=Some(Passed) wall_ms=11
+2026-09-19T09:02:27.200376Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=code-bug-fix#single#0 status=Some(Passed) wall_ms=115
+2026-09-19T09:02:27.284201Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=code-bug-fix#multi#0 status=Some(Passed) wall_ms=76
+2026-09-19T09:02:27.444965Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=code-contract-change#single#0 status=Some(Passed) wall_ms=150
+2026-09-19T09:02:27.579324Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=code-contract-change#multi#0 status=Some(Passed) wall_ms=123
+2026-09-19T09:02:27.679096Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=code-refactor#single#0 status=Some(Passed) wall_ms=91
+2026-09-19T09:02:27.772986Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=code-refactor#multi#0 status=Some(Passed) wall_ms=85
+2026-09-19T09:02:27.784237Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=research-source-compare#single#0 status=Some(Passed) wall_ms=2
+2026-09-19T09:02:27.794124Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=research-source-compare#multi#0 status=Some(Passed) wall_ms=1
+2026-09-19T09:02:27.825934Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=research-evidence-table#single#0 status=Some(Passed) wall_ms=23
+2026-09-19T09:02:27.858454Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=research-evidence-table#multi#0 status=Some(Passed) wall_ms=23
+2026-09-19T09:02:27.873784Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=research-technical-brief#single#0 status=Some(Passed) wall_ms=7
+2026-09-19T09:02:27.889296Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=research-technical-brief#multi#0 status=Some(Passed) wall_ms=7
+2026-09-19T09:02:27.899557Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=document-draft#single#0 status=Some(Passed) wall_ms=2
+2026-09-19T09:02:27.909260Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=document-draft#multi#0 status=Some(Passed) wall_ms=2
+2026-09-19T09:02:27.918991Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=document-revise#single#0 status=Some(Passed) wall_ms=2
+2026-09-19T09:02:27.929087Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=document-revise#multi#0 status=Some(Passed) wall_ms=2
+2026-09-19T09:02:27.940275Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=document-structured-extract#single#0 status=Some(Passed) wall_ms=3
+2026-09-19T09:02:27.949360Z  INFO owo_agent_product_eval::product_eval: product-eval 单元格完成 cell=document-structured-extract#multi#0 status=Some(Passed) wall_ms=1

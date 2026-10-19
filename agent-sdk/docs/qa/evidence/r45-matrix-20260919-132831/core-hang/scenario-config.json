@@ -1,0 +1,17 @@
+{
+    "id":  "core-hang",
+    "kind":  "hang",
+    "note":  "§3.4：sidecar 挂死 → core/handshake_timeout；动作=终止并重试",
+    "expected_codes":  [
+                           "core/handshake_timeout"
+                       ],
+    "required_actions":  [
+                             "终止并重试"
+                         ],
+    "final_budget_sec":  45,
+    "needs_workspace":  true,
+    "needs_key":  true,
+    "acceptance_mode":  "OWO_DESKTOP_ACCEPTANCE=1 + OWO_SIDECAR_ROOT=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132842\\core-hang",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132842\\core-hang\\owo-agent.exe",
+    "sidecar_sha256":  "FEFB3CFA8C6E7358994700B37236C3AB55D7E0D2BB453E1935819AD337553940"
+}

@@ -1,0 +1,19 @@
+{
+  "session_id": "e1e9a6ee-4a5c-4db9-946d-b3b9e8d25c91",
+  "workspace": "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\p6-real-perf-20260922-disconnect-reconnect-cancel-rerun\\runs\\run-03\\workspace",
+  "model": "glm-5.3-flash",
+  "prompt": "请认真处理这个请求，完成后再给出最终答复：先检查当前工作区是否可以读取，然后总结状态。",
+  "started_at": "2026-09-22T10:05:13.933608700+00:00",
+  "duration_ms": 65,
+  "steps": 0,
+  "final_text": null,
+  "events": [],
+  "usage": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0
+  },
+  "phase_timings": [],
+  "error": "agent aborted by user",
+  "performance_task": "disconnect_reconnect_cancel"
+}

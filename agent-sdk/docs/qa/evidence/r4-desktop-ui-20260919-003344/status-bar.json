@@ -1,0 +1,70 @@
+{
+    "present":  true,
+    "count":  5,
+    "segments":  [
+                     {
+                         "key":  "backend",
+                         "tag":  "BUTTON",
+                         "value":  "可用",
+                         "tone":  "ok",
+                         "target":  "settings",
+                         "title":  "后台：可用（核心服务状态 · 点击进入设置与诊断）",
+                         "aria":  "后台：可用（核心服务状态 · 点击进入设置与诊断）",
+                         "width":  69,
+                         "height":  24,
+                         "focusable":  true
+                     },
+                     {
+                         "key":  "workspace",
+                         "tag":  "BUTTON",
+                         "value":  "project",
+                         "tone":  "ok",
+                         "target":  "projects",
+                         "title":  "工作区：project（…\\r4-ui\\project · 当前项目与读写范围 · 点击进入工作区）",
+                         "aria":  "工作区：project（…\\r4-ui\\project · 当前项目与读写范围 · 点击进入工作区）",
+                         "width":  95,
+                         "height":  24,
+                         "focusable":  true
+                     },
+                     {
+                         "key":  "model",
+                         "tag":  "BUTTON",
+                         "value":  "unset · 未配置",
+                         "tone":  "warn",
+                         "target":  "settings",
+                         "title":  "模型：unset · 未配置（提供商与模型 · 点击进入设置）",
+                         "aria":  "模型：unset · 未配置（提供商与模型 · 点击进入设置）",
+                         "width":  118,
+                         "height":  24,
+                         "focusable":  true
+                     },
+                     {
+                         "key":  "permission",
+                         "tag":  "BUTTON",
+                         "value":  "点按查看",
+                         "tone":  "muted",
+                         "target":  "permissions",
+                         "title":  "权限：点按查看（权限中心会给出实际范围与撤销入口 · 权限档位与待审批 · 点击进入权限中心）",
+                         "aria":  "权限：点按查看（权限中心会给出实际范围与撤销入口 · 权限档位与待审批 · 点击进入权限中心）",
+                         "width":  91,
+                         "height":  24,
+                         "focusable":  true
+                     },
+                     {
+                         "key":  "task",
+                         "tag":  "BUTTON",
+                         "value":  "空闲",
+                         "tone":  "muted",
+                         "target":  "chat",
+                         "title":  "当前任务：空闲（任务进展 · 点击进入会话）",
+                         "aria":  "当前任务：空闲（任务进展 · 点击进入会话）",
+                         "width":  91,
+                         "height":  24,
+                         "focusable":  true
+                     }
+                 ],
+    "barRight":  962,
+    "barHeight":  39,
+    "innerWidth":  1280,
+    "bodyClass":  "has-global-status-bar route-chat"
+}

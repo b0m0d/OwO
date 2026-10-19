@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-03T17:06:51Z",
+  "repository": "T:/创新创业/OwO-master/agent-sdk",
+  "git": {
+    "head": "54e4bf9122d05c6a56119ef441d3ebbee8c64c1a",
+    "branch": "agent-frame",
+    "worktree": "dirty; unrelated untracked desktop/tauri preserved",
+    "committed": false
+  },
+  "iteration": {
+    "area": "GoalRunner target validation and Team artifact rework recovery",
+    "changes": [
+      "Goal-level VerificationPlan now executes registered WorkspacePaths validators against the bound host workspace.",
+      "Goal validation receipts include real workspace file hashes, a workspace identity hash, and a deterministic snapshot digest.",
+      "Added a GoalRunner regression test source for target-level workspace hash binding; not executed.",
+      "Artifact rework now persists dispatching intent before coordinator mutation, supports review-ID idempotent recovery, and records requested/completed/failed terminal status.",
+      "Budget exhaustion and terminal Team loop outcomes close pending rework tasks; successful v2 registration links the task to the new Artifact.",
+      "Completed rework replay remains idempotent after the source Artifact becomes Superseded; added assertions to the existing end-to-end test source.",
+      "Updated the architecture document to distinguish source changes from runtime verification."
+    ],
+    "validation": {
+      "static_diff_check": "git diff --check passed",
+      "cargo_or_tests": "deferred until implementation is complete, as requested",
+      "exit_code": null,
+      "cargo_processes": 0
+    },
+    "resources": {
+      "free_physical_memory_gb_approx": 10.74,
+      "free_T_drive_gb_approx": 34.91
+    },
+    "remaining": [
+      "Continue closing the shared task/issue repair lifecycle and unique WorkerRuntime design without weakening policy, validation, or independent review.",
+      "Complete source and compatibility review before the single final Rust verification pass.",
+      "Record actual final verification exit codes; do not claim runtime quality or a Team performance advantage without matched live evidence."
+    ]
+  }
+}

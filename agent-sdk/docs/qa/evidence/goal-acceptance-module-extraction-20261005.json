@@ -1,0 +1,25 @@
+{
+  "date": "2026-10-05",
+  "scope": "GoalRunner host acceptance and completion responsibility extraction",
+  "source_changes": [
+    "Moved aggregate goal verification, workspace receipt invalidation, candidate version hashing, completion record construction and failure completion into goal/acceptance.rs.",
+    "The shared step-validation receipt matcher was relocated with step execution to goal/execution.rs; acceptance continues to use that same matcher through the parent goal module.",
+    "The extraction keeps the existing completion contract and does not add a second Single/Team completion decision path."
+  ],
+  "static_validation": {
+    "rustfmt_check": "passed for goal/mod.rs, execution.rs, acceptance.rs and goal/tests.rs",
+    "source_review": "all moved helper call sites and the existing step_validation_receipt_matches helper were checked statically",
+    "utf8_whitespace": "UTF-8 and trailing-whitespace check passed",
+    "git_diff_check": "passed for tracked changed files"
+  },
+  "runtime_validation": {
+    "cargo_check": "not_run_resource_gate; no Cargo process started",
+    "goal_tests": "not_run_resource_gate",
+    "resource_snapshot": "2026-10-05 latest preflight: 4.19 GB available physical memory; 86.7 percent used; below repository gate (at least 6 GB available and below 80 percent used)"
+  },
+  "remaining_risks": [
+    "No compile or runtime evidence yet proves the private-method relocation is type-correct and behavior-preserving.",
+    "goal/mod.rs remains about 1900 lines; dispatch loop, cancellation cleanup, and result merge are still coupled.",
+    "Single/Team comprehensive matched benchmark and product closure remain outstanding."
+  ]
+}

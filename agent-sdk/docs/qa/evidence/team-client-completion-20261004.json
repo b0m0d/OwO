@@ -1,0 +1,55 @@
+{
+  "date": "2026-10-04",
+  "kind": "client-completion-contract",
+  "source_head": "3d2b03ac7f04443984cef20f0c00c3bdf7b5e7eb",
+  "dirty_worktree": true,
+  "source_sha256": {
+    "desktop/web/core/turn-sse.js": "d5740ca8927d2ab55eb383c2d36e6866c11761b8b040bff98e5d450b938b5738",
+    "desktop/web/app.js": "f3591494b8e4e1be7edd65a3a8dfb33290268a625f707e3d9423f8a8e569fe05",
+    "desktop/web/index.html": "0658c8ada9ef2ae0487ade77b531d54f278c584bbd083007ea0bc65f965a464f",
+    "clients/ts/src/index.ts": "43f4a928d49cfd08cf12947f7d20eed8150a4464f49dd94c3a9cfc18e595f6cb",
+    "desktop/web/tests/turn-completion.test.mjs": "ffee94db35915e11fc17c2ef43766211752db73892ffdaf030fc640fe9a6dfb6",
+    "clients/ts/tests/turn-completion.test.ts": "3d715ad941ca95ceaf2c2ddb1b290aeb4767aca240d853f9fce40f693ddf171e"
+  },
+  "web_targeted": {
+    "passed": 14,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "typescript": {
+    "compile_exit_code": 0,
+    "passed": 21,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "web_api_client_existing_suite": {
+    "passed": 21,
+    "failed": 2,
+    "exit_code": 1,
+    "failures": [
+      "business scripts bypass shared API client",
+      "route switches preserve settings and restored refresh"
+    ]
+  },
+  "rendered_qa": {
+    "passed": true,
+    "environment": "Edge headless, real desktop entry, controlled HTTP fixture, boot disabled in served copy",
+    "fallback": "Browser plugin not available",
+    "provisional": {
+      "active": true,
+      "summary": 0,
+      "status": "\n        \n        等待宿主验收…\n        0s\n      "
+    },
+    "replayCursor": "1",
+    "pageErrors": []
+  },
+  "artifacts_directory": "C:\\Users\\23843\\Documents\\Codex\\Artifacts\\team-stream-20261004",
+  "limitations": [
+    "Controlled HTTP events, no real Daemon/model run",
+    "TypeScript rejects missing terminal receipt; automatic replay is desktop-only",
+    "Rust new regressions not rerun due memory resource limit",
+    "No Single/Team speed, token or delivery comparison",
+    "Existing broader frontend suite has two failures"
+  ],
+  "goal_complete": false
+}

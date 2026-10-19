@@ -1,0 +1,6 @@
+[2m2026-09-21T14:39:52.717844Z[0m [33m WARN[0m [2mowo_agent_server[0m[2m:[0m 文件日志初始化失败（仅落 stderr）：系统找不到指定的路径。 (os error 3)
+[2m2026-09-21T14:39:52.748284Z[0m [32m INFO[0m [2mowo_agent::commands::serve[0m[2m:[0m owo-agent server listening on http://127.0.0.1:39461
+{"api_version":"0.7","build_id":"fc8251d42aa192715fa9f3208585802fa87d88ef","event":"core_ready","instance_id":"","pid":31832,"port":39461}
+[2m2026-09-21T14:39:58.435529Z[0m [32m INFO[0m [2mowo_agent::commands::serve[0m[2m:[0m 收到关闭请求：等待在途回合完成（上限 30s）
+[2m2026-09-21T14:39:58.437353Z[0m [32m INFO[0m [2mowo_agent::commands::serve[0m[2m:[0m 用量快照已落盘：C:\Users\23843\AppData\Local\Temp\owo-cross-client-20260921-223943\data\usage.json
+[2m2026-09-21T14:39:58.439839Z[0m [32m INFO[0m [2mowo_agent::commands::serve[0m[2m:[0m 审计已 flush，服务退出

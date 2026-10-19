@@ -1,0 +1,45 @@
+{
+  "date": "2026-10-05",
+  "scope": "Cargo feature isolation for optional local STT",
+  "changes": [
+    "Perception defaults to no STT; Core forwards an explicit stt feature and gates LocalStt/SttOutcome exports.",
+    "Server explicitly enables Core stt because its AppState and STT routes construct LocalStt; workspace perception dependency defaults are disabled."
+  ],
+  "static_checks": {
+    "toml_parse": "passed for workspace, core, server, and perception manifests using Python tomllib",
+    "feature_graph_assertions": "passed: workspace perception defaults disabled; perception/Core default feature sets empty; Core stt forwards perception/stt; Server explicitly enables Core stt",
+    "rustfmt_check": "passed for all 141 changed or newly added Rust files with rustfmt --check --edition 2021",
+    "git_diff_check": "passed with exit code 0; Git emitted CRLF-to-LF normalization notices"
+  },
+  "cargo_tree": {
+    "status": "passed_no_compile",
+    "lockfile_sync": "cargo tree --offline --workspace synchronized stale Cargo.lock entries for existing dependencies; resulting diff includes tempfile and the missing owo-agent-workswarm Core entry.",
+    "core_no_default_stt": {
+      "command": "cargo tree -p owo-agent-core --no-default-features --locked -e features",
+      "result": "passed; sherpa-onnx absent"
+    },
+    "server_stt": {
+      "command": "cargo tree -p owo-agent-server --locked -e features -i sherpa-onnx",
+      "result": "passed; Server -> Core feature stt -> Perception feature stt -> sherpa-onnx"
+    },
+    "build_started": false,
+    "core_test_graph_no_default_stt": {
+      "command": "cargo tree -p owo-agent-core --no-default-features --locked -e features,dev",
+      "result": "passed; Core test dependency graph including dev-dependencies has no sherpa-onnx"
+    },
+    "product_eval_no_default_stt": {
+      "command": "cargo tree --offline --manifest-path devtools/product-eval/Cargo.toml -e features, then the same with --locked",
+      "result": "passed; Sherpa absent from the full ProductEval graph after synchronizing its previously stale standalone Cargo.lock"
+    }
+  },
+  "cargo_check": "not_run_resource_limited",
+  "rust_tests": "not_run_resource_limited",
+  "cargo_gate": {
+    "status": "resource_limited",
+    "cargo_started": false,
+    "wrapper_exit_code": 2,
+    "cargo_exit_code": null,
+    "reason": "Controlled test gate refused at 4.26 GB available / 86.5% memory use; requires >= 6 GB available and < 80% use."
+  },
+  "limitations": "Cargo dependency feature resolution is verified without compiling. Core/Server type-checks, Rust tests, build-time, and artifact-size measurements remain unverified."
+}

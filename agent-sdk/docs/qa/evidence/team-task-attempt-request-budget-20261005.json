@@ -1,0 +1,35 @@
+{
+  "evidence_id": "team-task-attempt-request-budget-20261005",
+  "scope": "source-only",
+  "claim": "TaskGraph provider requests are admitted against a durable per-task-attempt ceiling, while uncapped Team requests retain the in-memory admission path; attempt identity is separate from phase metrics and lease scope.",
+  "verification": [
+    "Python source assertions verified attempt identity wiring, provider admission coverage, durable reservation for capped attempts, v1/v2 journal parsing, restart enforcement source, and regression source presence.",
+    "rustfmt --edition 2021 --check --config skip_children=true passed for five affected Rust files.",
+    "git diff --check passed."
+  ],
+  "limits": [
+    "No Rust compilation or tests were run per user instruction.",
+    "Capped TaskGraph requests incur the existing bounded batch window and durable journal I/O; latency impact is unmeasured.",
+    "No matched Team-vs-Single latency, token, or delivery evaluation was run.",
+    "Source checks do not establish compile correctness or runtime recovery behavior."
+  ],
+  "source_assertions": {
+    "task_and_attempt_ids_form_distinct_budget_scope": true,
+    "metrics_and_lease_scope_remains_phase_based": true,
+    "capped_attempt_reservations_are_durable_without_global_cap": true,
+    "uncapped_requests_keep_memory_path": true,
+    "provider_is_wrapped_when_budget_exists_even_without_metrics_counter": true,
+    "reservation_journal_reads_legacy_v1_and_current_v2": true,
+    "tests_cover_attempt_isolation_and_restart": true,
+    "architecture_and_problem_report_updated": true
+  },
+  "files_sha256": {
+    "crates/owo-agent-server/src/workswarm_metrics/request_budget.rs": "25895701d7aa91c23302c5dd37157d890e4412a1ee775d83a270551df8a8d720",
+    "crates/owo-agent-server/src/workswarm_metrics/tests.rs": "190b662831ea2190bd13a28bf500ca25e4cc3ea921c6383178f8236d4f6c265a",
+    "crates/owo-agent-server/src/workswarm_api/workers.rs": "5a725a03f0ced0d3b66dcffdd16e1e25fecb613ff3ae95e8cc85ebdbba28a657",
+    "crates/owo-agent-server/src/workswarm_api/runtime.rs": "67795057cdddcc328bb71746e42691482c8162f86114d1c65979f1506ff89ac7",
+    "crates/owo-agent-core/src/worker_runtime.rs": "d1d6c0d927e4953e46f53958870550f81371b2119957c2671fc9a8dabf0d1c90",
+    "docs/工程代码结构说明.md": "5c995436f7eb1ea573f7dcbfa48779305aca4ecfd4d227ef2f7e9dd320cbb4e3",
+    "docs/Team速度与交付质量问题解决报告-2026-10-05.md": "b610af27088465c4f875de62f4fd0bd5df1c08074b1a064b71da996e78be94fb"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "id": "team-run-budget-single-writer-20261008",
+  "date": "2026-10-08",
+  "scope": "Team run-wide step and retry budget authority",
+  "change": {
+    "authority": "persist_attempt_admissions is the only durable writer of Team steps_taken, total_retries, and admitted StepRecord.attempts.",
+    "progress_projection": "StepProgressUpdate may retain runner-local counters for diagnostics/API compatibility, but merge_step_progress_updates ignores them and only projects attempt-fenced StepRecord fields.",
+    "phase_finalize": "finalize_phase no longer accepts budget baselines or computes counters from phase GoalRunState."
+  },
+  "verification": {
+    "adversarial_progress_counter_projection": {
+      "passed": 1,
+      "failed": 0,
+      "snapshot_steps_taken": 500,
+      "snapshot_total_retries": 300,
+      "durable_counters_changed": false
+    },
+    "team_integration_tests": {
+      "passed": 50,
+      "failed": 0
+    },
+    "core_full_test": {
+      "command": "cargo test -p owo-agent-core --locked -j1 -- --test-threads=1",
+      "exit_code": 0,
+      "library_passed": 552,
+      "library_failed": 0,
+      "library_ignored": 3
+    },
+    "workspace_check": {
+      "command": "cargo check --workspace --locked -j1",
+      "exit_code": 0
+    },
+    "format_check": {
+      "exit_code": 0
+    },
+    "diff_check": {
+      "exit_code": 0
+    }
+  },
+  "limitations": [
+    "Step status still advances in phase GoalRunner and is projected into the durable Team state; full Durable Run Scheduler unification remains unfinished.",
+    "No real-model Single-versus-Team paired performance evaluation was run."
+  ]
+}

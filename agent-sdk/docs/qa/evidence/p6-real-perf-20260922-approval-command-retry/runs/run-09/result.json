@@ -1,0 +1,849 @@
+{
+  "run": 9,
+  "task": "approval_command",
+  "core_ready": {
+    "api_version": "0.7",
+    "build_id": "fc8251d42aa192715fa9f3208585802fa87d88ef",
+    "event": "core_ready",
+    "instance_id": "",
+    "pid": 43988,
+    "port": 6955,
+    "startup_ms": 225.64
+  },
+  "session_create_ms": 5.6,
+  "turn_duration_ms": 21496.78,
+  "session_id": "bcc77b05-be27-435b-b4ad-2651016c2a67",
+  "events": [
+    {
+      "message": "模型调用",
+      "type": "progress",
+      "v": 1
+    },
+    {
+      "args": {
+        "command": "rg --version"
+      },
+      "explain": {
+        "action": "执行命令：rg",
+        "risk": "该工具未声明风险信息（未提供 MCP annotations）",
+        "target": "--version",
+        "undoable": true
+      },
+      "level": "execute",
+      "reason": "执行命令：rg --version",
+      "redacted_args": {
+        "command": "rg --version"
+      },
+      "request_id": "a2551516-6729-4b63-b44a-6d5ed04759cb",
+      "risk_note": "该工具未声明风险信息（未提供 MCP annotations）",
+      "tool": "run_command",
+      "type": "permission_request",
+      "v": 1
+    },
+    {
+      "args": null,
+      "id": "call_994a6763e3a5441e8451f55b",
+      "tool": "run_command",
+      "type": "tool_use",
+      "v": 1
+    },
+    {
+      "id": "call_994a6763e3a5441e8451f55b",
+      "ok": true,
+      "tool": "run_command",
+      "type": "tool_result",
+      "v": 1
+    },
+    {
+      "message": "模型调用",
+      "type": "progress",
+      "v": 1
+    },
+    {
+      "delta": "执行",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "结果",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "：",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "命令",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "未能",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "成功",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "运行",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "。\n\n",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "-",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " **",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "命令",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "**",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "：",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "`",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "rg",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " --",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "version",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "`",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "（",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "只",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "读",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "）\n",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "-",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " **",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "返回",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "**",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "：",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "exit",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " code",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " ",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "1",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "，",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "错误",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "信息",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " `",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "Not",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " enough",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " quota",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " is",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " available",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " to",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " process",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " this",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " command",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": ".",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "`\n",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "-",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " **",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "结论",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "**",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "：",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "当前",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "环境的",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "命令",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "执行",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "配",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "额",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "已",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "耗",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "尽",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "（",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "或",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "被",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "限制",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "），",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "因此",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "无法",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "获取",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " rip",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "grep",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " 版",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "本",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "号",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "。\n\n",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "补充",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "说明",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "：\n",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "-",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " 我",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "不再",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "重复",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "执行",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "同一",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "命令",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "，",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "以免",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "继续",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "触发",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "配",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "额",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "限制",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "。\n",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "-",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " ",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "工",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "作",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "区",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "自",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "带的",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " rip",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "grep",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " ",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "搜索",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "功能",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "（",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "search",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "_files",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " ",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "工",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "具",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "）",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "本身",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "可用",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "，",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "但它",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "不",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "返回",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "版本",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "信息",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "，",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "无法",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "据此",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "推断",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "版本",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "。\n\n",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "**",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "建议",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "**",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "：",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "请",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "稍",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "后",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "配",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "额",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "恢复",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "时",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "再次",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "运行",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " `",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "rg",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": " --",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "version",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "`",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "，",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "或",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "直接",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "在",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "本地",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "终端",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "执行",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "该",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "命令",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "查看",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "版本",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "delta": "。",
+      "type": "token_delta",
+      "v": 1
+    },
+    {
+      "text": "执行结果：命令未能成功运行。\n\n- **命令**：`rg --version`（只读）\n- **返回**：exit code 1，错误信息 `Not enough quota is available to process this command.`\n- **结论**：当前环境的命令执行配额已耗尽（或被限制），因此无法获取 ripgrep 版本号。\n\n补充说明：\n- 我不再重复执行同一命令，以免继续触发配额限制。\n- 工作区自带的 ripgrep 搜索功能（search_files 工具）本身可用，但它不返回版本信息，无法据此推断版本。\n\n**建议**：请稍后配额恢复时再次运行 `rg --version`，或直接在本地终端执行该命令查看版本。",
+      "type": "final",
+      "v": 1
+    }
+  ],
+  "tool_names": [
+    "run_command"
+  ],
+  "final_received": true,
+  "final_text_length": 327,
+  "diff": null
+}

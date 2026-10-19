@@ -1,0 +1,68 @@
+[
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+        "pass":  true,
+        "detail":  "hwnd=3409872 owner=7740 t=0.5s fail="
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "DOM 事实通道（WebView2 CDP）建立",
+        "pass":  true,
+        "detail":  "requested=48186 effective=48186"
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "10s 内界面可操作（无永久 loading）",
+        "pass":  true,
+        "detail":  "t=1.1s health=\"连接中…\""
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "出现统一错误卡（含发生/已自动/下一步三段）",
+        "pass":  true,
+        "detail":  "t=11.8s（时限 20s 内）"
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "错误终态在 20s 时限内到达（§3.4）",
+        "pass":  true,
+        "detail":  "error_at_sec=11.8 budget=20"
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "错误码在期望集合内（不得含糊报错）",
+        "pass":  true,
+        "detail":  "found=storage/not_writable allowed=storage/not_writable"
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "错误卡提供全部契约动作（更换数据目录/重试)",
+        "pass":  true,
+        "detail":  "missing=; card=本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： storage/not_writable · 存储错误：数据目录不可写，请更换数据目录或修复权限 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间"
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "技术详情以折叠区呈现（不糊在正文里）",
+        "pass":  true,
+        "detail":  "details=True"
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "故障面截图（重获窗口 + 五重有效性）",
+        "pass":  true,
+        "detail":  "size=1280x720 bytes=133961 non_black_ratio=0.999295 variance=1484.9947 samples=36864"
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+        "pass":  true,
+        "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-122254\\data-dir-unwritable\\owo-agent.exe sha256=8CB3347C7CB78DD9DCC8263C9B9C3E9170FB1424446C024F74736D2C7978FC7C"
+    },
+    {
+        "scenario":  "data-dir-unwritable",
+        "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+        "pass":  true,
+        "detail":  "stages=ok"
+    }
+]

@@ -1,0 +1,31 @@
+{
+  "iteration": "2026-10-04-09",
+  "scope": "Single request-bound verification plan integrity and turn-local completion",
+  "changes": [
+    "Bound each Single VerificationPlan to both the current unique turn_id and the user prompt digest; added a backward-compatible SQLite migration for the turn identity.",
+    "Made a registered plan immutable within a turn and require registration before the first workspace write, preventing prompt replay and post-result verification downgrade.",
+    "Required each plan requirement to name covered user acceptance points; made all verifier resource fields explicitly required in the tool schema.",
+    "Registered verification_plan as a built-in read-class control tool so it does not fall through to high-risk execute approval.",
+    "Kept later ordinary replies at response_complete when only prior-turn unaccepted code exists, unless the user starts a fresh request-bound verification turn.",
+    "Updated the architecture document and added regression test source for old-plan replay and historical candidate isolation."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Final Cargo validation, formatting, and clippy are deferred until implementation is sufficiently complete.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 15.65,
+    "memory_used_percent": 50.5,
+    "free_workspace_volume_gb": 34.29,
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Final Cargo validation and formatting/clippy checks.",
+    "Single request requirement mapping still originates from model declarations and lacks semantic independent review or a manual acceptance path.",
+    "WorkerRuntime API and task-scoped persistence convergence across Single and Team.",
+    "Dynamic task-pool migration and removal of avoidable serial integration work.",
+    "Matched live Single/Team paired evaluation; no Team advantage is claimed."
+  ]
+}

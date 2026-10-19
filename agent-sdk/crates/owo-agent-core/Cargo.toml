@@ -1,0 +1,124 @@
+[package]
+name = "owo-agent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Agent/Core 默认路径不需要本地语音识别；Server 显式启用 STT，评测与 Core-only 构建跳过 Sherpa。
+default = []
+stt = ["owo-agent-perception/stt"]
+
+[dependencies]
+owo-agent-protocol.workspace = true
+# 微内核（M0）：error/platform/capability/audit/credentials/cas_store/
+# storage_crypto/whitelist/injection/lease/deadline 已下沉到 owo-agent-kernel。
+# 本 crate 通过 lib.rs 的 `pub use owo_agent_kernel::*` + 别名模块保持原有公共 API，
+# 因此 server / cli / Tauri 壳 / 36 个集成测试的既有路径全部继续有效。
+owo-agent-kernel.workspace = true
+# Daemon 扩展内核（M2）：notes / automation / change_set / change_set_store / cloud_exec
+# 已下沉到 owo-agent-extensions（它只依赖 kernel，反向依赖为零）。core 通过 lib.rs 的
+# 同名别名模块 + 顶层 pub use 保持既有路径，server/cli 与集成测试零改动。
+owo-agent-extensions.workspace = true
+# 受信执行内核（M3）：sandbox + audit_chain 已下沉到 owo-agent-tool-safety
+# （只依赖 kernel，反向依赖为零）。core 通过 lib.rs 的同名别名模块 + 顶层 pub use
+# 保持既有路径，mcp / plugin / tools 与 4 个相关集成测试零改动。
+owo-agent-tool-safety.workspace = true
+# 环境内核（M5）：desktop_env 已下沉到 owo-agent-env（只依赖 kernel）。
+# 本次是第一次真正的依赖倒置：TaskSurface 契约下沉内核，desktop_env 对 core 的依赖归零。
+owo-agent-env.workspace = true
+# 插件内核（M7）：plugin 已下沉；McpServerConfig 随插件外迁后由 core 反向引用。
+owo-agent-plugins.workspace = true
+# 共享契约内核（M8）：context/computer_task/plan/skill/skill_health 已下沉。
+owo-agent-contracts.workspace = true
+# 编排内核（M9）：project_space_store / team_benefit / workswarm_output 已下沉到
+# owo-agent-workswarm（只依赖 protocol，`crate::` 出边为 0）。core 的 workswarm /
+# team_strategy / artifact_pipeline / contract_worker / worker_profile 继续经 lib.rs 的
+# 同名别名模块使用 `crate::<模块>::` 路径，server/cli/集成测试/devtools 零改动。
+owo-agent-workswarm.workspace = true
+# MCP 宿主内核（M10）：mcp 已下沉到 owo-agent-mcp（零出边）。core 的 agent / tools /
+# tool_effects 继续经 lib.rs 的同名别名模块使用 `crate::mcp::` 路径；
+# 两台 MCP 假服务器与 mcp_tests 也随之迁走（`CARGO_BIN_EXE_*` 只在声明该 bin 的包内可用）。
+owo-agent-mcp.workspace = true
+# 记忆/观察/学习内核（M11）：memory / observe / learn 已下沉到 owo-agent-memory。
+# core 的 action_program / computer_use / executor / share_skill / workflow 与
+# server 的 memory_graph_api 继续经 lib.rs 的同名别名模块使用既有路径。
+# ProactiveSettings 随域搬到该 crate，core 的 settings.rs 用 pub use 转出。
+owo-agent-memory.workspace = true
+# 受信策略内核（M12）：permissions / permission_spec / grant_store / tool_effects 已下沉到
+# owo-agent-policy（指南 §4 的 tool-host/crates/policy 第一段）。core 的 agent / tools /
+# subagent / autoreview / settings 与 server 的权限中心继续经 lib.rs 的同名别名模块使用
+# 既有路径；工具命名契约 sanitize_tool_name 随之迁走，tools.rs 用 pub(crate) use 反向引用。
+owo-agent-policy.workspace = true
+# 感知内核（M14，ADR-002）：accessibility / ocr / onnx_ocr / paddle_ocr / vision /
+# scene / locate / element_registry / window_template 已下沉到 owo-agent-perception；
+# Core 默认关闭 Sherpa STT，仅 server 显式启用 `stt` feature。
+# core 的 executor / action_program / assert / computer_use 与 server 的 perception_api /
+# locate_api / desktop_api 继续经 lib.rs 的同名别名模块使用既有路径。
+# SttSettings 亦随域搬入，settings.rs 用 pub use 转出。
+# 默认构建不启用 Sherpa STT；选择 core 的 `stt` feature 才联入 sherpa-onnx。
+owo-agent-perception.workspace = true
+# UI 执行内核（M15）：executor 已下沉；core 的 action_program / computer_use 经别名使用。
+owo-agent-executor.workspace = true
+# 工作流内核（M15）：workflow / action_program / assert 已下沉；server 的 workflow_api 经别名使用。
+owo-agent-workflow.workspace = true
+# 开发工具（M1）：ProductEval 底座已外迁到 `devtools/product-eval/`（独立 workspace 的
+# 开发工具 crate，必须反向依赖本 crate 才能真实跑 Agent/Turn/工具/权限）。
+# 本 crate 对它的依赖是**零**——受信运行时不该依赖开发工具，而且任何反向依赖都会形成
+# Cargo 环。server/cli 通过 `owo-agent-eval-facade` 拿评测面。
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+base64.workspace = true
+tracing.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+futures = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+ed25519-dalek.workspace = true
+sha2.workspace = true
+zip = "2"
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+hmac = "0.12"
+regex = "1"
+
+# M1 起 core 不再有 product-eval feature：评测（product_eval / eval / dataset_builder /
+# product_eval_workswarm）整体位于 `devtools/product-eval/`，由 server/cli 经
+# `owo-agent-eval-facade` 使用。core 对开发工具的依赖为零，因此不需要任何 feature 开关，
+# 也不会因为 feature 并集与开发工具形成环。
+#
+# dev-dependencies 允许反向：Cargo 的环检测只作用于普通依赖图，dev-dependency 边
+# （core 的集成测试要构造 transition/world_model 数据集）不会成环，也不会进入应用构建。
+[dev-dependencies]
+owo-agent-eval-facade.workspace = true
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+# M14（ADR-002）把感知群组（UIA / OCR / STT / 视觉 / 场景 / 定位）整体迁到
+# `owo-agent-perception` 之后，这里的重依赖只剩 `windows`（executor.rs 需要 UIA 元素类型、
+# SendInput 与 SetCursorPos）与 `futures`。**已移除**：ndarray / ort / sherpa-onnx /
+# windows-future / windows-sys —— 这正是本步的目的：core 的测试二进制不再静态链接 ONNX。
+futures = "0.3"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    # 解码子进程输出用：Windows 控制台按 OEM 代码页（简中 936/GBK）输出，
+    # 直接用 UTF-8 解会让所有中文命令输出变成替换字符（见 tools::decode_process_output）。
+    "Win32_Globalization",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# MCP 的两台假服务器（`owo-mcp-test-server` / `owo-mcp-http-test-server`）连同
+# `tests/mcp_tests.rs` 已随 M10 一起迁到 owo-agent-mcp：`env!("CARGO_BIN_EXE_<name>")`
+# 只在声明该 bin 的包的集成测试里可用，且这两台服务器只服务于 MCP 这一条边界。
+# 产物路径不变（同一 workspace 共用 target/），`plugins/example-hello/manifest.json`
+# 里的 `../../target/debug/owo-mcp-test-server.exe` 继续有效。

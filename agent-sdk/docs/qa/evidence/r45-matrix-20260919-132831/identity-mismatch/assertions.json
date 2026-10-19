@@ -1,0 +1,68 @@
+[
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "窗口在 20s 内出现且句柄归属本壳进程（不是无声失败/别的窗口）",
+        "pass":  true,
+        "detail":  "hwnd=7406116 owner=41744 t=0.5s fail="
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "DOM 事实通道（WebView2 CDP）建立",
+        "pass":  true,
+        "detail":  "requested=4576 effective=4576"
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "10s 内界面可操作（无永久 loading）",
+        "pass":  true,
+        "detail":  "t=1.9s health=\"连接中…\""
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "出现统一错误卡（含发生/已自动/下一步三段）",
+        "pass":  true,
+        "detail":  "t=12.9s（时限 20s 内）"
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "错误终态在 20s 时限内到达（§3.4）",
+        "pass":  true,
+        "detail":  "error_at_sec=12.9 budget=20"
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "错误码在期望集合内（不得含糊报错）",
+        "pass":  true,
+        "detail":  "found=core/identity_mismatch allowed=core/identity_mismatch"
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "错误卡提供全部契约动作（重新安装或重建)",
+        "pass":  true,
+        "detail":  "missing=; card=本地核心服务暂不可用 核心服务在限定时间内未就绪 错误码： core/identity_mismatch · 组件身份不一致：检测到不属于本窗口的旧服务 已自动：查询壳连接诊断 → 单飞恢复（0/0.5/1/2/5 秒退避）→ 断连期间停止"
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "技术详情以折叠区呈现（不糊在正文里）",
+        "pass":  true,
+        "detail":  "details=True"
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "故障面截图（重获窗口 + 五重有效性）",
+        "pass":  true,
+        "detail":  "size=1280x720 bytes=80153 non_black_ratio=0.998183 variance=931.858 samples=36864"
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "实际启动的 core 来自场景目录（验收模式无回退）",
+        "pass":  true,
+        "detail":  "path=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260919-132842\\identity-mismatch\\owo-agent.exe sha256=FEFB3CFA8C6E7358994700B37236C3AB55D7E0D2BB453E1935819AD337553940"
+    },
+    {
+        "scenario":  "identity-mismatch",
+        "name":  "场景完整执行（prepare→collect 全阶段无异常）",
+        "pass":  true,
+        "detail":  "stages=ok"
+    }
+]

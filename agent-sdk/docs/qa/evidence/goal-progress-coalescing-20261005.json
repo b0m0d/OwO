@@ -1,0 +1,47 @@
+{
+  "created_at": "2026-10-05",
+  "claim": "Static architecture change: Team Goal progress snapshots are coalesced per step and each consumed batch merges through one Team state load/write; no runtime performance or type-check claim.",
+  "change": {
+    "signal_capacity": 1,
+    "pending_policy": "latest snapshot per step_id replaces older unconsumed snapshots",
+    "counter_merge": "monotonic max of same-epoch observed steps_taken and total_retries",
+    "scope_limit": "pending map scales with unique steps observed in current phase; total task-graph memory is not capped here",
+    "persistence_batch": "one Team lock and one state load per notification batch; one state write only if records or counters changed",
+    "record_change_detection": "includes status, attempts, attempt_id, phase_epoch, output, error, skip_reason and validation_receipts"
+  },
+  "regression_sources": [
+    "progress_queue_coalesces_snapshots_by_step",
+    "batched_merge_persists_receipt_only_changes_and_never_regresses_counters"
+  ],
+  "files": [
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/goal/types.rs",
+      "sha256": "fd187ca37697ff0d00efff66289f4e45ee63eaa6a84d6b7f08aca81da160eb5a",
+      "bytes": 18626
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/goal/mod.rs",
+      "sha256": "a12a22b31e3ef51a9eb29865c37f0ac28df74e4d4556d22b1157bedd665c464e",
+      "bytes": 106436
+    },
+    {
+      "path": "agent-sdk/crates/owo-agent-core/src/workswarm/coord_run.rs",
+      "sha256": "9b1ae27b7185ecbd39906e3cb5737a15f51f02eff8484fe139078f722beee039",
+      "bytes": 45432
+    }
+  ],
+  "validation": {
+    "rustfmt_parse": "passed_stdin",
+    "rustfmt_check": "passed_stdin",
+    "source_wiring": "passed_assertions",
+    "git_diff_check": "passed_exit_code_0",
+    "cargo_check_build_test_clippy": "not_run_user_requested_no_compilation",
+    "runtime_load_cancel_recovery": "not_run",
+    "latency_memory_disk_writes_tokens": "not_measured"
+  },
+  "limits": [
+    "Coalescing can omit intermediate states for one step; the latest snapshot and final phase merge preserve current state.",
+    "Pending snapshot count remains proportional to unique step IDs observed during the phase.",
+    "No speed, memory, storage-write or delivery-quality gain is claimed without runtime evidence."
+  ]
+}

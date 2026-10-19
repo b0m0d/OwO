@@ -1,0 +1,50 @@
+{
+    "schema":  "owo-mk-smoke/2",
+    "tag":  "p0-pos",
+    "mode":  "basic",
+    "identity_only":  true,
+    "started_at":  "2026-09-21T12:30:41.5027921Z",
+    "finished_at":  "2026-09-21T12:30:41.6771474Z",
+    "source":  {
+                   "commit":  "fc8251d42aa192715fa9f3208585802fa87d88ef",
+                   "dirty":  true
+               },
+    "binary":  {
+                   "path":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-mk-smoke-identity-20260921-203040\\owo-agent-current.cmd",
+                   "sha256":  "d33157308928103e3d33e31f325c617ad5fda03721330bc3a9a3dfefc84c266e",
+                   "bytes":  147,
+                   "mtime":  "2026-09-21T12:30:40.8170956Z",
+                   "version":  "0.1.0",
+                   "commit":  "fc8251d42aa192715fa9f3208585802fa87d88ef",
+                   "dirty":  "false",
+                   "built_at":  "2026-01-01T00:00:00Z",
+                   "api_version":  "0.7",
+                   "version_line":  "owo-agent 0.1.0 api=0.7 commit=fc8251d42aa192715fa9f3208585802fa87d88ef dirty=false built_at=2026-01-01T00:00:00Z source=compiled"
+               },
+    "build":  {
+                  "performed":  false,
+                  "policy":  "normal",
+                  "exit_code":  null
+              },
+    "identity":  {
+                     "ok":  false,
+                     "reason":  "产物 dirty 主张与源码事实不一致：exe dirty=false，tree dirty=true（构建身份作用域可能漂移）"
+                 },
+    "checks":  [
+                   {
+                       "check":  "binary.identity_matches_head",
+                       "pass":  false,
+                       "detail":  "产物 dirty 主张与源码事实不一致：exe dirty=false，tree dirty=true（构建身份作用域可能漂移）",
+                       "evidence":  "identity"
+                   }
+               ],
+    "real_turn":  {
+                      "requested":  false,
+                      "status":  "not_requested"
+                  },
+    "started":  false,
+    "work_dir":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-mk-smoke-p0-pos-20260921-203041",
+    "evidence_dir":  "T:\\创新创业\\OwO-master\\agent-sdk\\docs\\qa\\evidence\\mk-smoke-p0-pos-20260921-203041",
+    "ok":  false,
+    "exit_code":  3
+}

@@ -1,0 +1,31 @@
+{
+  "iteration": "2026-10-04-20",
+  "scope": "Make Single independent review cancellable and accountable to active turn budget",
+  "changes": [
+    "Wrapped the Single review provider request in cancellation handling; cancellation drops the in-flight future and ends the Agent turn as Aborted.",
+    "When turn_deadline is configured, the reviewer receives only the remaining model-phase budget and its latency is recorded in the turn phase timeline.",
+    "When no deadline is configured, the reviewer receives no new fixed timeout, preserving the ordinary unlimited-turn default while remaining cancellable.",
+    "Validation retry is suppressed after explicit model-round or active deadline exhaustion; the current result remains unverified instead of starting a doomed extra model request.",
+    "Added test source for reviewer cancellation, active deadline timeout, and no-deadline success."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Cargo validation, formatting, and clippy remain deferred until implementation convergence as requested.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 15.71,
+    "memory_used_percent": 50.3,
+    "free_workspace_volume_gb": null,
+    "workspace_volume_status": "Mapped workspace volume was not exposed by the current PowerShell probe; not inferred",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Manual acceptance remains unsupported by Single VerificationPlan; ordinary ask_user answers are not accepted as verification receipts.",
+    "Requirement decomposition remains model-proposed and not independently proven complete.",
+    "Single and Team do not yet share one persisted task/completion state machine.",
+    "Final Cargo validation and formatting/clippy checks.",
+    "Paired live Single/Team evaluation; no Team advantage is claimed."
+  ]
+}

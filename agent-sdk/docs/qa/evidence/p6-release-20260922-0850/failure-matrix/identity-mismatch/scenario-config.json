@@ -1,0 +1,17 @@
+{
+    "id":  "identity-mismatch",
+    "kind":  "identity",
+    "note":  "§3.4：伪造别窗口 core_ready → core/identity_mismatch；动作=重新安装或重建",
+    "expected_codes":  [
+                           "core/identity_mismatch"
+                       ],
+    "required_actions":  [
+                             "重新安装或重建"
+                         ],
+    "final_budget_sec":  20,
+    "needs_workspace":  true,
+    "needs_key":  true,
+    "acceptance_mode":  "OWO_DESKTOP_ACCEPTANCE=1 + OWO_SIDECAR_ROOT=C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-083006\\identity-mismatch",
+    "injected_sidecar":  "C:\\Users\\23843\\AppData\\Local\\Temp\\owo-desktop-acceptance\\20260922-083006\\identity-mismatch\\owo-agent.exe",
+    "sidecar_sha256":  "5366827BE10B43FA736BB80DB566B91AED7BE39466C3827731DDC699B8548C81"
+}

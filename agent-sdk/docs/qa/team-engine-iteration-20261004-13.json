@@ -1,0 +1,29 @@
+{
+  "iteration": "2026-10-04-13",
+  "scope": "Risk-triggered Single independent review bound to a workspace source snapshot",
+  "changes": [
+    "Added a separate read-only review request for high-risk source changes after host static validation succeeds.",
+    "The reviewer receives exact host-read source bytes, per-file SHA-256 values, the original user request, and frozen requirement quotes; approval must cite every reviewed source path.",
+    "Host records a ValidationReceipt and rechecks all snapshot hashes after the request; stale, malformed, rejected, unreadable, oversized, or sensitive-credential snapshots cannot be accepted.",
+    "Failed review returns structured evidence to the same Agent repair loop and reopens the accepted execution receipts until a later review passes.",
+    "Review model requests are included in current-turn usage and request telemetry; review uses the configured model route and is not model-diverse review."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Final Cargo validation, formatting, and clippy remain deferred until implementation convergence.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 15.91,
+    "memory_used_percent": 49.7,
+    "free_workspace_volume_gb": 34.29,
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Final Cargo validation and formatting/clippy checks.",
+    "Requirement coverage completeness is not independently proven for ordinary and non-triggered Single work.",
+    "WorkerRuntime and ResolvedTaskContext convergence across production entry points.",
+    "Matched live Single/Team paired evaluation; no Team advantage is claimed."
+  ]
+}

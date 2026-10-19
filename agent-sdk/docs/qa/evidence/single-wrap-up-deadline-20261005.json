@@ -1,0 +1,19 @@
+{
+  "evidence_id": "single-wrap-up-deadline-20261005",
+  "scope": "source-only",
+  "claim": "The additional Single turn-limit wrap-up request now observes the remaining model deadline and abort signal, records a started request in model phase timing, and falls back visibly on timeout without accepting candidate changes.",
+  "source_observations": {
+    "wrap_up_obeys_phase_budget": true,
+    "wrap_up_observes_abort": true,
+    "wrap_up_phase_timing": true,
+    "regression_test": true
+  },
+  "limits": [
+    "No Rust compilation or test execution was run.",
+    "The runtime timeout and cancellation behavior remains unverified until the regression test runs."
+  ],
+  "files": {
+    "crates/owo-agent-core/src/agent/turn.rs": "3dc1b31a992cb52e0f5cc3b69cff93f1450022fbef961da255d0b65f09846054",
+    "crates/owo-agent-core/src/agent/tests.rs": "57b238bf0461c9078d68b4a7bb0aa094a33f0a794062bd16e83b28aa7fdccaf2"
+  }
+}

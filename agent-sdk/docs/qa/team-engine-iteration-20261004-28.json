@@ -1,0 +1,28 @@
+{
+  "iteration": "2026-10-04-28",
+  "scope": "Expose host completion state on failed Single turn events",
+  "changes": [
+    "Added a defaulted completion_status field to TurnFailed and populate it from the durable host completion record.",
+    "CLI/TUI and desktop/web show the failure status; the IME bridge ignores the additive field and keeps its prior error behavior.",
+    "Added protocol regression-test source for old payload fallback to Unverified and new Aborted payload serialization."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "Compilation, formatting, route contracts, and frontend tests remain deferred until implementation convergence as requested.",
+    "git_diff_check": "passed"
+  },
+  "resources": {
+    "free_memory_gb": 16.22,
+    "memory_used_percent": 48.7,
+    "free_workspace_volume_gb": 34.28,
+    "workspace_volume_status": "Measured on T:; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Single and Team evidence collection still uses separate adapters over the shared completion contract.",
+    "Final-version acceptance needs final cross-path verification for source edits, artifacts, and resumed runs.",
+    "Final Cargo validation, formatting, route contracts, focused tests, and frontend tests.",
+    "Matched live Single/Team evaluation; no Team advantage is claimed."
+  ]
+}

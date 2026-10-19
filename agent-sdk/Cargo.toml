@@ -1,0 +1,116 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/owo-agent-protocol",
+    # 微内核（M0）：依赖根，只放被多个运行边界共用的稳定原语；core/server/cli 单向依赖它。
+    "crates/owo-agent-kernel",
+    "crates/owo-agent-core",
+    # Daemon 扩展内核（M2）：notes/automation/change_set/change_set_store/cloud_exec。
+    # 这五个模块在 core 依赖图里是唯一「零入边 + 零出边」的成规模集合（见 §6），
+    # 因此搬迁结构性安全。
+    "crates/owo-agent-extensions",
+    # 受信执行内核（M3）：sandbox + audit_chain。SCC 分析里唯一零出边的成规模分量；
+    # 两者互相引用但同处本 crate，不跨 crate 边界，故无需接口倒置。
+    "crates/owo-agent-tool-safety",
+    # 共享契约内核（M8）：context/computer_task/plan/skill/skill_health——最轻的依赖根
+    # （连 windows-sys/async-trait 都不带，只有 serde/chrono/uuid）。
+    "crates/owo-agent-contracts",
+    # 环境内核（M5）：desktop_env + transition/world_model/experience_store（M6）。
+    # M5 做了真正的依赖倒置（TaskSurface 下沉内核）。
+    "crates/owo-agent-env",
+    # 插件内核（M7）：plugin + 从 mcp 下沉的 McpServerConfig。
+    "crates/owo-agent-plugins",
+    # 编排内核（M9）：WorkSwarm 的契约与状态（project_space_store / team_benefit /
+    # workswarm_output，2,847 行，零出边）。只依赖 protocol —— 不得依赖 core。
+    # 这是指南 §3「extensions/workswarm 可选加载」的前置条件：执行侧仍留在 core。
+    "crates/owo-agent-workswarm",
+    # MCP 宿主内核（M10）：指南 §4 的 `tool-host/crates/mcp-host` 第一段——
+    # MCP 客户端 + 两台测试用假服务器 + 13 条 MCP 集成测试。零出边。
+    "crates/owo-agent-mcp",
+    # 记忆/观察/学习内核（M11）：memory + observe + learn（2,454 行）+ 随域搬入的
+    # ProactiveSettings。只依赖 kernel 与 contracts —— 不得依赖 core。
+    "crates/owo-agent-memory",
+    # 受信策略内核（M12）：指南 §4 `tool-host/crates/policy` 第一段——
+    # permissions / permission_spec / grant_store / tool_effects（3,068 行）+ 工具命名契约。
+    "crates/owo-agent-policy",
+    # 感知内核（M14，ADR-002）：UIA / OCR / STT / 视觉 / 场景融合 / 定位（11 模块 5,870 行）。
+    # 它的存在意义是把 ORT/Sherpa/ndarray/windows 从 core 的依赖与链接里摘出去。
+    "crates/owo-agent-perception",
+    # UI 执行内核（M15）：指南 §4 tool-host/crates/executor 的代码边界。
+    "crates/owo-agent-executor",
+    # 工作流/动作程序内核（M15）：workflow + action_program + assert。
+    "crates/owo-agent-workflow",
+    # ProductEval 兼容门面（M1）：给 server/cli 提供评测面路径，同时让 core 对
+    # devtools/product-eval 的依赖保持为零，避免 crate 环。
+    "crates/owo-agent-eval-facade",
+    "crates/owo-agent-server",
+    # 唯一共享客户端（P1，指南 §7.1）：discovery/auth/http/sse/sessions/turns/
+    # approvals/diagnostics。**只依赖 protocol**，禁止依赖 core/server/sqlite/mcp。
+    "crates/owo-agent-client",
+    "crates/owo-agent-cli",
+    "crates/owo-build-info",
+    "crates/owo-sim",
+]
+# 开发工具（M1）：ProductEval 底座在 `devtools/product-eval/`，**它是独立 workspace**
+# （自带 Cargo.lock 与 target/），因此这里用 exclude 明确拒绝把它拉进本 workspace。
+#
+# 为什么不能留在本 workspace（实测三次的 crate 环，不是图省事）：
+#   devtools/product-eval 必须依赖 owo-agent-core（要真实跑 Agent/Turn/工具/权限），
+#   而 server/cli 需要 core 转出的评测面 → core 必须反向依赖 product-eval。
+#   只要两者同处一个 workspace，Cargo 就按 feature 并集把 core 解析成同一个 package
+#   实例，稳定报 `cyclic package dependency: owo-agent-core depends on itself`。
+#   exclude + workspace 级 default-features=false 都试过，都不解决并集问题。
+#   独立 workspace 恰恰也是指南 §9 对它的要求：开发时加载、不进生产默认运行时、
+#   不拖累用户启动和 Rust 编译。
+#
+# 定向验证（不进默认 workspace 门禁；改动 core 公共面后必须手动跑一次）：
+#   cargo check --manifest-path devtools/product-eval/Cargo.toml --all-targets
+#   cargo test  --manifest-path devtools/product-eval/Cargo.toml -- --test-threads=2
+exclude = [
+    "devtools/product-eval",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+authors = ["OwO Agent SDK Team"]
+repository = ""
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "default-tls", "stream", "multipart"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+axum = "0.8"
+tokio-stream = { version = "0.1", features = ["sync"] }
+ed25519-dalek = "2"
+sha2 = "0.10"
+zip = "2"
+owo-agent-protocol = { path = "crates/owo-agent-protocol" }
+owo-agent-kernel = { path = "crates/owo-agent-kernel" }
+owo-agent-extensions = { path = "crates/owo-agent-extensions" }
+owo-agent-tool-safety = { path = "crates/owo-agent-tool-safety" }
+owo-agent-env = { path = "crates/owo-agent-env" }
+owo-agent-contracts = { path = "crates/owo-agent-contracts" }
+owo-agent-plugins = { path = "crates/owo-agent-plugins" }
+owo-agent-workswarm = { path = "crates/owo-agent-workswarm" }
+owo-agent-mcp = { path = "crates/owo-agent-mcp" }
+owo-agent-memory = { path = "crates/owo-agent-memory" }
+owo-agent-policy = { path = "crates/owo-agent-policy" }
+owo-agent-perception = { path = "crates/owo-agent-perception", default-features = false }
+owo-agent-executor = { path = "crates/owo-agent-executor" }
+owo-agent-workflow = { path = "crates/owo-agent-workflow" }
+owo-agent-core = { path = "crates/owo-agent-core" }
+owo-agent-eval-facade = { path = "crates/owo-agent-eval-facade" }
+owo-agent-server = { path = "crates/owo-agent-server" }
+owo-agent-client = { path = "crates/owo-agent-client" }
+owo-build-info = { path = "crates/owo-build-info" }

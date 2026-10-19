@@ -1,0 +1,27 @@
+{
+  "iteration": "2026-10-04-35",
+  "scope": "Include deleted source files in Single independent review",
+  "changes": [
+    "Accepted file-deletion receipts now produce a domain-separated workspace-absence digest in the Single review candidate set, so deleting the last source file still triggers independent review.",
+    "For deleted paths, the read-only reviewer receives a host-confirmed deletion marker plus the original snapshot content after verifying it against the receipt before hash; the review receipt records both baseline and candidate-absence digests.",
+    "The host confirms the deleted path remains absent after review; path recreation, unreadable snapshots, or hash mismatches fail closed. Added regression-test source for the deletion path and stale-state detection."
+  ],
+  "validation": {
+    "tests_run": false,
+    "test_exit_code": null,
+    "reason": "The final test round remains deferred until the refactor converges.",
+    "static_review": "git diff --check passed; review-path construction, deletion snapshot binding, and regression fixture were reviewed. No compilation, tests, formatting, clippy, or model calls were run."
+  },
+  "resources": {
+    "free_memory_gb": 15.95,
+    "memory_used_percent": 49.6,
+    "free_workspace_volume_gb": 34.32,
+    "workspace_volume_status": "Measured on T:; no build started",
+    "cargo_or_rustc_processes": 0
+  },
+  "uncompleted": [
+    "Single/Team final-state lifecycle and evidence still span separate session, GoalRunState, and TeamRun adapters.",
+    "All source mutation classes and legacy entrypoints still need an end-to-end review/version audit.",
+    "Final resource-gated Rust verification and paired live evaluation remain unexecuted; no Team advantage claim is supported."
+  ]
+}

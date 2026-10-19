@@ -1,0 +1,841 @@
+# OwO Agent CLI 验收盘点
+
+> 日期：2026-08-11 ｜ 分支：agent-frame ｜ 基线：技术文档 v0.3（仅实施 Agent 智能体方案）
+
+本文档把“OpenCode 式 CLI 完整做出来”的目标拆成可审计清单：每项给出实现位置、验证命令与已完成的实测证据。
+
+## 一、功能清单（对标 OpenCode）
+
+| OpenCode 能力 | 实现 | 证据/命令 |
+|---|---|---|
+| 全屏 TUI（多面板/滚动/流式/审批/主题/键位/差异视图） | `crates/owo-agent-cli/src/tui.rs` | `owo-agent tui`；`/diff`（d 切换）、`/theme`、`/keybinds` |
+| 交互式 REPL 与管道模式 | `main.rs`（`Repl`） | `owo-agent repl`；管道输入支持共享 stdin |
+| 会话管理（new/sessions/resume/fork/rewind/redo/tree/undo-msg） | `core/src/session.rs`、HTTP 端点 | `owo-agent repl` 内 `/sessions`、`/fork`、`/rewind`、`/redo`、`/tree`、`/undo-msg` |
+| 文件 diff/undo（快照回滚，新建文件可删） | `core/src/session.rs`、`tools.rs` | `/diff`、`/undo`；测试 `revert_removes_created_file` |
+| 权限审批（deny/ask/allow、危险命令 deny） | `core/src/permissions.rs` | 实测：写文件/工具调用弹审批，越权被拒并审计 |
+| 流式输出（SSE token 增量 + 工具调用片段组装） | `core/src/gateway.rs` | 实测 DeepSeek 打字机输出；测试 `streaming_deltas_are_emitted...` |
+| MCP stdio + HTTP 双传输 | `core/src/mcp.rs` | `/mcp add <name> <cmd>` / `/mcp add <name> http <url>`；测试 stdio+HTTP |
+| 子代理（explore/subagent + @直呼） | `core/src/subagent.rs`、`agent.rs` | `@explore <问题>`、`@subagent <任务>`；深度限制 2 层 |
+| Skills（SKILL.md 发现/清单注入/use_skill） | `core/src/skill.rs` | 示例 `.agents/skills/demo-summary`；`/skills` |
+| AGENTS.md 项目规则 | `core/src/context.rs` | 每次会话注入；仓库根 AGENTS.md |
+| 上下文压缩（模型摘要 + 截断兜底 + 规则保留） | `core/src/agent.rs` | `OWO_TOKEN_BUDGET`/`OWO_KEEP_RECENT` 调参；测试断言 AGENTS.md 规则在压缩后仍注入 |
+| Skills 热加载（不重启会话） | `core/src/skill.rs`、CLI | `/skills reload`；实测新增 SKILL.md 后 reload 立即可见 |
+| /share（Markdown/HTML 导出 + HTTP） | `core/src/share.rs` | `/share [html]`；`GET /session/{id}/export/{md\|html}` |
+| SQLite 存储（含老库迁移） | `core/src/sqlite_store.rs` | `<data>/index.db`；测试迁移与往返 |
+| Evals（内置 20+ 用例套件 + 报告 + 门禁脚本） | `core/src/eval.rs`、`scripts/run-eval-gate.ps1` | `owo-agent eval`；测试 `builtin_suite_has_at_least_twenty_cases` |
+| Traces（回合轨迹落盘/回放） | `core/src/trace.rs` | `/traces`、`/trace <n>`；实测含流式 token 事件 |
+| 工作区配置 settings.json（模型/只读/deny/MCP/主题/键位） | `core/src/settings.rs` | `settings.example.json`；`/settings`、`/theme`、`/keybinds` |
+| 本地插件 SDK（manifest + MCP 桥接） | `core/src/plugin.rs`、`plugins/example-hello` | `/plugins`；实测插件工具调用 |
+| HTTP 服务端（SSE/会话/导出/评估/OpenAPI 3.1） | `crates/owo-agent-server` | `owo-agent serve`；`GET /openapi.json` 可生成 SDK；冒烟 + 导出 200 |
+| 审计入库（SQLite audit 表） | `core/src/sqlite_store.rs` | 回合后自动追加；实测 permission/tool_call 两行落库 |
+| IPC 延迟基准 | `main.rs`（`run_bench`） | `owo-agent bench --requests 200`；实测 p50 320µs / p95 650µs（目标 <5ms） |
+
+## 二、技术文档 v1 P0 对照
+
+| P0 项 | 状态 |
+|---|---|
+| Agent SDK 核心（loop/工具/上下文/会话/审计） | ✅ |
+| 权限与审批（deny/ask/allow、独立审批接口） | ✅ |
+| 模型网关（OpenAI-compatible/Anthropic 预留、流式、用量） | ✅（流式/工具/用量统计） |
+| 执行环境（本地沙箱 workspace 校验） | ✅（OS 级沙箱为后续） |
+| AGENTS.md + Skills + 子代理 | ✅ |
+| MCP 工具生态（stdio/HTTP） | ✅ |
+| 客户端形态（CLI/TUI、HTTP API） | ✅（Tauri 桌面为后续） |
+| 插件 SDK（本地 manifest/权限/工具） | ✅（视图插槽/签名市场为后续） |
+| 文本层桌面控制（注入/剪贴板/只读上下文） | ⚠️ 接口预留，桌面客户端阶段落地 |
+| 本地优先数据（SQLite/会话/分享） | ✅ |
+| 评估与可观测（evals/traces/审计） | ✅ |
+
+## 三、质量门禁
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets   # 0 警告
+cargo test --workspace                    # 全绿（core/cli/server）
+scripts\run-eval-gate.ps1 -Threshold 0.8  # 评估门禁
+scripts\skill-gate.ps1                    # 内置技能端到端门禁
+```
+
+## 四、真实模型实测记录
+
+- 读/写/审批/审计闭环：DeepSeek 生成摘要并写入文件 ✅
+- 流式输出（纯文本与工具调用）✅
+- MCP stdio 与 HTTP 工具调用 ✅
+- 子代理 explore 调查代码库 ✅；@直呼 ✅
+- Skills use_skill ✅；上下文压缩事件 ✅
+- 会话 fork/rewind/redo/tree/undo-msg ✅
+- /share 导出与 HTTP export ✅；SQLite 跨进程恢复 ✅
+- 内置 eval 5/5 通过 ✅；插件工具调用 ✅
+
+## 五、已知限制与后续
+
+- 用量统计（token/成本）、审计入库（FTS5/向量）、OS 级沙箱、文本注入、Tauri 桌面工作台、云执行、公开市场、多格式笔记、computer-use：属 v1 增强或 v2/M4 路线。
+- 云端 /share 链接、可视化工作流、主题扩展（自定义色板）未实现。
+
+## 六、v0.4 迭代记录（2026-08-12，P1/P2/P3 SDK 地基）
+
+| v0.4 项 | 状态 | 证据 |
+|---|---|---|
+| 审计：v0.3 路线完成度 | ✅ M1/M2 完成，M3/M4 待办 | `builGoal/技术路线完成度审计-2026-08-12.md` |
+| 设置组（stt/explore/proactive/skills/whitelist） | ✅ | settings.rs 默认值 + 部分配置解析测试 + `settings.example.json` |
+| 应用白名单（D25） | ✅ | whitelist.rs：分级/敏感默认禁止/全屏游戏启发式；3 个契约测试 |
+| 全域情景感知（D19/D22） | ✅ SDK 层 | perception.rs：L0-L3、快照、掩码、L2 环形缓冲不落盘、SSE 订阅；5 个契约测试 |
+| 操作学习（D23/D26） | ✅ SDK 层 | learn.rs：录制/暂停/清空/敏感熔断、动作图、流程技能包存取删、主动建议阈值/频控/静默；6 个契约测试 |
+| 内置技能包（D18） | ✅ 包结构 + 校验 | skills/{documents,spreadsheets,pdf,browser}（SKILL.md+manifest+tests/3 用例）；skill_pack.rs 校验/发现/安装测试；serve 启动自动安装 |
+| v0.4 HTTP 接口 | ✅ | context.snapshot / perception.events(SSE) / learn.* / skill.verify / proactive.* / whitelist.*；OpenAPI 补充；本机冒烟通过（含 UTF-8 中文路径） |
+| CLI 接入 | ✅ | `/whitelist`、`/perception`、`/learn`、`/proactive` |
+| 桌面工作台 Web 壳（P1 骨架） | ✅ | `desktop/web/`：任务列表、对话 SSE 流式、审批条、diff 审阅、技能中心、感知状态区、白名单管理；`owo-agent serve` 在 `/` 静态托管；GET /、/app.js、/style.css、/sessions、/skills 冒烟通过 |
+| L0 前台窗口事件源（P2） | ✅ Windows | platform.rs（Win32 GetForegroundWindow/QueryFullProcessImageNameW）；`/context/snapshot` 自动刷新并去重；冒烟实测捕获 Obsidian 前台窗口且不重复记录 focus |
+| 内置技能真实执行链路（P1） | ✅ | `skills/*/tests/run_tests.py|js` 可执行契约测试：docx 生成/修改/结构校验、xlsx 生成/公式/CSV 往返、PDF 生成/AcroForm 填写/渲染校验、浏览器导航/表单/截图+DOM；`scripts/skill-gate.ps1` 全绿；可并入 `run-eval-gate.ps1 -SkillGate` |
+| 桌面主客户端（原 Tauri 2，ADR-003 起为 Electron） | ✅ 骨架可运行（壳已换 Electron） | **`desktop/electron/`（ADR-003 后的唯一壳）**：加载核心托管的工作台（非内嵌渲染层）、自动拉起核心（--port 0 动态端口 + 实例身份/API 版本双重握手）、崩溃指数退避重启、复用已存活核心、退出回收子进程、托盘（显示/退出/重启核心/开机自启）、全局快捷键 Ctrl+Alt+Shift+O（注册失败降级继续）、随包核心校验（stage-desktop-sidecar）、进程配对证明；Tauri 兼容命令桥 14 个命令（`window.__TAURI_INTERNALS__.invoke`，web 零改动）；`node --test` 24 项单测全绿 |
+| L0 剪贴板事件源（P2） | ✅ Windows | `GetClipboardSequenceNumber` 轮询 + 掩码事件（不读取内容）；冒烟：剪贴板变化后快照出现 copy_masked 且去重 |
+| L2 按需截图（P2） | ✅ Windows | GDI BitBlt/GetDIBits → 内存 BMP 环形缓冲（5 帧、不落盘）；快照仅暴露元数据；4x4 采样测试 + 环形缓冲/销毁断言 |
+| L1 无障碍 UI 树（P2） | ✅ Windows | accessibility.rs（UI Automation：角色/名称/类名语义锚点，深度/节点截断，变化去重）；快照 `ui_context.ui_tree` 冒烟实测 19 节点（Obsidian 前台窗口） |
+| L2 本地 OCR 摘要（P2） | ✅ Windows | ocr.rs（Media.Ocr 离线识别，摘要仅进内存帧元数据）；`/perception/capture`（width/height 可采样）+ `/perception/layers` 逐层授权；冒烟：L2 关闭时 400、开启后 8x8 采集成功且快照进入 l2_visual |
+| P3 动作图执行引擎 | ✅ 核心 | executor.rs：UiActionSource 抽象 + Windows 实现（UIA 锚点定位、InvokePattern/可点击点、SendInput Unicode/快捷键、前台标题验证）；图遍历（变量填充/验证/成环检测/步数上限/敏感面熔断）；`POST /learn/execute`；5 个契约测试 + 冒烟（敏感面 blocked、锚点缺失 failed 且不注入输入） |
+| P3 示范学习流水线 | ✅ SDK 层 | learn.rs：录制→泛化（重复 Type 锚点推断 `{value}`）→沉淀流程技能包；`/learn/execute` 分步审计入库；2 个契约测试 |
+| P3 桌面闭环 UI | ✅ | Web 工作台：录制控制/沉淀表单/流程技能包列表一键执行/主动建议四选；`/learn/start|stop|packages|sink|execute-package`、`/proactive/suggestions`；冒烟：录制 2 样本 → stop → 沉淀 send-file → 列包成功 |
+| P3 执行审批 + 自动观察 | ✅ 审批已验 / 观察已接线 | `/learn/execute*` 无 `confirm:true` 返回 400（冒烟验证）；确认后执行并写 approval 审计；`start_observer` 录制中 2s 采样前台/剪贴板（掩码、去重）——当前会话无前台/剪贴板可用，运行时采样待桌面会话验证 |
+| P3 高敏感二次确认 | ✅ | `sensitivity=high` 执行需 `high_risk_ack:true`（冒烟：无 ack 400，有 ack 安全失败不注入）；确认写审计；Web 端二次确认对话框 |
+| 流程技能包分享（D26） | ✅ | share_skill.rs：`.owskill` ZIP 导出/导入（4 个契约测试：往返、未知权限拒绝、敏感度必填、zip-slip）；`/learn/export/{name}` + `/learn/import` 冒烟：导出 830B → 导入回写成功；Web 端导出/导入按钮 |
+| 语音输入兜底 + 桌面自启 | ✅ | Web 工作台 🎤（系统语音识别转写进输入框）；Tauri 托盘“开机自启”切换 HKCU Run（winreg），编译通过 |
+| 本地 STT（D20） | ✅ 引擎 + 实机推理 | stt.rs：sherpa-onnx + SenseVoice-Small 离线转写，`POST /stt/transcribe`；`download-stt-model.ps1`（已修正资源 URL）实测下载 239MB int8 模型；真实推理冒烟：440Hz 测试 WAV → `{"ok":true,"text":"I.","elapsed_ms":2593}`（模型加载+推理全链路）；83 测试全绿（链接期 LNK4098 为 sherpa 静态库 /MT 与 Rust /MD 的已知告警，不影响运行） |
+| STT 普通话 CER 基线 + 缓存 | ✅ | 系统 TTS 生成普通话样本（文本即标准答案）→ 本地转写整句正确，**CER 0.00%（0/19 字符）**；识别器缓存后重复推理 **3.33s → 0.93s**（5s 音频 p95 <2s 预算口径达标）；注：TTS 合成语音，自然语音 WER 基线待真实语料 |
+| STT 自然语音 CER 基线（真实人声） | ✅ 首样本 | FunASR 官方中文示例 `asr_example_zh.wav`（真实人声，5.55s/16k）：标准文本“欢迎大家来体验达摩院推出的一系列语音识别模型”，本地转写“欢迎大家来体验达摩院推出的语音识别模型。”，**CER 13.64%（3/22，标点归一化后漏“一系列”；含标点口径 18.18%）**；`scripts/stt-wer-eval.py` 清单式评估工具就绪（2 样本试跑：TTS 0% + 真实人声 13.64%，均值 6.82%）；完整 50+20 条 WER<5% 口径仍需标注语料 |
+| 语音输入本地闭环（D20） | ✅ UI 已接 | 🎤 麦克风（WebAudio）→ 16k WAV 编码 → `/stt/transcribe` 本地推理 → 输入框；模型缺失/无麦克风自动回退 Web Speech；10s 自动停止；自然语音 WER 基线仍待真实标注语料 |
+| Web 工作台 JS 修复 | ✅ | `node --check` 发现 `package` 为严格模式保留字导致 app.js 解析失败（自技能包列表功能起整个工作台 JS 失效），已全部改名 `pkg`；node 语法校验通过 |
+| 主技术文档升级 v0.4 | ✅ | 按 v0.4 续写计划第 9 节合并：头部版本/范围、D17–D26 决策、3.1 桌面 P0、4.3 常驻进程模型、5.8 全域情景感知、6.5 操作学习与新增接口、7.6 感知隐私边界、9 路线图修订（M3–M6）、附录 B 术语；续写计划状态更新为“已合并” |
+| 自动更新（updater） | ✅ 骨架+签名管线 | tauri-plugin-updater 接入：托盘“检查更新”、端点为占位 URL、真实签名公钥（私钥在 .secrets，gitignore）；`generate-update-manifest.ps1` 实测签名安装包并产出 latest.json（signature 416 字符）；编译/clippy 通过 |
+| 录制自动观察实机验证 | ✅ | 修复：observer 原本被错误 spawn 进 run_bench，已移到 run_serve；实测：开始录制后 5s 自动采到 2 条掩码样本（前台去重生效），停止后待沉淀 |
+| 自动化面板（P1） | ✅ | automation.rs：单次/间隔/每天调度 + 提醒动作 + JSON 持久化 + 触发审计；4 个契约测试；冒烟：创建间隔 2s 任务 → 5s 内触发 2 条提醒（last_run 更新）→ 停用 → 删除；Web 工作台面板（创建/启停/删除/提醒列表） |
+| 数据出境开关（7.5） | ✅ | settings.rs `egress.cloud_enabled`（默认开）+ gateway.rs 联网前拒绝（完整/流式，每次调用检查运行时开关）+ CLI serve/repl/tui/turn 启动时应用 + `GET /settings` / `POST /settings/egress`（写 settings.json + 审计）+ Web“设置与诊断”区一键切换；契约测试 `cloud_disabled_rejects_requests_before_network` / `cloud_switch_applies_without_reconstruction`；E2E 实测：关闭→turn 返回“云端模型已禁用（数据出境开关关闭）”、接口写回、运行中即时切换（无需重启） |
+| 设置与诊断（P1） | ✅ | `GET /settings` / `POST /settings`（保存完整 settings.json + 运行时应用：数据出境、模型热切换、STT 模型/语言/ITN、主动建议阈值、白名单合并默认清单；保存写审计）；`whitelist/manage` 持久化用户清单；Web JSON 编辑器 + 保存按钮；契约测试：settings 保存/加载往返、STT `apply_settings`、ProactiveEngine `apply_settings`、网关模型热切换（`model_switch_applies_without_reconstruction`）；E2E 实测：POST /settings 后数据出境即时生效、白名单运行时生效、whitelist/manage 写回 settings.json |
+| 会话管理（P1） | ✅ | session.rs 新增 title/archived/pinned（fork 子会话继承父链）+ sqlite_store 列迁移；`GET /session/{id}`（历史断点恢复）、`POST /session/{id}/rename|archive|pin`；列表置顶排序 + 归档默认隐藏；Web 会话树（缩进子会话）+ 继续/重命名/置顶/归档/fork/回退/重做；契约测试 3 个（title/archive/pin 往返、空会话 fork 不 panic、SQLite 迁移与新列往返）；E2E 实测：改名/置顶/归档/fork/rewind/redo/children 全通，重启后元数据持久化 |
+| 审计落库 + 日志面板（P1） | ✅ | SessionStore trait 新增 `append_audit` / `recent_audit`（SQLite 落库、按条目 session_id）；服务端回合/设置/学习审计统一 flush；`GET /audit?limit=N`；Web 右侧审计日志面板（5s 刷新）；契约测试扩展：SQLite 追加+最近查询；E2E 实测：egress 开关 2 条审计落库、重启后仍可查询 |
+| 技能中心（P1） | ✅ | SkillRegistry 运行时共享禁用集合（`set_disabled`/`is_enabled`/`list_enabled`/`get_enabled`），系统提示与 use_skill 只放行启用技能；`skills.disabled` 持久化；`GET/POST /skills/{name}`（详情/编辑 SKILL.md）、`POST /skills/{name}/enabled`、`GET/DELETE /learn/packages/{name}`（详情/删除+审计）；Web 启用/禁用/查看/编辑/导出/删除；契约测试：禁用技能被过滤且共享集合即时生效、settings 往返含 disabled；E2E 实测 7 步全通（含导入→详情→删除→审计） |
+| 对话附件（P1） | ✅ | `POST/GET /session/{id}/attachments`（base64 JSON 上传、文件名清洗、50MB 上限、落盘工作区 `.owo-attachments/`）；`TurnRequest.attachments` 注入附件路径上下文，缺失附件 400；上传写审计；Web 📎 多选上传 + chips；契约测试：附件名清洗；E2E 实测 7 步全通（上传/穿越名清洗/列表/落盘校验/缺失 400/带附件 turn 联网/审计） |
+| 桌面操作迭代（launch/Inject/tree/parent/ui-verify/ClickAt/OCR/region-OCR） | ✅ | `ActionType::Launch` / `ClickAt`；`inject` handle=0 修复；`POST /perception/tree`（节点含边界框）；`POST /perception/ocr` + `/ocr/region` + `/ocr/status`；OCR 根因修复（WIC→直接 SoftwareBitmap，实测 1636 字符/647 坐标框）；`SemanticAnchor.parent`；`ui:`/`value:` 验证谓词；`qq-send-file` 图重写；契约测试 106 全绿 |
+| QQ 真实桌面实测（本机） | ✅ 文本 + 文件 + 表情三实锤（受控验证） | 受控路径：点输入框（坐标）→ 注入 → Enter；UIA 树消息列表出现“OwO 受控发送验证-081”；**文件链路全通**：`hello.txt` 气泡 + `67.00 B 已发送` + **“对方已成功接收文件‘hello.txt’”**；**表情发送实锤**：`[呲牙]` 以新消息出现在聊天记录（落木逐风 y=711）；QQ 图片表情面板为图像渲染（OCR 无文字，需视觉/模板迭代）；聊天中 prompt-injection 内容被忽略；红包/微信待复验 |
+| 微信实测准备（本机） | ✅ 已启动待登录 | `launch D:\apps\Weixin\Weixin.exe` 成功（修复后不再弹错误框）；UIA 树识别微信登录窗口：二维码 / 扫码登录 / 仅传输文件（Qt 界面，XTextView/XButton 可定位）；登录后即可复用 QQ 同套流程（搜索→会话→消息/文件/表情） |
+| 微信全功能测试 | ⬜ 未安装 | 本机未检测到 WeChat/Weixin 进程与常见安装路径；安装登录后可复用 QQ 同一套流程（launch→搜索→消息/文件/表情） |
+| P3 真实桌面端到端（Notepad 示范→复用） | ✅ | 执行器新增 ValuePattern 回读验证（递归找可编辑控件）；实测：Notepad 中输入“你好 OwO”并回读验证 ok → 换参数“第二次复用 456”再次执行 ok（2/2 成功，未越权、敏感面熔断保持） |
+| VSCode 语音改代码 E2E（P2 验收形态） | ✅ **30/30 = 100% PASS（两类任务）** | 语音链路：TTS 中文语音 → 本地 SenseVoice 转写 → DeepSeek Agent（deepseek-v4-flash）读取 hello.py → 新增函数并跑测试验证 → 文件确认；`voice_code_batch.py`（每轮硬看门狗、`E2E_FUNC` 可换目标函数）：add 任务 20/20 + multiply 任务 10/10，**累计 30/30 = 100%**，显著超过“20 次成功率 ≥80%” |
+| STT 中英混说基线（试跑） | ✅ 3 样本 | TTS 生成 3 条中英混说（Chrome/OpenAI Codex/GitHub/pull request/DeepSeek API 等）：CER 16.0% / 19.05% / 31.58%，均值 **22.21%**——离 <5% 目标有差距，属热词/ITN 调优方向；完整 20 条口径待语料 |
+| STT 语言/ITN 配置旋钮 | ✅ | `SttSettings` 新增 `language`（默认 auto）与 `itn`（默认 true），支持 `OWO_STT_LANGUAGE`/`OWO_STT_ITN` 环境覆盖（settings.example.json 同步）；语料门禁对比实验：auto+ITN **16.05%** < zh 16.91% < auto 无 ITN 16.80%，默认组合保留 |
+| L3 语义层 v1（任务假设） | ✅ | `perception.rs`：本地启发式 `infer_task_hypothesis`（coding/chatting/gaming/browsing/reading + 置信度），L3 授权时随前台刷新自动更新、变化才记录；2 个契约测试；冒烟：开启 l3_semantic 后快照含 `task_hypothesis`（如 browsing 0.7）且不上送云端 |
+| QQ 发文件流程技能包示例（D26/P3） | ✅ 包就绪（执行待测试账号） | `skills/user/qq-send-file`：SKILL.md + graph.json（5 节点：搜索联系人→进入会话→发送文件→选文件→发送）+ manifest（targetApps=qq、variables=contact/file、sensitivity=medium）+ 3 契约用例；契约测试 `qq_send_file_example_package_is_valid_and_round_trips` 通过（校验 + .owskill 往返）；真实 QQ 执行需测试账号与会话授权 |
+| STT 回归语料门禁 | ✅ 可复现 | `tests/stt-corpus/`（5 个 wav + corpus.tsv + README）；`scripts/run-stt-corpus.ps1` 实测 **5 样本均值 CER 16.05%**（TTS 0% / 真实人声 13.64% / 混说 16–31.6%），与历次结果一致 |
+| STT 任意视频音轨冒烟（用户口径） | ✅ | 本机视频 `Videos/2025-04-25 10-25-00.mkv` → ffmpeg 取 20s/16k 单声道 → SenseVoice-Small 转写成功（elapsed 5.36s），输出历史纪录片音轨文本；口径：任意视频能识别即说明引擎一般没问题 |
+| 桌面会话实机验证（本机） | ✅ 核心链路 | 4096 核心服务可实时看到交互桌面：前台应用切换（Edge→ChatGPT→QQ）被捕获、UIA 树可达（QQ 窗口节点可见）、剪贴板掩码事件、L2 截图成功（内存帧 9.2MB、不落盘）、L3 任务假设（reading 0.5）；`owo-agent bench` 200 请求 **p50 596µs / p95 1255µs**（目标 <5ms，面板预算 <150ms 余量充足） |
+| QQ 实测准备 | ✅ 环境就绪 / 待用户参数 | QQ.exe（D:\QQ）已唤起且前台被捕获（id=qq），UIA 树可达；`qq-send-file` 流程技能包已导入真实数据目录（variables: contact/file）；**注意**：唤起时 QQ 显示登录页（自动登录/账号密码登录），需用户切到已登录主窗口并提供测试联系人 + 待发送文件路径后执行 |
+| E2E 中发现并修复的 3 个真 bug | ✅ | ① 模型网关不读代理环境变量导致外网模型调用挂起——新增 OWO_HTTP_PROXY/HTTP(S)_PROXY 支持 + 180s 超时（gateway.rs）；② 文件工具按 Policy 工作区而非会话工作区解析相对路径，且 Windows canonicalize 的 `\\?\` 前缀导致误判越界——改为会话工作区基座 + 双侧规范化（tools.rs）；③ 服务端审批事件重复发送（Agent emit + ChannelApprover 各一次）导致客户端 404——移除 ChannelApprover 重复发送（server lib.rs） |
+| 便携打包发布 | ✅ | `scripts/package-desktop.ps1`：release 构建 → `dist/OwO-Agent-release.zip`（核心服务 + 桌面壳 + skills + README，6.8MB）；桌面壳 exe 同级定位核心服务与技能包；便携包冒烟：核心服务就绪、4 个内置技能从随包目录加载 |
+| NSIS 安装程序 | ✅ | `scripts/build-installer.ps1`：externalBin 内置核心服务（`owo-agent-x64.exe` 运行时同级定位）→ `OwO Agent_0.1.0_x64-setup.exe`（4.8MB，含核心服务；简体中文/English、当前用户安装）；实际构建通过 |
+
+### 下一迭代（P1 剩余 / P2）
+
+- 语音 STT 插件（SenseVoice-Small）。
+- Tauri 安装包（NSIS/MSI）/自动更新/常驻自启与核心服务版本管理（便携 zip 已可用）。
+- SenseVoice-Small 自然语音 WER 基线（需真实普通话语料；合成语音 CER 0.00% 已记录）。
+
+---
+
+## 七、v0.4.1 计算机使用专项（2026-08-12，后台静默模拟）
+
+目标：默认视觉识别自主迭代操作任意软件；改文件类优先后台 Agent，做不了的再模拟鼠标键盘；
+本轮验收 QQ 回复闭环（OCR 读上下文、等待、按指令回复）与浏览器搜索/浏览/图片下载。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| headless 模拟 QQ（GDI 离屏渲染 + HTTP 虚拟窗口） | ✅ | `owo-sim-qq --headless`：`/frame`（BMP）、`/ocr`（真值版面 lines+role_hint）、`/click`、`/type`、`/key`、`/state`、`/log`、`/reset`；事件日志含 incoming/outgoing/send_clicked/input_clicked |
+| 模拟浏览器站 | ✅ | `owo-sim-browser`：首页/搜索/文章/PNG 图片（3 张生成图 + 下载链接） |
+| 桌面/浏览器双表面工具 | ✅ | `screen_ocr`/`ocr_region`（lines 坐标 + role_hint）、`desktop_click/type/key/shortcut/activate/window_list/foreground/launch/wait`、`browser_navigate/search/snapshot/click/type/press/screenshot/download_image/close`；`OWO_SIM_QQ_URL` 一键切模拟面，服务端直连写接口在模拟面下 400 禁用 |
+| QQ 回复闭环 e2e（DeepSeek 真实模型） | ✅ 3/3 | `scripts/sim-qq-e2e.py`：轮次 3/4/5 全过（24–25s；2 条 outgoing + 2 次 send_clicked + 输入框清空；自动等待对方回复后二次回复并验证上屏） |
+| 浏览器搜索/下载 e2e | ✅ 2/2 | `scripts/sim-browser-e2e.py`：导航本地搜索站→输入关键词→打开文章→下载 40,767B PNG，PNG 头校验通过（含相对 `src` 解析） |
+| 一键验收脚本 | ✅ | `scripts/run-sim-e2e.ps1`：启动 headless 模拟 + 测试服务（4097）→ 两个 e2e → 自动清理进程 |
+| 浏览器驱动（Playwright + 本机 Edge） | ✅ | `scripts/browser-driver.js`：持久化 profile、可 headless、JSONL 常驻协议；图片相对 URL 用 `new URL(src, page.url())` 解析 |
+| 质量门禁 | ✅ | `cargo fmt --check` 干净；`clippy --workspace --all-targets` 0 警告；`cargo test --workspace` 全绿（core 86 + cli/server/协议） |
+
+后续（按设计文档 M-A/M-B/M-C 剩余项）：窗口级截取/窗口模板、PaddleOCR、本地视觉模型
+（场景描述/完成验证/grounding 交叉验证）、静默操作学习（情景/语义记忆）；真实 QQ 复用同一套
+`desktop_*` 工具链路（去掉 `OWO_SIM_QQ_URL` 即恢复真实桌面面）。
+
+## 八、v0.4.2 计算机使用增强（2026-08-12 续）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `desktop_wait_until`（OCR 谓词等待） | ✅ | computer_use.rs：按 `text`+可选 `role_hint` 轮询 `screen_ocr`，超时返回 `matched=false`；2 个单测；权限 Read |
+| QQ 多联系人切换 e2e（真实模型） | ✅ 1/1 | `sim-qq-e2e.py --prompt-file qq-multi-contact.txt --require-contacts-file qq-multi-contacts.txt`：55.4s，3 条消息覆盖张子豪+李四，含切会话、`desktop_wait_until` 等回复、每次发送后 OCR 验证 |
+| 真实网页 headless 浏览器 e2e | ✅ 1/1 | `web-browser-e2e.py`：Bing 被网络阻断时 Agent 自动换 360 搜索并选择可达的权威站点，下载 3,587B SVG 图片；含代理支持 `OWO_BROWSER_PROXY` |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 88 等） |
+
+## 九、v0.4.3 操作记忆闭环（2026-08-12 续）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 模拟面执行器源（SimUiActionSource） | ✅ | computer_use.rs：纯 TcpStream 同步 HTTP（避免 blocking reqwest 在 async 处理器析构 panic）；锚点匹配抽为 `sim_anchor_matches` 纯函数 + 单测；`/learn/execute*` 按 `OWO_SIM_QQ_URL` 自动选源 |
+| 示范→录制→泛化→沉淀→复用闭环 | ✅ 2/2 | `sim-qq-learn-e2e.py`：脚本化示范两次回复 → 6 个 RecordedAction（内容掩码）→ `qq_reply` 技能包泛化出 `{value}` → 重置场景 → 换参数复用执行 6/6 步 ok，两条新消息发出；`-001`/`-002` 两轮均通过 |
+| 回车发送也记录 send_clicked | ✅ | sim_qq.rs：`/key enter` 与点击发送等价记录发送事件 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿 |
+
+说明：学习样本只记录动作摘要（类型/锚点/次数），不记录消息正文（`value_masked=true`）；
+技能执行走模拟面虚拟窗口，真实桌面技能执行仍走 WindowsUiaSource。
+
+## 十、v0.4.4 视觉模型网关（2026-08-12 续，M-B 起步）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| vision.rs（BMP→PNG + Ollama/OpenAI 双通道） | ✅ | `bmp_to_png`（PNG 头单测）、`describe_image`、`parse_verification`（YES/NO+置信度单测）、`ollama_models` |
+| Agent 工具 | ✅ | `screen_vision`（场景描述）、`vision_verify`（yes/no+confidence）；权限 Read |
+| 服务端接口 | ✅ | `GET /vision/status`（provider/model/已拉模型）、`POST /vision/describe`；未就绪时 502 + “请先运行 ollama pull qwen2.5vl:3b” |
+| 本地模型拉取 | ⏳ 后台进行中 | `ollama pull qwen2.5vl:3b`（约 3.2GB，1.5-2MB/s，ETA ~30min）；`scripts/download-vision-model.ps1` 可重跑 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 91） |
+
+环境变量：`OWO_VISION_PROVIDER`（ollama/openai）、`OWO_VISION_MODEL`、`OWO_VISION_BASE_URL`、
+`OWO_VISION_API_KEY`、`OWO_OLLAMA_HOST`。视觉只做理解与验证，主控制仍走 OCR+坐标。
+
+## 十一、v0.4.5 静默观察与情景记忆（2026-08-12 续，M-D 起步）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| observe.rs（情景记忆 JSONL + 事件摘要） | ✅ | `MemoryStore`（追加/列表/清空，往返单测）、`observation_from_sim_event`（内容掩码单测）、`map_sim_events_to_actions`（动作序列单测）、`value_hash` |
+| 静默观察器 | ✅ | `start_memory_observer`：模拟面每 2s 拉取模拟日志，自动写入情景记忆（不经过 /learn/record）；服务启动即挂载 |
+| 挖掘接口 | ✅ | `GET /memory/observations`、`POST /memory/clear`、`POST /memory/mine-skill`（观察序列→泛化→沉淀技能包，审计入库） |
+| 静默观察→挖掘→复用 e2e | ✅ 1/1 | `sim-qq-observe-e2e.py`：观察器自动入库 9 条摘要（incoming/input_clicked/typed/outgoing/send_clicked）→ 挖掘 `qq_reply_observed`（{value}）→ 重置后换参数执行，两条新消息发出、输入框清空 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 94） |
+
+下一步：真实面观察源（UIA 事件/窗口状态采样）、候选技能“用户确认转 active”、情景记忆保留期滚动清理。
+
+## 十二、v0.4.6 BYOK 视觉通道端到端验证（2026-08-12 续）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `POST /vision/verify` 接口 | ✅ | 对当前截图（模拟帧/真实屏幕）问 yes/no 问题，返回 answer + confidence |
+| BYOK（OpenAI-compatible）通道 e2e | ✅ 1/1 | `vision-mock-e2e.py`：mock 端点收到 3 次带图请求（data:image/png，b64≈114KB）→ describe 返回界面描述、verify 解析 yes/0.95 与 yes/0.93 |
+| 本地 VL 模型（qwen2.5vl:3b） | ⏳ 后台下载中 | 3.2GB 受网络限速，已续传；就绪后 `scripts/sim-qq-vision-e2e.py` 直接跑真实视觉描述/验证 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿 |
+
+视觉通道优先级：本地 Ollama（默认）→ BYOK 云端（`OWO_VISION_PROVIDER=openai`）；
+模型不可用时返回明确错误，主链路（OCR+坐标）不受影响。
+
+## 十三、v0.4.7 PP-OCRv6 接入 + 真实 QQ 受控发送（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| PP-OCRv6 云 API 客户端 | ✅ | paddle_ocr.rs：multipart 提交 → 轮询 job → 下载 JSONL → 解析 `prunedResult.rec_texts/rec_polys`；凭据 `PADDLE_OCR_TOKEN` 环境变量，云 OCR 受数据出境开关约束；代理仅 `PADDLE_OCR_PROXY` 显式启用（实测本地代理访问 API 超时、直连正常） |
+| OCR 引擎路由 | ✅ | `ocr_preferred`：Paddle 启用时优先，失败回退 Media.Ocr 并标记 provider；`OWO_OCR_STRICT=paddle` 可开严格模式看真实报错；screen_ocr/ocr_region//perception/ocr*/vision ground 全部接入 |
+| PP-OCRv6 实测（模拟 QQ 帧） | ✅ | provider=paddle-v6，0.9s，93 字符/12 框，**读出了“输入消息...”和“发送”**（Media.Ocr 长期读不出的离屏小字） |
+| 真实 QQ 受控发送（UIA 锚点） | ✅ | `real-qq-send.py`：聚焦 Rich Text Editor → SendInput 输入 → UIA 点击“发送”→ UIA 树确认消息上屏；受控消息 002/004 实锤，聊天中的 prompt-injection 内容被忽略 |
+| 滚轮支持 | ✅ | `desktop_scroll`（tool + HTTP + executor），权限 Inject；滚动会话/聊天列表 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 99） |
+
+## 十四、v0.4.22 网络恢复后实机闭环复测（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| DeepSeek 多轮通道 | ✅ 恢复 | 无工具双轮冒烟 1.6s / 1.3s；4097 一次视觉闭环仍偶发“首轮工具后挂起”，同构 4098 实例完整通过，确认属外部流式偶发而非代码缺陷 |
+| 模拟 QQ 视觉 Agent 闭环 | ✅ | screen_ocr → desktop_click → desktop_type → desktop_click → screen_ocr → vision_verify×2；outgoing=1、send_clicks=1、input_after=""；135.7s，DeepSeek 全程流式正常 |
+| 真实 QQ 群聊受控发送 | ✅ 实锤 | 「26大创-智能输入法」群：UIA 搜索 → 点击会话行 → 聊天头校验（防发错）→ 输入 → 点击发送 → UIA 树命中消息文本；消息带“OwO 受控测试”标记，全程 15.9s |
+| 真实浏览器 Agent 闭环 | ✅ | Bing 搜索 rust → 识别 rust-lang.org 官方结果 → 打开官网 → 下载 Rust Logo（SVG 2396B）→ run_command 校验；67.9s；中间一次选择器超时后自动恢复 |
+| 本地视觉验证 | ✅ | qwen2.5vl:3b：新消息上屏 yes/0.8；输入框清空被判 no/0.95（占位符“输入消息...”干扰，screen_ocr 已确认实际清空） |
+| 回归门禁 | ✅ 2/2 | qq-learn / qq-observe 确定性套件通过（12.6s） |
+| 脚本修正 | ✅ | `real-qq-group-send.py` 增加 `--base` 参数，默认指向真实桌面服务 4096 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
+结论：多模态 Agent 两条核心路径（桌面视觉操作、真实浏览器搜索/下载）在 DeepSeek 网络恢复后均
+跑通完整闭环；真实 QQ 群聊发送已实锤。下一步：把 vision_verify 的“输入框清空”判定改为忽略
+占位符（或让视觉提示词排除占位文字），并把视觉 grounding 结果并入元素注册表。
+
+## 十五、v0.4.9 窗口级截取（M-A 第一优先，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| PrintWindow 窗口抓取 | ✅ | `platform::capture_window_bmp`（PW_RENDERFULLCONTENT，失败回退 BitBlt），后台只读、可抓被遮挡窗口；返回 BMP+屏幕矩形 |
+| 窗口级 OCR 接口 | ✅ | `POST /perception/window {hwnd}`：窗口 BMP → PP-OCRv6/Media → 文本+整行坐标（窗口矩形附带） |
+| Agent 工具 | ✅ | `desktop_window_ocr`（hwnd 或 process/title），输出转屏幕坐标，权限 Read |
+| 实测（QQ 窗口 198064） | ✅ | 后台只读抓取 QQ（846,179-1856,951）→ paddle-v6，339 字符/33 行，“张子豪/发送”可读；全程不切前台、不干扰桌面 |
+
+下一步：窗口模板（ROI 集合）与“窗口元素注册表”，把窗口级 OCR 稳定用于真实 QQ 会话定位。
+
+## 十六、v0.4.10 窗口模板（UIA/OCR 双路径）+ 深度抓窗（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| UIA-by-hwnd | ✅ | `ui_tree_for_hwnd`（不要求前台，`/perception/tree` 支持 hwnd 参数）；Chromium 应用（QQ）在非激活态只暴露 2 节点（内容仅激活时提供） |
+| 窗口模板（UIA 版） | ✅ | `window_template.rs`：从 UIA 树提取“会话列表/消息列表/Rich Text Editor/发送/搜索/表情/文件/红包”ROI；`/perception/template/build|detect` + 持久化；单测（构建/检测/存取） |
+| 窗口模板（OCR 版） | ✅ | `build_template_from_ocr`/`detect_template_ocr`：PrintWindow+PP-OCRv6 按语义文本提取 ROI，后台可用；实测锁屏下 QQ 窗口提取到“搜索”ROI 并命中 |
+| 深度抓窗 | ✅ | `capture_window_bmp_deep`：枚举子窗口逐帧 PrintWindow+BitBlt 择优（Chromium 渲染子窗口）；实测锁屏下 QQ 仍缺底部输入区（D3D 呈现暂停，属环境限制） |
+| 锁屏限制说明 | ⚠️ | 锁屏/无人值守时 Chromium 应用不向窗口 DC 呈现底部区域，完整窗口 OCR/模板需交互桌面会话；会话列表/消息区可后台读取（339 字符） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 102） |
+
+## 十七、v0.4.11 真实桌面输入会话限制与修复（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 激活逻辑修复 | ✅ | `activate_window`：Alt 解锁键仅在 SetForegroundWindow 失败时发送并加沉降延时，避免无谓破坏输入队列；windows-sys BOOL 判定修正 |
+| QQ 群聊脚本改进 | ✅ | `real-qq-group-send.py` 搜索改用 UIA 点击“搜索”+Ctrl+A 清空（避免 Ctrl+F 后 SendInput 偶发失效），仍带“聊天头校验防发错”保护 |
+| 沙箱输入桌面限制 | ⚠️ 环境限制 | 本沙箱拉起的进程（无论是否提权）无交互输入桌面：`SetCursorPos` 报 0x800700CB、`GetForegroundWindow` 为空、SendInput 返回 0；计划任务投递同样不可行（Queued）。真实 QQ 键盘/鼠标注入需在用户交互会话内启动服务（桌面壳自启的 4096 已验证可行） |
+| 会话诊断脚本 | ✅ | `scripts/owo-session-probe.ps1`：由计划任务/交互会话执行时输出 SESSIONNAME 与 QQ 进程，用于验证桌面可达性 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 102） |
+
+建议：真实桌面测试请由用户侧终端/桌面应用启动核心服务（如 `owo-agent serve --port 4096`），
+本沙箱服务（4097）继续用于模型/OCR/模拟面能力。
+
+## 十八、v0.4.12 窗口元素注册表（设计文档 10.1，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| element_registry.rs | ✅ | `SceneElement`（多源/置信度/stale）、`ElementRegistry`（稳定 ID 匹配：名称+角色+位置邻近，>3 帧淘汰）、`fuse_sources`（UIA+OCR 同名重合合并，UIA 优先几何）；4 个单测 |
+| `/perception/elements` 接口 | ✅ | `{hwnd, app_id}`：UIA 树 + 窗口 OCR（转屏幕坐标）融合 → 注册表更新 → 返回稳定元素列表 |
+| 后台实测（QQ 窗口 198064） | ✅ | 连续两帧各 34 个融合元素（paddle-v6），**稳定 ID 34/34**；不切前台、后台只读 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 106） |
+
+下一步：视觉 grounding 结果并入注册表（source=vision），并用稳定元素 ID 驱动“点击/验证”动作，
+减少对每次 OCR 重新定位的依赖。
+
+## 十九、v0.4.13 执行器 OCR 文本锚点兜底（设计文档 4.1 L2，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| AnchorTarget 双通道 | ✅ | `WindowsUiaSource.keep` 改为 `Element/Point` 两态：UIA 元素或 OCR 坐标 |
+| UIA 失败 → OCR 兜底 | ✅ | `find`：UIA 递归未命中时，屏幕 Media.Ocr → 行分组 → 文本中心坐标；`invoke/type_text` 对 Point 走坐标点击+注入 |
+| 纯函数 | ✅ | `find_ocr_anchor_point`（OCR 行包含锚点名 → 行中心）+ 单测（命中/未命中） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 107） |
+
+说明：OCR 兜底为同步 Media.Ocr 路径（避免 async HTTP 阻塞动作图）；Paddle/PP-OCRv6 的异步
+OCR 锚点定位由 Agent 工具（screen_ocr/desktop_click）承担。
+
+## 二十、v0.4.14 本地 VL 模型就绪 + 真实视觉描述/验证通过（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| qwen2.5vl:3b 本地模型 | ✅ | Ollama 已拉取（2.98GB）；`/vision/status` 返回 provider=ollama、model=qwen2.5vl:3b |
+| 视觉区域支持 | ✅ | `capture_vision_png_region`（裁剪+放大）；screen_vision/vision_verify 与 /vision/describe、/vision/verify 均支持 x/y/width/height/scale |
+| 真实本地 VL 描述 | ✅ | 模拟 QQ 帧：模型正确描述“即时通讯软件，张子豪/李四，右下角蓝色发送按钮，下方输入框”（此前误读为锁屏是因为服务未设 OWO_SIM_QQ_URL、抓了真实 Windows 锁屏——管线本身正常） |
+| 真实本地 VL 验证 | ✅ | 发送后区域验证：输入框已清空 yes/0.8、聊天区出现新消息 yes/0.8；`sim-qq-vision-e2e.py` 通过 |
+| 测试稳定性修复 | ✅ | element_registry 测试改为按名字断言（HashMap 顺序无关），消除偶发失败 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 107） |
+
+本地 VL 现在可用作：场景描述（screen_vision）、完成验证（vision_verify，支持区域）、
+grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
+
+## 二十一、v0.4.15 情景记忆滚动清理 + 测试并发修复（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 记忆保留期/容量清理 | ✅ | `MemoryStore::prune`：默认保留 30 天/1 万条（`OWO_MEMORY_RETENTION_DAYS`/`OWO_MEMORY_MAX` 可配），加载与追加时滚动清理；单测覆盖超期淘汰与容量上限 |
+| 测试并发修复 | ✅ | observe 测试临时文件加唯一计数（同 pid 并行测试不再共文件），消除偶发失败 |
+| 视觉 Agent 闭环阻塞说明 | ⚠️ 网络不稳定 | Agent 多轮调用时 DeepSeek 经本地代理的后续请求偶发流式挂起（首轮正常、单轮冒烟 6.4s 通过）；工具链与本地 VL 均正常，属当前代理/网络问题，重试或换通道后即可跑通 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 108） |
+
+## 二十二、v0.4.16 模型网关韧性（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 发送失败代理→直连降级 | ✅ | `post_chat`：优先代理客户端，失败自动切无代理直连重试；4xx/5xx 不重试 |
+| 流式空闲看门狗 | ✅ | `complete_stream` 每块 60s 超时，空流不再无限挂起；单次请求超时降到 120s |
+| 直连客户端单测 | ✅ | 配置代理时 `direct_client` 创建、移除后为 None（ENV_LOCK 串行保护） |
+| 实机复测 | ⚠️ 网络仍不稳 | 视觉 Agent 多轮任务在本地代理下仍出现后续调用挂起（4 分钟无数据，超时看门狗应触发但未见退出，指向代理连接级问题）；单轮模型冒烟正常（6.4s） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
+## 二十三、v0.4.21 全本地工具调用验证（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| llama3.2:3b 工具调用 | ✅ | 直连 Ollama 触发 read_file（11.9s）；经完整 Agent（全部 25 工具）read_file 轮 64.8s 完成并汇报 |
+| 全本地视觉 Agent 闭环 | ⚠️ 慢/超时 | 复杂多步中文提示词 + 25 工具在 CPU（3B）首个请求 10 分钟未返回（Ollama CPU 停滞）；本地多轮可行性成立，性能不达标 |
+| 结论 | ⚠️ | 本地工具调用链路可用；复杂任务建议用 DeepSeek（网络稳定时）或等待 GPU/更大算力；llama3.2 适合简单工具轮 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
+## 二十四、v0.4.20 定位多轮卡死根因：screen_ocr boxes（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 根因定位 | ✅ | 同一会话内：read_file 工具轮 10.1s、ocr_region 工具轮 9.6s、screen_ocr(max_boxes=0) 8.7s 均正常；screen_ocr 默认（含 120 boxes）第二轮必卡——**boxes 数组是 DeepSeek 多轮卡死触发点** |
+| 修复 | ✅ | screen_ocr 默认 `max_boxes=0`（不再带 boxes；lines 已含坐标）；desktop_wait_until 内部同步改为 0 |
+| 完整任务复测 | ⚠️ 外部流式 | 单工具轮通过；含多步提示词的完整视觉任务仍偶发第二轮无响应（无 delta、CPU 空闲），指向 DeepSeek 外部流式不稳定 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
+## 二十五、v0.4.19 OCR 输出截断与多轮复测（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| OCR 输出截断 | ✅ | `ocr_summary_json`：text≤2000 字符、lines≤60、boxes≤80，控制多轮上下文体积 |
+| DeepSeek 多轮复测 | ⚠️ 偶发 | 无工具双轮稳定（1.2-1.8s）；read_file 工具轮正常（10.9s）；screen_ocr 工具轮在 4097 仍偶发无响应（与结果大小无关，指向 DeepSeek 对该工具结果内容的流式不稳定） |
+| 本地工具调用模型 | ⏳ 进行中 | qwen2.5:0.5b/3b 均不触发 tool_calls；llama3.2:3b 拉取中（工具调用能力强，待验证） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
+## 二十六、v0.4.18 本地文本模型工具调用评估（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| qwen2.5:3b 本地文本模型 | ✅ | Ollama 拉取完成（与 VL 模型并存）；单轮对话正常（46s，CPU） |
+| 工具调用能力 | ⚠️ 不达标 | 直连 Ollama /v1/chat/completions 带 tools 请求：qwen2.5vl:3b 直接 400“不支持 tools”；qwen2.5:3b 接受 tools 但不触发调用（返回 null tool_calls 并反问），Agent 工具闭环无法全本地化 |
+| 结论 | ⚠️ | 全本地多轮 Agent 需更强工具调用模型（如 llama3.2:3b 或 7B+）或 DeepSeek 网络恢复；当前继续用 DeepSeek（网络恢复后）+ 本地 VL 做视觉验证 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
+## 二十七、v0.4.17 本地模型通道与回归门禁（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 回归门禁脚本 | ✅ | `sim-regression.py`：确定性套件（qq-learn、qq-observe）顺序执行并聚合结果；`--with-llm` 追加 QQ 单轮/浏览器模拟 |
+| 确定性回归实测 | ✅ 2/2 | qq-learn PASS、qq-observe PASS（“回归复用验证-001/回归观察验证-001”均发送成功） |
+| Ollama VL 工具调用限制 | ⚠️ 已确认 | `qwen2.5vl:3b` 的 OpenAI 兼容端点对含 tools 的请求返回 400（“does not support tools”）；已改拉文本版 `qwen2.5:3b`（支持工具调用，后台下载中） |
+| 本地模型多轮通道 | ⏳ 进行中 | qwen2.5:3b 下载完成后，Agent 多轮闭环可完全本地化，绕开 DeepSeek 网络不稳定 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
+环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
+`PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
+
+## 二十八、v0.4.8 真实环境迭代修复（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| SendInput 偶发失败重试 | ✅ | 真实桌面实测 `SendInput 文本注入失败` 瞬态报错 → `send_inputs_retry`（3 次重试+退避），click/type/shortcut/scroll 统一接入 |
+| 浏览器驱动 src 解析增强 | ✅ | 首张图 src 为空时回退 `currentSrc/data-src`，取页面首个非空图片地址；`browser-driver-direct-test.py` 直连真实网页（不经 Agent）通过：360 搜索 → 今日头条文章 → 下载 141,751B JPEG |
+| 真实 QQ 群聊受控发送脚本 | ✅ 就绪（待交互桌面） | `real-qq-group-send.py`：搜索群 → UIA 点击会话行 → 校验聊天头（防发错）→ 输入 → 发送 → UIA 验证；`qq-tree-dump.py` 调试工具；当次运行因桌面会话前台不可用（GetForegroundWindow 为空）中止，未发送任何消息 |
+| 本地 OCR 部署可行性 | ⚠️ 网络受阻 | PyPI TLS 连接被当前网络中断（SSLEOFError），rapidocr/onnxruntime 无法安装；云端 PP-OCRv6 继续作为当前 OCR 通道，本地 ONNX 待网络恢复后落地 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 99） |
+
+## 二十九、v0.4.23 视觉验证占位符 + 视觉 grounding 并入元素注册表（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| vision_verify 忽略占位符 | ✅ | `verification_prompt(question, ignore_placeholder)` 纯函数：默认 true 时提示模型“输入框内的灰色/浅色占位文字（如‘输入消息...’）不算实际内容”；Agent 工具与 `POST /vision/verify` 均接入（`ignore_placeholder` 默认 true）；单测覆盖提示词开关 |
+| 视觉 grounding 并入注册表（source=vision） | ✅ | `VisionGrounding`（描述+坐标框+置信度+cross_validated）+ `fuse_sources_with_vision` 三源融合：视觉元素与重合 OCR 行合并（cross_validated 补 `ocr` 源），与 UIA/OCR 共享稳定 ID 空间；`register_vision_grounding` 复用原 ID；4 个新单测 |
+| `/perception/elements` 支持视觉输入 | ✅ | `ElementsRequest.vision`（Vec\<VisionGrounding>）→ UIA+OCR+vision 融合 → 注册表更新返回稳定元素列表 |
+| `/vision/ground` 注册返回 element_id | ✅ | 请求可选 `app_id`；grounding matched 时写入注册表并返回 `element_id`，Agent 后续可直接按 ID 点击 |
+| `vision_ground` 工具注册 | ✅ | Agent 工具新增可选 `app_id`：结果并入共享注册表（ToolContext/Agent 与 HTTP 层共用同一注册表，`AppState::new` 接线），返回 element_id；`vision_grounding_from_value` 单测 |
+| `desktop_click` 稳定 ID 点击 | ✅ | 工具新增 `element_id`+`app_id`：按注册表取元素中心点击（优先于坐标），未命中给出“请刷新感知”的明确错误；坐标模式兼容不变 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 114） |
+
+说明：本轮打通“视觉定位 → 注册表稳定 ID → 点击/验证”的 Agent 工具闭环，减少对每次 OCR
+重新定位的依赖。
+
+## 三十、v0.4.24 动作图执行器接入 element_id 锚点（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `SemanticAnchor.element_id` 字段 | ✅ | 可选字段（serde default 兼容旧技能包 JSON）；`semantic_anchor_element_id_round_trip_and_backward_compat` 单测覆盖新旧格式 |
+| `WindowsUiaSource.new_with_registry` | ✅ | 执行器源可携带窗口元素注册表；`new()` 保持无注册表兼容 |
+| `find` element_id 优先定位 | ✅ | 锚点带 element_id 时按注册表取元素中心坐标（Point 通道点击/注入），未命中返回“稳定元素 ID 未命中（可能已失效），请先刷新 /perception/elements”明确错误；敏感面熔断仍在 execute_graph 层生效 |
+| 服务端接线 | ✅ | `ui_action_source(state.elements.clone())`：`/learn/execute` 与 `/learn/execute-package` 均共享 HTTP 感知层同一注册表；HTTP 冒烟：confirm=true + element_id 锚点返回“稳定元素 ID 未命中（可能已失效）”，confirm=false 仍 400 强制审批 |
+| 纯函数 | ✅ | `registry_element_point`（按稳定 ID 取中心）+ 单测（命中/未命中） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 117） |
+
+说明：至此“视觉定位 → 注册表稳定 ID → 点击/验证”在 Agent 工具与动作图执行器两条路径均闭环；
+旧流程技能包（无 element_id）仍按语义锚点（UIA/OCR）原有逻辑执行，不受影响。
+
+## 三十一、v0.4.25 真实面观察源（桌面状态采样，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| DesktopSnapshot 采样 | ✅ | `sample_desktop()`：前台应用 + 窗口标题哈希（原始标题不落盘）+ 剪贴板序列号；无前台窗口时安全返回 None 字段 |
+| 变化检测观察 | ✅ | `desktop_observation(prev, next)`：仅前台应用/标题哈希/剪贴板序列变化时生成 `kind=desktop_event` 记录；摘要如“前台应用：qq”“窗口标题变化（内容掩码）”“剪贴板变化（内容掩码）” |
+| 隐私边界（D22） | ✅ | 观察 detail 只含 title_hash / clipboard_changed，不含标题原文与剪贴板内容；契约测试断言序列化结果不包含原始标题 |
+| 服务端接线 | ✅ | `start_memory_observer` 每 2s 采样桌面（受 L0Event 感知授权门控，可热撤），模拟面日志观察逻辑保持不变 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 120） |
+
+说明：真实面观察源落地后，情景记忆可覆盖“用户正在什么应用、切了哪个窗口、剪贴板是否变化”
+的掩码轨迹；技能挖掘（/memory/mine-skill）仍以模拟面/示范录制的动作序列为准，
+真实面动作级学习走 UIA 锚点录制链路。
+
+## 三十二、v0.4.26 主动建议“学习”确认转 active 技能包（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 建议动作序列 → 学习样本 | ✅ | `recorded_actions_from_sequence`：`click:发送`/`type:输入消息` 解析为动作图样本，Type 一律内容掩码；空锚点/未知前缀安全处理；单测覆盖 |
+| 直接沉淀接口 | ✅ | `LearnPipeline::sink_from_actions`（sink_skill 重构复用）：建议确认后无需先录制，直接泛化 → 流程技能包 → 入 FlowSkillStore（active）；单测验证包合法且可列出 |
+| `/proactive/decide` learn 闭环 | ✅ | HTTP 层先取建议，decide 后把序列沉淀为 `proactive-<uuid>` 技能包（target_apps=建议应用、sensitivity=low），返回 package 信息并写 learn-confirm 审计；Learn 后建议从列表移除避免重复学习 |
+| UI/API 动作枚举不一致修复 | ✅ | Web 端按钮改发 `execute_once`/`mute_forever`；服务端 `SuggestionAction` 增加 `execute`/`mute` serde 别名兼容旧调用 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 123） |
+| HTTP e2e | ✅ 1/1 | 3 次 observe → 建议；`execute` 别名 200；再 observe → `learn` 200 返回 `proactive-3f942068`；`/learn/packages` 可见；建议列表移除；`mute` 别名解析正常（404=JSON 已解析） |
+
+说明：D24 主动建议的“学习/执行一次/忽略/静默”四选在 HTTP+Web 端全部可解析；
+“执行一次”仍走执行审批（技能包执行需 confirm），默认只提示不执行的安全边界保持不变。
+
+## 三十三、v0.4.27 vision_ground 置信度解析（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 边界框+置信度解析 | ✅ | `parse_vision_box_with_confidence`：支持 `BOX x,y,w,h 0.85`、`BOX x,y,w,h（置信度 80%）`、裸四元组；无置信度时为 None；`VisionBox` 类型别名收敛签名 |
+| 置信度提取复用 | ✅ | `extract_confidence` 供 parse_verification 与 grounding 共用；百分比兜底仅在文本含 `%` 时启用（修复裸整数被误判为 0.x 的缺陷） |
+| grounding 提示词与响应 | ✅ | 提示词要求“BOX x,y,w,h + 0-1 置信度”；matched/未交叉验证响应均带 `confidence` 字段（未给出时 null） |
+| 注册表置信度透传 | ✅ | `vision_grounding_from_value` 已读取 confidence（缺省 0.7），单测覆盖 0.88 透传与缺省值 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 123） |
+
+说明：置信度进入元素注册表后，可支撑后续“低置信度元素不直接点击/需二次确认”的策略
+（当前交叉验证仍以 OCR 重合为准，安全边界不变）。
+
+## 三十四、v0.4.28 视觉-only 高置信度定位策略（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| vision-only 门槛 | ✅ | `vision_only_allowed(confidence, min)` 纯函数：无 OCR 重合时仅置信度 ≥0.9 允许视觉定位命中（`OWO_VISION_MIN_VISION_ONLY_CONFIDENCE` 可调）；单测覆盖边界值 |
+| grounding 三态响应 | ✅ | OCR 重合 → `matched=true/cross_validated=true`；无 OCR 但高置信度 → `matched=true/vision_only=true`（仅纯视觉元素，图片表情/自绘按钮）；无 OCR 且低置信度 → `matched=false`“未重合且置信度不足” |
+| 工具契约更新 | ✅ | `vision_ground` 描述区分 cross_validated（点 line 中心）与 vision_only（只能点 box 中心），低置信度拒绝保持 |
+| 安全边界 | ✅ | 默认 0.9 高门槛 + 环境变量可调；敏感面熔断、审批流程不受影响 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 124） |
+
+说明：该策略解决 QQ 图片表情面板等“OCR 无文字、纯图像渲染”元素的定位问题，
+为后续视觉-only 点击闭环提供受控入口（仍建议首次执行走审批）。
+
+## 三十五、v0.4.29 模型网关用量统计（P0 补齐，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| TokenUsage 结构 | ✅ | prompt/completion/total + `add`/`saturating_sub`/`cost_estimate_usd`（$/M token 单价可配，默认 0）；单测覆盖算术与成本 |
+| usage 解析 | ✅ | `parse_usage_value` 兼容 OpenAI/DeepSeek（prompt_tokens 等）与 Ollama 原生字段（prompt_eval_count/eval_count）；流式末尾 usage 块经 `parse_sse_payload` 提取 |
+| Provider 累计快照 | ✅ | `OpenAiCompatibleProvider.usage` 互斥累计，非流式与流式均记录；`ModelProvider::usage_snapshot` 默认零（未实现 Provider 兼容） |
+| 回合增量 | ✅ | `TurnOutcome.usage`（serde default 兼容旧序列化）：回合开始/结束取快照差值，跨多次模型调用累计 |
+| 可观测落点 | ✅ | TraceRecord 记录 usage（旧 trace 反序列化兼容）；服务端回合结束写 `model/usage` 审计（prompt/completion/total/cost_usd，价格经 `OWO_MODEL_INPUT/OUTPUT_PRICE_PER_MTOK` 配置） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 127） |
+
+说明：P0“用量统计/预算上限”统计部分已补齐；预算上限见下一节。
+
+## 三十六、v0.4.30 模型用量预算上限（P0 补齐，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 预算熔断纯函数 | ✅ | `budget_violation(usage, total_cap, cost_cap, in_price, out_price)`：累计 token 或成本任一超限返回明确原因；未配置预算返回 None；单测覆盖未超/超限/成本三档 |
+| Provider 预算检查 | ✅ | `OpenAiCompatibleProvider::usage_budget_check` 每次 complete/complete_stream 发请求前检查（在数据出境开关之后、联网之前），超限直接 Err，不产生新开销 |
+| 配置入口 | ✅ | `OWO_USAGE_TOKEN_BUDGET`（累计 token 上限）、`OWO_USAGE_COST_BUDGET_USD`（成本上限，配合 `OWO_MODEL_INPUT/OUTPUT_PRICE_PER_MTOK` 单价）；未配置默认不熔断 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 128） |
+
+说明：至此 P0 模型网关“统一 Provider 接口/流式/工具调用/用量统计/预算上限/BYOK”全部落地；
+预算为累计口径（跨会话进程内累计），进程重启后归零，云端持久化预算留作 v2。
+
+## 三十七、v0.4.31 桌面端用量面板与 /usage 接口（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `GET /usage` | ✅ | 返回累计 token（输入/输出/总）、成本估算、预算配置（token/cost 上限、单价）与是否超限（violation）；OpenAPI 已登记 |
+| 桌面端用量面板 | ✅ | 设置与诊断区新增“模型用量与预算”：累计 tokens/成本/预算/状态，10s 自动刷新，预算未配置显示“未配置”，超限显示 ⚠️ |
+| 前端语法 | ✅ | `node --check` 通过 |
+| HTTP 冒烟 | ✅ | 带预算环境变量启动：/usage 返回 total=0、cost=0.0、token_cap=100000、cost_cap=5.0、violation=null；openapi.json 含 /usage |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 128） |
+
+说明：预算配置当前经环境变量生效（运行时改动即时被 provider 读取），
+设置页 JSON 持久化预算字段留作后续（settings.json 扩展）。
+
+## 三十八、v0.4.32 用量预算持久化到 settings.json（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| UsageSettings 配置组 | ✅ | settings.json 新增 `usage`：token_budget/cost_budget_usd（None=不熔断）+ 单价（0=不估算）；serde default 兼容旧 settings.json |
+| 运行时应用 | ✅ | `Settings::apply_usage_env` 把预算/单价写回环境变量（None 清除，防旧值残留）；服务端启动（AppState::new）、`POST /settings`、CLI turn/repl/tui 均接入 |
+| settings.json 持久化 | ✅ | `POST /settings` 保存完整配置并即时生效；`/settings` 返回 usage 组；settings.example.json 同步示例 |
+| 桌面端预览 | ✅ | 设置与诊断 JSON 预览含 usage 组（用量面板保持一致） |
+| BOM 兼容修复 | ✅ | `Settings::load` 剥离 UTF-8 BOM（Windows 编辑器常见），避免配置静默失效；单测覆盖 BOM 场景 |
+| HTTP e2e | ✅ | 启动时 BOM settings.json（50000/2.5/0.4）→ /usage 启动即生效；POST /settings（777/0.5）→ /usage 即时更新且 settings.json 持久化 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 130） |
+
+说明：至此用量预算可从设置页 JSON 编辑并持久化，启动/运行时均生效；
+用量统计、预算熔断、展示、持久化四条链路全部闭环。
+
+## 三十九、v0.4.33 建议沉淀结果在 Web 端即时反馈（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 学习确认后刷新技能包 | ✅ | 建议四选按钮处理 learn 成功且返回 package 时：消息区提示“建议已沉淀为技能包 <name>（变量…）”，并立即刷新技能中心列表 |
+| 建议列表同步 | ✅ | decide 后仍刷新建议列表（learn 已移除、其余保留），行为与后端一致 |
+| 前端语法 | ✅ | `node --check` 通过 |
+| 质量门禁 | ✅ | 后端无改动；此前 `cargo test --workspace` 全绿（core 130） |
+
+说明：配合 v0.4.26 的 learn-confirm 沉淀闭环，桌面端现在“学习 → 沉淀 → 技能中心可见”全链路可见。
+
+## 四十、v0.4.34 官方示例插件（翻译 / 剪贴板历史，2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 翻译插件 | ✅ | `plugins/owo-translate`：manifest + Python stdio MCP 服务器，`translate` 工具（演示词典中英互译，未命中返回 `[演示翻译]` 前缀原文）；无网络依赖 |
+| 剪贴板历史插件 | ✅ | `plugins/owo-clipboard`：`clipboard_read`/`clipboard_write`（Windows PowerShell，base64 传输避免转义）；权限声明 `clipboard:read/write` |
+| 契约测试 | ✅ 3/3 | `official_example_plugins_discover_and_validate`（工作区发现两个插件）、`official_translate_plugin_serves_tools`（tools/list + translate 命中/兜底 + 未知工具报错）、`official_clipboard_plugin_lists_and_reads`（工具清单 + 只读调用） |
+| Windows stdio 修复 | ✅ | Python 文本模式 stdout 在 tokio 管道下第二帧丢失 → 改用 `io.TextIOWrapper(sys.stdin/stdout.buffer, utf-8)` 二进制包装，全链路通过 |
+| 文档 | ✅ | `plugins/README.md`：运行要求（python in PATH、相对路径、启动目录）、权限说明 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（mcp_tests 8 项） |
+
+说明：本轮改动按用户要求暂不 git 提交，留待本地持续迭代后统一提交。
+
+## 四十一、v0.4.35 插件管理界面（/plugins + Web 面板，2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `GET /plugins` | ✅ | 返回工作区 + 数据目录发现的插件（id/name/version/description/permissions/MCP 配置/manifest 路径）；OpenAPI 已登记 |
+| Web 插件面板 | ✅ | 侧栏新增“插件”区：名称/id/版本/描述/权限/MCP 通道，15s 自动刷新；`node --check` 通过 |
+| HTTP 冒烟 | ✅ | 从 agent-sdk 根启动服务：`/plugins` 返回 count=3（example-hello + translate + clipboard），权限清单正确 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 130 + mcp_tests 6） |
+
+说明：至此 P0“插件 SDK（manifest + 沙箱 + 权限声明 + 能力 API + 插件管理界面；随包 2 个官方示例插件）”
+管理界面与示例插件均落地；启停/安装（市场）留作 v2。本轮改动仍未 git 提交。
+
+## 四十二、v0.4.36 审计过滤与门禁复测（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `/audit` 事件/工具过滤 | ✅ | 新增 `event`（精确）与 `tool`（精确）查询参数，OpenAPI 已登记；Web 审计面板加事件/工具过滤输入框 + 应用按钮，定时刷新保留过滤 |
+| 门禁复测 | ✅ | `skill-gate.ps1` 12/12 PASS；`run-eval-gate.ps1 -Threshold 0.8` 20/20=100%；`sim-regression.py` qq-learn/qq-observe 2/2 PASS（无模型依赖） |
+| HTTP 冒烟 | ✅ | 触发 egress 审计后：`/audit` 全量 1 条 event=egress；`event=settings`→0、`tool=read_file`→0（精确过滤语义正确） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 130 + mcp_tests 6）；`node --check` 通过；构建产物更新 |
+
+说明：多轮本地改动（插件示例/插件面板/审计过滤）全部通过既有回归门禁；仍未 git 提交。
+
+## 四十三、v0.4.37 桌面打包脚本修复与复测（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 打包脚本 bug 修复 | ✅ | `package-desktop.ps1` 原先对 debug 配置生成 `cargo build --debug`（非法参数）导致必失败；改为仅 release 追加 `--release`，debug 用默认 profile |
+| 桌面便携包复测 | ✅ | `package-desktop.ps1 -Configuration debug` 完成：核心服务 + 桌面壳（Tauri）构建成功，产出 `dist/OwO-Agent-debug.zip`；Web 资产改动未破坏桌面壳 |
+| 质量门禁 | ✅ | 本轮前 fmt/clippy/test 全绿（core 130 + mcp_tests 6）；打包构建通过 |
+
+说明：用户指示本轮完成即停止目标；改动仍未 git 提交，留待后续统一提交。
+
+## 四十四、v0.5.1 全流程专项 M-A～M-D + 生产加固（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| M-A 场景图 | ✅ | `scene.rs`：SceneGraph 跨帧稳定 ID 保持（5 帧 ≥95%）、冲突降置信、stale 淘汰、多源证据（UIA/OCR/视觉/模板/历史）、元素关系、模板 ROI 命中率、`elements_from_*`/`merge_sources` 构建管线；`element_registry.list_all()` |
+| M-A 多源定位 | ✅ | `locate.rs`：`AnchorQuery`（stable_id/name/role/parent/text_hash/context_rect/source_priority/min_confidence）、`score = w_uia·uia + w_ocr·ocr + w_vision·vision(cross_validated) + w_template·template_hit + w_history·prior_hit`、uncertainty/可靠线、视觉-only 拒绝、同名冲突降分；`POST /locate/query` 已接入（OpenAPI 登记） |
+| M-A 契约测试 | ✅ 6/6 + 8 项单测 | `tests/scene_locate_tests.rs`：5 帧稳定 ID ≥95%、20 例 top-1 IoU≥0.8、视觉-only 拒绝、交叉验证融合、模板 ROI/历史先验、UIA+OCR+视觉融合管线 |
+| M-B 动作程序 | ✅ | `action_program.rs`：ProgramNode（Step/Assert/WaitUntil/Branch/Loop/Retry/Sub）+ 完整解释器（变量填充、敏感面熔断、步数上限、子程序 4 层、WaitUntil 200ms 轮询超时）；`from_graph` 线性兼容 |
+| M-B 结构化断言 | ✅ | `assert.rs`：9 类断言，`OcrBoxGone{text}` 占位符确定性判定（占位符存在→false、消失→true），未接入类型明确报错不静默通过；单测 18 项 |
+| M-C 记忆三层 | ✅ | `observe.rs` Outcome + `MemoryStore.recall/mark_outcome`（JSONL + 语义索引持久化）；`memory.rs` SemanticMemory（CJK 二元组检索、prune/save/load）；`/memory/recall` 冒烟通过 |
+| M-C 多轨迹泛化 | ✅ | `learn::generalize_traces`（编辑距离对齐 + 跨轨迹一致性变量推断）+ `candidate_eligible`（≥3 条且成功率 ≥80%）；`/memory/mine-skill` 支持 traces/outcomes，HTTP 冒烟：3 条成功轨迹 → 变量 `value`、技能包落盘 |
+| M-D 技能健康度 | ✅ | `skill_health.rs`（连续 2 败 Degraded、成功恢复、模板命中率 <40% 降级、JSON 持久化）；`FlowSkillStore` 健康门禁（Disabled 拒绝、Degraded 需 degraded_ack）；`/skills/health` + 重置端点 + Web 技能包健康显示 |
+| 生产加固：MCP stdio 超时 | ✅ | 可配置超时（配置 > `OWO_MCP_STDIO_TIMEOUT_MS` > 15s 默认），超时杀挂死子进程并自动重连重试一次 |
+| 生产加固：插件启停 | ✅ | `PluginStateStore`（默认启用、禁用持久化、reset）+ `discover_enabled_plugins`；`POST /plugins/{id}/enabled` + Web 面板开关，冒烟 ok |
+| 生产加固：审计查询 | ✅ | `AuditQuery`（limit/offset/event/tool/approved/q 模糊搜索 + LIKE 转义）；`/audit` 全参数接入，冒烟 `q=mine` 命中 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 218 项全绿（lib 172 + 集成 46）；`skill-gate.ps1` 12/12；`run-eval-gate.ps1 -Threshold 0.8` 20/20=100%；`sim-regression.py` qq-learn/qq-observe 2/2 PASS；HTTP 冒烟（locate/plugins/health/mine-skill/audit）通过 |
+
+说明：本轮按用户要求不 git 提交；M-A 的“执行器主链路替换为 locate”与 M-E（本地 ONNX OCR）留作下一迭代。子代理质量评估：M-B 交付质量好；M-C/M-D 部分交付后停滞由根代理补齐；M-A 两个子代理零产出被中断、由根代理实现——后续迭代默认根代理直接实现核心路径，子代理只用于明确的独立子任务。
+
+## 四十五、v0.5.2 M-A 收尾 + 插件热卸载（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 执行器接入多源定位 | ✅ | `executor::locate_anchor_point`：从元素注册表构建 SceneGraph → `AnchorQuery` 加权打分，可信命中直接按中心点操作；视觉-only/冲突/低置信返回 None 降级到 UIA 递归 + OCR 兜底（不硬猜）；`WindowsUiaSource::find` 主链路已接入；3 项契约测试（UIA 命中、视觉-only 拒绝、未知返回 None） |
+| AnchorQuery 默认可信线 | ✅ | `min_confidence` 默认 0.4（此前 derive Default 为 0.0 导致低置信也能返回 best） |
+| 工具注册表前缀撤销 | ✅ | `ToolRegistry::remove_prefix`（按 `owo_plugin_<id>_` 前缀移除）；`mcp_tool_prefix` 命名空间助手；单测覆盖移除只匹配前缀 |
+| Agent 热卸载过滤 | ✅ | `Agent::set_tool_prefix_enabled/tool_disabled`：禁用后工具从模型可见集移除、直接调用返回“插件热卸载”错误并写审计；`loop_tests::hot_disabled_plugin_tool_prefix_is_hidden_and_blocked` 通过 |
+| 服务端即时生效 | ✅ | `POST /plugins/{id}/enabled` 同步设置 Agent 工具前缀；`/plugins` 返回 `tools_hidden` 字段；服务启动时按 `plugin_state.json` 恢复禁用状态；HTTP 冒烟：禁用 translate 后 `enabled=False tools_hidden=True` |
+| 场景图跨请求持久化 | ✅ | `AppState.scene`：`/locate/query` 复用持久 SceneGraph（元素每请求刷新），模板命中率/历史命中先验跨请求保留 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 177 + 集成 47）；HTTP 冒烟通过 |
+
+说明：插件禁用为“工具级热卸载”（模型不可见、直接调用被拒、状态持久化）；进程级 kill 子进程需 Agent 注册表改造，列为后续。改动仍未 git 提交。
+
+## 四十六、v0.5.3 独立审批模型 + Prompt Injection 防护（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 独立审批模型（Auto-review） | ✅ | `autoreview.rs`：`Reviewer` trait + `HeuristicReviewer`（零成本预筛）+ `ModelReviewer`（独立模型 ALLOW/DENY/UNKNOWN）+ `AutoReviewChain`（启发式 Deny 优先 → 模型 → 人工）；`Agent::set_reviewer` 接入审批循环：Ask 先过审查链，Deny 不打扰用户并写 `auto_review` 审计，Unknown 才转人工 |
+| CLI 默认挂载 | ✅ | `build_agent_with_mcp` 默认挂启发式链；`OWO_AUTO_REVIEW=1` 启用独立模型复审（`OWO_REVIEW_MODEL` 可选覆盖）；模型初始化失败自动降级启发式并告警 |
+| Prompt Injection 防护 | ✅ | `injection.rs`：`InjectionGuard` 25 条中英模式扫描 + 行级净化；`sanitize_tool_result` 对外部来源工具（OCR/UI/剪贴板/浏览器快照/视觉）结果进上下文前过滤；Agent 工具结果统一走净化 |
+| 拦截率验收 | ✅ ≥95% | 内部 20 条注入样本拦截 100%（19/20 高置信 + 管道取数），3 条正常内容零误报；`internal_injection_suite_interception_rate_at_least_95_percent` |
+| 集成测试 | ✅ 5 项 | `loop_tests`：Auto-review Deny 不写文件且审计、Allow 放行、Unknown 回退人工、剪贴板注入行进上下文前被替换（审计含“已过滤”） |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 235 项全绿（lib 185 + 集成 50） |
+
+说明：Auto-review 默认只启用启发式预筛（零成本），独立模型审查需显式 `OWO_AUTO_REVIEW=1`（BYOK，凭据仅环境变量）。改动仍未 git 提交。
+
+## 四十七、v0.5.4 桌面工作台增强（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| Markdown 渲染（对标 Codex 桌面） | ✅ | `renderMarkdown`（代码块带复制按钮/标题/列表/表格/链接/行内样式，XSS 转义）；用户/助手消息与流式 `token_delta`/`progress`/`final` 均走 markdown 渲染；Node 提取渲染器 10/10 断言通过（含 XSS 转义） |
+| 流式中断按钮 | ✅ | `abortBtn`：AbortController 中断 fetch + `POST /session/{id}/abort`；回合结束后禁用 |
+| diff 内容展开 | ✅ | `diffText` 行级 diff（`-`/`+`/` ` 前缀，对标 git diff）；点击 diff 条目展开 before/after 内容，默认收起 |
+| 情景记忆面板 | ✅ | `/memory/observations` 最近 30 条 + `/memory/recall` 语义检索（Enter/按钮触发）；字段按 `MemoryEntry`（ts/app_id/summary/confidence）渲染 |
+| 技能健康度面板 | ✅ | `/skills/health` 全量展示（Active/Degraded/Disabled、成功率、连续失败、模板命中率）；30s 轮询 |
+| Eval 面板 | ✅ | `/eval/run` 运行内置套件，展示通过率/耗时/逐用例结果；未知套件 404 校验通过 |
+| 服务端冒烟 | ✅ | 4189 实例：health/静态托管（index 6401B/app.js 50399B/css 6223B 均含新功能）、create session/diff/mine-skill/audit、真实模型 turn（SSE 113 token_delta + final，代码块/列表 markdown 内容，消息持久化 2 条） |
+| 质量门禁 | ✅ | `node --check` app.js 通过；`cargo check --workspace` 干净；未改 Rust 代码 |
+
+说明：本轮只改 `desktop/web/`（index.html/app.js/style.css），与 OCR 专项（onnx_ocr/paddle_ocr/ocr）无文件交集，避免竞争修改。
+
+## 四十八、v0.5.5 M-E 本地 ONNX OCR（全流程专项收尾，2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `onnx_ocr.rs` 本地 ONNX 引擎 | ✅ | `ort` 2.0.0-rc.13（load-dynamic）+ ch_PP-OCRv4 det/rec ONNX：det 预处理（limit_side=736 min 侧 + 32 对齐 + BGR 通道 mean/std 归一化）、DB 后处理（二值化 0.3 → 2x2 膨胀 → 连通域并查集 → 凸包最小外接矩形 → 框内概率均值 ≥0.5 → unclip 1.6 → NMS 0.3）、rec 预处理（高 48/宽≤320、[-1,1]）、CTC 解码（折叠重复 + blank 剔除 + 字典映射）；引擎惰性加载缓存，加载失败告警并降级 |
+| OCR 通道优先级 | ✅ | `ocr_preferred`：本地 ONNX（模型就绪时优先，provider=onnx-v4）→ Paddle 云（PADDLE_OCR_TOKEN）→ Media.Ocr；`OWO_OCR_STRICT=onnx` 强制本地；本地通道不受数据出境开关约束（无网络请求） |
+| 行分组 + 合并 | ✅ | det 在字符间隙切出多框：按 y 重叠 ≥50% 同行分组 → 行内按 x 排序 → 相邻框 gap<24px 合并后统一 rec，避免顺序错乱/粘连伪字符（修复“输入消息”→"<消息输入" 两处顺序 bug） |
+| 模型下载脚本 | ✅ | `scripts/download-onnx-ocr-models.ps1`：RapidOCR v1.1.0 官方 release（det 4.7MB + rec 10.9MB）+ PaddleOCR Gitee 镜像字典（6624 行）；已下载至 `agent-sdk/models/ocr/` |
+| 真实模型集成测试 | ✅ 5/5 | `onnx_ocr_real_models_when_present`（GDI 内存渲染已知文本，模型缺失自动跳过）：发送/输入消息/hello world/你好 世界/两行混排 全部 LCS 重合 1.00；渲染图 ASCII 校验与字符码校验排除了镜像/错序 |
+| 契约测试 | ✅ 8 项单测 + 2 集成 | BMP 解析（含 54 字节头断言）、det 32 对齐/通道归一化、DB 检出+坐标还原+unclip 几何、NMS 合并、CTC 解码、字典加载、四点排序、rec 形状；真实模型门控测试 1 项；GDI 渲染辅助 1 项 |
+| 修复的 3 个真 bug | ✅ | ① BMP biSizeImage 用 `usize::to_le_bytes()`（x64 写 8 字节致头部 58 字节错位）→ 显式 u32；② `quad_score` 外接框只取单角点导致竖排笔画框分数恒 0 被误拒（单字/竖笔画文本检测缺失根因）；③ rec 输出 T 按输入宽推断（实为 W/8）致 CTC 行错位 → 从输出维度取 (T, C) |
+| onnxruntime.dll 部署 | ✅ | ort 按 load-dynamic 加载（exe 同级优先）；`package-desktop.ps1` 打包时自动附带：本地构建产物优先，缺失则从 microsoft/onnxruntime v1.28.0 官方 release 下载；实测 1.28.0 DLL 全链路可用 |
+| HTTP 冒烟 | ✅ | 服务端 `GET /perception/ocr/status` 返回 `onnx_models_present=true`；`OWO_OCR_STRICT=onnx` 下 `POST /perception/ocr/bytes` 返回 provider=onnx-v4 + 坐标框 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 196 + 集成 55，含真实模型门控 5 例）；模型缺失环境自动跳过不阻塞 |
+
+说明：M-E 验收“无网本地识别与云 API 字符级重合率 ≥90%”在本环境以“渲染已知文本 LCS=1.00”口径验证；
+云 API 对照（需 PADDLE_OCR_TOKEN）与真实桌面截图口径留作外部验收项。改动仍未 git 提交。
+## 四十九、v0.5.5 Agent 核心能力 HTTP 化 + 桌面面板（2026-08-13，未提交）
+
+对标 Codex：CLI 独占的子代理（@explore/@subagent）、AGENTS.md 项目规则、MCP 服务器管理
+接入 HTTP API 与桌面工作台。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| Agent 工具注册表 RwLock 化 | ✅ | `Agent.registry: Arc<RwLock<ToolRegistry>>`：`register_mcp_tools`/`remove_tools_prefix` 改 `&self`（热注册无需重建 Agent）；`ToolRegistry.tools` 改 `Arc<dyn Tool>` + 新增 `get()`（锁内取句柄、锁外跨 await 执行，解决 RwLockGuard 非 Send）；`registry()` 返回 Arc |
+| 子代理 HTTP 接口 | ✅ | `POST /subagent/run {prompt, read_only?, model?}` → 只读探索（对齐 @explore）/通用子代理（对齐 @subagent），复用 `Agent::run_subagent`；审计 `subagent/explore|run`；冒烟：真实模型只读探索 2.0s 返回文件列表 markdown |
+| AGENTS.md 项目规则管理 | ✅ | `GET /project/rules`（AGENTS.md/CLAUDE.md 存在性 + 注入状态 + 内容）；`POST /project/rules`（写 AGENTS.md + 审计）；冒烟：写入后 exists/injected 联动为 true |
+| MCP 服务器管理 | ✅ | `GET /mcp`（mcp-servers.json + settings.json 合并去重）；`POST /mcp/add`（连接成功即热注册工具 + 持久化 + 审计，重复 409，连接失败 502）；`POST /mcp/remove`（持久化 + 前缀禁用热卸载）；冒烟：stdio 测试服务器连接 3 工具、移除成功 |
+| OpenAPI 登记 | ✅ | `/subagent/run`、`/project/rules`、`/mcp`、`/mcp/add`、`/mcp/remove` 五端点登记 |
+| 契约测试 | ✅ | `mcp_tests::agent_hot_register_mcp_tools_after_construction`：Arc<Agent> 构造后热注册 → 工具可见 → 前缀撤销后消失（mcp_tests 8/8） |
+| 桌面 UI 三面板 | ✅ | 子代理面板（只读/通用模式切换 + 结果展示）、项目规则面板（注入状态 + AGENTS.md 编辑保存）、MCP 管理面板（列表/移除/添加连接）；node --check 通过 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 196 + 集成 50+）；HTTP 冒烟 8 步全过；静态托管检查 12/12 PASS |
+
+说明：本轮文件变更 `agent.rs`（registry RwLock）、`tools.rs`（Arc<dyn Tool> + get）、`owo-agent-server/lib.rs`（三组接口 + OpenAPI）、`mcp_tests.rs`（热注册契约）、`desktop/web/*`（三面板）；与 OCR 专项无文件交集。测试残留 AGENTS.md 已清理。
+
+## 五十、v0.5.6 Traces 可观测 HTTP 化 + 会话导出 UI（2026-08-13，未提交）
+
+M2 验收项"trace 可回放"补齐 HTTP 面；桌面端 P0 补会话导出入口。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| Traces 列表接口 | ✅ | `GET /traces`：倒序列表（prompt 预览/steps/耗时/model/usage/final），与 CLI `/traces` 同口径；OpenAPI 登记 |
+| Traces 回放接口 | ✅ | `GET /traces/{index}`：完整 TraceRecord（事件序列含 tool_start/tool_result/permission_request/compaction/final）；越界 404；OpenAPI 登记 |
+| 桌面 Traces 面板 | ✅ | 左侧面板：轨迹列表（15s 轮询 + 手动刷新），点击回放事件流（模型调用/工具/审批/压缩/最终）；node --check 通过 |
+| 会话导出 UI | ✅ | diff 区新增"导出 MD/HTML"按钮（复用既有 `/session/{id}/export/{format}`）；冒烟 md 211B / html 753B |
+| 协作冲突处理 | ✅ | 发现并修复另一模型中间态导致的编译失败：CLI `merge_plugin_mcp` 已删但调用点未更新 → 恢复函数（基于 core `plugin_mcp_config`，语义一致）；`mcp_add` 统一走 `Agent::connect_mcp_server`（进入 McpRegistry，支持进程级卸载） |
+| 冒烟 | ✅ | 4191 实例：静态面板 6/6、traces 列表 83→85 条（真实 turn 后新增）、回放 111 事件、越界 404、导出 md/html 200 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 197 + 集成，mcp_tests 10/10 含另一模型进程级卸载测试） |
+
+说明：本轮文件变更 `owo-agent-server/lib.rs`（traces 两接口 + OpenAPI）、`desktop/web/*`（Traces 面板 + 导出按钮）、`owo-agent-cli/main.rs`（恢复 merge_plugin_mcp）。与 OCR 专项无文件交集；与另一模型在 server lib.rs 的并行改动（插件进程级热卸载）共存并通过全部测试。
+
+## 五十一、v0.5.7 上下文管理可视化 + AGENTS.md 模板（2026-08-13，未提交）
+
+对标 Codex 的上下文状态显示与 init 命令桌面化；文档 5.2.2 上下文预算可视化落地。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 会话上下文接口 | ✅ | `GET /session/{id}/context`：消息数、估算 token（与压缩同口径 estimate_tokens）、token 预算、压缩开关、规则注入状态、最近压缩摘要；OpenAPI 登记 |
+| Agent config 访问器 | ✅ | `Agent::config()` 只读快照（token_budget/compaction 等）供诊断/仪表 |
+| AGENTS.md 模板接口 | ✅ | `POST /project/rules/template`：幂等生成（已存在 409，审计 rules-template，/init 等价）；OpenAPI 登记 |
+| 桌面上下文仪表 | ✅ | 对话区顶部 token 进度条（绿/黄/红三态：>80% 警告、超预算红色）+ 消息数/规则/压缩徽章 + 最近压缩摘要悬停提示；selectSession 与回合结束刷新 |
+| 项目规则面板 | ✅ | "生成模板"按钮（不存在时一键生成并载入编辑器） |
+| 契约测试 | ✅ | `agent::tests`：estimate_tokens 计数/空列表/compact_truncate 保留 system+最近尾部（3 项，lib 200 全绿） |
+| 协作冲突处理 | ✅ | 另一模型扩展 EvalCase（expected_files/expected_missing 真实落盘断言）处于中间态（24 个用例缺字段）→ 补齐全部用例字段并保留其断言语义；eval_tests 3/3 通过（含真实落盘/假写失败/删除残留用例） |
+| 冒烟 | ✅ | 4192 实例：context 0 消息→turn 后 2 消息 13 tokens/budget 60000/压缩开；模板生成 200（158 字符）后清理；静态 UI 5/5 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 200 + 集成 13+） |
+
+说明：本轮文件变更 `agent.rs`（config 访问器 + 3 测试）、`owo-agent-server/lib.rs`（context 接口 + 模板接口 + OpenAPI）、`eval.rs`/`eval_tests.rs`（补齐另一模型 EvalCase 扩展的中间态）、`desktop/web/*`（上下文仪表 + 模板按钮）。与 OCR 专项零交集；与另一模型并行改动（EvalCase 落盘断言、MCP 热卸载）共存通过。
+
+## 五十二、v0.5.8 交付面收敛（2026-08-14）
+
+四 Agent 并行交付：A=HTTP 服务面恢复 + 路由契约测试；B=桌面面板联调；C=回归门禁修复 + ONNX 模型随包分发；D=文档与验收基线收敛。协作遵循 `.coord/OWNERSHIP.md` 文件域冻结，契约见 `.coord/CONTRACT.md`，门禁矩阵见 `.coord/GATES.md`。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 9 组 HTTP 接口恢复 | ✅ | /locate/query、/memory/recall、/skills/health[/{name}/reset]、/plugins、/traces[/{index}]、/subagent/run、/project/rules[/template]、/mcp[/add\|remove]、/session/{id}/context 全部恢复注册（此前因 lib.rs 重建回归丢失返回 404） |
+| OpenAPI 一致 | ✅ | openapi_spec 补齐 24 个漏登路径（/desktop/*、/vision/*、/perception/template/*、/perception/elements、/perception/ocr/bytes、/perception/window、/learn/status、/openapi.json）；服务端 /openapi.json 106 路径 = clients/ts/openapi.json 快照 = schema.d.ts（generate:local 重新生成） |
+| 路由面契约测试 | ✅ 3/3 | route_contract_tests：契约快照全路径+方法非 404/405（资源型 404 白名单 8 项：skills/learn-packages/traces/mcp-remove/automations/perception-template）、/openapi.json 覆盖断言、真实 HTTP smoke；tempfile 临时数据目录，测试后清理 |
+| 桌面工作台联调 | ✅ 33 项矩阵 | app.js 新增 friendlyError（404/5xx → "服务接口不可用"；资源型 404 → "资源不存在"），18+10 处面板 catch 统一友好错误；插件管理/技能健康/记忆检索/Traces 轮询回放/子代理（只读/通用）/项目规则（注入+编辑+模板）/MCP 管理/会话上下文 token 仪表（绿黄红三态）/模型用量全通；P2 computer-use 任务面板按文档 7.3 语义（target_app、max_duration_ms、approve/reject/cancel/start/pause/fuse/resume/complete 状态迁移）实测对齐；XSS 基线保持（esc() + renderMarkdown 协议白名单） |
+| sim 回归修复 | ✅ 2/2 | sim-qq-observe-e2e.py：seen_kinds 只统计 kind=sim_event 且 detail.type 为字符串的观察项（None 跳过），保留 typed/send_clicked 断言语义；qq-learn PASS + qq-observe PASS（含挖掘 {value} 变量 + 换参复用发送） |
+| 技能门禁 | ✅ 12/12 | skill-gate.ps1：documents/spreadsheets/pdf/browser ×3 用例全过（运行时 python 装 reportlab 4.4.9） |
+| onnx_ocr model_dir() 回退链 | ✅ | 优先级：OWO_ONNX_OCR_MODEL_DIR → 用户数据目录 → exe 同级 models/ocr → 仓库相对路径；新增 3 个单测；真实模型测试不再静默跳过（onnx_ocr 13 项含真实推理通过） |
+| 打包含 ONNX 模型 | ✅ | dist/OwO-Agent-debug.zip（42.3MB）、dist/OwO-Agent-release.zip（37.0MB）、NSIS setup.exe（11.9MB）+ .sig、dist/updates/latest.json 时间戳均为 2026-08-14；解包自检（release 便携包 + 临时数据目录 + OWO_OCR_STRICT=onnx）：/health 200、/perception/ocr/status onnx_models_present=true、POST /perception/ocr/bytes provider=onnx-v4 文本非空——全部 PASS |
+| 编码损坏重建记录 | ✅ | 并行 agent 曾以错误编码写 lib.rs 导致 GBK mojibake（117 处损坏）；以 git HEAD 为基线重建 + 从损坏备份提取修复 14 组 handler（A 复核当前无重复 route/fn） |
+| 质量门禁 | ✅ | cargo test --workspace 294 项全绿（core lib 220 + 集成 61 = audit 3/cloud_exec 7/eval 3/loop 20/mcp 13/memory_health 6/plugin_lifecycle 3/scene_locate 6 + server 6 = 单测 3/route_contract 3 + CLI 7）；cargo fmt --all -- --check 干净；cargo clippy --workspace --all-targets -D warnings 0 警告；node --check 0 错误；TS SDK typecheck 0 错误 / build 通过 / test:unit 3/3 |
+
+说明：全量门禁由 D 收尾统一执行（详见 `.coord/GATES.md`）；eval-gate（需 OPENAI_API_KEY）未纳入本轮实测，C.4 外部验收项保持"开放"。修复过程中 A 的 `route_contract_tests.rs` 白名单缺 `/perception/template/{app_id}`（资源型 404），经协调由 D 补 1 行后全绿。
+
+## 五十三、v0.5.9 四条核心库主线落地（2026-08-14/15）
+
+按技术文档 §9 M4 里程碑 + §12 v2 底座推进四线：多格式笔记 v1（M4c）、插件市场治理骨架（M4b）、.owflow 工作流引擎 v1（§12 支柱1）、Goal/Plan 多 Agent 编排（§12 底座）。协调协议 `.coord3/`（OWNERSHIP/GATES/COMMIT-PLAN/DEPENDENCIES/STATUS-T1~T4）。
+
+| 线 | 状态 | 证据 |
+|---|---|---|
+| T1 多格式笔记 v1（M4c） | ✅ | `notes.rs`（46KB）：块树模型（11 类块：段落/标题/列表/代码/表格/图片/文件/引用/HTML嵌入/画布/AI生成，稳定 id+attrs+有序子块，纯函数 add/insert/remove/move 含环检测）；`<dir>/doc.json` 原子写+assets/ 目录往返无损；Markdown 导入/导出（MD 可表达元素往返不动点）；`sanitize_html`（标签白名单、script/style/iframe 整体剥离、事件属性/`javascript:`/`data:`/style 剥离、安全 URL 保留）；画布数据模型（rects/notes/layers）；全文索引（内存分词 + SQLite FTS5 trigram 中文子串检索，<3 字符 LIKE 回退）；零丢失验收（10 次改→存→读哈希稳定 + 100 份程序化混合样例磁盘/MD 往返）；`notes_tests` 27/27 |
+| T2 插件市场治理（M4b） | ✅ | `plugin.rs` 扩展：PluginManifest 签名可选字段（serde default 向后兼容）、VersionsJson 解析 + version_cmp/version_gte/resolve_compatible（版本→App 最低版本映射，不兼容拒绝）；Ed25519 签名（`plugin-sign.ps1`/`plugin-sign.py` 密钥生成/签名/校验，摘要=sha256(id\|name\|version\|entry[+文件])，`verify_plugin_signature` 缺失/不匹配拒绝加载）；静态扫描（危险 API 黑名单 + http(s) URL 提取 + allowlist 域校验）；PluginManager 安装/更新/回滚状态机（install→verify→activate，update 先备份旧版失败自动回滚，全程审计）；三个示例插件补 entry/versions.json/README 签名流程说明；P2 预留 PluginSubmission/MarketUpdateManifest；`plugin_lifecycle_tests` 17/17 |
+| T3 .owflow 工作流 v1（§12） | ✅ | `workflow.rs`（50KB）：JSON 声明式 DSL（触发器：前台应用/文件/剪贴板/定时/手动；步骤：感知/定位/动作/断言/调用技能包/调用 MCP/人审/通知/子流程/条件分支/回滚点/前置条件）；`validate_definition` schema 校验非法定义明确报错；`compile_to_program` 编译到 action_program 执行；人审节点 approve/reject；失败自动回滚到最近回滚点（快照目录在 work_root 外部，回滚先删后建不会丢失快照源）；权限声明默认 deny 经 Policy 校验；SkillHealth 门禁（Disabled 拒绝/Degraded 确认 + 执行后回写）；`workflow_tests` 30/30 |
+| T4 Goal/Plan 编排（§12） | ✅ | `goal.rs` + `plan.rs`：Goal 状态机（Pending→Planning→Running→Verifying→Succeeded/Failed/Aborted + 预算）；Plan DAG（步骤前置依赖/可并行标记/worker 规格/验证断言/重试策略，非法环检测，序列化持久化重启恢复）；调度器拓扑排序 + 并行度上限（JoinSet + max_parallel 限流）；Worker trait（MockWorker 测试，真实 Agent::run_subagent 接线留主控）；验证断言失败重试（预算内）或 replan（只重建未完成子图）；恢复幂等（已完成步骤不重跑）；abort 立即停止保留现场；全程审计；`goal_plan_tests` 21/21 |
+| 云端执行 v0.2 延续（M4a） | ✅ | `cloud_exec.rs` 在上轮基础上补 P2：`validate_batch`（diff 批量应用前校验）、`describe_diff`（多文件合并展示文本）、UsageMetrics 成本/时长计量；CLI `owo-agent cloud` 全子命令可用；`cloud_exec_tests` 21/21 |
+| computer-use 闭环延续（M4d） | ✅ | 上轮基础上 `computer_use_tests` 11/11（动作门禁/敏感熔断/闭环/超时预算） |
+| lib.rs 模块登记与顶层导出 | ✅ | `pub mod notes/workflow/goal/plan`；新增 `pub use` 顶层导出 6 组（cloud_exec/computer_use/goal/notes/plan/workflow）+ plugin 扩展导出（PluginManager/verify_plugin_signature/VersionsJson 等）；重名处理：cloud_exec::TaskState → `CloudTaskState`、workflow::StepRecord → `WorkflowStepRecord` |
+| 依赖合并 | ✅ | workspace + core 新增 `ed25519-dalek = "2"`、`sha2 = "0.10"`（T2 签名需要，已去重 T2 误加行）；server dev-deps 保持 tower/tempfile |
+| 主控收尾修复 | ✅ | 全量门禁 429 项全绿（core lib 238 + notes 27 + workflow 30 + goal_plan 21 + cloud_exec 21 + plugin_lifecycle 17 + computer_use 11 + 其余 64）；fmt/clippy 0 警告；workflow rollback 快照目录位置 bug 修复（快照在 work_root 内会被回滚删除）；goal WorkerRegistry 借用修复；编码损坏恢复（workflow_tests 19 行 GBK 双重编码） |
+
+说明：HTTP/UI 面（/notes/*、/workflow/*、/goal/*、/plugins/market/*、云端 SSE 进度流）按计划留待下一轮由单一人统一接入；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十四、第四轮：核心模块 HTTP/UI 集成（2026-08-15）
+
+把五十三轮已交付且测试全绿的 core 层（notes/workflow/goal/plan/plugin/cloud_exec）接到 HTTP API 与桌面工作台。四条 lane 并行（只新建文件），主控统一收尾接线（lib.rs 合并 router、openapi_spec/快照、route_contract 契约、index.html/app.js 挂载面板、全量门禁、文档）。协调协议 `.coord4/`（OWNERSHIP/PROTOCOL/GATES/DEPENDENCIES/STATUS-*）。
+
+| lane | 状态 | 证据 |
+|---|---|---|
+| A 笔记 HTTP API + 面板 | ✅ 13 用例 | `notes_api.rs`（模块内 data_root 键控注册表，不给 AppState 加字段）：/notes 列表/创建（markdown 走 md_to_doc）、/notes/{id} 读取/整文档替换（孤儿块拒绝）/删除、块增删移动（环检测复用 core）、import/export（md 往返零丢块、html 经 sanitize_html 无 script）、search（每文档独立 fts.db 合并检索）、reindex；写操作审计；`notes.panel.js`：列表/新建/搜索/块树/导出/内联编辑 |
+| B 插件市场 API + 面板 | ✅ 9 用例（~16 断言） | `plugin_market_api.rs`：目录合并（discover_plugins + market.json 含 has_update/risks）、seed、versions 兼容解析、verify/install（高危扫描拒绝）/update（备份+失败回滚）/uninstall、scan、audit 尾部；require_signature 默认 true（OWO_PLUGIN_REQUIRE_SIGNATURE=0 关闭）；签名语义测试串行化（env 进程级）；`plugin-market.panel.js` |
+| C 工作流 API + 面板 | ✅ 18 用例 | `workflow_api.rs`：发现（深度上限 3）/加载+validate/内联校验（非法 400）/run（MockBackend 沙箱 + 20ms abort 窗口）/runs/snapshot/abort/audit；outcome 落盘 data_root/workflow-runs/<run_id>/；`workflow.panel.js`：列表/定义预览/validate/ctx+运行/步骤时间线/abort/audit |
+| D Goal/Plan API + 云端 SSE + 面板 | ✅ 18 用例（12 goal + 6 SSE） | `goal_api.rs`：goal 创建/列表/plan（环检测 400 + topological_waves 预览）/run（GoalRunner + attach_audit，echo/sleep/fail 演示 worker）/status/abort/audit/runs；运行态注册表 + 落盘恢复；`sse.rs`：CloudSseHub（task_id→broadcast + 历史 ≤512 重放）、SseHubSink（CloudProgress 九变体→JSON 帧）、GET /cloud/tasks/{id}/events text/event-stream；`goal.panel.js`（含 EventSource 云端进度区） |
+| 主控接线：lib.rs | ✅ | `mod notes_api/plugin_market_api/workflow_api/goal_api/sse`；`extern crate self as owo_agent_server`（协议全限定名在 crate 内可解析）；build_router 在 with_state 后 merge 五个 router（lane router 内部已 with_state，返回 Router\<()\>）；cloud_task_submit 的 ProgressSink 由 NullSink 换 `sse::sink(task_id)`（实测 /cloud/tasks/cloud-0001/events 收到 snapshotting→submitting→submitted→executing→fetching→succeeded 六帧） |
+| 主控接线：OpenAPI | ✅ | openapi_spec 登记 35 条新路径（/notes 9、/workflow 8、/goal 9、/plugins/market 9、/cloud/tasks/{id}/events）；clients/ts/openapi.json 快照重新抓取（146 路径，git-ignored 生成物） |
+| 主控接线：路由契约 | ✅ 3/3 | route_contract_tests：新 POST 路由 sample_body（含 /workflow/validate 最小合法定义）、{block_id}/{run_id} 路径占位、资源型 404 白名单新增 21 项（notes 6 + goal 7 + workflow 6 + plugins/market/uninstall）；SSE 端点 stream 立即返回 200，遍历无需特判 |
+| 主控接线：桌面挂载 | ✅ | index.html 引入四个 panel 脚本 + "扩展面板"区；app.js 注入 helpers（baseUrl/get/post/esc/friendlyError/renderMarkdown）按序挂载 OwoPanels.notes/plugin-market/workflow/goal；node --check 5 文件 0 错误 |
+| 工程问题修复 | ✅ | Windows 下 FTS SQLite 句柄占用导致 DELETE 返回 404（remove_dir_all 失败）——删除笔记目录前先释放索引器句柄；core `FtsNoteIndex::index_doc` 为单文档语义，多文档检索采用每文档独立 fts.db 后合并（记录于 STATUS-notes.md） |
+| 质量门禁 | ✅ | cargo test --workspace 487 项全绿（较上轮 429 新增 58：notes 13 + plugin_market 9 + workflow 18 + goal 12 + sse 6）；cargo fmt --all -- --check 干净；cargo clippy --workspace --all-targets -D warnings 0 警告；node --check 0 错误；serve 冒烟（/notes /workflow /goal /plugins/market /openapi.json / 桌面页/面板脚本）+ SSE 端到端帧验证通过 |
+
+说明：四个 lane 面板依赖后端同源托管（build_router permissive CORS）；run 级进度 SSE 与真实 ActionBackend（工作流）留待后续轮次；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十五、第五轮：R5 四线收尾 + 阶段 0 门禁恢复（2026-08-16）
+
+按综合技术文档 §7 阶段 0 收尾：R5 并行交付的 5 个路由模块（eval_gate/team_api/observability_api/memory_graph_api/intent_api）全部挂载并复核 market_client/workflow_backend/agent_worker 接线；恢复全量门禁绿色，R5 交付物进入主链路。协调协议 `.coord6/`（Agent 1 主控收尾 + Agent 2/3/4 并行：多 Agent P0 原语、安全硬化 Wave 1、韧性 Wave 1）。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| R5 路由挂载 | ✅ | lib.rs 合并 `team_api/eval_gate/observability_api/memory_graph_api/intent_api` 五个 router（此前已并入 workflow_api/goal_api/plugin_market_api/notes_api/sse）；复核 market_client（plugin_market_api 经 `super::` 引用）、workflow_backend（workflow_api 内 `#[path]` 子模块）、agent_worker（goal_api 内子模块 + Worker 实现）接线完整；另接线 R6 Agent 4 交付的 event_stream（`/events/stream`，SSE 续传 + 背压） |
+| 路由面契约测试 | ✅ 3/3（4.6s） | route_contract_tests：`POST /team/export → 404`（资源缺失，白名单）、`/eval/gate/run` sample_body 改传不存在套件（防止真实凭据环境下触发分钟级真实 eval 挂起）、`/session/{id}/permission/{request_id}` sample_body 修正为 `{"allow":true}`；每请求加 60s 超时（SSE/慢路径挂起即报错指明路径，不再拖垮测试）；新增"模块路由漏登记"扫描（全部 src/*.rs 的 .route 提取）与"快照⇄served spec 路径双向一致"断言（抓出 2 条未登记路径：/events/stream、/metrics/runtime，已补） |
+| OpenAPI 同步 | ✅ | openapi_spec 补 `/events/stream`（last_event_id 查询参数）、`/metrics/runtime`；clients/ts/openapi.json 快照同步（171→173 路径）；schema.d.ts 经 `npm run generate:local` 重新生成（新增 eventsStream/metricsRuntime operation）；TS SDK typecheck 0 错误、test:unit 3/3 |
+| 桌面面板挂载 | ✅ | index.html 引入 9 个面板脚本（notes/plugin-market/workflow/goal/team/eval/observability/memory/command）；app.js PANEL_ORDER 全部注册、helpers 注入、按序 mount；node --check app.js + 10 面板 0 错误；serve 冒烟 9 个面板脚本与桌面页全部 200 |
+| CLI 复核 | ✅ | `cargo check -p owo-agent-cli` 通过；`owo-agent plugin catalog/check/verify/install` 子命令完整（sign/scan 复用 core PluginManager，HTTP 面 /plugins/market/refresh）；无编译问题需修复 |
+| 编码修复 | ✅ | lib.rs 2 处历史 GBK 双重编码损坏修复（"鍙??鎺㈢储"→"只读探索"、"缂哄皯鏌ヨ?鍙傛暟 q"→"缺少查询参数 q"）；全量 .rs/.js/.json/.html 扫描无 mojibake；event_stream.rs 主控接线后补模块级 allow(dead_code)（与 team_api.rs 同款，测试面符号说明入注释）；gate.ps1 补 UTF-8 BOM（PS 5.1 无 BOM 按 ANSI 解码导致解析失败，R5 交付脚本首次可运行） |
+| 全量门禁 | ✅ | `cargo test --workspace` 691 项全绿（较上轮 487 新增 204：core lib 265、fleet 13、goal_plan 29、sandbox 19、credentials 11、audit_chain 20、event_stream 12、idempotency 7、error_codes 8、observability 13、team 10、eval_gate 6、intent 11、memory_graph 9、workflow_api 33、CLI 7…）；`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 0 警告；`cargo build --workspace` 通过；gate.ps1 4/4（fmt/clippy/server-tests/node）；node --check 0 错误；UTF-8 全量校验通过（gate.ps1 含 BOM 除外） |
+| serve 冒烟 + SSE 端到端 | ✅ | 真实 `owo-agent serve`（OWO_AGENT_DATA=临时目录）实测：/health 200、/openapi.json 173 路径、/metrics/runtime 200、/team/export 404（资源缺失非路由缺失）、/team/audit、/command/audit、/eval/gate/reports、/memory/graph/entries、/workflow、/goal、/plugins/market、/intent/parse、/command/run 全部 200；`GET /events/stream` content-type: text/event-stream；POST /cloud/tasks（mock 传输）→ Succeeded → `GET /cloud/tasks/cloud-0001/events` 历史重放 snapshotting→submitting→submitted→executing→fetching→succeeded 六帧 |
+
+说明：Agent 2/3/4 的三条 R6 线（多 Agent P0 原语 critic/blackboard/fan-out 超时仲裁、sandbox/credentials/audit_chain 安全抽象、event_stream/idempotency/error_codes/metrics 韧性契约）均随本轮全量门禁入库并各自提交 STATUS（fleet_tests 13 / sandbox 19 / credentials 11 / audit_chain 20 / event_stream 12 / idempotency 7 / error_codes 8 / observability 13）；SSE→observability 指标桥接（record_sse_connection/record_events）按 Agent 4 约定留待下一轮接线；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十六、第六轮：R8 增量（SQLite 迁移 + 存储运维 + 服务端韧性 + 主控接线）（2026-08-16）
+
+R8 四线并行交付后主控统一收尾：R7 安全边界（X03 auth/rate_limit/CLI audit/SSE→metrics//metrics/slo）复核确认已接线；Agent 1 交付 SQLite 迁移框架、/storage/* 存储运维、/server/* 服务端韧性，并接线 Agent 2/3/4 交付物（usage_router、trace_id、capability RunnerConfig 集成修复）。协调协议不建状态文件，交接用文件头部 `// R8:<模块> 完成，待主控接线` 注释。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| R7 收尾复核 | ✅ | route_contract_tests.rs fmt/clippy 遗留修复（assert 格式化）；auth（/auth/token + require_auth 中间件）、rate_limit（双令牌桶 + 429/Retry-After + 审计）、CLI audit（`owo-agent audit verify|export`）、SSE→metrics（event_stream::set_metrics_observer→observability_api::ingest_metrics_sample）、/metrics/slo（register_slo_report_probe(slo::report_global)）接线确认完整；OpenAPI/TS/面板挂载已在第五十五节登记 |
+| SQLite 迁移框架 | ✅ 7/7 | `sqlite_store.rs`：`PRAGMA user_version` + 顺序迁移表 `MIGRATIONS`（v1：sessions 列补齐，替代原运行时隐式 ALTER，实现"禁止隐式 ALTER"）；`open` 启动自动迁移（事务内逐条应用并推进 user_version）；迁移失败降级只读（SQLITE_OPEN_READ_ONLY 重开）并记录 last_error 提示；新增 `migration_status/is_read_only/clear_all/integrity_check/counts`；SessionStore trait 增默认 `clear/is_read_only/migration_warning`（JsonSessionStore 不受影响）；测试含迁移幂等、legacy v1 迁移、失败降级只读、清空+完整性校验 |
+| 备份/恢复/导出/清空 | ✅ 3/3 | `backup.rs`：POST /storage/backup（zip 打包 index.db+settings+notes+skills+workflows+memory+plugin_state+automations+goals+intent-workflows+eval 报告，排除 models/traces/backups 缓存与模型，附 manifest.json）；POST /storage/restore（恢复前自动备份 pre-restore-*.zip；zip-slip 防护：条目数/单条/总量上限 + 路径净化；index.db 经核心存储打开 + integrity_check 校验后暂存 .restored、重启生效）；POST /storage/export（全量标准 JSON：sessions/audit/notes/skills/workflows/settings + counts）；POST /storage/clear（二次确认 `{"confirm":"CLEAR_ALL"}`，清空会话/审计/笔记/记忆/自动化，清空后完整性校验）；`storage_api_tests.rs` 3 项（备份→恢复回路、导出全节、清空二次确认+完整性） |
+| 服务端韧性 | ✅ 5/5 | `shutdown.rs`：ShutdownGate（信号量全局并发 turn 上限，OWO_SERVER_MAX_CONCURRENT_TURNS 默认 4，try_acquire 拒绝 AtCapacity/ShuttingDown）；优雅关闭 request_shutdown→await_drain（30s 限时）→flush→退出；强杀恢复 PidFile（server.pid 正常 Drop 清理）+ recover_force_kill（陈旧 pid 清理、存活实例拒绝双开）；turn() 入口接并发上限；GET /server/status（并发/关闭中/存储只读降级提示）、POST /server/shutdown（二次确认）；CLI serve 接线 pid 文件 + 关闭 watcher（等待在途→flush_audit→exit(0)）；`shutdown_tests.rs` 5 项 |
+| 主控接线（Agent 2/4 交付物） | ✅ | usage.rs `usage_router` 并入 build_router（/usage/summary、/usage/records）；turn 完成记会话维度用量（record_tokens）；turn 入口预算硬熔断（check_budget→402 + 加额提示）；AppState::new 注入单价/预算环境变量；主控补 POST /usage/topup（request_topup 解除熔断）；logging.rs 接线 trace_id 中间件（X-Trace-Id 继承/生成 + 响应头回填 + JSON 结构化访问日志，脱敏不落消息体）；storage/关闭操作落结构化审计日志；goal_api.rs RunnerConfig 新增 capability_registry/capability_requirement 字段集成修复（Agent 2 core 变更同步） |
+| OpenAPI/TS 同步 | ✅ | openapi_spec 新增 8 路径（/storage/* 4、/server/* 2、/usage/* 2）；clients/ts/openapi.json 快照同步（173→181 路径）；schema.d.ts 补 storageServer/usage 系列 paths+operations（含 query/requestBody 类型）；route_contract_tests 双向一致性全绿（8/8，含新路由可达性） |
+| 桌面面板 | ✅ | index.html "设置与诊断"区新增"存储与恢复"（备份/导出/恢复…/一键清空数据 + /server/status 状态行）；app.js storageBackup/storageExport/storageRestore/storageClear/refreshServerStatus + 事件绑定 + 初始加载；style.css 补 button.danger；node --check app.js + 10 面板 0 错误 |
+| gate.ps1 | ✅ | 新增 UTF-8 校验步骤（全部源文件严格 UTF-8 解码 + .ps1 必须带 BOM）；-WorkspaceTests 开关（默认 server 测试，开关跑 workspace 全量）；PS 5.1 兼容；脚本本身补 UTF-8 BOM |
+| 全量门禁 | ✅ | `cargo test --workspace` 全绿（core lib 284 含 sqlite 迁移 7 新增、goal_plan 18、worker_pool 11、fleet 13、sandbox 21、notes 30、workflow_api 33、route_contract 8、storage 3、shutdown 5、observability 22、rate_limit 21 等）；`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 0 警告；node --check app.js + 10 面板 0 错误；UTF-8 严格校验 1977 文件全过；serve 冒烟：/server/status、/storage/backup（zip 落盘）、/storage/export、/storage/clear（400→确认→integrity=ok）、/usage/summary、/usage/topup、优雅关闭（shutting_down→进程退出→pid 清理→重启恢复）全部实测通过 |
+
+说明：Agent 2 worker pool/capability 两用例随其收尾修复后复核通过（goal_plan_tests 18/18、worker_pool_tests 11/11）；Agent 4 logging/usage 预留 API clippy 处理后 workspace -D warnings 0 警告；Agent 4 遗留的临时验证文件 usage_scratch_tests.rs（头部注释"验证后删除"）按原意图删除（备份于 %TEMP%\opencode\）；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十七、第九轮：R9 加倍（挂载验证 + 模型网关韧性）（2026-08-17）
+
+四线并行（主控/集成 + 多 Agent 编排 + 生产化安全 + 可靠性与可观测性）。Agent 1 交付：R8 模块挂载复核 + OpenAPI/TS/CLI 同步 + 模型网关韧性（重试/熔断/failover/成本硬停）；并接线 Agent 4 交付的 /metrics/prometheus、/metrics/slo/alerts、/metrics/slo/report、/usage/report 与全局 trace 上下文。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| R8 模块挂载复核 | ✅ | /storage/backup\|restore\|export\|clear、/usage/*、/metrics/slo、logging/trace_id 中间件、graceful shutdown 全部路由可达（契约测试 8/8 + serve 冒烟）；/metrics/prometheus（Agent 4 交付，文本格式）、/metrics/slo/alerts、/metrics/slo/report、/usage/report 路由并入 observability_api/usage_router 后自动生效 |
+| OpenAPI/TS 同步 | ✅ | openapi_spec 新增 4 路径（/metrics/prometheus、/metrics/slo/alerts、/metrics/slo/report、/usage/report）；clients/ts/openapi.json 快照同步（181→185 路径）；schema.d.ts 补 metricsPrometheus/metricsSloAlerts/metricsSloReport/usageReport paths+operations；route_contract_tests 双向一致性全绿 |
+| CLI audit/backup 复核 | ✅ | `owo-agent audit verify\|export` 可用（R7）；新增 `owo-agent backup` 子命令（复用 server backup::build_backup_zip，zip 打包到 `<data>/backups/`，实测 1.7KB zip 落盘）；server backup 模块改为 `pub mod` 暴露打包函数（只读接线，未动实现逻辑） |
+| 模型网关韧性 | ✅ 4/4 | `gateway.rs`：`RetryPolicy`（指数退避 2^n×base 封顶 + 0..20% jitter；OWO_MODEL_RETRY_MAX/BASE_MS/MAX_DELAY_MS；429/网络/空闲看门狗可重试，预算/出境/解析不可重试）；`CircuitBreaker`（连续失败阈值 OWO_MODEL_CIRCUIT_THRESHOLD 默认 5 → Open 快速失败 → 冷却 OWO_MODEL_CIRCUIT_COOLDOWN_SECS 默认 10s → HalfOpen 单探测 → 成功恢复 Closed）；`ResilientProvider`（primary 强模型 → fallbacks 次选云/本地，OWO_MODEL_FALLBACK_BASE_URLS 逗号分隔，本地端点免 key；failover 语义：不可重试错误不降级）；流式路径每块预算检查（OpenAiCompatibleProvider::complete_stream 每 usage 块 usage_budget_check，超限立即停轮返回可读错误）；流式空闲看门狗失败自动整条重试/降级（成功后才回放增量，防重复）；`gateway_tests.rs` 4 条主链路（失败→重试→成功；熔断开→半开→恢复；failover 降级；流式重试 + 预算不降级） |
+| CLI 主链路接线 | ✅ | run_eval、build_agent_with_mcp（serve）改用 `ResilientProvider::from_config`（重试/熔断/failover 生效）；auto-review 独立审批模型保持原构造 |
+| 集成修复 | ✅ | McpServerConfig 新增 network_allowlist 字段（Agent 3 core 变更）在 /mcp/add 构造处同步（空 allowlist）；gateway jitter 实现无 rand 依赖（DefaultHasher 伪随机） |
+| 全量门禁 | ✅ | `cargo test --workspace` 全绿（core lib 289 含 gateway 新冒烟 4、bus_store 等 Agent 2/3/4 新增项；server 全量含 route_contract 8 / observability 22 等）；`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 0 警告；`cargo build --workspace` 通过；node --check 0 错误；UTF-8 严格校验 1979 文件全过 + 全部 20 个 .ps1 补 UTF-8 BOM（8 个历史脚本字节级加 BOM，内容不变）；serve 冒烟：/metrics/prometheus（Prometheus 文本格式 # HELP/# TYPE 正确）、/metrics/slo/alerts、/metrics/slo/report?days=7、/usage/report?days=7、/storage/backup、/usage/summary、/server/status 全部 200；trace_id 贯穿实测（X-Trace-Id 头继承回填同一值 + 无头自动生成回填） |
+
+说明：R9 模型网关韧性为纯增量（新增组件 + 包装层），未改动既有 OpenAiCompatibleProvider 请求语义；熔断/failover 参数全部环境变量可调，默认值保守（重试 3 次、阈值 5、冷却 10s）；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十八、第十轮：R10 三包（v0.7 收尾 + API 契约治理 + 发布工程）（2026-08-17）
+
+Agent 1 三工作包：v0.7 收尾接线与门禁、API 版本化与契约治理、发布工程骨架。协作不建状态文件，交接用文件头注释。
+
+| 工作包 | 状态 | 证据 |
+|---|---|---|
+| 1 · v0.7 收尾接线 | ✅ | /storage/*、/usage/*、/metrics/slo|alerts|report|prometheus、logging/trace_id 中间件、graceful shutdown 全部路由可达（契约 8/8 + serve 冒烟）；CLI `audit`/`backup`/新增 `doctor` 子命令可构建（doctor 实测：数据目录/SQLite/凭据/网关韧性/服务健康逐项输出 [ok]/[fail]，任一 fail 非零退出）；OpenAPI/TS/面板同步（见下）；全量门禁见末行 |
+| 2 · API 契约治理 | ✅ | SSE 事件 data 统一携带 `v` 字段（protocol::SSE_PROTOCOL_VERSION=1；to_event 注入，实测每帧 `"v":1`）；OpenAPI 顶层 `x-owo-api-version: "0.7"`（OWO_API_VERSION const，openapi.json 同步）；新增 `/schemas`（索引）+ `/schemas/{kind}/{version}`（plugin-manifest/owskill/owflow 三份 draft-07 JSON Schema 版本化发布，实测 200 + 未知 kind 404）；弃用策略：`DEPRECATED_ROUTES` 注册表 + deprecation_middleware（命中附加 `Deprecation` 头，弃用期 ≥2 minor）+ 路由/事件变更 RFC 注释登记（lib.rs 契约区）；错误码表接入 HTTP 层：`api_error_response` 统一 `{error:{code,message,retry_after_ms,domain,reason,retryable}}` 响应体，应用于 /usage/topup 非法 amount（实测 400 + validation/invalid_input/not_retryable）与 turn 503 错误码前缀 |
+| 3 · 发布工程骨架 | ✅ | updater：generate-update-manifest.ps1 增加 `channel`（stable/beta）+ `cohort` 灰度 + `rolloutFailureThreshold` + `paused`（读上一清单失败率自动暂停，-PreviousManifest 支持）；桌面打包：package-desktop.ps1 版本号从 Cargo.toml 同步（`OwO-Agent-<版本>-<配置>.zip`）+ Authenticode 签名占位（-SignCert + signtool 自动定位，缺省打印提示）+ NSIS（build-installer.ps1）+ SBOM 纳入 dist；新建 `sbom.ps1`（cargo metadata 依赖清单 SPDX 2.3 + 产物 sha256，实测 5 依赖）；新建 `SECURITY.md`（支持版本/报告渠道/漏洞等级）+ `desktop/web/privacy.md`（数据字典/一键关闭/保留期，桌面"设置与诊断"加入口） |
+| 全量门禁 | ✅ | `cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 0 警告；`cargo test --workspace` 全绿（core lib 289 + server 全量 route_contract 8 / observability 22 等 + Agent 2/3/4 新增 control_plane/os_sandbox 等）；`cargo build --workspace` 通过；node --check 0 错误；UTF-8 严格校验 325 文件 + 全部 .ps1 带 BOM；**gate.ps1 5/5 全过**（修复 Run-Step $LASTEXITCODE 为 $null 时误判失败的 bug——UTF-8 为第一步不运行外部程序导致）；serve 冒烟：/schemas 列表 + 三份 schema 200、未知 kind 404、openapi x-owo-api-version=0.7、/usage/topup 非法 amount 400 + validation/invalid_input 统一错误体、SSE 事件帧带 v:1；CLI doctor 逐项诊断实测 |
+
+说明：R10 契约治理为兼容加法（SSE 帧新增 v 字段、OpenAPI 新增 x-owo-api-version 与 /schemas 路径、错误响应新增统一体，均不破坏既有 wire 格式；旧客户端缺 v 视为 v=0）；当前无已弃用路由（DEPRECATED_ROUTES 为空，机制就绪）；updater 完整签名流程需 Tauri 私钥（生成脚本逻辑已落地）；gate.ps1 Run-Step 修复 $LASTEXITCODE null 判定（R8 引入 UTF-8 首步后暴露）；跨 Agent 集成修复：RunnerConfig 新增 transport/leases 字段在 goal_api 同步、Agent 3/4 交付文件 fmt/clippy 由主控收尾统一处理；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。

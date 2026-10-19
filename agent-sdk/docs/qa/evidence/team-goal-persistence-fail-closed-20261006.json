@@ -1,0 +1,21 @@
+{
+  "evidence_id": "team-goal-persistence-fail-closed-20261006",
+  "scope": "static-source-review-and-rust-format-check",
+  "claim": "GoalRunner does not report successful completion when the latest state checkpoint write failed; a later successful checkpoint clears the pending persistence error.",
+  "verification": [
+    "Regression test source covers a regular file used as persist_dir and asserts run() returns a checkpoint-write error after in-memory goal success.",
+    "Rust formatting check and scoped diff check are recorded separately; Rust test and type checking were not run."
+  ],
+  "limits": [
+    "No Cargo type check or Rust tests ran because the user asked to continue static checks while memory remained below the repository gate.",
+    "No live Team execution, crash-recovery test, or paired Team-versus-Single benchmark was performed."
+  ],
+  "files_sha256": {
+    "crates/owo-agent-core/src/goal/mod.rs": "b03be7e71a60dc7fbd738fc26a5341bb342471440152e5d6517385c3f323d31d",
+    "crates/owo-agent-core/src/goal/acceptance.rs": "2a9167792144ea2eb7dc2ee3fd4de2821ffdaf1307b55305033a134c370b0f1e",
+    "crates/owo-agent-core/src/goal/tests.rs": "337dfe0a0803142784f702982948c7d7bdcbb8be35c88437a7d4aea885439053",
+    "docs/工程代码结构说明.md": "555abc98c3bda123d89f82b93136fc1c3ed600a3d67fd04a85686f9f1d2c87a4",
+    "docs/Team架构综合审查与改造方案-2026-10-06.md": "af2b588fa57d19a15cc4893e4ca5baae8a798d4b41ce4596300a8aa9ed4ca9dc",
+    "crates/owo-agent-core/src/workswarm/coord_finalize.rs": "caac1dadc7db72893a9e908caf98c879da60dfa498b5569284b8c2d70ffcf06c"
+  }
+}

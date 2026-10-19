@@ -1,0 +1,44 @@
+﻿{
+    "label":  "hidden-window",
+    "captured_at":  "2026-09-17T16:37:37.9755323Z",
+    "server_total":  26,
+    "returned":  26,
+    "web_total":  0,
+    "web_health":  0,
+    "web_auth":  0,
+    "web_events":  0,
+    "web_business":  0,
+    "web_business_routes":  [
+                                " "
+                            ],
+    "web_route_repeats":  [
+
+                          ],
+    "shell_total":  2,
+    "shell_auth":  1,
+    "shell_health":  1,
+    "other_total":  0,
+    "probe_total":  24,
+    "sources":  [
+                    "probe",
+                    "shell"
+                ],
+    "records":  [
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/health",
+                        "source":  "shell",
+                        "started_at":  "2026-09-17T16:31:52.193Z",
+                        "status":  200
+                    },
+                    {
+                        "duration_ms":  0,
+                        "method":  "GET",
+                        "route_template":  "/auth/token",
+                        "source":  "shell",
+                        "started_at":  "2026-09-17T16:31:52.197Z",
+                        "status":  200
+                    }
+                ]
+}
