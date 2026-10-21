@@ -45,7 +45,7 @@ PipeExchangeResult exchange_agent_pipe(const std::wstring_view pipe_name,
         return {false, {}, "third-party Agent is not connected"};
     const HANDLE pipe = CreateFileW(std::wstring(pipe_name).c_str(),
         GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-        FILE_FLAG_OVERLAPPED, nullptr);
+        FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
     if (pipe == INVALID_HANDLE_VALUE)
         return {false, {}, "third-party Agent pipe open failed"};
     const auto transfer = [&](void* buffer, const DWORD size, const bool writing) {
