@@ -16,6 +16,40 @@ void write(const std::filesystem::path& path, const std::string_view text) {
 int main(const int argc, char** argv) {
     if (argc != 2) return 1;
     const std::filesystem::path root(argv[1]);
+    {
+    auto single_first = owo::config::AppConfig{};
+    if (!single_first.candidate_single_character_first_enabled) return 56;
+    single_first.candidate_single_character_first_enabled = false;
+    const auto single_first_roundtrip = owo::config::parse_config(
+        owo::config::serialize_config(single_first));
+    if (!single_first_roundtrip.ok || single_first_roundtrip.value != single_first) return 57;
+    auto version_fifteen = owo::config::serialize_config(single_first);
+    version_fifteen.replace(0, std::string("schema_version=21").size(), "schema_version=15");
+    for (const auto key : {"expanded_previous_page_shortcut_enabled=", "expanded_previous_page_shortcut=",
+                            "expanded_next_page_shortcut_enabled=", "expanded_next_page_shortcut="}) {
+        const auto begin = version_fifteen.find(key);
+        version_fifteen.erase(begin, version_fifteen.find('\n', begin) - begin + 1);
+    }
+    const auto single_first_begin = version_fifteen.find("candidate_single_character_first_enabled=");
+    version_fifteen.erase(single_first_begin,
+        version_fifteen.find('\n', single_first_begin) - single_first_begin + 1);
+    for (const auto key : {"smart_candidates_enabled=","expressive_candidates_enabled=","concept_candidates_enabled=","corpus_learning_enabled=","corpus_learning_paused=","corpus_learning_allowed_apps=","corpus_learning_excluded_apps=","corpus_retention_days=","corpus_prediction_enabled=","style_scene_mask=","style_preferences=","tone_reply_enabled=","tone_continuation_enabled=","tone_cloud_model_enabled="}) {
+        const auto begin = version_fifteen.find(key);
+        version_fifteen.erase(begin, version_fifteen.find('\n', begin) - begin + 1);
+    }
+    const auto migrated_single_first = owo::config::parse_config(version_fifteen);
+    if (!migrated_single_first.ok ||
+        !migrated_single_first.value.candidate_single_character_first_enabled) return 58;
+    auto invalid_single_first = owo::config::serialize_config(single_first);
+    const auto flag_begin = invalid_single_first.find("candidate_single_character_first_enabled=");
+    invalid_single_first.replace(flag_begin,
+        invalid_single_first.find('\n', flag_begin) - flag_begin,
+        "candidate_single_character_first_enabled=invalid");
+    if (owo::config::parse_config(invalid_single_first).ok) return 59;
+    invalid_single_first.erase(flag_begin,
+        invalid_single_first.find('\n', flag_begin) - flag_begin + 1);
+    if (owo::config::parse_config(invalid_single_first).ok) return 60;
+    }
     // Per-key preferences survive persistence, while older schemas preserve all conversions.
     auto punctuation = owo::config::AppConfig{};
     for (const char source : owo::config::kChinesePunctuationSources)
@@ -65,7 +99,8 @@ int main(const int argc, char** argv) {
         text.erase(begin, text.find('\n', begin) - begin + 1);
         return true;
     };
-    version_fourteen.replace(0, std::string("schema_version=20").size(), "schema_version=14");
+    version_fourteen.replace(0, std::string("schema_version=21").size(), "schema_version=14");
+    for (const auto key : {"candidate_single_character_first_enabled=","expanded_previous_page_shortcut_enabled=","expanded_previous_page_shortcut=","expanded_next_page_shortcut_enabled=","expanded_next_page_shortcut="}) erase_field(version_fourteen, key);
     const auto mask_begin = version_fourteen.find("chinese_punctuation_mask=");
     version_fourteen.erase(mask_begin, version_fourteen.find('\n', mask_begin) - mask_begin + 1);
     // v14 predates the assistive candidate switches and corpus learning.
@@ -160,6 +195,7 @@ int main(const int argc, char** argv) {
     changed.candidate_page_size = 7;
     changed.candidate_wrap_length = 18;
     changed.candidate_partition_enabled = false;
+    changed.candidate_single_character_first_enabled = false;
     changed.candidate_immediate_commit_enabled = false;
     changed.smart_candidates_enabled = false;
     changed.expressive_candidates_enabled = false;
@@ -261,7 +297,8 @@ int main(const int argc, char** argv) {
         legacy.value.language_shortcuts != std::vector<std::string>{"Ctrl+Space"} ||
         legacy.value.raw_input_shortcuts != std::vector<std::string>{"Enter"} ||
         legacy.value.cursor_left_shortcuts != std::vector<std::string>{"Left"} ||
-        legacy.value.next_page_shortcuts != std::vector<std::string>{"]", "Down"} ||
+        legacy.value.next_page_shortcuts != std::vector<std::string>{"]"} ||
+        legacy.value.expanded_next_page_shortcuts != std::vector<std::string>{"Down"} ||
         legacy.value.candidate_wrap_length != 12 ||
         !legacy.value.candidate_partition_enabled ||
         !legacy.value.candidate_immediate_commit_enabled ||
@@ -308,20 +345,21 @@ int main(const int argc, char** argv) {
     version_ten_text.replace(version_ten_text.find("cursor_right_shortcut=Right"),
                              std::string("cursor_right_shortcut=Right").size(),
                              "cursor_right_shortcut=Shift+Right");
-    version_ten_text.replace(version_ten_text.find("previous_page_shortcut=[;Up"),
-                             std::string("previous_page_shortcut=[;Up").size(),
-                             "previous_page_shortcut=[;Shift+Up");
-    version_ten_text.replace(version_ten_text.find("next_page_shortcut=];Down"),
-                             std::string("next_page_shortcut=];Down").size(),
-                             "next_page_shortcut=];Shift+Down");
+    version_ten_text.replace(version_ten_text.find("previous_page_shortcut=[\n"),
+                             std::string("previous_page_shortcut=[\n").size(),
+                             "previous_page_shortcut=[;Shift+Up\n");
+    version_ten_text.replace(version_ten_text.find("next_page_shortcut=]\n"),
+                             std::string("next_page_shortcut=]\n").size(),
+                             "next_page_shortcut=];Shift+Down\n");
     const auto version_ten = owo::config::parse_config(version_ten_text);
     if (!version_ten.ok ||
         version_ten.value.cursor_left_shortcuts != std::vector<std::string>{"Left"} ||
         version_ten.value.cursor_right_shortcuts != std::vector<std::string>{"Right"} ||
         version_ten.value.previous_page_shortcuts !=
-            std::vector<std::string>{"[", "Up"} ||
+            std::vector<std::string>{"["} ||
         version_ten.value.next_page_shortcuts !=
-            std::vector<std::string>{"]", "Down"}) return 34;
+            std::vector<std::string>{"]"} ||
+        version_ten.value.expanded_previous_page_shortcuts != std::vector<std::string>{"Up"}) return 34;
 
     const auto version_two = owo::config::parse_config(
         "schema_version=2\ncandidate_page_size=5\nuser_learning_enabled=true\n"

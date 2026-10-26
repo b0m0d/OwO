@@ -8,7 +8,9 @@ public sealed partial class MainPage
     private readonly DispatcherTimer _autoSaveTimer = new() { Interval = TimeSpan.FromMilliseconds(450) };
     private readonly SemaphoreSlim _settingsSaveGate = new(1, 1);
     private readonly Dictionary<PluginSettingsModel, Dictionary<string, object?>> _pendingPluginSaves = [];
-    private bool _settingsLoaded, _settingsBusy, _pendingSettingsSave, _loadingUiPreferences, _buildingPluginSettings;
+    private bool _settingsLoaded, _settingsBusy, _pendingSettingsSave, _buildingPluginSettings;
+    // XAML 默认开启也会触发 Toggled；读取偏好前不能将默认值写回，覆盖用户手动关闭的选择。
+    private bool _loadingUiPreferences = true;
     private string UiPreferencesPath => Path.Combine(Path.GetDirectoryName(_client.ConfigPath)!, "settings-ui.json");
 
     private void InitializeAutoSave()
@@ -24,21 +26,7 @@ public sealed partial class MainPage
             _autoSaveTimer.Stop();
             await FlushAutoSaveAsync();
         };
-        Control[] settings = [InputScheme, CandidatePageSize, CandidateWrapLength,
-            CandidatePartition, CandidateImmediateCommit, FocusLossCommit, ChinesePunctuation,
-            AltCodePreview, AltCodePreviewPageSize, AltCodePreviewWheel, UserLearning,
-            UserLearningSensitivity, UserCompletion, UserCompletionRange, ModelRanking, ModelTimeout,
-            CorrectionShortcutEnabled, LanguageShortcutEnabled, RawInputShortcutEnabled,
-            CursorLeftShortcutEnabled, CursorRightShortcutEnabled, PreviousPageShortcutEnabled,
-            NextPageShortcutEnabled, PunctuationShortcutEnabled, TextNavigationShortcutEnabled,
-            TextNavigationSelectEnabled];
-        foreach (var control in settings) ObserveAutoSave(control);
-        foreach (var control in _punctuationSwitches.Values) ObserveAutoSave(control);
-        foreach (var toggle in _styleSceneToggles) ObserveAutoSave(toggle);
-        ObserveAutoSave(StylePreferencesBox);
-        ObserveAutoSave(ToneReply);
-        ObserveAutoSave(ToneContinuation);
-        ObserveAutoSave(ToneCloudModel);
+        foreach (var control in _settingsEditors.ObservedControls) ObserveAutoSave(control);
         Unloaded += (_, _) => _autoSaveTimer.Stop();
     }
 
@@ -58,7 +46,11 @@ public sealed partial class MainPage
             var current = Value();
             if (Equals(previous, current)) return; // Template initialization is not a user edit.
             previous = current;
-            if (plugin) QueuePluginAutoSave(); else QueueSettingsAutoSave();
+            if (plugin) QueuePluginAutoSave();
+            else {
+                UpdateDependentSettings();
+                QueueSettingsAutoSave();
+            }
         }
         switch (control) {
             case ToggleSwitch toggle: toggle.Toggled += (_, _) => Changed(); break;

@@ -8,7 +8,7 @@
 
 namespace owo::config {
 
-inline constexpr std::uint32_t kConfigSchemaVersion = 20;
+inline constexpr std::uint32_t kConfigSchemaVersion = 21;
 
 // Style scenes (learning layer 3). The order and bits mirror
 // engine::StyleScene in owo/engine/style_profile.h; the settings and the
@@ -37,6 +37,7 @@ struct AppConfig {
     std::uint32_t candidate_page_size{7};
     std::uint32_t candidate_wrap_length{12};
     bool candidate_partition_enabled{true};
+    bool candidate_single_character_first_enabled{true};
     bool candidate_immediate_commit_enabled{true};
     // Assistive candidate families. The modeless unified input itself (mixed
     // preedit, tone digits, literal fallback) is not gated by these switches.
@@ -68,9 +69,13 @@ struct AppConfig {
     bool cursor_right_shortcut_enabled{true};
     std::vector<std::string> cursor_right_shortcuts{"Right"};
     bool previous_page_shortcut_enabled{true};
-    std::vector<std::string> previous_page_shortcuts{"[", "Up"};
+    std::vector<std::string> previous_page_shortcuts{"["};
     bool next_page_shortcut_enabled{true};
-    std::vector<std::string> next_page_shortcuts{"]", "Down"};
+    std::vector<std::string> next_page_shortcuts{"]"};
+    bool expanded_previous_page_shortcut_enabled{true};
+    std::vector<std::string> expanded_previous_page_shortcuts{"Up"};
+    bool expanded_next_page_shortcut_enabled{true};
+    std::vector<std::string> expanded_next_page_shortcuts{"Down"};
     bool text_navigation_shortcut_enabled{true};
     std::vector<std::string> text_navigation_shortcuts{
         "Shift+Left", "Shift+Right", "Shift+Up", "Shift+Down"};
@@ -130,6 +135,8 @@ struct ConfigIoResult {
 [[nodiscard]] ConfigValidationResult validate_config(const AppConfig&);
 /// Whether a committed fragment from `executable` may enter the user corpus.
 [[nodiscard]] bool corpus_learning_allows(const AppConfig&, std::string_view executable) noexcept;
+// 仅用于旧配置迁移：移动原翻页组里的 Up/Down，遇到用户自定义冲突时禁用新动作。
+void migrate_expanded_page_shortcuts(AppConfig&);
 [[nodiscard]] ConfigParseResult parse_config(std::string_view utf8);
 [[nodiscard]] std::string serialize_config(const AppConfig&);
 

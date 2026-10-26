@@ -271,6 +271,37 @@ bool corpus_learning_allows(const AppConfig& value, const std::string_view execu
     return allowed.empty() || std::any_of(allowed.begin(), allowed.end(), same);
 }
 
+void migrate_expanded_page_shortcuts(AppConfig& value) {
+    const auto move_key = [](bool& enabled, std::vector<std::string>& keys,
+                              bool& expanded_enabled, const std::string& key) {
+        if (std::find(keys.begin(), keys.end(), key) != keys.end()) {
+            expanded_enabled = enabled;
+            std::erase(keys, key);
+            if (keys.empty()) enabled = false;
+        }
+    };
+    move_key(value.previous_page_shortcut_enabled, value.previous_page_shortcuts,
+             value.expanded_previous_page_shortcut_enabled, "Up");
+    move_key(value.next_page_shortcut_enabled, value.next_page_shortcuts,
+             value.expanded_next_page_shortcut_enabled, "Down");
+    const auto used = [&value](const std::string& key) {
+        const auto contains = [&key](bool enabled, const auto& keys) {
+            return enabled && std::find(keys.begin(), keys.end(), key) != keys.end();
+        };
+        return contains(value.correction_shortcut_enabled, value.correction_shortcuts) ||
+            contains(value.language_shortcut_enabled, value.language_shortcuts) ||
+            contains(value.raw_input_shortcut_enabled, value.raw_input_shortcuts) ||
+            contains(value.cursor_left_shortcut_enabled, value.cursor_left_shortcuts) ||
+            contains(value.cursor_right_shortcut_enabled, value.cursor_right_shortcuts) ||
+            contains(value.previous_page_shortcut_enabled, value.previous_page_shortcuts) ||
+            contains(value.next_page_shortcut_enabled, value.next_page_shortcuts) ||
+            contains(value.text_navigation_shortcut_enabled, value.text_navigation_shortcuts) ||
+            contains(value.punctuation_shortcut_enabled, value.punctuation_shortcuts);
+    };
+    if (used("Up")) value.expanded_previous_page_shortcut_enabled = false;
+    if (used("Down")) value.expanded_next_page_shortcut_enabled = false;
+}
+
 ConfigValidationResult validate_config(const AppConfig& value) {
     const auto valid_apps = [](const std::vector<std::string>& apps) {
         if (apps.size() > kMaximumCorpusApplications) return false;
@@ -325,6 +356,8 @@ ConfigValidationResult validate_config(const AppConfig& value) {
         !valid_list(value.cursor_right_shortcut_enabled, value.cursor_right_shortcuts) ||
         !valid_list(value.previous_page_shortcut_enabled, value.previous_page_shortcuts) ||
         !valid_list(value.next_page_shortcut_enabled, value.next_page_shortcuts) ||
+        !valid_list(value.expanded_previous_page_shortcut_enabled, value.expanded_previous_page_shortcuts) ||
+        !valid_list(value.expanded_next_page_shortcut_enabled, value.expanded_next_page_shortcuts) ||
         !valid_list(value.text_navigation_shortcut_enabled,
                     value.text_navigation_shortcuts) ||
         !valid_list(value.punctuation_shortcut_enabled, value.punctuation_shortcuts))
@@ -346,6 +379,10 @@ ConfigValidationResult validate_config(const AppConfig& value) {
                            value.previous_page_shortcuts) ||
         !unique_if_enabled(value.next_page_shortcut_enabled,
                            value.next_page_shortcuts) ||
+        !unique_if_enabled(value.expanded_previous_page_shortcut_enabled,
+                           value.expanded_previous_page_shortcuts) ||
+        !unique_if_enabled(value.expanded_next_page_shortcut_enabled,
+                           value.expanded_next_page_shortcuts) ||
         !unique_if_enabled(value.text_navigation_shortcut_enabled,
                            value.text_navigation_shortcuts))
         return {false, "enabled shortcuts must be unique"};
@@ -382,6 +419,16 @@ ConfigParseResult parse_config(const std::string_view utf8) {
         !parse_u32(fields["schema_version"], version) ||
         (version < 1 || version > kConfigSchemaVersion))
         return {false, {}, "unsupported configuration schema_version"};
+    // v16/v17 were independently assigned by master and the standalone release.
+    // Detect the release lineage by its fields; each layout remains strict.
+    const bool release_layout = version >= 16 && version <= 17 &&
+        (fields.contains("candidate_single_character_first_enabled") ||
+         fields.contains("expanded_previous_page_shortcut_enabled") ||
+         fields.contains("expanded_previous_page_shortcut") ||
+         fields.contains("expanded_next_page_shortcut_enabled") ||
+         fields.contains("expanded_next_page_shortcut"));
+    const auto master_version = release_layout ? 15u : version;
+    const auto candidate_version = version >= 21 ? 17u : release_layout ? version : 15u;
     constexpr std::string_view base_required[]{"schema_version", "candidate_page_size",
         "user_learning_enabled", "model_ranking_enabled", "model_timeout_ms"};
     constexpr std::string_view shortcut_required[]{"correction_shortcut_enabled",
@@ -420,6 +467,9 @@ ConfigParseResult parse_config(const std::string_view utf8) {
         "style_preferences"};
     constexpr std::string_view tone_required[]{"tone_reply_enabled",
         "tone_continuation_enabled", "tone_cloud_model_enabled"};
+    constexpr std::string_view expanded_navigation_required[]{
+        "expanded_previous_page_shortcut_enabled", "expanded_previous_page_shortcut",
+        "expanded_next_page_shortcut_enabled", "expanded_next_page_shortcut"};
     const auto expected_size = std::size(base_required) +
                                (version >= 2 ? std::size(shortcut_required) : 0) +
                                (version >= 3 ? std::size(wrap_required) : 0) +
@@ -433,11 +483,13 @@ ConfigParseResult parse_config(const std::string_view utf8) {
                                (version >= 13 ? std::size(input_scheme_required) : 0) +
                                (version >= 14 ? std::size(user_completion_required) : 0) +
                                (version >= 15 ? 1 : 0) +
-                               (version >= 16 ? std::size(assistive_required) : 0) +
-                               (version >= 17 ? std::size(corpus_required) : 0) +
-                               (version >= 18 ? std::size(corpus_prediction_required) : 0) +
-                               (version >= 19 ? std::size(style_required) : 0) +
-                               (version >= 20 ? std::size(tone_required) : 0);
+                               (master_version >= 16 ? std::size(assistive_required) : 0) +
+                               (master_version >= 17 ? std::size(corpus_required) : 0) +
+                               (master_version >= 18 ? std::size(corpus_prediction_required) : 0) +
+                               (master_version >= 19 ? std::size(style_required) : 0) +
+                               (master_version >= 20 ? std::size(tone_required) : 0) +
+                               (candidate_version >= 16 ? 1 : 0) +
+                               (candidate_version >= 17 ? std::size(expanded_navigation_required) : 0);
     if (fields.size() != expected_size)
         return {false, {}, "configuration fields are missing or unknown"};
     for (const auto key : base_required)
@@ -476,22 +528,36 @@ ConfigParseResult parse_config(const std::string_view utf8) {
     if (version >= 14) for (const auto key : user_completion_required)
         if (!fields.contains(std::string(key)))
             return {false, {}, "configuration fields are missing or unknown"};
-    if (version >= 16) for (const auto key : assistive_required)
+    if (master_version >= 16) for (const auto key : assistive_required)
         if (!fields.contains(std::string(key)))
             return {false, {}, "configuration fields are missing or unknown"};
-    if (version >= 17) for (const auto key : corpus_required)
+    if (master_version >= 17) for (const auto key : corpus_required)
         if (!fields.contains(std::string(key)))
             return {false, {}, "configuration fields are missing or unknown"};
-    if (version >= 18) for (const auto key : corpus_prediction_required)
+    if (master_version >= 18) for (const auto key : corpus_prediction_required)
         if (!fields.contains(std::string(key)))
             return {false, {}, "configuration fields are missing or unknown"};
-    if (version >= 19) for (const auto key : style_required)
+    if (master_version >= 19) for (const auto key : style_required)
         if (!fields.contains(std::string(key)))
             return {false, {}, "configuration fields are missing or unknown"};
-    if (version >= 20) for (const auto key : tone_required)
+    if (master_version >= 20) for (const auto key : tone_required)
+        if (!fields.contains(std::string(key)))
+            return {false, {}, "configuration fields are missing or unknown"};
+    if (candidate_version >= 17) for (const auto key : expanded_navigation_required)
         if (!fields.contains(std::string(key)))
             return {false, {}, "configuration fields are missing or unknown"};
     AppConfig value;
+    if (candidate_version >= 17 &&
+        (!parse_bool(fields["expanded_previous_page_shortcut_enabled"], value.expanded_previous_page_shortcut_enabled) ||
+         !parse_shortcut_list(fields["expanded_previous_page_shortcut"], value.expanded_previous_page_shortcuts) ||
+         !parse_bool(fields["expanded_next_page_shortcut_enabled"], value.expanded_next_page_shortcut_enabled) ||
+         !parse_shortcut_list(fields["expanded_next_page_shortcut"], value.expanded_next_page_shortcuts)))
+        return {false, {}, "expanded page shortcut fields are invalid"};
+    if (candidate_version >= 16 &&
+        (!fields.contains("candidate_single_character_first_enabled") ||
+         !parse_bool(fields["candidate_single_character_first_enabled"],
+                     value.candidate_single_character_first_enabled)))
+        return {false, {}, "candidate_single_character_first_enabled is missing or invalid"};
     if (version >= 15 &&
         (!fields.contains("chinese_punctuation_mask") ||
          !parse_u32(fields["chinese_punctuation_mask"], value.chinese_punctuation_mask)))
@@ -573,7 +639,7 @@ ConfigParseResult parse_config(const std::string_view utf8) {
                         value.text_navigation_select_enabled))
             return {false, {}, "configuration field type is invalid"};
     }
-    if (version >= 16) {
+    if (master_version >= 16) {
         if (!parse_bool(fields["smart_candidates_enabled"],
                         value.smart_candidates_enabled) ||
             !parse_bool(fields["expressive_candidates_enabled"],
@@ -582,7 +648,7 @@ ConfigParseResult parse_config(const std::string_view utf8) {
                         value.concept_candidates_enabled))
             return {false, {}, "configuration field type is invalid"};
     }
-    if (version >= 17) {
+    if (master_version >= 17) {
         if (!parse_bool(fields["corpus_learning_enabled"], value.corpus_learning_enabled) ||
             !parse_bool(fields["corpus_learning_paused"], value.corpus_learning_paused) ||
             !parse_shortcut_list(fields["corpus_learning_allowed_apps"],
@@ -592,12 +658,12 @@ ConfigParseResult parse_config(const std::string_view utf8) {
             !parse_u32(fields["corpus_retention_days"], value.corpus_retention_days))
             return {false, {}, "configuration field type is invalid"};
     }
-    if (version >= 18) {
+    if (master_version >= 18) {
         if (!parse_bool(fields["corpus_prediction_enabled"],
                         value.corpus_prediction_enabled))
             return {false, {}, "configuration field type is invalid"};
     }
-    if (version >= 19) {
+    if (master_version >= 19) {
         if (!parse_u32(fields["style_scene_mask"], value.style_scene_mask) ||
             (value.style_scene_mask & ~kStyleSceneAll) != 0)
             return {false, {}, "style_scene_mask contains unknown scenes"};
@@ -605,7 +671,7 @@ ConfigParseResult parse_config(const std::string_view utf8) {
                                      value.style_preferences))
             return {false, {}, "style_preferences is invalid"};
     }
-    if (version >= 20) {
+    if (master_version >= 20) {
         if (!parse_bool(fields["tone_reply_enabled"], value.tone_reply_enabled) ||
             !parse_bool(fields["tone_continuation_enabled"],
                         value.tone_continuation_enabled) ||
@@ -657,6 +723,14 @@ ConfigParseResult parse_config(const std::string_view utf8) {
                 value.next_page_shortcuts = {"]", "Down"};
         }
     }
+    if (candidate_version < 17) {
+        auto legacy = value;
+        legacy.expanded_previous_page_shortcut_enabled = false;
+        legacy.expanded_next_page_shortcut_enabled = false;
+        const auto valid_legacy = validate_config(legacy);
+        if (!valid_legacy.ok) return {false, {}, valid_legacy.diagnostic};
+        migrate_expanded_page_shortcuts(value);
+    }
     const auto validation = validate_config(value);
     if (!validation.ok) return {false, {}, validation.diagnostic};
     return {true, value, {}};
@@ -670,6 +744,8 @@ std::string serialize_config(const AppConfig& value) {
            "\ncandidate_wrap_length=" + std::to_string(value.candidate_wrap_length) +
            "\ncandidate_partition_enabled=" +
                (value.candidate_partition_enabled ? std::string("true") : "false") +
+           "\ncandidate_single_character_first_enabled=" +
+               (value.candidate_single_character_first_enabled ? std::string("true") : "false") +
            "\ncandidate_immediate_commit_enabled=" +
                (value.candidate_immediate_commit_enabled ? std::string("true") : "false") +
            "\nfocus_loss_commit_enabled=" +
@@ -742,6 +818,12 @@ std::string serialize_config(const AppConfig& value) {
            "\nnext_page_shortcut_enabled=" +
                (value.next_page_shortcut_enabled ? std::string("true") : "false") +
            "\nnext_page_shortcut=" + serialize_shortcut_list(value.next_page_shortcuts) +
+           "\nexpanded_previous_page_shortcut_enabled=" +
+               (value.expanded_previous_page_shortcut_enabled ? std::string("true") : "false") +
+           "\nexpanded_previous_page_shortcut=" + serialize_shortcut_list(value.expanded_previous_page_shortcuts) +
+           "\nexpanded_next_page_shortcut_enabled=" +
+               (value.expanded_next_page_shortcut_enabled ? std::string("true") : "false") +
+           "\nexpanded_next_page_shortcut=" + serialize_shortcut_list(value.expanded_next_page_shortcuts) +
            "\ntext_navigation_shortcut_enabled=" +
                (value.text_navigation_shortcut_enabled ? std::string("true") : "false") +
            "\ntext_navigation_shortcut=" +

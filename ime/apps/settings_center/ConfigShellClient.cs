@@ -5,6 +5,7 @@ namespace OwO_Settings;
 internal sealed record SettingsSnapshot(string InputScheme,
                                         uint CandidatePageSize, uint CandidateWrapLength,
                                         bool CandidatePartitionEnabled,
+                                        bool CandidateSingleCharacterFirstEnabled,
                                         bool CandidateImmediateCommitEnabled,
                                         bool FocusLossCommitEnabled,
                                         bool ChinesePunctuationEnabled,
@@ -37,17 +38,38 @@ internal sealed record SettingsSnapshot(string InputScheme,
                                         string StylePreferences,
                                         bool ToneReplyEnabled,
                                         bool ToneContinuationEnabled,
-                                        bool ToneCloudModelEnabled);
+                                        bool ToneCloudModelEnabled,
+                                        bool ExpandedPreviousPageShortcutEnabled, IReadOnlyList<string> ExpandedPreviousPageShortcuts,
+                                        bool ExpandedNextPageShortcutEnabled, IReadOnlyList<string> ExpandedNextPageShortcuts);
 
 internal sealed class ConfigShellClient
 {
-    private readonly string _shellPath = Environment.GetEnvironmentVariable("OWO_CONFIG_SHELL_PATH")
-        ?? Path.Combine(AppContext.BaseDirectory, "owo_config_shell.exe");
-    private readonly string _configPath = Environment.GetEnvironmentVariable("OWO_CONFIG_PATH")
-        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                        "OwO", "InputMethod", "config", "owo.conf");
+    private readonly string _shellPath;
+    private readonly string _configPath;
+
+    internal ConfigShellClient(string? configPath = null, string? shellPath = null)
+    {
+        _shellPath = shellPath ?? Environment.GetEnvironmentVariable("OWO_CONFIG_SHELL_PATH")
+            ?? Path.Combine(AppContext.BaseDirectory, "owo_config_shell.exe");
+        _configPath = configPath ?? Environment.GetEnvironmentVariable("OWO_CONFIG_PATH")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                            "OwO", "InputMethod", "config", "owo.conf");
+    }
 
     internal string ConfigPath => _configPath;
+
+    internal async Task<SettingsSnapshot> ValidateAsync(SettingsSnapshot value,
+                                                       CancellationToken cancellationToken = default)
+    {
+        // 复用原生配置校验，但绝不将待确认的配置写入正在使用的路径。
+        var directory = Path.Combine(Path.GetTempPath(), "OwO-settings-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try {
+            var isolated = new ConfigShellClient(Path.Combine(directory, "owo.conf"), _shellPath);
+            await isolated.SaveAsync(value, cancellationToken);
+            return await isolated.LoadAsync(cancellationToken);
+        } finally { Directory.Delete(directory, recursive: true); }
+    }
 
     internal async Task<SettingsSnapshot> LoadAsync(CancellationToken cancellationToken = default)
     {
@@ -71,6 +93,7 @@ internal sealed class ConfigShellClient
                    uint.Parse(values["candidate_page_size"]),
                    uint.Parse(values["candidate_wrap_length"]),
                    bool.Parse(values["candidate_partition_enabled"]),
+                   bool.Parse(values["candidate_single_character_first_enabled"]),
                    bool.Parse(values["candidate_immediate_commit_enabled"]),
                    bool.Parse(values["focus_loss_commit_enabled"]),
                    bool.Parse(values["chinese_punctuation_enabled"]),
@@ -113,7 +136,11 @@ internal sealed class ConfigShellClient
                    UnescapeStylePreferences(values["style_preferences"]),
                    bool.Parse(values["tone_reply_enabled"]),
                    bool.Parse(values["tone_continuation_enabled"]),
-                   bool.Parse(values["tone_cloud_model_enabled"]));
+                   bool.Parse(values["tone_cloud_model_enabled"]),
+                   bool.Parse(values["expanded_previous_page_shortcut_enabled"]),
+                   SplitShortcuts(values["expanded_previous_page_shortcut"]),
+                   bool.Parse(values["expanded_next_page_shortcut_enabled"]),
+                   SplitShortcuts(values["expanded_next_page_shortcut"]));
     }
 
     internal Task SaveAsync(SettingsSnapshot value, CancellationToken cancellationToken = default) =>
@@ -163,7 +190,12 @@ internal sealed class ConfigShellClient
                   NormalizeStylePreferences(value.StylePreferences),
                   value.ToneReplyEnabled.ToString().ToLowerInvariant(),
                   value.ToneContinuationEnabled.ToString().ToLowerInvariant(),
-                  value.ToneCloudModelEnabled.ToString().ToLowerInvariant()],
+                  value.ToneCloudModelEnabled.ToString().ToLowerInvariant(),
+                  value.CandidateSingleCharacterFirstEnabled.ToString().ToLowerInvariant(),
+                  value.ExpandedPreviousPageShortcutEnabled.ToString().ToLowerInvariant(),
+                  JoinShortcuts(value.ExpandedPreviousPageShortcuts),
+                  value.ExpandedNextPageShortcutEnabled.ToString().ToLowerInvariant(),
+                  JoinShortcuts(value.ExpandedNextPageShortcuts)],
             cancellationToken);
 
     // Preferences are one line in the key=value file. A literal newline cannot
@@ -205,9 +237,19 @@ internal sealed class ConfigShellClient
         };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("无法启动配置后端。");
-        var output = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var error = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        // 先持续读取两条输出流，超时后结束自己启动的后端，避免校验暂存文件被占用。
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException) {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            await Task.WhenAll(output, error);
+            if (cancellationToken.IsCancellationRequested) throw;
+            throw new TimeoutException("OwO 配置后端响应超时，请稍后重试。");
+        }
         if (process.ExitCode != 0) {
             var message = (await error).Trim();
             throw new InvalidOperationException(message.Length > 0 ? message :

@@ -8,6 +8,9 @@
 #include "owo/tsf/key_routing.h"
 #include "owo/engine/tone_session.h"
 #include "tone_preview.h"
+#include "owo/tsf/composition_learning.h"
+#include "owo/tsf/expanded_candidate_pages.h"
+#include "owo/tsf/backdrop_snapshot.h"
 
 #include <Windows.h>
 #include <msctf.h>
@@ -23,6 +26,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 struct ID2D1Factory;
@@ -101,6 +105,9 @@ public:
 private:
     friend class LanguageBarItem;
     friend struct ToneInputTest;
+#ifdef OWO_TSF_TEST_ACCESS
+    friend struct ExpandedCandidateTestAccess;
+#endif
     struct CandidateResult {
         std::uint64_t request_id{};
         std::uint64_t generation{};
@@ -141,6 +148,7 @@ private:
     enum class HitKind : std::uint8_t {
         pinyin_cursor,
         candidate,
+        candidate_page,
         previous_page,
         next_page,
         toggle_expanded,
@@ -257,18 +265,24 @@ private:
     void move_candidate_page_from_shortcut(int direction);
     void change_candidate_page(int direction);
     void scroll_expanded_candidates(int rows);
+    void set_candidates_expanded(bool expanded);
+    void move_expanded_page(int direction);
+    [[nodiscard]] std::optional<std::size_t> candidate_shortcut_index(std::size_t slot) const;
+    [[nodiscard]] std::size_t candidate_page_width() const noexcept;
+    [[nodiscard]] std::size_t plugin_expanded_block_rows() const noexcept;
     void append_alt_code_digit(unsigned digit);
     void finish_alt_code_preview() noexcept;
     HRESULT commit_alt_code_preview_from_window();
     void change_alt_code_preview_page(int direction);
     void invoke_hit_target(const HitTarget& target);
-    void defer_candidate_selection(std::size_t index, ITfContext* context);
+    void defer_candidate_selection(std::size_t index, ITfContext* context, bool shortcut = false);
     void clear_deferred_candidate_selection() noexcept;
     void defer_punctuation(std::wstring punctuation, ITfContext* context);
     void clear_deferred_punctuation() noexcept;
     [[nodiscard]] std::optional<HitTarget> hit_test(POINT point) const;
     void update_candidate_anchor(ITfContext* context);
     void clear_composition();
+    void reset_learning_chain();
     [[nodiscard]] bool should_eat_key(WPARAM key) const noexcept;
     // Candidates reachable through Space and the number keys. A learned
     // continuation is unnumbered and is committed only by clicking it, so it
@@ -284,7 +298,7 @@ private:
     HRESULT commit_candidate(ITfContext* context, std::size_t index,
                              std::wstring_view suffix = {});
     HRESULT stage_agent_candidate(ITfContext* context, std::size_t index);
-    HRESULT commit_text(ITfContext* context, std::wstring text);
+    HRESULT commit_text(ITfContext* context, std::wstring text, bool* learning_continues = nullptr);
     HRESULT commit_raw_input(ITfContext* context);
     HRESULT commit_candidate_from_window(std::size_t index);
     HRESULT toggle_language_mode(ITfContext* context);
@@ -304,7 +318,8 @@ private:
     void poll_plugin_input();
     void finish_plugin_input_on_ui();
     void queue_plugin_compose();
-    void select_plugin_candidate(std::size_t, bool defer = false);
+    void select_plugin_candidate(std::size_t, bool defer = false,
+                                 std::optional<std::size_t> shortcut_slot = {});
     void change_plugin_page(int);
     void sync_plugin_display();
     void reset_plugin_input();
@@ -324,7 +339,8 @@ private:
     std::future<ipc::InputMethodClientResult> plugin_input_future_;
     std::string plugin_input_session_;
     std::uint64_t plugin_input_request_id_{};
-    struct PluginPendingSelection { std::size_t index; std::wstring input; std::uint64_t generation, page; };
+    struct PluginPendingSelection { std::size_t index; std::wstring input; std::uint64_t generation, page;
+        bool expanded; std::size_t selected_page; std::optional<std::size_t> shortcut_slot; };
     std::optional<PluginPendingSelection> plugin_pending_selection_;
     bool plugin_input_opening_{}, plugin_input_committing_{};
     struct PluginDeferredKey { WPARAM key; LPARAM flags; BYTE state[256]; };
@@ -358,6 +374,7 @@ private:
     void* layered_surface_pixels_{nullptr};
     SIZE layered_surface_size_{};
     std::vector<std::uint32_t> blurred_candidate_background_;
+    BackdropSnapshot clean_candidate_background_;
     SIZE candidate_shadow_surface_size_{};
     owo::plugin::CandidateTheme candidate_shadow_theme_{};
     bool candidate_shadow_surface_valid_{false};
@@ -377,9 +394,9 @@ private:
     std::size_t input_cursor_{0};
     std::vector<StagedCandidate> staged_candidates_;
     std::size_t staged_cursor_{0};
-    std::wstring learning_chain_text_;
-    std::wstring learning_chain_input_;
-    std::wstring learning_chain_context_;
+    CompositionLearningChain learning_chain_;
+    ITfContext* learning_document_{nullptr};
+    ITfRange* learning_insertion_end_{nullptr};
     std::wstring recent_language_context_;
     std::wstring recent_agent_context_;
     std::wstring recent_language_input_;
@@ -415,6 +432,7 @@ private:
     std::optional<HitTarget> hovered_target_;
     std::optional<HitTarget> pressed_target_;
     std::optional<std::wstring> deferred_candidate_text_;
+    std::optional<std::pair<std::size_t, std::size_t>> deferred_expanded_choice_;
     ITfContext* deferred_candidate_context_{nullptr};
     std::optional<std::wstring> deferred_punctuation_;
     ITfContext* deferred_punctuation_context_{nullptr};
@@ -432,7 +450,7 @@ private:
     bool candidate_request_failed_{false};
     std::uint8_t candidate_retry_count_{0};
     bool candidates_expanded_{false};
-    std::size_t expanded_scroll_row_{0};
+    ExpandedCandidatePages expanded_pages_;
     config::ConfigStore shortcut_config_store_;
     config::AppConfig shortcut_config_;
     ULONGLONG next_shortcut_config_refresh_{0};

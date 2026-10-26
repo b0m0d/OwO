@@ -2,18 +2,21 @@
 #include "owo/agent/agent_protocol.h"
 #include "owo/core/plugin_executor.h"
 #include "owo/ipc/contextual_candidate_order.h"
+#include "owo/ipc/user_lexicon_management.h"
 #include "owo/config/config_monitor.h"
 #include "owo/model/model_backend.h"
 #include "owo/model/model_protocol.h"
 
 #include "owo/engine/candidate_generator.h"
 #include "owo/engine/collocation.h"
+#include "owo/engine/candidate_partition.h"
 #include "owo/engine/exact_code_schema.h"
 #include "owo/engine/full_pinyin_schema.h"
 #include "owo/engine/lexicon.h"
 #include "owo/engine/unified_input.h"
 #include "owo/engine/user_corpus.h"
 #include "owo/engine/user_frequency.h"
+#include "owo/engine/user_lexicon_alignment.h"
 
 #include "owo/protocol/messages.h"
 
@@ -167,6 +170,33 @@ private:
     SECURITY_ATTRIBUTES attributes_{};
 };
 
+bool lexicon_editor_peer_allowed(HANDLE pipe) {
+    if (!ImpersonateNamedPipeClient(pipe)) return false;
+    HANDLE token{};
+    const bool opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token) != FALSE;
+    if (!RevertToSelf()) {
+        // Never continue store/file operations under an untrusted client token.
+        if (token != nullptr) CloseHandle(token);
+        TerminateProcess(GetCurrentProcess(), ERROR_ACCESS_DENIED);
+        return false;
+    }
+    if (!opened) return false;
+    DWORD appcontainer{}, bytes{};
+    bool allowed = GetTokenInformation(token, TokenIsAppContainer, &appcontainer,
+        sizeof(appcontainer), &bytes) && appcontainer == 0;
+    GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &bytes);
+    std::vector<std::byte> storage(bytes);
+    if (bytes == 0 || !GetTokenInformation(token, TokenIntegrityLevel, storage.data(), bytes, &bytes)) allowed = false;
+    else {
+        const auto label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(storage.data());
+        const auto count = *GetSidSubAuthorityCount(label->Label.Sid);
+        allowed = allowed && count != 0 &&
+            *GetSidSubAuthority(label->Label.Sid, count - 1) >= SECURITY_MANDATORY_MEDIUM_RID;
+    }
+    CloseHandle(token);
+    return allowed;
+}
+
 protocol::ValidationResult io_error(const char* operation) {
     const DWORD error = GetLastError();
     const auto code = error == ERROR_SEM_TIMEOUT || error == ERROR_TIMEOUT
@@ -319,7 +349,8 @@ std::string read_frame(const HANDLE pipe) {
 std::vector<std::string> preferred_source_segmentation(
     const engine::ParseResult& parsed,
     const std::vector<std::string>& candidate_segments,
-    const bool correction_enabled) {
+    const bool correction_enabled,
+    const engine::Candidate* const winning_candidate) {
     const auto source_segments = [&parsed](const engine::ParsePath& path) {
         std::vector<std::string> segments;
         segments.reserve(path.syllables.size());
@@ -352,11 +383,28 @@ std::vector<std::string> preferred_source_segmentation(
         parsed.paths.begin(), parsed.paths.end(), [](const engine::ParsePath& path) {
             return path.match_kind == engine::InputMatchKind::exact && !path.syllables.empty();
         });
-    // For long compact input the engine may intentionally compare two exact
-    // segmentations. Keep the preview aligned with the winning candidate;
-    // short input and user-authored apostrophe boundaries retain the existing
-    // preview rules.
-    if (parsed.normalized_input.size() >= 12 &&
+    // Use lexical evidence only for a complete exact candidate whose raw
+    // source boundaries are present in the parse graph. Never let a prefix,
+    // abbreviation or completed spelling replace the user's actual input.
+    const bool winning_exact_source = winning_candidate != nullptr &&
+        winning_candidate->match_kind == engine::InputMatchKind::exact &&
+        winning_candidate->consumed_input_bytes == parsed.normalized_input.size() &&
+        std::any_of(parsed.paths.begin(), parsed.paths.end(), [&](const auto& path) {
+            if (path.match_kind != engine::InputMatchKind::exact ||
+                path.syllables.size() != candidate_segments.size()) return false;
+            for (std::size_t index = 0; index < path.syllables.size(); ++index) {
+                const auto& syllable = path.syllables[index];
+                if (!syllable.complete || syllable.end > parsed.normalized_input.size() ||
+                    syllable.begin >= syllable.end ||
+                    std::string_view(parsed.normalized_input).substr(syllable.begin, syllable.end - syllable.begin) != candidate_segments[index])
+                    return false;
+            }
+            return true;
+        });
+    // Exact full-input evidence can choose a different source boundary even
+    // for short input; keep it aligned with the candidate. Retain the existing
+    // long-input policy, and never reinterpret user-authored apostrophes.
+    if ((parsed.normalized_input.size() >= 12 || winning_exact_source) &&
         parsed.normalized_input.find('\'') == std::string::npos &&
         !candidate_segments.empty())
         return candidate_segments;
@@ -473,6 +521,7 @@ struct CandidateCacheKey {
     // sentence must also drop predictions that were learned from it.
     std::uint64_t corpus_revision{};
     std::uint64_t learning_generation{};
+    std::uint64_t learning_epoch{};
     std::size_t parse_path_limit{};
     bool correction_enabled{};
     bool contextual_ranking{};
@@ -491,6 +540,7 @@ struct CandidateCacheKeyHash {
         combine(std::hash<std::uint64_t>{}(key.config_generation));
         combine(std::hash<std::uint64_t>{}(key.corpus_revision));
         combine(std::hash<std::uint64_t>{}(key.learning_generation));
+        combine(std::hash<std::uint64_t>{}(key.learning_epoch));
         combine(key.parse_path_limit);
         combine(key.correction_enabled);
         combine(key.contextual_ranking);
@@ -793,6 +843,10 @@ std::uint64_t candidate_group(const engine::Candidate& candidate,
     if (candidate.match_kind == engine::InputMatchKind::input_continuation &&
         candidate.consumed_input_bytes == full_input_bytes)
         return static_cast<std::uint64_t>(protocol::CandidateGroup::continuation);
+    // Reuse the phrase-area wire group for a joined word/sentence band, so
+    // both rendering and asynchronous model updates see one area.
+    if (candidate.joint_phrase_partition && characters >= 2)
+        return static_cast<std::uint64_t>(protocol::CandidateGroup::sentence);
     const bool sentence = candidate.consumed_input_bytes == full_input_bytes &&
                           candidate.syllables.size() >= 3 &&
                           characters == candidate.syllables.size() &&
@@ -812,7 +866,8 @@ void arrange_partitioned_candidate_pages(
     std::vector<engine::Candidate>& candidates,
     const std::size_t page_size,
     const std::size_t full_input_bytes,
-    const bool single_syllable_input) {
+    const bool single_syllable_input,
+    const bool corrected_single_syllable) {
     if (page_size < 4 || candidates.empty()) return;
     std::vector<engine::Candidate> sentences;
     std::vector<engine::Candidate> dictionary_candidates;
@@ -842,13 +897,19 @@ void arrange_partitioned_candidate_pages(
         }
     }
 
+    const auto exact_learned_whole_word = [full_input_bytes](const engine::Candidate& candidate) {
+        return candidate.user_preferred() && candidate.segment_count == 1 &&
+            candidate.match_kind == engine::InputMatchKind::exact &&
+            candidate.consumed_input_bytes == full_input_bytes &&
+            utf8_character_count(candidate.text) == candidate.syllables.size();
+    };
     // The generator works with an internal pool that is intentionally much
     // larger than one visible page. Its pool-relative placement can therefore
     // bury the first character of the best sentence behind every homophone.
     // Within the optional partitioned layout, keep that character first in the
     // single-character area; the configured page split then determines its
     // exact visible slot without relying on a hard-coded page size.
-    if (!single_characters.empty()) {
+    if (!single_characters.empty() && !corrected_single_syllable) {
         std::vector<std::string> preferred_heads;
         preferred_heads.reserve(2);
         const auto collect_head = [&](const engine::Candidate& candidate) {
@@ -860,6 +921,8 @@ void arrange_partitioned_candidate_pages(
                     preferred_heads.end()) return;
             preferred_heads.push_back(head);
         };
+        for (const auto& candidate : dictionary_candidates)
+            if (exact_learned_whole_word(candidate)) collect_head(candidate);
         for (const auto& sentence : sentences) collect_head(sentence);
         for (const auto& candidate : dictionary_candidates) {
             if (preferred_heads.size() == 2) break;
@@ -868,6 +931,11 @@ void arrange_partitioned_candidate_pages(
         std::vector<engine::Candidate> reordered;
         reordered.reserve(single_characters.size());
         std::vector<bool> used(single_characters.size());
+        for (std::size_t index = 0; index < single_characters.size(); ++index) {
+            if (!single_characters[index].user_preferred()) continue;
+            used[index] = true;
+            reordered.push_back(std::move(single_characters[index]));
+        }
         for (const auto& head : preferred_heads) {
             const auto found = std::find_if(
                 single_characters.begin(), single_characters.end(),
@@ -876,6 +944,7 @@ void arrange_partitioned_candidate_pages(
                 });
             if (found == single_characters.end()) continue;
             const auto index = static_cast<std::size_t>(found - single_characters.begin());
+            if (used[index]) continue;
             used[index] = true;
             reordered.push_back(std::move(*found));
         }
@@ -910,7 +979,15 @@ void arrange_partitioned_candidate_pages(
     // beside a much stronger real phrase. Do not let the fixed group order put
     // “我市吗” ahead of the dictionary-backed “为什么”. This is score-driven
     // and applies to every input: sentence-first remains the default unless a
-    // real whole-input dictionary entry has stronger evidence.
+    // real whole-input dictionary entry has stronger evidence AND the
+    // competing sentences lack a verified exact-reading phrase chain. An
+    // exact learned whole word preserves the generator's personalization
+    // precedence even when it also has a compositional sentence spelling.
+    const bool coherent_exact_sentence = std::any_of(
+        sentences.begin(), sentences.end(), [](const engine::Candidate& candidate) {
+            return candidate.match_kind == engine::InputMatchKind::exact &&
+                   candidate.coherence_score > 0;
+        });
     const auto best_sentence_score = sentences.empty()
         ? (std::numeric_limits<std::int64_t>::min)()
         : std::max_element(sentences.begin(), sentences.end(),
@@ -920,21 +997,27 @@ void arrange_partitioned_candidate_pages(
                            })->score;
     const auto best_whole_dictionary = std::max_element(
         dictionary.begin(), dictionary.end(),
-        [full_input_bytes](const engine::Candidate& left,
+        [full_input_bytes, &exact_learned_whole_word](const engine::Candidate& left,
                            const engine::Candidate& right) {
-            const auto evidence = [full_input_bytes](const engine::Candidate& value) {
-                return value.segment_count == 1 &&
-                       value.consumed_input_bytes == full_input_bytes
-                    ? value.score
-                    : (std::numeric_limits<std::int64_t>::min)();
+            const auto evidence = [full_input_bytes, &exact_learned_whole_word](const engine::Candidate& value) {
+                const bool whole = value.segment_count == 1 &&
+                    value.consumed_input_bytes == full_input_bytes;
+                return std::pair{whole && exact_learned_whole_word(value), whole
+                    ? value.score : (std::numeric_limits<std::int64_t>::min)()};
             };
             return evidence(left) < evidence(right);
         });
-    const bool dictionary_before_sentences =
+    // An original abbreviation sentence remains available beside a repaired
+    // whole syllable, but must not take over its leading character partition.
+    const bool dictionary_before_sentences = corrected_single_syllable || (
         !sentences.empty() && best_whole_dictionary != dictionary.end() &&
         best_whole_dictionary->segment_count == 1 &&
         best_whole_dictionary->consumed_input_bytes == full_input_bytes &&
-        best_whole_dictionary->score > best_sentence_score;
+        // Learning an existing sentence turns it into a whole user word. It
+        // must not become LESS preferred merely because its structural group
+        // changes from sentence to dictionary after the first commit.
+        (exact_learned_whole_word(*best_whole_dictionary) ||
+         (!coherent_exact_sentence && best_whole_dictionary->score > best_sentence_score)));
 
     std::vector<engine::Candidate> paged;
     paged.reserve(sentences.size() + dictionary.size() + single_characters.size());
@@ -968,21 +1051,24 @@ void arrange_partitioned_candidate_pages(
         const auto dictionary_end = dictionary_index + dictionary_count;
         // A compact input that is itself one complete syllable expresses a
         // stronger single-character intent than an alternative cross-boundary
-        // parse (for example liang versus li'ang). Put only the first page's
-        // single-character area first; later pages retain the stable dictionary-
-        // then-character layout used by paging and expanded views.
-        if (first_page && dictionary_before_sentences) {
+        // parse (for example liang versus li'ang). Use the same area order on
+        // every page, including the rows returned by the expanded view. Keep
+        // each area's quota unchanged (odd pages still give characters one more).
+        if (single_syllable_input) {
+            while (single_index < single_end)
+                paged.push_back(std::move(single_characters[single_index++]));
+            while (dictionary_index < dictionary_end)
+                paged.push_back(std::move(dictionary[dictionary_index++]));
+            if (first_page && dictionary_before_sentences)
+                for (auto& sentence : sentences)
+                    paged.push_back(std::move(sentence));
+        } else if (first_page && dictionary_before_sentences) {
             while (dictionary_index < dictionary_end)
                 paged.push_back(std::move(dictionary[dictionary_index++]));
             for (auto& sentence : sentences)
                 paged.push_back(std::move(sentence));
             while (single_index < single_end)
                 paged.push_back(std::move(single_characters[single_index++]));
-        } else if (first_page && single_syllable_input) {
-            while (single_index < single_end)
-                paged.push_back(std::move(single_characters[single_index++]));
-            while (dictionary_index < dictionary_end)
-                paged.push_back(std::move(dictionary[dictionary_index++]));
         } else {
             while (dictionary_index < dictionary_end)
                 paged.push_back(std::move(dictionary[dictionary_index++]));
@@ -1231,6 +1317,10 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
         std::vector<std::string> candidates;
         std::vector<std::uint64_t> candidate_consumed;
         std::vector<std::uint64_t> candidate_groups;
+        std::vector<std::uint64_t> candidate_confidence;
+        std::vector<bool> joint_phrase_partition;
+        std::vector<bool> generated_sentences;
+        std::size_t sentence_limit{};
         std::size_t full_input_bytes{};
         std::size_t visible_count{};
         std::vector<std::string> contextual_preferences;
@@ -1256,6 +1346,9 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
     std::optional<PendingCandidateRefinement> pending_candidate_refinement;
     engine::FullPinyinIncrementalState incremental_parse_state;
     std::uint64_t learning_generation = 0;
+    const auto lexicon_revision_base = static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count()) ^
+        (static_cast<std::uint64_t>(GetCurrentProcessId()) << 32);
     const auto model_key = [](const std::uint64_t request_id, const std::uint64_t generation) {
         return std::to_string(request_id) + ':' + std::to_string(generation);
     };
@@ -1268,7 +1361,7 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
     bool ready_signalled = false;
     while (running) {
         const HANDLE pipe = CreateNamedPipeW(
-            pipe_name, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            pipe_name, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1, protocol::kMaximumPayloadBytes + 4U, protocol::kMaximumPayloadBytes + 4U,
             5000, pipe_security.get());
         if (pipe == INVALID_HANDLE_VALUE) {
@@ -1374,6 +1467,32 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     response.text = "shutdown_ack";
                 }
                 running = false;
+            } else if (decoded.message.type == protocol::MessageType::user_lexicon_request) {
+                if (user_frequency == nullptr || !lexicon_editor_peer_allowed(pipe)) {
+                    response.type = protocol::MessageType::error_response;
+                    response.text = "词库管理不可用，或客户端权限不足。请从普通桌面设置中心操作。";
+                } else {
+                    try {
+                        auto lexicon_revision = lexicon_revision_base + learning_generation;
+                        const auto managed = manage_user_lexicon(*user_frequency,
+                            decoded.message.text, lexicon_revision);
+                        response.type = managed.ok ? protocol::MessageType::user_lexicon_response
+                                                   : protocol::MessageType::error_response;
+                        response.text = managed.text;
+                        if (managed.mutated) {
+                            ++learning_generation;
+                            unflushed_selections = 0;
+                            model_requests.clear();
+                            pending_candidate_refinement.reset();
+                        }
+                    } catch (const std::exception&) {
+                        ++learning_generation;
+                        model_requests.clear();
+                        pending_candidate_refinement.reset();
+                        response.type = protocol::MessageType::error_response;
+                        response.text = "词库操作未能正常完成，请刷新确认结果后重试；不会自动重复提交。";
+                    }
+                }
             } else if (decoded.message.type == protocol::MessageType::agent_request) {
                 response.type = protocol::MessageType::agent_response;
                 auto agent_request = agent::decode_request(decoded.message.text);
@@ -1531,14 +1650,21 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                         apply_contextual_candidate_order(
                             update.candidates, pending.full_input_bytes,
                             pending.candidates, pending.candidate_consumed,
-                            response.candidates, response.candidate_consumed);
+                            response.candidates, response.candidate_consumed,
+                            pending.candidate_confidence, pending.joint_phrase_partition);
                         promote_preferred_candidates(
                             pending.contextual_preferences, response.candidates,
                             response.candidate_consumed);
                         restore_preferred_candidate_positions(
                             pending.learned_preferences, pending.candidates,
                             pending.candidate_consumed, response.candidates,
-                            response.candidate_consumed);
+                            response.candidate_consumed, pending.joint_phrase_partition);
+                        if (std::any_of(pending.joint_phrase_partition.begin(),
+                                        pending.joint_phrase_partition.end(), [](bool value) { return value; }))
+                            limit_model_sentence_candidates(
+                                pending.candidates, pending.candidate_consumed,
+                                pending.generated_sentences, pending.sentence_limit,
+                                response.candidates, response.candidate_consumed);
                         response.candidate_groups = candidate_groups_for_order(
                             response.candidates, response.candidate_consumed,
                             pending.candidates, pending.candidate_consumed,
@@ -1553,8 +1679,9 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                             response.candidate_consumed = pending.candidate_consumed;
                             response.candidate_groups = pending.candidate_groups;
                         } else {
-                            // Model ranking is authoritative only inside each
-                            // candidate group. Reapply the visible base layout
+                            // Model ranking is authoritative inside each
+                            // candidate group, including a joined word/sentence
+                            // band. Reapply the visible base layout
                             // before truncation so hidden whole-input words
                             // cannot consume every sentence slot (wsm used to
                             // lose both short sentences at this point).
@@ -1584,9 +1711,26 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     decoded.message.request_id, decoded.message.context_generation);
                 const HANDLE cancellation_event = CreateEventW(
                     nullptr, TRUE, FALSE, cancellation_name.c_str());
-                const auto cancelled = [cancellation_event] {
-                    return cancellation_event != nullptr &&
-                           WaitForSingleObject(cancellation_event, 0) == WAIT_OBJECT_0;
+                bool client_disconnected = false;
+                auto next_connection_check = request_started;
+                const auto cancelled = [cancellation_event, pipe,
+                                        &client_disconnected, &next_connection_check] {
+                    if (client_disconnected || (cancellation_event != nullptr &&
+                        WaitForSingleObject(cancellation_event, 0) == WAIT_OBJECT_0))
+                        return true;
+                    // A timed-out client closes its pipe without necessarily
+                    // issuing a new keystroke/cancellation event. Do not keep
+                    // the serial Core occupied by that abandoned composition.
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now >= next_connection_check) {
+                        next_connection_check = now + std::chrono::milliseconds(8);
+                        if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, nullptr, nullptr)) {
+                            const auto error = GetLastError();
+                            client_disconnected = error == ERROR_BROKEN_PIPE ||
+                                error == ERROR_PIPE_NOT_CONNECTED || error == ERROR_NO_DATA;
+                        }
+                    }
+                    return client_disconnected;
                 };
                 response.type = protocol::MessageType::candidate_response;
                 constexpr std::uint64_t maximum_page = 100;
@@ -1594,6 +1738,9 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                 bool request_cancelled = false;
                 std::vector<std::string> model_candidate_pool;
                 std::vector<std::size_t> model_candidate_consumed;
+                std::vector<std::uint64_t> model_candidate_confidence;
+                std::vector<bool> model_candidate_joint_partition;
+                std::vector<bool> model_candidate_generated_sentence;
                 std::vector<std::string> model_hidden_candidates;
                 std::vector<std::uint64_t> model_hidden_consumed;
                 std::vector<std::uint64_t> model_hidden_groups;
@@ -1675,6 +1822,7 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                         // identity.
                         collocation_revision,
                         learning_generation,
+                        user_frequency != nullptr ? user_frequency->ranking_epoch() : 0,
                         parse_path_limit,
                         decoded.message.correction_enabled,
                         adaptive_ranking_enabled};
@@ -1759,13 +1907,27 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                             std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::steady_clock::now() -
                                 strict_generation_started).count());
+                        const bool single_syllable_typo = full_pinyin_scheme &&
+                            decoded.message.correction_enabled &&
+                            full_pinyin_schema.is_single_syllable_transposition(
+                                parsed.normalized_input) &&
+                            std::none_of(parsed.paths.begin(), parsed.paths.end(),
+                                [](const auto& path) {
+                                    return path.match_kind == engine::InputMatchKind::exact &&
+                                        std::all_of(path.syllables.begin(), path.syllables.end(),
+                                            [](const auto& syllable) { return syllable.complete; });
+                                });
                         const auto strict_evidence = std::any_of(
                             candidates.begin(), candidates.end(),
-                            [&parsed](const auto& candidate) {
+                            [&parsed, single_syllable_typo](const auto& candidate) {
                                 if (candidate.consumed_input_bytes !=
                                     parsed.normalized_input.size()) return false;
                                 if (candidate.match_kind == engine::InputMatchKind::exact)
                                     return true;
+                                // Broad abbreviation expansions must not hide a
+                                // one-swap whole syllable (chnag -> chang).
+                                // Genuine complete exact readings still win.
+                                if (single_syllable_typo) return false;
                                 // A full-input dictionary phrase is conclusive
                                 // evidence even when only one source segment is
                                 // abbreviated, such as sh -> sheng in
@@ -1782,12 +1944,28 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                 }
                                 // A short trailing prefix (nih -> ni+hao) is
                                 // already useful. Longer compact forms require
-                                // at least two independent abbreviation matches
-                                // (bugd -> bu+gan+dang) before they suppress typo
-                                // correction such as niaho -> ni+hao.
-                                return candidate.source_segments.size() <= 2 ||
-                                       (abbreviated_segments >= 2 &&
-                                        abbreviated_segments <= 4);
+                                // at least two dictionary-backed abbreviation
+                                // matches before they suppress typo correction.
+                                // Expanding isolated letters into unrelated
+                                // characters is not lexical evidence: nneg can
+                                // become n+ne+g and hide the local neng repair.
+                                if (candidate.source_segments.size() <= 2) return true;
+                                if (abbreviated_segments < 2 || abbreviated_segments > 4)
+                                    return false;
+                                std::size_t dictionary_abbreviations = 0;
+                                std::size_t begin = 0;
+                                for (const auto length : candidate.segment_lengths) {
+                                    if (begin >= shared || length > shared - begin) return false;
+                                    if (length >= 2) {
+                                        for (auto index = begin; index < begin + length; ++index) {
+                                            if (candidate.source_segments[index].size() <
+                                                candidate.syllables[index].size())
+                                                ++dictionary_abbreviations;
+                                        }
+                                    }
+                                    begin += length;
+                                }
+                                return begin == shared && dictionary_abbreviations >= 2;
                             });
                         correction_fallback = full_pinyin_scheme &&
                                               decoded.message.correction_enabled &&
@@ -1807,9 +1985,10 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                 decoded.message.text, parse_path_limit, true,
                                 &corrected_parse_metrics, cancelled);
                             engine::ParseResult correction_only = corrected;
-                            std::erase_if(correction_only.paths, [](const auto& path) {
+                            std::erase_if(correction_only.paths, [single_syllable_typo](const auto& path) {
                                 return path.match_kind !=
-                                       engine::InputMatchKind::corrected;
+                                           engine::InputMatchKind::corrected ||
+                                       (single_syllable_typo && path.syllables.size() != 1);
                             });
                             correction_only.valid = !correction_only.paths.empty();
                             parse_phase_us += static_cast<std::uint64_t>(
@@ -1835,12 +2014,22 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                 corrected_parse_metrics.segmentation_us;
                             parse_metrics.correction_us +=
                                 corrected_parse_metrics.correction_us;
+                            parse_metrics.assistance_us +=
+                                corrected_parse_metrics.assistance_us;
                             generation_metrics.lexicon_lookup_us +=
                                 corrected_generation_metrics.lexicon_lookup_us;
                             generation_metrics.lexicon_lookup_count +=
                                 corrected_generation_metrics.lexicon_lookup_count;
                             generation_metrics.sort_us +=
                                 corrected_generation_metrics.sort_us;
+                            generation_metrics.beam_transitions +=
+                                corrected_generation_metrics.beam_transitions;
+                            generation_metrics.beam_materialized +=
+                                corrected_generation_metrics.beam_materialized;
+                            generation_metrics.exact_lookup_cache_hits +=
+                                corrected_generation_metrics.exact_lookup_cache_hits;
+                            generation_metrics.coherence_cache_hits +=
+                                corrected_generation_metrics.coherence_cache_hits;
                             const bool complete_correction = std::any_of(
                                 corrected_candidates.begin(),
                                 corrected_candidates.end(),
@@ -1851,6 +2040,22 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                                correction_only.normalized_input.size();
                                 });
                             if (complete_correction) {
+                                std::vector<engine::Candidate> correction_tail;
+                                if (single_syllable_typo && !candidates.empty()) {
+                                    // Reserve bounded pool capacity for the
+                                    // unmodified segmentation as well as the
+                                    // repaired syllable. Otherwise common
+                                    // corrected characters can fill the whole
+                                    // budget before original alternatives enter.
+                                    const auto base_reserve = std::min(
+                                        candidates.size(), generation_limit / 2);
+                                    const auto correction_prefix = std::min(
+                                        corrected_candidates.size(), generation_limit - base_reserve);
+                                    correction_tail.assign(
+                                        std::make_move_iterator(corrected_candidates.begin() + correction_prefix),
+                                        std::make_move_iterator(corrected_candidates.end()));
+                                    corrected_candidates.resize(correction_prefix);
+                                }
                                 for (auto& candidate : candidates) {
                                     if (corrected_candidates.size() >= generation_limit)
                                         break;
@@ -1865,6 +2070,16 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                     if (!duplicate)
                                         corrected_candidates.push_back(
                                             std::move(candidate));
+                                }
+                                for (auto& candidate : correction_tail) {
+                                    if (corrected_candidates.size() >= generation_limit) break;
+                                    const auto duplicate = std::any_of(
+                                        corrected_candidates.begin(), corrected_candidates.end(),
+                                        [&candidate](const auto& existing) {
+                                            return existing.text == candidate.text &&
+                                                existing.consumed_input_bytes == candidate.consumed_input_bytes;
+                                        });
+                                    if (!duplicate) corrected_candidates.push_back(std::move(candidate));
                                 }
                                 parsed = std::move(correction_only);
                                 candidates = std::move(corrected_candidates);
@@ -1932,7 +2147,21 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                             std::make_move_iterator(model_begin),
                             std::make_move_iterator(candidates.end()));
                         candidates.erase(model_begin, candidates.end());
-                        const bool single_syllable_input = std::any_of(
+                        // A multi-syllable repair may also contain a weaker
+                        // single-syllable deletion (niaho -> niao). That alone
+                        // must not turn the request into single-character mode.
+                        const bool corrected_single_syllable = !parsed.paths.empty() &&
+                            std::all_of(parsed.paths.begin(), parsed.paths.end(),
+                                [&parsed](const engine::ParsePath& path) {
+                                    return path.match_kind == engine::InputMatchKind::corrected &&
+                                        path.syllables.size() == 1 && path.syllables.front().complete &&
+                                        path.syllables.front().begin == 0 &&
+                                        path.syllables.front().end == parsed.normalized_input.size();
+                                });
+                        const bool single_syllable_input =
+                            (runtime_config == nullptr ||
+                             runtime_config->candidate_single_character_first_enabled) &&
+                            (corrected_single_syllable || std::any_of(
                             parsed.paths.begin(), parsed.paths.end(),
                             [&parsed](const engine::ParsePath& path) {
                                 return path.match_kind == engine::InputMatchKind::exact &&
@@ -1941,13 +2170,15 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                        path.syllables.front().begin == 0 &&
                                        path.syllables.front().end ==
                                            parsed.normalized_input.size();
-                            });
+                            }));
                         arrange_partitioned_candidate_pages(
                             candidates, page_size, full_input_bytes,
-                            single_syllable_input);
+                            single_syllable_input, corrected_single_syllable);
                         candidates.insert(candidates.end(),
                                           std::make_move_iterator(hidden.begin()),
                                           std::make_move_iterator(hidden.end()));
+                        if (!single_syllable_input && !corrected_single_syllable)
+                            engine::merge_similar_length_partitions(candidates, full_input_bytes);
                     }
                     if (!cache_hit && previous_pool)
                         preserve_candidate_pool_prefix(
@@ -2014,10 +2245,51 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                         first_model_only - candidates.begin());
                     model_candidate_pool.reserve(candidates.size());
                     model_candidate_consumed.reserve(candidates.size());
+                    // Preserve lexical evidence when a rank-only backend
+                    // returns an arbitrary permutation. This is not a pinned
+                    // first candidate: alternatives within one confidence band
+                    // remain free to respond to context/model evidence.
+                    constexpr std::int64_t kModelLexicalConfidenceBand = 16'000;
+                    const auto reference = std::find_if(candidates.begin(), candidates.end(),
+                        [full_input_bytes](const engine::Candidate& candidate) {
+                            return !candidate.model_only && !candidate.user_preferred() &&
+                                candidate.match_kind == engine::InputMatchKind::exact &&
+                                candidate.segment_count > 1 &&
+                                candidate.consumed_input_bytes == full_input_bytes;
+                        });
+                    const engine::Candidate* joint_reference = nullptr;
+                    for (const auto& candidate : candidates) {
+                        if (candidate.joint_phrase_partition && !candidate.model_only &&
+                            !candidate.user_preferred() &&
+                            (joint_reference == nullptr || candidate.score > joint_reference->score))
+                            joint_reference = &candidate;
+                    }
                     for (const auto& candidate : candidates) {
                         model_candidate_pool.push_back(candidate.text);
                         model_candidate_consumed.push_back(
                             candidate.consumed_input_bytes);
+                        model_candidate_joint_partition.push_back(candidate.joint_phrase_partition);
+                        model_candidate_generated_sentence.push_back(
+                            candidate.segment_count > 1 && candidate.syllables.size() >= 3 &&
+                            candidate.consumed_input_bytes == full_input_bytes &&
+                            utf8_character_count(candidate.text) == candidate.syllables.size());
+                        std::uint64_t confidence = 0;
+                        if (reference != candidates.end() && !candidate.user_preferred() &&
+                            candidate.match_kind == engine::InputMatchKind::exact &&
+                            candidate.segment_count > 1 &&
+                            candidate.consumed_input_bytes == full_input_bytes &&
+                            candidate.source_segments == reference->source_segments &&
+                            candidate.syllables == reference->syllables &&
+                            candidate.coherence_score <= reference->coherence_score &&
+                            candidate.score < reference->score)
+                            confidence = static_cast<std::uint64_t>(
+                                (reference->score - candidate.score) / kModelLexicalConfidenceBand);
+                        model_candidate_confidence.push_back(confidence);
+                        if (candidate.joint_phrase_partition && !candidate.user_preferred() &&
+                            joint_reference != nullptr && candidate.score < joint_reference->score)
+                            model_candidate_confidence.back() = std::max(confidence,
+                                static_cast<std::uint64_t>((joint_reference->score - candidate.score) /
+                                    kModelLexicalConfidenceBand));
                     }
                     if (begin == 0) {
                         for (std::size_t index = visible_candidate_count;
@@ -2057,9 +2329,17 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                             candidate_segments = candidates.front().source_segments;
                         }
                         response.syllables = preferred_source_segmentation(
-                            parsed, candidate_segments, decoded.message.correction_enabled);
+                            parsed, candidate_segments, decoded.message.correction_enabled,
+                            candidates.empty() ? nullptr : &candidates.front());
                         if (response.syllables.empty())
                             response.syllables = candidate_segments;
+                        // An unresolved raw chunk can be the entire long input.
+                        // It is NOT a protocol-sized syllable. Leave preview
+                        // segmentation unspecified (TSF owns the original input)
+                        // rather than inventing boundaries or dropping the reply.
+                        if (std::any_of(response.syllables.begin(), response.syllables.end(),
+                            [](const auto& part) { return part.size() > protocol::kMaximumSyllableBytes; }))
+                            response.syllables.clear();
                     }
                     // Normal candidates own the page's positions and hotkeys.
                     // The learned continuation is appended last so Space and
@@ -2122,15 +2402,21 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                         << R"(,"normalization_us":)" << parse_metrics.normalization_us
                         << R"(,"segmentation_us":)" << parse_metrics.segmentation_us
                         << R"(,"correction_us":)" << parse_metrics.correction_us
+                        << R"(,"assistance_us":)" << parse_metrics.assistance_us
                         << R"(,"generation_us":)" << generation_us
                         << R"(,"lexicon_lookup_us":)" << generation_metrics.lexicon_lookup_us
                         << R"(,"lexicon_lookup_count":)" << generation_metrics.lexicon_lookup_count
                         << R"(,"sort_us":)" << generation_metrics.sort_us
+                        << R"(,"beam_transitions":)" << generation_metrics.beam_transitions
+                        << R"(,"beam_materialized":)" << generation_metrics.beam_materialized
+                        << R"(,"exact_lookup_cache_hits":)" << generation_metrics.exact_lookup_cache_hits
+                        << R"(,"coherence_cache_hits":)" << generation_metrics.coherence_cache_hits
                         << R"(,"total_us":)" << total_us
                         << R"(,"correction_enabled":)"
                         << (decoded.message.correction_enabled ? "true" : "false")
                         << R"(,"expanded":)" << (decoded.message.expanded ? "true" : "false")
                         << R"(,"cancelled":)" << (request_cancelled ? "true" : "false")
+                        << R"(,"client_disconnected":)" << (client_disconnected ? "true" : "false")
                         << R"(,"cache_hit":)" << (cache_hit ? "true" : "false")
                         << R"(,"correction_fallback":)"
                         << (correction_fallback ? "true" : "false")
@@ -2240,6 +2526,26 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     pending_model.candidates = std::move(model_update_candidates);
                     pending_model.candidate_consumed = std::move(model_update_consumed);
                     pending_model.candidate_groups = std::move(model_update_groups);
+                    pending_model.joint_phrase_partition.reserve(pending_model.candidates.size());
+                    pending_model.candidate_confidence.reserve(pending_model.candidates.size());
+                    pending_model.generated_sentences.reserve(pending_model.candidates.size());
+                    for (std::size_t index = 0; index < pending_model.candidates.size(); ++index) {
+                        auto match = model_candidate_pool.size();
+                        for (std::size_t source = 0; source < model_candidate_pool.size(); ++source) {
+                            if (model_candidate_pool[source] == pending_model.candidates[index] &&
+                                model_candidate_consumed[source] == pending_model.candidate_consumed[index]) {
+                                match = source;
+                                break;
+                            }
+                        }
+                        pending_model.joint_phrase_partition.push_back(
+                            match < model_candidate_pool.size() && model_candidate_joint_partition[match]);
+                        pending_model.candidate_confidence.push_back(match < model_candidate_pool.size()
+                            ? model_candidate_confidence[match] : 0);
+                        const bool sentence = match < model_candidate_pool.size() && model_candidate_generated_sentence[match];
+                        pending_model.generated_sentences.push_back(sentence);
+                        if (index < response.candidates.size() && sentence) ++pending_model.sentence_limit;
+                    }
                     pending_model.full_input_bytes = full_input_bytes;
                     pending_model.visible_count = response.candidates.size();
                     pending_model.contextual_preferences =
@@ -2291,10 +2597,27 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                 response.text = "commit_ack";
                 if (user_frequency != nullptr && user_learning_enabled &&
                     !decoded.message.text.empty()) {
-                    const auto feedback = full_pinyin_scheme
+                    auto feedback = full_pinyin_scheme
                         ? full_pinyin_schema.parse(decoded.message.input, 1, false)
                         : exact_code_schema.parse(decoded.message.input, 1);
-                    if (feedback.valid)
+                    const auto has_aligned_source = [&] {
+                        return feedback.valid && std::any_of(
+                            feedback.paths.begin(), feedback.paths.end(), [&](const auto& path) {
+                                return engine::user_word_matches_source_path(
+                                    feedback, path, decoded.message.text);
+                            });
+                    };
+                    bool aligned_source = has_aligned_source();
+                    // Most commits fit the first path. Only inspect alternate
+                    // segmentations on a mismatch (e.g. xian -> xi'an).
+                    if (full_pinyin_scheme && !aligned_source) {
+                        feedback = full_pinyin_schema.parse(decoded.message.input, 32, false);
+                        aligned_source = has_aligned_source();
+                    }
+                    // Keep global usage evidence for a selected completion,
+                    // but never promote its short typed prefix to an exact
+                    // user-word spelling. Code-based schemes remain unrestricted.
+                    if (aligned_source)
                         user_frequency->record(decoded.message.context,
                                                feedback.normalized_input,
                                                decoded.message.text);
@@ -2319,7 +2642,17 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
 
         corpus_collector.finish_idle(wall_clock_ms());
         flush_user_corpus(user_corpus_path, corpus_collector, corpus_retention_days, false);
-        const auto encoded = protocol::encode_message(response);
+        auto encoded = protocol::encode_message(response);
+        if (encoded.empty()) {
+            std::clog << R"({"process":"core_service","module":"ipc","level":"error","event_id":"response_encoding_failed","request_id":)"
+                      << response.request_id << "}\n";
+            protocol::Message error;
+            error.type = protocol::MessageType::error_response;
+            error.request_id = response.request_id;
+            error.context_generation = response.context_generation;
+            error.text = "invalid service response";
+            encoded = protocol::encode_message(error);
+        }
         if (!encoded.empty()) write_frame(pipe, encoded);
         FlushFileBuffers(pipe);
         }

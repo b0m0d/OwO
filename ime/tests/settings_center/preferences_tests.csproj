@@ -4,10 +4,17 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="PreferencesTests.cs"/>
+    <Compile Include="InstallerPayloadTests.cs"/>
+    <Compile Include="InstallerProcessRunnerTests.cs"/>
     <Compile Include="../../apps/settings_center/SettingsUiPreferences.cs" Link="SettingsUiPreferences.cs"/>
     <Compile Include="../../apps/settings_center/ConfigShellClient.cs" Link="ConfigShellClient.cs"/>
     <Compile Include="../../apps/settings_center/ToneFeedbackText.cs" Link="ToneFeedbackText.cs"/>
+    <Compile Include="../../apps/settings_center/SetupPrerequisites.cs" Link="SetupPrerequisites.cs"/>
+    <Compile Include="../../apps/settings_center/InstallerPayload.cs" Link="InstallerPayload.cs"/>
+    <Compile Include="../../apps/settings_center/InstallerProcessRunner.cs" Link="InstallerProcessRunner.cs"/>
   </ItemGroup>
 </Project>

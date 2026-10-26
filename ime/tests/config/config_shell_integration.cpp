@@ -114,14 +114,18 @@ int wmain(const int argc, wchar_t** argv) {
     sensitivity_input.close();
     if (sensitivity_bytes.find("user_learning_sensitivity=9\n") == std::string::npos)
         return 20;
-    PROCESS_INFORMATION navigation{};
-    if (!launch(executable + L" " + config +
-                L" set-all 4 true true 40 true Ctrl+Alt+C false Ctrl+Shift+Space true Enter 18 9"
+    const std::wstring navigation_arguments = L" set-all 4 true true 40 true Ctrl+Alt+C false Ctrl+Shift+Space true Enter 18 9"
                 L" true Ctrl+Shift+Left true Ctrl+Shift+Right true Ctrl+Shift+Up true Ctrl+Shift+Down"
                 L" false true false \"\" true 6 false false true"
                 L" true Shift+Left;Shift+Right;Shift+Up;Shift+Down false exact_code false 4 7"
-                L" true false \"\" true 90 false 6 简短、少用感叹号~ true false true",
-                navigation) || wait_and_close(navigation) != 0) return 21;
+                L" true false \"\" true 90 false 6 简短、少用感叹号~ true false true";
+    PROCESS_INFORMATION legacy_navigation{};
+    if (!launch(executable + L" " + config + navigation_arguments, legacy_navigation) ||
+        wait_and_close(legacy_navigation) != 0) return 33;
+    PROCESS_INFORMATION navigation{};
+    if (!launch(executable + L" " + config + navigation_arguments +
+                L" false true Ctrl+F7 false Ctrl+F8", navigation) ||
+        wait_and_close(navigation) != 0) return 21;
     std::ifstream navigation_input(path, std::ios::binary);
     const std::string navigation_bytes((std::istreambuf_iterator<char>(navigation_input)), {});
     navigation_input.close();
@@ -134,6 +138,14 @@ int wmain(const int argc, wchar_t** argv) {
         navigation_bytes.find("next_page_shortcut=Ctrl+Shift+Down\n") ==
             std::string::npos ||
         navigation_bytes.find("candidate_partition_enabled=false\n") ==
+            std::string::npos ||
+        navigation_bytes.find("candidate_single_character_first_enabled=false\n") ==
+            std::string::npos ||
+        navigation_bytes.find("expanded_previous_page_shortcut=Ctrl+F7\n") ==
+            std::string::npos ||
+        navigation_bytes.find("expanded_next_page_shortcut_enabled=false\n") ==
+            std::string::npos ||
+        navigation_bytes.find("expanded_next_page_shortcut=Ctrl+F8\n") ==
             std::string::npos ||
         navigation_bytes.find("chinese_punctuation_enabled=true\n") ==
             std::string::npos ||

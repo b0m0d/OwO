@@ -1,5 +1,8 @@
 #include "owo/config/config_monitor.h"
 #include "owo/config/config_store.h"
+#include "owo/ipc/named_pipe.h"
+#include "owo/protocol/messages.h"
+#include <Windows.h>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -100,6 +103,10 @@ bool apply(owo::config::AppConfig& config, const std::wstring_view field,
         return parse_shortcuts(value, config.previous_page_shortcuts);
     if (field == L"next_page_shortcut")
         return parse_shortcuts(value, config.next_page_shortcuts);
+    if (field == L"expanded_previous_page_shortcut")
+        return parse_shortcuts(value, config.expanded_previous_page_shortcuts);
+    if (field == L"expanded_next_page_shortcut")
+        return parse_shortcuts(value, config.expanded_next_page_shortcuts);
     if (field == L"text_navigation_shortcut")
         return parse_shortcuts(value, config.text_navigation_shortcuts);
     if (field == L"punctuation_shortcut")
@@ -126,6 +133,8 @@ bool apply(owo::config::AppConfig& config, const std::wstring_view field,
         config.punctuation_shortcut_enabled = parsed;
     else if (field == L"candidate_partition_enabled")
         config.candidate_partition_enabled = parsed;
+    else if (field == L"candidate_single_character_first_enabled")
+        config.candidate_single_character_first_enabled = parsed;
     else if (field == L"candidate_immediate_commit_enabled")
         config.candidate_immediate_commit_enabled = parsed;
     else if (field == L"focus_loss_commit_enabled")
@@ -149,6 +158,10 @@ bool apply(owo::config::AppConfig& config, const std::wstring_view field,
         config.previous_page_shortcut_enabled = parsed;
     else if (field == L"next_page_shortcut_enabled")
         config.next_page_shortcut_enabled = parsed;
+    else if (field == L"expanded_previous_page_shortcut_enabled")
+        config.expanded_previous_page_shortcut_enabled = parsed;
+    else if (field == L"expanded_next_page_shortcut_enabled")
+        config.expanded_next_page_shortcut_enabled = parsed;
     else if (field == L"text_navigation_shortcut_enabled")
         config.text_navigation_shortcut_enabled = parsed;
     else if (field == L"text_navigation_select_enabled")
@@ -187,13 +200,45 @@ void usage() {
                  "<corpus-retention-days> [<corpus-prediction-enabled> "
                  "[<style-scene-mask> <style-preferences> "
                  "[<tone-reply-enabled> <tone-continuation-enabled> "
-                 "<tone-cloud-model-enabled>]]]]]]]]]]]]] | "
+                 "<tone-cloud-model-enabled> [<single-character-first-enabled> "
+                 "<expanded-previous-enabled> <expanded-previous-key> "
+                 "<expanded-next-enabled> <expanded-next-key>]]]]]]]]]]]]]] | "
                  "watch <timeout-ms>\n";
 }
 
 }  // namespace
 
 int wmain(const int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--user-lexicon") {
+        std::string payload;
+        char c{};
+        while (std::cin.get(c)) {
+            if (payload.size() >= 512 * 1024) { std::cerr << "词库请求过大。\n"; return 2; }
+            payload += c;
+        }
+        owo::protocol::Message request;
+        request.type = owo::protocol::MessageType::user_lexicon_request;
+        request.request_id = GetTickCount64();
+        request.context_generation = (std::uint64_t{GetCurrentProcessId()} << 32) | 0x4c455831;
+        request.text = std::move(payload);
+        const auto encoded = owo::protocol::encode_message(request);
+        if (encoded.empty() || encoded.size() > owo::protocol::kMaximumPayloadBytes) {
+            std::cerr << "词库请求编码后过大，请拆分导入。\n"; return 2;
+        }
+        const auto reply = owo::ipc::exchange(owo::ipc::kCorePipeName,
+            encoded, std::chrono::seconds(10));
+        if (!reply.status) { std::cerr << "无法连接词库服务，请先启动最新版 OwO Core。\n"; return 4; }
+        const auto decoded = owo::protocol::decode_message(reply.response);
+        if (!decoded.validation || decoded.message.request_id != request.request_id ||
+            decoded.message.context_generation != request.context_generation) {
+            std::cerr << "词库响应无效或版本不匹配。\n"; return 4;
+        }
+        if (decoded.message.type != owo::protocol::MessageType::user_lexicon_response) {
+            std::cerr << decoded.message.text << '\n'; return 5;
+        }
+        std::cout << decoded.message.text;
+        return 0;
+    }
     if (argc < 3) {
         usage();
         return 2;
@@ -249,7 +294,7 @@ int wmain(const int argc, wchar_t** argv) {
         (argc == 7 || argc == 13 || argc == 14 || argc == 15 || argc == 23 ||
          argc == 24 || argc == 27 || argc == 30 || argc == 32 || argc == 35 ||
          argc == 36 || argc == 38 || argc == 39 || argc == 44 || argc == 45 ||
-         argc == 47 || argc == 50)) {
+         argc == 47 || argc == 50 || argc == 55)) {
         owo::config::ConfigStore store;
         const auto loaded = store.load(path);
         if (!loaded.success) return 3;
@@ -312,7 +357,13 @@ int wmain(const int argc, wchar_t** argv) {
             (argc >= 50 &&
              (!apply(value, L"tone_reply_enabled", argv[47]) ||
               !apply(value, L"tone_continuation_enabled", argv[48]) ||
-              !apply(value, L"tone_cloud_model_enabled", argv[49])))) {
+              !apply(value, L"tone_cloud_model_enabled", argv[49]))) ||
+            (argc >= 55 &&
+             (!apply(value, L"candidate_single_character_first_enabled", argv[50]) ||
+              !apply(value, L"expanded_previous_page_shortcut_enabled", argv[51]) ||
+              !apply(value, L"expanded_previous_page_shortcut", argv[52]) ||
+              !apply(value, L"expanded_next_page_shortcut_enabled", argv[53]) ||
+              !apply(value, L"expanded_next_page_shortcut", argv[54])))) {
             std::cerr << "invalid configuration value type\n";
             return 4;
         }

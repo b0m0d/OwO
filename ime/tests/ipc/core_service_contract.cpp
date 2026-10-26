@@ -8,6 +8,7 @@
 #include <atomic>
 #include <iostream>
 #include <filesystem>
+#include <set>
 #include <thread>
 
 namespace {
@@ -67,7 +68,7 @@ int main() {
     std::error_code ignored;
     std::filesystem::remove(user_path, ignored);
     std::filesystem::remove(user_path.wstring() + L".bak", ignored);
-    const auto written = owo::engine::write_binary_lexicon(path, {
+    std::vector<owo::engine::LexiconEntry> entries{
         {{"ni", "hao"}, "你好", 1000}, {{"ni", "hao"}, "你号", 50},
         {{"ce", "shi"}, "测试一", 1000}, {{"ce", "shi"}, "测试二", 900},
         {{"ce", "shi"}, "测试三", 800}, {{"ce", "shi"}, "测试四", 700},
@@ -77,6 +78,29 @@ int main() {
         {{"wo", "ai"}, "我爱", 1500}, {{"wo"}, "我", 1400},
         {{"ai"}, "爱", 1350}, {{"shi"}, "是", 1300},
         {{"ma"}, "吗", 1250},
+        {{"an"}, "按", 3000000}, {{"an", "you"}, "案由", 20000},
+        {{"xian", "du"}, "先读", 5000}, {{"xian", "du"}, "限度", 5000},
+        {{"you", "xian", "du"}, "有限度", 8000},
+        {{"an", "you", "xian"}, "按优先", 800},
+        {{"you", "xian", "du"}, "优先度", 100},
+        {{"du"}, "度", 2000000}, {{"du"}, "读", 1000000},
+        {{"rang"}, "让", 3000000}, {{"xue", "xi"}, "学习", 100000},
+        {{"ji", "lu"}, "记录", 100000}, {{"xue", "xi", "ji", "lu"}, "学习记录", 500},
+        {{"xue", "xi", "ji"}, "学习记", 20},
+        {{"ji"}, "记", 1000000}, {{"lu"}, "路", 1000000}, {{"lu"}, "录", 1000},
+        {{"chang"}, "长", 2000}, {{"chang"}, "常", 1900},
+        {{"shang"}, "上", 2000}, {{"zhong"}, "中", 2000},
+        {{"cheng"}, "成", 2000}, {{"jing"}, "京", 2000},
+        {{"ci"}, "此", 2000}, {{"cai"}, "才", 2000},
+        {{"cu"}, "粗", 2000}, {{"cuo"}, "错", 2000},
+        {{"cha", "na"}, "刹那", 900000},
+        {{"cha", "na", "ge"}, "刹那个", 800000},
+        {{"che", "na", "ge"}, "车那个", 700000},
+        {{"chi", "na", "ge"}, "吃那个", 600000},
+        {{"chu", "na", "ge"}, "出那个", 500000},
+        {{"chao", "nan", "gua"}, "炒南瓜", 400000},
+        {{"chao", "nian", "gao"}, "炒年糕", 300000},
+        {{"cha", "nei", "gui"}, "查内鬼", 200000},
         {{"wei", "shen", "me"}, "为什么", 9000},
         {{"wan", "shen", "me"}, "玩什么", 3000},
         {{"jun", "jiang"}, "均将", 5000},
@@ -84,6 +108,14 @@ int main() {
         {{"he"}, "和", 5000}, {{"he"}, "合", 4000},
         {{"he"}, "盒", 3900}, {{"he"}, "喝", 3800},
         {{"gong", "neng"}, "功能", 1700},
+        {{"gong", "neng", "kai", "guan"}, "功能开关", 5000},
+        {{"kai", "guan"}, "开馆", 1000000},
+        {{"kai", "gan"}, "开干", 1000000},
+        {{"kai", "gua"}, "开挂", 1000000},
+        {{"hai", "chan"}, "海产", 1000000},
+        {{"hai", "cha"}, "还差", 500000},
+        {{"na", "xie"}, "哪些", 500000},
+        {{"hai"}, "还", 1000000}, {{"a"}, "啊", 1000000}, {{"xie"}, "些", 1000000},
         {{"shi", "jie"}, "世界", 1600},
         {{"liang"}, "两", 1800}, {{"liang"}, "亮", 1700},
         {{"liang"}, "量", 1600}, {{"liang"}, "梁", 1500},
@@ -96,7 +128,18 @@ int main() {
         {{"ga", "da"}, "aa", 2000}, {{"ge", "de"}, "bb", 1900},
         {{"gou", "dong"}, "cc", 1800}, {{"gu", "dian"}, "dd", 1700},
         {{"gang", "du"}, "ee", 1600}, {{"gong", "di"}, "ff", 1500},
-        {{"gui", "dao"}, "gg", 1400}});
+        {{"gui", "dao"}, "gg", 1400}};
+    // More repaired characters than the ordinary generation budget: merely
+    // removing the old early-exit still starves the raw segmentation here.
+    for (std::uint32_t index = 0; index < 80; ++index) {
+        const auto point = 0x9fa0u + index;
+        std::string text;
+        text.push_back(static_cast<char>(0xe0 | (point >> 12)));
+        text.push_back(static_cast<char>(0x80 | ((point >> 6) & 0x3f)));
+        text.push_back(static_cast<char>(0x80 | (point & 0x3f)));
+        entries.push_back({{"chang"}, std::move(text), 500 - index});
+    }
+    const auto written = owo::engine::write_binary_lexicon(path, entries);
     owo::engine::BinaryLexicon lexicon;
     const auto loaded = lexicon.load(path);
     owo::engine::UserFrequencyStore user_frequency;
@@ -128,6 +171,189 @@ int main() {
                                        102, 8, "nihao"}),
         std::chrono::seconds(2)).response);
     persistent.reset();
+    bool dictionary_bridge_ok = true;
+    std::uint64_t bridge_request_id = 600;
+    for (const bool correction : {false, true}) {
+        owo::protocol::Message request{owo::protocol::MessageType::candidate_request,
+            ++bridge_request_id, 600, "anyouxiandu"};
+        request.correction_enabled = correction;
+        const auto result = send_request(pipe_name, request);
+        const auto prefix = std::find(result.message.candidates.begin(), result.message.candidates.end(), "按优先");
+        const auto prefix_index = static_cast<std::size_t>(prefix - result.message.candidates.begin());
+        dictionary_bridge_ok = dictionary_bridge_ok && result.validation &&
+            !result.message.candidates.empty() && result.message.candidates.front() == "按优先度" &&
+            result.message.syllables == std::vector<std::string>{"an", "you", "xian", "du"} &&
+            !result.message.candidate_consumed.empty() && result.message.candidate_consumed.front() == 11 &&
+            prefix_index < result.message.candidate_consumed.size() &&
+            result.message.candidate_consumed[prefix_index] == 9 &&
+            std::find(result.message.candidates.begin(), result.message.candidates.end(), "按") != result.message.candidates.end();
+        request.request_id = ++bridge_request_id;
+        request.text = "an'you'xian'du";
+        const auto separated = send_request(pipe_name, request);
+        dictionary_bridge_ok = dictionary_bridge_ok && separated.validation &&
+            !separated.message.candidates.empty() && separated.message.candidates.front() == "按优先度" &&
+            separated.message.syllables == std::vector<std::string>{"an", "you", "xian", "du"};
+    }
+    owo::protocol::Message bridge_feedback{owo::protocol::MessageType::candidate_committed,
+        650, 650, "案由先读"};
+    bridge_feedback.input = "anyouxiandu";
+    const auto bridge_ack = send_request(pipe_name, bridge_feedback);
+    const auto personalized_bridge = send_request(pipe_name,
+        {owo::protocol::MessageType::candidate_request, 651, 650, "anyouxiandu"});
+    const auto bridged_text = std::find(personalized_bridge.message.candidates.begin(),
+        personalized_bridge.message.candidates.end(), "按优先度");
+    const auto bridged_index = static_cast<std::size_t>(bridged_text - personalized_bridge.message.candidates.begin());
+    dictionary_bridge_ok = dictionary_bridge_ok && bridge_ack.validation && personalized_bridge.validation &&
+        !personalized_bridge.message.candidates.empty() &&
+        personalized_bridge.message.candidates.front() == "案由先读" &&
+        bridged_index < personalized_bridge.message.candidate_groups.size() &&
+        personalized_bridge.message.candidate_groups[bridged_index] == 0 &&
+        std::find(personalized_bridge.message.candidates.begin(), personalized_bridge.message.candidates.end(),
+            "案由先读") != personalized_bridge.message.candidates.end();
+    // Equal-length words and sentences now share the release joint partition.
+    // Explicit learning wins inside that band; lexical alternatives stay visible.
+    bool repeated_bridge_learning_ok = true;
+    for (std::uint64_t index = 0; index < 8; ++index) {
+        bridge_feedback.request_id = 660 + index;
+        const auto ack = send_request(pipe_name, bridge_feedback);
+        repeated_bridge_learning_ok = repeated_bridge_learning_ok && ack.validation;
+    }
+    owo::protocol::Message learned_request{owo::protocol::MessageType::candidate_request,
+        670, 650, "anyouxiandu"};
+    const auto repeatedly_learned_bridge = send_request(pipe_name, learned_request);
+    learned_request.request_id = 671;
+    learned_request.expanded = true;
+    const auto expanded_learned_bridge = send_request(pipe_name, learned_request);
+    for (const auto* result : {&repeatedly_learned_bridge, &expanded_learned_bridge}) {
+        const auto& value = result->message;
+        const auto evidence = std::find(value.candidates.begin(), value.candidates.end(), "按优先度");
+        const auto evidence_index = static_cast<std::size_t>(evidence - value.candidates.begin());
+        dictionary_bridge_ok = dictionary_bridge_ok && repeated_bridge_learning_ok && result->validation &&
+            !value.candidates.empty() && value.candidates.front() == "案由先读" &&
+            !value.candidate_groups.empty() && value.candidate_groups.front() == 0 &&
+            evidence_index < value.candidate_groups.size() && value.candidate_groups[evidence_index] == 0;
+    }
+    bool long_suffix_ok = true;
+    std::uint64_t suffix_request_id = 700;
+    for (const bool correction : {false, true}) {
+        owo::protocol::Message request{owo::protocol::MessageType::candidate_request,
+            ++suffix_request_id, 700, "rangxuexijilu"};
+        request.correction_enabled = correction;
+        const auto result = send_request(pipe_name, request);
+        const auto head = std::find(result.message.candidates.begin(), result.message.candidates.end(), "让");
+        const auto head_index = static_cast<std::size_t>(head - result.message.candidates.begin());
+        const bool valid = result.validation && !result.message.candidates.empty() &&
+            result.message.candidates.front() == "让学习记录" &&
+            result.message.syllables == std::vector<std::string>{"rang", "xue", "xi", "ji", "lu"} &&
+            !result.message.candidate_consumed.empty() && result.message.candidate_consumed.front() == 13 &&
+            head_index < result.message.candidate_consumed.size() && result.message.candidate_consumed[head_index] == 4;
+        if (!valid) std::cerr << "initial long suffix: " << owo::protocol::encode_message(result.message) << '\n';
+        long_suffix_ok &= valid;
+    }
+    owo::protocol::Message suffix_feedback{owo::protocol::MessageType::candidate_committed,
+        ++suffix_request_id, 700, "让学习记路"};
+    suffix_feedback.input = "rangxuexijilu";
+    const auto suffix_ack = send_request(pipe_name, suffix_feedback);
+    for (const bool expanded : {false, true}) {
+        owo::protocol::Message request{owo::protocol::MessageType::candidate_request,
+            ++suffix_request_id, 700, "rangxuexijilu"};
+        request.expanded = expanded;
+        const auto result = send_request(pipe_name, request);
+        const bool valid = suffix_ack.validation && result.validation &&
+            !result.message.candidates.empty() && result.message.candidates.front() == "让学习记路" &&
+            std::find(result.message.candidates.begin(), result.message.candidates.end(), "让学习记录") != result.message.candidates.end();
+        if (!valid) std::cerr << "learned long suffix: " << owo::protocol::encode_message(result.message) << '\n';
+        long_suffix_ok &= valid;
+    }
+    const auto suffix_remainder = send_request(pipe_name,
+        {owo::protocol::MessageType::candidate_request, ++suffix_request_id, 700, "xuexijilu"});
+    long_suffix_ok = long_suffix_ok && suffix_remainder.validation &&
+        std::find(suffix_remainder.message.candidates.begin(), suffix_remainder.message.candidates.end(), "学习记录") != suffix_remainder.message.candidates.end();
+    bool transposition_contract_ok = true;
+    std::uint64_t transposition_id = 400;
+    for (const auto& [input, expected] : {
+             std::pair{"chnag", "长"}, {"shnag", "上"},
+             {"zhogn", "中"}, {"chneg", "成"}, {"jnig", "京"}}) {
+        owo::protocol::Message request{
+            owo::protocol::MessageType::candidate_request,
+            ++transposition_id, 400, input};
+        request.defer_expensive_candidates = true;
+        const auto base = send_request(pipe_name, request);
+        request.defer_expensive_candidates = false;
+        const auto complete = send_request(pipe_name, request);
+        if (!complete.validation || complete.message.candidates.empty() ||
+            complete.message.candidates.front() != expected) {
+            std::cerr << "repair " << input << " candidates:";
+            for (const auto& text : complete.message.candidates) std::cerr << '[' << text << ']';
+            std::cerr << '\n';
+        }
+        transposition_contract_ok = transposition_contract_ok && base.validation &&
+            complete.validation && !complete.message.candidates.empty() &&
+            complete.message.candidates.front() == expected &&
+            complete.message.syllables == std::vector<std::string>{input} &&
+            !complete.message.candidate_refinement_pending &&
+            !complete.message.candidate_consumed.empty() &&
+            complete.message.candidate_consumed.front() == std::string_view(input).size();
+        request.request_id = ++transposition_id;
+        request.correction_enabled = false;
+        const auto strict = send_request(pipe_name, request);
+        bool strict_repair = false;
+        for (std::size_t index = 0; index < strict.message.candidates.size(); ++index)
+            if (strict.message.candidates[index] == expected &&
+                index < strict.message.candidate_consumed.size() &&
+                strict.message.candidate_consumed[index] == std::string_view(input).size())
+                strict_repair = true;
+        transposition_contract_ok = transposition_contract_ok && strict.validation &&
+            !strict_repair;
+        if (std::string_view(input) == "chnag") {
+            // Both sources survive even when the repaired characters alone
+            // can fill an ordinary pool. Retain original partial-consumption
+            // metadata rather than relabeling abbreviation text as corrected.
+            transposition_contract_ok = transposition_contract_ok &&
+                base.message.candidate_refinement_pending &&
+                strict.message.candidates.size() == 7;
+            request.request_id = ++transposition_id;
+            request.correction_enabled = true;
+            request.expanded = true;
+            const auto expanded_repair = send_request(pipe_name, request);
+            bool retained_original_full = false;
+            bool retained_original_prefix = false;
+            std::set<std::pair<std::string, std::uint64_t>> identities;
+            for (std::size_t index = 0; index < expanded_repair.message.candidates.size(); ++index) {
+                if (index >= expanded_repair.message.candidate_consumed.size()) {
+                    transposition_contract_ok = false;
+                    break;
+                }
+                const auto& text = expanded_repair.message.candidates[index];
+                const auto consumed = expanded_repair.message.candidate_consumed[index];
+                retained_original_full |= (text == "出那个" && consumed == 5);
+                retained_original_prefix |= (text == "刹那" && consumed == 4);
+                transposition_contract_ok &= identities.emplace(text, consumed).second;
+            }
+            std::vector<std::string> paged;
+            std::vector<std::uint64_t> consumed, groups;
+            for (std::uint64_t page = 0; page < 40; ++page) {
+                request.request_id = ++transposition_id;
+                request.expanded = false;
+                request.page = page;
+                const auto row = send_request(pipe_name, request);
+                transposition_contract_ok &= static_cast<bool>(row.validation);
+                paged.insert(paged.end(), row.message.candidates.begin(), row.message.candidates.end());
+                consumed.insert(consumed.end(), row.message.candidate_consumed.begin(), row.message.candidate_consumed.end());
+                groups.insert(groups.end(), row.message.candidate_groups.begin(), row.message.candidate_groups.end());
+                if (!row.message.has_more) break;
+            }
+            transposition_contract_ok = transposition_contract_ok &&
+                expanded_repair.validation && !expanded_repair.message.candidates.empty() &&
+                expanded_repair.message.candidates.front() == expected &&
+                retained_original_full && retained_original_prefix &&
+                std::any_of(complete.message.candidates.begin(), complete.message.candidates.end(),
+                    [](const auto& text) { return text == "出那个" || text == "刹那"; }) &&
+                paged == expanded_repair.message.candidates &&
+                consumed == expanded_repair.message.candidate_consumed &&
+                groups == expanded_repair.message.candidate_groups;
+        }
+    }
     auto invalid_payload = owo::protocol::encode_message(
         {owo::protocol::MessageType::candidate_request, 120, 12, "nihao"});
     const auto page_size_offset = invalid_payload.find("\"page_size\":0");
@@ -163,6 +389,46 @@ int main() {
         corrected_second_syllable.message.candidates.front() == "功能" &&
         corrected_second_syllable.message.syllables ==
             std::vector<std::string>{"gong", "nneg"};
+    owo::protocol::Message local_correction_request{
+        owo::protocol::MessageType::candidate_request, 194, 8, "gongnnegkaiguan"};
+    local_correction_request.defer_expensive_candidates = true;
+    const auto local_base = send_request(pipe_name, local_correction_request);
+    local_correction_request.defer_expensive_candidates = false;
+    const auto local_corrected = send_request(pipe_name, local_correction_request);
+    local_correction_request.correction_enabled = false;
+    const auto local_strict = send_request(pipe_name, local_correction_request);
+    const bool local_correction_ok = local_base.validation &&
+        local_base.message.candidate_refinement_pending &&
+        local_corrected.validation && !local_corrected.message.candidate_refinement_pending &&
+        !local_corrected.message.candidates.empty() &&
+        local_corrected.message.candidates.front() == "功能开关" &&
+        local_corrected.message.syllables == std::vector<std::string>{"gong", "nneg", "kai", "guan"} &&
+        !local_corrected.message.candidate_consumed.empty() &&
+        local_corrected.message.candidate_consumed.front() == 15 &&
+        local_strict.validation && !local_strict.message.correction_enabled &&
+        std::find(local_strict.message.candidates.begin(), local_strict.message.candidates.end(),
+                  "功能开关") == local_strict.message.candidates.end();
+    const auto ambiguous_short = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 190, 8, "haichanaxie"});
+    owo::protocol::Message explicit_boundary_request{owo::protocol::MessageType::candidate_request, 191, 8, "hai'chan'a'xie"};
+    explicit_boundary_request.correction_enabled = false;
+    const auto explicit_boundary = send_request(pipe_name, explicit_boundary_request);
+    owo::protocol::Message strict_boundary_request{owo::protocol::MessageType::candidate_request, 192, 8, "haichanaxie"};
+    strict_boundary_request.correction_enabled = false;
+    const auto strict_boundary = send_request(pipe_name, strict_boundary_request);
+    const auto remaining_boundary = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 193, 8, "naxie"});
+    const auto short_head = std::find(ambiguous_short.message.candidates.begin(), ambiguous_short.message.candidates.end(), "还差");
+    const bool ambiguous_short_ok = ambiguous_short.validation &&
+        !ambiguous_short.message.candidates.empty() && ambiguous_short.message.candidates.front() == "还差哪些" &&
+        ambiguous_short.message.syllables == std::vector<std::string>{"hai", "cha", "na", "xie"} &&
+        ambiguous_short.message.candidate_consumed.front() == 11 &&
+        explicit_boundary.validation && explicit_boundary.message.syllables == std::vector<std::string>{"hai", "chan", "a", "xie"} &&
+        strict_boundary.validation && strict_boundary.message.syllables == std::vector<std::string>{"hai", "cha", "na", "xie"} &&
+        !strict_boundary.message.candidates.empty() && strict_boundary.message.candidates.front() == "还差哪些" &&
+        short_head != ambiguous_short.message.candidates.end() &&
+        ambiguous_short.message.candidate_consumed[static_cast<std::size_t>(short_head - ambiguous_short.message.candidates.begin())] == 6 &&
+        remaining_boundary.validation && !remaining_boundary.message.candidates.empty() && remaining_boundary.message.candidates.front() == "哪些";
     const auto stable_xingb = send_request(
         pipe_name, {owo::protocol::MessageType::candidate_request, 112, 8, "xingb"});
     const auto stable_xingbaf = send_request(
@@ -332,13 +598,63 @@ int main() {
         std::find(glossary_request.message.candidates.begin(),
                   glossary_request.message.candidates.end(), "项目术语") !=
             glossary_request.message.candidates.end();
+    owo::protocol::Message full_phrase_commit{
+        owo::protocol::MessageType::candidate_committed, 224, 8, "修复该问题"};
+    full_phrase_commit.input = "xiufugaiwenti";
+    const auto full_phrase_ack = send_request(pipe_name, full_phrase_commit);
+    auto completion_commit = full_phrase_commit;
+    completion_commit.request_id = 225;
+    completion_commit.input = "xiufu";
+    completion_commit.context = "请";
+    const auto completion_ack = send_request(pipe_name, completion_commit);
+    const auto short_phrase_candidates = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 226, 8, "xiufu"});
+    const auto full_phrase_candidates = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 227, 8, "xiufugaiwenti"});
+    const auto near_phrase_candidates = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 228, 8, "xiufugaiwent"});
+    auto ambiguous_word_commit = full_phrase_commit;
+    ambiguous_word_commit.request_id = 229;
+    ambiguous_word_commit.input = "xian";
+    ambiguous_word_commit.text = "西安";
+    const auto ambiguous_word_ack = send_request(pipe_name, ambiguous_word_commit);
     const auto shutdown = send_request(pipe_name, {owo::protocol::MessageType::shutdown_request, 103, 9, {}});
     server.join();
+    if (!long_suffix_ok) {
+        std::cerr << "long suffix/local bridge Core contract failed\n";
+        return 9;
+    }
+    if (!dictionary_bridge_ok) {
+        std::cerr << "dictionary-bridge Core preview/prefix contract failed\n";
+        return 8;
+    }
+    if (!transposition_contract_ok) {
+        std::cerr << "single-syllable transposition Core contract failed\n";
+        return 7;
+    }
     std::filesystem::remove(path, ignored);
     owo::engine::UserFrequencyStore persisted;
     const auto persisted_result = persisted.load(user_path);
+    const auto has_phrase = [](const auto& response) {
+        return response.validation && std::find(response.message.candidates.begin(),
+            response.message.candidates.end(), "修复该问题") != response.message.candidates.end();
+    };
+    const bool completion_learning_ok = full_phrase_ack.validation && completion_ack.validation &&
+        full_phrase_ack.message.type == owo::protocol::MessageType::acknowledgement &&
+        completion_ack.message.type == owo::protocol::MessageType::acknowledgement &&
+        short_phrase_candidates.validation && !has_phrase(short_phrase_candidates) &&
+        has_phrase(full_phrase_candidates) && has_phrase(near_phrase_candidates) &&
+        persisted_result.success && persisted.count("修复该问题") == 2 &&
+        persisted.contextual_count("xiufugaiwenti", "修复该问题") == 1 &&
+        persisted.contextual_count("xiufu", "修复该问题") == 0 &&
+        persisted.language_context_score("请", "xiufu", "修复该问题") == 0 &&
+        ambiguous_word_ack.validation && persisted.contextual_count("xian", "西安") == 1;
     std::filesystem::remove(user_path, ignored);
     std::filesystem::remove(user_path.wstring() + L".bak", ignored);
+    if (!completion_learning_ok) {
+        std::cerr << "completion feedback polluted exact user-word learning\n";
+        return 5;
+    }
     if (!invalid_request_identity_ok) {
         std::cerr << "invalid request response did not preserve request identity\n";
         return 4;
@@ -347,13 +663,17 @@ int main() {
         std::cerr << "second-syllable correction contract failed\n";
         return 5;
     }
+    if (!local_correction_ok) {
+        std::cerr << "local correction refinement, preview or disabled-mode contract failed\n";
+        return 5;
+    }
     const bool abbreviation_partition_order_ok =
         abbreviation_partition_order.validation &&
         !abbreviation_partition_order.message.candidates.empty() &&
         abbreviation_partition_order.message.candidate_groups.size() ==
             abbreviation_partition_order.message.candidates.size() &&
         abbreviation_partition_order.message.candidates.front() == "为什么" &&
-        abbreviation_partition_order.message.candidate_groups.front() == 1 &&
+        abbreviation_partition_order.message.candidate_groups.front() == 0 &&
         std::find(abbreviation_partition_order.message.candidate_groups.begin(),
                   abbreviation_partition_order.message.candidate_groups.end(), 0) !=
             abbreviation_partition_order.message.candidate_groups.end() &&
@@ -434,7 +754,7 @@ int main() {
         deferred_correction_complete.message.candidates !=
             std::vector<std::string>{"你好", "你号"} ||
         !valid_response(corrected, 110, 8, {"你好", "你号"}, {"ni", "aho"}) ||
-        !stable_xingb.validation ||
+        !ambiguous_short_ok || !stable_xingb.validation ||
         stable_xingb.message.syllables != std::vector<std::string>{"xing", "b"} ||
         !stable_xingbaf.validation ||
         stable_xingbaf.message.syllables !=
@@ -579,10 +899,10 @@ int main() {
         duration_request.message.candidate_consumed !=
             std::vector<std::uint64_t>{5, 5} ||
         !latin_intent_request.validation ||
-        latin_intent_request.message.candidates !=
-            std::vector<std::string>{"API"} ||
-        latin_intent_request.message.candidate_consumed !=
-            std::vector<std::uint64_t>{3} ||
+        latin_intent_request.message.candidates.empty() ||
+        latin_intent_request.message.candidates.front() != "API" ||
+        latin_intent_request.message.candidate_consumed.empty() ||
+        latin_intent_request.message.candidate_consumed.front() != 3 ||
         !date_range_request.validation ||
         date_range_request.message.candidates !=
             std::vector<std::string>{"2026年10月19日 至 2026年10月25日",
