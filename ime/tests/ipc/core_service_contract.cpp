@@ -18,27 +18,24 @@ std::wstring contract_pipe_name() {
     return LR"(\\.\pipe\OwO.InputMethod.ContractTest.)" + std::to_wstring(unique_suffix);
 }
 
-owo::protocol::DecodeResult send_request(const std::wstring& pipe_name,
-                                         const owo::protocol::Message& request) {
-    for (int attempt = 0; attempt < 100; ++attempt) {
-        const auto result = owo::ipc::exchange(pipe_name.c_str(),
-                                               owo::protocol::encode_message(request),
-                                               std::chrono::milliseconds(100));
-        if (result.status) return owo::protocol::decode_message(result.response);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return {};
-}
-
 owo::protocol::DecodeResult send_payload(const std::wstring& pipe_name,
                                          const std::string& payload) {
-    for (int attempt = 0; attempt < 100; ++attempt) {
-        const auto result = owo::ipc::exchange(pipe_name.c_str(), payload,
-                                               std::chrono::milliseconds(100));
-        if (result.status) return owo::protocol::decode_message(result.response);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // exchange already waits for server startup. A 100 ms polling exchange
+    // closes the pipe during Debug typo recovery, cancelling useful work on
+    // every retry. Send once and wait for the response; latency/cancellation
+    // bounds are tested separately by candidate_abandonment_contract.
+    const auto result = owo::ipc::exchange(pipe_name.c_str(), payload,
+                                           std::chrono::seconds(5));
+    if (!result.status) {
+        std::cerr << "Core contract exchange failed: " << result.status.message << '\n';
+        return {{}, result.status};
     }
-    return {};
+    return owo::protocol::decode_message(result.response);
+}
+
+owo::protocol::DecodeResult send_request(const std::wstring& pipe_name,
+                                         const owo::protocol::Message& request) {
+    return send_payload(pipe_name, owo::protocol::encode_message(request));
 }
 
 bool valid_response(const owo::protocol::DecodeResult& response,

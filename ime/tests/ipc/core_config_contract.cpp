@@ -14,14 +14,20 @@
 
 namespace {
 
-owo::protocol::DecodeResult send(const std::wstring& pipe, const owo::protocol::Message& message) {
-    for (int attempt = 0; attempt < 100; ++attempt) {
-        const auto exchanged = owo::ipc::exchange(
-            pipe.c_str(), owo::protocol::encode_message(message), std::chrono::milliseconds(100));
-        if (exchanged.status) return owo::protocol::decode_message(exchanged.response);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+owo::protocol::DecodeResult send_payload(const std::wstring& pipe, const std::string& payload) {
+    // exchange handles startup waiting itself. Keep the request alive through
+    // Debug correction work instead of cancelling and replaying it every 100 ms.
+    const auto exchanged = owo::ipc::exchange(
+        pipe.c_str(), payload, std::chrono::seconds(5));
+    if (!exchanged.status) {
+        std::cerr << "Config contract exchange failed: " << exchanged.status.message << '\n';
+        return {{}, exchanged.status};
     }
-    return {};
+    return owo::protocol::decode_message(exchanged.response);
+}
+
+owo::protocol::DecodeResult send(const std::wstring& pipe, const owo::protocol::Message& message) {
+    return send_payload(pipe, owo::protocol::encode_message(message));
 }
 
 bool acknowledged(const owo::protocol::DecodeResult& result, std::string_view text) {
@@ -358,7 +364,18 @@ int wmain(int argc, wchar_t** argv) {
     const auto corpus_disallowed = send(pipe, disallowed);
     auto sensitive = corpus_entry(44, "密码框里的话不该记住。");
     sensitive.application_sensitive_input = true;
-    const auto corpus_sensitive = send(pipe, sensitive);
+    const bool sensitive_encoder_rejected = owo::protocol::encode_message(sensitive).empty();
+    // The normal encoder rejects this combination. Send a modified valid wire
+    // message to exercise Core's decoder too, rather than mistaking a local
+    // transport failure/default DecodeResult for a server error response.
+    sensitive.application_sensitive_input = false;
+    auto sensitive_payload = owo::protocol::encode_message(sensitive);
+    const std::string sensitive_field = "\"application_sensitive_input\":false";
+    const auto sensitive_offset = sensitive_payload.find(sensitive_field);
+    if (sensitive_offset != std::string::npos)
+        sensitive_payload.replace(sensitive_offset, sensitive_field.size(),
+                                  "\"application_sensitive_input\":true");
+    const auto corpus_sensitive = send_payload(pipe, sensitive_payload);
     auto ineligible = corpus_entry(45, "Agent 回写的内容不该记住。");
     ineligible.corpus_eligible = false;
     const auto corpus_ineligible = send(pipe, ineligible);
@@ -462,7 +479,9 @@ int wmain(int argc, wchar_t** argv) {
                     acknowledged(corpus_disallowed, "agent_context_ack") &&
                     // A sensitive context entry is refused by validation and can
                     // never carry corpus eligibility.
-                    corpus_sensitive.validation &&
+                    sensitive_encoder_rejected && sensitive_offset != std::string::npos &&
+                    corpus_sensitive.validation && corpus_sensitive.message.request_id == 44 &&
+                    corpus_sensitive.message.context_generation == 1 &&
                     corpus_sensitive.message.type ==
                         owo::protocol::MessageType::error_response &&
                     acknowledged(corpus_ineligible, "agent_context_ack") &&
