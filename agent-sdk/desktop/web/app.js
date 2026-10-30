@@ -3934,7 +3934,14 @@ function applyTheme(theme) {
   }
   localStorage.setItem("owo.theme", dark ? "dark" : "light");
 }
-applyTheme(localStorage.getItem("owo.theme") || "light");
+// 新版工作台以深色为主。旧版本每次启动都会写入浅色偏好，因此一次性迁移到深色，
+// 之后仍完整尊重用户主动切换的主题。
+if (localStorage.getItem("owo.theme-version") !== "2") {
+  localStorage.setItem("owo.theme-version", "2");
+  applyTheme("dark");
+} else {
+  applyTheme(localStorage.getItem("owo.theme") || "dark");
+}
 $("themeToggle").addEventListener("click", () => {
   applyTheme(document.body.classList.contains("dark-theme") ? "light" : "dark");
 });
@@ -4762,7 +4769,7 @@ function syncProjectChip() {
   const emptyDescription = $("emptyStateDescription");
   if (emptyDescription) emptyDescription.textContent = needsWorkspace
     ? "新任务需要一个工作目录。选择已有文件夹，或创建一个新项目文件夹。"
-    : (isChat ? "提问、解释、查资料 · 不会读写本机文件" : "直接描述目标，或先定义范围与执行方式。已有结果可在产物与证据中查看。");
+    : (isChat ? "提问、解释、查资料 · 不会读写本机文件" : "描述目标，OwO 会拆解任务、执行操作并保留完整记录。");
   const emptyWorkspaceButton = $("emptyStateWorkspaceBtn");
   if (emptyWorkspaceButton) emptyWorkspaceButton.hidden = !needsWorkspace;
 }

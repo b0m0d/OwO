@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="team-delivery.css">
   <link rel="stylesheet" href="interface-final.css?v=20261030-2">
 </head>
-<body>
+<body class="dark-theme">
   <main id="setupRoot" class="setup-root" hidden aria-label="首次配置"></main>
   <!-- 全局菜单栏（仿 Codex 桌面：文件/编辑/视图/帮助 + 连接状态 + 主题） -->
   <div id="menubar">
@@ -27,7 +27,6 @@
       </nav>
     </div>
     <div class="menubar-side menubar-right">
-      <button id="taskStatusPill" class="task-status-pill" type="button" aria-label="查看当前任务状态"><span class="task-status-dot" aria-hidden="true"></span><span id="taskStatusText">空闲</span></button>
       <details id="connectionDetails" class="connection-details">
         <summary aria-label="连接与设置"><span class="connection-dot" aria-hidden="true"></span><span class="connection-gear" aria-hidden="true">⚙</span><span id="connectionLabel" class="sr-only">连接与设置</span></summary>
         <div class="connection-popover"><div class="connection-popover-head"><strong>工作环境</strong><span id="menubarHealth" class="pill">连接中…</span></div>
@@ -56,7 +55,10 @@
     <!-- Codex 侧栏：顶部图标行 / 新对话 / 导航 / 会话列表 / 底部用户卡 -->
     <div class="codex-sidebar">
       <div class="codex-sidebar-top">
-
+        <div class="sidebar-product" aria-label="OwO Agent">
+          <span class="sidebar-product-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="7" fill="currentColor"/><circle cx="8.2" cy="10.6" r="2.6" fill="none" stroke="#fff" stroke-width="1.7"/><circle cx="15.8" cy="10.6" r="2.6" fill="none" stroke="#fff" stroke-width="1.7"/><path d="M9.6 16.2c.8.8 1.5.8 2.4 0 .9.8 1.6.8 2.4 0" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span class="sidebar-product-name"><strong>OwO</strong><span>AGENT</span></span>
+        </div>
         <span class="codex-sidebar-spacer"></span>
         <button type="button" id="sidebarCollapseBtn" class="codex-icon-btn" title="隐藏会话栏（Ctrl+B）" aria-label="隐藏会话栏（Ctrl+B）"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5h14M3 10h14M3 15.5h14"/><path d="M6.5 4.5v11"/></svg></button>
         <button id="sidebarToolsBtn" class="codex-icon-btn" type="button" title="工具与设置" aria-label="工具与设置" hidden>
@@ -68,7 +70,8 @@
         <span class="codex-workspace-meta"><strong id="sidebarWorkspaceTitle">连接工作区</strong><span id="sidebarWorkspaceName" hidden>未选择项目</span></span>
         <svg class="codex-workspace-chevron" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m4.5 6.2 3.5 3.5 3.5-3.5"/></svg>
       </button>
-      <button type="button" data-workbench-panel="project-launcher" class="primary workbench-create-task"><svg class="nav-icon" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg><span>新任务</span></button>
+      <button type="button" data-workbench-panel="project-launcher" class="primary workbench-create-task"><svg class="nav-icon" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg><span>新建任务</span></button>
+      <div class="sidebar-section-label">工作空间</div>
       <nav class="workbench-shortcuts" aria-label="主要工作入口">
         <button type="button" data-workbench-panel="home"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round" aria-hidden="true"><rect x="2.3" y="2.3" width="4.7" height="5.6" rx="1.3"/><rect x="9" y="2.3" width="4.7" height="3.4" rx="1.3"/><rect x="9" y="7.8" width="4.7" height="5.9" rx="1.3"/><rect x="2.3" y="10" width="4.7" height="3.7" rx="1.3"/></svg><span>工作台</span></button>
         <button type="button" data-workbench-panel="project-history"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8a5.4 5.4 0 1 0 1.6-3.8"/><path d="M2.4 2.6v2.6H5"/><path d="M8 5.2V8l2 1.3"/></svg><span>任务记录</span></button>
@@ -883,9 +886,12 @@
         <button type="button" role="tab" data-mode-switch="chat" aria-selected="true">对话</button>
         <button type="button" role="tab" data-mode-switch="agent" aria-selected="false">工作区</button>
       </div>
-      <button id="inspectorToggle" class="codex-inspector-toggle" type="button" title="查看执行步骤、文件变化与结果来源" aria-label="打开运行详情" aria-expanded="false" aria-controls="right">
-        运行详情 <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="1.6"/><path d="M9.6 2.8v10.4"/></svg>
-      </button>
+      <div class="workspace-page-actions">
+        <button id="taskStatusPill" class="task-status-pill" type="button" aria-label="查看当前任务状态"><span class="task-status-dot" aria-hidden="true"></span><span class="task-status-owner">Agent</span><span class="task-status-separator" aria-hidden="true"></span><span id="taskStatusText">空闲</span></button>
+        <button id="inspectorToggle" class="codex-inspector-toggle" type="button" title="查看执行步骤、文件变化与结果来源" aria-label="打开运行详情" aria-expanded="false" aria-controls="right">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="1.6"/><path d="M9.6 2.8v10.4"/></svg><span>运行详情</span>
+        </button>
+      </div>
     </div>
     <div id="serviceBanner" class="hidden" role="status" aria-live="polite">
       <span class="service-dot" aria-hidden="true"></span>
@@ -900,8 +906,9 @@
         <div class="codex-empty-logo" aria-hidden="true">
           <span class="agent-orb"><svg viewBox="0 0 24 24" width="40" height="40"><defs><linearGradient id="owoOrbGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#34a37f"/><stop offset="1" stop-color="#1d6a73"/></linearGradient></defs><rect width="24" height="24" rx="7" fill="url(#owoOrbGrad)"/><circle cx="8.2" cy="10.6" r="2.6" fill="none" stroke="#fff" stroke-width="1.7"/><circle cx="15.8" cy="10.6" r="2.6" fill="none" stroke="#fff" stroke-width="1.7"/><path d="M9.6 16.2c.8.8 1.5.8 2.4 0 .9.8 1.6.8 2.4 0" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
         </div>
+        <div class="empty-state-kicker"><span></span>你的个人 AI 工作搭档</div>
         <h2 id="emptyStateTitle">你想完成什么？</h2>
-        <p id="emptyStateDescription">直接描述目标，或先定义范围与执行方式。已有结果可在产物与证据中查看。</p>
+        <p id="emptyStateDescription">描述目标，OwO 会拆解任务、执行操作并保留完整记录。</p>
         <div class="workspace-welcome-actions">
           <button type="button" class="primary welcome-tile" data-workbench-panel="project-launcher"><span class="welcome-tile-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h2.4l7-7a1.7 1.7 0 0 0-2.4-2.4l-7 7z"/><path d="m9.2 4.4 2.4 2.4"/></svg></span><span class="welcome-tile-text"><strong>创建任务</strong><small>定义目标、范围与执行方式，再交给 Agent</small></span><span class="welcome-tile-go" aria-hidden="true">→</span></button>
           <button type="button" class="welcome-tile" data-workbench-panel="home"><span class="welcome-tile-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"><rect x="2.3" y="2.3" width="4.7" height="5.6" rx="1.3"/><rect x="9" y="2.3" width="4.7" height="3.4" rx="1.3"/><rect x="9" y="7.8" width="4.7" height="5.9" rx="1.3"/><rect x="2.3" y="10" width="4.7" height="3.7" rx="1.3"/></svg></span><span class="welcome-tile-text"><strong>查看项目状态</strong><small>最近任务、团队运行与待处理事项</small></span><span class="welcome-tile-go" aria-hidden="true">→</span></button>
@@ -970,8 +977,13 @@
         </div>
       </div>
     </form>
+    <div class="composer-footnote"><span><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span><span>重要操作前会请求你的确认</span></div>
 
-    <div class="empty-examples" aria-label="示例问题"><button type="button" data-example-prompt="解释这段代码">解释这段代码</button><button type="button" data-example-prompt="翻译这段话">翻译这段话</button><button type="button" data-example-prompt="写一段说明">写一段说明</button></div>
+    <div class="empty-examples" aria-label="快速开始">
+      <button type="button" data-example-prompt="分析当前项目结构，找出可以改进的地方，并先给我一份行动计划。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5 7.5 12l3 2.5L17 7"/><path d="M12.5 7H17v4.5"/></svg></span><span class="example-copy"><strong>分析项目</strong><small>梳理代码结构，发现改进机会</small></span><span class="example-arrow" aria-hidden="true">↗</span></button>
+      <button type="button" data-example-prompt="检查当前工作区最近的改动，总结主要内容并指出潜在问题。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.8 16 5.5v4.3c0 3.6-2.4 6.2-6 7.4-3.6-1.2-6-3.8-6-7.4V5.5z"/><path d="m7 10 2 2 4-4"/></svg></span><span class="example-copy"><strong>审查改动</strong><small>检查变更质量与潜在问题</small></span><span class="example-arrow" aria-hidden="true">↗</span></button>
+      <button type="button" data-example-prompt="帮我规划一个任务，先明确目标、执行步骤和验收标准。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10v14H5z"/><path d="M8 7h4M8 10h4M8 13h2"/></svg></span><span class="example-copy"><strong>规划任务</strong><small>明确目标、步骤与验收标准</small></span><span class="example-arrow" aria-hidden="true">↗</span></button>
+    </div>
   </main>
   <div id="rightResize" class="resize-handle" role="separator" aria-label="调整检查器宽度"></div>
 
