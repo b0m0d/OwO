@@ -1,6 +1,6 @@
 /* The team page prioritizes the user's files and a compact progress summary. */
-#workbenchPanelSection:has([data-panel="workswarm"]) .workbench-panel-rail { display:none; }
-body.tools-open.panel-open #workbenchPanelSection:has([data-panel="workswarm"]) .workbench-panel-layout { grid-template-columns:minmax(0,1fr); }
+#workbenchPanelSection:has(#panelRoot section[data-panel="workswarm"]) .workbench-panel-rail { display:none; }
+body.tools-open.panel-open #workbenchPanelSection:has(#panelRoot section[data-panel="workswarm"]) .workbench-panel-layout { grid-template-columns:minmax(0,1fr); }
 .owo-ws-panel:has(#ws-d-main) .owo-ws-tabs { display:none; }
 .owo-ws-panel:has(#ws-d-main) { max-width:1080px; margin:0 auto; }
 .owo-ws-panel #ws-d-main { gap:16px !important; }

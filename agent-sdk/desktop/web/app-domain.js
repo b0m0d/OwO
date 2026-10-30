@@ -3138,7 +3138,8 @@ function initPanels() {
   $("panelSearch")?.addEventListener("input", (event) => filterPanelNavigation(nav, event.target.value));
   // 保留有效的工具/设置深链；旧面板、拼错的 hash 不得劫持默认会话页。
   const initialRoute = window.OwoWorkbenchView.resolveInitialRoute(location.hash, PANEL_ORDER);
-  if (location.hash && initialRoute.kind === "chat") {
+  // 面板 hash 只用于当前会话内导航；工作台重新加载/重启后回到聊天首页，避免把上次的分栏布局误当成首屏。
+  if (location.hash && initialRoute.kind !== "chat") {
     history.replaceState(null, "", location.pathname + location.search);
   }
   // 首屏默认是对话视图；检查器面板直到用户显式打开才挂载并请求数据。

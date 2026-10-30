@@ -6,6 +6,14 @@ import { createRequire } from "node:module";
 const nav = createRequire(import.meta.url)("../core/workbench-navigation.js");
 const read = file => readFileSync(new URL("../" + file, import.meta.url), "utf8");
 
+test("sidebar primary action starts a conversation instead of opening the task wizard", () => {
+  const index = read("index.html");
+  const button = index.match(/<button[^>]*id="sidebarNewChat"[^>]*>[\s\S]*?<\/button>/)?.[0] || "";
+  assert.match(button, /新建对话/);
+  assert.doesNotMatch(button, /data-workbench-panel/);
+  assert.match(read("app.js"), /\$\("sidebarNewChat"\)\?\.addEventListener\("click", startNewConversation\)/);
+});
+
 test("primary and disclosed navigation preserve every registered route exactly once", () => {
   const sections = nav.sections();
   assert.deepEqual(sections[0].entries.map(item => item.id), ["home","project-launcher","project-history","workswarm","evidence","action-center"]);

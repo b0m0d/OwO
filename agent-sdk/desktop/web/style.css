@@ -5,6 +5,8 @@
    规则：组件只消费 token；视图状态只在"视图状态"层定义；暗色只改 token。
    ========================================================================== */
 
+html.dark-theme-pending { color-scheme: dark; --bg:#111515; --canvas:#121716; --surface:#161b1a; --surface-2:#1c2220; --surface-3:#252d29; --border:#2c3732; --border-strong:#425049; --text:#e8eeea; --text-2:#a7b5ae; --text-3:#7f9087; --sidebar-bg:#151a18; --sidebar-hover:rgba(220,235,226,.08); --accent-soft:#20372e; --user-bubble:#1f3129; --user-bubble-border:#2d4c3e; }
+
 /* ---------- tokens · 浅色（默认） ---------- */
 :root {
   --bg: #f5f6f8;

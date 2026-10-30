@@ -2027,6 +2027,7 @@ function loadLocalPrefs() {
 }
 function saveLocalPrefs() {
   localStorage.setItem("owo.prefs", JSON.stringify(LOCAL_PREFS));
+  if (LOCAL_PREFS.theme === "dark" || LOCAL_PREFS.theme === "light") localStorage.setItem("owo.theme", LOCAL_PREFS.theme);
 }
 function applyLocalPrefs() {
   document.body.classList.toggle("compact-mode", LOCAL_PREFS.compact);
@@ -2639,9 +2640,13 @@ function openComposerMenu(trigger, html, bind) {
   // expanded after placement and can overflow the viewport on narrow windows.
   if (bind) bind(menu);
   const rect = trigger.getBoundingClientRect();
-  const position = composerMenuPosition(rect, menu.getBoundingClientRect(), window.innerWidth);
+  const menuRect = menu.getBoundingClientRect();
+  const position = composerMenuPosition(rect, menuRect, window.innerWidth);
+  // 首页输入框位于窗口中部时，上下都放不下高菜单（如模型列表）；把菜单收回视口内，避免底部被裁掉。
+  // 用 offsetHeight：弹出动画的 scale 会让 getBoundingClientRect 偏小。
+  const maxTop = window.innerHeight - menu.offsetHeight - 12;
   menu.style.left = `${position.left}px`;
-  menu.style.top = `${position.top}px`;
+  menu.style.top = `${Math.max(12, Math.min(position.top, maxTop))}px`;
   document.addEventListener("pointerdown", onComposerMenuOutside, true);
 }
 
@@ -3911,6 +3916,7 @@ const savedWorkspace = localStorage.getItem("owo.workspace");
 if (savedWorkspace) $("workspace").value = savedWorkspace;
 function applyTheme(theme) {
   const dark = theme === "dark";
+  document.documentElement.classList.remove("dark-theme-pending");
   document.body.classList.toggle("dark-theme", dark);
   const appearanceTheme = $("prefTheme");
   if (appearanceTheme && LOCAL_PREFS.theme !== "system") appearanceTheme.value = dark ? "dark" : "light";
@@ -3923,8 +3929,9 @@ function applyTheme(theme) {
   const side = $("themeToggleSide");
   if (side) {
     side.innerHTML = themeIcon;
-    side.title = $("themeToggle").title;
-    side.setAttribute("aria-label", side.title);
+    // 侧栏图标轨用 CSS 提示（读 aria-label），不再设原生 title，避免两层提示叠加。
+    side.removeAttribute("title");
+    side.setAttribute("aria-label", $("themeToggle").title);
   }
   const bar = $("menubarTheme");
   if (bar) {
@@ -3933,15 +3940,22 @@ function applyTheme(theme) {
     bar.setAttribute("aria-label", bar.title);
   }
   localStorage.setItem("owo.theme", dark ? "dark" : "light");
+  if (LOCAL_PREFS.theme !== "system") {
+    LOCAL_PREFS.theme = dark ? "dark" : "light";
+    localStorage.setItem("owo.prefs", JSON.stringify(LOCAL_PREFS));
+  }
 }
 // 新版工作台以深色为主。旧版本每次启动都会写入浅色偏好，因此一次性迁移到深色，
 // 之后仍完整尊重用户主动切换的主题。
 if (localStorage.getItem("owo.theme-version") !== "2") {
   localStorage.setItem("owo.theme-version", "2");
-  applyTheme("dark");
-} else {
-  applyTheme(localStorage.getItem("owo.theme") || "dark");
 }
+let storedTheme = localStorage.getItem("owo.theme") || "dark";
+try {
+  const storedPrefs = JSON.parse(localStorage.getItem("owo.prefs") || "{}");
+  if (["dark", "light", "system"].includes(storedPrefs.theme)) storedTheme = storedPrefs.theme === "system" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : storedPrefs.theme;
+} catch (_) {}
+applyTheme(storedTheme);
 $("themeToggle").addEventListener("click", () => {
   applyTheme(document.body.classList.contains("dark-theme") ? "light" : "dark");
 });
@@ -4094,6 +4108,7 @@ const startNewConversation = () => {
 };
 $("railNewChat")?.addEventListener("click", startNewConversation);
 $("newChatTop")?.addEventListener("click", startNewConversation);
+$("sidebarNewChat")?.addEventListener("click", startNewConversation);
 $("sidebarBrandBtn")?.addEventListener("click", () => $("sidebarWorkspaceBtn")?.click());
 $("workbenchReturnChat")?.addEventListener("click", () => setToolsVisible(false));
 $("workbenchSwitchPanel")?.addEventListener("click", () => openWorkbenchSearch());
@@ -4743,6 +4758,10 @@ document.addEventListener("click", event => {
   prompt.focus();
   prompt.dispatchEvent(new Event("input", { bubbles: true }));
 });
+// 首页执行托盘里的「/ 命令」只是 #slashHint 的入口，行为保持一致。
+document.addEventListener("click", event => {
+  if (event.target.closest?.("[data-composer-slash]")) $("slashHint")?.click();
+});
 function syncProjectChip() {
   const value = $("workspace").value.trim();
   const name = value ? value.split(/[\\/]/).filter(Boolean).pop() : "";
@@ -5208,9 +5227,14 @@ async function hydrateShell() {
 document.querySelector(".composer-context")?.setAttribute("hidden", "");
 const emptyLayoutRoot = $("emptyState");
 if (emptyLayoutRoot && typeof MutationObserver !== "undefined") {
-  const syncEmptyLayout = () => document.body.classList.toggle("empty-conversation", !emptyLayoutRoot.hidden);
+  // 欢迎页由 .hidden 类切换；同步到 [hidden] 与 body.empty-conversation，否则有消息时空态布局仍生效。
+  const syncEmptyLayout = () => {
+    const hide = emptyLayoutRoot.classList.contains("hidden");
+    if (emptyLayoutRoot.hidden !== hide) emptyLayoutRoot.hidden = hide;
+    document.body.classList.toggle("empty-conversation", !hide);
+  };
   syncEmptyLayout();
-  new MutationObserver(syncEmptyLayout).observe(emptyLayoutRoot, { attributes: true, attributeFilter: ["hidden"] });
+  new MutationObserver(syncEmptyLayout).observe(emptyLayoutRoot, { attributes: true, attributeFilter: ["class"] });
 }
 $("composerProjectBtn")?.setAttribute("hidden", "");
 $("composerEnvironmentBtn")?.setAttribute("hidden", "");
@@ -5232,6 +5256,8 @@ async function boot() {
   setInterval(() => updateComposerRunning(), 250);
   // 先读回本机偏好再应用：否则刷新后已保存的紧凑模式/桌宠等开关会被内存默认值覆盖。
   loadLocalPrefs();
+  const initialTheme = LOCAL_PREFS.theme === "system" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : (LOCAL_PREFS.theme === "dark" ? "dark" : "light");
+  applyTheme(initialTheme);
   applyLocalPrefs();
   syncProjectChip();
   initGlobalStatusBar();
@@ -5248,7 +5274,8 @@ async function boot() {
   shellHydrated = true;
   // 初始深链要等服务水合/恢复完成再打开，避免面板请求早于授权与 ready。
   applyDeepLink();
-  window.owo?.pendingFeed?.().then(openPetFeedRun).catch(()=>{});
+  // 待办团队由桌宠的显式打开事件导航；工作台启动不自动恢复旧任务，避免刷新被带回分栏页。
+  void window.owo?.pendingFeed?.().catch(()=>{});
   startInvalidation();
   workbenchRefresh.start();
 }
