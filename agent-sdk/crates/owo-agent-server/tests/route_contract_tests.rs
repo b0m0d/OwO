@@ -320,6 +320,8 @@ fn anonymous_request(
 /// 契约路径的最小合法/非法请求体（缺省 {}，避免 route 存在性判断被 body 校验干扰）。
 fn sample_body(path: &str) -> Option<&'static str> {
     match path {
+        "/ime/tasks" => Some(r#"{}"#),
+        "/settings/ime" => Some(r#"{}"#),
         "/session" => Some(r#"{"workspace":".","model":"idle"}"#),
         "/session/{id}/turn" => Some(r#"{"prompt":"hi"}"#),
         "/permissions" => Some(r#"{"profile":"workspace"}"#),

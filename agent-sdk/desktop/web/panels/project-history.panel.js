@@ -306,13 +306,14 @@
       return (
         '<div class="ph-row" data-ph-row="' + esc(tid) + '">' +
         '<div class="ph-row-head">' +
-        '<code class="ph-tid">' + esc(tid) + "</code>" +
+        '<h3 class="ph-title">' + esc(extras.objective || team.objective || (team.members || []).map(function (m) { return m.role || ""; }).filter(Boolean).join("、") || "任务 " + tid.slice(0, 8)) + "</h3>" +
         statusBadge(team.status) +
         '<span class="ph-mode">' + esc(String(team.mode || "").toLowerCase() || "team") + "</span>" +
         (team.template_id
           ? '<span class="ph-tpl">' + esc(String(team.template_id)) + "</span>"
           : '<span class="ph-tpl ph-tpl-none">动态组队</span>') +
         "</div>" +
+        '<div class="ph-source hint">' + esc(tid) + " · " + esc(projectKeyOf(team)) + "</div>" +
         '<div class="ph-row-meta hint">' +
         "<span>创建 " + esc(String(team.created_at || "").replace("T", " ").slice(0, 19)) + "</span>" +
         (dur ? "<span>耗时 " + esc(dur) + "</span>" : "") +
@@ -380,7 +381,7 @@
         '<option value="">全部模板</option>' + opt(templateOptions(st.teams), f.template) + "</select>" +
         '<select id="ph-f-project" aria-label="按项目过滤">' +
         '<option value="">全部项目</option>' + opt(projectOptions(st.teams), f.project) + "</select>" +
-        '<input id="ph-f-q" type="search" placeholder="按 team_id 搜索" value="' + esc(f.q) + '" />' +
+        '<input id="ph-f-q" type="search" placeholder="搜索任务名称或项目" aria-label="搜索任务名称或项目" value="' + esc(f.q) + '" />' +
         "</div>"
       );
     }
@@ -389,8 +390,8 @@
       return (
         '<div class="ph">' +
         '<div class="ph-head">' +
-        "<h2>项目与运行历史</h2>" +
-        '<span class="hint" title="技术详情：/teams · /teams/{id} · /projects/{pid}/deliverables · /projects/{pid}/workspace · POST /teams">聚合各项目的运行历史、产物与待办</span>' +
+        '<h2 title="项目与运行历史">任务记录</h2>' +
+        '<span class="hint">查看历史运行、结果与可复用的任务目标</span>' +
         '<button type="button" id="ph-refresh" class="owo-ac-mini">刷新</button>' +
         '<span id="ph-meta" class="hint" aria-live="polite"></span>' +
         "</div>" +

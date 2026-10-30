@@ -134,6 +134,11 @@
           if (typeof connection.token === "string" && connection.token.length > 0) {
             this.injectedToken = connection.token;
             this.token = connection.token;
+            // Electron injects the bearer before the first web request.  Emit the
+            // authenticated-ready signal here as well as in the browser token
+            // bootstrap path, otherwise the shared action gate stays disabled
+            // forever even though every authenticated request succeeds.
+            this.emit(true, { reason: "token" });
           }
         }
         global.__owoCoreDiagnostics = ApiClient.buildCoreDiagnostics(connection);

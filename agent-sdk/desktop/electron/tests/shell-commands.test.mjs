@@ -108,7 +108,7 @@ test("get_provider_status 形状：字段齐全、密钥只给掩码与布尔", 
     { envGet: () => "", configPath: "C:\\cfg\\config.json" },
   );
   for (const field of [
-    "provider", "baseUrl", "model", "keyConfigured", "keySource", "keyMasked",
+    "provider", "deferred", "baseUrl", "model", "keyConfigured", "keySource", "keyMasked",
     "keyEnv", "ready", "configPath", "models", "contextWindow", "maxOutputTokens",
     "temperature", "timeoutSecs", "keepRecent", "compaction", "modelOutputTokens",
   ]) {
@@ -130,6 +130,16 @@ test("本地端点（ollama）不需要凭据也算 ready；unset 必须有凭�
   assert.equal(ollama.keyConfigured, false);
   const unset = providerStatusValue({ provider: "unset" }, { envGet: () => "" });
   assert.equal(unset.ready, false);
+});
+
+test("稍后配置模型的决定写入持久配置并在状态中保留", () => {
+  const deferred = applyModelConfigPatch({ model: { provider: "unset", deferred: false } }, { mode: "unset" });
+  assert.equal(deferred.ok, true);
+  assert.equal(deferred.config.model.deferred, true);
+  assert.equal(providerStatusValue(deferred.config.model, { envGet: () => "" }).deferred, true);
+  const selected = applyModelConfigPatch(deferred.config, { mode: "bigmodel" });
+  assert.equal(selected.ok, true);
+  assert.equal(selected.config.model.deferred, false);
 });
 
 test("set_model_config：未传字段保持原样（不得抹掉用户已存的密钥）", () => {

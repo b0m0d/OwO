@@ -39,3 +39,31 @@ test('interrupted teams still permit the explicit stop action',async()=>{let can
 test('resuming an interrupted team during confirmation prevents a second dispatch',async()=>{let done,interrupted=true;const f=fixture((_p,o)=>{if(o)assert.fail('no second team');return{team:{status:'Running'},interrupted};},{confirm:()=>new Promise(resolve=>done=resolve)});f.controller.restore({id:'old'});await tick();const pending=f.controller.feed('new requirement');await tick();interrupted=false;done({text:'new requirement'});await pending;assert.equal(f.calls.filter(([,o])=>o?.method==='POST').length,0);assert.equal(f.controller.ref.id,'old');});
 
 test('mixed existing slots and named roles keep models, responsibilities and unique identities',()=>{const body=buildTeamRequest('goal','D:/demo',{team:{roles:[{role:'w2',model:'a',handoff_contract:'只做前端'},{role:'builder',model:'b',handoff_contract:'只做数据'},{role:'critic',capabilities:['review'],handoff_contract:'检查交互'}]}},{commander:true});assert.deepEqual(body.roles.map(role=>role.role),['lead','w2','w1','reviewer']);assert.match(body.roles[1].handoff_contract,/只做前端/);assert.match(body.roles[0].handoff_contract,/只做数据/);assert.match(body.roles[3].handoff_contract,/检查交互/);});
+
+
+test('late initial binding read cannot cancel a task awaiting user confirmation',async()=>{
+ let confirm;const f=fixture((p,o)=>o?{team_id:'confirmed'}:{team:{status:'Running'}},
+   {confirm:input=>new Promise(resolve=>confirm=()=>resolve(input))});
+ const pending=f.controller.feed('explicit task');await tick();
+ f.controller.restore(null,{initial:true});confirm();await pending;
+ assert.equal(f.controller.ref.id,'confirmed');
+ assert.equal(f.calls.filter(([,o])=>o?.method==='POST').length,1);
+});
+test('late initial binding read cannot replace an already-created team',async()=>{
+ const f=fixture((p,o)=>o?{team_id:'current'}:{team:{status:'Running'}});
+ await f.controller.feed('task');f.controller.restore({id:'stale'},{initial:true});
+ assert.equal(f.controller.ref.id,'current');
+});
+test('initial restoration still observes a stored team without resubmitting',async()=>{
+ const f=fixture((_p,o)=>{assert(!o);return{team:{status:'Succeeded'}};});
+ f.controller.restore({id:'stored'},{initial:true});await tick();
+ assert.equal(f.controller.ref.id,'stored');assert.equal(f.controller.status,'succeeded');
+ assert.equal(f.calls.filter(([,o])=>o?.method==='POST').length,0);
+});
+test('explicit forget still invalidates pending confirmation',async()=>{
+ let confirm;const f=fixture(()=>assert.fail('must not dispatch'),
+   {confirm:input=>new Promise(resolve=>confirm=()=>resolve(input))});
+ const pending=f.controller.feed('task');await tick();await f.controller.forget();
+ f.controller.restore({id:'stale'},{initial:true});confirm();await pending;
+ assert.equal(f.controller.ref,null);assert.equal(f.calls.length,0);
+});

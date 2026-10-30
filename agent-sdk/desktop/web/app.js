@@ -54,6 +54,18 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+let activeSessionMode = "chat";
+function currentSessionMode() {
+  return activeSessionMode;
+}
+function setSessionMode(mode) {
+  activeSessionMode = mode === "agent" ? "agent" : "chat";
+  document.body.classList.toggle("chat-mode", activeSessionMode === "chat");
+  document.body.classList.toggle("agent-mode", activeSessionMode === "agent");
+  return activeSessionMode;
+}
+setSessionMode("chat");
+
 // Markdown/LaTeX 渲染器唯一来源：core/markdown.js（须在 app.js 之前加载）。
 const {
   escapeHtml,
@@ -67,6 +79,7 @@ const {
   isMarkdownTableSeparator,
   markdownTableAlignment,
   renderMarkdown,
+  renderMessage,
 } = window.OwoMarkdown || {};
 const ModelRouting = window.OwoModelRouting;
 const sessionModelUpdateQueue = ModelRouting.createSessionModelUpdateQueue((sessionId, request) =>
@@ -89,7 +102,20 @@ function getComposerModel() {
 }
 function refreshComposerModelChip() {
   const text = $("modelChipText");
-  if (text) text.textContent = getComposerModel() || "默认模型";
+  const ready = !modelGateMissing();
+  if (text) {
+    const model = getComposerModel() || "模型";
+    const effort = typeof EFFORT_MODES !== "undefined"
+      ? (EFFORT_MODES.find((item) => item.id === getEffort()) || EFFORT_MODES[0])
+      : null;
+    text.textContent = ready ? `${model} · ${effort?.label || "标准"}` : "未连接模型";
+  }
+  const chip = $("modelChip");
+  if (chip) {
+    chip.disabled = !ready;
+    chip.setAttribute("aria-disabled", String(!ready));
+    chip.title = ready ? "选择模型" : "请先在设置中连接模型服务";
+  }
   updateModelChipMeta();
   window.OwoStatusBar?.repaint();
 }
@@ -205,7 +231,8 @@ async function needsSetup() {
     const providerReady = Boolean(provider && provider.ready);
     let deferredProvider = false;
     try {
-      deferredProvider = !providerReady && localStorage.getItem("owo.setup.provider-deferred") === "1";
+      deferredProvider = Boolean(provider && provider.deferred) ||
+        (!providerReady && localStorage.getItem("owo.setup.provider-deferred") === "1");
       if (providerReady) localStorage.removeItem("owo.setup.provider-deferred");
     } catch (_) { /* storage can be disabled in browser/test contexts */ }
     window.__owoSetupDiagnostics = {
@@ -1336,35 +1363,40 @@ function fillTurnSummaryMeta(turn) {
   const wall = server.duration_ms
     ? Math.round(server.duration_ms / 1000)
     : Math.max(1, Math.round((Date.now() - turn.startedAt) / 1000));
-  const parts = [`耗时 ${wall}s`, `工具 ${turn.tools} 次`];
-  if (turn.stopped) parts.push("未完成");
+  const detailParts = [`耗时 ${wall}s`, `工具 ${turn.tools} 次`];
+  if (turn.stopped) detailParts.push("未完成");
   const completionStatus = server.completion_status;
-  if (completionStatus === "candidate") parts.push("代码变更待验收");
-  else if (completionStatus === "unverified") parts.push("结果未验证");
-  else if (completionStatus === "blocked") parts.push("存在阻断问题");
-  else if (completionStatus === "accepted") parts.push("宿主验收通过");
+  if (completionStatus === "candidate") detailParts.push("代码变更待验收");
+  else if (completionStatus === "unverified") detailParts.push("结果未验证");
+  else if (completionStatus === "blocked") detailParts.push("存在阻断问题");
+  else if (completionStatus === "accepted") detailParts.push("宿主验收通过");
   const modelCallCount = Array.isArray(server.model_calls)
     ? server.model_calls.length
     : turn.modelCalls;
-  if (modelCallCount) parts.push(`模型请求 ${modelCallCount} 次`);
-  if (server.steps) parts.push(`共 ${server.steps} 步`);
+  if (modelCallCount) detailParts.push(`模型请求 ${modelCallCount} 次`);
+  if (server.steps) detailParts.push(`共 ${server.steps} 步`);
   const reportedUsage = window.OwoCompletionRecord?.usageFromTurnStats(server);
-  if (reportedUsage) parts.push(reportedUsage.text);
+  if (reportedUsage) detailParts.push(reportedUsage.text);
   else if (server.total_tokens != null && Number.isFinite(Number(server.total_tokens))) {
     const tokens =
       server.total_tokens >= 1000
         ? `${(server.total_tokens / 1000).toFixed(1)}k`
         : String(server.total_tokens);
-    parts.push(`消耗 ${tokens} tokens`);
+    detailParts.push(`消耗 ${tokens} tokens`);
   }
-  if (server.cost_usd > 0) parts.push(`$${Number(server.cost_usd).toFixed(4)}`);
-  if (!reportedUsage && server.total_tokens == null) parts.push("用量未知");
+  if (server.cost_usd > 0) detailParts.push(`$${Number(server.cost_usd).toFixed(4)}`);
+  if (!reportedUsage && server.total_tokens == null) detailParts.push("用量未知");
   const actualModel = window.OwoCompletionRecord?.fromTurnStats(server).lastExecutionModel;
-  if (actualModel) parts.push("实际模型 " + actualModel);
+  if (actualModel) detailParts.push("实际模型 " + actualModel);
   const completionEvidence = window.OwoCompletionRecord?.summarize(server.completion_record);
-  if (completionEvidence) parts.push(completionEvidence.compact);
+  if (completionEvidence) detailParts.push(completionEvidence.compact);
   const meta = card.querySelector(".turn-summary-meta");
-  if (meta) meta.textContent = parts.join(" · ");
+  if (meta) {
+    const statusText = turn.stopped ? "已停止" : completionStatus === "accepted" ? "验收通过" : completionStatus === "candidate" ? "待验收" : completionStatus === "blocked" ? "存在阻断" : "已完成";
+    meta.textContent = `${statusText} · ${turn.tools ? `执行 ${turn.tools} 个工具` : "未执行工具"}`;
+  }
+  const technical = card.querySelector(".turn-summary-technical-body");
+  if (technical) technical.textContent = detailParts.join(" · ");
 }
 
 // 路径归一：比较 diff 相对路径与工具入参路径（容忍 ./ 前缀、绝对/相对、分隔符差异）。
@@ -1395,7 +1427,8 @@ async function renderTurnSummary(sessionId, turn) {
     '<button type="button" class="turn-summary-open" title="在检查器中查看改动">↗</button>' +
     "</div>" +
     '<div class="turn-summary-list hidden"></div>' +
-    '<div class="turn-summary-meta"></div>';
+    '<div class="turn-summary-meta"></div>' +
+    '<details class="turn-summary-technical"><summary>运行详情</summary><div class="turn-summary-technical-body"></div></details>';
   writeBox().appendChild(card);
   followScroll();
   turn.card = card;
@@ -1417,7 +1450,7 @@ async function renderTurnSummary(sessionId, turn) {
     const section = document.createElement("div");
     section.className = "turn-summary-evidence";
     const heading = document.createElement("strong");
-    heading.textContent = `宿主完成记录 · ${evidence.status}`;
+    heading.textContent = `执行完成记录 · ${evidence.status}`;
     section.appendChild(heading);
     for (const [label, value] of evidence.details) {
       const row = document.createElement("div");
@@ -1932,9 +1965,12 @@ async function refreshSettings() {
     toggle.classList.toggle("on", cloudEnabled);
     toggle.setAttribute("aria-checked", String(cloudEnabled));
     toggle.dataset.enabled = String(cloudEnabled);
-    const model = getDefaultModel();
+    const modelReady = !modelGateMissing();
+    const model = modelReady ? getDefaultModel() : "";
     const modelSelect = $("settingsModel");
-    if (modelSelect.querySelector(`option[value="${CSS.escape(model)}"]`)) {
+    if (!modelReady) {
+      modelSelect.value = "";
+    } else if (modelSelect.querySelector(`option[value="${CSS.escape(model)}"]`)) {
       modelSelect.value = model;
     } else {
       // 当前模型不在候选里（如端点实际在用的模型名不在预设中）：
@@ -1947,7 +1983,6 @@ async function refreshSettings() {
       modelSelect.value = model;
     }
     // 会话覆盖只从具体会话详情恢复，默认值来自当前运行服务商。
-    $("modelChipText").textContent = getComposerModel() || "默认模型";
     renderEffortChip();
     $("connectionSummary").textContent = cloudEnabled ? "云端模型已启用" : "云端模型已关闭";
     // 主动建议（个性化）
@@ -1963,6 +1998,7 @@ async function refreshSettings() {
     updateModelChipMeta();
     renderProviderForm();
     await refreshModelOutputSettings();
+    await imeAccessSettings.refresh();
     updateModelGate();
   } catch (error) {
     const summary = $("connectionSummary");
@@ -2088,6 +2124,8 @@ async function toggleDesktopPet() {
       method: "POST",
       body: JSON.stringify({ visible: next }),
     });
+    // 核心期望值是持久真相源，壳 IPC 负责立即执行，避免等下一轮心跳才显隐。
+    if (window.owo?.setPetVisible) await window.owo.setPetVisible(next);
     showToast(next ? "已请求显示桌面桌宠" : "已请求隐藏桌面桌宠", "ok");
   } catch (error) {
     showToast(`桌宠切换失败：${friendlyError(error, { resource: true })}`, "error");
@@ -2098,7 +2136,9 @@ async function toggleDesktopPet() {
 // ---------- 设置页交互：分类导航 / 模态框 / 自定义模型 / 本地偏好 ----------
 
 // 左侧分类 ↔ 右侧表单页
+const imeAccessSettings = window.OwoImeSettings.create({ api, onSaved: config => { if (state.settings) state.settings.ime_access = config; } });
 function setSettingsTab(name) {
+  if (name === "ime") void imeAccessSettings.refresh();
   for (const item of document.querySelectorAll(".settings-nav-item")) {
     item.classList.toggle("active", item.dataset.settingsTab === name);
   }
@@ -2139,7 +2179,7 @@ function syncTaskDetails(statusFacts) {
 function setTaskDetailsVisible(open) {
   document.body.classList.toggle("inspector-open", open);
   $("inspectorToggle").setAttribute("aria-expanded", String(open));
-  $("inspectorToggle").setAttribute("aria-label", open ? "关闭任务详情" : "打开任务详情");
+  $("inspectorToggle").setAttribute("aria-label", open ? "关闭运行详情" : "打开运行详情");
   syncTaskDetails();
   if (open) { $("right").querySelector(".task-details-content").scrollTop = 0; $("taskDetailsClose").focus(); }
 }
@@ -2154,6 +2194,7 @@ function initGlobalStatusBar() {
       stopping: currentTurn()?.stopping === true,
       pendingApproval: Boolean(state.pendingApproval) || state.pendingApprovals.size > 0,
       lastTurnOutcome: currentTurn() ? "" : state.completedTurnFacts.get(state.sessionId)?.outcome || "",
+      sessionMode: currentSessionMode(),
       selectedModel: currentTurn()?.requestedModel || getComposerModel(),
       settings: { model: getDefaultModel(), custom_models: loadCustomModels() },
       ...(state.completedTurnFacts.get(state.sessionId) || {}),
@@ -2346,7 +2387,7 @@ function updateComposerRunning() {
   const running = !!currentTurn();
   const button = $("sendBtn");
   if (!button) return;
-  button.disabled = currentTurn()?.stopping === true;
+  button.disabled = currentTurn()?.stopping === true || (!running && !($("prompt")?.value || "").trim());
   button.classList.toggle("is-stop", running);
   button.innerHTML = running ? STOP_SVG : SEND_SVG;
   button.title = running ? "中断当前回合" : "发送";
@@ -2639,6 +2680,10 @@ function focusComposerModelChoice(menu, key, currentTarget) {
 }
 
 function openModelMenu() {
+  if (modelGateMissing()) {
+    openModelGateSettings();
+    return;
+  }
   const selected = state.sessionId ? state.selectedModel : state.pendingModelOverride;
   const effectiveModel = getComposerModel();
   const defaultModel = getDefaultModel();
@@ -2667,9 +2712,7 @@ function openModelMenu() {
   let html = '<div class="composer-menu-title">选择模型</div>' +
     '<div class="composer-model-scope">' + scope + '</div>' +
     (unsupportedCurrent
-      ? '<div class="composer-model-warning"><strong>当前模型与服务商不匹配</strong><span>' +
-        esc(effectiveModel) + ' 不在 ' + esc(providerPreset.label || providerPreset.id) +
-        ' 的可用模型清单中。请选择下方兼容模型，或切换“跟随默认模型”。</span></div>'
+      ? '<div class="composer-model-warning"><strong>当前模型与服务商不兼容</strong><span>选择服务商默认模型，或改用下方兼容模型。</span></div>'
       : '') +
     '<label class="composer-model-search-wrap"><span class="sr-only">筛选模型</span>' +
       '<input type="search" class="composer-model-search" data-model-search aria-label="筛选模型" placeholder="筛选模型…" autocomplete="off" spellcheck="false"></label>' +
@@ -2677,8 +2720,8 @@ function openModelMenu() {
       '<div class="composer-menu-group">默认</div>' +
       '<button type="button" class="composer-menu-item has-desc' + (!selected ? " active" : "") +
       '" data-model-default data-model-choice data-model-search="' +
-      escapeAttribute("跟随默认模型 " + defaultModel) + '">' +
-      '<span class="composer-menu-label">跟随默认模型</span>' +
+      escapeAttribute("使用服务商默认模型 " + defaultModel) + '">' +
+      '<span class="composer-menu-label">使用服务商默认模型</span>' +
       '<span class="composer-menu-desc">' + esc(defaultModel || "由当前服务商决定") + '</span>' +
       (!selected ? '<span class="composer-menu-check">✓</span>' : '') + '</button></div>';
   const renderGroup = (label, list, activeModel) => {
@@ -2696,7 +2739,7 @@ function openModelMenu() {
   html += renderGroup(providerPreset ? "当前服务商可用模型" : "可用模型", preset, selected);
   if (unsupportedCurrent) html += '<div class="composer-menu-group">当前会话模型（不兼容）</div>' +
     '<div class="composer-model-incompatible"><span>' + esc(effectiveModel) + '</span><span>需切换</span></div>';
-  html += renderGroup("自定义模型", custom, selected);
+  html += renderGroup("额外模型连接", custom, selected);
   html += '<div class="composer-model-empty" data-model-empty hidden>没有找到匹配的模型</div>' +
     '<div class="composer-menu-foot"><button type="button" class="composer-menu-link" data-go-settings>管理模型与预设…</button></div>';
   openComposerMenu($("modelChip"), html, (menu) => {
@@ -2747,6 +2790,10 @@ function openModelMenu() {
 }
 
 async function selectModel(id) {
+  if (modelGateMissing()) {
+    showToast("请先连接模型服务", "error");
+    return;
+  }
   const model = String(id || "").trim();
   const sessionId = state.sessionId;
   try {
@@ -2789,11 +2836,12 @@ function renderEffortChip() {
   const mode = EFFORT_MODES.find((item) => item.id === getEffort()) || EFFORT_MODES[0];
   const text = $("effortChipText");
   const chip = $("effortChip");
-  if (text) text.textContent = mode.id ? `推理 ${mode.label}` : "推理默认";
+  if (text) text.textContent = mode.id ? `推理 ${mode.label}` : "推理";
   if (chip) {
     chip.dataset.effort = mode.id;
     chip.title = `推理档位：${mode.label}（${mode.desc}）`;
   }
+  refreshComposerModelChip();
 }
 
 async function selectEffort(id) {
@@ -2836,7 +2884,7 @@ function setAccessMode() { localStorage.removeItem("owo.access-mode"); renderAcc
 function renderAccessChip() {
   const text = $("accessChipText"), dot = $("accessDot"), chip = $("accessChip");
   if (text) text.textContent = "每次询问";
-  if (dot) dot.className = "codex-access-dot mode-ask";
+  if (dot) dot.setAttribute("class", "codex-access-dot mode-ask");
   if (chip) { chip.dataset.mode = "ask"; chip.title = "审批方式：每次询问；自动授权请查看服务端权限中心"; }
 }
 function openAccessMenu() {
@@ -3009,6 +3057,13 @@ function isReasoningModel(id) {
 function updateModelChipMeta() {
   const chip = $("modelChip");
   if (!chip) return;
+  if (modelGateMissing()) {
+    chip.classList.remove("is-reasoner", "is-model-incompatible");
+    chip.querySelector(".reasoner-badge")?.remove();
+    chip.querySelector(".model-warning-badge")?.remove();
+    chip.title = "请先在设置中连接模型服务";
+    return;
+  }
   const model = getComposerModel();
   const reasoner = isReasoningModel(model);
   const registry = window.OwoProviderPresets;
@@ -3045,6 +3100,39 @@ function syncProviderModels(presetOverride) {
   if (!registry || !select || typeof registry.presets !== "function") return;
   const settings = state.settings || {};
   const runtime = settings.runtime || {};
+  const ready = !modelGateMissing();
+  const dependentRows = [$("defaultModelSettingsRow"), $("modelOutputSettingsRow"), $("providerImageInput")]
+    .filter(Boolean);
+  dependentRows.forEach((node) => {
+    const row = node.closest?.(".settings-row") || node;
+    row.classList.toggle("model-unavailable", !ready);
+  });
+  select.disabled = !ready;
+  let placeholder = select.querySelector("option[data-model-placeholder]");
+  if (!ready) {
+    if (!placeholder) {
+      placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.dataset.modelPlaceholder = "1";
+      select.prepend(placeholder);
+    }
+    placeholder.textContent = "未连接模型";
+    for (const option of select.options) {
+      if (option !== placeholder) option.hidden = true;
+    }
+    select.value = "";
+    const hint = $("modelCompatibilityHint");
+    if (hint) {
+      hint.hidden = false;
+      hint.textContent = "连接模型服务后才能选择默认模型。";
+    }
+    refreshComposerModelChip();
+    return;
+  }
+  placeholder?.remove();
+  for (const option of select.options) option.hidden = false;
+  const imageInput = $("providerImageInput");
+  if (imageInput) imageInput.disabled = false;
   const baseUrl = String((settings.provider && settings.provider.base_url) || "").toLowerCase();
   const preset = presetOverride !== undefined
     ? presetOverride
@@ -3078,6 +3166,7 @@ function syncProviderModels(presetOverride) {
       ? "\u5f53\u524d\u9ed8\u8ba4\u6a21\u578b\u4e0d\u5728\u8be5\u670d\u52a1\u5546\u7684\u5e38\u7528\u6a21\u578b\u5217\u8868\u4e2d\uff0c\u8bf7\u5207\u6362\u5230\u5f53\u524d\u670d\u52a1\u5546\u652f\u6301\u7684\u6a21\u578b\u3002"
       : "";
   }
+  refreshComposerModelChip();
 }
 function renderCustomModels() {
   const list = $("customModelList");
@@ -3097,7 +3186,7 @@ function renderCustomModels() {
     select.appendChild(option);
   }
   if (!models.length) {
-    list.innerHTML = '<div class="sub">暂无自定义模型，点击右上角添加。</div>';
+    list.innerHTML = '<div class="sub">暂无额外模型连接，普通使用无需添加。</div>';
     return;
   }
   list.innerHTML = "";
@@ -3141,7 +3230,7 @@ function renderCustomModels() {
 function openCustomModelDialog(existing) {
   const model = existing || { apiFormat: "openai" };
   openModal({
-    title: existing ? "编辑自定义模型" : "添加自定义模型",
+    title: existing ? "编辑额外模型连接" : "添加额外模型连接",
     body: `
       <div class="form-grid">
         <label class="field-label">API 格式
@@ -3245,7 +3334,7 @@ function openCustomModelDialog(existing) {
           } catch (error) { showToast("模型未保存：" + friendlyError(error), "error"); return; }
           renderCustomModels();
           close();
-          showToast(`已保存自定义模型 ${next.label}`, "ok");
+          showToast(`已保存额外模型连接 ${next.label}`, "ok");
         },
       },
     ],
@@ -3420,7 +3509,7 @@ function updatePresetApplyAvailability(presetOverride) {
   if (!button) return;
   const preset = presetOverride || findPreset($("providerPreset")?.value);
   const gate = window.OwoCoreActionAvailability;
-  button.disabled = !preset?.model || !gate || !gate.isAvailable();
+  button.disabled = !preset?.model || !gate || !gate.isAvailable() || modelGateMissing();
 }
 
 function renderPresetInfo() {
@@ -3583,20 +3672,36 @@ function renderProviderForm() {
   }
 }
 
+let providerSaveInFlight = false;
 // 保存模型接入：端点 + 模型 + 密钥（留空密钥 = 保留已存值），写本机设置并即时生效。
 async function saveProvider() {
-  const baseUrl = $("providerBaseUrl").value.trim();
+  if (providerSaveInFlight) return null;
+  providerSaveInFlight = true;
+  const saveButton = $("providerSaveBtn");
+  if (saveButton) saveButton.disabled = true;
+  const baseInput = $("providerBaseUrl");
+  const preset = findPreset($("providerPreset")?.value);
+  let baseUrl = baseInput.value.trim();
+  // 浏览器会记住下拉框选择，但不一定恢复脚本填入的端点；选了预设时自动补齐。
+  if (!baseUrl && preset?.baseUrl) {
+    baseUrl = preset.baseUrl;
+    baseInput.value = baseUrl;
+  }
   const apiKey = $("providerApiKey").value.trim();
   if (!baseUrl) {
     // 端点缺失时不能只存密钥：服务端会回落到内置默认 https://api.openai.com/v1，
     // 用户的密钥会被静默打到错误端点（曾实测请求发往 OpenAI 而非用户的服务商）。
     showToast("请填写 API 端点（可从上方服务商预设一键填入）", "error");
+    providerSaveInFlight = false;
+    if (saveButton) saveButton.disabled = false;
     return null;
   }
   try {
     const settings = { ...(state.settings || {}) };
     delete settings.custom_models; // 自定义模型只存本机，不发给服务端
-    settings.model = $("settingsModel").value;
+    const selectedModel = $("settingsModel").value.trim() || String(preset?.model || "").trim();
+    if (selectedModel) settings.model = selectedModel;
+    else delete settings.model;
     settings.provider = {
       base_url: baseUrl,
       // 留空不下发密钥字段，服务端据此保留加密信封里的旧值。
@@ -3614,6 +3719,9 @@ async function saveProvider() {
   } catch (error) {
     showToast(`连接失败：${error.message || error}`, "error");
     return { ok: false };
+  } finally {
+    providerSaveInFlight = false;
+    if (saveButton) saveButton.disabled = false;
   }
 }
 
@@ -3748,6 +3856,9 @@ function updateModelGate() {
   const send = $("sendBtn");
   if (send) send.disabled = missing;
   document.body.classList.toggle("model-gate-active", missing);
+  updatePresetApplyAvailability();
+  if (typeof syncProviderModels === "function") syncProviderModels();
+  else refreshComposerModelChip();
 }
 
 function openModelGateSettings() {
@@ -3965,6 +4076,41 @@ bindToolsEntry("sidebarToolsBtn");
 $("codexSettingsEntry").addEventListener("click", () => setSettingsPageVisible(true));
 $("codexViewBack").addEventListener("click", () => setSettingsPageVisible(false));
 $("inspectorToggle").addEventListener("click", () => setTaskDetailsVisible(!document.body.classList.contains("inspector-open")));
+const startNewConversation = () => {
+  setSettingsPageVisible(false);
+  let notified = false;
+  const timer = setTimeout(() => { notified = true; showToast("正在创建新对话…"); }, 350);
+  Promise.resolve().then(() => newSession()).catch((error) => showToast(`创建会话失败：${error?.message || error}`, "error")).finally(() => {
+    clearTimeout(timer);
+    if (notified) dismissToast("正在创建新对话…");
+  });
+};
+$("railNewChat")?.addEventListener("click", startNewConversation);
+$("newChatTop")?.addEventListener("click", startNewConversation);
+$("sidebarBrandBtn")?.addEventListener("click", () => $("sidebarWorkspaceBtn")?.click());
+$("workbenchReturnChat")?.addEventListener("click", () => setToolsVisible(false));
+$("workbenchSwitchPanel")?.addEventListener("click", () => openWorkbenchSearch());
+$("settingsBackBtn")?.addEventListener("click", () => setSettingsPageVisible(false));
+const modeSwitch = $("modeSwitch");
+if (modeSwitch) {
+  const modeTabs = Array.from(modeSwitch.querySelectorAll("[data-mode-switch]"));
+  const setModeTab = (mode) => {
+    setSessionMode(mode);
+    modeTabs.forEach((tab) => {
+      const active = tab.dataset.modeSwitch === mode;
+      tab.classList.toggle("is-active", active);
+      tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
+    });
+    modeSwitch.dataset.activeMode = mode;
+    syncProjectChip();
+  };
+  setModeTab(modeSwitch.querySelector('[aria-selected="true"]')?.dataset.modeSwitch || "chat");
+  modeSwitch.addEventListener("click", (event) => {
+    const tab = event.target.closest?.("[data-mode-switch]");
+    if (tab) setModeTab(tab.dataset.modeSwitch || "chat");
+  });
+}
 // 功能页内主侧栏常驻：在功能页点会话或「新对话」，先回到对话视图，再交给原有处理器。
 document.addEventListener("click", (event) => {
   if (!document.body.classList.contains("panel-open")) return;
@@ -4004,15 +4150,27 @@ function showToast(text, kind = "") {
     root.id = "toastRoot";
     document.body.appendChild(root);
   }
+  const message = String(text);
+  const now = Date.now();
+  if (Array.from(root.children).some((item) => item.dataset?.message === message)) return;
+  if (root.dataset.lastMessage === message && now - Number(root.dataset.lastAt || 0) < 1200) return;
+  root.dataset.lastMessage = message;
+  root.dataset.lastAt = String(now);
   const toast = document.createElement("div");
+  toast.dataset.message = message;
   toast.className = `toast${kind ? ` toast-${kind}` : ""}`;
-  toast.textContent = text;
+  toast.textContent = message;
   root.appendChild(toast);
   setTimeout(() => {
     toast.style.opacity = "0";
     toast.style.transition = "opacity .3s";
     setTimeout(() => toast.remove(), 320);
   }, 2600);
+}
+function dismissToast(text) {
+  const root = $("toastRoot");
+  if (!root) return;
+  for (const item of Array.from(root.children)) if (item.dataset?.message === String(text)) item.remove();
 }
 
 // 菜单项图标（与侧栏同一套 16px 线性图标）
@@ -4492,6 +4650,9 @@ document.addEventListener("keydown", (event) => {
   } else if (key === "b") {
     event.preventDefault();
     document.body.classList.toggle("sidebar-collapsed");
+  } else if (key === "l") {
+    event.preventDefault();
+    $("prompt").focus();
   } else if (key === ",") {
     event.preventDefault();
     setSettingsPageVisible(true);
@@ -4539,6 +4700,14 @@ $("sidebarWorkspaceBtn").addEventListener("click", () => {
   if (composerMenuEl && composerMenuEl.dataset.owner === "project") closeComposerMenu();
   else openWorkspaceMenu($("sidebarWorkspaceBtn"));
 });
+$("sidebarCollapseBtn")?.addEventListener("click", () => {
+  const collapsed = document.body.classList.toggle("sidebar-collapsed");
+  const button = $("sidebarCollapseBtn");
+  if (button) {
+    button.title = collapsed ? "显示会话栏（Ctrl+B）" : "隐藏会话栏（Ctrl+B）";
+    button.setAttribute("aria-label", button.title);
+  }
+});
 // 会话搜索：图标按钮切换输入框，输入实时过滤
 $("sidebarSearchBtn").addEventListener("click", () => {
   const input = $("sessionSearch");
@@ -4551,26 +4720,49 @@ $("sidebarSearchBtn").addEventListener("click", () => {
   }
 });
 $("sessionSearch").addEventListener("input", filterSessionList);
+$("sidebarSessionMenu")?.addEventListener("click", () => {
+  const archived = $("showArchived");
+  if (!archived) return;
+  archived.checked = !archived.checked;
+  archived.dispatchEvent(new Event("change", { bubbles: true }));
+  showToast(archived.checked ? "已显示归档会话" : "已隐藏归档会话");
+});
+document.addEventListener("click", event => {
+  const button = event.target.closest?.("[data-example-prompt]");
+  if (!button) return;
+  const prompt = $("prompt");
+  if (!prompt) return;
+  prompt.value = button.dataset.examplePrompt || "";
+  prompt.focus();
+  prompt.dispatchEvent(new Event("input", { bubbles: true }));
+});
 function syncProjectChip() {
   const value = $("workspace").value.trim();
   const name = value ? value.split(/[\\/]/).filter(Boolean).pop() : "";
+  const isChat = currentSessionMode() === "chat";
   const displayName = name || "未选择项目";
+  document.body.classList.toggle("workspace-connected", Boolean(value));
+  document.body.classList.toggle("workspace-missing", !value);
   if ($("composerProjectName")) $("composerProjectName").textContent = displayName;
-  if ($("sidebarWorkspaceName")) $("sidebarWorkspaceName").textContent = displayName;
+  if ($("sidebarWorkspaceTitle")) $("sidebarWorkspaceTitle").textContent = value ? "当前工作区" : "连接工作区";
+  if ($("sidebarWorkspaceName")) {
+    $("sidebarWorkspaceName").textContent = value ? displayName : "未选择项目";
+    $("sidebarWorkspaceName").hidden = !value;
+  }
   const title = value ? "当前工作区：" + value : "未设置工作区（点击选择）";
   if ($("composerProjectBtn")) $("composerProjectBtn").title = title;
   if ($("sidebarWorkspaceBtn")) $("sidebarWorkspaceBtn").title = title;
   const headerProject = document.querySelector(".project-label strong");
-  if (headerProject) headerProject.textContent = displayName;
-  const needsWorkspace = !value && !state.sessionId;
+  if (headerProject) headerProject.textContent = value ? displayName : "未连接工作区";
+  const needsWorkspace = !isChat && !value && !state.sessionId;
   const emptyState = $("emptyState");
   if (emptyState) emptyState.classList.toggle("needs-workspace", needsWorkspace);
   const emptyTitle = $("emptyStateTitle");
-  if (emptyTitle) emptyTitle.textContent = needsWorkspace ? "先选择一个项目工作区" : "你想完成什么？";
+  if (emptyTitle) emptyTitle.textContent = needsWorkspace ? "先选择一个项目工作区" : (isChat ? "今天想聊点什么？" : "你想完成什么？");
   const emptyDescription = $("emptyStateDescription");
   if (emptyDescription) emptyDescription.textContent = needsWorkspace
     ? "新任务需要一个工作目录。选择已有文件夹，或创建一个新项目文件夹。"
-    : "直接描述目标，或先定义范围与执行方式。已有结果可在产物与证据中查看。";
+    : (isChat ? "提问、解释、查资料 · 不会读写本机文件" : "直接描述目标，或先定义范围与执行方式。已有结果可在产物与证据中查看。");
   const emptyWorkspaceButton = $("emptyStateWorkspaceBtn");
   if (emptyWorkspaceButton) emptyWorkspaceButton.hidden = !needsWorkspace;
 }
@@ -4698,6 +4890,16 @@ $("accessChip").addEventListener("click", () => {
   openAccessMenu();
   if (composerMenuEl) composerMenuEl.dataset.owner = "access";
 });
+$("mediaBtn")?.addEventListener("click", () => {
+  openComposerMenu($("mediaBtn"), '<div class="composer-menu-title">生成媒体</div><div class="composer-menu-note">请先在设置中配置图片或语音连接，再从这里发起生成。</div><button type="button" class="composer-menu-item" data-open-media-settings>打开媒体设置 →</button>', (menu) => {
+    menu.classList.add("composer-menu-media");
+    menu.querySelector("[data-open-media-settings]")?.addEventListener("click", () => {
+      closeComposerMenu();
+      setSettingsPageVisible(true);
+    });
+  });
+  if (composerMenuEl) composerMenuEl.dataset.owner = "media";
+});
 $("revertBtn").addEventListener("click", revertAll);
 $("auditFilterBtn").addEventListener("click", () => refreshAudit());
 $("learnStart").addEventListener("click", () => learnControl("start"));
@@ -4797,6 +4999,7 @@ $("whitelistForm").addEventListener("submit", async (event) => {
 $("prompt").addEventListener("input", () => {
   updateComposerHint();
   refreshSlashMenu();
+  updateComposerRunning();
 });
 $("prompt").addEventListener("keydown", (event) => {
   const slashOpen = composerMenuEl && composerMenuEl.dataset.owner === "slash";
@@ -4995,6 +5198,16 @@ async function hydrateShell() {
   return window.OwoRecovery.runWithConcurrency(BOOT_HYDRATE_TASKS, 4);
 }
 
+document.querySelector(".composer-context")?.setAttribute("hidden", "");
+const emptyLayoutRoot = $("emptyState");
+if (emptyLayoutRoot && typeof MutationObserver !== "undefined") {
+  const syncEmptyLayout = () => document.body.classList.toggle("empty-conversation", !emptyLayoutRoot.hidden);
+  syncEmptyLayout();
+  new MutationObserver(syncEmptyLayout).observe(emptyLayoutRoot, { attributes: true, attributeFilter: ["hidden"] });
+}
+$("composerProjectBtn")?.setAttribute("hidden", "");
+$("composerEnvironmentBtn")?.setAttribute("hidden", "");
+
 async function boot() {
   await window.OwoCustomModels.init();
   initSpeech();
@@ -5007,6 +5220,9 @@ async function boot() {
   renderEffortChip();
   setMicRecording(false);
   updateComposerRunning();
+  // Electron/IME 输入有时以原生 value 变化到达，未经过 WebView 的 input 事件；
+  // 低频同步确保发送按钮不会因事件丢失而一直保持禁用。
+  setInterval(() => updateComposerRunning(), 250);
   // 先读回本机偏好再应用：否则刷新后已保存的紧凑模式/桌宠等开关会被内存默认值覆盖。
   loadLocalPrefs();
   applyLocalPrefs();
@@ -5018,7 +5234,9 @@ async function boot() {
   }
   // A8-3：桌面桌宠开关状态来自引擎（每 15 秒刷新，跟随桌面端侧的改动）。
   await hydrateShell();
-  await restoreLastSession();
+  const imeSession = new URLSearchParams(location.search).get("session");
+  if (imeSession && /^[0-9a-f-]{36}$/.test(imeSession)) await selectSession(imeSession);
+  else await restoreLastSession();
   refreshWorkspaceTrust();
   shellHydrated = true;
   // 初始深链要等服务水合/恢复完成再打开，避免面板请求早于授权与 ready。
@@ -5044,3 +5262,12 @@ function openPetFeedRun(ref) {
   if(ref?.id) window.OwoPanels.workswarm.open(ref.id);
 }
 window.owo?.onOpenFeed?.(openPetFeedRun);
+
+
+// Gateway requests open the existing authenticated Desktop, keeping approvals in the same session.
+window.owo?.onImeSession?.(async ref => {
+  if (!shellHydrated || !/^[0-9a-f-]{36}$/.test(ref?.sessionId || "")) return;
+  setToolsVisible(false); setSettingsPageVisible(false);
+  try { await refreshSessions(); await selectSession(ref.sessionId); }
+  catch (error) { showToast(friendlyError(error), "error"); }
+});

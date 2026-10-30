@@ -95,7 +95,13 @@ async fn main() -> std::process::ExitCode {
         }
     });
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        if tokio::signal::ctrl_c().await.is_err() {
+            // Electron launches without a console on Windows. Failure to register
+            // a console handler is not a shutdown request. Keep the sender alive
+            // as dropping it would also wake shutdown.changed() in the pipe loop.
+            tracing::warn!("Console shutdown signal unavailable; gateway remains active until its owning Desktop stops it");
+            std::future::pending::<()>().await;
+        }
         let _ = shutdown_tx.send(true);
     });
 

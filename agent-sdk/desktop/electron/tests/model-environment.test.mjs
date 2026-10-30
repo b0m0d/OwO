@@ -11,7 +11,7 @@ function actualCoreEnv(config, inherited = {}) {
   assert.ok(start >= 0 && end > start);
   const context = {
     process: { env: inherited }, shellCommands: commands,
-    agentDataDir: () => "fixture-data", PAIRING_SECRET: "fixture-pairing",
+    agentDataDir: () => "fixture-data", PAIRING_SECRET: "fixture-pairing", IME_ORIGIN_KEY: "fixture-origin",
   };
   vm.createContext(context);
   vm.runInContext(source.slice(start, end), context);

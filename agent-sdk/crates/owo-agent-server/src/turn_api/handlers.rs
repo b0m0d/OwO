@@ -206,6 +206,7 @@ pub(crate) async fn turn(
         .map_err(|_| (StatusCode::CONFLICT, "该会话已有回合正在运行".to_string()))?;
     // Load the authoritative snapshot only after acquiring the per-session turn lock.
     let session = crate::session_api::load_session(&state, &id)?;
+    let ime_scope = crate::ime_api::scope_for_session(&state, &session)?;
     // R8：全局并发 turn 上限 + 关闭中拒绝新回合。
     let concurrency_permit = state.shutdown_gate.try_acquire_turn().map_err(|busy| {
         // R10：错误码表接入（domain/reason/retryable 统一前缀，见 error_codes.rs）。
@@ -261,6 +262,13 @@ pub(crate) async fn turn(
         .map_err(poison)?
         .register(&id, &turn_id)
         .map_err(|code| (StatusCode::CONFLICT, code.to_string()))?;
+    if ime_scope.as_ref().is_some_and(|scope| scope.is_revoked()) {
+        let _ = state
+            .turn_controls
+            .lock()
+            .map_err(poison)?
+            .cancel(&id, Some(&turn_id));
+    }
     let lifecycle = TurnLifecycleGuard {
         state: Arc::clone(&state),
         session_id: id.clone(),
@@ -361,6 +369,7 @@ pub(crate) async fn turn(
         };
         let mut success_stats = None;
         let options = owo_agent_core::TurnExecutionOptions {
+            permission_scope: ime_scope,
             read_only: request.read_only.unwrap_or(false),
             turn_id: Some(producer_turn_id.clone()),
         };

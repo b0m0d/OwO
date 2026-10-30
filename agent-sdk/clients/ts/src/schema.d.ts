@@ -1514,6 +1514,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ime/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admit one authenticated IME task into ordinary persisted Agent execution
+         * @description Separate task-purpose HMAC proof required. Source proof grants no execution rights. The configured IME restrictions narrow the live Agent policy, including nested tools and desktop resume. Receipts are durable and duplicate submissions do not execute again.
+         */
+        post: operations["submitImeTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/intent/parse": {
         parameters: {
             query?: never;
@@ -3646,6 +3666,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/settings/ime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Current IME configuration and available Agent tools */
+        get: operations["getImeAccess"];
+        put?: never;
+        /** Save IME access; revoke and cancel active IME turns on change */
+        post: operations["setImeAccess"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/settings/provider-test": {
         parameters: {
             query?: never;
@@ -5079,6 +5117,82 @@ export interface components {
             /** @description 启动阶段（当前恒为 ready） */
             stage?: string;
             version: string;
+        };
+        ImeAccessSettings: {
+            /** @description null follows all enabled tools; [] permits no tool calls */
+            allowed_tools?: string[] | null;
+            /**
+             * @default follow_agent
+             * @enum {string}
+             */
+            mode: "disabled" | "read_only" | "follow_agent" | "custom";
+            permission_spec?: {
+                /** @enum {string} */
+                command: "deny" | "allowlisted" | "unrestricted";
+                /** @enum {string} */
+                filesystem: "none" | "workspace_read" | "workspace_write" | "unrestricted";
+                /** @enum {string} */
+                network: "deny" | "allowlisted" | "unrestricted";
+                /** @enum {string} */
+                persistence: "once" | "task" | "workspace";
+                scopes?: string[];
+            } | null;
+            /** @description Absolute server-side working directory; null follows Agent workspace */
+            workspace?: string | null;
+        };
+        ImeTaskOriginCapsule: {
+            payload: {
+                /** @enum {string} */
+                audience: "owo-daemon-ime-task";
+                binding: {
+                    request_id: string;
+                    session_id: string;
+                    task_revision: number;
+                };
+                capsule_id: string;
+                freshness: {
+                    issued_at_ms: number;
+                    ttl_ms: number;
+                };
+                /** @enum {integer} */
+                ic_version: 1;
+                /** @enum {string} */
+                issuer: "owo-intent-gateway";
+                nonce: string;
+                origin: {
+                    /** @enum {string} */
+                    application_metadata: "connector_claim";
+                    connector_pid: number;
+                    context_id: string;
+                    executable_sha256: string;
+                    process_created_at_hex: string;
+                    selection_sha256: string | null;
+                    /** @enum {string} */
+                    source: "ime";
+                };
+                origin_request_sha256: string;
+                prompt_sha256: string;
+                scope: {
+                    /** @enum {string} */
+                    mode: "agent_task";
+                };
+            };
+            signature: {
+                /** @enum {string} */
+                alg: "HMAC-SHA256";
+                /** @enum {string} */
+                key_id: "gateway-ime-task-v1";
+                value: string;
+            };
+        };
+        ImeTaskReceipt: {
+            origin_verified: boolean;
+            /** Format: uuid */
+            session_id: string;
+            /** @enum {string} */
+            status: "accepted" | "existing";
+            /** Format: uuid */
+            turn_id: string;
         };
         /** @description 矩阵单元格：(case_id, agent_mode, repetition)；agent_mode 为核心小写词（workswarm 拓扑序列化为 multi） */
         MatrixKey: {
@@ -8298,6 +8412,68 @@ export interface operations {
             };
             /** @description 未被领取/已被他人领取/领域冲突（如 artifact 已终态） */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    submitImeTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    origin_capsule: components["schemas"]["ImeTaskOriginCapsule"];
+                    prompt: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Accepted or existing task; use ordinary session event replay */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImeTaskReceipt"];
+                };
+            };
+            /** @description Invalid prompt or configured workspace */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bearer authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Disabled access or rejected task origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Conflicting identity or ambiguous in-flight admission; do not resubmit side effects */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Admission limit */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11778,6 +11954,76 @@ export interface operations {
         responses: {
             /** @description cloud enabled state */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getImeAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Effective configuration */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        agent_profile: string;
+                        config: components["schemas"]["ImeAccessSettings"];
+                        default_workspace: string;
+                        tools: {
+                            description: string;
+                            name: string;
+                        }[];
+                    };
+                };
+            };
+        };
+    };
+    setImeAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImeAccessSettings"];
+            };
+        };
+        responses: {
+            /** @description Saved immediately */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        config: components["schemas"]["ImeAccessSettings"];
+                        interrupted_sessions: number;
+                        ok: boolean;
+                    };
+                };
+            };
+            /** @description Invalid configuration or workspace */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bearer authentication required */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

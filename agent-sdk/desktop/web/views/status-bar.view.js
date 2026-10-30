@@ -207,7 +207,9 @@
       if (status === "candidate") return { text: "候选待验收", tone: "warn" };
       if (status === "blocked") return { text: "存在阻断", tone: "bad" };
       if (status === "aborted") return { text: "已取消", tone: "muted" };
-      return { text: "回答完成 · 未验证", tone: "muted", detail: status === "accepted" ? "宿主状态为 accepted，但验收记录未返回" : "回答结束不代表产物已验收" };
+      if (state.sessionMode === "chat") return { text: "已完成", tone: "muted", detail: "普通对话无需产物验收" };
+      if (!state.sessionMode) return { text: "回答完成 · 未验证", tone: "muted", detail: "回答结束不代表产物已验收" };
+      return { text: "结果待验证", tone: "muted", detail: "工作区任务已结束，但尚未返回验收记录" };
     }
     return { text: "空闲", tone: "muted" };
   }

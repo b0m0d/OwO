@@ -13,14 +13,15 @@ use std::{
 };
 use zeroize::Zeroizing;
 const MAX_RECEIPTS: usize = 256;
-struct Receipt {
+struct Receipt<R> {
     fingerprint: [u8; 32],
     expires: Instant,
-    result: Option<ExpressionResponse>,
+    result: Option<R>,
 }
-pub(crate) struct OriginVerifier {
+pub(crate) type OriginVerifier = OriginVerifierFor<ExpressionResponse>;
+pub(crate) struct OriginVerifierFor<R> {
     key: Option<Zeroizing<[u8; 32]>>,
-    receipts: HashMap<String, Receipt>,
+    receipts: HashMap<String, Receipt<R>>,
     last_wall_ms: u64,
     reaper_started: bool,
 }
@@ -28,9 +29,9 @@ pub(crate) struct OriginLease {
     nonce: String,
     fingerprint: [u8; 32],
 }
-pub(crate) enum OriginAdmission {
+pub(crate) enum OriginAdmission<R = ExpressionResponse> {
     Fresh(OriginLease),
-    Cached(ExpressionResponse),
+    Cached(R),
 }
 pub(crate) struct OriginError {
     pub status: u16,
@@ -52,7 +53,7 @@ fn hex_bytes(value: &str) -> Option<Zeroizing<Vec<u8>>> {
         .collect::<Option<Vec<u8>>>()
         .map(Zeroizing::new)
 }
-impl OriginVerifier {
+impl<R: Clone + Send + 'static> OriginVerifierFor<R> {
     pub(crate) fn from_env() -> Self {
         let secret = std::env::var("OWO_EXPRESSION_ORIGIN_KEY")
             .ok()
@@ -100,22 +101,49 @@ impl OriginVerifier {
         &mut self,
         capsule: &ExpressionOriginCapsule,
         prompt: &str,
-    ) -> Result<OriginAdmission, OriginError> {
+    ) -> Result<OriginAdmission<R>, OriginError> {
+        self.begin_scoped(capsule, prompt, false)
+    }
+    pub(crate) fn begin_task(
+        &mut self,
+        capsule: &ExpressionOriginCapsule,
+        prompt: &str,
+    ) -> Result<OriginAdmission<R>, OriginError> {
+        self.begin_scoped(capsule, prompt, true)
+    }
+    fn begin_scoped(
+        &mut self,
+        capsule: &ExpressionOriginCapsule,
+        prompt: &str,
+        task: bool,
+    ) -> Result<OriginAdmission<R>, OriginError> {
         let key = self
             .key
             .as_ref()
             .ok_or_else(|| denied("expression/origin_not_registered"))?;
-        if capsule.signature.alg != "HMAC-SHA256"
-            || capsule.signature.key_id != EXPRESSION_ORIGIN_KEY_ID
-        {
+        let key_id = if task {
+            owo_agent_protocol::IME_TASK_ORIGIN_KEY_ID
+        } else {
+            EXPRESSION_ORIGIN_KEY_ID
+        };
+        if capsule.signature.alg != "HMAC-SHA256" || capsule.signature.key_id != key_id {
             return Err(denied("expression/origin_signature"));
         }
-        let bytes = capsule.payload.canonical_bytes().map_err(denied)?;
+        let bytes = if task {
+            capsule.payload.canonical_task_bytes()
+        } else {
+            capsule.payload.canonical_bytes()
+        }
+        .map_err(denied)?;
         let tag = hex_bytes(&capsule.signature.value)
             .ok_or_else(|| denied("expression/origin_signature"))?;
         let mut mac = Hmac::<Sha256>::new_from_slice(key.as_ref())
             .map_err(|_| denied("expression/origin_signature"))?;
-        mac.update(EXPRESSION_ORIGIN_PURPOSE);
+        mac.update(if task {
+            owo_agent_protocol::IME_TASK_ORIGIN_PURPOSE
+        } else {
+            EXPRESSION_ORIGIN_PURPOSE
+        });
         mac.update(&bytes);
         mac.verify_slice(&tag)
             .map_err(|_| denied("expression/origin_signature"))?;
@@ -180,11 +208,7 @@ impl OriginVerifier {
             fingerprint,
         }))
     }
-    pub(crate) fn complete(
-        &mut self,
-        lease: OriginLease,
-        response: ExpressionResponse,
-    ) -> Result<(), OriginError> {
+    pub(crate) fn complete(&mut self, lease: OriginLease, response: R) -> Result<(), OriginError> {
         let receipt = self
             .receipts
             .get_mut(&lease.nonce)

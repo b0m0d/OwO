@@ -224,6 +224,8 @@ pub struct TeamSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(default)]
+    pub ime_access: crate::ime_access::ImeAccessSettings,
     /// 默认模型（低于环境变量与命令行参数）。
     #[serde(default)]
     pub model: Option<String>,

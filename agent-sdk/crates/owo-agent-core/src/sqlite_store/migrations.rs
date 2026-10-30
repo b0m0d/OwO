@@ -189,6 +189,18 @@ pub const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 11,
+        name: "IME session origin and task admission identity",
+        run: |conn| {
+            let columns = table_columns(conn, "sessions")?;
+            if !columns.iter().any(|existing| existing == "ime_origin_json") {
+                conn.execute_batch("ALTER TABLE sessions ADD COLUMN ime_origin_json TEXT")
+                    .map_err(sqlite_error)?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// 基表结构（CREATE TABLE IF NOT EXISTS，幂等）。
@@ -218,7 +230,8 @@ pub(super) fn base_schema() -> &'static str {
          single_verification_plan_turn_id TEXT,
          single_review_issues_json TEXT NOT NULL DEFAULT '[]',
          completion_record_json TEXT,
-         goal_json TEXT
+         goal_json TEXT,
+         ime_origin_json TEXT
      );
      CREATE TABLE IF NOT EXISTS audit (
          id INTEGER PRIMARY KEY AUTOINCREMENT,

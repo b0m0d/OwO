@@ -3,7 +3,7 @@ const {BrowserWindow,ipcMain,screen}=require('electron');
 const path=require('node:path');
 const {pathToFileURL}=require('node:url');
 const {randomUUID}=require('node:crypto');
-function installTaskConfirmation({pet,pets,workspace,port}) {
+function installTaskConfirmation({pet,pets,workspace,port,trustDialog}) {
   const page=path.join(__dirname,'pet-task-confirmation.html'),pageUrl=pathToFileURL(page).href;
   let current=null;
   function text(value){if(typeof value!=='string'||!value.trim()||value.length>8000)throw Error('需求应为 1–8000 字');return value.trim();}
@@ -24,6 +24,7 @@ function installTaskConfirmation({pet,pets,workspace,port}) {
     const area=screen.getPrimaryDisplay().workArea,width=Math.min(740,area.width-32),height=Math.min(720,area.height-32);
     const parent=pets().find(w=>w&&!w.isDestroyed()&&w.isVisible())||pet();
     const w=new BrowserWindow({parent,modal:true,width,height,x:Math.round(area.x+(area.width-width)/2),y:Math.round(area.y+(area.height-height)/2),show:false,resizable:true,minWidth:420,minHeight:480,title:'确认交给队伍的任务',backgroundColor:'#101824',webPreferences:{preload:path.join(__dirname,'pet-task-confirmation-preload.js'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
+    trustDialog(w,pageUrl);
     w.webContents.setWindowOpenHandler(()=>({action:'deny'}));w.webContents.on('will-navigate',e=>e.preventDefault());
     const result=new Promise(resolve=>{current={window:w,resolve,input:{requestId:randomUUID(),text:task,workspace:project,previousInterrupted:input.previousInterrupted===true,output:path.join(project,'outputs'),roles}};});
     w.once('closed',()=>{if(current?.window===w)finish(null);});

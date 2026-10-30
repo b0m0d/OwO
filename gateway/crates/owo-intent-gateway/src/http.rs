@@ -168,6 +168,77 @@ impl OwoHttpClient {
             None => Ok(None),
         }
     }
+    pub(crate) fn issue_task_origin(
+        &self,
+        origin: Option<&crate::source_capsule::VerifiedOrigin>,
+        request: &crate::protocol::AgentIpcRequest,
+        prompt: &str,
+    ) -> Result<Option<owo_agent_protocol::ExpressionOriginCapsule>, BridgeError> {
+        let signer = self
+            .origin_signer
+            .as_ref()
+            .ok_or_else(|| BridgeError::Protocol("authenticated task origin required".into()))?;
+        signer
+            .issue_task(
+                origin.ok_or_else(|| {
+                    BridgeError::Protocol("authenticated task origin required".into())
+                })?,
+                request,
+                prompt,
+            )
+            .map(Some)
+    }
+    pub(crate) async fn submit_ime_task(
+        &self,
+        prompt: &str,
+        capsule: owo_agent_protocol::ExpressionOriginCapsule,
+    ) -> Result<owo_agent_protocol::ImeTaskReceipt, BridgeError> {
+        let body = owo_agent_protocol::ImeTaskRequest {
+            prompt: prompt.into(),
+            origin_capsule: capsule,
+        };
+        let response = self
+            .authed(|http, token| {
+                http.post(format!("{}/ime/tasks", self.base_url))
+                    .bearer_auth(token)
+                    .timeout(REQUEST_TIMEOUT)
+                    .json(&body)
+            })
+            .await?;
+        if !response.status().is_success() {
+            return Err(status_error(response).await);
+        }
+        let receipt: owo_agent_protocol::ImeTaskReceipt = response.json().await?;
+        if !receipt.origin_verified
+            || uuid::Uuid::parse_str(&receipt.session_id).is_err()
+            || uuid::Uuid::parse_str(&receipt.turn_id).is_err()
+        {
+            return Err(BridgeError::Protocol("invalid IME task receipt".into()));
+        }
+        Ok(receipt)
+    }
+    pub(crate) async fn replay_turn(
+        &self,
+        session: &str,
+        turn: &str,
+        after: u64,
+    ) -> Result<owo_agent_protocol::TurnEventReplayPage, BridgeError> {
+        let response = self
+            .authed(|http, token| {
+                http.get(format!("{}/session/{session}/turn/events", self.base_url))
+                    .bearer_auth(token)
+                    .timeout(REQUEST_TIMEOUT)
+                    .query(&[
+                        ("turn_id", turn.to_string()),
+                        ("after_seq", after.to_string()),
+                    ])
+            })
+            .await?;
+        if !response.status().is_success() {
+            return Err(status_error(response).await);
+        }
+        Ok(response.json().await?)
+    }
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -327,6 +398,24 @@ impl OwoHttpClient {
     }
 
     /// `POST /session/{id}/abort`。
+    pub(crate) async fn abort_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<(), BridgeError> {
+        let response = self
+            .authed(|http, token| {
+                http.post(format!("{}/session/{session_id}/abort", self.base_url))
+                    .bearer_auth(token)
+                    .timeout(REQUEST_TIMEOUT)
+                    .json(&serde_json::json!({"turn_id": turn_id}))
+            })
+            .await?;
+        if !response.status().is_success() {
+            return Err(status_error(response).await);
+        }
+        Ok(())
+    }
     pub async fn abort(&self, session_id: &str) -> Result<(), BridgeError> {
         let response = self
             .authed(|http, token| {

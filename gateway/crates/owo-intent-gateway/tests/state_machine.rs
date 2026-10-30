@@ -495,7 +495,8 @@ fn cancel_discards_cached_results_before_session_reuse() {
     reused.input.selected_text = "找文件".into();
     let result = expect_respond(state.dispatch(&reused));
     assert_ne!(result.commands, draft.commands);
-    assert_eq!(result.commands[0].id, "open-agent");
+    assert_eq!(result.commands[0].id, "task-commit");
+    assert_eq!(result.task.intent, "agent.task");
 }
 
 #[tokio::test]
@@ -538,7 +539,7 @@ async fn changed_submission_supersedes_pending_or_unread_expression_and_old_cach
 }
 
 #[test]
-fn non_expression_handoff_removes_cached_expression_preview() {
+fn general_task_draft_removes_cached_expression_preview() {
     let state = ImeState::new(Duration::from_secs(60));
     let req = request(Action::Submit, "before-handoff");
     let (_, turn) = expect_start_turn(&state, &req);
@@ -552,13 +553,14 @@ fn non_expression_handoff_removes_cached_expression_preview() {
     changed.input.selected_text = "帮我找文件".into();
     let handoff = expect_respond(state.dispatch(&changed));
     assert_eq!(handoff.commands.len(), 1);
-    assert_eq!(handoff.commands[0].id, "open-agent");
+    assert_eq!(handoff.commands[0].id, "task-commit");
+    assert_eq!(handoff.task.intent, "agent.task");
     let mut replay = request(Action::Select, "old-result-replay");
     replay.idempotency_key = format!("{}-commit", req.idempotency_key);
     replay.command_id = "task-commit".into();
     replay.task_revision = 1;
     let rejected = expect_respond(state.dispatch(&replay));
-    assert_eq!(rejected.error_code, "unknown_command");
+    assert_eq!(rejected.error_code, "task_revision_mismatch");
     assert!(rejected.commands.is_empty());
 }
 
@@ -891,4 +893,40 @@ fn same_input_new_draft_revokes_consumed_result_confirmation_cache() {
     let observed = expect_respond(state.dispatch(&request(Action::Poll, "observe-fresh")));
     assert_eq!(observed.task, draft.task);
     assert_eq!(observed.commands, draft.commands);
+}
+
+#[tokio::test]
+async fn general_task_survives_focus_change_but_explicit_cancel_signals_abort() {
+    for explicit_cancel in [false, true] {
+        let state = ImeState::new(Duration::from_secs(60));
+        let mut submit = request(Action::Submit, "general-focus");
+        submit.input.selected_text = "create a fixture file".into();
+        let (_, turn) = expect_start_turn(&state, &submit);
+        assert!(turn.agent_task);
+        assert!(turn.slot.is_persistent_task());
+        let mut next = submit.clone();
+        next.idempotency_key = "changed-focus".into();
+        if explicit_cancel {
+            next.action = Action::Cancel;
+        } else {
+            next.application.context_id = "another-editor".into();
+        }
+        let response = expect_respond(state.dispatch(&next));
+        if explicit_cancel {
+            assert_eq!(response.status, Status::Cancelled);
+            tokio::time::timeout(Duration::from_millis(100), turn.slot.cancelled())
+                .await
+                .unwrap();
+        } else {
+            assert_eq!(response.error_code, "target_changed");
+            tokio::time::timeout(Duration::from_millis(100), turn.slot.detached())
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), turn.slot.cancelled())
+                    .await
+                    .is_err()
+            );
+        }
+    }
 }

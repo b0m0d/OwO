@@ -63,6 +63,23 @@ impl SourceSigner {
         request: &AgentIpcRequest,
         prompt: &str,
     ) -> Result<ExpressionOriginCapsule, BridgeError> {
+        self.issue_scoped(evidence, request, prompt, false)
+    }
+    pub(crate) fn issue_task(
+        &self,
+        evidence: &VerifiedOrigin,
+        request: &AgentIpcRequest,
+        prompt: &str,
+    ) -> Result<ExpressionOriginCapsule, BridgeError> {
+        self.issue_scoped(evidence, request, prompt, true)
+    }
+    fn issue_scoped(
+        &self,
+        evidence: &VerifiedOrigin,
+        request: &AgentIpcRequest,
+        prompt: &str,
+        task: bool,
+    ) -> Result<ExpressionOriginCapsule, BridgeError> {
         // Bind the decoded request to the exact kernel-authenticated bytes too.
         let original = AgentIpcRequest::decode(&evidence.raw).map_err(|_| invalid())?;
         if original != *request || evidence.raw.len() > 256 * 1024 {
@@ -80,7 +97,12 @@ impl SourceSigner {
             ic_version: 1,
             capsule_id: uuid::Uuid::new_v4().simple().to_string(),
             issuer: "owo-intent-gateway".into(),
-            audience: "owo-daemon-expression".into(),
+            audience: if task {
+                IME_TASK_ORIGIN_AUDIENCE
+            } else {
+                "owo-daemon-expression"
+            }
+            .into(),
             binding: ExpressionOriginBinding {
                 session_id: request.session_id.clone(),
                 request_id: request.request_id.clone(),
@@ -114,16 +136,35 @@ impl SourceSigner {
             },
             nonce,
             scope: ExpressionOnlyScope {
-                mode: "expression_only".into(),
+                mode: if task {
+                    IME_TASK_ORIGIN_SCOPE
+                } else {
+                    "expression_only"
+                }
+                .into(),
             },
         };
-        let bytes = payload.canonical_bytes().map_err(|_| invalid())?;
+        let bytes = if task {
+            payload.canonical_task_bytes()
+        } else {
+            payload.canonical_bytes()
+        }
+        .map_err(|_| invalid())?;
         let mut mac = Hmac::<Sha256>::new_from_slice(self.key.as_ref()).map_err(|_| invalid())?;
-        mac.update(EXPRESSION_ORIGIN_PURPOSE);
+        mac.update(if task {
+            IME_TASK_ORIGIN_PURPOSE
+        } else {
+            EXPRESSION_ORIGIN_PURPOSE
+        });
         mac.update(&bytes);
         let signature = ExpressionOriginSignature {
             alg: "HMAC-SHA256".into(),
-            key_id: EXPRESSION_ORIGIN_KEY_ID.into(),
+            key_id: if task {
+                IME_TASK_ORIGIN_KEY_ID
+            } else {
+                EXPRESSION_ORIGIN_KEY_ID
+            }
+            .into(),
             value: mac
                 .finalize()
                 .into_bytes()
@@ -224,5 +265,33 @@ mod tests {
         signer.prune();
         assert!(signer.receipts.lock().unwrap().is_empty());
         signer.issue(&origin, &request, "synthetic").unwrap();
+    }
+    #[test]
+    fn task_proof_has_a_separate_purpose_and_cannot_become_expression_proof() {
+        let signer = signer();
+        let (evidence, request) = evidence();
+        let task = signer
+            .issue_task(&evidence, &request, "complete fixture task")
+            .unwrap();
+        assert_eq!(task.payload.audience, IME_TASK_ORIGIN_AUDIENCE);
+        assert_eq!(task.signature.key_id, IME_TASK_ORIGIN_KEY_ID);
+        assert!(task.payload.canonical_bytes().is_err());
+        let mut mac = Hmac::<Sha256>::new_from_slice(&[7; 32]).unwrap();
+        mac.update(IME_TASK_ORIGIN_PURPOSE);
+        mac.update(&task.payload.canonical_task_bytes().unwrap());
+        let tag: Vec<u8> = (0..32)
+            .map(|i| u8::from_str_radix(&task.signature.value[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        mac.verify_slice(&tag).unwrap();
+        let expression = signer
+            .issue(&evidence, &request, "complete fixture task")
+            .unwrap();
+        assert!(expression.payload.canonical_task_bytes().is_err());
+        assert_ne!(task.signature.value, expression.signature.value);
+        let mut changed = request;
+        changed.user_input = "changed".into();
+        assert!(signer
+            .issue_task(&evidence, &changed, "complete fixture task")
+            .is_err());
     }
 }

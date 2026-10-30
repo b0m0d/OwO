@@ -162,7 +162,13 @@
       async forget(){stopTimer();generation++;ref=null;busy=false;pending=null;status='';interrupted=false;await save(null);emit('已解除观察绑定，可以重新投喂');},
       reconcile,refresh:observe,
       open(){return deps.open(ref?.id?ref:null);},
-      restore(value){stopTimer();generation++;ref=value;busy=!!value;status='';interrupted=false;if(value)observe();else emit('等待任务');},
+      restore(value,{initial=false}={}){
+        // The initial persisted read may resolve after confirmation has opened
+        // or after POST. It must never invalidate a newer user action.
+        if(disposed||initial&&(generation!==0||pending))return;
+        stopTimer();generation++;ref=value;busy=!!value;status='';interrupted=false;
+        if(value)observe();else emit('等待任务');
+      },
       dispose(){disposed=true;generation++;stopTimer();},
       get ref(){return ref;},get busy(){return busy;},get status(){return status;},get interrupted(){return interrupted;}
     };
@@ -229,6 +235,6 @@
   });
   const unsubscribe=g.petShell?.onFeed(text=>receive(text).catch(e=>update(e.message,{error:true})));
   const unobserve=g.petShell?.onFeedRun(ref=>controller.restore(ref));
-  g.petShell?.loadFeed().then(ref=>controller.restore(ref)).catch(()=>{});
+  g.petShell?.loadFeed().then(ref=>controller.restore(ref,{initial:true})).catch(()=>{});
   g.addEventListener('beforeunload',()=>{controller.dispose();clearTimeout(visualTimer);unsubscribe?.();unobserve?.();});
 })(globalThis);

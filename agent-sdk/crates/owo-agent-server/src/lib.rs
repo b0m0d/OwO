@@ -53,6 +53,7 @@ mod fleet_api;
 mod fs_api;
 mod goal_api;
 mod idempotency;
+mod ime_api;
 mod intent_api;
 mod learn_api;
 mod locate_api;
@@ -223,6 +224,7 @@ pub struct AppState {
     /// 启动时是否因未信任而进入受限模式（跳过 hooks/权限放宽/白名单）。
     pub workspace_trust_gated: bool,
     pub(crate) expression_origin: Arc<Mutex<expression_origin::OriginVerifier>>,
+    pub(crate) ime_tasks: ime_api::ImeTaskState,
 }
 
 impl AppState {
@@ -336,6 +338,7 @@ impl AppState {
         let shutdown_gate = Arc::new(shutdown::ShutdownGate::from_env());
         // V1 三日（第四路）：ProductEval suite 注册根目录（v1 → workspace/evals/v1/suite.json）。
         let product_eval_suite_root = workspace.join("evals");
+        let ime_tasks = ime_api::ImeTaskState::new(&workspace);
         Self {
             agent: Arc::new(agent),
             store: Arc::new(store),
@@ -436,6 +439,7 @@ impl AppState {
             trust_store,
             workspace_trust_gated,
             expression_origin: Arc::new(Mutex::new(expression_origin::OriginVerifier::from_env())),
+            ime_tasks,
         }
     }
 }

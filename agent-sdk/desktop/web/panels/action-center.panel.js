@@ -763,8 +763,9 @@
       if (!rootEl) return;
       var box = el("#ac-sections");
       if (box) {
-        box.innerHTML =
-          state.inboxSource === "inbox"
+        box.innerHTML = totalOf(state.items) === 0 && state.inboxSource !== "inbox"
+          ? '<div class="owo-ac-empty owo-ac-empty-global"><strong>目前没有需要你处理的事项</strong><span>当任务需要确认、补充信息或重试时，会显示在这里。</span></div>'
+          : state.inboxSource === "inbox"
             ? inboxSectionsHtml(state.inbox)
             : sectionsHtml(state.items, state);
       }

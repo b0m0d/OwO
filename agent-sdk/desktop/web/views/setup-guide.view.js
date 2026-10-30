@@ -90,6 +90,7 @@
       // 本卡直接判定完成，不再要求用户多点一次「使用此目录」。
       global.OwoFolderPicker.attach(pathInput, browseButton, {
         title: "选择项目工作区（原生目录选择器）",
+        displayAlias: false,
         onPicked: function (workspace) {
           if (!form.dataset.done) {
             form.dataset.done = "1";

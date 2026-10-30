@@ -4,10 +4,13 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("owo", {
   pendingFeed: () => ipcRenderer.invoke('pet:feed:pending'),
   onOpenFeed: handler => {const fn=(_event,ref)=>handler(ref);ipcRenderer.on('pet:feed:open-run',fn);return ()=>ipcRenderer.removeListener('pet:feed:open-run',fn);},
+  onImeSession: handler => { const listener = (_event, ref) => handler(ref); ipcRenderer.on("ime:open-session", listener); return () => ipcRenderer.removeListener("ime:open-session", listener); },
+  imeConnection: { status: () => ipcRenderer.invoke("ime:status"), start: () => ipcRenderer.invoke("ime:start"), stop: () => ipcRenderer.invoke("ime:stop") },
   getCoreState: () => ipcRenderer.invoke("core:get"),
   downloadArtifact: id => ipcRenderer.invoke("artifact:download", id),
   teamFiles: { list: input => ipcRenderer.invoke("team:files:list", input), act: input => ipcRenderer.invoke("team:files:act", input) },
   setZoom: factor => ipcRenderer.invoke("view:zoom", factor),
+  setPetVisible: visible => ipcRenderer.invoke("pet:visible", Boolean(visible)),
   customModels: { list: () => ipcRenderer.invoke("models:list"), upsert: input => ipcRenderer.invoke("models:upsert", input), remove: id => ipcRenderer.invoke("models:remove", { id }), migrate: input => ipcRenderer.invoke("models:migrate", input), probe: input => ipcRenderer.invoke("models:probe", input) },
   restartCore: () => ipcRenderer.invoke("core:restart"),
   readConfig: () => ipcRenderer.invoke("config:read"),

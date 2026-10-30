@@ -165,6 +165,8 @@ mod env_limit_tests {
 
 #[derive(Debug, Clone, Default)]
 pub struct TurnExecutionOptions {
+    pub permission_scope:
+        Option<std::sync::Arc<owo_agent_policy::request_scope::RequestPermissionScope>>,
     /// A narrowing-only constraint; false never changes the host policy.
     pub read_only: bool,
     /// Host-validated identity shared by SSE, cancellation, traces and receipts.

@@ -79,6 +79,13 @@ const crypto = require("node:crypto");
 // 放进窗口，也拿不到其它窗口的 sender 身份，且来源 origin 校验会再拦一层。
 
 const trustedWindows = new WeakSet();
+// Local task dialogs receive only their own two channels, never the shell bridge.
+const taskDialogTrust = new WeakMap();
+function registerTaskDialogIpc(window, pageUrl) {
+  const contents = window.webContents;
+  taskDialogTrust.set(contents, pageUrl);
+  window.once("closed", () => taskDialogTrust.delete(contents));
+}
 
 function isLoopbackOrBootUrl(raw) {
   let url = null;
@@ -94,12 +101,15 @@ function isLoopbackOrBootUrl(raw) {
   return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
 }
 
-function isTrustedIpcSender(event) {
+function isTrustedIpcSender(event, channel) {
   const contents = event && event.sender;
-  if (!contents || !trustedWindows.has(contents)) return false;
+  if (!contents) return false;
   const frame = event.senderFrame;
   if (!frame || frame !== contents.mainFrame) return false;
-  return isLoopbackOrBootUrl(frame.url);
+  const dialogUrl = taskDialogTrust.get(contents);
+  if (dialogUrl && dialogUrl === frame.url &&
+      ["pet:task:input", "pet:task:answer"].includes(channel)) return true;
+  return trustedWindows.has(contents) && isLoopbackOrBootUrl(frame.url);
 }
 
 let ipcGuardInstalled = false;
@@ -109,7 +119,7 @@ function installIpcSenderGuard() {
   const original = ipcMain.handle.bind(ipcMain);
   ipcMain.handle = (channel, listener) =>
     original(channel, (event, ...args) => {
-      if (!isTrustedIpcSender(event)) {
+      if (!isTrustedIpcSender(event, channel)) {
         console.warn(`[ipc] 拒绝非受信来源：${channel}`);
         throw new Error(`ipc/untrusted_sender: ${channel}`);
       }
@@ -141,6 +151,7 @@ function lockNavigation(win) {
 // `ipcMain.handle` 注册，否则那些 handler 不在守卫内。
 installIpcSenderGuard();
 
+const IME_ORIGIN_KEY = crypto.randomBytes(32).toString("hex");
 const supervision = require("./core-supervision.js");
 const shellCommands = require("./shell-commands.js");
 const { configuredWorkspacePath } = require("./workspace-state.js");
@@ -298,6 +309,11 @@ function loadDataRootOverride() {
 }
 
 function dataRoot() {
+  const explicit = process.env.OWO_DESKTOP_DATA_ROOT;
+  if (explicit) {
+    if (!path.isAbsolute(explicit) || !fs.statSync(explicit).isDirectory()) throw new Error("Invalid desktop data root");
+    return fs.realpathSync(explicit);
+  }
   return loadDataRootOverride() || defaultDataRoot();
 }
 
@@ -337,7 +353,7 @@ function coreLogPath() {
 // 配对证明绝不能落进日志（旧壳 core_runtime.rs::redact 同一职责）：
 // 核心若把环境或请求回显出来，日志就成了凭据泄漏面。
 function redactSecrets(text) {
-  return String(text).split(PAIRING_SECRET).join("***pairing***");
+  return String(text).split(PAIRING_SECRET).join("***pairing***").split(IME_ORIGIN_KEY).join("***origin***");
 }
 
 function workspacePath() {
@@ -377,12 +393,38 @@ function coreCandidates() {
   return list.filter((candidate) => fs.existsSync(candidate));
 }
 
+// The desktop only controls the separately built gateway; IME stays outside the SDK workspace.
+const imeConnection = require("./ime-connection.js").create({
+  runtime: () => core?.proc && core.port ? { owned: true, port: core.port, dataRoot: agentDataDir() } : null,
+  executable: () => {
+    const candidates = [
+      process.env.OWO_GATEWAY_EXE,
+      path.join(process.resourcesPath || "", "owo-intent-gateway.exe"),
+      path.resolve(__dirname, "../../../../target/debug/owo-intent-gateway.exe"),
+      path.resolve(__dirname, "../../../../target/release/owo-intent-gateway.exe"),
+      path.resolve(__dirname, "../../../../../gateway/target/debug/owo-intent-gateway.exe"),
+      path.resolve(__dirname, "../../../../../gateway/target/release/owo-intent-gateway.exe"),
+    ];
+    return candidates.find(file => file && fs.existsSync(file));
+  },
+  localAppData, dataRoot, originKey: IME_ORIGIN_KEY,
+  onOpenSession: sessionId => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.show(); mainWindow.focus();
+    mainWindow.webContents.send("ime:open-session", { sessionId });
+  },
+});
+ipcMain.handle("ime:status", () => imeConnection.status());
+ipcMain.handle("ime:start", () => imeConnection.start());
+ipcMain.handle("ime:stop", () => imeConnection.stop());
+
 // ---------- 配置读写（唯一事实源：config.json） ----------
 
 const DEFAULT_CONFIG = {
   version: 1,
   model: {
     provider: "unset",
+    deferred: false,
     base_url: "",
     name: "",
     api_key: "",
@@ -460,6 +502,7 @@ function coreEnv(config, extra = {}) {
     ...bindings,
     OWO_AGENT_DATA: agentDataDir(),
     OWO_DESKTOP_RELEASE: "1",
+    OWO_EXPRESSION_ORIGIN_KEY: IME_ORIGIN_KEY,
     OWO_DESKTOP_PAIRING_SECRET: PAIRING_SECRET,
     ...extra,
   }, config.model || {});
@@ -614,6 +657,7 @@ async function adoptExistingCore(myGeneration, apiVersion = CORE_API_VERSION) {
 // ---------- 核心：启动 / 就绪 / 关闭 ----------
 
 function killCore() {
+  void imeConnection.stop();
   if (!core || !core.proc) {
     core = null;
     return;
@@ -851,6 +895,8 @@ function notifyState() {
     uiPort = coreState.port;
     mainWindow.loadURL(webUiUrl(coreState.port));
     syncPetWindow(coreState.port);
+    // 核心就绪后会重新导航页面；再次置前，避免这次导航把工作台留在其他窗口后面。
+    raiseMainWindow();
     return;
   }
   // 还没进过工作台时，由壳页负责把启动失败说清楚；
@@ -890,6 +936,12 @@ function createWindow() {
   // ADR-003：先给占位页，core ready 后由 notifyState 导航到核心托管的工作台。
   mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(bootPage(coreState))}`);
   bootShown = true;
+  // 某些 Windows 会话会把上次收进托盘/最小化状态带到新窗口；确保首次启动真的可见。
+  mainWindow.once("ready-to-show", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      raiseMainWindow();
+    }
+  });
   // 工作台里的外链交给系统浏览器，壳内不新开窗口。
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(String(url))) shell.openExternal(url);
@@ -992,11 +1044,10 @@ function createPetWindow(port) {
     movable: false,
     minimizable: false,
     maximizable: false,
+    focusable: false,
     hasShadow: false,
     skipTaskbar: true, // 桌宠不进任务栏，也不该出现在 Alt+Tab 里干扰工作
-    alwaysOnTop: true,
-    // Windows 上 alwaysOnTop 会盖住开始菜单/通知，用 'screen-saver' 之上的层级
-    // 保证可见，同时残留在普通应用之上；这里取 Electron 的最高档。
+    alwaysOnTop: false, // 桌宠也不强制置顶，避免遮挡其他应用
     title: "OwO 桌宠",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -1047,18 +1098,17 @@ function ensureAgentPets(ref) {
   const primary=members.find(m=>['lead','planner'].includes(m.role)) || members[0];
   const roles=Array.isArray(ref?.members)?members.filter(m=>m!==primary).map(m=>m.role):['implementer','reviewer'];
   for(const [role,w] of agentPetWindows)if(!roles.includes(role)){w.destroy();agentPetWindows.delete(role);}
-  const prefs=actorPreferences(),used=new Set([readPetPref().skin || 'petdex-haibara-ai']);
-  for(const role of roles){const w=agentPetWindows.get(role);if(w&&!w.isDestroyed()&&prefs[role]?.skin)used.add(prefs[role].skin);}
-  const available=['petdex-coco','petdex-boba','petdex-lulu-capybara','petdex-usagi','petdex-wangcai','petdex-doraemon','petdex-zero-two','petdex-nier-2b'];
+  const prefs=actorPreferences();
+  // 目前桌宠资源只保留用户提供的 3D 墨鱼；多个成员窗口共用同一套模型。
+  const defaultSkin='owo-squid';
   let index=0;
   for(const role of roles){
     index++;
-    const existing=agentPetWindows.get(role);if(existing&&!existing.isDestroyed()){if(prefs[role]?.skin)used.add(prefs[role].skin);continue;}
-    const requested=prefs[role]?.skin;const skin=requested&&!used.has(requested)?requested:available.find(x=>!used.has(x));
-    if(!skin)throw Error('No distinct skin available for configured agent');used.add(skin);
+    const existing=agentPetWindows.get(role);if(existing&&!existing.isDestroyed())continue;
+    const requested=prefs[role]?.skin;const skin=requested===defaultSkin?requested:defaultSkin;
     const origin=petWindow&&!petWindow.isDestroyed()?petWindow.getBounds():petDefaultBounds();
     const saved=prefs[role],position=saved&&Number.isFinite(saved.x)&&Number.isFinite(saved.y)?clampToWorkArea(saved.x,saved.y):clampToWorkArea(origin.x-index*PET_SIZE.width,origin.y);
-    const w=new BrowserWindow({...PET_SIZE,...position,show:false,frame:false,transparent:true,backgroundColor:'#00000000',resizable:false,movable:false,skipTaskbar:true,alwaysOnTop:true,hasShadow:false,webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
+    const w=new BrowserWindow({...PET_SIZE,...position,show:false,frame:false,transparent:true,backgroundColor:'#00000000',resizable:false,movable:false,minimizable:false,maximizable:false,focusable:false,skipTaskbar:true,alwaysOnTop:false,hasShadow:false,webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
     agentPetWindows.set(role,w);prefs[role]={...prefs[role],skin};
     trustedWindows.add(w.webContents);
     lockNavigation(w);
@@ -1192,9 +1242,18 @@ function toggleWindow() {
   if (mainWindow.isVisible()) {
     mainWindow.hide();
   } else {
-    mainWindow.show();
-    mainWindow.focus();
+    raiseMainWindow();
   }
+}
+
+  // 只在用户打开/唤起工作台时把它带到前面；不设置 always-on-top，
+  // 避免工作台覆盖用户正在使用的其他窗口。
+function raiseMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.moveTop();
+  mainWindow.focus();
 }
 
 function quitApp() {
@@ -1214,9 +1273,7 @@ function showWorkspace() {
     createWindow();
     return;
   }
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  if (!mainWindow.isVisible()) mainWindow.show();
-  mainWindow.focus();
+  raiseMainWindow();
 }
 
 function registerGlobalShortcut() {
@@ -1230,7 +1287,7 @@ function registerGlobalShortcut() {
   return registered;
 }
 
-require('./pet-task-confirmation.js').installTaskConfirmation({pet:()=>petWindow,pets:()=>[petWindow,...agentPetWindows.values()],workspace:()=>workspacePath(),port:()=>coreState.port});
+require('./pet-task-confirmation.js').installTaskConfirmation({pet:()=>petWindow,pets:()=>[petWindow,...agentPetWindows.values()],workspace:()=>workspacePath(),port:()=>coreState.port,trustDialog:registerTaskDialogIpc});
 require('./pet-feed.js').installPetFeed({pet:()=>petWindow,main:()=>mainWindow,workspace:()=>showWorkspace(),dataRoot,port:()=>coreState.port,pets:()=>[petWindow,...agentPetWindows.values()],ensureAgents:ensureAgentPets,moveActor:movePetActor,resetActor:resetPetActor,setVisible:setPetDesired,present:state=>petPresence.update(state),queryVisible:()=>petPresence.isVisible()});
 
 // ---------- IPC ----------
@@ -1342,8 +1399,7 @@ ipcMain.handle("pet:visible", (_event, visible) => {
 
 ipcMain.handle("pet:workbench", () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.show();
-    mainWindow.focus();
+    raiseMainWindow();
     return { ok: true };
   }
   createWindow();

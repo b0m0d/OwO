@@ -647,8 +647,10 @@ pub(super) async fn permissions_set_spec(
 /// 通用设置保存：写入 settings.json 并应用运行时设置（数据出境、STT、主动建议、白名单）。
 pub(super) async fn settings_update(
     State(state): State<Arc<AppState>>,
-    Json(settings): Json<owo_agent_core::Settings>,
+    Json(mut settings): Json<owo_agent_core::Settings>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let _ime_admission = state.ime_tasks.admission.lock().await;
+    settings.ime_access = state.ime_tasks.config()?;
     settings
         .save(&state.workspace)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;

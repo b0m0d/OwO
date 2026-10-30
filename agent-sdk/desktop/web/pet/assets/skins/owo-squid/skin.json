@@ -1,0 +1,38 @@
+{
+  "id": "owo-squid",
+  "name": "3D 墨鱼",
+  "author": "用户提供的 Squid.glb",
+  "version": "1.0.0",
+  "description": "使用用户提供的 Squid.glb 模型渲染的透明 3D 桌宠。",
+  "kind": "gltf",
+  "model": "Squid.glb",
+  "modelScale": 1.0,
+  "states": {
+    "idle": {
+      "model": "Squid.glb",
+      "durationMs": 2200,
+      "bubble": "墨鱼待机中～"
+    },
+    "thinking": {
+      "model": "Squid.glb",
+      "durationMs": 1500,
+      "bubble": "墨鱼思考中…"
+    },
+    "speaking": {
+      "model": "Squid.glb",
+      "durationMs": 900,
+      "bubble": "墨鱼出动！"
+    },
+    "alert": {
+      "model": "Squid.glb",
+      "durationMs": 700,
+      "bubble": "墨鱼提醒你！"
+    }
+  },
+  "bubbles": {
+    "idle": "墨鱼待机中～",
+    "thinking": "墨鱼思考中…",
+    "speaking": "墨鱼出动！",
+    "alert": "墨鱼提醒你！"
+  }
+}

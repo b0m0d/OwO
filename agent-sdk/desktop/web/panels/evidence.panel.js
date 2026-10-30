@@ -12,9 +12,9 @@
     if (state.mode === "session") {
       const facts = state.session ? root.OwoSessionFacts.fromDetail(state.session) : null;
       const record = root.OwoCompletionRecord.summarize(facts?.lastCompletionRecord);
-      body = '<div class="evidence-session"><h3>宿主完成记录</h3><p>' + esc(record?.compact || "没有可用的宿主完成记录，不能据此认定任务通过验收") + '</p><p>实际模型：' + esc(facts?.lastExecutionModel || "未知") + '</p>' +
-        (record ? '<dl>' + record.details.map(([key, value]) => '<dt>' + esc(key) + '</dt><dd>' + esc(value) + '</dd>').join("") + '</dl>' : "") +
-        '<h3>文件变更</h3>' + (state.diffs.length ? state.diffs.map(diff => '<details class="evidence-diff"><summary>' + esc(diff.path) + '</summary><div class="diff-columns"><div><strong>改动前</strong><pre>' + esc(String(diff.before ?? "").slice(0, 131072)) + '</pre></div><div><strong>改动后</strong><pre>' + esc(String(diff.after ?? "").slice(0, 131072)) + '</pre></div></div></details>').join("") : '<div class="panel-empty-state"><strong>未记录文件变更</strong><span>这不代表任务已经验收，请同时查看宿主完成记录。</span></div>') +
+      body = '<div class="evidence-session"><h3>执行完成记录</h3><p>' + esc(record?.compact || "尚无可验证的执行结果，暂时无法判断是否通过验收") + '</p><details class="evidence-technical"><summary>运行详情</summary><p>暂无模型记录：' + esc(facts?.lastExecutionModel || "未知") + '</p>' +
+        (record ? '<dl>' + record.details.map(([key, value]) => '<dt>' + esc(key) + '</dt><dd>' + esc(value) + '</dd>').join("") + '</dl>' : "") + '</details>' +
+        '<h3>文件变更</h3>' + (state.diffs.length ? state.diffs.map(diff => '<details class="evidence-diff"><summary>' + esc(diff.path) + '</summary><div class="diff-columns"><div><strong>改动前</strong><pre>' + esc(String(diff.before ?? "").slice(0, 131072)) + '</pre></div><div><strong>改动后</strong><pre>' + esc(String(diff.after ?? "").slice(0, 131072)) + '</pre></div></div></details>').join("") : '<div class="panel-empty-state"><strong>暂无文件变更记录</strong><span>没有文件记录不等于没有改动，请结合执行结果查看。</span></div>') +
         '<div class="evidence-actions"><button data-evidence-audit>查看会话与执行记录</button><button data-evidence-export>导出证据摘要</button></div></div>';
     } else {
       const meta = state.detail?.metadata, history = state.detail?.history;

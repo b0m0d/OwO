@@ -31,6 +31,7 @@ pub mod goal;
 /// Hooks 生命周期扩展点（A2-1，取优合并自远端 engine）：settings.json 的
 /// `hooks: [{event, matcher?, command}]`，exit 2 = 阻断。
 pub mod hooks;
+pub mod ime_access;
 mod json_schema;
 pub mod node_agent;
 /// 用户提问通道（ask_user 工具；取优合并自远端 engine）。
@@ -239,6 +240,7 @@ pub use owo_agent_memory::{learn, memory, observe, share_skill};
 // 入边（agent / tools / subagent / autoreview / settings + server 的 permissions_center_api
 // 与集成测试）全部由下面的别名模块满足，调用方零改动。
 // ---------------------------------------------------------------------------
+pub use owo_agent_policy::request_scope;
 pub use owo_agent_policy::{
     command_guard, grant_store, mcp_health, permission_spec, permissions, tool_effects,
 };

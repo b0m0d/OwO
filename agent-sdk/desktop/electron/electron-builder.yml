@@ -22,6 +22,10 @@ files:
 asar: true
 
 extraResources:
+  - from: binaries/owo-intent-gateway.exe
+    to: owo-intent-gateway.exe
+  - from: binaries/ime-gateway-build.json
+    to: ime-gateway-build.json
   # 核心服务：不直接取 target/release，而是取经 stage-desktop-sidecar.ps1 校验过的
   # 产物（清残留 + 三元组命名 + 构建身份 commit= 与 SHA-256 核对）。历史上正是
   # 绕过这一步才出现"安装包里装着上一代 core"的错包；npm run dist 经 predist 自动

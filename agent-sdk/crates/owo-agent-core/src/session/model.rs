@@ -50,6 +50,8 @@ pub struct ExecutionReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ime_origin: Option<owo_agent_protocol::ImeSessionSource>,
     pub id: String,
     pub workspace: PathBuf,
     pub model: String,
@@ -134,6 +136,7 @@ impl Session {
         let now = Utc::now().to_rfc3339();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            ime_origin: None,
             workspace: workspace.into(),
             model: model.into(),
             system_prompt,
@@ -528,6 +531,7 @@ impl Session {
         let now = Utc::now().to_rfc3339();
         Session {
             id: uuid::Uuid::new_v4().to_string(),
+            ime_origin: self.ime_origin.clone(),
             workspace: self.workspace.clone(),
             model: self.model.clone(),
             system_prompt: self.system_prompt.clone(),

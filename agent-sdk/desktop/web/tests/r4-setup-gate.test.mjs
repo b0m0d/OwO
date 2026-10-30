@@ -24,6 +24,8 @@ import vm from "node:vm";
 
 const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
 const appSource = readFileSync(join(WEB, "app.js"), "utf8");
+const setupGuideSource = readFileSync(join(WEB, "views", "setup-guide.view.js"), "utf8");
+const preloadSource = readFileSync(join(WEB, "..", "electron", "src", "main", "preload.js"), "utf8");
 
 /** 按大括号配平抽出顶层函数源码（含声明），用于在沙箱里真实执行。 */
 function extractTopLevelFunction(source, name) {
@@ -177,6 +179,11 @@ test("非壳环境（纯浏览器 dev）不判引导；引导门取样全程零 
 });
 
 
+test("稍后配置和目录选择都不依赖易失的浏览器状态", () => {
+  assert.match(appSource, /Boolean\(provider && provider\.deferred\)/);
+  assert.match(setupGuideSource, /displayAlias: false/);
+});
+
 test("设置门脚本接线：桌面先加载原生目录选择器与配置视图，后加载 app 主入口", () => {
   const html = readFileSync(join(WEB, "index.html"), "utf8");
   assert.match(html, /<main id="setupRoot"[^>]*hidden/);
@@ -186,6 +193,11 @@ test("设置门脚本接线：桌面先加载原生目录选择器与配置视�
   assert.ok(picker >= 0 && guide > picker && app > guide, "设置视图依赖必须先于 app 加载");
 });
 
+
+test("工作台桌宠显隐同时写核心并立即通知桌面壳", () => {
+  assert.match(appSource, /window\.owo\.setPetVisible\(next\)/);
+  assert.match(preloadSource, /setPetVisible: visible => ipcRenderer\.invoke\("pet:visible", Boolean\(visible\)\)/);
+});
 
 test("明确配置的 shell 工作区会回灌输入框，即使 WebView 本地存储为空", async () => {
   const selected = makeHarness({ states: [{ state: "ready" }], workspace: { workspace: "D:\\work\\demo", configured: true } });

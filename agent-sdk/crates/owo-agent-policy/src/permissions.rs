@@ -413,6 +413,7 @@ pub struct Policy {
     runtime_deny: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     read_only: Arc<AtomicBool>,
     request_read_only: bool,
+    request_scope: Option<Arc<crate::request_scope::RequestPermissionScope>>,
     /// §5.3 权限档位（默认 Workspace：工作区内只读默认允许，首次写入/执行/联网/
     /// UI 控制/越界/破坏性操作询问；审批后由有作用域 Grant 记忆）。
     profile: std::sync::Arc<std::sync::Mutex<PermissionProfile>>,
@@ -441,6 +442,7 @@ impl Policy {
             runtime_deny: Arc::clone(&self.runtime_deny),
             read_only: Arc::clone(&self.read_only),
             request_read_only: self.request_read_only,
+            request_scope: self.request_scope.clone(),
             profile: Arc::clone(&self.profile),
             grants: Arc::clone(&self.grants),
             spec: Arc::clone(&self.spec),
@@ -464,6 +466,7 @@ impl Policy {
             runtime_deny: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             read_only: Arc::new(AtomicBool::new(false)),
             request_read_only: false,
+            request_scope: None,
             profile: std::sync::Arc::new(std::sync::Mutex::new(PermissionProfile::Workspace)),
             grants: Arc::new(std::sync::RwLock::new(None)),
             spec: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -609,7 +612,12 @@ impl Policy {
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.request_read_only || self.read_only.load(Ordering::Acquire)
+        self.request_read_only
+            || self
+                .request_scope
+                .as_ref()
+                .is_some_and(|s| s.is_read_only())
+            || self.read_only.load(Ordering::Acquire)
     }
 
     pub fn workspace(&self) -> &Path {
@@ -758,7 +766,32 @@ impl Policy {
 
     /// Recheck only denials before executing an already approved capability.
     /// This does not consume a reusable grant or replace a required approval.
+    pub fn includes_request_tool(&self, name: &str) -> bool {
+        self.request_scope
+            .as_ref()
+            .is_none_or(|scope| scope.includes_tool(name))
+    }
+    pub fn allows_lifecycle_hooks(&self) -> bool {
+        self.request_scope
+            .as_ref()
+            .is_none_or(|scope| scope.allows_lifecycle_hooks())
+    }
+    pub fn with_request_scope(
+        mut self,
+        scope: Arc<crate::request_scope::RequestPermissionScope>,
+    ) -> Self {
+        self.request_scope = Some(scope);
+        self
+    }
+
     pub fn execution_denial(&self, request: &PermissionRequest) -> Option<String> {
+        if let Some(reason) = self
+            .request_scope
+            .as_ref()
+            .and_then(|scope| scope.denial(request))
+        {
+            return Some(reason);
+        }
         if request.reason.starts_with("拒绝") {
             return Some(request.reason.clone());
         }
@@ -786,7 +819,11 @@ impl Policy {
         if self.execution_denial(request).is_some() {
             return Decision::Deny;
         }
-        if request.level == Level::Read {
+        let caller_asks = self
+            .request_scope
+            .as_ref()
+            .is_some_and(|scope| scope.requires_approval(request));
+        if request.level == Level::Read && !caller_asks {
             return Decision::Allow;
         }
         if self.is_read_only() || self.profile() == PermissionProfile::ReadOnly {
@@ -797,6 +834,9 @@ impl Policy {
             if grants.consume(request, &self.workspace_id()).is_some() {
                 return Decision::Allow;
             }
+        }
+        if caller_asks {
+            return Decision::Ask;
         }
         match self.profile() {
             // Workspace：工作区内写入也必须首次审批；审批卡生成的有作用域 Grant

@@ -757,7 +757,16 @@ function renderHistoricalCompletion(sessionId, facts) {
   node.className = "historical-completion";
   const summary = window.OwoCompletionRecord.summarize(facts.lastCompletionRecord);
   const usage = window.OwoCompletionRecord.usageFromTurnStats(facts.stats);
-  node.textContent = [summary?.compact || "宿主终态：" + facts.outcome, "实际模型：" + (facts.lastExecutionModel || "未知"), usage?.text || "用量明细未返回"].join(" · ");
+  const headline = document.createElement("strong");
+  headline.textContent = facts.outcome === "completed" ? "已完成" : (summary?.status || "运行结束");
+  node.appendChild(headline);
+  const detail = document.createElement("details");
+  const detailSummary = document.createElement("summary");
+  detailSummary.textContent = "运行详情";
+  const detailBody = document.createElement("span");
+  detailBody.textContent = [summary?.compact || "宿主终态：" + facts.outcome, "实际模型：" + (facts.lastExecutionModel || "未知"), usage?.text || "用量明细未返回"].join(" · ");
+  detail.append(detailSummary, detailBody);
+  node.appendChild(detail);
   if (["failed","cancelled","interrupted"].includes(facts.outcome)) node.appendChild(turnRecoveryActions(sessionId, state.lastSessionPrompts.get(sessionId) || "", facts.outcome));
   sessionView(sessionId).appendChild(node);
 }

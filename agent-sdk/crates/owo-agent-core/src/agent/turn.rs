@@ -44,6 +44,10 @@ impl Agent {
         } else {
             turn_policy
         };
+        let turn_policy = match &options.permission_scope {
+            Some(scope) => turn_policy.with_request_scope(std::sync::Arc::clone(scope)),
+            None => turn_policy,
+        };
         let mut usage_known = true;
         let mut model_requests = 0usize;
         // §9.2：turn 入口建立统一预算（None = 不限时，仅记账不强制）；
@@ -83,7 +87,7 @@ impl Agent {
         // A2-1 UserPromptSubmit hook：exit 2 = 拒绝本回合（敏感词门卫/强制工单号等
         // 确定性控制），stderr 回喂模型与用户。
         let hooks = self.hooks_snapshot();
-        if !hooks.is_empty() {
+        if !hooks.is_empty() && turn_policy.allows_lifecycle_hooks() {
             let outcome = hooks
                 .run(
                     crate::hooks::HookEvent::UserPromptSubmit,
@@ -107,6 +111,7 @@ impl Agent {
         let tools = self
             .visible_tool_specs()
             .into_iter()
+            .filter(|spec| turn_policy.includes_request_tool(&spec.name))
             .filter(|spec| {
                 !turn_policy.is_read_only()
                     || spec.effect.as_ref().is_some_and(|effect| {
@@ -157,7 +162,7 @@ impl Agent {
             }
             // A2-1 PreCompact hook：通知性质（不阻断——压缩是保护性动作）。
             let hooks = self.hooks_snapshot();
-            if !hooks.is_empty() {
+            if !hooks.is_empty() && turn_policy.allows_lifecycle_hooks() {
                 let _ = hooks
                     .run(
                         crate::hooks::HookEvent::PreCompact,
@@ -626,7 +631,7 @@ impl Agent {
                         // A2-1 PreToolUse hook：exit 2 = 阻断该次调用，stderr 原样作为
                         // 拒绝原因回喂模型（模型可据此换策略），不终止回合。
                         let hooks = self.hooks_snapshot();
-                        if !hooks.is_empty() {
+                        if !hooks.is_empty() && turn_policy.allows_lifecycle_hooks() {
                             let outcome = hooks
                                 .run(
                                     crate::hooks::HookEvent::PreToolUse,
@@ -1369,7 +1374,7 @@ impl Agent {
         commit_turn_messages(session, &messages);
         // A2-1 Stop hook：回合结束通知（finally 类动作如测试/通知）。
         let hooks = self.hooks_snapshot();
-        if !hooks.is_empty() {
+        if !hooks.is_empty() && turn_policy.allows_lifecycle_hooks() {
             let _ = hooks
                 .run(
                     crate::hooks::HookEvent::Stop,

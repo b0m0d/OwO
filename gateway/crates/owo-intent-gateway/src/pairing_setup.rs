@@ -94,15 +94,16 @@ pub fn confirm_interactively(options: SetupOptions) -> io::Result<PairingSession
     };
     let binding = crate::peer::process_connector_binding(options.connector_pid)?;
     let mut host = EnrollmentHost::default();
-    let challenge = host
-        .prepare(binding, options.approved_sha256, Instant::now())
+    let preflight = host
+        .prepare(binding.clone(), options.approved_sha256, Instant::now())
         .map_err(|_| io::Error::other("connector does not match the reviewed installation"))?;
+    host.cancel(preflight);
     let digest: String = options
         .approved_sha256
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let text=format!("允许此 OwO 连接器提交你明确确认的文本请求吗？有效期一小时。\n\n连接器进程：{}\n已核对的程序 SHA256：{}\n加密凭据目录：{}\n\n改写、翻译等表达请求可能将文本发送给已配置的云端模型。本次配对不会授予工具、MCP、hooks 或自主执行权限。凭据仅为当前 Windows 用户加密保护。如果不是你主动发起，请选“否”。",options.connector_pid,digest,options.directory.display());
+    let text=format!("允许此 OwO 连接器提交你明确确认的文本请求吗？有效期一小时。\n\n连接器进程：{}\n已核对的程序 SHA256：{}\n加密凭据目录：{}\n\n改写、翻译等表达请求可能将文本发送给已配置的云端模型。Agent 任务将按 Agent Desktop 中的输入法调用范围执行；工具、MCP 与自主执行仍由 Agent 权限及审批控制。凭据仅为当前 Windows 用户加密保护。如果不是你主动发起，请选“否”。",options.connector_pid,digest,options.directory.display());
     let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
     let title: Vec<u16> = "OwO - 确认连接器配对"
         .encode_utf16()
@@ -120,6 +121,16 @@ pub fn confirm_interactively(options: SetupOptions) -> io::Result<PairingSession
         return Err(io::Error::other("pairing not approved"));
     }
     let current = crate::peer::process_connector_binding(options.connector_pid)?;
+    // The human may keep the local modal open to review it. Begin the short
+    // enrollment transaction only after the real Yes action, and only if the
+    // kernel binding still matches exactly what that modal displayed.
+    let challenge = challenge_after_local_consent(
+        &mut host,
+        &binding,
+        current.clone(),
+        options.approved_sha256,
+        Instant::now(),
+    )?;
     let store = CredentialStore::create_new(&options.directory)?;
     let mut registry = PairingRegistry::default();
     let issued = host
@@ -144,9 +155,72 @@ pub fn confirm_interactively(options: SetupOptions) -> io::Result<PairingSession
         id: issued.id,
     })
 }
+fn challenge_after_local_consent(
+    host: &mut EnrollmentHost,
+    displayed: &crate::pairing::ConnectorBinding,
+    current: crate::pairing::ConnectorBinding,
+    reviewed_sha256: [u8; 32],
+    now: Instant,
+) -> io::Result<crate::enrollment::EnrollmentChallenge> {
+    if displayed != &current {
+        return Err(io::Error::other(
+            "connector changed during local confirmation",
+        ));
+    }
+    host.prepare(current, reviewed_sha256, now)
+        .map_err(|_| io::Error::other("connector does not match the reviewed installation"))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_review_can_exceed_transaction_ttl_but_cannot_switch_connector() {
+        let binding = crate::peer::process_connector_binding(std::process::id()).unwrap();
+        let mut host = EnrollmentHost::default();
+        let now = Instant::now();
+        let preflight = host
+            .prepare(binding.clone(), binding.executable_sha256, now)
+            .unwrap();
+        assert!(host.cancel(preflight));
+        let confirmed = now + Duration::from_secs(300);
+        let challenge = challenge_after_local_consent(
+            &mut host,
+            &binding,
+            binding.clone(),
+            binding.executable_sha256,
+            confirmed,
+        )
+        .unwrap();
+        let mut registry = PairingRegistry::default();
+        assert!(host
+            .confirm_from_trusted_ui(
+                challenge,
+                binding.clone(),
+                binding.executable_sha256,
+                confirmed,
+                Duration::from_secs(3600),
+                &mut registry,
+            )
+            .is_ok());
+        let mut changed = binding.clone();
+        changed.process_created_at += 1;
+        assert!(challenge_after_local_consent(
+            &mut host,
+            &binding,
+            changed,
+            binding.executable_sha256,
+            confirmed,
+        )
+        .is_err());
+        assert!(challenge_after_local_consent(
+            &mut host,
+            &binding,
+            binding.clone(),
+            [0; 32],
+            confirmed,
+        )
+        .is_err());
+    }
     #[test]
     fn setup_is_explicit_bounded_and_rejects_missing_duplicate_or_bad_options() {
         assert!(SetupOptions::parse(&[]).is_err());

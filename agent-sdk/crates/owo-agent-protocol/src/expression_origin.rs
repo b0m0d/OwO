@@ -85,11 +85,24 @@ fn identifier(value: &str) -> bool {
 }
 impl ExpressionOriginPayload {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        self.canonical_bytes_for_scope("owo-daemon-expression", "expression_only")
+    }
+    pub fn canonical_task_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        self.canonical_bytes_for_scope(
+            crate::IME_TASK_ORIGIN_AUDIENCE,
+            crate::IME_TASK_ORIGIN_SCOPE,
+        )
+    }
+    fn canonical_bytes_for_scope(
+        &self,
+        audience: &str,
+        mode: &str,
+    ) -> Result<Vec<u8>, &'static str> {
         const MAX_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
         if self.ic_version != 1
             || self.issuer != "owo-intent-gateway"
-            || self.audience != "owo-daemon-expression"
-            || self.scope.mode != "expression_only"
+            || self.audience != audience
+            || self.scope.mode != mode
             || self.origin.source != "ime"
             || self.origin.application_metadata != "connector_claim"
         {

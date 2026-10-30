@@ -29,6 +29,8 @@ const $ = (id) => document.getElementById(id);
 const pet = $("pet");
 const avatar = $("pet-avatar");
 const avatarImg = $("pet-avatar-img");
+const avatar3d = $("pet-avatar-3d");
+const modelRenderer = globalThis.OwoModelRenderer && avatar3d ? globalThis.OwoModelRenderer.create(avatar3d) : null;
 const bubble = $("bubble");
 const fxLayer = $("fx");
 const menu = $("skin-menu");
@@ -180,7 +182,7 @@ const DEFAULT_BUBBLES = {
   alert: "需要你",
 };
 
-let config = { images: {}, anims: null, frame: null, bubbles: DEFAULT_BUBBLES };
+let config = { images: {}, anims: null, model: null, frame: null, bubbles: DEFAULT_BUBBLES };
 let currentSkinId = "";
 let skinIndex = { default: "", skins: [] };
 let status = "idle";
@@ -201,6 +203,14 @@ function probeAsset(url) {
   });
 }
 
+function probeModelAsset(url) {
+  const client = window.OwoApi;
+  if (!client || typeof client.resource !== "function") return Promise.resolve(false);
+  return client.resource(url, { cache: "no-store" })
+    .then((response) => response.ok)
+    .catch(() => false);
+}
+
 /// 切换形象：**先确认素材可达再装配**。
 ///
 /// 为什么不直接 applySkin：素材缺失时页面只剩一个气泡、形象凭空消失，用户完全
@@ -208,9 +218,10 @@ function probeAsset(url) {
 /// spritesheet.webp，切过去桌宠看着就像"自己没了"）。宁可不切，也不能切完变空。
 async function switchSkin(entry, silent) {
   const idle = entry.states.idle || {};
-  const file = idle.sheet || idle.image;
+  const file = entry.kind === "gltf" ? entry.model : (idle.sheet || idle.image);
   if (file) {
-    const ok = await probeAsset(`${ASSETS}/${entry.id}/${file}`);
+    const url = `${ASSETS}/${entry.id}/${file}`;
+    const ok = entry.kind === "gltf" ? await probeModelAsset(url) : await probeAsset(url);
     if (!ok) {
       if (!silent) sayTemp("这套形象素材缺失");
       return false;
@@ -282,6 +293,10 @@ function applySkin(entry) {
   config = {
     images,
     anims: Object.keys(anims).length ? anims : null,
+    model: entry.kind === "gltf" && entry.model ? {
+      url: `${ASSETS}/${entry.id}/${entry.model}`,
+      scale: Number(entry.modelScale) || 1.0,
+    } : null,
     frame: entry.frame || null,
     bubbles: entry.bubbles || DEFAULT_BUBBLES,
   };
@@ -299,7 +314,7 @@ async function loadSkinIndex() {
 /// 恢复上次皮肤；偏好里已没有（旧皮肤下架）时回落默认。
 async function restoreSkin() {
   const role = globalThis.OwoPetActor?.role;
-  const bound = new URLSearchParams(globalThis.location?.search || "").get("skin") || { implementer: "petdex-coco", w1: "petdex-coco", reviewer: "petdex-boba" }[role];
+  const bound = new URLSearchParams(globalThis.location?.search || "").get("skin") || "owo-squid";
   if (bound && skinEntry(bound)) return bound;
   const saved = await loadSkinPref();
   if (saved && skinEntry(saved)) return saved;
@@ -311,16 +326,48 @@ globalThis.OwoPetActor = { render, role: new URLSearchParams(globalThis.location
 // The commander reads the brief in place; sprite motion carries its state.
 pet.classList.toggle("commander", ["planner", "lead"].includes(globalThis.OwoPetActor.role));
 
+function fallbackFromModel() {
+  const fallback = skinEntry(skinIndex.default) || skinIndex.skins[0];
+  if (fallback && fallback.id !== currentSkinId) {
+    applySkin(fallback);
+    sayTemp("3D 墨鱼暂不可用，请检查模型资源");
+  } else {
+    sayTemp(modelRenderer ? "3D 墨鱼加载失败" : "当前环境不支持 WebGL");
+  }
+}
+
 function render(next) {
   if ((globalThis.OwoFeedUI?.controller.ref || !activity.pending_approvals) && globalThis.OwoFeedUI?.state?.()) next = globalThis.OwoFeedUI.state();
   status = next || "idle";
   // 只切状态类，保留 dragging/dropped/antic/happy 等临时动画类。
   for (const s of STATES) pet.classList.toggle(s, s === status);
   const anim = (config.anims && config.anims[status]) || null;
-  if (anim && startAnim(anim)) {
+  if (config.model) {
+    if (!modelRenderer) {
+      fallbackFromModel();
+      return;
+    }
+    stopAnim();
+    avatar.classList.remove("is-anim");
+    avatar.classList.add("is-model");
+    avatarImg.style.display = "none";
+    if (avatar3d) avatar3d.style.display = "block";
+    modelRenderer.setState(status);
+    modelRenderer.setModel(config.model.url, { scale: config.model.scale }).catch((error) => {
+      avatar.classList.remove("is-model");
+      if (avatar3d) avatar3d.style.display = "none";
+      fallbackFromModel();
+    });
+  } else if (anim && startAnim(anim)) {
+    avatar.classList.remove("is-model");
+    if (modelRenderer) modelRenderer.clear();
+    if (avatar3d) avatar3d.style.display = "none";
     avatarImg.style.display = "none";
     avatar.classList.add("is-anim");
   } else {
+    avatar.classList.remove("is-model");
+    if (modelRenderer) modelRenderer.clear();
+    if (avatar3d) avatar3d.style.display = "none";
     const file = config.images[status];
     // 既没有帧动画也没有静态图（皮肤数据异常）时**保持当前画面**，不清成空白：
     // 「形象旧一帧」远好过「形象凭空消失」——后者用户只会看到气泡，无从判断。
@@ -491,8 +538,10 @@ function menuHead(text, extraClass) {
 
 function placeMenu(x, y) {
   const rect = menu.getBoundingClientRect();
-  menu.style.left = Math.max(6, Math.min(x - rect.width / 2, 214 - rect.width)) + "px";
-  menu.style.top = Math.max(6, Math.min(y - 10, 254 - rect.height)) + "px";
+  const maxX = Math.max(6, window.innerWidth - rect.width - 6);
+  const maxY = Math.max(6, window.innerHeight - rect.height - 6);
+  menu.style.left = `${Math.max(6, Math.min(x - rect.width / 2, maxX))}px`;
+  menu.style.top = `${Math.max(6, Math.min(y - 10, maxY))}px`;
 }
 
 async function decide(requestId, sessionId, allow) {
@@ -512,63 +561,31 @@ async function abortCurrent(sessionId) {
 
 function openMenu(x, y) {
   menu.replaceChildren();
-  menu.appendChild(menuHead(globalThis.OwoFeedUI?.text() || describeHead() || "空闲"));
-  if (globalThis.OwoFeedUI) {
-    menu.appendChild(menuItem("喂入剪贴板需求", () => globalThis.OwoFeedUI.paste()));
-    menu.appendChild(menuItem("查看任务与成果", () => globalThis.OwoFeedUI.controller.open()));
-    if ((globalThis.OwoFeedUI.controller.busy || globalThis.OwoFeedUI.controller.interrupted) && globalThis.OwoFeedUI.controller.ref?.id) menu.appendChild(menuItem("停止这次任务", () => globalThis.OwoFeedUI.controller.cancel(), "is-deny"));
-  }
-
-  const boundTeam = !!globalThis.OwoFeedUI?.controller.ref;
-  if(boundTeam && activity.pending.length && shellBridge?.openApprovals)menu.appendChild(menuItem("打开审批中心（核对任务后处理）",()=>shellBridge.openApprovals()));
-  if(globalThis.OwoFeedUI?.controller.ref?.pending){
-    menu.appendChild(menuItem("查找已启动的任务",()=>globalThis.OwoFeedUI.controller.reconcile()));
-    menu.appendChild(menuItem("解除不确定绑定",()=>{if(globalThis.confirm("任务可能仍在运行。已查看团队记录并确认可以解除观察绑定？"))return globalThis.OwoFeedUI.controller.forget();}));
-  }
-  const waiting = boundTeam ? null : (activity.pending || [])[0];
-  if (waiting) {
-    const remaining = approvalRemaining(waiting.request_id);
-    menu.appendChild(
-      menuItem(
-        `允许：${waiting.tool || "操作"}${
-          remaining !== null ? ` · 剩 ${formatRemaining(remaining)}` : ""
-        }`,
-        () => decide(waiting.request_id, waiting.session_id, true),
-        "is-allow"
-      )
-    );
-    menu.appendChild(
-      menuItem(`拒绝：${waiting.tool || "操作"}`, () =>
-        decide(waiting.request_id, waiting.session_id, false)
-      , "is-deny")
-    );
-  }
-  const head = boundTeam ? null : (activity.active || [])[0];
-  if (head && head.session_id) {
-    menu.appendChild(menuItem("停止当前回合", () => abortCurrent(head.session_id), "is-deny"));
-  }
   if (shellBridge && typeof shellBridge.showWorkbench === "function") {
-    menu.appendChild(menuItem("打开工作台", () => shellBridge.showWorkbench()));
+    menu.appendChild(menuItem("打开工作台", () => shellBridge.showWorkbench(), "menu-primary"));
   }
-  // 皮肤区：只列清单里真实存在的（缺 idle 的在生成 index 时已剔除）。
-  if (skinIndex.skins.length && !globalThis.OwoFeedUI) {
+  if (skinIndex.skins.length) {
     menu.appendChild(menuHead("换形象", "menu-sub"));
+    const grid = document.createElement("div");
+    grid.className = "skin-grid";
     for (const entry of skinIndex.skins) {
-      menu.appendChild(
-        menuItem(entry.name, () => switchSkin(entry), entry.id === currentSkinId ? "is-active" : "")
-      );
+      const item = menuItem(entry.name, () => switchSkin(entry), entry.id === currentSkinId ? "is-active" : "");
+      item.classList.add("skin-choice");
+      const swatch = document.createElement("span");
+      swatch.className = "skin-swatch";
+      swatch.textContent = entry.id === "pink-squid" ? "🌸" : "🦑";
+      swatch.setAttribute("aria-hidden", "true");
+      item.prepend(swatch);
+      grid.appendChild(item);
     }
+    menu.appendChild(grid);
   }
   if (shellBridge && typeof shellBridge.setVisible === "function") {
     menu.appendChild(menuItem("隐藏桌宠", async () => {
-      // 写期望值而不是直接隐藏：所有显隐入口都只写这一个真相源（见 reportVisibility 说明）。
       visibleRegistry = false;
       await api("/desktop/pet", { method: "POST", json: { visible: false } });
       await shellBridge.setVisible(false);
-    }));
-    if (typeof shellBridge.resetPosition === "function") {
-      menu.appendChild(menuItem("回到右下角", () => shellBridge.resetPosition()));
-    }
+    }, "menu-danger"));
   }
   menu.hidden = false;
   placeMenu(x, y);
@@ -632,9 +649,14 @@ pet.addEventListener("pointermove", (event) => {
   const total = Math.hypot(event.screenX - down.x, event.screenY - down.y);
   // 5px 死区：单击的微小抖动不应推动窗口；越过一次就永久生效（回拖也不失效）。
   if (total > 5) down.moved = true;
-  if (down.moved && (dx || dy) && shellBridge && typeof shellBridge.moveBy === "function") {
-    const dpr = globalThis.devicePixelRatio || 1;
-    shellBridge.moveBy(Math.round(dx * dpr), Math.round(dy * dpr));
+  if (down.moved && (dx || dy)) {
+    if (config.model && modelRenderer && typeof modelRenderer.rotate === "function") {
+      // 3D 形象拖动时翻转模型；窗口位置保持不动，方便连续观察各个角度。
+      modelRenderer.rotate(dx * 0.018, dy * 0.018);
+    } else if (shellBridge && typeof shellBridge.moveBy === "function") {
+      const dpr = globalThis.devicePixelRatio || 1;
+      shellBridge.moveBy(Math.round(dx * dpr), Math.round(dy * dpr));
+    }
   }
 });
 
@@ -688,8 +710,8 @@ function scheduleAntic() {
 }
 
 const PET_LINES = {
-  "petdex-nailong": ["duang～再摸摸", "肚肚不许戳！", "龙龙很满意", "嘿嘿嘿"],
-  "petdex-coco": ["呼噜呼噜…", "下巴这边再挠挠", "尾巴不许拽！", "喵呜～好舒服"],
+  "owo-squid": ["墨鱼触手伸懒腰～", "再摸摸我嘛", "墨鱼很满意", "咕噜咕噜～"],
+  "pink-squid": ["粉色触手伸懒腰～", "粉色墨鱼很满意", "再摸摸我嘛", "闪闪发光～"],
 };
 const PET_FALLBACK_LINES = ["嘿嘿，好痒～", "再摸摸我嘛", "(*´▽`*)"];
 

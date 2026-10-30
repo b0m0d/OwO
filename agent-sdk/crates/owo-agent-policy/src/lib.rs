@@ -30,6 +30,7 @@ pub mod grant_store;
 pub mod mcp_health;
 pub mod permission_spec;
 pub mod permissions;
+pub mod request_scope;
 pub mod tool_effects;
 pub mod tool_names;
 
