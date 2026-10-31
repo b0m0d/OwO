@@ -810,8 +810,9 @@ test("侧栏项目分组可折叠且折叠态持久化", () => {
 
 test("首启门读服务端真实字段，不读不存在的 settings.provider_ready", () => {
   const app = readFileSync(join(here, "../app.js"), "utf8");
-  const body = app.slice(app.indexOf("function modelGateMissing"), app.indexOf("function updateModelGate"));
-  assert.ok(body.length > 0, "应能找到 modelGateMissing 实现");
+  // 服务商就绪判断已抽到 providerGateMissing；连同 modelGateMissing 一起检查。
+  const body = app.slice(app.indexOf("function providerGateMissing"), app.indexOf("function updateModelGate"));
+  assert.ok(body.length > 0, "应能找到 providerGateMissing/modelGateMissing 实现");
   // 必须优先看 runtime 段（服务端 effective_runtime_config 的产物）。
   assert.match(body, /settings\.runtime|runtime\s*=\s*settings\.runtime/);
   assert.match(body, /endpoint_kind\s*===\s*"local"/, "本地端点无需凭据，应放行");
@@ -820,7 +821,7 @@ test("首启门读服务端真实字段，不读不存在的 settings.provider_r
 
 test("本地端点（Ollama）不因缺密钥被拦", () => {
   const app = readFileSync(join(here, "../app.js"), "utf8");
-  const body = app.slice(app.indexOf("function modelGateMissing"), app.indexOf("function updateModelGate"));
+  const body = app.slice(app.indexOf("function providerGateMissing"), app.indexOf("function updateModelGate"));
   // endpoint_kind=local 即放行：Ollama 之类本地服务不需要 API 密钥。
   assert.doesNotMatch(
     body,

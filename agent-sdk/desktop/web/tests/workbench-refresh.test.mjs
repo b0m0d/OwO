@@ -100,6 +100,9 @@ test("actual bootstrap health-checks first and runs only the four essential hydr
   const order = [];
   const context = {
     serviceWatch: { start: async () => { order.push("health"); } },
+    // 水合块与 boot() 之间还有一段空状态布局接线（document/$），vm 里给最小桩。
+    document: { querySelector: () => null, body: { classList: { toggle: () => {} } } },
+    $: () => null,
     window: { OwoRecovery: { runWithConcurrency: async (items, limit) => {
       assert.equal(limit, 4);
       return Promise.all(items.map(item => item()));

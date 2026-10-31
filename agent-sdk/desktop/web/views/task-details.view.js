@@ -10,7 +10,7 @@
     const running = Boolean(input.running);
     const status = needsInput ? "需要补充信息" : pending ? "等待你确认" : running ? phaseLabels[input.phase] || "正在处理任务" : task.text === "空闲" || !task.text ? "等待任务" : task.text;
     const hint = needsInput ? "请先回答对话中的问题，再继续执行。" : pending ? "请检查操作范围与影响，再决定是否允许。" : running ? "进展来自实际执行记录；你可以随时停止。" : status === "等待任务" ? "写下目标，或先规划任务的范围与执行方式。" : /未验证|候选/.test(status) ? "回答已经结束。请检查结果和验证依据后再确认交付。" : /失败|阻断|未确认/.test(status) ? "任务尚未顺利结束，请查看对话中的说明与恢复入口。" : /验收通过/.test(status) ? "已有宿主验收记录，来源可在成果页查看。" : "详细结果和执行记录保留在对话中。";
-    const title = input.title && !/^会话\s+[a-f0-9-]+$/i.test(input.title) ? input.title : input.request ? input.request.split("\n")[0] : "新的任务";
+    const title = input.title && !/^会话\s+[a-f0-9-]+$/i.test(input.title) ? input.title : input.request ? input.request.split("\n")[0] : input.fallbackTitle || "新对话";
     return {
       title: String(title).slice(0, 100), status, hint,
       request: input.request || "还没有填写任务目标。",

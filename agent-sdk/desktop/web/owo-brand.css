@@ -3,14 +3,11 @@
    highlight) and the shared primitives every page uses, so pages no longer
    carry their own palette. Behaviour/DOM stay in the earlier layers.
 
-   TODO(brand-assets): the squid mark is a vector placeholder defined once as
-   <symbol id="owo-squid"> in index.html. Final assets (transparent PNG/SVG):
-     - owo-logo.svg          主 Logo，侧栏 28px / 欢迎页 64px，透明背景，需单色与彩色两版
-     - owo-mascot.png        墨鱼吉祥物，512×512 透明背景（欢迎页、引导页）
-     - owo-mascot-{idle,thinking,working,done,error}.png  状态表情，256×256 透明背景
-     - owo-welcome.png       欢迎页插画，1200×640 透明背景
-     - owo-empty.png         空状态插画，320×200 透明背景
-   Slots are marked with data-asset="…" in the markup and --owo-empty-art below. */
+   Brand mark: assets/owo-logo.png (the user-provided mascot, transparent
+   background), shown in the sidebar and welcome slot; the favicon uses
+   assets/owo-logo-64.png. The old inline #owo-squid symbol has been retired.
+   Other illustration slots are marked with data-asset="…" in the markup and
+   --owo-empty-art below. */
 
 :root {
   --owo-ink-0: #0a1014;

@@ -152,10 +152,11 @@ test("工具和设置导航：按功能组进入工具页、按分类切换设�
   const toolGroups = index.match(/data-group="(workspace|intelligence|automation|system)"/g) || [];
   assert.ok(navTabs.length >= 8, "设置页保留分类导航");
   assert.ok(toolGroups.length >= 8, "工具视图按类别组织内容");
-  assert.match(index, /id="codexToolsEntry"/);
+  assert.doesNotMatch(index, /id="codexToolsEntry"/);
   assert.match(index, /id="codexSettingsEntry"/);
   assert.match(app, /function setSettingsTab\(name\)/);
-  assert.match(app, /bindToolsEntry\("codexToolsEntry"\)/);
+  assert.match(app, /function focusWorkbenchSearch\(\)/);
+  assert.match(app, /label: "工具与设置", action: \(\) => openToolsView\(\)/);
   assert.match(app, /setSettingsPageVisible\(true\)/);
   assert.match(css, /\.settings-layout/);
   assert.ok(!index.includes('id="toolsPanel"'), "工具页已由工作台视图状态机承载");
@@ -183,13 +184,13 @@ test("R10 侧栏：复杂表单受工具/设置视图状态门控，不常驻会
   for (const id of ["providerBaseUrl", "mcpForm", "evalRunBtn"]) {
     assert.ok(!primaryShell.includes('id="' + id + '"'), id + " 不得进入常驻会话导航");
   }
-  assert.match(index, /id="codexToolsEntry"/);
+  assert.doesNotMatch(index, /id="codexToolsEntry"/);
   assert.match(index, /id="codexSettingsEntry"/);
   assert.match(index, /<section class="settings-section" data-group="settings">/);
   assert.match(css, /#sidebar > section \{ display: none; \}/);
   assert.match(css, /body\.tools-open #sidebar > section/);
   assert.match(css, /body\.settings-open #sidebar > section\.settings-section/);
-  assert.match(app, /bindToolsEntry\("codexToolsEntry"\)/);
+  assert.match(app, /function focusWorkbenchSearch\(\)/);
   assert.match(app, /\$\("codexSettingsEntry"\)\.addEventListener\("click"/);
 });
 test("R12 会话卡片：低频操作收进 ⋯ 弹层，卡片上不再堆按钮", () => {

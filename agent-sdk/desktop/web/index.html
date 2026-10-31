@@ -15,8 +15,7 @@
   </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OwO Agent 工作台</title>
-  <!-- TODO(brand-assets): 替换为正式 owo-logo 图标（32×32 / 256×256，透明背景） -->
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d1418'/%3E%3Cpath d='M16 4.2c1.6 1.6 6.9 5 7.8 9.3v3.9c0 1.1-.9 2-2 2H10.2c-1.1 0-2-.9-2-2v-3.9c.9-4.3 6.2-7.7 7.8-9.3z' fill='%233fd0bd'/%3E%3Ccircle cx='13' cy='13.6' r='1.9' fill='%23eafffb'/%3E%3Ccircle cx='19' cy='13.6' r='1.9' fill='%23eafffb'/%3E%3Cpath d='M10.4 20.6c0 2.7 1.2 5 2.7 5s1.8-2.2 2.9-4.7c1.1 2.5 1.4 4.7 2.9 4.7s2.7-2.3 2.7-5' fill='none' stroke='%233fd0bd' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/png" href="assets/owo-logo-64.png">
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="visual-polish.css">
   <link rel="stylesheet" href="product-shell.css">
@@ -24,27 +23,18 @@
   <link rel="stylesheet" href="team-delivery.css">
   <link rel="stylesheet" href="interface-final.css?v=20261030-2">
   <link rel="stylesheet" href="owo-brand.css?v=20261030-7">
-  <link rel="stylesheet" href="workbench-home.css?v=20261030-1">
+  <link rel="stylesheet" href="workbench-home.css?v=20261030-4">
+  <link rel="stylesheet" href="owo-ui.css?v=20261031-5">
+  <link rel="stylesheet" href="chatgpt-theme.css?v=20261031-13">
+  <link rel="stylesheet" href="codex-refine.css?v=20261101-2">
 </head>
 <body class="dark-theme">
-  <!-- OwO 墨鱼品牌符号（O-O 眼睛 + W 触手）：全局唯一定义，侧栏/欢迎页通过 <use href="#owo-squid"> 引用。
-       TODO(brand-assets): 正式 Logo 定稿后替换此 symbol（矢量 SVG，透明背景，保持 32×32 视框）。 -->
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
-    <symbol id="owo-squid" viewBox="0 0 32 32">
-      <path d="M16 2.6c1.7 1.7 7.5 5.5 8.5 10.2v4.4c0 1.2-1 2.2-2.2 2.2H9.7c-1.2 0-2.2-1-2.2-2.2v-4.4C8.5 8.1 14.3 4.3 16 2.6z" fill="currentColor"/>
-      <path d="M8.3 9.4 5.2 8.1l2.4 4.4zM23.7 9.4l3.1-1.3-2.4 4.4z" fill="currentColor" opacity=".7"/>
-      <circle cx="12.7" cy="13.6" r="2.25" fill="var(--owo-squid-eye, #fff)"/>
-      <circle cx="19.3" cy="13.6" r="2.25" fill="var(--owo-squid-eye, #fff)"/>
-      <circle cx="12.9" cy="13.9" r="1" fill="var(--owo-squid-ink, #04201c)"/>
-      <circle cx="19.5" cy="13.9" r="1" fill="var(--owo-squid-ink, #04201c)"/>
-      <path d="M9.9 20.6c0 3 1.3 5.6 2.9 5.6s2-2.4 3.2-5.2c1.2 2.8 1.6 5.2 3.2 5.2s2.9-2.6 2.9-5.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    </symbol>
-  </svg>
   <main id="setupRoot" class="setup-root" hidden aria-label="首次配置"></main>
   <!-- 全局菜单栏（仿 Codex 桌面：文件/编辑/视图/帮助 + 连接状态 + 主题） -->
   <div id="menubar">
     <div class="menubar-side">
       <button id="mobileSidebarToggle" class="mobile-sidebar-toggle" type="button" aria-label="打开会话侧栏" aria-expanded="false" aria-controls="sidebar">☰</button>
+      <button type="button" id="sidebarCollapseBtn" class="codex-icon-btn menubar-sidebar-toggle" title="隐藏会话栏（Ctrl+B）" aria-label="隐藏会话栏（Ctrl+B）"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5h14M3 10h14M3 15.5h14"/><path d="M6.5 4.5v11"/></svg></button>
       <span class="menubar-brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><defs><linearGradient id="owoBrandGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#34a37f"/><stop offset="1" stop-color="#1d6a73"/></linearGradient></defs><rect width="24" height="24" rx="7" fill="url(#owoBrandGrad)"/><circle cx="8.2" cy="10.6" r="2.6" fill="none" stroke="#fff" stroke-width="1.7"/><circle cx="15.8" cy="10.6" r="2.6" fill="none" stroke="#fff" stroke-width="1.7"/><path d="M9.6 16.2c.8.8 1.5.8 2.4 0 .9.8 1.6.8 2.4 0" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span><strong>OwO</strong><span class="brand-tag">Agent</span></span>
       <nav class="menubar-menus" aria-label="主菜单">
         <button type="button" class="menubar-menu-btn" data-menu="file">文件</button>
@@ -55,12 +45,11 @@
     </div>
     <div class="menubar-side menubar-right">
       <details id="connectionDetails" class="connection-details">
-        <summary aria-label="连接与设置"><span class="connection-dot" aria-hidden="true"></span><span class="connection-gear" aria-hidden="true">⚙</span><span id="connectionLabel" class="sr-only">连接与设置</span></summary>
+        <summary aria-label="工作环境与连接状态"><span class="connection-dot" aria-hidden="true"></span><span id="connectionLabel" class="sr-only">工作环境与连接状态</span></summary>
         <div class="connection-popover"><div class="connection-popover-head"><strong>工作环境</strong><span id="menubarHealth" class="pill">连接中…</span></div>
           <div id="globalStatusBar" class="global-status-bar" role="group" aria-label="工作环境与权限"></div>
         </div>
       </details>
-      <button id="menubarTheme" class="menubar-theme" type="button" title="切换深色主题" aria-label="切换深色主题">☾</button>
     </div>
     <!-- 下拉菜单（文件/编辑/视图/帮助与左下用户卡共用，JS 动态填充并定位） -->
     <div id="menuPopover" class="menu-popover hidden" role="menu" aria-hidden="true"></div>
@@ -83,12 +72,10 @@
     <div class="codex-sidebar">
       <div class="codex-sidebar-top">
         <div class="sidebar-product" aria-label="OwO Agent">
-          <!-- TODO(brand-assets): 主 Logo 位，28×28 显示，建议提供 owo-logo.svg（透明背景，深/浅色两版） -->
-          <span class="sidebar-product-mark" data-asset="owo-logo" aria-hidden="true"><svg class="owo-squid" viewBox="0 0 32 32"><use href="#owo-squid"/></svg></span>
+          <span class="sidebar-product-mark" data-asset="owo-logo" aria-hidden="true"><img class="sidebar-logo-img" src="assets/owo-logo.png" alt="" width="26" height="26" draggable="false"></span>
           <span class="sidebar-product-name"><strong>O<span class="owo-w">w</span>O</strong><span>AGENT</span></span>
         </div>
         <span class="codex-sidebar-spacer"></span>
-        <button type="button" id="sidebarCollapseBtn" class="codex-icon-btn" title="隐藏会话栏（Ctrl+B）" aria-label="隐藏会话栏（Ctrl+B）"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5h14M3 10h14M3 15.5h14"/><path d="M6.5 4.5v11"/></svg></button>
         <button id="sidebarToolsBtn" class="codex-icon-btn" type="button" title="工具与设置" aria-label="工具与设置" hidden>
           <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.2" y="2.2" width="5" height="5" rx="1.2"/><rect x="8.8" y="2.2" width="5" height="5" rx="1.2"/><rect x="2.2" y="8.8" width="5" height="5" rx="1.2"/><rect x="8.8" y="8.8" width="5" height="5" rx="1.2"/></svg>
         </button>
@@ -101,11 +88,13 @@
       <button type="button" id="sidebarNewChat" class="primary workbench-create-task" title="新建对话（Ctrl+N）" aria-label="新建对话"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.2 8.6v3.6c0 .7-.6 1.3-1.3 1.3H3.8c-.7 0-1.3-.6-1.3-1.3V4.1c0-.7.6-1.3 1.3-1.3h3.6"/><path d="M11.4 2.3a1.3 1.3 0 0 1 1.8 1.8L8.4 8.9l-2.4.6.6-2.4z"/></svg><span>新建对话</span><kbd class="sidebar-kbd" aria-hidden="true">Ctrl N</kbd></button>
       <div class="sidebar-section-label">工作空间</div>
       <nav class="workbench-shortcuts" aria-label="主要工作入口">
+        <button type="button" id="sidebarHome" title="首页" aria-label="首页"><svg class="nav-icon" viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2.2 7.2 5.8-4.8 5.8 4.8"/><path d="M3.7 6.4v6.3c0 .7.5 1.2 1.2 1.2h6.2c.7 0 1.2-.5 1.2-1.2V6.4"/><path d="M6.4 13.9V9.8h3.2v4.1"/></svg><span>首页</span></button>
         <button type="button" data-workbench-panel="home" aria-label="工作台"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round" aria-hidden="true"><rect x="2.3" y="2.3" width="4.7" height="5.6" rx="1.3"/><rect x="9" y="2.3" width="4.7" height="3.4" rx="1.3"/><rect x="9" y="7.8" width="4.7" height="5.9" rx="1.3"/><rect x="2.3" y="10" width="4.7" height="3.7" rx="1.3"/></svg><span>工作台</span></button>
-        <button type="button" data-workbench-panel="project-history" aria-label="任务记录"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8a5.4 5.4 0 1 0 1.6-3.8"/><path d="M2.4 2.6v2.6H5"/><path d="M8 5.2V8l2 1.3"/></svg><span>任务记录</span></button>
-        <button type="button" data-workbench-panel="workswarm" aria-label="团队协作"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="3.8" r="1.8"/><circle cx="3.6" cy="11.6" r="1.8"/><circle cx="12.4" cy="11.6" r="1.8"/><path d="M7 5.4 4.6 9.9M9 5.4l2.4 4.5M5.5 11.6h5"/></svg><span>团队协作</span></button>
-        <button type="button" data-workbench-panel="evidence" aria-label="产物与证据"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 13.6 5v6L8 14.1 2.4 11V5z"/><path d="m2.6 5.1 5.4 3 5.4-3M8 8.1v5.8"/></svg><span>产物与证据</span></button>
-        <button type="button" data-workbench-panel="action-center" aria-label="待我处理"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.4 9.2 4 3.4c.1-.5.6-.9 1.1-.9h5.8c.5 0 1 .4 1.1.9l1.6 5.8v3.1c0 .7-.5 1.2-1.2 1.2H3.6c-.7 0-1.2-.5-1.2-1.2z"/><path d="M2.5 9.2h3.2l.8 1.6h3l.8-1.6h3.2"/></svg><span>待我处理</span></button>
+        <button type="button" data-workbench-panel="workswarm" aria-label="团队协作"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="3.8" r="1.8"/><circle cx="3.6" cy="11.6" r="1.8"/><circle cx="12.4" cy="11.6" r="1.8"/><path d="M7 5.4 4.6 9.9M9 5.4l2.4 4.5M5.5 11.6h5"/></svg><span>团队协作</span></button>
+        <span class="rail-divider" aria-hidden="true"></span>
+        <button type="button" data-workbench-panel="automations" aria-label="定时任务"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8a5.4 5.4 0 1 0 1.6-3.8"/><path d="M2.4 2.6v2.6H5"/><path d="M8 5.2V8l2 1.3"/></svg><span>定时任务</span></button>
+        <button type="button" data-workbench-panel="workflow" aria-label="工作流"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="3.2" r="1.4"/><circle cx="3.6" cy="12.8" r="1.4"/><circle cx="12.4" cy="12.8" r="1.4"/><path d="M8 4.6v2.2c0 1.1-.9 2-2 2H5.6c-1.1 0-2 .9-2 2v1"/><path d="M8 6.8c0-1.1.9-2 2-2h.4c1.1 0 2 .9 2 2v4.5"/></svg><span>工作流</span></button>
+        <button type="button" data-workbench-panel="custom-workflows" aria-label="自定义工作流"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" aria-hidden="true"><path d="M2.6 5.2h10.8M2.6 10.8h10.8"/><circle cx="6.1" cy="5.2" r="1.6"/><circle cx="10.2" cy="10.8" r="1.6"/></svg><span>自定义工作流</span></button>
       </nav>
       <nav class="codex-nav" aria-label="工作台导航">
         <button type="button" data-codex-group="workspace">
@@ -132,10 +121,6 @@
       <ul id="sessionList" class="list codex-sessions"></ul>
       <label class="codex-archived"><input type="checkbox" id="showArchived"> 显示归档</label>
       <div class="codex-sidebar-footer">
-        <button id="codexToolsEntry" class="codex-footer-btn" type="button" aria-label="更多功能 Ctrl K">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7.5 9.5 3 2.5-3 2.5M13 15h3.5"/></svg>
-          更多功能 <span class="sidebar-shortcut">Ctrl K</span>
-        </button>
         <button id="codexSettingsEntry" class="codex-footer-btn" type="button" aria-label="设置">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
           设置
@@ -500,8 +485,8 @@
     </section>
 
     <section class="span-all" data-group="panels" id="workbenchPanelSection">
-      <div class="workbench-panel-header"><div><span class="workbench-eyebrow">项目工作台</span><h2 id="workbenchPanelTitle">选择一个工具</h2><p id="workbenchPanelDescription" class="sub">按任务查找功能，Ctrl+K 快速切换</p></div><button type="button" id="workbenchPanelNewTask" data-workbench-panel="project-launcher" class="primary">＋ 新任务</button></div>
-      <div class="workbench-panel-layout"><nav class="workbench-panel-rail" aria-label="功能导航"><label class="workbench-panel-search"><span class="sr-only">搜索功能</span><input id="panelSearch" type="search" placeholder="搜索功能…"></label><div id="panelNav"></div></nav><div id="panelRoot"></div></div>
+      <div class="workbench-panel-header"><div><span class="workbench-eyebrow">项目工作台</span><h2 id="workbenchPanelTitle">选择一个工具</h2><p id="workbenchPanelDescription" class="sub">按任务查找功能，Ctrl+K 聚焦搜索</p></div><button type="button" id="workbenchPanelNewTask" data-workbench-panel="project-launcher" class="primary">＋ 新任务</button></div>
+      <div class="workbench-panel-layout"><nav class="workbench-panel-rail" aria-label="功能导航"><label class="workbench-panel-search"><span class="sr-only">搜索功能</span><input id="panelSearch" type="search" placeholder="搜索工作台…"></label><div id="panelNav"></div></nav><div id="panelRoot"></div></div>
     </section>
 
     <section class="settings-section" data-group="settings">
@@ -806,6 +791,7 @@
                   <tr><td><kbd>Ctrl</kbd> + <kbd>N</kbd></td><td>新对话</td></tr>
                   <tr><td><kbd>Ctrl</kbd> + <kbd>O</kbd></td><td>打开文件夹（选择工作区）</td></tr>
                   <tr><td><kbd>Ctrl</kbd> + <kbd>B</kbd></td><td>显示 / 隐藏会话栏</td></tr>
+                  <tr><td><kbd>Ctrl</kbd> + <kbd>K</kbd></td><td>搜索工作台</td></tr>
                   <tr><td><kbd>Ctrl</kbd> + <kbd>,</kbd></td><td>打开设置</td></tr>
                   <tr><td><kbd>Ctrl</kbd> + <kbd>L</kbd></td><td>聚焦输入框</td></tr>
                   <tr><td><kbd>F11</kbd></td><td>全屏 / 窗口</td></tr>
@@ -902,14 +888,14 @@
       </div>
     </section>
 
-    <!-- 保留在 DOM 供状态机调用，视觉入口为 codexToolsEntry -->
+    <!-- 保留在 DOM 供状态机调用；高级工具页从「视图 → 工具与设置」进入。 -->
     <button id="toggleTools" class="tools-toggle hidden" type="button" aria-expanded="false">显示工具与设置</button>
   </aside>
   <div id="sidebarResize" class="resize-handle" role="separator" aria-label="调整会话栏宽度"></div>
 
   <main>
     <div class="workspace-page-head">
-      <div class="workspace-page-title"><span id="chatProjectAlias">个人工作台</span><h1 id="chatTaskTitle">新的任务</h1></div>
+      <div class="workspace-page-title"><span id="chatProjectAlias">个人工作台</span><h1 id="chatTaskTitle">新对话</h1></div>
       <div id="modeSwitch" class="mode-switch" role="tablist" aria-label="对话或工作区">
         <button type="button" role="tab" data-mode-switch="chat" aria-selected="true">对话</button>
         <button type="button" role="tab" data-mode-switch="agent" aria-selected="false">工作区</button>
@@ -931,8 +917,8 @@
     </div>
     <div class="codex-stage">
       <div id="emptyState" class="codex-empty">
-        <!-- TODO(brand-assets): 欢迎页吉祥物位，64×64 显示；替换为 owo-mascot.png（512×512，透明背景），后续可按 Agent 状态切换 owo-mascot-{idle,thinking,working,done,error}.png（256×256）。 -->
-        <div class="codex-empty-logo" aria-hidden="true"><span class="owo-mascot-slot" data-asset="owo-mascot" data-mascot-state="idle"><svg class="owo-squid" viewBox="0 0 32 32"><use href="#owo-squid"/></svg></span></div>
+        <!-- 欢迎页品牌图形：assets/owo-logo.png（用户提供的墨鱼形象，透明背景）。data-mascot-state 保留，后续可按 Agent 状态切换表情。 -->
+        <div class="codex-empty-logo" aria-hidden="true"><span class="owo-mascot-slot" data-asset="owo-logo" data-mascot-state="idle"><img class="owo-mascot-img" src="assets/owo-logo.png" alt="" width="48" height="48" draggable="false"></span></div>
         <div class="empty-state-kicker"><span></span>你的个人 AI 工作搭档</div>
         <h2 id="emptyStateTitle">你想完成什么？</h2>
         <p id="emptyStateDescription">描述目标，OwO 会拆解任务、执行操作并保留完整记录。</p>
@@ -974,48 +960,43 @@
           <button type="button" id="attachmentBtn" title="添加附件（图片/文件）" aria-label="添加附件">
             <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
           </button>
-          <button type="button" id="micBtn" title="语音输入" aria-label="语音输入"></button>
           <button type="button" class="composer-plan-task" data-workbench-panel="project-launcher" title="先定义目标、范围与执行方式">任务规划</button>
-          <button type="button" id="slashHint" class="slash-hint" title="输入 / 唤起命令（/new、/undo、/export…）">
-            <span>/</span> 命令
-          </button>
-        </div>
-        <div class="codex-composer-right">
           <button type="button" id="accessChip" class="codex-access-chip" title="本机审批方式；实际授权由服务端策略决定">
             <svg class="codex-access-dot" id="accessDot" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.8 13 3.7v3.5c0 3.1-2 5.8-5 7-3-1.2-5-3.9-5-7V3.7z"/><path d="m5.6 8 1.6 1.6 3.2-3.2"/></svg>
             <span id="accessChipText">每次询问</span>
             <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
           </button>
+          <button type="button" id="composerProjectBtn" class="codex-project-chip" title="选择工作区">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h4.5c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H3.4c-.66 0-1.2-.54-1.2-1.2V4.4z"/></svg>
+            <span id="composerProjectName">未选择项目</span>
+          </button>
+        </div>
+        <div class="codex-composer-right">
           <button type="button" id="modelChip" class="codex-model-chip" title="请先连接模型服务" disabled aria-disabled="true">
             <span id="modelChipText">未连接模型</span>
-            <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
+            <span class="composer-effort-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+            <svg class="composer-model-chevron" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
           </button>
           <button type="button" id="effortChip" class="codex-model-chip" title="推理档位（思考强度）">
             <span id="effortChipText">推理</span>
             <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
           </button>
+          <button type="button" id="micBtn" class="codex-composer-icon" title="语音输入" aria-label="语音输入"></button>
           <button type="button" id="sendBtn" class="codex-send" title="发送" aria-label="发送" disabled>
             <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12.4V4.2M4.6 7.6 8 4.2l3.4 3.4"/></svg>
           </button>
         </div>
       </div>
     </form>
-    <div class="composer-footnote composer-tray" role="group" aria-label="执行设置">
-      <div class="composer-tray-tools">
-        <button type="button" id="composerProjectBtn" class="codex-project-chip" title="选择工作区">
-        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h4.5c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H3.4c-.66 0-1.2-.54-1.2-1.2V4.4z"/></svg>
-        <span id="composerProjectName">未选择项目</span>
-      </button>
-        <button type="button" class="composer-tray-btn" data-workbench-panel="project-launcher" title="先定义目标、范围与执行方式"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.6 4.2h7.2M5.6 8h7.2M5.6 11.8h4.6"/><path d="m2.4 4.2.6.6 1.1-1.2M2.4 8l.6.6 1.1-1.2"/><circle cx="3.1" cy="11.8" r=".7"/></svg><span>任务规划</span></button>
-        <button type="button" class="composer-tray-btn" data-composer-slash title="输入 / 唤起命令（/new、/undo、/export…）"><span class="composer-tray-slash" aria-hidden="true">/</span><span>命令</span></button>
-      </div>
-      <span class="composer-tray-hint" title="重要操作前会请求你的确认"><kbd>Enter</kbd> 发送<span class="composer-tray-dot" aria-hidden="true"></span><kbd>Shift</kbd><kbd>Enter</kbd> 换行</span>
-    </div>
+    <div class="composer-footnote"><span><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行 · 输入 <kbd>/</kbd> 使用命令</span></div>
 
     <div class="empty-examples" aria-label="快速开始">
-      <button type="button" data-example-prompt="分析当前项目结构，找出可以改进的地方，并先给我一份行动计划。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5 7.5 12l3 2.5L17 7"/><path d="M12.5 7H17v4.5"/></svg></span><span class="example-copy"><strong>分析项目</strong><small>梳理代码结构，发现改进机会</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
-      <button type="button" data-example-prompt="检查当前工作区最近的改动，总结主要内容并指出潜在问题。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.8 16 5.5v4.3c0 3.6-2.4 6.2-6 7.4-3.6-1.2-6-3.8-6-7.4V5.5z"/><path d="m7 10 2 2 4-4"/></svg></span><span class="example-copy"><strong>审查改动</strong><small>检查变更质量与潜在问题</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
-      <button type="button" data-example-prompt="帮我规划一个任务，先明确目标、执行步骤和验收标准。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10v14H5z"/><path d="M8 7h4M8 10h4M8 13h2"/></svg></span><span class="example-copy"><strong>规划任务</strong><small>明确目标、步骤与验收标准</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-chat" data-example-prompt="用简单的例子解释一下什么是向量数据库。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4.5h12v8H9.5L6 16v-3.5H4z"/><path d="M7 8h6"/></svg></span><span class="example-copy"><strong>解释一个概念</strong><small>把复杂问题讲清楚</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-chat" data-example-prompt="我有个产品想法，帮我梳理目标用户、核心价值和关键假设。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h8v13H6z"/><path d="M8.5 7h3M8.5 10h3M8.5 13h2"/></svg></span><span class="example-copy"><strong>梳理思路</strong><small>把模糊想法整理成结构</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-chat" data-example-prompt="帮我起草一封给合作方的项目进度说明邮件，语气专业、简洁。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15.5h14"/><path d="m5 12 2.6-.6 7-7a1.5 1.5 0 0 0-2.1-2.1l-7 7z"/></svg></span><span class="example-copy"><strong>起草文字</strong><small>邮件、说明与文案初稿</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-agent" data-example-prompt="分析当前项目结构，找出可以改进的地方，并先给我一份行动计划。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5 7.5 12l3 2.5L17 7"/><path d="M12.5 7H17v4.5"/></svg></span><span class="example-copy"><strong>分析项目</strong><small>梳理代码结构，找出改进点</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-agent" data-example-prompt="检查当前工作区最近的改动，总结主要内容并指出潜在问题。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.8 16 5.5v4.3c0 3.6-2.4 6.2-6 7.4-3.6-1.2-6-3.8-6-7.4V5.5z"/><path d="m7 10 2 2 4-4"/></svg></span><span class="example-copy"><strong>审查改动</strong><small>检查变更质量与潜在问题</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-agent" data-example-prompt="帮我规划一个任务，先明确目标、执行步骤和验收标准。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10v14H5z"/><path d="M8 7h4M8 10h4M8 13h2"/></svg></span><span class="example-copy"><strong>规划任务</strong><small>明确目标、步骤与验收标准</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
     </div>
   </main>
   <div id="rightResize" class="resize-handle" role="separator" aria-label="调整检查器宽度"></div>

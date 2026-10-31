@@ -720,18 +720,52 @@
     }
 
     function shellHtml() {
+      // 页面标题由工作台面板头（#workbenchPanelTitle）承担；这里只放概览与内容，
+      // 避免出现两个“待我处理”标题。概览数字全部来自真实加载结果。
       return (
         '<div class="owo-ac">' +
-        '<div class="owo-ac-head">' +
-        "<h2>待我处理</h2>" +
-        '<span class="hint" title="技术详情：/teams · /teams/{id} · /projects/{pid}/artifacts · steer(retry)">汇总各团队的待办：人工结果、待评审产物、失败步骤与写入权</span>' + // ui-lint:allow（§8.2 允许的“技术详情”提示面）
-        '<button type="button" id="ac-refresh" class="owo-ac-mini">刷新</button>' +
-        '<span id="ac-meta" class="hint" aria-live="polite"></span>' +
+        '<div class="owo-ac-overview">' +
+        '<div class="owo-ac-stats" id="ac-stats" aria-live="polite"></div>' +
+        '<div class="owo-ac-overview-side">' +
+        '<button type="button" id="ac-refresh" class="owo-ac-refresh">刷新</button>' +
+        '<span id="ac-meta" class="owo-ac-meta" title="技术详情：/teams · /teams/{id} · /projects/{pid}/artifacts · steer(retry)" aria-live="polite"></span>' + // ui-lint:allow（§8.2 允许的“技术详情”提示面）
+        "</div>" +
         "</div>" +
         '<div id="ac-errors" aria-live="polite"></div>' +
-        '<div id="ac-sections"><div class="owo-ac-empty">正在聚合待办…</div></div>' +
+        '<div id="ac-sections"><div class="owo-ac-loading">正在聚合待办…</div></div>' +
         "</div>"
       );
+    }
+
+    var STAT_LABELS = {
+      human: "等待人工", review: "待评审", failed: "失败重试", lease: "写入权持有",
+      human_result: "等待人工", artifact_review: "待评审", change_set: "ChangeSet 审批", step_retry: "失败重试",
+    };
+
+    function statTiles(entries) {
+      return entries.map(function (e) {
+        return (
+          '<div class="owo-ac-stat' + (e.count ? " has" : "") + '">' +
+          "<strong>" + Number(e.count || 0) + "</strong>" +
+          "<span>" + esc(e.label) + "</span>" +
+          "</div>"
+        );
+      }).join("");
+    }
+
+    function paintStats() {
+      var box = el("#ac-stats");
+      if (!box) return;
+      if (state.inboxSource === "inbox") {
+        var grouped = groupInbox(state.inbox);
+        box.innerHTML = statTiles(INBOX_KIND_ORDER.map(function (kind) {
+          return { label: STAT_LABELS[kind] || INBOX_KIND_CN[kind], count: (grouped[kind] || []).length };
+        }));
+      } else {
+        box.innerHTML = statTiles(SEC_DEFS.map(function (def) {
+          return { label: STAT_LABELS[def.key] || def.title, count: (state.items[def.key] || []).length };
+        }));
+      }
     }
 
     // ---------- 行为层 ----------
@@ -763,21 +797,24 @@
       if (!rootEl) return;
       var box = el("#ac-sections");
       if (box) {
-        box.innerHTML = totalOf(state.items) === 0 && state.inboxSource !== "inbox"
+        // 空状态只在整个主区域显示一次：Inbox 口径按未处理条目判断，
+        // 聚合口径按四类合计判断，避免四个大留白区块重复占屏。
+        var empty = state.inboxSource === "inbox"
+          ? inboxTotal(state.inbox) === 0
+          : totalOf(state.items) === 0;
+        box.innerHTML = empty
           ? '<div class="owo-ac-empty owo-ac-empty-global"><strong>目前没有需要你处理的事项</strong><span>当任务需要确认、补充信息或重试时，会显示在这里。</span></div>'
           : state.inboxSource === "inbox"
             ? inboxSectionsHtml(state.inbox)
             : sectionsHtml(state.items, state);
       }
+      paintStats();
       paintErrors();
       paintMeta(
         state.loading
           ? "加载中…"
-          : state.inboxSource === "inbox"
-            ? "正式 Inbox：" + inboxTotal(state.inbox) + " 项待办" +
-              (state.lastLoadedAt ? " · 更新于 " + state.lastLoadedAt : "")
-            : "共 " + totalOf(state.items) + " 项待办（客户端聚合）" +
-              (state.lastLoadedAt ? " · 更新于 " + state.lastLoadedAt : "")
+          : "共 " + (state.inboxSource === "inbox" ? inboxTotal(state.inbox) : totalOf(state.items)) +
+            " 项待办" + (state.lastLoadedAt ? " · 更新于 " + state.lastLoadedAt : "")
       );
     }
 

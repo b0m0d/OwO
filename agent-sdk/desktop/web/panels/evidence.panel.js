@@ -6,7 +6,19 @@
   const keys = new Map();
   function validationText(value) { return !value ? "格式校验未返回" : value.valid === true ? "格式校验通过" : "格式校验失败：" + (value.reason || "原因未返回"); }
   function view() {
-    const esc = H.esc, options = state.mode === "project" ? state.projects : state.sessions.map(s => ({ id: s.id, title: s.title || s.id }));
+    const esc = H.esc;
+    const displayTitle = (s) => {
+      const base = typeof root.owoSessionDisplayTitle === "function"
+        ? root.owoSessionDisplayTitle(s)
+        : (String((s && s.title) || "").trim() || "未命名任务");
+      if (base !== "未命名任务") return base;
+      // 同名未命名会话用更新时间区分，仍然不展示内部 ID。
+      const when = String((s && (s.updated_at || s.created_at)) || "").slice(5, 16).replace("T", " ");
+      return when ? base + " · " + when : base;
+    };
+    const options = state.mode === "project"
+      ? state.projects
+      : state.sessions.map(s => ({ id: s.id, title: displayTitle(s) }));
     const selector = '<label>数据来源<select data-evidence-mode><option value="project"' + (state.mode === "project" ? " selected" : "") + '>团队交付</option><option value="session"' + (state.mode === "session" ? " selected" : "") + '>会话变更与验收</option></select></label><label>项目或会话<select data-evidence-select><option value="">选择…</option>' + options.map(p => '<option value="' + esc(p.id) + '"' + (p.id === state.selected ? " selected" : "") + '>' + esc(p.title) + '</option>').join("") + '</select></label><button data-evidence-refresh>刷新</button>';
     let body;
     if (state.mode === "session") {

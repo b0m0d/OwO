@@ -75,6 +75,8 @@ test("settings model list adds supported options and marks only the incompatible
     document: { createElement: () => option("") },
     isReasoningModel: () => false,
     getDefaultModel: () => select.value,
+    loadCustomModels: () => [],
+    refreshComposerModelChip: () => {},
     $: (id) => id === "settingsModel" ? select : id === "modelCompatibilityHint" ? hint : null,
   };
   const sync = runInNewContext(match[0] + "\nsyncProviderModels;", context);
@@ -96,9 +98,9 @@ test("Qwen runtime alias filters composer/settings choices even when endpoint ca
   const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
   const match = /function syncProviderModels\(presetOverride\) \{[\s\S]*?\n\}/.exec(app);
   assert.ok(match);
-  const composerMenu = /function openModelMenu\(\) \{[\s\S]*?\n\}/.exec(app);
-  assert.ok(composerMenu);
-  assert.match(composerMenu[0], /ModelRouting\.findProviderPreset/, "会话模型菜单与设置页必须共用服务商别名解析");
+  const composerCatalog = /function composerModelCatalog\(\) \{[\s\S]*?\n\}/.exec(app);
+  assert.ok(composerCatalog);
+  assert.match(composerCatalog[0], /ModelRouting\.findProviderPreset/, "会话模型菜单与设置页必须共用服务商别名解析（含自定义连接端点）");
   const option = (value) => ({ value, dataset: {}, hidden: false, disabled: false, textContent: value });
   const select = {
     value: "qwen3.8-max",
@@ -117,6 +119,8 @@ test("Qwen runtime alias filters composer/settings choices even when endpoint ca
     document: { createElement: () => option("") },
     isReasoningModel: () => false,
     getDefaultModel: () => select.value,
+    loadCustomModels: () => [],
+    refreshComposerModelChip: () => {},
     $: (id) => id === "settingsModel" ? select : null,
   };
   runInNewContext(match[0] + "\nsyncProviderModels();", context);
@@ -179,18 +183,24 @@ test("provider compatibility distinguishes unsupported choices from custom endpo
   assert.deepEqual(routing.providerModelCompatibility("local-model", []), { known: false, compatible: true });
 });
 
-test("composer menu labels unsupported current model separately instead of as provider-supported", () => {
+test("composer menu flags the unsupported current model and keeps effort in one panel", () => {
   const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
   const match = /function openModelMenu\(\) \{[\s\S]*?\n\}/.exec(app);
-  assert.ok(match);
-  const option = (value, custom = false) => ({ value, textContent: value, dataset: { custom: custom ? "1" : "" } });
-  const options = [option("qwen3.8-max"), option("glm-5.3-flash"), option("my-local-model", true)];
+  const catalogSource = /function composerModelCatalog\(\) \{[\s\S]*?\n\}/.exec(app)?.[0];
+  assert.ok(match && catalogSource);
   let menuHtml = "";
   const context = {
     state: { sessionId: "s1", selectedModel: "qwen3.8-max", settings: { runtime: { provider: "bigmodel" }, provider: {} } },
     window: { OwoProviderPresets: { presets: () => [{ id: "bigmodel", label: "BigModel", models: ["glm-5.3-flash"] }] } },
     ModelRouting: routing,
-    $: (id) => id === "settingsModel" ? { options } : id === "modelChip" ? {} : null,
+    EFFORT_MODES: [
+      { id: "", label: "默认", desc: "跟随模型自身默认" },
+      { id: "high", label: "高", desc: "尽量深入思考" },
+    ],
+    getEffort: () => "",
+    loadCustomModels: () => [{ id: "my-local-model", label: "本地模型", baseUrl: "http://127.0.0.1:9999/v1", disabled: false }],
+    providerGateMissing: () => false,
+    $: (id) => id === "modelChip" ? {} : null,
     getComposerModel: () => "qwen3.8-max",
     getDefaultModel: () => "glm-5.3-flash",
     esc: (value) => String(value),
@@ -202,13 +212,136 @@ test("composer menu labels unsupported current model separately instead of as pr
     setSettingsTab() {},
     composerMenuEl: null,
   };
-  runInNewContext(match[0] + "\nopenModelMenu();", context);
-  assert.match(menuHtml, /当前模型与服务商不匹配/);
-  assert.match(menuHtml, /当前服务商可用模型/);
-  assert.match(menuHtml, /glm-5.3-flash/);
-  assert.match(menuHtml, /当前会话模型（不兼容）/);
-  assert.match(menuHtml, /qwen3.8-max/);
-  assert.match(menuHtml, /自定义模型/);
+  runInNewContext(catalogSource + "\n" + match[0] + "\nopenModelMenu();", context);
+  // 当前模型不在可用目录里：给出可读提示，但不把它当成一个可选项再列一遍。
+  assert.match(menuHtml, /当前模型不可用/);
+  assert.match(menuHtml, /没有可用连接/);
+  assert.match(menuHtml, /qwen3\.8-max/);
+  assert.doesNotMatch(menuHtml, /data-model="qwen3\.8-max"/);
+  assert.match(menuHtml, /glm-5\.3-flash/);
+  assert.match(menuHtml, /my-local-model/);
+  assert.match(menuHtml, /BigModel/);
+  assert.match(menuHtml, /独立连接/);
+  assert.match(menuHtml, /思考强度/);
+  assert.match(menuHtml, /data-effort/);
+  assert.match(menuHtml, /data-effort-segment/);
+  assert.match(menuHtml, /data-model-default/);
+  // 单面板：不再有「›」二级箭头、悬停说明或行内档位文字。
+  assert.doesNotMatch(menuHtml, /composer-model-arrow/);
+  assert.doesNotMatch(menuHtml, /悬停或聚焦模型/);
+  assert.doesNotMatch(menuHtml, /aria-haspopup/);
+  // 不足 6 个模型时不渲染搜索框，列表直接露出。
+  assert.doesNotMatch(menuHtml, /data-model-search-input/);
+});
+
+test("custom model connection routes provider compatibility through its own endpoint", () => {
+  const presets = [
+    { id: "openai", baseUrl: "https://api.openai.com/v1", models: ["gpt-4o-mini", "gpt-4o", "o3-mini"] },
+    { id: "deepseek", baseUrl: "https://api.deepseek.com/v1", models: ["deepseek-flash", "deepseek-chat", "deepseek-reasoner"] },
+  ];
+  assert.equal(routing.findProviderPreset("", presets, "https://api.deepseek.com/")?.id, "deepseek");
+  assert.equal(
+    routing.findModelProviderPreset(
+      "deepseek-flash",
+      [{ id: "deepseek-flash", baseUrl: "https://api.deepseek.com/" }],
+      "openai-compatible", presets, "https://api.openai.com/v1"
+    )?.id,
+    "deepseek"
+  );
+  // 运行时 provider 还停在别的服务商（bigmodel）时，自定义连接自己的端点仍然优先。
+  assert.equal(
+    routing.findModelProviderPreset(
+      "deepseek-flash",
+      [{ id: "deepseek-flash", baseUrl: "https://api.deepseek.com/" }],
+      "bigmodel", presets, "https://open.bigmodel.cn/api/paas/v4"
+    )?.id,
+    "deepseek"
+  );
+  assert.equal(routing.findModelProviderPreset("other", [], "openai-compatible", presets, "https://api.openai.com/v1")?.id, "openai");
+});
+
+test("composer menu keeps the catalog clean when a custom connection drives the current model", () => {
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const match = /function openModelMenu\(\) \{[\s\S]*?\n\}/.exec(app);
+  const catalogSource = /function composerModelCatalog\(\) \{[\s\S]*?\n\}/.exec(app)?.[0];
+  assert.ok(match && catalogSource);
+  let menuHtml = "";
+  const context = {
+    state: { sessionId: null, pendingModelOverride: null, settings: { runtime: { provider: "openai-compatible" }, provider: { base_url: "https://api.openai.com/v1" } } },
+    window: { OwoProviderPresets: { presets: () => [
+      { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", models: ["gpt-4o-mini", "gpt-4o", "o3-mini"] },
+      { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", models: ["deepseek-flash", "deepseek-chat", "deepseek-reasoner"] },
+    ] } },
+    ModelRouting: routing,
+    EFFORT_MODES: [{ id: "", label: "默认", desc: "跟随模型自身默认" }],
+    getEffort: () => "",
+    loadCustomModels: () => [{ id: "deepseek-flash", label: "deepseek", baseUrl: "https://api.deepseek.com/", apiFormat: "openai" }],
+    // 只配了 deepseek-flash 一条独立连接，服务商本身未就绪。
+    providerGateMissing: () => true,
+    $: (id) => id === "modelChip" ? {} : null,
+    getComposerModel: () => "deepseek-flash",
+    getDefaultModel: () => "deepseek-flash",
+    esc: (value) => String(value),
+    escapeAttribute: (value) => String(value),
+    openComposerMenu: (_trigger, html) => { menuHtml = html; },
+    closeComposerMenu() {},
+    selectModel() {},
+    setSettingsPageVisible() {},
+    setSettingsTab() {},
+    composerMenuEl: null,
+  };
+  runInNewContext(catalogSource + "\n" + match[0] + "\nopenModelMenu();", context);
+  assert.doesNotMatch(menuHtml, /不匹配/);
+  // 目录里没有连接过的模型（DeepSeek 预设的其它型号、OpenAI 的型号）都不该出现。
+  assert.doesNotMatch(menuHtml, /gpt-4o/);
+  assert.doesNotMatch(menuHtml, /deepseek-chat/);
+  assert.match(menuHtml, /data-model="deepseek-flash"/);
+  // 唯一可用模型就是默认模型时，不再重复一条「默认 · deepseek-flash」。
+  assert.doesNotMatch(menuHtml, /data-model-default/);
+});
+
+test("model menu keeps a way back when the current model has no connection", () => {
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const match = /function openModelMenu\(\) \{[\s\S]*?\n\}/.exec(app);
+  const catalogSource = /function composerModelCatalog\(\) \{[\s\S]*?\n\}/.exec(app)?.[0];
+  assert.ok(match && catalogSource);
+  let menuHtml = "";
+  const context = {
+    state: {
+      sessionId: "s1",
+      selectedModel: "deepseek-chat",
+      settings: {
+        runtime: { provider: "openai-compatible", provider_ready: false },
+        provider: { base_url: "https://api.openai.com/v1" },
+      },
+    },
+    window: { OwoProviderPresets: { presets: () => [
+      { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", models: ["gpt-4o-mini"] },
+      { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", models: ["deepseek-flash", "deepseek-chat"] },
+    ] } },
+    ModelRouting: routing,
+    EFFORT_MODES: [{ id: "", label: "默认", desc: "跟随模型自身默认" }],
+    getEffort: () => "",
+    loadCustomModels: () => [{ id: "deepseek-flash", label: "deepseek", baseUrl: "https://api.deepseek.com/", apiFormat: "openai" }],
+    providerGateMissing: () => true,
+    $: (id) => id === "modelChip" ? {} : null,
+    getComposerModel: () => "deepseek-chat",
+    getDefaultModel: () => "deepseek-flash",
+    esc: (value) => String(value),
+    escapeAttribute: (value) => String(value),
+    openComposerMenu: (_trigger, html) => { menuHtml = html; },
+    closeComposerMenu() {},
+    selectModel() {},
+    setSettingsPageVisible() {},
+    setSettingsTab() {},
+    composerMenuEl: null,
+  };
+  runInNewContext(catalogSource + "\n" + match[0] + "\nopenModelMenu();", context);
+  // 当前模型没有连接时，菜单仍打开并给出切回可用模型的入口。
+  assert.match(menuHtml, /当前模型不可用/);
+  assert.match(menuHtml, /deepseek-chat 没有可用连接/);
+  assert.doesNotMatch(menuHtml, /data-model="deepseek-chat"/);
+  assert.match(menuHtml, /data-model="deepseek-flash"/);
 });
 
 test("custom selection carries its own connection instead of only the model id", () => {

@@ -3,6 +3,65 @@
 // 建立的 API、状态和渲染能力。此文件是上述域逻辑的唯一实现来源。
 
 // 侧栏与会话附属面板使用递增代次，丢弃较早请求的迟到结果。
+// 展示用会话标题：空标题、内部 ID，或服务端自动生成的「会话 xxxx」都不直接露出。
+// 只影响展示，session.id 与数据层不变；侧栏与产物页共用同一口径。
+function owoSessionDisplayTitle(session) {
+  const title = String((session && session.title) || "").trim();
+  const id = String((session && session.id) || "");
+  if (!title) return "新对话";
+  if (id && title.length >= 8 && (title === id || id.startsWith(title))) return "新对话";
+  if (/^会话[\s_-]*[0-9a-f]{6,}$/i.test(title)) return "新对话";
+  return title;
+}
+// 服务端对空会话只给「会话 xxxx」占位标题。这类会话不再进入列表：
+// 新建对话改为懒创建（首次发送才 POST /session），历史遗留的空会话也一并隐藏，
+// 但当前正在查看的那条仍保留，避免选中项突然消失。
+function owoSessionHasAutoTitle(session) {
+  const title = String((session && session.title) || "").trim();
+  const id = String((session && session.id) || "");
+  if (!title) return true;
+  if (id && title.length >= 8 && (title === id || id.startsWith(title))) return true;
+  return /^会话[\s_-]*[0-9a-f]{6,}$/i.test(title);
+}
+// 首轮发送后给会话一个 8–14 字的可读标题（服务端默认会截到 40 字，侧栏放不下）。
+// 只在会话仍是自动标题时改写一次；用户手动改过名的会话不再覆盖。
+const autoTitledSessions = new Set();
+function deriveConversationTitle(text) {
+  const line = String(text || "").replace(/\s+/g, " ").trim();
+  if (!line) return "";
+  const clauses = line.split(/[。！？!?；;，,\n]/).map((part) => part.trim()).filter(Boolean);
+  let title = clauses[0] || line;
+  // 第一段太短时并上第二段，避免出现「分析」这种两字标题。
+  if (Array.from(title).length < 6 && clauses[1]) title = `${title}，${clauses[1]}`;
+  // 「请帮我…」这类叠词前缀要连续剥掉，而不是只去一层。
+  let previous = "";
+  while (title && title !== previous) {
+    previous = title;
+    title = title.replace(/^(帮我|请|麻烦|我想|想请你|能不能|可以|给我|帮忙)\s*/, "").trim();
+  }
+  if (!title) title = clauses[0] || line;
+  title = title.replace(/[，,、：:]+$/, "").trim();
+  const chars = Array.from(title);
+  if (chars.length > 14) title = chars.slice(0, 14).join("");
+  return title;
+}
+async function autoTitleSession(sessionId, prompt) {
+  if (!sessionId || !prompt || autoTitledSessions.has(sessionId)) return;
+  autoTitledSessions.add(sessionId);
+  const known = (state.sessionIndex || []).find((item) => item.id === sessionId);
+  if (known && !owoSessionHasAutoTitle(known)) return;
+  const title = deriveConversationTitle(prompt);
+  if (!title) return;
+  try {
+    await api(`/session/${encodeURIComponent(sessionId)}/rename`, {
+      method: "POST",
+      body: JSON.stringify({ title }),
+    });
+    await refreshSessions(state.sessionId);
+  } catch (_) {
+    // 标题只是可读性增强；失败不影响回合，也不打扰用户。
+  }
+}
 let sessionListRefreshGeneration = 0;
 let sessionContextRefreshGeneration = 0;
 let sessionDiffRefreshGeneration = 0;
@@ -361,7 +420,10 @@ async function refreshSessionsImpl(selectId, generation, selectionVersion) {
     ? (selectId || state.sessionId)
     : state.sessionId;
   const showArchived = $("showArchived").checked;
-  const visible = sessions.filter((session) => showArchived || !session.archived);
+  const visible = sessions.filter((session) =>
+    (showArchived || !session.archived)
+    && (!owoSessionHasAutoTitle(session) || session.id === selectedSessionId)
+  );
   const visibleIds = new Set(visible.map((session) => session.id));
   const byParent = new Map();
   for (const session of visible) {
@@ -401,6 +463,9 @@ async function refreshSessionsImpl(selectId, generation, selectionVersion) {
     });
   }
   list.innerHTML = "";
+  // 没有真实标题的会话不把内部 ID 当名称显示：空标题、ID 本身，或服务端自动生成的「会话 xxxx」。
+  // 只影响展示，session.id 与数据层不变。
+  const sessionDisplayTitle = owoSessionDisplayTitle;
   const renderSession = (session, depth, groupWorkspace) => {
     const li = document.createElement("li");
     li.dataset.groupWorkspace = groupWorkspace || "";
@@ -417,10 +482,11 @@ async function refreshSessionsImpl(selectId, generation, selectionVersion) {
     const raw = session.updated_at || session.created_at || "";
     const updated = raw ? raw.slice(5, 16).replace("T", " ") : "";
     li.title = `${session.model || "默认模型"} · ${raw.slice(0, 19).replace("T", " ")}`;
+    const displayTitle = sessionDisplayTitle(session);
     li.innerHTML = `
       <div class="owo-session-row" style="margin-left:${depth * 14}px">
-        <button type="button" class="owo-session-title" data-session-select aria-current="${session.id === selectedSessionId ? "page" : "false"}" title="打开会话：${esc(session.title || session.id.slice(0, 12))}">
-          <strong>${esc(session.title || session.id.slice(0, 12))} ${badges.join(" ")}</strong>
+        <button type="button" class="owo-session-title" data-session-select aria-current="${session.id === selectedSessionId ? "page" : "false"}" title="打开会话：${esc(displayTitle)}">
+          <strong>${esc(displayTitle)} ${badges.join(" ")}</strong>
           <span class="sub">${esc(updated)}</span>
         </button>
         <button type="button" class="owo-session-more" data-act="menu" aria-haspopup="menu" aria-expanded="false" aria-label="会话操作">⋯</button>
@@ -559,21 +625,22 @@ async function refreshSessionsImpl(selectId, generation, selectionVersion) {
   // 会话记录本就带 workspace 字段，之前只在列表里裸铺，多项目下无法分辨。
   const groups = new Map();
   for (const workspace of [$("workspace").value.trim(), ...recentWorkspaces()]) {
-    if (workspace && !groups.has(workspace.toLowerCase())) {
-      groups.set(workspace.toLowerCase(), { workspace, roots: [] });
+    const key = workspacePathKey(workspace);
+    if (workspace && !groups.has(key)) {
+      groups.set(key, { workspace, roots: [] });
     }
   }
   for (const session of visible) {
     if (!isRoot(session)) continue;
     const workspace = String(session.workspace || "").trim();
-    const key = workspace.toLowerCase();
+    const key = workspacePathKey(workspace);
     if (!groups.has(key)) groups.set(key, { workspace, roots: [] });
     groups.get(key).roots.push(session);
   }
   for (const group of groups.values()) {
     // 项目分组可折叠：组头点击折叠/展开，展开状态按「工作区名」记忆在 localStorage，
     // 刷新后保持。多项目并行时默认全部展开（同屏可见），用户可自行收起。
-    const groupId = "grp:" + (group.workspace || "").toLowerCase();
+    const groupId = "grp:" + workspacePathKey(group.workspace);
     const header = document.createElement("li");
     header.className = "codex-session-group";
     header.dataset.groupWorkspace = group.workspace || "";
@@ -655,6 +722,39 @@ function workspaceLabel(workspace) {
   if (!raw) return "未指定工作区";
   const parts = raw.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || raw;
+}
+
+function workspacePathKey(workspace) {
+  // Windows 路径可能以 / 或 \ 到达；比较与分组时统一成反斜杠，避免同一目录出现两个分组。
+  return String(workspace || "").trim().replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+}
+
+// 打开会话时让「当前工作区」跟随该会话：标题、工作区芯片和新会话目标保持一致。
+// 只更新本地选择并尽力持久化；即使壳层持久化失败，界面也不会继续显示两个工作区。
+function adoptSessionWorkspace(workspace) {
+  const target = String(workspace || "").trim();
+  if (!target) return false;
+  const input = $("workspace");
+  const current = String(input?.value || "").trim();
+  if (current && workspacePathKey(current) === workspacePathKey(target)) return false;
+  if (input) {
+    input.value = target;
+    input.dataset.path = target;
+  }
+  try {
+    localStorage.setItem("owo.workspace", target);
+  } catch (_) {
+    /* 隐私模式等场景不阻塞会话打开 */
+  }
+  if (typeof rememberWorkspace === "function") rememberWorkspace(target);
+  if (typeof syncProjectChip === "function") syncProjectChip();
+  if (typeof syncTaskDetails === "function") syncTaskDetails();
+  if (typeof persistWorkspace === "function") {
+    Promise.resolve(persistWorkspace(target)).catch(() => {
+      if (typeof showToast === "function") showToast("已打开会话，但工作区切换未保存", "warn");
+    });
+  }
+  return true;
 }
 
 // 会话列表搜索过滤（Codex 侧栏搜索框）
@@ -841,6 +941,9 @@ function turnRecoveryActions(sessionId, prompt, reason) {
 async function selectSession(id, forceHistory = false) {
   const selectionVersion = ++state.selectionVersion;
   state.sessionId = id;
+  // 会话属于哪个工作区，芯片就跟到哪个工作区；标题、芯片和新会话目标不再分叉。
+  const knownSession = (state.sessionIndex || []).find(item => item.id === id);
+  if (knownSession?.workspace) adoptSessionWorkspace(knownSession.workspace);
   // 记住当前对话：下次进入自动恢复，不再要求手动切换。
   localStorage.setItem("owo.lastSession", id);
   state.attachments = [];
@@ -852,6 +955,9 @@ async function selectSession(id, forceHistory = false) {
   updateScrollBottomBtn();
   // 每会话独立视图：切回时保留该会话的本地输出（含仍在运行回合的实时内容）。
   showSessionView(id);
+  // 顶部标题属于所选会话：立即按该会话的工作区刷新，不能沿用当前工作区芯片。
+  window.syncTaskDetails?.();
+  window.syncSidebarHome?.();
   // 并行回合：状态条/发送钮跟随切回来的会话（该会话在跑 → 恢复运行中视图）。
   const runningTurn = currentTurn();
   if (runningTurn) {
@@ -867,6 +973,7 @@ async function selectSession(id, forceHistory = false) {
   try {
     const detail = await api(`/session/${id}`);
     if (selectionVersion !== state.selectionVersion) return;
+    if (detail?.workspace) adoptSessionWorkspace(detail.workspace);
     state.selectedModel = String((detail && detail.model_override) || "").trim();
     if (typeof refreshComposerModelChip === "function") refreshComposerModelChip();
     const previousInput = [...(detail.messages || [])].reverse().find(message => message.role === "user" && message.content);
@@ -877,6 +984,7 @@ async function selectSession(id, forceHistory = false) {
       syncSessionWelcome();
       await refreshSessions(id);
       if (selectionVersion !== state.selectionVersion) return;
+      window.syncTaskDetails?.();
       await refreshDiff(id);
       if (selectionVersion !== state.selectionVersion) return;
       await refreshSessionContext(id);
@@ -956,6 +1064,7 @@ async function selectSession(id, forceHistory = false) {
   }
   await refreshSessions(id);
   if (selectionVersion !== state.selectionVersion) return;
+  window.syncTaskDetails?.();
   await refreshDiff(id);
   if (selectionVersion !== state.selectionVersion) return;
   await refreshSessionContext(id);
@@ -1020,16 +1129,29 @@ async function newSession(workspaceOverride) {
 
 // 进入时自动恢复上次的对话：优先 localStorage 记忆，其次最近更新的会话；
 // 都没有则保持空状态，不强制用户手动切换。
+// 只在当前工作区内恢复：当前工作区是用户的选择，不能被上一条别的目录的会话悄悄改写。
+// 别的目录的会话仍可从侧栏打开，打开时 selectSession 会把芯片切到该会话的工作区。
 async function restoreLastSession() {
   if (state.sessionId) return;
   try {
     const sessions = (await api("/sessions")) || [];
+    const workspaceInput = $("workspace");
+    const currentWorkspace = String(workspaceInput?.value || "").trim();
+    const currentKey = workspacePathKey(currentWorkspace);
+    const inCurrentWorkspace = (session) =>
+      !currentKey || workspacePathKey(session.workspace) === currentKey;
     const last = localStorage.getItem("owo.lastSession");
-    const remembered =
-      last && sessions.some((session) => session.id === last && !session.archived);
-    if (last && !remembered) localStorage.removeItem("owo.lastSession");
-    const fallback = sessions.find((session) => !session.archived);
-    const target = remembered ? last : fallback && fallback.id;
+    // 空会话只有「会话 xxxx」占位标题，不该在启动时被恢复成当前会话，
+    // 也不该成为兜底项——否则刷新后会回到一个侧栏里看不见的空对话。
+    const restorable = (session) =>
+      !session.archived && inCurrentWorkspace(session) && !owoSessionHasAutoTitle(session);
+    const rememberedSession = last
+      ? sessions.find((session) => session.id === last && restorable(session))
+      : null;
+    if (last && !rememberedSession) localStorage.removeItem("owo.lastSession");
+    const remembered = rememberedSession ? rememberedSession.id : null;
+    const fallback = sessions.find(restorable);
+    const target = remembered || (fallback && fallback.id);
     if (!target) return;
     await selectSession(target);
   } catch (_) {
@@ -1108,6 +1230,8 @@ async function sendPrompt() {
   addMessage("user", prompt);
   if (!state.lastSessionPrompts) state.lastSessionPrompts = new Map();
   state.lastSessionPrompts.set(state.sessionId, prompt);
+  // 首轮先补一个可读标题：重命名与回合共用会话锁，放在发送前才不会等整轮结束。
+  if (typeof autoTitleSession === "function") await autoTitleSession(state.sessionId, prompt);
   const attachments = state.attachments.map((attachment) => attachment.id);
   if (attachments.length) {
     addMessage("system", `附带 ${attachments.length} 个附件`);
@@ -2731,6 +2855,29 @@ const PANEL_ORDER = [
   "about",
 ];
 
+// 左侧「工作台」入口覆盖的功能页：它们共用同一个一级入口，内部再用页面导航切换。
+// 团队协作与三个自动化页面是一级入口，不在此集合内。
+const WORKBENCH_HUB_PANELS = new Set([
+  "home",
+  "project-launcher",
+  "project-history",
+  "evidence",
+  "action-center",
+  "goal",
+  "notes",
+  "memory",
+  "team",
+  "plugin-market",
+  "permissions",
+  "command",
+  "observability",
+  "diagnostics-ledger",
+  "fleet",
+  "capabilities",
+  "eval",
+  "product-eval",
+]);
+
 function panelHelpers() {
   return {
     baseUrl: API_BASE,
@@ -2741,7 +2888,7 @@ function panelHelpers() {
       const blob = await window.OwoApi.download("/artifacts/" + encodeURIComponent(id) + "/content?raw=true");
       const url = URL.createObjectURL(blob), link = document.createElement("a"); link.href = url; link.download = "artifact"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
     },
-    openChat: async () => { setSettingsPageVisible(false); await newSession(); $("prompt").focus(); },
+    openChat: async () => { setSettingsPageVisible(false); showHomeView({ keepMode: true }); $("prompt").focus(); },
     openSession: async id => { setSettingsPageVisible(false); await selectSession(id); },
     openTeam: id => { openPanelById("workswarm"); window.OwoPanels.workswarm.open(id); },
     get(path, options) {
@@ -2789,13 +2936,18 @@ function unmountActivePanel() {
 }
 
 /// 主侧栏的工作入口跟随当前功能页高亮（功能页内主侧栏常驻，用户始终知道自己在哪）。
+/// 工作台内部的页面统一点亮「工作台」；团队协作与自动化各自点亮对应的一级入口。
 function markSidebarPanel(id) {
   for (const button of document.querySelectorAll(".codex-sidebar [data-workbench-panel]")) {
-    const current = Boolean(id) && button.dataset.workbenchPanel === id;
+    const panelId = button.dataset.workbenchPanel;
+    const current = Boolean(id) && (
+      panelId === id || (panelId === "home" && WORKBENCH_HUB_PANELS.has(id))
+    );
     button.classList.toggle("is-current", current);
     if (current) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
+  window.syncSidebarHome?.();
 }
 const panelObserverScope = window.OwoObserverScope.createObserverScope();
 let stopPanelAccessibility = null;
@@ -2834,6 +2986,12 @@ function mountPanel(id, writeHash = true) {
   // 引导时的默认挂载传 writeHash=false：否则地址栏被钉上 #notes，刷新后
   // applyDeepLink 又把它当深链 → 每次打开工作台都停在工具视图（用户实测反馈）。
   if (writeHash) workbenchView.setRoute(id);
+  // 切换页面时清掉上一页的筛选，避免新页面的主入口被旧关键词藏起来。
+  const panelSearch = $("panelSearch");
+  if (panelSearch && panelSearch.value) {
+    panelSearch.value = "";
+    filterPanelNavigation($("panelNav"), "");
+  }
   for (const button of document.querySelectorAll("#panelNav button")) {
     button.classList.toggle("active", button.dataset.panel === id);
     if (button.dataset.panel === id) {
@@ -3107,6 +3265,10 @@ function filterPanelNavigation(nav, query) {
       delete section.dataset.searchWasOpen;
     }
   }
+  const primary = nav.querySelector?.(".workbench-nav-primary");
+  if (primary) {
+    primary.hidden = !Array.from(primary.querySelectorAll("button[data-panel]")).some(button => !button.hidden);
+  }
 }
 
 function initPanels() {
@@ -3116,9 +3278,15 @@ function initPanels() {
   window.OwoPanels.baseUrl = API_BASE;
   nav.innerHTML = "";
   for (const group of window.OwoWorkbenchNavigation.sections(PANEL_ORDER)) {
+    if (!group.entries.length) continue;
     const section = document.createElement(group.primary ? "div" : "details");
     section.className = group.primary ? "workbench-nav-primary" : "workbench-nav-section";
-    if (!group.primary) {
+    if (group.primary) {
+      const heading = document.createElement("div");
+      heading.className = "workbench-nav-heading";
+      heading.textContent = "工作台";
+      section.appendChild(heading);
+    } else {
       const summary = document.createElement("summary");
       summary.textContent = group.label;
       section.appendChild(summary);
@@ -3152,19 +3320,6 @@ function initPanels() {
 
 window.addEventListener("hashchange", () => applyDeepLink());
 window.addEventListener("popstate", () => { if (!applyDeepLink()) setSettingsPageVisible(false); });
-
-function openWorkbenchSearch() {
-  const entries = window.OwoWorkbenchNavigation.search("", PANEL_ORDER).filter(item => window.OwoPanels?.[item.id]);
-  openModal({ title: "查找功能", body: '<label><span class="sr-only">搜索功能</span><input id="workbenchQuickSearch" type="search" placeholder="搜索任务、笔记、权限或工具…"></label><div class="workbench-quick-results">' + entries.map(item => '<button type="button" data-quick-panel="' + esc(item.id) + '"><strong>' + esc(item.title) + '</strong><span>' + esc(item.description) + '</span></button>').join("") + "</div>" });
-  const body = $("modalBody");
-  const input = $("workbenchQuickSearch");
-  input.addEventListener("input", () => {
-    const matches = new Set(window.OwoWorkbenchNavigation.search(input.value, PANEL_ORDER).map(item => item.id));
-    for (const button of body.querySelectorAll("[data-quick-panel]")) button.hidden = !matches.has(button.dataset.quickPanel);
-  });
-  for (const button of body.querySelectorAll("[data-quick-panel]")) button.addEventListener("click", () => { closeModal(); openPanelById(button.dataset.quickPanel); });
-  input.addEventListener("keydown", event => { if (event.key === "Enter") { const first = Array.from(body.querySelectorAll("[data-quick-panel]")).find(button => !button.hidden); if (first) first.click(); } });
-}
 
 // 深链：#<panel-id> 打开对应面板，#settings 打开设置页（便于分享与逐页截图验证）。
 function applyDeepLink() {

@@ -19,9 +19,10 @@
       class="pet idle"
       id="pet"
       aria-label="OwO 桌宠"
-      title="左键点我摸摸头；右键打开操作菜单（允许 / 拒绝审批 · 停止回合 · 打开工作台 · 换形象 · 隐藏）；拖动可移动"
+      title="左键点我摸摸头，双击聊天；右键打开操作菜单（打开工作台 · 和我聊天 · 换形象 · 隐藏）；拖动移动，Shift 拖动旋转 3D 形象"
     >
       <span class="halo"></span>
+      <span class="pet-hitbox" id="pet-hitbox" aria-hidden="true"></span>
       <div class="avatar" id="pet-avatar" role="img" aria-label="OwO 桌宠形象">
         <canvas id="pet-avatar-3d" aria-hidden="true"></canvas>
         <img id="pet-avatar-img" src="" alt="" draggable="false" />
@@ -29,8 +30,13 @@
       <span class="fx-layer" id="fx" aria-hidden="true"></span>
       <span class="bubble" id="bubble">OwO</span>
     </button>
-    <div class="skin-menu" id="skin-menu" hidden></div>
+    <aside class="chat-panel" id="chat-panel" hidden aria-label="桌宠聊天">
+      <header><span class="chat-id"><span class="chat-avatar" aria-hidden="true"></span><strong>OwO</strong></span><button type="button" id="chat-close" aria-label="收起聊天">×</button></header>
+      <div class="chat-log" id="chat-log"><div class="chat-empty" id="chat-empty">嗨，我是 OwO。<br>想聊点什么？</div></div>
+      <input id="chat-input" type="text" placeholder="和 OwO 说点什么…" autocomplete="off" />
+    </aside>
     <script src="/core/api-client.js"></script>
+    <script src="/core/turn-sse.js"></script>
     <script src="model-renderer.js"></script>
     <script src="pet.js"></script>
     <script src="feed-controller.js"></script>

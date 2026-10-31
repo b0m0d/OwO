@@ -768,7 +768,6 @@ body[data-agent=waiting] #taskDetailStatus { color: var(--yellow); }
     background: var(--canvas) !important; border: 1px solid var(--border) !important; border-radius: 14px !important; box-shadow: var(--shadow-xs) !important;
   }
   body.dark-theme.tools-open.panel-open #sidebar #workbenchPanelSection { border-color: #1f2724 !important; }
-  body.panel-open .workbench-nav-primary { display: none; }
 }
 body.tools-open.panel-open .workbench-panel-header {
   display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 64px; padding: 14px 24px; margin: 0;

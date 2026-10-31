@@ -1,5 +1,5 @@
 "use strict";
-const {app,ipcMain,clipboard,globalShortcut}=require('electron');
+const {app,ipcMain,clipboard,globalShortcut,Menu}=require('electron');
 const fs=require('node:fs'),path=require('node:path');
 function installPetFeed({pet,main,workspace,dataRoot,port,pets=()=>[pet()],ensureAgents=()=>{},moveActor,resetActor,setVisible,present=()=>{},queryVisible}) {
   const statePath=()=>path.join(dataRoot(),'pet-feed-run.json');
@@ -34,11 +34,46 @@ function installPetFeed({pet,main,workspace,dataRoot,port,pets=()=>[pet()],ensur
   ipcMain.handle('pet:actor:visible',(event,visible)=>{actor(event);if(typeof visible!=='boolean')throw Error('invalid visibility');return setVisible?setVisible(visible):{ok:false};});
   ipcMain.handle('pet:actor:move',(event,dx,dy)=>{const w=actor(event);if(!Number.isFinite(dx)||!Number.isFinite(dy))throw Error('invalid movement');if(moveActor)return moveActor(w,dx,dy);const [x,y]=w.getPosition();w.setPosition(x+Math.max(-500,Math.min(500,dx)),y+Math.max(-500,Math.min(500,dy)));return {ok:true};});
   ipcMain.handle('pet:actor:reset',event=>{const w=actor(event);return resetActor?resetActor(w):{ok:false};});
+  ipcMain.handle('pet:actor:ignore-mouse',(event,ignore)=>{const w=actor(event);if(typeof ignore!=='boolean')throw Error('invalid mouse mode');w.setIgnoreMouseEvents(ignore,{forward:true});return {ok:true};});
+  // 桌宠窗口常驻不可聚焦，避免抢键盘；只有聊天面板打开期间临时可聚焦，
+  // 否则输入框拿不到系统键盘焦点，打字全落到上一个前台窗口。
+  // 另外 Windows 下 WS_EX_NOACTIVATE 会让 Chromium 丢掉 mousedown（只剩 mouseup），
+  // 点击就会"时灵时不灵"。所以指针进入命中区时也临时可聚焦，但**不**主动 focus，
+  // 只有真的点下去才激活，移出后再交还。
+  const chatFocused=new WeakSet();
+  ipcMain.handle('pet:actor:chat-focus',(event,open)=>{const w=actor(event);if(typeof open!=='boolean')throw Error('invalid chat focus');if(open){chatFocused.add(w);w.setFocusable(true);w.show();w.moveTop();w.focus();}else{chatFocused.delete(w);if(w.isFocused())w.blur();w.setFocusable(false);}return {ok:true};});
+  ipcMain.handle('pet:actor:hover',(event,inside)=>{const w=actor(event);if(typeof inside!=='boolean')throw Error('invalid hover');if(chatFocused.has(w))return {ok:true};if(inside){w.setFocusable(true);}else{if(w.isFocused())w.blur();w.setFocusable(false);}return {ok:true};});
+  // 点击/拖动会激活窗口（需要它才能收到 mousedown），但互动结束要把键盘还回去：
+  // 只 blur，不撤 focusable，否则指针没离开命中区时下一次点击又会被吞掉。
+  ipcMain.handle('pet:actor:blur',event=>{const w=actor(event);if(chatFocused.has(w))return {ok:true};if(w.isFocused())w.blur();return {ok:true};});
+  function nativeMenuItems(items,select,depth=0){
+    if(!Array.isArray(items)||!items.length||items.length>40||depth>3)throw Error('invalid menu');
+    return items.map(item=>{
+      if(item?.type==='separator')return {type:'separator'};
+      if(!item||!id(item.id)||typeof item.label!=='string'||!item.label.trim()||item.label.length>160)throw Error('invalid menu item');
+      const native={id:item.id,label:item.label,enabled:item.enabled!==false,click:()=>select(item.id)};
+      if(typeof item.checked==='boolean'){native.type='checkbox';native.checked=item.checked;}
+      if(item.submenu)native.submenu=nativeMenuItems(item.submenu,select,depth+1);
+      return native;
+    });
+  }
+  ipcMain.handle('pet:actor:menu',(event,items)=>{
+    const w=actor(event);
+    return new Promise((resolve,reject)=>{
+      let finished=false;
+      const finish=value=>{if(finished)return;finished=true;resolve(value);};
+      try{
+        const popup=Menu.buildFromTemplate(nativeMenuItems(items,finish));
+        popup.once('menu-will-close',()=>setImmediate(()=>finish(null)));
+        popup.popup({window:w});
+      }catch(error){reject(error);}
+    });
+  });
   let wanted=null;
   function open(ref){wanted=ref;workspace();if(main()&&!main().isDestroyed())main().webContents.send('pet:feed:open-run',wanted);}
   ipcMain.handle('pet:feed:open',(event,ref)=>{actor(event);if(ref&&!valid(ref))throw Error('invalid run');open(ref);});
   ipcMain.handle('pet:feed:approvals',event=>{actor(event);open({panel:'permissions'});});
-  ipcMain.handle('pet:feed:pending',event=>{trusted(event,main());return wanted;});
+  ipcMain.handle('pet:feed:pending',event=>{trusted(event,main());const ref=wanted;wanted=null;return ref;});
   app.whenReady().then(()=>{
     const ok=globalShortcut.register('Control+Alt+F',()=>{const w=pet();if(w&&!w.isDestroyed()){if(setVisible)Promise.resolve(setVisible(true)).catch(()=>{});w.webContents.send('pet:feed:text',clipboard.readText());}});
     if(!ok)console.warn('[pet-feed] Shortcut unavailable; use right-click feeding.');

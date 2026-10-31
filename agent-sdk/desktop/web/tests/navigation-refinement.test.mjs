@@ -14,13 +14,32 @@ test("sidebar primary action starts a conversation instead of opening the task w
   assert.match(read("app.js"), /\$\("sidebarNewChat"\)\?\.addEventListener\("click", startNewConversation\)/);
 });
 
-test("primary and disclosed navigation preserve every registered route exactly once", () => {
+test("workbench navigation gives each in-panel route one home", () => {
   const sections = nav.sections();
-  assert.deepEqual(sections[0].entries.map(item => item.id), ["home","project-launcher","project-history","workswarm","evidence","action-center"]);
+  assert.deepEqual(sections[0].entries.map(item => item.id), ["home","project-history","evidence","action-center"]);
+  assert.deepEqual(sections.slice(1).map(group => group.label), ["资料与记忆","工具与权限","运行与诊断","实验与评测"]);
   const ids = sections.flatMap(group => group.entries.map(item => item.id));
-  assert.equal(new Set(ids).size, 23);
-  assert.deepEqual([...ids].sort(), nav.entries.map(item => item.id).sort());
+  assert.equal(new Set(ids).size, ids.length);
+  assert.equal(ids.length, 17);
+  // 团队协作、三个自动化页面与帮助页是一级入口 / 独立页面，不重复出现在工作台内部导航。
+  const outsideWorkbench = new Set(["project-launcher","workswarm","automations","workflow","custom-workflows","about"]);
+  assert.deepEqual([...ids].sort(), nav.entries.filter(item => !outsideWorkbench.has(item.id)).map(item => item.id).sort());
   assert.deepEqual(nav.sections(["notes","permissions"]).flatMap(group => group.entries.map(item => item.id)), ["notes","permissions"]);
+});
+
+test("left rail has one workbench hub, keeps team, and promotes automation", () => {
+  const index = read("index.html");
+  const rail = index.match(/<nav class="workbench-shortcuts"[\s\S]*?<\/nav>/)?.[0] || "";
+  assert.match(rail, /data-workbench-panel="home"/);
+  for (const id of ["project-history", "evidence", "action-center"]) {
+    assert.doesNotMatch(rail, new RegExp(`data-workbench-panel="${id}"`), `${id} 不应再占用一级入口`);
+  }
+  for (const id of ["workswarm", "automations", "workflow", "custom-workflows"]) {
+    assert.match(rail, new RegExp(`data-workbench-panel="${id}"`), `${id} 应保留一级入口`);
+  }
+  assert.doesNotMatch(index, /id="codexToolsEntry"/);
+  assert.doesNotMatch(index, /更多功能/);
+  assert.match(index, /id="panelSearch"/);
 });
 
 test("search reveals folded destinations and restores user disclosure after clearing", () => {

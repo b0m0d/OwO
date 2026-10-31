@@ -227,8 +227,9 @@ test("first-run empty state makes workspace selection explicit and restores the 
   };
   const context = {
     state: { sessionId: null },
+    currentSessionMode: () => "agent",
     $: (id) => elements[id] || null,
-    document: { querySelector: () => null },
+    document: { querySelector: () => null, body: { classList: { toggle: () => {} } } },
   };
   const sync = runInNewContext(match[0] + "\nsyncProjectChip;", context);
   sync();

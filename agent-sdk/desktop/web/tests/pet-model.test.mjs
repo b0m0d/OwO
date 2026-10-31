@@ -40,11 +40,13 @@ test("桌宠页面加载 3D canvas 与 GLB 渲染器，同时保留精灵图入�
   assert.match(renderer, /texImage2D/);
   assert.match(renderer, /rotate\(dx,dy\)/);
   assert.match(js, /modelRenderer\.rotate/);
-  assert.match(js, /拖动时翻转模型/);
+  assert.match(js, /按住 Shift 拖动/);
   assert.match(js, /if \(skinIndex\.skins\.length\) \{/);
   assert.doesNotMatch(js, /skinIndex\.skins\.length && !globalThis\.OwoFeedUI/);
   assert.match(js, /menuItem\("打开工作台"/);
   assert.match(js, /menuItem\("隐藏桌宠"/);
-  assert.match(js, /className = "skin-grid"/);
+  assert.match(js, /label: "更换形象"/);
+  assert.match(js, /submenu: skinIndex\.skins\.map/);
+  assert.match(js, /shellBridge\.showMenu\(items\)/);
   assert.doesNotMatch(js, /喂入剪贴板需求/);
 });

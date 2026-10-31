@@ -64,7 +64,7 @@
     }
         function nav() {
       return [
-        '<div class="owo-wf">',
+        '<div class="owo-wf" data-panel="custom-workflows">',
         '  <p class="hint">用「角色 / 依赖 / 工具 / 交付契约」描述任意特定功能的工作流。校验与评审都由宿主完成；AI 只生成候选，采纳后才可用。</p>',
         '  <div class="owo-wf-toolbar">',
         '    <button type="button" class="owo-wf-refresh">刷新我的工作流</button>',

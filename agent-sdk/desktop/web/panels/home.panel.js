@@ -17,7 +17,8 @@
     const pending = data.inbox ? data.inbox.filter(item => !["resolved", "cancelled"].includes(item.status)).length : null;
     const sessionRows = data.sessions.slice(0, 6).map(item => {
       const f = item.facts, status = f ? (f.outcome === "running" ? "运行中" : root.OwoCompletionRecord.summarize(f.lastCompletionRecord)?.status || ({ cancelled: "已取消", failed: "失败", interrupted: "终态未确认", completed: "回答完成 · 未验证" })[f.outcome] || "尚无完成记录") : "正在读取宿主记录";
-      return '<button class="home-task-row" data-home-session="' + H.esc(item.id) + '"><strong>' + H.esc(item.title || "未命名会话") + '</strong><span>' + H.esc(status) + '</span><small>' + H.esc(f?.lastExecutionModel ? "实际模型 " + f.lastExecutionModel : "实际模型未知") + '</small></button>';
+      const displayTitle = typeof root.owoSessionDisplayTitle === "function" ? root.owoSessionDisplayTitle(item) : (item.title || "未命名任务");
+      return '<button class="home-task-row" data-home-session="' + H.esc(item.id) + '"><strong>' + H.esc(displayTitle) + '</strong><span>' + H.esc(status) + '</span><small>' + H.esc(f?.lastExecutionModel ? "实际模型 " + f.lastExecutionModel : "实际模型未知") + '</small></button>';
     }).join("");
     const teamRows = data.teams.slice(0, 6).map(team => '<button class="home-task-row" data-home-team="' + H.esc(team.team_id) + '"><strong>' + H.esc(team.objective || team.team_id) + '</strong><span>' + H.esc(team.interrupted ? "已中断 · 等待恢复" : labels[team.status] || team.status || "未知") + '</span><small>团队运行 · 交付验收请查看证据页</small></button>').join("");
     return '<section data-panel="home" data-layout="custom" class="project-home"><div class="home-intro"><h3>' + H.esc(root.OwoWorkspaceDisplay?.alias(snap.workspace) || "项目工作台") + '</h3><p>从目标到交付，查看每一步的状态和依据。</p></div><div class="home-summary-grid">' +

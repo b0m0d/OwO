@@ -84,13 +84,21 @@
     const normalized = normalizeProviderId(provider);
     const byId = normalized && list.find((preset) => normalizeProviderId(preset && preset.id) === normalized);
     if (byId) return byId;
-    const strip = (url) => String(url || "").trim().toLowerCase().replace(/^https?:\/\//, "");
+    const strip = (url) => String(url || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
     const endpoint = strip(baseUrl);
     if (!endpoint) return null;
     return list.find((preset) => {
       const candidate = strip(preset && preset.baseUrl);
-      return candidate && endpoint.includes(candidate);
+      return candidate && (endpoint.includes(candidate) || candidate.startsWith(endpoint + "/"));
     }) || null;
+  }
+  function findModelProviderPreset(model, customModels, provider, presets, baseUrl) {
+    const connection = (Array.isArray(customModels) ? customModels : [])
+      .find((item) => item && item.id === model && !item.disabled);
+    // 自定义连接自带端点时，端点比运行时 provider 更具体：运行时可能还停在
+    // 上一个服务商（例如 bigmodel），不能因此把 DeepSeek 模型判成不可用。
+    if (connection) return findProviderPreset("", presets, connection.baseUrl);
+    return findProviderPreset(provider, presets, baseUrl);
   }
   function providerModelOptionState(model, supportedModels, currentModel, custom) {
     const supported = Array.isArray(supportedModels) ? supportedModels.map(String) : [];
@@ -115,6 +123,7 @@
     providerModelCompatibility,
     normalizeProviderId,
     findProviderPreset,
+    findModelProviderPreset,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.OwoModelRouting = api;

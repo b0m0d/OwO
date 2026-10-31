@@ -33,6 +33,7 @@ window.OwoPanels.about = (function () {
     ["Ctrl + N", "新对话"],
     ["Ctrl + O", "打开文件夹（选择工作区）"],
     ["Ctrl + B", "显示 / 隐藏会话栏"],
+    ["Ctrl + K", "搜索工作台"],
     ["Ctrl + ,", "打开设置"],
     ["Ctrl + L", "聚焦输入框"],
     ["F11", "全屏 / 窗口"],
