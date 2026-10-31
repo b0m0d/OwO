@@ -21,21 +21,15 @@
   <link rel="stylesheet" href="product-shell.css">
   <link rel="stylesheet" href="experience.css">
   <link rel="stylesheet" href="team-delivery.css">
-  <link rel="stylesheet" href="chatgpt.css">
-  <link rel="stylesheet" href="workflow-canvas.css">
-  <link rel="stylesheet" href="sidebar-rail.css">
-  <link rel="stylesheet" href="workbench-pages.css">
-  <link rel="stylesheet" href="team-workbench.css">
   <link rel="stylesheet" href="interface-final.css?v=20261030-2">
   <link rel="stylesheet" href="owo-brand.css?v=20261030-7">
   <link rel="stylesheet" href="workbench-home.css?v=20261030-4">
   <link rel="stylesheet" href="owo-ui.css?v=20261031-5">
   <link rel="stylesheet" href="chatgpt-theme.css?v=20261031-13">
   <link rel="stylesheet" href="codex-refine.css?v=20261101-2">
-  <link rel="stylesheet" href="codex-model-menu.css?v=20261101-1">
-  <link rel="stylesheet" href="brand-shell-bridge.css?v=20261101-1">
+  <link rel="stylesheet" href="shell-compat.css?v=20261101-2">
 </head>
-<body>
+<body class="dark-theme">
   <main id="setupRoot" class="setup-root" hidden aria-label="首次配置"></main>
   <!-- 全局菜单栏（仿 Codex 桌面：文件/编辑/视图/帮助 + 连接状态 + 主题） -->
   <div id="menubar">
@@ -51,7 +45,6 @@
       </nav>
     </div>
     <div class="menubar-side menubar-right">
-      <button id="taskStatusPill" class="task-status-pill" type="button" aria-label="查看当前任务状态"><span class="task-status-dot" aria-hidden="true"></span><span id="taskStatusText">等待任务</span></button>
       <details id="connectionDetails" class="connection-details">
         <summary aria-label="工作环境与连接状态"><span class="connection-dot" aria-hidden="true"></span><span id="connectionLabel" class="sr-only">工作环境与连接状态</span></summary>
         <div class="connection-popover"><div class="connection-popover-head"><strong>工作环境</strong><span id="menubarHealth" class="pill">连接中…</span></div>
@@ -77,13 +70,12 @@
 
 
   <aside id="sidebar">
-    <!-- OwO 品牌侧栏（10-30 品牌层）：产品头 / 新对话 / 工作入口 / 会话列表 / 底部用户卡。 -->
+    <!-- Codex 侧栏：顶部图标行 / 新对话 / 导航 / 会话列表 / 底部用户卡 -->
     <div class="codex-sidebar">
       <div class="codex-sidebar-top">
         <button id="sidebarBrandBtn" class="sidebar-product sidebar-brand" type="button" aria-label="OwO 工作台菜单" aria-haspopup="menu">
           <span class="sidebar-product-mark" data-asset="owo-logo" aria-hidden="true"><img class="sidebar-logo-img" src="assets/owo-logo.png" alt="" width="26" height="26" draggable="false"></span>
           <span class="sidebar-product-name"><strong>O<span class="owo-w">w</span>O</strong><span>AGENT</span></span>
-          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
         </button>
         <span class="codex-sidebar-spacer"></span>
         <button id="sidebarToolsBtn" class="codex-icon-btn" type="button" title="工具与设置" aria-label="工具与设置" hidden>
@@ -101,14 +93,10 @@
         <button type="button" id="sidebarHome" title="首页" aria-label="首页"><svg class="nav-icon" viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2.2 7.2 5.8-4.8 5.8 4.8"/><path d="M3.7 6.4v6.3c0 .7.5 1.2 1.2 1.2h6.2c.7 0 1.2-.5 1.2-1.2V6.4"/><path d="M6.4 13.9V9.8h3.2v4.1"/></svg><span>首页</span></button>
         <button type="button" data-workbench-panel="home" aria-label="工作台"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round" aria-hidden="true"><rect x="2.3" y="2.3" width="4.7" height="5.6" rx="1.3"/><rect x="9" y="2.3" width="4.7" height="3.4" rx="1.3"/><rect x="9" y="7.8" width="4.7" height="5.9" rx="1.3"/><rect x="2.3" y="10" width="4.7" height="3.7" rx="1.3"/></svg><span>工作台</span></button>
         <button type="button" data-workbench-panel="workswarm" aria-label="团队协作"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="3.8" r="1.8"/><circle cx="3.6" cy="11.6" r="1.8"/><circle cx="12.4" cy="11.6" r="1.8"/><path d="M7 5.4 4.6 9.9M9 5.4l2.4 4.5M5.5 11.6h5"/></svg><span>团队协作</span></button>
-        <button type="button" data-workbench-panel="project-history" aria-label="任务记录"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8a5.4 5.4 0 1 0 1.6-3.8"/><path d="M2.4 2.6v2.6H5"/><path d="M8 5.2V8l2 1.3"/></svg><span>任务记录</span></button>
-        <button type="button" data-workbench-panel="evidence" aria-label="产物与证据"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round" aria-hidden="true"><path d="m8 2.4 5.6 3.1v5.9L8 14.5l-5.6-3.1V5.5z"/><path d="m2.6 5.6 5.4 3 5.4-3M8 8.6v5.8"/></svg><span>产物与证据</span></button>
-        <button type="button" data-workbench-panel="action-center" aria-label="待我处理"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 9.1 4.2 3.4c.2-.6.6-.9 1.2-.9h5.2c.6 0 1 .3 1.2.9l1.6 5.7v2.7c0 .7-.6 1.2-1.2 1.2H3.8c-.7 0-1.2-.5-1.2-1.2z"/><path d="M2.8 9.1h3l.8 1.5h2.8l.8-1.5h3"/></svg><span>待我处理</span></button>
         <span class="rail-divider" aria-hidden="true"></span>
         <button type="button" data-workbench-panel="automations" aria-label="定时任务"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8a5.4 5.4 0 1 0 1.6-3.8"/><path d="M2.4 2.6v2.6H5"/><path d="M8 5.2V8l2 1.3"/></svg><span>定时任务</span></button>
         <button type="button" data-workbench-panel="workflow" aria-label="工作流"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="3.2" r="1.4"/><circle cx="3.6" cy="12.8" r="1.4"/><circle cx="12.4" cy="12.8" r="1.4"/><path d="M8 4.6v2.2c0 1.1-.9 2-2 2H5.6c-1.1 0-2 .9-2 2v1"/><path d="M8 6.8c0-1.1.9-2 2-2h.4c1.1 0 2 .9 2 2v4.5"/></svg><span>工作流</span></button>
         <button type="button" data-workbench-panel="custom-workflows" aria-label="自定义工作流"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" aria-hidden="true"><path d="M2.6 5.2h10.8M2.6 10.8h10.8"/><circle cx="6.1" cy="5.2" r="1.6"/><circle cx="10.2" cy="10.8" r="1.6"/></svg><span>自定义工作流</span></button>
-        <button type="button" id="codexToolsEntry" aria-label="更多功能"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.2" y="2.2" width="4.4" height="4.4" rx="1.2"/><rect x="9.4" y="2.2" width="4.4" height="4.4" rx="1.2"/><rect x="2.2" y="9.4" width="4.4" height="4.4" rx="1.2"/><rect x="9.4" y="9.4" width="4.4" height="4.4" rx="1.2"/></svg><span>更多功能</span></button>
       </nav>
       <nav class="codex-nav" aria-label="工作台导航">
         <button type="button" data-codex-group="workspace">
@@ -128,7 +116,7 @@
           插件
         </button>
       </nav>
-      <div class="codex-sessions-heading"><span class="codex-sessions-head">最近对话</span><button id="newSession" class="codex-new-chat" type="button" title="新建空白会话" aria-label="新建空白会话">＋</button><button id="sidebarSessionMenu" class="codex-icon-btn" type="button" title="会话选项" aria-label="会话选项">⋯</button><button id="sidebarSearchBtn" class="codex-icon-btn" type="button" title="搜索会话" aria-label="搜索会话">
+      <div class="codex-sessions-heading"><span class="codex-sessions-head">最近对话</span><button id="newSession" class="codex-new-chat" type="button" title="新建空白会话">＋ 新对话</button><button id="sidebarSessionMenu" class="codex-icon-btn" type="button" title="会话选项" aria-label="会话选项">⋯</button><button id="sidebarSearchBtn" class="codex-icon-btn" type="button" title="搜索会话" aria-label="搜索会话">
           <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 13.5 13.5"/></svg>
         </button></div>
       <input id="sessionSearch" class="codex-session-search" placeholder="搜索会话…" hidden>
@@ -499,17 +487,17 @@
     </section>
 
     <section class="span-all" data-group="panels" id="workbenchPanelSection">
-      <div class="workbench-panel-header"><button id="workbenchReturnChat" class="workbench-return-chat" type="button" aria-label="返回当前对话"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m11.5 4-6 6 6 6M6 10h11"/></svg></button><div><span class="workbench-eyebrow">项目工作台</span><h2 id="workbenchPanelTitle">选择一个工具</h2><p id="workbenchPanelDescription" class="sub">按任务查找功能，Ctrl+K 快速切换</p></div><button type="button" id="workbenchSwitchPanel" class="workbench-switch-panel" title="查找全部功能（Ctrl+K）">切换功能 <kbd>Ctrl K</kbd></button><button type="button" id="workbenchPanelNewTask" data-workbench-panel="project-launcher" class="primary">＋ 新任务</button></div>
-      <div class="workbench-panel-layout"><nav class="workbench-panel-rail" aria-label="功能导航"><label class="workbench-panel-search"><span class="sr-only">搜索功能</span><input id="panelSearch" type="search" placeholder="搜索功能…"></label><div id="panelNav"></div></nav><div id="panelRoot"></div></div>
+      <div class="workbench-panel-header"><div><span class="workbench-eyebrow">项目工作台</span><h2 id="workbenchPanelTitle">选择一个工具</h2><p id="workbenchPanelDescription" class="sub">按任务查找功能，Ctrl+K 聚焦搜索</p></div><button type="button" id="workbenchPanelNewTask" data-workbench-panel="project-launcher" class="primary">＋ 新任务</button></div>
+      <div class="workbench-panel-layout"><nav class="workbench-panel-rail" aria-label="功能导航"><label class="workbench-panel-search"><span class="sr-only">搜索功能</span><input id="panelSearch" type="search" placeholder="搜索工作台…"></label><div id="panelNav"></div></nav><div id="panelRoot"></div></div>
     </section>
 
     <section class="settings-section" data-group="settings">
-      <div class="settings-shell-header"><button id="settingsBackBtn" type="button" class="workbench-return-chat" aria-label="返回当前对话"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.5 4-6 6 6 6M6 10h11"/></svg></button><strong>设置</strong></div>
       <div class="settings-layout">
         <!-- 左侧分类导航（仿 Codex 设置页） -->
         <nav class="settings-nav" id="settingsNav" aria-label="设置分类">
+          <div class="settings-nav-title">设置</div>
           <label class="settings-search"><span class="sr-only">搜索设置</span><svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m12.5 12.5 4 4"/></svg><input id="settingsSearch" type="search" placeholder="搜索设置" autocomplete="off" aria-controls="settingsSearchResults"></label>
-          <button type="button" class="settings-nav-item active" data-settings-tab="general" aria-current="page">常规</button>
+          <button type="button" class="settings-nav-item active" data-settings-tab="general">常规</button>
           <button type="button" class="settings-nav-item" data-settings-tab="models">配置</button>
           <button type="button" class="settings-nav-item" data-settings-tab="appearance">外观</button>
           <button type="button" class="settings-nav-item" data-settings-tab="voice">语音</button>
@@ -568,6 +556,40 @@
             </div>
           </div>
 
+
+          <div class="settings-tab" data-settings-tab="ime" hidden>
+            <div class="settings-page-title"><div><strong>输入法</strong><span>在任意输入位置将任务交给 Agent，进度与结果保留在工作台</span></div></div>
+            <div class="settings-card-list">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>输入法连接</strong><span id="imeConnectionStatus" role="status">检查中…</span></div>
+                <div class="settings-row-control"><button type="button" id="imeConnect">连接输入法…</button><button type="button" id="imeDisconnect">断开</button></div>
+              </div>
+              <p class="sub">连接时会确认本机连接器。配对有效一小时，连接器重启后需重新连接。</p>
+            </div>
+            <form id="imeAccessForm" class="settings-card-list" style="margin-top:16px">
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>调用模式</strong><span>工具执行沿用 Agent 审批。更改范围会中止当前输入法任务。</span><span id="imeProfile"></span></div>
+                <div class="settings-row-control"><select id="imeMode">
+                  <option value="follow_agent">跟随 Agent 权限</option><option value="read_only">只读任务</option>
+                  <option value="custom">自定义范围</option><option value="disabled">关闭任务调用</option>
+                </select></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label"><strong>任务工作目录</strong><span>输入法任务和生成文件使用此目录</span></div>
+                <div class="settings-row-control settings-control-path"><code id="imeWorkspace"></code><button type="button" id="imePickWorkspace">选择…</button><button type="button" id="imeResetWorkspace">跟随 Agent</button></div>
+              </div>
+              <div id="imeCustom" hidden>
+                <div class="settings-row"><label for="imeFilesystem">文件访问</label><select id="imeFilesystem"><option value="none">不开放</option><option value="workspace_read">工作区只读</option><option value="workspace_write">工作区可写</option><option value="unrestricted">跟随 Agent 文件范围</option></select></div>
+                <div class="settings-row"><label for="imeCommand">命令执行</label><select id="imeCommand"><option value="deny">禁止</option><option value="allowlisted">白名单与审批</option><option value="unrestricted">跟随 Agent</option></select></div>
+                <div class="settings-row"><label for="imeNetwork">工具联网</label><select id="imeNetwork"><option value="deny">禁止</option><option value="allowlisted">白名单与审批</option><option value="unrestricted">跟随 Agent</option></select></div>
+                <p class="sub">自定义范围可进一步限制 Agent 权限；实际放行仍由权限中心和逐次审批决定。只读、自定义或指定工具时暂停用户命令钩子。</p>
+              </div>
+              <div class="settings-row"><div class="settings-row-label"><strong>可调用工具</strong><span>选择当前 Agent 已启用的工具，包含可用扩展</span></div><label><input id="imeAllTools" type="checkbox">跟随所有可用工具（含后续启用的工具）</label></div>
+              <div id="imeToolList" class="ime-tool-list"></div>
+              <div class="settings-row"><span id="imeResult" role="status"></span><div><button id="imeSave" type="submit" class="primary" data-core-action>保存</button><button id="imeReload" type="button">重新加载</button></div></div>
+            </form>
+          </div>
+
           <!-- 配置（模型管理） -->
           <div class="settings-tab" data-settings-tab="models" hidden>
             <div class="settings-page-title">
@@ -575,22 +597,23 @@
             </div>
             <div class="settings-card-list">
               <p class="sub" data-core-action-hint>连接并授权本地核心后，才能切换默认模型、保存接口与加密密钥、修改模型输出上限。服务商预设命令可先复制到启动终端使用。</p>
-              <div class="settings-row">
-                <div class="settings-row-label"><strong>默认模型</strong><span>新回合使用的模型</span></div>
+              <div class="settings-row" id="defaultModelSettingsRow">
+                <div class="settings-row-label"><strong>默认模型</strong><span>连接模型服务后可选；新回合使用的模型</span></div>
                 <div class="settings-row-control">
                   <select id="settingsModel" data-core-action>
-                    <option value="qwen3.8-max">qwen3.8-max</option>
-                    <option value="qwen3.7-plus">qwen3.7-plus</option>
-                    <option value="qwen3.7-max">qwen3.7-max</option>
-                    <option value="qwen3.6-flash">qwen3.6-flash</option>
-                    <option value="deepseek-v4-pro-0813">deepseek-v4-pro-0813</option>
-                    <option value="deepseek-v4-flash-0731">deepseek-v4-flash-0731</option>
-                    <option value="glm-5.2">glm-5.2</option>
+                    <option value="" selected>未连接模型</option>
+                    <option value="qwen3.8-max" hidden>qwen3.8-max</option>
+                    <option value="qwen3.7-plus" hidden>qwen3.7-plus</option>
+                    <option value="qwen3.7-max" hidden>qwen3.7-max</option>
+                    <option value="qwen3.6-flash" hidden>qwen3.6-flash</option>
+                    <option value="deepseek-v4-pro-0813" hidden>deepseek-v4-pro-0813</option>
+                    <option value="deepseek-v4-flash-0731" hidden>deepseek-v4-flash-0731</option>
+                    <option value="glm-5.2" hidden>glm-5.2</option>
                   </select>
                   <div id="modelCompatibilityHint" class="sub settings-model-hint" hidden></div>
                 </div>
               </div>
-              <div class="settings-row">
+              <div class="settings-row" id="modelOutputSettingsRow">
                 <div class="settings-row-label"><strong>模型输出上限</strong><span>按模型分别设置；实际受服务商模型上限约束，未设置时默认 32k</span></div>
                 <div class="settings-row-control settings-output-control">
                   <input id="modelOutputModel" data-core-action type="text" list="modelOutputCandidates" placeholder="模型名称" autocomplete="off">
@@ -633,10 +656,10 @@
                 </div>
               </div>
               <div class="settings-row">
-                <div class="settings-row-label"><strong>保存配置</strong><span>写入本机设置，新回合即时生效</span></div>
+                <div class="settings-row-label"><strong>保存并连接</strong><span>写入本机设置，新回合即时生效</span></div>
                 <div class="settings-row-control">
                   <span class="pill" id="providerKeyState">未保存</span>
-                  <button type="button" id="providerSaveBtn" class="primary" data-core-action>保存配置</button>
+                  <button type="button" id="providerSaveBtn" class="primary" data-core-action>保存并连接</button>
                 </div>
               </div>
             </div>
@@ -649,15 +672,15 @@
                 <button id="presetApplyModelBtn" type="button" data-core-action>使用默认模型并保存</button>
                 <button id="presetCopyCmdBtn" type="button">复制 PowerShell 环境变量命令</button>
               </div>
-              <p class="sub" id="presetHint">选预设会自动填入上方端点与模型；密钥请在「API 密钥」填写后点「保存配置」。</p>
+              <p class="sub" id="presetHint">选预设会自动填入上方端点与模型；密钥请在「API 密钥」填写后点「保存并连接」。</p>
             </div>
-            <div class="settings-block" style="margin-top:14px">
+            <details class="settings-block" id="customModelsSection" style="margin-top:14px">
+              <summary><strong>额外模型连接（可选）</strong><span class="sub">普通使用无需添加；仅用于连接多个端点或 Anthropic 接口。</span></summary>
               <div class="settings-block-head">
-                <strong>自定义模型</strong>
-                <button type="button" id="customModelAddBtn" class="primary">+ 自定义模型</button>
+                <button type="button" id="customModelAddBtn" class="primary">+ 添加额外模型</button>
               </div>
-              <div id="customModelStorageState" class="storage-status" role="status"></div><div id="customModelList" class="model-list"><div class="sub">暂无自定义模型，点击右上角添加。</div></div>
-            </div>
+              <div id="customModelStorageState" class="storage-status" role="status"></div><div id="customModelList" class="model-list"><div class="sub">暂无额外模型连接，普通使用无需添加。</div></div>
+            </details>
             <section id="mediaConnectionSettings" class="settings-block media-profiles-settings" aria-label="媒体连接配置" style="margin-top:14px"></section>
             <div class="settings-block" style="margin-top:14px">
               <div class="settings-block-head"><strong>密钥</strong></div>
@@ -782,6 +805,7 @@
                   <tr><td><kbd>Ctrl</kbd> + <kbd>N</kbd></td><td>新对话</td></tr>
                   <tr><td><kbd>Ctrl</kbd> + <kbd>O</kbd></td><td>打开文件夹（选择工作区）</td></tr>
                   <tr><td><kbd>Ctrl</kbd> + <kbd>B</kbd></td><td>显示 / 隐藏会话栏</td></tr>
+                  <tr><td><kbd>Ctrl</kbd> + <kbd>K</kbd></td><td>搜索工作台</td></tr>
                   <tr><td><kbd>Ctrl</kbd> + <kbd>,</kbd></td><td>打开设置</td></tr>
                   <tr><td><kbd>Ctrl</kbd> + <kbd>L</kbd></td><td>聚焦输入框</td></tr>
                   <tr><td><kbd>F11</kbd></td><td>全屏 / 窗口</td></tr>
@@ -878,7 +902,7 @@
       </div>
     </section>
 
-    <!-- 保留在 DOM 供状态机调用，视觉入口为 codexToolsEntry -->
+    <!-- 保留在 DOM 供状态机调用；高级工具页从「视图 → 工具与设置」进入。 -->
     <button id="toggleTools" class="tools-toggle hidden" type="button" aria-expanded="false">显示工具与设置</button>
   </aside>
   <div id="sidebarResize" class="resize-handle" role="separator" aria-label="调整会话栏宽度"></div>
@@ -886,13 +910,16 @@
   <main>
     <div class="workspace-page-head">
       <div class="workspace-page-title"><span id="chatProjectAlias">个人工作台</span><h1 id="chatTaskTitle">新对话</h1></div>
-      <div id="modeSwitch" class="mode-switch" role="tablist" aria-label="对话或 Work">
+      <div id="modeSwitch" class="mode-switch" role="tablist" aria-label="对话或工作区">
         <button type="button" role="tab" data-mode-switch="chat" aria-selected="true">对话</button>
-        <button type="button" role="tab" data-mode-switch="agent" aria-selected="false">Work</button>
+        <button type="button" role="tab" data-mode-switch="agent" aria-selected="false">工作区</button>
       </div>
-      <button id="inspectorToggle" class="codex-inspector-toggle" type="button" title="查看任务进展、文件变化与结果来源" aria-label="打开任务详情" aria-expanded="false" aria-controls="right">
-        任务详情 <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="1.6"/><path d="M9.6 2.8v10.4"/></svg>
-      </button>
+      <div class="workspace-page-actions">
+        <button id="taskStatusPill" class="task-status-pill" type="button" aria-label="查看当前任务状态"><span class="task-status-dot" aria-hidden="true"></span><span class="task-status-owner">Agent</span><span class="task-status-separator" aria-hidden="true"></span><span id="taskStatusText">空闲</span></button>
+        <button id="inspectorToggle" class="codex-inspector-toggle" type="button" title="查看执行步骤、文件变化与结果来源" aria-label="打开运行详情" aria-expanded="false" aria-controls="right">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="1.6"/><path d="M9.6 2.8v10.4"/></svg><span>运行详情</span>
+        </button>
+      </div>
     </div>
     <div id="serviceBanner" class="hidden" role="status" aria-live="polite">
       <span class="service-dot" aria-hidden="true"></span>
@@ -904,9 +931,11 @@
     </div>
     <div class="codex-stage">
       <div id="emptyState" class="codex-empty">
-        <div class="codex-empty-logo" aria-hidden="true"><svg viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="12" width="48" height="40" rx="8"/><path d="m20 24 8 8-8 8M35 40h10"/></svg></div>
-        <h2 id="emptyStateTitle">今天想聊点什么？</h2>
-        <p id="emptyStateDescription">提问、解释、查资料。对话模式不会读写本机文件，也不会执行命令。</p>
+        <!-- 欢迎页品牌图形：assets/owo-logo.png（用户提供的墨鱼形象，透明背景）。data-mascot-state 保留，后续可按 Agent 状态切换表情。 -->
+        <div class="codex-empty-logo" aria-hidden="true"><span class="owo-mascot-slot" data-asset="owo-logo" data-mascot-state="idle"><img class="owo-mascot-img" src="assets/owo-logo.png" alt="" width="48" height="48" draggable="false"></span></div>
+        <div class="empty-state-kicker"><span></span>你的个人 AI 工作搭档</div>
+        <h2 id="emptyStateTitle">你想完成什么？</h2>
+        <p id="emptyStateDescription">描述目标，OwO 会拆解任务、执行操作并保留完整记录。</p>
         <div class="workspace-welcome-actions">
           <button type="button" class="primary welcome-tile" data-workbench-panel="project-launcher"><span class="welcome-tile-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h2.4l7-7a1.7 1.7 0 0 0-2.4-2.4l-7 7z"/><path d="m9.2 4.4 2.4 2.4"/></svg></span><span class="welcome-tile-text"><strong>创建任务</strong><small>定义目标、范围与执行方式，再交给 Agent</small></span><span class="welcome-tile-go" aria-hidden="true">→</span></button>
           <button type="button" class="welcome-tile" data-workbench-panel="home"><span class="welcome-tile-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"><rect x="2.3" y="2.3" width="4.7" height="5.6" rx="1.3"/><rect x="9" y="2.3" width="4.7" height="3.4" rx="1.3"/><rect x="9" y="7.8" width="4.7" height="5.9" rx="1.3"/><rect x="2.3" y="10" width="4.7" height="3.7" rx="1.3"/></svg></span><span class="welcome-tile-text"><strong>查看项目状态</strong><small>最近任务、团队运行与待处理事项</small></span><span class="welcome-tile-go" aria-hidden="true">→</span></button>
@@ -939,36 +968,29 @@
         </div>
         <button type="button" id="modelGateBtn" class="primary" data-model-gate-allow>去连接</button>
       </div>
-      <div class="composer-context" aria-label="任务环境">
-      <button type="button" id="composerProjectBtn" class="codex-project-chip" title="选择工作区">
-        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h4.5c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H3.4c-.66 0-1.2-.54-1.2-1.2V4.4z"/></svg>
-        <span id="composerProjectName">未选择项目</span>
-      </button>
-        <button id="composerEnvironmentBtn" class="composer-environment" type="button" title="查看本机连接与运行环境"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3.5" width="14" height="10" rx="1.5"/><path d="M1.8 16.5h16.4M7 13.5v3M13 13.5v3"/></svg><span>本机</span></button>
-        <span class="composer-context-space"></span>
-        <button id="composerSettingsBtn" class="codex-icon-btn" type="button" title="打开工作台设置" aria-label="工作台设置"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 6h4M11 6h6M3 14h6M13 14h4"/><circle cx="9" cy="6" r="2"/><circle cx="11" cy="14" r="2"/></svg></button>
-      </div>
       <div id="modeNotice" class="mode-notice" role="status" hidden></div>
-      <textarea id="prompt" aria-label="消息或任务" rows="3" placeholder="问点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <textarea id="prompt" rows="1" placeholder="问点什么…"></textarea>
       <div class="prompt-toolbar">
         <div class="prompt-tools">
-          <button type="button" id="attachmentBtn" title="添加附件：PNG/JPEG/WebP/GIF 图片单张 ≤5 MiB，其他文件约24 MiB上限" aria-label="添加附件">
+          <button type="button" id="attachmentBtn" title="添加附件（图片/文件）" aria-label="添加附件">
             <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
           </button>
+          <button type="button" class="composer-plan-task" data-workbench-panel="project-launcher" title="先定义目标、范围与执行方式">任务规划</button>
           <button type="button" id="accessChip" class="codex-access-chip" title="本机审批方式；实际授权由服务端策略决定">
-            <span class="codex-access-dot" id="accessDot" aria-hidden="true"></span>
+            <svg class="codex-access-dot" id="accessDot" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.8 13 3.7v3.5c0 3.1-2 5.8-5 7-3-1.2-5-3.9-5-7V3.7z"/><path d="m5.6 8 1.6 1.6 3.2-3.2"/></svg>
             <span id="accessChipText">每次询问</span>
             <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
           </button>
-          <button type="button" id="micBtn" title="语音输入" aria-label="语音输入"></button>
-          <button type="button" class="composer-plan-task" data-workbench-panel="project-launcher" title="先定义目标、范围与执行方式">任务规划</button>
+          <button type="button" id="composerProjectBtn" class="codex-project-chip" title="选择工作区">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h4.5c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H3.4c-.66 0-1.2-.54-1.2-1.2V4.4z"/></svg>
+            <span id="composerProjectName">未选择项目</span>
+          </button>
+        </div>
           <button type="button" id="mediaBtn" title="生成图片 / 语音" aria-label="生成媒体" aria-haspopup="menu"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="2"/><circle cx="5.8" cy="6.6" r="1.1"/><path d="M2.6 11.6 6 8.6l2.2 2 1.9-1.6 3.3 2.6"/></svg></button>
           <button type="button" id="slashHint" class="slash-hint" title="输入 / 唤起命令（/new、/undo、/export…）">
             <span>/</span> 命令
           </button>
-        </div>
         <div class="codex-composer-right">
-
           <button type="button" id="promptChip" class="codex-model-chip" title="自定义提示词（persona 预设）" aria-haspopup="menu">
             <span id="promptChipText">默认提示词</span>
             <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
@@ -977,23 +999,23 @@
             <span id="modeChipText">Work</span>
             <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
           </button>
-          <button type="button" id="modelChip" class="codex-model-chip" title="选择模型">
-            <span id="modelChipText">默认模型</span>
-            <!-- 思考强度改用信号条表示，档位本身在模型菜单底部的分段里调整。 -->
+          <button type="button" id="modelChip" class="codex-model-chip" title="请先连接模型服务" disabled aria-disabled="true">
+            <span id="modelChipText">未连接模型</span>
             <span class="composer-effort-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
             <svg class="composer-model-chevron" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
           </button>
           <button type="button" id="effortChip" class="codex-model-chip" title="推理档位（思考强度）">
-            <span id="effortChipText">推理默认</span>
+            <span id="effortChipText">推理</span>
             <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
           </button>
-          <button type="button" id="sendBtn" class="codex-send" title="发送" aria-label="发送">
+          <button type="button" id="micBtn" class="codex-composer-icon" title="语音输入" aria-label="语音输入"></button>
+          <button type="button" id="sendBtn" class="codex-send" title="发送" aria-label="发送" disabled>
             <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12.4V4.2M4.6 7.6 8 4.2l3.4 3.4"/></svg>
           </button>
         </div>
       </div>
     </form>
-    <p class="composer-key-hint">Enter 发送 <span aria-hidden="true">·</span> Shift+Enter 换行</p>
+    <div class="composer-footnote"><span><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行 · 输入 <kbd>/</kbd> 使用命令</span></div>
     <div id="chatStarters" class="chat-starters home-suggestions hidden" role="group" aria-label="对话建议">
       <button type="button" class="chat-starter" data-chat-starter="用生活里的类比解释一个我似懂非懂的概念，并指出类比在哪里不成立">解释一个概念</button>
       <button type="button" class="chat-starter" data-chat-starter="对比两种做法的优缺点，先给结论表格，再说明适用条件">对比两个方案</button>
@@ -1006,11 +1028,20 @@
       <button type="button" class="chat-starter" data-work-starter="运行项目测试，定位失败原因并修复，最后把验证结果给我">运行测试并修复失败</button>
       <button type="button" class="chat-starter" data-work-starter="帮我把一个重复性工作拆成可复用的工作流，并生成节点和角色配置">生成一个可复用工作流</button>
     </div>
+
+    <div class="empty-examples" aria-label="快速开始">
+      <button type="button" class="example-chat" data-example-prompt="用简单的例子解释一下什么是向量数据库。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4.5h12v8H9.5L6 16v-3.5H4z"/><path d="M7 8h6"/></svg></span><span class="example-copy"><strong>解释一个概念</strong><small>把复杂问题讲清楚</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-chat" data-example-prompt="我有个产品想法，帮我梳理目标用户、核心价值和关键假设。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h8v13H6z"/><path d="M8.5 7h3M8.5 10h3M8.5 13h2"/></svg></span><span class="example-copy"><strong>梳理思路</strong><small>把模糊想法整理成结构</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-chat" data-example-prompt="帮我起草一封给合作方的项目进度说明邮件，语气专业、简洁。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15.5h14"/><path d="m5 12 2.6-.6 7-7a1.5 1.5 0 0 0-2.1-2.1l-7 7z"/></svg></span><span class="example-copy"><strong>起草文字</strong><small>邮件、说明与文案初稿</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-agent" data-example-prompt="分析当前项目结构，找出可以改进的地方，并先给我一份行动计划。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5 7.5 12l3 2.5L17 7"/><path d="M12.5 7H17v4.5"/></svg></span><span class="example-copy"><strong>分析项目</strong><small>梳理代码结构，找出改进点</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-agent" data-example-prompt="检查当前工作区最近的改动，总结主要内容并指出潜在问题。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.8 16 5.5v4.3c0 3.6-2.4 6.2-6 7.4-3.6-1.2-6-3.8-6-7.4V5.5z"/><path d="m7 10 2 2 4-4"/></svg></span><span class="example-copy"><strong>审查改动</strong><small>检查变更质量与潜在问题</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+      <button type="button" class="example-agent" data-example-prompt="帮我规划一个任务，先明确目标、执行步骤和验收标准。"><span class="example-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10v14H5z"/><path d="M8 7h4M8 10h4M8 13h2"/></svg></span><span class="example-copy"><strong>规划任务</strong><small>明确目标、步骤与验收标准</small></span><span class="example-arrow" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11 11 5M6.2 5H11v4.8"/></svg></span></button>
+    </div>
   </main>
   <div id="rightResize" class="resize-handle" role="separator" aria-label="调整检查器宽度"></div>
 
   <aside id="right" class="task-details" aria-labelledby="taskDetailsTitle">
-    <div class="task-details-head"><div><span class="detail-eyebrow">当前会话</span><h2 id="taskDetailsTitle">任务详情</h2></div><button id="taskDetailsClose" type="button" aria-label="关闭任务详情">×</button></div>
+    <div class="task-details-head"><div><span class="detail-eyebrow">当前会话</span><h2 id="taskDetailsTitle">运行详情</h2></div><button id="taskDetailsClose" type="button" aria-label="关闭运行详情">×</button></div>
     <div class="task-details-content">
       <section class="task-overview">
         <span class="detail-label">现在的进展</span><strong id="taskDetailStatus">等待任务</strong><p id="taskDetailHint">写下目标，或先规划任务的范围与执行方式。</p>
@@ -1131,7 +1162,7 @@
   <script src="core/turn-model.js"></script>
   <script src="core/model-bar.js"></script>
   <script src="core/media-result.js"></script>
-    <script src="core/media-capability.js"></script>
+  <script src="core/media-capability.js"></script>
   <script src="core/hunk-review.js"></script>
   <script src="core/symbol-search.js"></script>
   <script src="core/workflow-document.js"></script>
@@ -1145,6 +1176,7 @@
   <script src="app-domain.js"></script>
   <script src="core/settings-search.js"></script>
   <script src="core/media-profiles-settings.js"></script>
+  <script src="core/ime-settings.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -2194,7 +2194,11 @@ async function refreshSettings() {
     renderProviderForm();
     await refreshModelOutputSettings();
     // 输入法接入设置来自合并进来的 IME 设置模块；未加载时跳过，不能让整个设置页报错。
-    await imeAccessSettings?.refresh();
+    // 输入法接入设置来自 10-30 的 IME 设置页；核心没有 /settings/ime 路由时
+    // 页签会被移除，此时不要发起请求。
+    if (document.querySelector('.settings-nav-item[data-settings-tab="ime"]')) {
+      await imeAccessSettings?.refresh();
+    }
     updateModelGate();
   } catch (error) {
     const summary = $("connectionSummary");

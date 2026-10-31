@@ -152,7 +152,7 @@ test("工具和设置导航：按功能组进入工具页、按分类切换设�
   const toolGroups = index.match(/data-group="(workspace|intelligence|automation|system)"/g) || [];
   assert.ok(navTabs.length >= 8, "设置页保留分类导航");
   assert.ok(toolGroups.length >= 8, "工具视图按类别组织内容");
-  assert.match(index, /id="codexToolsEntry"/);
+  assert.match(index, /id="sidebarToolsBtn"/);
   assert.match(index, /id="codexSettingsEntry"/);
   assert.match(app, /function setSettingsTab\(name\)/);
   assert.match(app, /bindToolsEntry\("codexToolsEntry"\)/);
@@ -183,7 +183,7 @@ test("R10 侧栏：复杂表单受工具/设置视图状态门控，不常驻会
   for (const id of ["providerBaseUrl", "mcpForm", "evalRunBtn"]) {
     assert.ok(!primaryShell.includes('id="' + id + '"'), id + " 不得进入常驻会话导航");
   }
-  assert.match(index, /id="codexToolsEntry"/);
+  assert.match(index, /id="sidebarToolsBtn"/);
   assert.match(index, /id="codexSettingsEntry"/);
   assert.match(index, /<section class="settings-section" data-group="settings">/);
   assert.match(css, /#sidebar > section \{ display: none; \}/);

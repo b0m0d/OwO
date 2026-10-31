@@ -1,0 +1,13 @@
+/* 30 号页面的兼容层（最小改动）：
+   1) app.js 仍会写入对话 / Work 两排建议块（#chatStarters/#workStarters），
+      30 号页面改用输入框下方的 .empty-examples 卡片，这里隐藏重复的那两排。
+   2) 侧栏产品头在 30 号是纯展示元素；为满足 app.js 的硬依赖改成按钮后，
+      去掉按钮自带的底色、边框和内边距。 */
+#chatStarters, #workStarters { display: none !important; }
+
+.codex-sidebar-top .sidebar-product.sidebar-brand {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}

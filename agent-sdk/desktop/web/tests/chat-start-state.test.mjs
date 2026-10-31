@@ -14,7 +14,7 @@ test("顶层只提供对话 / Work 两个模式，且切换控件在页面主区
   const buttons = html.match(/data-mode-switch="/g) || [];
   assert.equal(buttons.length, 2, "模式只能有对话与 Work 两个选项");
   assert.match(html, /data-mode-switch="chat" aria-selected="true">对话</);
-  assert.match(html, /data-mode-switch="agent" aria-selected="false">Work</);
+  assert.match(html, /data-mode-switch="agent" aria-selected="false">工作区</);
   assert.match(mode, /label: "对话"/);
   assert.match(mode, /label: "Work"/);
   assert.match(app, /function refreshModeSwitch\(mode\)/);
@@ -28,24 +28,25 @@ test("侧栏顶部入口改成「新对话」，并直接新建会话而不是�
   assert.match(app, /\$\("sidebarNewChat"\)\?\.addEventListener\("click", startNewConversation\)/);
 });
 
-test("侧栏改为品牌单列结构：产品头 + 工作入口 + 会话列表，旧图标栏已并入", () => {
-  const railCss = readFileSync(new URL("../sidebar-rail.css", import.meta.url), "utf8");
-  assert.match(html, /chatgpt\.css[\s\S]{0,160}sidebar-rail\.css/, "图标栏样式必须最后加载");
+test("侧栏保持 10-30 的单列结构：品牌头 + 工作区 + 新建对话 + 工作入口 + 会话列表", () => {
+  // 合并后的页面用 10-30 的样式表；agent-frame 的旧外壳（chatgpt.css / sidebar-rail.css）不再加载。
+  assert.doesNotMatch(html, /href="chatgpt\.css"/);
+  assert.doesNotMatch(html, /href="sidebar-rail\.css"/);
   assert.doesNotMatch(html, /<nav class="codex-rail"/, "旧图标栏入口已全部并入品牌侧栏");
+  assert.match(html, /id="sidebarBrandBtn" class="sidebar-product sidebar-brand"/);
   assert.match(html, /class="sidebar-product-name"[^>]*><strong>O<span class="owo-w">w<\/span>O<\/strong><span>AGENT<\/span>/);
-  for (const panel of ["home", "project-history", "workswarm", "evidence", "action-center", "automations", "custom-workflows"]) {
+  assert.match(html, /id="sidebarWorkspaceBtn"/);
+  assert.match(html, /id="sidebarNewChat"[\s\S]{0,600}<span>新建对话<\/span>[\s\S]{0,160}<kbd class="sidebar-kbd" aria-hidden="true">Ctrl N<\/kbd>/);
+  assert.match(html, /<nav class="workbench-shortcuts" aria-label="主要工作入口">/);
+  for (const panel of ["home", "workswarm", "automations", "custom-workflows"]) {
     assert.match(html, new RegExp('data-workbench-panel="' + panel + '"'));
   }
-  assert.match(html, /<nav class="workbench-shortcuts" aria-label="主要工作入口">/);
   assert.match(html, /id="sidebarHome"/);
-  assert.match(html, /id="codexToolsEntry"/);
+  assert.match(html, /id="sidebarToolsBtn"/);
   assert.match(html, /id="sidebarSearchBtn"[\s\S]{0,200}aria-label="搜索会话"/);
   assert.match(html, /<span class="codex-sessions-head">最近对话<\/span>/);
   assert.match(html, /<ul id="sessionList" class="list codex-sessions"><\/ul>/);
   assert.match(html, /id="codexSettingsEntry" class="codex-footer-btn"/);
-  assert.match(railCss, /#sidebar \{[\s\S]{0,80}flex-direction: row/);
-  assert.match(railCss, /--codex-rail-width: 0px/, "品牌侧栏下不再为图标栏预留宽度");
-  assert.doesNotMatch(html, /class="codex-rail-btn"/, "旧图标栏按钮不得残留");
   assert.match(app, /\$\("sidebarHome"\)\?\.addEventListener\("click", showHomeView\)/);
   assert.match(app, /\$\("sidebarNewChat"\)\?\.addEventListener\("click", startNewConversation\)/);
   assert.match(domain, /#sidebar .codex-sidebar \[data-workbench-panel\]/);
@@ -86,8 +87,9 @@ test("默认进入对话模式，刷新后不用先选工作区", () => {
   // parse("") 会归一成 agent；没有原始偏好时必须保留默认 chat。
   assert.match(app, /const raw = localStorage\.getItem\(MODE_PREF_KEY\);/);
   assert.match(app, /const saved = raw && window\.OwoSessionMode/);
-  assert.match(html, /<h2 id="emptyStateTitle">今天想聊点什么？<\/h2>/);
-  assert.match(html, /提问、解释、查资料。对话模式不会读写本机文件，也不会执行命令。/);
+  // 静态页面写的是 Work 模式的标题；对话模式的标题与说明由 app.js 运行时替换。
+  assert.match(html, /<h2 id="emptyStateTitle">你想完成什么？<\/h2>/);
+  assert.match(app, /title: "今天想聊点什么？"/);
 });
 
 test("对话不选工作区也能开始，Work 仍先要求目录", () => {
