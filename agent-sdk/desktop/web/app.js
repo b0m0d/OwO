@@ -1,6 +1,11 @@
 // OwO Agent 工作台（v0.4 P1 桌面壳，纯静态，直连本地 HTTP API + SSE）
 "use strict";
 
+// composer 通用下拉浮层（模型 / 访问级别 / 提示词共用）的当前实例。
+// 必须在任何顶层调用之前声明：早期初始化会同步走 closeComposerMenu()，
+// 声明放晚会触发 TDZ（Cannot access before initialization），整页初始化中断。
+let composerMenuEl = null;
+
 // 侧栏项目分组的折叠状态（存工作区原文，localStorage 持久化）。
 // 刻意放在模块级而非 state：它只影响列表渲染，不参与任何业务判定。
 const collapsedGroups = new Set(
@@ -70,13 +75,16 @@ let activeSessionMode = "chat";
 function currentSessionMode() {
   return activeSessionMode;
 }
-function setSessionMode(mode) {
+// 顶层初始化只负责 body 上的模式类；真正的 setSessionMode 定义在下方
+// （同步服务端、刷新输入区）。这里不能提前调用它：它依赖后面才声明的常量，
+// 提前调用会触发 TDZ，整页初始化中断。
+function applySessionModeClass(mode) {
   activeSessionMode = mode === "agent" ? "agent" : "chat";
   document.body.classList.toggle("chat-mode", activeSessionMode === "chat");
   document.body.classList.toggle("agent-mode", activeSessionMode === "agent");
   return activeSessionMode;
 }
-setSessionMode("chat");
+applySessionModeClass("chat");
 
 // Markdown/LaTeX 渲染器唯一来源：core/markdown.js（须在 app.js 之前加载）。
 const {
@@ -2856,7 +2864,6 @@ function continueTurn() {
 
 // ---------- composer 通用下拉浮层（模型 / 访问级别共用） ----------
 
-let composerMenuEl = null;
 function closeComposerMenu() {
   if (composerMenuEl) {
     composerMenuEl.remove();
