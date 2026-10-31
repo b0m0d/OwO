@@ -11,3 +11,22 @@
   background: transparent !important;
   box-shadow: none !important;
 }
+
+/* 3) 两套样式表都把设置搜索框当"输入框"：30 号把 .settings-search 画成带边框的
+   药丸，另一套又给里面的 <input> 加了带 !important 的边框和底色，叠出双层框。
+   让里层输入框退化成透明的无边框区域，只保留外层的边框和焦点样式。
+   下面这串 :not() 是为了在 !important 下压过 chatgpt-theme.css 里
+   `:is(#panelRoot, …) :is(input:not(…):not(…):not(…):not(…))` 的权重。 */
+.settings-search input#settingsSearch:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]) {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  outline: none !important;
+  padding: 0 0 0 8px !important;
+  height: 100% !important;
+}
+
+/* 4) 设置项里控件换行成多行时（例如"模型输出上限"：模型名 + 上限 + 按钮 + 提示），
+   align-items:center 会把标题挤到中间，看着像串行。统一顶部对齐。 */
+.settings-row { align-items: start !important; }

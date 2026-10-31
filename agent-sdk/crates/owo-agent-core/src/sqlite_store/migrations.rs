@@ -227,6 +227,24 @@ pub const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 14,
+        name: "补回会话工作模式列（与输入法分支的迁移号冲突）",
+        run: |conn| {
+            // 输入法分支在自己的 v11–v13 里登记了 `ime_origin_json` 等列；两边合并后
+            // 用户库的 user_version 已经是 13，本文件的 v11（新增 mode 列）不会再执行，
+            // 于是新建会话会以 "table sessions has no column named mode" 失败。
+            // 这条迁移对两种血统都幂等：新库已有 mode 就跳过；旧库补上，老会话按 agent 加载。
+            let columns = table_columns(conn, "sessions")?;
+            if !columns.iter().any(|existing| existing == "mode") {
+                conn.execute_batch(
+                    "ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'agent'",
+                )
+                .map_err(sqlite_error)?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// 基表结构（CREATE TABLE IF NOT EXISTS，幂等）。

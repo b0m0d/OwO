@@ -984,6 +984,63 @@ mod tests {
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 
+    /// 两个分支的迁移号撞车：输入法分支用自己的 v11–v13 加了 `ime_origin_json` 等列，
+    /// 合并后库的 user_version 已是 13，agent-frame 的 v11（新增 mode 列）永远不会执行。
+    /// 缺少列时 `POST /session` 直接 500，v14 必须把列幂等补回来。
+    #[test]
+    fn repairs_mode_column_when_schema_version_already_past_v11() {
+        let path = std::env::temp_dir()
+            .join(format!("owo-sqlite-mode-repair-{}.db", uuid::Uuid::new_v4()));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 workspace TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 system_prompt TEXT,
+                 messages_json TEXT NOT NULL,
+                 snapshots_json TEXT NOT NULL,
+                 execution_receipts_json TEXT NOT NULL DEFAULT '[]',
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 parent_id TEXT,
+                 fork_point INTEGER,
+                 redo_json TEXT NOT NULL,
+                 message_redo_json TEXT NOT NULL DEFAULT '[]',
+                 title TEXT,
+                 archived INTEGER NOT NULL DEFAULT 0,
+                 pinned INTEGER NOT NULL DEFAULT 0,
+                 model_override TEXT,
+                 validation_receipts_json TEXT NOT NULL DEFAULT '[]',
+                 single_verification_plan_json TEXT,
+                 single_verification_plan_input_sha256 TEXT,
+                 single_verification_plan_turn_id TEXT,
+                 single_review_issues_json TEXT NOT NULL DEFAULT '[]',
+                 completion_record_json TEXT,
+                 goal_json TEXT,
+                 ime_origin_json TEXT,
+                 todos_json TEXT NOT NULL DEFAULT '[]'
+             );
+             PRAGMA user_version = 13;",
+        )
+        .unwrap();
+        drop(conn);
+
+        // 打开时 v14 迁移补列；否则这里的 create 会以缺列失败。
+        let store = SqliteSessionStore::open(&path).unwrap();
+        let session = store.create(Path::new("."), "mock", None).unwrap();
+        store.save(&session).unwrap();
+        let loaded = store.load(&session.id).unwrap();
+        assert_eq!(
+            loaded.mode,
+            crate::session::SessionMode::Agent,
+            "补列后旧库新建会话按 agent 落库"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
     /// 工作模式随会话落库：重开进程后 chat 仍是 chat，旧行按 agent 处理。
     #[test]
     fn mode_roundtrip_survives_reopen() {

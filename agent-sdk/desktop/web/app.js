@@ -3417,12 +3417,7 @@ function refreshComposerModeChip() {
   const text = $("modeChipText");
   if (text) text.textContent = window.OwoSessionMode ? window.OwoSessionMode.label(mode) : mode;
   $("modeChip")?.classList.toggle("is-chat-mode", mode === "chat");
-  const notice = window.OwoSessionMode ? window.OwoSessionMode.notice(mode) : "";
-  const bar = $("modeNotice");
-  if (bar) {
-    bar.textContent = notice;
-    bar.hidden = !notice;
-  }
+  // 输入区上方的模式提示行已按用户要求去掉：只在模式菜单里保留说明。
   if (typeof syncChatStarters === "function") syncChatStarters(mode);
   // 空状态换了文案，项目入口也必须同一拍：否则切到对话后输入区仍写
   // 「未选择项目 / 未设置工作区」，与旁边「今天想聊点什么」自相矛盾。

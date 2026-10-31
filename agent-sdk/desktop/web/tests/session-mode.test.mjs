@@ -41,7 +41,8 @@ test("纯对话模式必须给出「不碰本机文件」的可见提示", () =>
 test("输入区模式入口与切换调用已接线", () => {
   const html = readFileSync(join(web, "index.html"), "utf8");
   assert.match(html, /id="modeChip"/, "缺少模式 chip");
-  assert.match(html, /id="modeNotice"/, "缺少纯对话提示条");
+  // 输入区上方的纯对话提示条已按用户要求移除，模式说明只留在模式菜单里。
+  assert.doesNotMatch(html, /id="modeNotice"/, "纯对话提示条不应再出现在输入区");
   assert.match(html, /<script src="core\/session-mode.js"><\/script>/, "未注册脚本");
 
   const app = readFileSync(join(web, "app.js"), "utf8");
