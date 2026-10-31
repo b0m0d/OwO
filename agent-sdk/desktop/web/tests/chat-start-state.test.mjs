@@ -22,30 +22,33 @@ test("顶层只提供对话 / Work 两个模式，且切换控件在页面主区
   assert.match(css, /\.mode-switch \{/);
 });
 
-test("左上入口改成「新对话」，并直接新建会话而不是打开任务面板", () => {
-  assert.match(html, /id="newChatTop" class="primary workbench-create-task"[\s\S]{0,200}<span>新对话<\/span>/);
-  assert.doesNotMatch(html, /id="newChatTop"[^>]*data-workbench-panel/);
-  assert.match(app, /\$\("newChatTop"\)\?\.addEventListener\("click", \(\) => \$\("newSession"\)\.click\(\)\)/);
+test("侧栏顶部入口改成「新对话」，并直接新建会话而不是打开任务面板", () => {
+  assert.match(html, /id="sidebarNewChat" class="primary workbench-create-task"[\s\S]{0,600}<span>新建对话<\/span>/);
+  assert.doesNotMatch(html, /id="sidebarNewChat"[^>]*data-workbench-panel/);
+  assert.match(app, /\$\("sidebarNewChat"\)\?\.addEventListener\("click", startNewConversation\)/);
 });
 
-test("侧栏改为 ChatGPT 式图标栏：核心功能保留，右侧专注工作区与会话", () => {
+test("侧栏改为品牌单列结构：产品头 + 工作入口 + 会话列表，旧图标栏已并入", () => {
   const railCss = readFileSync(new URL("../sidebar-rail.css", import.meta.url), "utf8");
   assert.match(html, /chatgpt\.css[\s\S]{0,160}sidebar-rail\.css/, "图标栏样式必须最后加载");
-  assert.match(html, /<nav class="codex-rail" aria-label="主导航">/);
-  for (const panel of ["home", "project-history", "workswarm", "evidence", "action-center"]) {
+  assert.doesNotMatch(html, /<nav class="codex-rail"/, "旧图标栏入口已全部并入品牌侧栏");
+  assert.match(html, /class="sidebar-product-name"[^>]*><strong>O<span class="owo-w">w<\/span>O<\/strong><span>AGENT<\/span>/);
+  for (const panel of ["home", "project-history", "workswarm", "evidence", "action-center", "automations", "custom-workflows"]) {
     assert.match(html, new RegExp('data-workbench-panel="' + panel + '"'));
   }
-  assert.match(html, /id="railNewChat"/);
+  assert.match(html, /<nav class="workbench-shortcuts" aria-label="主要工作入口">/);
+  assert.match(html, /id="sidebarHome"/);
+  assert.match(html, /id="codexToolsEntry"/);
   assert.match(html, /id="sidebarSearchBtn"[\s\S]{0,200}aria-label="搜索会话"/);
   assert.match(html, /<span class="codex-sessions-head">最近对话<\/span>/);
   assert.match(html, /<ul id="sessionList" class="list codex-sessions"><\/ul>/);
+  assert.match(html, /id="codexSettingsEntry" class="codex-footer-btn"/);
   assert.match(railCss, /#sidebar \{[\s\S]{0,80}flex-direction: row/);
-  assert.match(railCss, /\.codex-rail \{[\s\S]{0,160}flex-direction: column/);
-  assert.match(railCss, /body\.tools-open\.panel-open \.codex-rail \{[\s\S]{0,80}display: flex !important/);
-  assert.doesNotMatch(html, /class="workbench-shortcuts"/, "功能入口不再堆在会话栏");
-  assert.doesNotMatch(html, /class="codex-nav"/, "分类导航收进更多功能");
-  assert.match(app, /\$\("railNewChat"\)\?\.addEventListener\("click", \(\) => \$\("newSession"\)\.click\(\)\)/);
-  assert.match(domain, /#sidebar \.codex-rail \[data-workbench-panel\]/);
+  assert.match(railCss, /--codex-rail-width: 0px/, "品牌侧栏下不再为图标栏预留宽度");
+  assert.doesNotMatch(html, /class="codex-rail-btn"/, "旧图标栏按钮不得残留");
+  assert.match(app, /\$\("sidebarHome"\)\?\.addEventListener\("click", showHomeView\)/);
+  assert.match(app, /\$\("sidebarNewChat"\)\?\.addEventListener\("click", startNewConversation\)/);
+  assert.match(domain, /#sidebar .codex-sidebar \[data-workbench-panel\]/);
 });
 
 test("对话示例移到输入框下方，默认隐藏且点击只填入不发送", () => {

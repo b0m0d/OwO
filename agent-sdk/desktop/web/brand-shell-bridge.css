@@ -1,0 +1,32 @@
+/*
+ * 品牌侧栏（10-30 视觉层）与 agent-frame 功能画布模式的对接补丁。
+ * 品牌层把功能图标轨并进 .codex-sidebar（自身作 grid，左列 --rail-w 是图标轨）；
+ * 打开功能页时 owo-ui.css 只保留 56px 图标轨、隐藏会话列，画布占右侧。
+ * agent-frame 的三列规则（图标轨 / 会话栏 / 画布）在图标轨并入后会把
+ * .codex-sidebar 推到第二列、画布推到不存在的第三列，这里只纠正两者所在的网格位置。
+ */
+@media (min-width: 861px) {
+  body.tools-open.panel-open #sidebar {
+    display: grid !important;
+    grid-template-columns: var(--rail-w) minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0;
+    overflow: hidden !important;
+  }
+
+  body.tools-open.panel-open #sidebar > .codex-sidebar {
+    grid-column: 1 !important;
+    grid-row: 1;
+    width: var(--rail-w) !important;
+    min-width: var(--rail-w) !important;
+  }
+
+  body.tools-open.panel-open #sidebar > #workbenchPanelSection {
+    grid-column: 2 !important;
+    grid-row: 1;
+    min-width: 0;
+  }
+}
+/* 品牌层在图标轨布局里隐藏了产品名，产品按钮只剩一个箭头，与下方工作区切换器重复；
+   品牌图形本身仍绝对定位在图标轨顶部并保留点击（打开工作区菜单）。 */
+.codex-sidebar-top .sidebar-brand > svg { display: none !important; }

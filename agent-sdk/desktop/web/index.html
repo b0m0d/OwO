@@ -2,9 +2,20 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <script>
+    // 先恢复主题令牌，再加载样式，避免刷新时浅色/深色闪烁。
+    (() => {
+      try {
+        const prefs = JSON.parse(localStorage.getItem("owo.prefs") || "{}");
+        const saved = prefs.theme === "dark" || prefs.theme === "light" ? prefs.theme : localStorage.getItem("owo.theme");
+        const dark = saved === "dark" || (saved !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) document.documentElement.classList.add("dark-theme-pending");
+      } catch (_) {}
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OwO Agent 工作台</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233e7562'/%3E%3Ctext x='16' y='23' font-family='Arial,sans-serif' font-size='19' font-weight='bold' fill='white' text-anchor='middle'%3EO%3C/text%3E%3C/svg%3E">
+  <link rel="icon" type="image/png" href="assets/owo-logo-64.png">
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="visual-polish.css">
   <link rel="stylesheet" href="product-shell.css">
@@ -15,7 +26,14 @@
   <link rel="stylesheet" href="sidebar-rail.css">
   <link rel="stylesheet" href="workbench-pages.css">
   <link rel="stylesheet" href="team-workbench.css">
+  <link rel="stylesheet" href="interface-final.css?v=20261030-2">
+  <link rel="stylesheet" href="owo-brand.css?v=20261030-7">
+  <link rel="stylesheet" href="workbench-home.css?v=20261030-4">
+  <link rel="stylesheet" href="owo-ui.css?v=20261031-5">
+  <link rel="stylesheet" href="chatgpt-theme.css?v=20261031-13">
+  <link rel="stylesheet" href="codex-refine.css?v=20261101-2">
   <link rel="stylesheet" href="codex-model-menu.css?v=20261101-1">
+  <link rel="stylesheet" href="brand-shell-bridge.css?v=20261101-1">
 </head>
 <body>
   <main id="setupRoot" class="setup-root" hidden aria-label="首次配置"></main>
@@ -23,6 +41,7 @@
   <div id="menubar">
     <div class="menubar-side">
       <button id="mobileSidebarToggle" class="mobile-sidebar-toggle" type="button" aria-label="打开会话侧栏" aria-expanded="false" aria-controls="sidebar">☰</button>
+      <button type="button" id="sidebarCollapseBtn" class="codex-icon-btn menubar-sidebar-toggle" title="隐藏会话栏（Ctrl+B）" aria-label="隐藏会话栏（Ctrl+B）"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5h14M3 10h14M3 15.5h14"/><path d="M6.5 4.5v11"/></svg></button>
       <span class="menubar-brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><defs><linearGradient id="owoBrandGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#34a37f"/><stop offset="1" stop-color="#1d6a73"/></linearGradient></defs><rect width="24" height="24" rx="7" fill="url(#owoBrandGrad)"/><circle cx="8.2" cy="10.6" r="2.6" fill="none" stroke="#fff" stroke-width="1.7"/><circle cx="15.8" cy="10.6" r="2.6" fill="none" stroke="#fff" stroke-width="1.7"/><path d="M9.6 16.2c.8.8 1.5.8 2.4 0 .9.8 1.6.8 2.4 0" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span><strong>OwO</strong><span class="brand-tag">Agent</span></span>
       <nav class="menubar-menus" aria-label="主菜单">
         <button type="button" class="menubar-menu-btn" data-menu="file">文件</button>
@@ -34,7 +53,7 @@
     <div class="menubar-side menubar-right">
       <button id="taskStatusPill" class="task-status-pill" type="button" aria-label="查看当前任务状态"><span class="task-status-dot" aria-hidden="true"></span><span id="taskStatusText">等待任务</span></button>
       <details id="connectionDetails" class="connection-details">
-        <summary><span class="connection-dot" aria-hidden="true"></span><span id="connectionLabel">连接与设置</span><span aria-hidden="true">⌄</span></summary>
+        <summary aria-label="工作环境与连接状态"><span class="connection-dot" aria-hidden="true"></span><span id="connectionLabel" class="sr-only">工作环境与连接状态</span></summary>
         <div class="connection-popover"><div class="connection-popover-head"><strong>工作环境</strong><span id="menubarHealth" class="pill">连接中…</span></div>
           <div id="globalStatusBar" class="global-status-bar" role="group" aria-label="工作环境与权限"></div>
         </div>
@@ -58,64 +77,72 @@
 
 
   <aside id="sidebar">
-    <!-- ChatGPT 式双栏：最左侧只放核心功能图标，右侧专注工作区与会话记录。 -->
-    <nav class="codex-rail" aria-label="主导航">
-      <button type="button" class="codex-rail-btn codex-rail-brand" data-workbench-panel="home" data-label="工作台" title="工作台" aria-label="工作台">
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9.2 10 3l7 6.2"/><path d="M4.8 8.2v7.3c0 .6.5 1.1 1.1 1.1h8.2c.6 0 1.1-.5 1.1-1.1V8.2"/><path d="M8 16.5v-4.2h4v4.2"/></svg>
-      </button>
-      <button type="button" id="railNewChat" class="codex-rail-btn codex-rail-primary" data-label="新对话" title="新对话" aria-label="新对话">
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.4 3.8a1.8 1.8 0 0 1 2.6 2.6l-7.8 7.8-3.5.9.9-3.5z"/><path d="M11.2 5l2.6 2.6"/></svg>
-      </button>
-
-      <span class="codex-rail-divider" aria-hidden="true"></span>
-      <button type="button" class="codex-rail-btn" data-workbench-panel="project-history" data-label="任务记录" title="任务记录" aria-label="任务记录">
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 10a6.8 6.8 0 1 0 2-4.8"/><path d="M3 3.2v3.4h3.4"/><path d="M10 6.6V10l2.5 1.6"/></svg>
-      </button>
-      <button type="button" class="codex-rail-btn" data-workbench-panel="workswarm" data-label="团队协作" title="团队协作" aria-label="团队协作">
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="4.6" r="2.2"/><circle cx="4.5" cy="14.6" r="2.2"/><circle cx="15.5" cy="14.6" r="2.2"/><path d="M8.8 6.6 5.8 12.4M11.2 6.6l3 5.8M6.7 14.6h6.6"/></svg>
-      </button>
-      <button type="button" class="codex-rail-btn" data-workbench-panel="evidence" data-label="产物与证据" title="产物与证据" aria-label="产物与证据">
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="m10 2.4 7 3.9v7.4l-7 3.9-7-3.9V6.3z"/><path d="m3.2 6.4 6.8 3.8 6.8-3.8M10 10.2v7.2"/></svg>
-      </button>
-      <button type="button" class="codex-rail-btn" data-workbench-panel="action-center" data-label="待我处理" title="待我处理" aria-label="待我处理">
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 11.4 5.2 4.3c.2-.7.8-1.1 1.5-1.1h6.6c.7 0 1.3.4 1.5 1.1l2 7.1v3.4c0 .8-.7 1.5-1.5 1.5H4.7c-.8 0-1.5-.7-1.5-1.5z"/><path d="M3.4 11.4h3.8l1 1.9h3.6l1-1.9h3.8"/></svg>
-      </button>
-      <button type="button" class="codex-rail-btn" data-workbench-panel="automations" data-label="定时任务" title="定时任务" aria-label="定时任务"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="11" r="6.5"/><path d="M10 7.5V11l2.5 1.5M3 3.5 1.5 5M17 3.5 18.5 5M7.5 1.8h5"/></svg></button>
-      <button type="button" class="codex-rail-btn" data-workbench-panel="custom-workflows" data-label="自定义工作流" title="自定义工作流" aria-label="自定义工作流"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1.4"/><rect x="13" y="13" width="5" height="5" rx="1.4"/><path d="M7 4.5h6a2.5 2.5 0 0 1 2.5 2.5v6M4.5 7v6a2.5 2.5 0 0 0 2.5 2.5h6"/></svg></button>
-      <span class="codex-rail-spacer" aria-hidden="true"></span>
-      <button type="button" id="codexToolsEntry" class="codex-rail-btn" data-label="更多功能" title="更多功能（Ctrl K）" aria-label="更多功能">
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3.2" y="3.2" width="5.4" height="5.4" rx="1.4"/><rect x="11.4" y="3.2" width="5.4" height="5.4" rx="1.4"/><rect x="3.2" y="11.4" width="5.4" height="5.4" rx="1.4"/><rect x="11.4" y="11.4" width="5.4" height="5.4" rx="1.4"/></svg>
-      </button>
-      <button type="button" id="codexSettingsEntry" class="codex-rail-btn" data-label="设置" title="设置" aria-label="设置">
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 6h4M11 6h6M3 14h6M13 14h4"/><circle cx="9" cy="6" r="2"/><circle cx="11" cy="14" r="2"/></svg>
-      </button>
-    </nav>
-    <!-- 右侧栏：工作区 + 会话记录；功能入口收进左侧图标栏。 -->
+    <!-- OwO 品牌侧栏（10-30 品牌层）：产品头 / 新对话 / 工作入口 / 会话列表 / 底部用户卡。 -->
     <div class="codex-sidebar">
       <div class="codex-sidebar-top">
-        <button id="sidebarBrandBtn" class="sidebar-brand" type="button" aria-label="OwO 工作台菜单" aria-haspopup="menu"><strong>OwO</strong><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 6 4 4 4-4"/></svg></button>
-      <button type="button" id="sidebarSearchBtn" class="codex-icon-btn" data-label="搜索会话" title="搜索会话" aria-label="搜索会话">
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8.6" cy="8.6" r="5.1"/><path d="m12.4 12.4 4.1 4.1"/></svg>
-      </button>
+        <button id="sidebarBrandBtn" class="sidebar-product sidebar-brand" type="button" aria-label="OwO 工作台菜单" aria-haspopup="menu">
+          <span class="sidebar-product-mark" data-asset="owo-logo" aria-hidden="true"><img class="sidebar-logo-img" src="assets/owo-logo.png" alt="" width="26" height="26" draggable="false"></span>
+          <span class="sidebar-product-name"><strong>O<span class="owo-w">w</span>O</strong><span>AGENT</span></span>
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+        </button>
+        <span class="codex-sidebar-spacer"></span>
         <button id="sidebarToolsBtn" class="codex-icon-btn" type="button" title="工具与设置" aria-label="工具与设置" hidden>
           <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.2" y="2.2" width="5" height="5" rx="1.2"/><rect x="8.8" y="2.2" width="5" height="5" rx="1.2"/><rect x="2.2" y="8.8" width="5" height="5" rx="1.2"/><rect x="8.8" y="8.8" width="5" height="5" rx="1.2"/></svg>
         </button>
       </div>
       <button id="sidebarWorkspaceBtn" class="codex-workspace-switcher" type="button" title="切换或新建项目工作区" aria-haspopup="menu" aria-expanded="false">
         <span class="codex-workspace-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h5.1c.66 0 1.2.54 1.2 1.2v5.7c0 .66-.54 1.2-1.2 1.2H3.2c-.66 0-1.2-.54-1.2-1.2V4.4z"/><path d="M2.2 6.2h11.5"/></svg></span>
-        <span class="codex-workspace-meta"><strong>添加工作区</strong><span id="sidebarWorkspaceName" hidden>未选择项目</span></span>
+        <span class="codex-workspace-meta"><strong id="sidebarWorkspaceTitle">连接工作区</strong><span id="sidebarWorkspaceName" hidden>未选择项目</span></span>
         <svg class="codex-workspace-chevron" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m4.5 6.2 3.5 3.5 3.5-3.5"/></svg>
       </button>
-      <button type="button" id="newChatTop" class="primary workbench-create-task"><svg class="nav-icon" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg><span>新对话</span></button>
-      <div class="codex-sessions-heading"><span class="codex-sessions-head">最近对话</span><button id="newSession" class="codex-new-chat" type="button" title="新建空白会话" aria-label="新建空白会话">＋</button></div>
+      <button type="button" id="sidebarNewChat" class="primary workbench-create-task" title="新建对话（Ctrl+N）" aria-label="新建对话"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.2 8.6v3.6c0 .7-.6 1.3-1.3 1.3H3.8c-.7 0-1.3-.6-1.3-1.3V4.1c0-.7.6-1.3 1.3-1.3h3.6"/><path d="M11.4 2.3a1.3 1.3 0 0 1 1.8 1.8L8.4 8.9l-2.4.6.6-2.4z"/></svg><span>新建对话</span><kbd class="sidebar-kbd" aria-hidden="true">Ctrl N</kbd></button>
+      <div class="sidebar-section-label">工作空间</div>
+      <nav class="workbench-shortcuts" aria-label="主要工作入口">
+        <button type="button" id="sidebarHome" title="首页" aria-label="首页"><svg class="nav-icon" viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2.2 7.2 5.8-4.8 5.8 4.8"/><path d="M3.7 6.4v6.3c0 .7.5 1.2 1.2 1.2h6.2c.7 0 1.2-.5 1.2-1.2V6.4"/><path d="M6.4 13.9V9.8h3.2v4.1"/></svg><span>首页</span></button>
+        <button type="button" data-workbench-panel="home" aria-label="工作台"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round" aria-hidden="true"><rect x="2.3" y="2.3" width="4.7" height="5.6" rx="1.3"/><rect x="9" y="2.3" width="4.7" height="3.4" rx="1.3"/><rect x="9" y="7.8" width="4.7" height="5.9" rx="1.3"/><rect x="2.3" y="10" width="4.7" height="3.7" rx="1.3"/></svg><span>工作台</span></button>
+        <button type="button" data-workbench-panel="workswarm" aria-label="团队协作"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="3.8" r="1.8"/><circle cx="3.6" cy="11.6" r="1.8"/><circle cx="12.4" cy="11.6" r="1.8"/><path d="M7 5.4 4.6 9.9M9 5.4l2.4 4.5M5.5 11.6h5"/></svg><span>团队协作</span></button>
+        <button type="button" data-workbench-panel="project-history" aria-label="任务记录"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8a5.4 5.4 0 1 0 1.6-3.8"/><path d="M2.4 2.6v2.6H5"/><path d="M8 5.2V8l2 1.3"/></svg><span>任务记录</span></button>
+        <button type="button" data-workbench-panel="evidence" aria-label="产物与证据"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round" aria-hidden="true"><path d="m8 2.4 5.6 3.1v5.9L8 14.5l-5.6-3.1V5.5z"/><path d="m2.6 5.6 5.4 3 5.4-3M8 8.6v5.8"/></svg><span>产物与证据</span></button>
+        <button type="button" data-workbench-panel="action-center" aria-label="待我处理"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 9.1 4.2 3.4c.2-.6.6-.9 1.2-.9h5.2c.6 0 1 .3 1.2.9l1.6 5.7v2.7c0 .7-.6 1.2-1.2 1.2H3.8c-.7 0-1.2-.5-1.2-1.2z"/><path d="M2.8 9.1h3l.8 1.5h2.8l.8-1.5h3"/></svg><span>待我处理</span></button>
+        <span class="rail-divider" aria-hidden="true"></span>
+        <button type="button" data-workbench-panel="automations" aria-label="定时任务"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8a5.4 5.4 0 1 0 1.6-3.8"/><path d="M2.4 2.6v2.6H5"/><path d="M8 5.2V8l2 1.3"/></svg><span>定时任务</span></button>
+        <button type="button" data-workbench-panel="workflow" aria-label="工作流"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="3.2" r="1.4"/><circle cx="3.6" cy="12.8" r="1.4"/><circle cx="12.4" cy="12.8" r="1.4"/><path d="M8 4.6v2.2c0 1.1-.9 2-2 2H5.6c-1.1 0-2 .9-2 2v1"/><path d="M8 6.8c0-1.1.9-2 2-2h.4c1.1 0 2 .9 2 2v4.5"/></svg><span>工作流</span></button>
+        <button type="button" data-workbench-panel="custom-workflows" aria-label="自定义工作流"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" aria-hidden="true"><path d="M2.6 5.2h10.8M2.6 10.8h10.8"/><circle cx="6.1" cy="5.2" r="1.6"/><circle cx="10.2" cy="10.8" r="1.6"/></svg><span>自定义工作流</span></button>
+        <button type="button" id="codexToolsEntry" aria-label="更多功能"><svg class="nav-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.2" y="2.2" width="4.4" height="4.4" rx="1.2"/><rect x="9.4" y="2.2" width="4.4" height="4.4" rx="1.2"/><rect x="2.2" y="9.4" width="4.4" height="4.4" rx="1.2"/><rect x="9.4" y="9.4" width="4.4" height="4.4" rx="1.2"/></svg><span>更多功能</span></button>
+      </nav>
+      <nav class="codex-nav" aria-label="工作台导航">
+        <button type="button" data-codex-group="workspace">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.2 4.4c0-.66.54-1.2 1.2-1.2h2.3l1.4 1.6h4.5c.66 0 1.2.54 1.2 1.2v5.6c0 .66-.54 1.2-1.2 1.2H3.4c-.66 0-1.2-.54-1.2-1.2V4.4z"/></svg>
+          工作区
+        </button>
+        <button type="button" data-codex-group="intelligence">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M6.6 2.4 7.7 5l2.6 1.1-2.6 1.1-1.1 2.6-1.1-2.6L2.9 6.1 5.5 5z"/><path d="M11.6 9.2l.6 1.5 1.5.6-1.5.6-.6 1.5-.6-1.5-1.5-.6 1.5-.6z"/></svg>
+          智能
+        </button>
+        <button type="button" data-codex-group="automation">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.6"/></svg>
+          自动化
+        </button>
+        <button type="button" data-codex-group="system">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2.2 13.4 5.3v5.4L8 13.8 2.6 10.7V5.3z"/><path d="M2.6 5.3 8 8.4l5.4-3.1M8 8.4v5.4"/></svg>
+          插件
+        </button>
+      </nav>
+      <div class="codex-sessions-heading"><span class="codex-sessions-head">最近对话</span><button id="newSession" class="codex-new-chat" type="button" title="新建空白会话" aria-label="新建空白会话">＋</button><button id="sidebarSessionMenu" class="codex-icon-btn" type="button" title="会话选项" aria-label="会话选项">⋯</button><button id="sidebarSearchBtn" class="codex-icon-btn" type="button" title="搜索会话" aria-label="搜索会话">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 13.5 13.5"/></svg>
+        </button></div>
       <input id="sessionSearch" class="codex-session-search" placeholder="搜索会话…" hidden>
       <ul id="sessionList" class="list codex-sessions"></ul>
       <label class="codex-archived"><input type="checkbox" id="showArchived"> 显示归档</label>
       <div class="codex-sidebar-footer">
-        <div class="codex-user" id="codexUserCard" role="button" tabindex="0" title="账户菜单">
+        <button id="codexSettingsEntry" class="codex-footer-btn" type="button" aria-label="设置">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          设置
+        </button>
+        <div class="codex-user" id="codexUserCard" role="button" tabindex="0" aria-label="账户菜单">
           <span class="codex-avatar" aria-hidden="true">用</span>
           <div class="codex-user-meta"><strong>用户1</strong><span>本地账户</span></div>
-          <button id="themeToggleSide" class="codex-icon-btn" type="button" title="切换深色主题" aria-label="切换深色主题">☾</button>
+          <button id="themeToggleSide" class="codex-icon-btn" type="button" aria-label="切换深色主题">☾</button>
         </div>
       </div>
     </div>
