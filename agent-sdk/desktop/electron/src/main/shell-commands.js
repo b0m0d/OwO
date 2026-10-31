@@ -190,6 +190,7 @@ function providerStatusValue(model, options = {}) {
   const ready = effective.ready;
   return {
     provider,
+    deferred: source.deferred === true,
     baseUrl: effective.baseUrl,
     model: effective.model,
     keyConfigured: Boolean(resolved.key),
@@ -287,6 +288,9 @@ function applyModelConfigPatch(config, args) {
     const canonical = supervision.normalizeProvider(input.mode);
     if (!canonical) return { ok: false, error: `未知模型提供方：${input.mode}` };
     model.provider = canonical;
+    // Keep the explicit setup decision in the durable shell config. WebView
+    // localStorage is origin-scoped and changes when the core chooses a port.
+    model.deferred = canonical === "unset";
   }
   if (input.base_url !== undefined) {
     const text = String(input.base_url == null ? "" : input.base_url).trim();

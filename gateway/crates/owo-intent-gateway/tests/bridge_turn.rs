@@ -200,14 +200,15 @@ async fn expression_uses_only_dedicated_route_and_negotiates_effects() {
     }
 }
 #[tokio::test]
-async fn non_expression_hands_off_without_model_or_insert() {
+async fn general_task_requires_confirmation_before_execution() {
     let (probe, _, bridge, _) = setup(0).await;
     let mut request = req(Action::Submit, "submit");
     request.input.selected_text = "帮我找文件".into();
     let response = call(&bridge, &request).await;
     assert_eq!(response.commands.len(), 1);
-    assert_eq!(response.commands[0].id, "open-agent");
-    assert!(!response.commands[0].commit_task);
+    assert_eq!(response.commands[0].id, "task-commit");
+    assert_eq!(response.task.intent, "agent.task");
+    assert!(response.commands[0].commit_task);
     assert!(response.commands[0].effect.is_none());
     assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
     assert_eq!(probe.generic.load(Ordering::SeqCst), 0);

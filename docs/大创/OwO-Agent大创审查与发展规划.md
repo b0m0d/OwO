@@ -1,5 +1,7 @@
 # OwO Agent（agent-frame）大创审查与发展规划 v2.0
 
+> **状态更新（2026-10-22）**：本文保留为 2026-10-15 的历史静态审查。当前输入法核心已接通 Agent，团队 API 已完成真实文件交付，不能继续沿用“完全脱钩”“来源机制零实现”等旧状态。后续实现与大创范围请先读[最新实施方案](D:/OwO/OwO-agent-dev/docs/大创/OwO大创实施方案-个性化学习与主动协同-2026-10-22.md)，其中区分了已完成、待验收和待实现；旧安全发现是否仍存在须按当前源码与复现结果逐项判断。
+
 > 面向：大创项目组（选题“智能输入法”，主体为仿 Codex 的本地 Agent）
 > 基线：`agent-frame` 分支 `66e88400`（"audit: retain team collaboration findings"，其父提交 `79fbc6f6`）
 > 输入法侧参照：`b0m0d/OwO` `master@e1c0537`（C++ TSF 输入法，已从 agent-frame 移除，见提交 `4eeeefbc`）

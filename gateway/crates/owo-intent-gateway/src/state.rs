@@ -49,14 +49,34 @@ pub struct PendingSlot {
 pub struct PendingHandle {
     slot: Mutex<PendingSlot>,
     cancel: Notify,
+    detach: Notify,
+    persistent_task: bool,
 }
 
 impl PendingHandle {
     pub fn new() -> Arc<Self> {
+        Self::for_task(false)
+    }
+    fn for_task(persistent_task: bool) -> Arc<Self> {
         Arc::new(Self {
             slot: Mutex::new(PendingSlot::default()),
             cancel: Notify::new(),
+            detach: Notify::new(),
+            persistent_task,
         })
+    }
+    fn discard_candidate(&self) {
+        if self.persistent_task {
+            self.detach.notify_one();
+        } else {
+            self.request_cancel();
+        }
+    }
+    pub async fn detached(&self) {
+        self.detach.notified().await;
+    }
+    pub fn is_persistent_task(&self) -> bool {
+        self.persistent_task
     }
 
     pub fn lock(&self) -> MutexGuard<'_, PendingSlot> {
@@ -99,6 +119,7 @@ pub struct StartTurnRequest {
     pub slot: Arc<PendingHandle>,
     /// 已确定的提示词（任务提交时由草稿生成）；`None` 时 bridge 按请求组装。
     pub prompt: Option<String>,
+    pub agent_task: bool,
 }
 
 /// 状态机对请求的处理结果。
@@ -196,7 +217,7 @@ impl ImeState {
             // The HTTP task owns another Arc: dropping the session does not
             // cancel its wait. Revoke it before discarding the origin/cache.
             if let Some(pending) = &session.pending {
-                pending.request_cancel();
+                pending.discard_candidate();
             }
             false
         });
@@ -216,7 +237,7 @@ impl ImeState {
                 .retain(|key, _| !key.starts_with(&format!("{}:", request.session_id)));
             if let Some(session) = lock(&self.sessions).remove(&request.session_id) {
                 if let Some(pending) = session.pending {
-                    pending.request_cancel();
+                    pending.discard_candidate();
                 }
             }
             return StateAction::Respond(commands::error_response(
@@ -242,7 +263,7 @@ impl ImeState {
             if mismatch {
                 if let Some(session) = sessions.remove(&request.session_id) {
                     if let Some(pending) = session.pending {
-                        pending.request_cancel();
+                        pending.discard_candidate();
                     }
                 }
                 lock(&self.idempotency)
@@ -333,7 +354,7 @@ impl ImeState {
     /// Call only after validating the edit, so rejected edits preserve the task.
     fn revoke_execution(&self, request: &AgentIpcRequest, session: &mut ImeSession) {
         if let Some(pending) = session.pending.take() {
-            pending.request_cancel();
+            pending.discard_candidate();
         }
         session.execution_request = None;
         lock(&self.idempotency)
@@ -341,45 +362,15 @@ impl ImeState {
     }
 
     fn handle_submit(&self, request: &AgentIpcRequest) -> StateAction {
-        if intent::parse(request).is_none() {
-            let mut sessions = lock(&self.sessions);
-            let session = sessions
-                .entry(request.session_id.clone())
-                .or_insert_with(|| ImeSession {
-                    draft_retry: None,
-                    patch_retry: None,
-                    execution_request: None,
-                    last_request: request.clone(),
-                    task: TaskDraft::default(),
-                    state_revision: 0,
-                    pending: None,
-                    commands: Vec::new(),
-                    actions: HashMap::new(),
-                    expires_at: Instant::now() + self.session_ttl,
-                });
-            self.supersede_changed_input(request, session);
-            if let Some(pending) = session.pending.take() {
-                pending.request_cancel();
-            }
-            let mut command = commands::command(
-                "open-agent",
-                "在 Agent 工作台继续",
-                "agent.open",
-                crate::protocol::RiskLevel::None,
-            );
-            command.id = "open-agent".into();
-            command.label = "在 Agent 工作台继续".into();
-            command.preview = "此任务由 Agent 界面处理，不生成输入候选".into();
-            session.commands = vec![command];
-            session.actions = HashMap::from([("open-agent".into(), CommandAction::OpenWorkbench)]);
-            session.task = TaskDraft::default();
-            session.last_request = request.clone();
-            session.expires_at = Instant::now() + self.session_ttl;
-            let mut response = commands::base_response(request, Status::AgentMode);
-            response.message = "请在 Agent 工作台处理此任务".into();
-            response.commands = session.commands.clone();
-            response.can_cancel = true;
-            return StateAction::Respond(self.finalize(session, response));
+        if intent::parse(request)
+            .or_else(|| intent::agent_task(request))
+            .is_none()
+        {
+            return StateAction::Respond(commands::error_response(
+                request,
+                "invalid_task",
+                "请输入完整任务（最多 4096 字节）",
+            ));
         }
 
         let slot = PendingHandle::new();
@@ -451,6 +442,7 @@ impl ImeState {
                 request: request.clone(),
                 slot,
                 prompt: None,
+                agent_task: true,
             }),
         }
     }
@@ -461,7 +453,7 @@ impl ImeState {
         request: &AgentIpcRequest,
         session: &mut ImeSession,
     ) -> Option<AgentIpcResponse> {
-        let parsed = intent::parse(request)?;
+        let parsed = intent::parse(request).or_else(|| intent::agent_task(request))?;
         let mut task = parsed.task;
         task.revision = session.task.revision + 1;
         let summary = intent::describe(&task).unwrap_or_default();
@@ -470,7 +462,11 @@ impl ImeState {
         session.task = task.clone();
         let mut commit = commands::task_commit_command(task.revision);
         commit.label = format!("确认：{summary}");
-        commit.preview = "只生成文字，不调用工具、不修改文件".to_string();
+        commit.preview = if task.intent == intent::INTENT_AGENT {
+            "交给 Agent 执行；范围与审批由桌面设置控制".to_string()
+        } else {
+            "只生成文字，不调用工具、不修改文件".to_string()
+        };
         session.commands = vec![commit];
         session.actions = HashMap::from([("task-commit".to_string(), CommandAction::CommitTask)]);
         let mut response = commands::base_response(request, Status::AgentMode);
@@ -499,7 +495,10 @@ impl ImeState {
             response.task = session.task.clone();
             return StateAction::Respond(self.finalize(session, response));
         }
-        let Some(prompt) = intent::expression_prompt(&session.task) else {
+        let agent_task = session.task.intent == intent::INTENT_AGENT;
+        let Some(prompt) = intent::expression_prompt(&session.task)
+            .or_else(|| intent::agent_prompt(&session.task, &session.last_request))
+        else {
             let response = commands::error_response(
                 request,
                 "unsupported_task",
@@ -514,7 +513,7 @@ impl ImeState {
                 return StateAction::Respond(thinking);
             }
         }
-        let slot = PendingHandle::new();
+        let slot = PendingHandle::for_task(agent_task);
         let mut origin = session.last_request.clone();
         origin.request_id = request.request_id.clone();
         origin.parent_request_id = request.parent_request_id.clone();
@@ -538,6 +537,7 @@ impl ImeState {
                 request: origin,
                 slot,
                 prompt: Some(prompt),
+                agent_task,
             }),
         }
     }
@@ -621,7 +621,7 @@ impl ImeState {
                 let slot = pending.lock();
                 if !slot.done {
                     drop(slot);
-                    pending.request_cancel(); // bridge 收到后执行 HTTP abort
+                    pending.request_cancel(); // explicit cancellation aborts the accepted Agent turn
                 }
             }
         }

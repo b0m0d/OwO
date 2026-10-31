@@ -1,6 +1,72 @@
 {
-  "default": "petdex-haibara-ai",
+  "default": "owo-squid",
   "skins": [
+    {
+      "id": "owo-squid",
+      "name": "3D 墨鱼",
+      "author": "用户提供的 Squid.glb",
+      "description": "使用用户提供的 Squid.glb 模型渲染的透明 3D 桌宠。",
+      "kind": "gltf",
+      "model": "Squid.glb",
+      "modelScale": 0.55,
+      "states": {
+        "idle": {
+          "model": "Squid.glb",
+          "durationMs": 2200
+        },
+        "thinking": {
+          "model": "Squid.glb",
+          "durationMs": 1500
+        },
+        "speaking": {
+          "model": "Squid.glb",
+          "durationMs": 900
+        },
+        "alert": {
+          "model": "Squid.glb",
+          "durationMs": 700
+        }
+      },
+      "bubbles": {
+        "idle": "墨鱼待机中～",
+        "thinking": "墨鱼思考中…",
+        "speaking": "墨鱼出动！",
+        "alert": "墨鱼提醒你！"
+      }
+    },
+    {
+      "id": "pink-squid",
+      "name": "粉色 3D 墨鱼",
+      "author": "用户提供的 PinkSquid.glb",
+      "description": "使用用户提供的 PinkSquid.glb 渲染的粉色 3D 桌宠。",
+      "kind": "gltf",
+      "model": "PinkSquid.glb",
+      "modelScale": 0.55,
+      "states": {
+        "idle": {
+          "model": "PinkSquid.glb",
+          "durationMs": 2200
+        },
+        "thinking": {
+          "model": "PinkSquid.glb",
+          "durationMs": 1500
+        },
+        "speaking": {
+          "model": "PinkSquid.glb",
+          "durationMs": 900
+        },
+        "alert": {
+          "model": "PinkSquid.glb",
+          "durationMs": 700
+        }
+      },
+      "bubbles": {
+        "idle": "粉色墨鱼待机中～",
+        "thinking": "粉色墨鱼思考中…",
+        "speaking": "粉色墨鱼出动！",
+        "alert": "粉色墨鱼提醒你！"
+      }
+    },
     {
       "id": "petdex-aerith",
       "name": "爱丽丝",

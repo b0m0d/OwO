@@ -9,7 +9,7 @@
 //      pointermove → pointerup、contextmenu），断言
 //      · 左键点击 = 摸摸头（happy 摇动 + ❤×4 + 互动台词），且**不弹菜单、不移动窗口**；
 //      · 拖动 = 纯移动（调壳 moveBy），不互动、不弹菜单；长距/回拖同样是纯移动；
-//      · 右键 = 菜单（再按一次关掉），审批动作仍在菜单里一步可达。
+//      · 右键 = 系统原生菜单，审批动作仍在菜单里一步可达；透明区域不拦截鼠标。
 //   ② 接线层：源码里"打开菜单"的调用点只能落在右键处理器内、拖动路径不得再夹互动，
 //      index.html 的提示文案必须与实际按键一致——防止有人把左键分支改回去而行为
 //      测试之外无人发现。
@@ -24,7 +24,7 @@ const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
 const petSource = readFileSync(join(WEB, "pet", "pet.js"), "utf8");
 const petHtml = readFileSync(join(WEB, "pet", "index.html"), "utf8");
 
-const PET_IDS = ["pet", "pet-avatar", "pet-avatar-img", "bubble", "fx", "skin-menu"];
+const PET_IDS = ["pet", "pet-hitbox", "pet-avatar", "pet-avatar-img", "bubble", "fx", "chat-panel", "chat-log", "chat-input", "chat-close"];
 
 function makeClassList() {
   const names = new Set();
@@ -53,6 +53,8 @@ function makeElement(tag) {
     src: "",
     type: "",
     display: "",
+    value: "",
+    focused: 0,
     dataset: {},
     attrs: {},
     style: { setProperty(name, value) { this[name] = value; } },
@@ -65,12 +67,15 @@ function makeElement(tag) {
     dispatch(type, event) {
       (listeners[type] || []).forEach((handler) => handler(event));
     },
+    focus() { this.focused += 1; },
+    remove() { this.removed = true; },
     appendChild(child) { this.children.push(child); return child; },
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); },
     replaceChildren(...nodes) { this.children = []; this.append(...nodes); },
     contains(node) {
       return node === this || this.children.some((child) => child === node || child.contains(node));
     },
+    querySelector() { return null; },
     getBoundingClientRect() {
       return { width: 120, height: 80, left: 0, top: 0, right: 120, bottom: 80 };
     },
@@ -80,27 +85,17 @@ function makeElement(tag) {
   return element;
 }
 
-/** 把整棵子树的文案拼起来（菜单项文案都在里层 span 上）。 */
-function textOf(element) {
-  return [element.textContent || ""]
-    .concat(element.children.map((child) => textOf(child)))
-    .filter(Boolean)
-    .join(" ");
-}
-
 function loadPet(options) {
   const opts = options || {};
   const ids = {};
   for (const id of PET_IDS) ids[id] = makeElement(id === "pet-avatar-img" ? "img" : "div");
-  // 对齐 index.html 的 `<div class="skin-menu" id="skin-menu" hidden>`：菜单初始是收起的，
-  // 否则"右键 toggle"会被测成"右键关菜单"，看着绿实则假。
-  ids["skin-menu"].hidden = true;
 
   const documentListeners = {};
   const windowListeners = {};
-  const calls = { moveBy: [], setVisible: [], showWorkbench: 0, resetPosition: 0, requests: [] };
+  const calls = { moveBy: [], setVisible: [], showMenu: [], ignoreMouse: [], hover: [], chatFocus: [], releaseFocus: 0, showWorkbench: 0, resetPosition: 0, requests: [] };
 
   const documentStub = {
+    body: makeElement("body"),
     getElementById: (id) => ids[id] || null,
     createElement: (tag) => makeElement(tag),
     addEventListener(type, handler) {
@@ -124,6 +119,9 @@ function loadPet(options) {
     cancelAnimationFrame: () => {},
     performance: { now: () => 0 },
     devicePixelRatio: 1,
+    screenX: 0,
+    screenY: 0,
+    screen: { availLeft: 0, availTop: 0, availWidth: 1280, availHeight: 752 },
     localStorage: { getItem: () => null, setItem: () => {} },
     // 皮肤清单拿不到（离线/静态资源没挂）→ boot 走"保持默认外观"分支，把被测面
     // 收在按键行为上，不掺皮肤装配。
@@ -149,6 +147,11 @@ function loadPet(options) {
       query: async () => ({ alive: true, visible: true }),
       setVisible: async (visible) => { calls.setVisible.push(visible); },
       moveBy: (dx, dy) => { calls.moveBy.push([dx, dy]); },
+      showMenu: async (items) => { calls.showMenu.push(items); return opts.menuSelection || null; },
+      setIgnoreMouseEvents: async (ignore) => { calls.ignoreMouse.push(ignore); },
+      setHover: async (inside) => { calls.hover.push(inside); },
+      releaseFocus: async () => { calls.releaseFocus += 1; },
+      setChatFocus: async (open) => { calls.chatFocus.push(open); },
       showWorkbench: () => { calls.showWorkbench += 1; },
       resetPosition: () => { calls.resetPosition += 1; },
       getPref: async () => ({}),
@@ -218,26 +221,64 @@ test("左键点击＝只互动：happy 摇动 + ❤×4 + 互动台词，且不�
   leftClick(pet.ids.pet, 120, 120);
 
   assert.equal(pet.ids.pet.classList.contains("happy"), true, "左键点击必须给出摸摸头反应");
-  assert.equal(pet.ids["skin-menu"].hidden, true, "左键点击不得弹菜单（旧行为就是两个键都弹）");
+  assert.equal(pet.calls.showMenu.length, 0, "左键点击不得弹菜单（旧行为就是两个键都弹）");
   assert.equal(pet.ids.fx.children.length, 4, "摸摸头必须飘 ❤×4");
   assert.deepEqual(pet.ids.fx.children.map((node) => node.textContent), ["❤", "❤", "❤", "❤"]);
   const line = pet.ids.bubble.textContent;
   assert.ok(line && line !== "OwO", `左键点击要换成互动台词，实际=${line}`);
   assert.deepEqual(pet.calls.moveBy, [], "5px 死区内的单击不得推动窗口");
+  assert.equal(pet.calls.releaseFocus, 1, "互动结束必须把键盘还给原来的前台窗口");
 });
 
-test("菜单开着时的左键点击：先收起菜单，不再顺手多弹一次", async () => {
+test("透明区域穿透鼠标，只有进入形象命中区才接管交互", async () => {
   const pet = loadPet({ shell: true });
   await flush();
-  rightClick(pet.ids.pet, 100, 100);
-  assert.equal(pet.ids["skin-menu"].hidden, false, "前置：右键菜单已打开");
+  pet.document.dispatch("mousemove", { clientX: 200, clientY: 200 });
+  pet.document.dispatch("mousemove", { clientX: 20, clientY: 20 });
+  pet.document.dispatch("mousemove", { clientX: 30, clientY: 30 });
+  pet.document.dispatch("mousemove", { clientX: 200, clientY: 200 });
+  assert.deepEqual(pet.calls.ignoreMouse, [true, false, true]);
+  // 命中区内还要临时去掉 Windows 的不可激活样式，否则 Chromium 只收到 mouseup，
+  // 单击/双击/× 都会时灵时不灵（输入框也就拿不到键盘焦点）。
+  assert.deepEqual(pet.calls.hover, [false, true, false]);
+});
 
-  const menu = pet.ids["skin-menu"];
-  // 点在桌宠身上（不在菜单内）：document mousedown 会先收菜单。
-  pet.document.dispatch("mousedown", { type: "mousedown", target: pet.ids.pet });
-  leftClick(pet.ids.pet, 120, 120);
-  assert.equal(menu.hidden, true, "点击后菜单必须是收起的");
-  assert.equal(menu.children.length, 0, "收起的菜单必须清空，不能留下上一次的动作项");
+test("聊天在边缘打开时移入完整面板，关闭后恢复透明穿透", async () => {
+  const pet = loadPet({ shell: true });
+  await flush();
+  const panel = pet.ids["chat-panel"];
+  panel.getBoundingClientRect = () => ({ left: 6, top: 6, right: 264, bottom: 284, width: 258, height: 278 });
+  pet.sandbox.screenX = -80;
+  pet.sandbox.screenY = -116;
+  pet.sandbox.devicePixelRatio = 2;
+
+  await pet.run("toggleChat(true)");
+  assert.deepEqual(pet.calls.moveBy, [[74, 110]], "只移动面板越出工作区的距离");
+  assert.equal(panel.hidden, false);
+  assert.deepEqual(pet.calls.ignoreMouse, [false], "聊天打开时整个面板都必须可交互");
+  assert.deepEqual(pet.calls.chatFocus, [true], "聊天期间窗口必须临时可聚焦，否则键盘发送不到输入框");
+  assert.ok(pet.ids["chat-input"].focused >= 1, "打开面板后输入框要拿到焦点");
+
+  await pet.run("toggleChat(false)");
+  assert.equal(panel.hidden, true);
+  assert.deepEqual(pet.calls.ignoreMouse, [false, true], "关闭聊天后恢复模型命中区穿透");
+  assert.deepEqual(pet.calls.chatFocus, [true, false], "关闭聊天后窗口恢复不可聚焦，不再抢键盘");
+});
+
+test("聊天面板可用 Esc 或 × 收起", async () => {
+  const pet = loadPet({ shell: true });
+  await flush();
+
+  await pet.run("toggleChat(true)");
+  assert.equal(pet.ids["chat-panel"].hidden, false);
+  pet.document.dispatch("keydown", { key: "Escape", preventDefault() {} });
+  await flush();
+  assert.equal(pet.ids["chat-panel"].hidden, true, "Esc 必须能收起聊天面板");
+
+  await pet.run("toggleChat(true)");
+  pet.ids["chat-close"].dispatch("click", {});
+  await flush();
+  assert.equal(pet.ids["chat-panel"].hidden, true, "× 按钮必须能收起聊天面板");
 });
 
 test("拖动＝纯移动：交给壳 moveBy，不互动、不弹菜单", async () => {
@@ -252,10 +293,10 @@ test("拖动＝纯移动：交给壳 moveBy，不互动、不弹菜单", async (
   assert.equal(petElement.classList.contains("dropped"), true, "松手要有掉落反馈");
   assert.equal(petElement.classList.contains("happy"), false, "拖动不是互动，不得触发摸摸头");
   assert.equal(pet.ids.fx.children.length, 0, "拖动不得飘 ❤");
-  assert.equal(pet.ids["skin-menu"].hidden, true, "拖动不得弹菜单");
+  assert.equal(pet.calls.showMenu.length, 0, "拖动不得弹菜单");
 });
 
-test("右键＝功能面：菜单按当前状态列动作（审批一步可达），再按一次关掉", async () => {
+test("右键＝原生功能菜单：按当前状态列动作，取消后可再次打开", async () => {
   const pet = loadPet({
     shell: true,
     api: {
@@ -271,10 +312,10 @@ test("右键＝功能面：菜单按当前状态列动作（审批一步可达�
   await flush();
   await pet.run("refreshActivity()");
 
-  const menu = pet.ids["skin-menu"];
   rightClick(pet.ids.pet, 100, 100);
-  assert.equal(menu.hidden, false, "右键必须打开菜单");
-  const text = textOf(menu);
+  await flush();
+  assert.equal(pet.calls.showMenu.length, 1, "右键必须打开原生菜单");
+  const text = JSON.stringify(pet.calls.showMenu[0]);
   assert.match(text, /允许：write_file/, `菜单必须给出允许动作，实际=${text}`);
   assert.match(text, /拒绝：write_file/, `菜单必须给出拒绝动作，实际=${text}`);
   assert.match(text, /停止当前回合/);
@@ -285,8 +326,8 @@ test("右键＝功能面：菜单按当前状态列动作（审批一步可达�
   assert.deepEqual(pet.ids.fx.children, [], "右键不得飘 ❤");
 
   rightClick(pet.ids.pet, 100, 100);
-  assert.equal(menu.hidden, true, "菜单开着再右键必须关掉（toggle）");
-  assert.equal(menu.children.length, 0, "关掉的菜单必须清空");
+  await flush();
+  assert.equal(pet.calls.showMenu.length, 2, "取消后必须能重新打开菜单");
 });
 
 test("长距拖动（累计 >420px）＝仍然是纯移动，不得顺手摸摸头", async () => {
@@ -313,7 +354,7 @@ test("长距拖动（累计 >420px）＝仍然是纯移动，不得顺手摸摸�
   assert.equal(petElement.classList.contains("happy"), false, "长距拖动不得触发摸摸头");
   assert.equal(pet.ids.fx.children.length, 0, "长距拖动不得飘 ❤");
   assert.equal(pet.ids.bubble.textContent, lineBefore, "长距拖动不得换互动台词");
-  assert.equal(pet.ids["skin-menu"].hidden, true, "长距拖动不得弹菜单");
+  assert.equal(pet.calls.showMenu.length, 0, "长距拖动不得弹菜单");
   assert.equal(petElement.classList.contains("dropped"), true, "松手仍要有掉落反馈");
 });
 

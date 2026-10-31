@@ -81,11 +81,19 @@ impl ImeBridge {
         let response = match self.state.dispatch(&request) {
             StateAction::Respond(response) => response,
             StateAction::StartTurn { immediate, turn } => {
-                let capsule = self.client.issue_origin(
-                    origin.as_ref(),
-                    &request,
-                    turn.prompt.as_deref().unwrap_or(""),
-                );
+                let capsule = if turn.agent_task {
+                    self.client.issue_task_origin(
+                        origin.as_ref(),
+                        &request,
+                        turn.prompt.as_deref().unwrap_or(""),
+                    )
+                } else {
+                    self.client.issue_origin(
+                        origin.as_ref(),
+                        &request,
+                        turn.prompt.as_deref().unwrap_or(""),
+                    )
+                };
                 tokio::spawn(run_turn_task_with_capsule(
                     Arc::clone(&self.state),
                     Arc::clone(&self.client),
@@ -110,6 +118,28 @@ impl ImeBridge {
         }
     }
 
+    async fn open_session_ui(&self, ime_session: &str, url: &str) {
+        if std::env::var("OWO_GATEWAY_DESKTOP_LINK").as_deref() == Ok("1") {
+            if let Some(session) = self.sessions.lock().await.get(ime_session) {
+                println!(
+                    "OWO_DESKTOP_OPEN_SESSION {}",
+                    serde_json::json!({"session_id":session})
+                );
+            }
+        } else {
+            open_in_browser(url);
+        }
+    }
+    async fn session_url(&self, ime_session: &str) -> String {
+        let mut url = match reqwest::Url::parse(&self.web_url) {
+            Ok(url) => url,
+            Err(_) => return self.web_url.clone(),
+        };
+        if let Some(session) = self.sessions.lock().await.get(ime_session) {
+            url.query_pairs_mut().append_pair("session", session);
+        }
+        url.to_string()
+    }
     /// 执行命令动作（真实 IO）。
     async fn run_command(
         &self,
@@ -149,9 +179,9 @@ impl ImeBridge {
                 }
             }
             CommandAction::OpenConfirmUi { request_id } => {
-                let url = self.web_url.clone();
+                let url = self.session_url(ime_session_id).await;
                 info!(%request_id, %url, "打开 Agent 可信界面");
-                open_in_browser(&url);
+                self.open_session_ui(ime_session_id, &url).await;
                 let mut response = commands::base_response(request, Status::WaitingForConfirmation);
                 response.message = format!("请在 Agent 可信界面完成确认（已请求打开 {url}）");
                 response.can_cancel = true;
@@ -159,9 +189,9 @@ impl ImeBridge {
                     .complete_command(ime_session_id, request, response)
             }
             CommandAction::OpenWorkbench => {
-                let url = self.web_url.clone();
+                let url = self.session_url(ime_session_id).await;
                 info!(%url, "打开 Agent 工作台");
-                open_in_browser(&url);
+                self.open_session_ui(ime_session_id, &url).await;
                 let mut response = commands::base_response(request, Status::Completed);
                 response.message = format!("已打开 Agent 工作台，请在其中继续处理任务（{url}）");
                 self.state
@@ -208,21 +238,42 @@ async fn run_turn_task_with_capsule(
     let request = turn.request.clone();
 
     let outcome = match capsule {
-        Ok(capsule) => execute_turn(&client, &sessions, &workspace, &turn, capsule).await,
+        Ok(capsule) => {
+            if turn.agent_task {
+                execute_agent_task(&client, &sessions, &turn, capsule).await
+            } else {
+                execute_turn(&client, &sessions, &workspace, &turn, capsule).await
+            }
+        }
         Err(error) => Err(error),
     };
     let (mut final_response, insert_text) = match outcome {
         Ok(accumulator) => build_final_response(&request, &accumulator),
-        Err(_) => {
-            warn!(session = %ime_session_id, "IME expression request failed; acceptance may be unknown");
-            (
-                commands::error_response(
-                    &request,
-                    "expression_failed",
-                    "表达请求失败，上游受理状态可能未知；不会自动重发，请在 Agent 界面检查",
+        Err(error) => {
+            warn!(session = %ime_session_id, "IME request failed; no automatic resubmission");
+            let (code, message) = match &error {
+                BridgeError::Status { status: 403, body }
+                    if body.contains("ime/access_disabled") =>
+                {
+                    (
+                        "ime_disabled",
+                        "输入法任务调用已关闭，请在 Agent Desktop 的输入法设置中开启",
+                    )
+                }
+                BridgeError::Status { status: 400, body } if body.contains("ime/workspace") => (
+                    "ime_workspace_unavailable",
+                    "任务工作目录不可用，请在输入法设置中重新选择",
                 ),
-                None,
-            )
+                BridgeError::Status { status: 403, .. } => (
+                    "ime_origin_rejected",
+                    "连接验证未通过，请在 Agent Desktop 中重新连接输入法",
+                ),
+                _ => (
+                    "agent_request_failed",
+                    "请求失败或连接中断，任务受理状态可能未知；不会自动重发，请在 Agent 会话中检查",
+                ),
+            };
+            (commands::error_response(&request, code, message), None)
         }
     };
     let mut actions = HashMap::new();
@@ -230,9 +281,121 @@ async fn run_turn_task_with_capsule(
         let mut command = commands::insert_reply_command(&text);
         commands::attach_commit_effect(&mut command, &request, &text);
         actions.insert(command.id.clone(), CommandAction::InsertReply { text });
-        final_response.commands = vec![command];
+        final_response.commands.push(command);
+    }
+    if turn.agent_task && sessions.lock().await.contains_key(&ime_session_id) {
+        let mut command = commands::command(
+            "open-agent",
+            "查看 Agent 任务",
+            "agent.open",
+            crate::protocol::RiskLevel::None,
+        );
+        command.preview = "查看任务进度、审批与执行结果".into();
+        actions.insert(command.id.clone(), CommandAction::OpenWorkbench);
+        final_response.commands.push(command);
     }
     let _ = state.complete_expression(&ime_session_id, &turn.slot, final_response, actions);
+}
+
+/// Submit once; subsequent network activity only reads durable events.
+async fn execute_agent_task(
+    client: &OwoHttpClient,
+    sessions: &Mutex<HashMap<String, String>>,
+    turn: &StartTurnRequest,
+    capsule: Option<owo_agent_protocol::ExpressionOriginCapsule>,
+) -> Result<TurnAccumulator, BridgeError> {
+    use owo_agent_protocol::{SseEvent, TurnReplayState};
+    let prompt = turn
+        .prompt
+        .as_deref()
+        .ok_or_else(|| BridgeError::Protocol("missing task prompt".into()))?;
+    let capsule = capsule
+        .ok_or_else(|| BridgeError::Protocol("authenticated task origin required".into()))?;
+    // Do not drop admission on cancellation: the receipt is needed to abort an accepted task.
+    let receipt = client.submit_ime_task(prompt, capsule).await?;
+    sessions
+        .lock()
+        .await
+        .insert(turn.session_id.clone(), receipt.session_id.clone());
+    let mut result = TurnAccumulator::default();
+    let mut after = 0;
+    loop {
+        let page = tokio::select! {
+            biased;
+            _ = turn.slot.detached() => { result.backgrounded = true; return Ok(result); },
+            _ = turn.slot.cancelled() => {
+                client.abort_turn(&receipt.session_id, &receipt.turn_id).await?;
+                result.cancelled = true;
+                return Ok(result);
+            },
+            page = client.replay_turn(&receipt.session_id, &receipt.turn_id, after) => page?,
+        };
+        for record in page.events {
+            if record.turn_id != receipt.turn_id || record.seq <= after {
+                continue;
+            }
+            after = record.seq;
+            match record.payload {
+                SseEvent::Final { text } => result.final_text = text,
+                SseEvent::ToolUse { .. } => result.tools_used += 1,
+                SseEvent::PermissionRequest {
+                    request_id,
+                    tool,
+                    reason,
+                    ..
+                } => {
+                    result.permission = Some(PermissionNotice {
+                        request_id,
+                        tool,
+                        reason,
+                    });
+                }
+                SseEvent::UserQuestion {
+                    question_id,
+                    question,
+                    ..
+                } => {
+                    result.permission = Some(PermissionNotice {
+                        request_id: question_id,
+                        tool: "需要补充信息".into(),
+                        reason: question,
+                    });
+                }
+                SseEvent::PermissionResolved { request_id, .. } => {
+                    if result
+                        .permission
+                        .as_ref()
+                        .is_some_and(|n| n.request_id == request_id)
+                    {
+                        result.permission = None;
+                    }
+                }
+                SseEvent::UserAnswered { .. } => result.permission = None,
+                SseEvent::TurnFailed { message, .. } => result.failed = Some(message),
+                _ => {}
+            }
+        }
+        {
+            let mut slot = turn.slot.lock();
+            slot.tools_used = result.tools_used;
+            slot.permission_waiting = result.permission.clone();
+        }
+        if !page.active {
+            if page.state == TurnReplayState::Interrupted {
+                result.failed = Some("Agent 已中断，请在桌面查看与恢复任务".into());
+            }
+            return Ok(result);
+        }
+        tokio::select! {
+            biased;
+            _ = turn.slot.detached() => { result.backgrounded = true; return Ok(result); },
+            _ = turn.slot.cancelled() => {
+                client.abort_turn(&receipt.session_id, &receipt.turn_id).await?;
+                result.cancelled = true; return Ok(result);
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+        }
+    }
 }
 
 /// Execute one stateless expression request; cancellation discards its response.
@@ -263,6 +426,7 @@ pub struct TurnAccumulator {
     pub tools_used: usize,
     pub permission: Option<PermissionNotice>,
     pub cancelled: bool,
+    pub backgrounded: bool,
 }
 
 /// 由累积器构造最终 IME 响应。
@@ -272,6 +436,11 @@ fn build_final_response(
     request: &AgentIpcRequest,
     accumulator: &TurnAccumulator,
 ) -> (AgentIpcResponse, Option<String>) {
+    if accumulator.backgrounded {
+        let mut response = commands::base_response(request, Status::Completed);
+        response.message = "任务已在 Agent 工作台继续执行".into();
+        return (response, None);
+    }
     if accumulator.cancelled {
         let mut response = commands::base_response(request, Status::Cancelled);
         response.message = "任务已取消".to_string();
@@ -501,5 +670,158 @@ mod tests {
         let prompt = compose_prompt(&request);
         // 800 字符上限 + 省略号：总长必须受控。
         assert!(prompt.chars().count() < 1200, "上下文必须限长");
+    }
+    #[tokio::test]
+    async fn agent_task_replays_progress_opens_session_and_cancels_exact_turn() {
+        use axum::{
+            extract::{Query, State},
+            routing::{get, post},
+            Json, Router,
+        };
+        use serde_json::{json, Value};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Default)]
+        struct Probe {
+            submitted: AtomicUsize,
+            phase: AtomicUsize,
+            aborted: AtomicUsize,
+        }
+        async fn submit(State(p): State<Arc<Probe>>, Json(body): Json<Value>) -> Json<Value> {
+            assert_eq!(body["prompt"], "create a fixture file");
+            assert_eq!(
+                body["origin_capsule"]["payload"]["scope"]["mode"],
+                "agent_task"
+            );
+            p.submitted.fetch_add(1, Ordering::SeqCst);
+            Json(
+                json!({"session_id":"11111111-1111-4111-8111-111111111111","turn_id":"22222222-2222-4222-8222-222222222222","origin_verified":true,"status":"accepted"}),
+            )
+        }
+        async fn events(
+            State(p): State<Arc<Probe>>,
+            Query(query): Query<HashMap<String, String>>,
+        ) -> Json<Value> {
+            assert_eq!(query["turn_id"], "22222222-2222-4222-8222-222222222222");
+            let after = query["after_seq"].parse::<u64>().unwrap();
+            let mut events = Vec::new();
+            let record = |seq, payload| json!({"session_id":"11111111-1111-4111-8111-111111111111","turn_id":"22222222-2222-4222-8222-222222222222","seq":seq,"created_at":"fixture","payload":payload});
+            if after < 1 {
+                events.push(record(1,json!({"type":"permission_request","request_id":"fixture-approval","tool":"write_file","args":{},"reason":"write fixture"})));
+            }
+            let done = p.phase.load(Ordering::SeqCst) > 0;
+            if done && after < 2 {
+                events.push(record(2,json!({"type":"permission_resolved","request_id":"fixture-approval","source":"user","allowed":true})));
+            }
+            if done && after < 3 {
+                events.push(record(
+                    3,
+                    json!({"type":"final","text":"fixture completed"}),
+                ));
+            }
+            Json(
+                json!({"events":events,"active":!done,"state":if done {"completed"}else{"active"},"next_after_seq":if done {3}else{1}}),
+            )
+        }
+        async fn abort(State(p): State<Arc<Probe>>, Json(body): Json<Value>) -> Json<Value> {
+            assert_eq!(body["turn_id"], "22222222-2222-4222-8222-222222222222");
+            p.aborted.fetch_add(1, Ordering::SeqCst);
+            Json(json!({"ok":true}))
+        }
+        for cancelled in [false, true] {
+            let probe = Arc::new(Probe::default());
+            let app = Router::new()
+                .route("/ime/tasks", post(submit))
+                .route("/session/{id}/turn/events", get(events))
+                .route("/session/{id}/abort", post(abort))
+                .with_state(probe.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let file =
+                std::env::temp_dir().join(format!("owo-task-token-{}", uuid::Uuid::new_v4()));
+            std::fs::write(&file, "fixture-token").unwrap();
+            let client = Arc::new(OwoHttpClient::new(base, &file).unwrap());
+            let state = Arc::new(ImeState::new(std::time::Duration::from_secs(60)));
+            let mut request = base_request();
+            request.input.selected_text = "create a fixture file".into();
+            request.user_input = "create a fixture file".into();
+            let draft = match state.dispatch(&request) {
+                StateAction::Respond(r) => r,
+                _ => panic!("draft"),
+            };
+            request.action = crate::protocol::Action::Select;
+            request.command_id = "task-commit".into();
+            request.task_revision = draft.task.revision;
+            request.idempotency_key = "task-fixture-commit".into();
+            let mut turn = match state.dispatch(&request) {
+                StateAction::StartTurn { turn, .. } => turn,
+                _ => panic!("commit"),
+            };
+            turn.prompt = Some("create a fixture file".into());
+            assert!(turn.agent_task);
+            let pending = turn.slot.clone();
+            let sessions = Arc::new(Mutex::new(HashMap::new()));
+            let fixture: Value = serde_json::from_str(include_str!(
+                "../../../../contracts/expression-origin/synthetic-golden.json"
+            ))
+            .unwrap();
+            let mut capsule: owo_agent_protocol::ExpressionOriginCapsule =
+                serde_json::from_value(fixture["capsule"].clone()).unwrap();
+            capsule.payload.scope.mode = "agent_task".into();
+            let job = tokio::spawn(run_turn_task_with_capsule(
+                state.clone(),
+                client,
+                sessions.clone(),
+                String::new(),
+                turn,
+                Ok(Some(capsule)),
+            ));
+            for _ in 0..100 {
+                if pending.lock().permission_waiting.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                pending.lock().permission_waiting.as_ref().unwrap().tool,
+                "write_file"
+            );
+            let mut poll = request.clone();
+            poll.action = crate::protocol::Action::Poll;
+            poll.command_id.clear();
+            poll.idempotency_key = "poll-fixture".into();
+            let waiting = match state.dispatch(&poll) {
+                StateAction::Respond(r) => r,
+                _ => panic!("poll"),
+            };
+            assert_eq!(waiting.status, Status::WaitingForConfirmation);
+            assert!(waiting
+                .commands
+                .iter()
+                .all(|c| c.category != "permission.allow"));
+            if cancelled {
+                pending.request_cancel();
+            } else {
+                probe.phase.store(1, Ordering::SeqCst);
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), job)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(probe.submitted.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.aborted.load(Ordering::SeqCst), usize::from(cancelled));
+            assert!(pending.lock().done);
+            let slot = pending.lock();
+            let response = slot.response.as_ref().unwrap();
+            if cancelled {
+                assert_eq!(response.status, Status::Cancelled);
+            } else {
+                assert_eq!(response.message, "fixture completed");
+                assert!(response.commands.iter().any(|c| c.id == "open-agent"));
+            }
+            drop(slot);
+            server.abort();
+            std::fs::remove_file(file).unwrap();
+        }
     }
 }

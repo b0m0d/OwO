@@ -1,0 +1,405 @@
+/* OwO Agent 工作台 · 模型菜单与思考强度（单面板）
+   从 codex-refine.css 抽出与模型菜单/触发按钮相关的部分，供工作台外壳单独加载：
+   变量、模型芯片、单面板菜单（搜索 / 分组 / 底部档位 / 管理模型）。
+   独立成文件是因为该外壳有自己的整体视觉层，不宜整份加载 codex-refine.css。 */
+/* ---------- 变量 ---------- */
+:root {
+  /* 原生窗口按钮覆盖层高度 = 顶栏高度；experience/owo-brand 用这个变量算网格行。 */
+  --titlebar-h: 44px;
+  --refine-canvas: #f5f5f4;
+  --refine-panel: #ffffff;
+  --refine-panel-2: #fafafa;
+  --refine-line: rgba(0, 0, 0, .06);
+  --refine-line-strong: rgba(0, 0, 0, .10);
+  --refine-ink: #1f1f1f;
+  --refine-ink-2: #5f5f5f;
+  --refine-ink-3: #8c8c8c;
+  --refine-hover: rgba(0, 0, 0, .045);
+  --refine-press: rgba(0, 0, 0, .07);
+  --refine-primary: #0f9988;
+  --refine-primary-hover: #0c8577;
+  --refine-primary-soft: rgba(15, 153, 136, .12);
+  --refine-ease: cubic-bezier(.2, .7, .2, 1);
+  --refine-radius: 12px;
+  /* 兼容 workbench-home 的面色变量：chrome/rail 落到画布，canvas 落到面板 */
+  --wh-chrome: var(--refine-canvas);
+  --wh-rail: var(--refine-canvas);
+  --wh-canvas: var(--refine-panel);
+  --wh-raise: var(--refine-panel);
+  --wh-line: var(--refine-line);
+  --wh-line-soft: var(--refine-line);
+  --wh-ink: var(--refine-ink);
+  --wh-ink-2: var(--refine-ink-2);
+  --wh-ink-3: var(--refine-ink-3);
+  --wh-hover: var(--refine-hover);
+  --wh-press: var(--refine-press);
+  --wh-input: var(--refine-panel);
+}
+body.dark-theme {
+  --refine-canvas: #1a1a1a;
+  --refine-panel: #202020;
+  --refine-panel-2: #252525;
+  --refine-line: rgba(255, 255, 255, .07);
+  --refine-line-strong: rgba(255, 255, 255, .12);
+  --refine-ink: #ececec;
+  --refine-ink-2: #a9a9a9;
+  --refine-ink-3: #7d7d7d;
+  --refine-hover: rgba(255, 255, 255, .06);
+  --refine-press: rgba(255, 255, 255, .09);
+  --refine-primary: #23b3a0;
+  --refine-primary-hover: #2cc4af;
+  --refine-primary-soft: rgba(35, 179, 160, .16);
+  --wh-chrome: var(--refine-canvas);
+  --wh-rail: var(--refine-canvas);
+  --wh-canvas: var(--refine-panel);
+  --wh-raise: #262626;
+  --wh-line: var(--refine-line);
+  --wh-line-soft: var(--refine-line);
+  --wh-ink: var(--refine-ink);
+  --wh-ink-2: var(--refine-ink-2);
+  --wh-ink-3: var(--refine-ink-3);
+  --wh-hover: var(--refine-hover);
+  --wh-press: var(--refine-press);
+  --wh-input: var(--refine-panel-2);
+
+/* ---------- 模型芯片 ---------- */
+.codex-composer-right #modelChip {
+  max-width: 220px !important;
+  height: 30px !important;
+  padding: 0 7px !important;
+  font-size: 12px !important;
+}
+/* 「深度思考」原先是黑白反色小牌，抢过发送键的注意力，改为低饱和主色标签 */
+body.empty-conversation #chatForm#chatForm #modelChip .reasoner-badge,
+body #chatForm#chatForm #modelChip .reasoner-badge {
+  padding: 1px 5px !important;
+  border: 0 !important;
+  border-radius: 5px !important;
+  color: var(--refine-primary) !important;
+  background: var(--refine-primary-soft) !important;
+  font-size: 10.5px !important;
+  font-weight: 500 !important;
+}
+.codex-composer-right #effortChip {
+  height: 30px !important;
+  padding: 0 6px !important;
+  color: var(--refine-ink-3) !important;
+  font-size: 11.5px !important;
+
+/* ---------- 单面板菜单 ---------- */
+/* ---------- 11. 模型菜单：单面板（模型 + 思考强度） ----------
+   2026-11-01：原「左列表 + 右档位浮层」改成同一个面板：
+   标题 / 搜索 / 默认项 / 服务商分组 / 底部分段档位 / 管理模型。
+   行内不再重复档位文字和「›」，选中只用一枚勾。 */
+
+.composer-menu.composer-menu-model {
+  width: min(332px, calc(100vw - 24px)) !important;
+  max-width: min(332px, calc(100vw - 24px)) !important;
+  max-height: min(560px, calc(100vh - 24px)) !important;
+  padding: 10px !important;
+  border: 1px solid var(--refine-line-strong) !important;
+  border-radius: 12px !important;
+  background: var(--refine-panel) !important;
+  box-shadow: 0 16px 40px -18px rgba(0, 0, 0, .32), 0 2px 10px rgba(0, 0, 0, .06) !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.composer-menu-model .composer-menu-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 6px 8px !important;
+}
+.composer-menu-model .composer-menu-title {
+  padding: 0 !important;
+  margin: 0 !important;
+  color: var(--refine-ink) !important;
+  font-size: 13.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: -.01em !important;
+}
+.composer-menu-model .composer-model-scope {
+  margin: 0 !important;
+  color: var(--refine-ink-3) !important;
+  font-size: 11px !important;
+  white-space: nowrap;
+}
+.composer-menu-model .composer-model-warning {
+  margin: 0 0 8px !important;
+  padding: 7px 10px !important;
+  border: 1px solid color-mix(in srgb, #d9a400 32%, var(--refine-line)) !important;
+  border-radius: 8px !important;
+  background: color-mix(in srgb, #d9a400 8%, var(--refine-panel)) !important;
+}
+
+/* 搜索框：真实放大镜图标 + 与列表同字号；模型少于 6 个时整块不渲染。 */
+.composer-menu-model .composer-model-search-wrap {
+  position: relative;
+  display: block;
+  margin: 0 2px 6px !important;
+  padding: 0 !important;
+  background: transparent !important;
+}
+.composer-menu-model .composer-model-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--refine-ink-3);
+  pointer-events: none;
+}
+.composer-menu-model .composer-model-search {
+  width: 100%;
+  height: 30px !important;
+  padding: 0 10px 0 30px !important;
+  border: 1px solid var(--refine-line) !important;
+  border-radius: 8px !important;
+  background-color: var(--refine-panel-2) !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  color: var(--refine-ink) !important;
+  font-size: 12.5px !important;
+}
+.composer-menu-model .composer-model-search:focus {
+  border-color: color-mix(in srgb, var(--refine-primary) 45%, var(--refine-line)) !important;
+  background-color: var(--refine-panel) !important;
+  box-shadow: 0 0 0 3px var(--refine-primary-soft) !important;
+}
+.composer-menu-model .composer-model-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 306px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 2px 2px;
+  margin: 0 -2px;
+}
+.composer-menu-model .composer-model-section-default {
+  padding-bottom: 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--refine-line);
+}
+.composer-menu-model .composer-menu-group {
+  padding: 8px 8px 3px !important;
+  color: var(--refine-ink-3) !important;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  letter-spacing: .08em !important;
+  text-transform: uppercase !important;
+}
+.composer-menu-model .composer-menu-item {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px !important;
+  padding: 0 8px !important;
+  border-radius: 8px !important;
+  color: var(--refine-ink) !important;
+  font-size: 14px !important;
+  font-weight: 400 !important;
+  text-align: left;
+  box-shadow: none !important;
+}
+.composer-menu-model .composer-menu-item:hover { background: var(--refine-hover) !important; }
+/* 选中态只留勾：不再有左侧竖条和灰底，和 hover 区分开。 */
+.composer-menu-model .composer-menu-item.active,
+.composer-menu-model .composer-menu-item.active:hover {
+  color: var(--refine-ink) !important;
+  background: transparent !important;
+  font-weight: 400 !important;
+  box-shadow: none !important;
+}
+.composer-menu-model .composer-menu-item.active:hover { background: var(--refine-hover) !important; }
+.composer-menu-model .composer-menu-item:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--refine-primary) 55%, transparent);
+  outline-offset: -2px;
+}
+/* 鼠标打开时脚本把焦点放到选中行，但不该出现键盘焦点环。 */
+.composer-menu-model.is-pointer-open .composer-menu-item:focus { outline: none !important; }
+.composer-menu-model .composer-menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  font-size: 14px;
+  font-weight: 400;
+}
+.composer-menu-model .composer-model-default-name { color: var(--refine-ink-2); font-weight: 400; }
+.composer-menu-model .composer-menu-check {
+  position: static !important;
+  inset: auto !important;
+  display: grid !important;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  transform: none !important;
+  color: var(--refine-primary) !important;
+  font-size: 12px;
+  font-weight: 600;
+}
+/* 独立连接：从「独立连接」胶囊收成一枚链条图标，文字放到 title 里。 */
+.composer-menu-model .composer-model-custom {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--refine-ink-3);
+  font-size: 0;
+  line-height: 1;
+}
+.composer-menu-model .composer-model-custom svg { display: block; }
+.composer-menu-model .composer-model-empty {
+  padding: 16px 8px !important;
+  color: var(--refine-ink-3) !important;
+  font-size: 12.5px !important;
+  text-align: center;
+}
+
+/* 底部思考强度：同一面板内的分段控件，只描述当前档位一行。 */
+.composer-menu-model .composer-model-effort {
+  position: static !important;
+  inset: auto !important;
+  width: auto !important;
+  margin: 6px -2px 0 !important;
+  padding: 8px 6px 4px !important;
+  border: 0 !important;
+  border-top: 1px solid var(--refine-line) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  display: block !important;
+}
+.composer-menu-model .composer-model-effort[hidden] { display: none !important; }
+.composer-menu-model .composer-effort-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 6px !important;
+}
+.composer-menu-model .composer-effort-title {
+  color: var(--refine-ink-2);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+.composer-menu-model .composer-effort-segments {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--refine-panel-2);
+}
+body.dark-theme .composer-menu-model .composer-effort-segments { background: rgba(255, 255, 255, .045); }
+.composer-menu-model .composer-effort-segment {
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--refine-ink-2);
+  background: transparent;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color .12s var(--refine-ease), color .12s var(--refine-ease),
+    box-shadow .12s var(--refine-ease);
+}
+.composer-menu-model .composer-effort-segment:hover:not(:disabled) {
+  color: var(--refine-ink);
+  background: var(--refine-hover);
+}
+.composer-menu-model .composer-effort-segment.is-active {
+  color: var(--refine-ink);
+  background: var(--refine-panel);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .10), 0 0 0 1px var(--refine-line);
+}
+body.dark-theme .composer-menu-model .composer-effort-segment.is-active {
+  background: #2e2e2e;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .40), 0 0 0 1px rgba(255, 255, 255, .06);
+}
+.composer-menu-model .composer-effort-segment:disabled { opacity: .38; cursor: default; }
+.composer-menu-model .composer-effort-segment:focus-visible {
+  outline: 2px solid var(--refine-primary);
+  outline-offset: 1px;
+}
+.composer-effort-bars {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 10px;
+}
+.composer-effort-bars i {
+  display: block;
+  width: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: .28;
+}
+.composer-effort-bars i:nth-child(1) { height: 3px; }
+.composer-effort-bars i:nth-child(2) { height: 5px; }
+.composer-effort-bars i:nth-child(3) { height: 7px; }
+.composer-effort-bars i:nth-child(4) { height: 9px; }
+.composer-effort-segment[data-effort="minimal"] .composer-effort-bars i:nth-child(-n+1),
+.composer-effort-segment[data-effort="low"] .composer-effort-bars i:nth-child(-n+2),
+.composer-effort-segment[data-effort="medium"] .composer-effort-bars i:nth-child(-n+3),
+.composer-effort-segment[data-effort="high"] .composer-effort-bars i:nth-child(-n+4) { opacity: 1; }
+.composer-menu-model .composer-effort-desc {
+  min-height: 15px;
+  padding: 6px 2px 0;
+  color: var(--refine-ink-3);
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+.composer-menu-model .composer-menu-foot {
+  position: static !important;
+  display: flex !important;
+  justify-content: flex-end !important;
+  margin: 6px 0 0 !important;
+  padding: 6px 2px 0 !important;
+  border-top: 1px solid var(--refine-line) !important;
+  background: transparent !important;
+}
+.composer-menu-model .composer-menu-link {
+  width: auto !important;
+  height: 26px !important;
+  padding: 0 8px !important;
+  border: 0 !important;
+  border-radius: 6px !important;
+  color: var(--refine-ink-2) !important;
+  background: transparent !important;
+  font-size: 11.5px !important;
+}
+.composer-menu-model .composer-menu-link:hover {
+  color: var(--refine-ink) !important;
+  background: var(--refine-hover) !important;
+}
+
+/* 触发按钮：模型名 + 信号条，档位不再写成「· 中」，也不再加绿色徽标。 */
+#modelChip { gap: 6px; }
+#modelChip .composer-effort-bars { color: var(--refine-ink-2); }
+#modelChip[data-effort="minimal"] .composer-effort-bars i:nth-child(-n+1),
+#modelChip[data-effort="low"] .composer-effort-bars i:nth-child(-n+2),
+#modelChip[data-effort="medium"] .composer-effort-bars i:nth-child(-n+3),
+#modelChip[data-effort="high"] .composer-effort-bars i:nth-child(-n+4) { opacity: 1; }
+#modelChip .composer-model-chevron { opacity: .7; }
+
+/* 档位已并入模型菜单：旧的独立档位按钮只保留 DOM（脚本仍引用），不再显示。 */
+#effortChip { display: none !important; }

@@ -29,7 +29,7 @@ test("completion status remains owned by host facts, not the presentation layer"
 });
 
 test("administrative identifiers and repeated raw UI events have readable summaries", () => {
-  assert.equal(details.presentation({title:"会话 d52b8d28"}).title,"新的任务");
+  assert.equal(details.presentation({title:"会话 d52b8d28"}).title,"新对话");
   assert.equal(details.presentation({title:"会话 d52b8d28",request:"整理项目资料\n第二行"}).title,"整理项目资料");
   assert.equal(details.describeActions(["ui_change","ui_change","focus","ui_change"]),"界面发生变化、切换了当前应用");
   assert.equal(details.describeActions([]),"暂未记录近期活动");

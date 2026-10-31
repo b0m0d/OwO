@@ -15,6 +15,7 @@
   <link rel="stylesheet" href="sidebar-rail.css">
   <link rel="stylesheet" href="workbench-pages.css">
   <link rel="stylesheet" href="team-workbench.css">
+  <link rel="stylesheet" href="codex-model-menu.css?v=20261101-1">
 </head>
 <body>
   <main id="setupRoot" class="setup-root" hidden aria-label="首次配置"></main>
@@ -951,7 +952,9 @@
           </button>
           <button type="button" id="modelChip" class="codex-model-chip" title="选择模型">
             <span id="modelChipText">默认模型</span>
-            <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
+            <!-- 思考强度改用信号条表示，档位本身在模型菜单底部的分段里调整。 -->
+            <span class="composer-effort-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+            <svg class="composer-model-chevron" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5 8 9.5l3-3"/></svg>
           </button>
           <button type="button" id="effortChip" class="codex-model-chip" title="推理档位（思考强度）">
             <span id="effortChipText">推理默认</span>

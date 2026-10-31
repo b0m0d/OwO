@@ -14,10 +14,20 @@ body { display: grid; place-items: end center; padding: 8px; }
   outline: 0;
   background: transparent;
   cursor: grab;
+  pointer-events: none;
   filter: drop-shadow(0 10px 10px rgba(0, 0, 0, .3));
   animation: float 3s ease-in-out infinite;
 }
 .pet:active { cursor: grabbing; }
+.pet-hitbox {
+  position: absolute;
+  z-index: 7;
+  left: 43px;
+  top: 78px;
+  width: 120px;
+  height: 120px;
+  pointer-events: auto;
+}
 .avatar {
   position: absolute;
   z-index: 2;
@@ -31,6 +41,10 @@ body { display: grid; place-items: end center; padding: 8px; }
 }
 /* 静态图皮肤未就绪（src 为空）时不要露出破图图标 */
 .avatar img[src=""] { display: none; }
+/* 3D 皮肤使用透明 WebGL 画布；尺寸和精灵图保持一致，方便两种形象互换。 */
+.avatar canvas#pet-avatar-3d { display: none; width: 200px; height: 202px; pointer-events: none; }
+.avatar.is-model canvas#pet-avatar-3d { display: block; }
+.avatar.is-model { background: transparent !important; }
 /* 帧动画皮肤：容器自身作画布，JS 逐帧移动 background-position。
    petdex spritesheet 固定 8 列，行数（9/11）由 JS 按图片实际高度探测。 */
 .avatar.is-anim {
@@ -103,50 +117,6 @@ body { display: grid; place-items: end center; padding: 8px; }
 }
 .pet:hover .avatar { filter: brightness(1.05); }
 
-.skin-menu {
-  position: fixed;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 150px;
-  max-width: 196px;
-  max-height: 190px;
-  padding: 6px;
-  overflow-y: auto;
-  background: rgba(32, 32, 32, .95);
-  border: 1px solid rgba(255, 255, 255, .1);
-  border-radius: 10px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, .45);
-}
-.skin-menu[hidden] { display: none; }
-.skin-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 5px 8px;
-  color: #ececf0;
-  font-size: 12px;
-  background: transparent;
-  border: 0;
-  border-radius: var(--radius-sm, 6px);
-  cursor: pointer;
-}
-.skin-item:hover { background: rgba(255, 255, 255, .07); }
-.skin-item.is-active { background: rgba(76, 194, 255, .14); }
-.skin-item img { flex: 0 0 auto; width: 28px; height: 28px; object-fit: contain; image-rendering: pixelated; }
-/* spritesheet 缩略：div 背景取 idle 行首列
-   （background-size/position 由 JS 按后端网格信息内联覆盖） */
-.skin-item .thumb-anim {
-  flex: 0 0 auto;
-  width: 28px;
-  height: 30px;
-  background-repeat: no-repeat;
-  border-radius: 4px;
-}
-.skin-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
 /* ---- 互动层：摸摸头爱心 ---- */
 
 .fx-layer {
@@ -177,13 +147,6 @@ body { display: grid; place-items: end center; padding: 8px; }
   100% { transform: none; }
 }
 
-/* A8-2 点击操作菜单（进度控制台）：信息行 + 允许/拒绝强调色 */
-.menu-head { padding: 4px 8px 6px; color: #a9a9b3; font-size: 11px; line-height: 1.4; border-bottom: 1px solid rgba(255, 255, 255, .08); margin-bottom: 3px; word-break: break-all; }
-/* 分区小标题：菜单现在是"进度控制台 + 换形象"，需要一处轻分隔的视觉分节。 */
-.menu-head.menu-sub { margin-top: 4px; padding-top: 6px; border-bottom: 0; border-top: 1px solid rgba(255, 255, 255, .08); color: #7a7a85; }
-.skin-item.is-allow { color: #7ee787; }
-.skin-item.is-deny { color: #ffa3a4; }
-
 /* 无障碍：系统开启"减少动态效果"时停掉漂浮/光环/掉落弹跳，但保留状态配色
    （alert 的脉冲是注意力通道，降级为静态强调色而非完全去掉）。 */
 @media (prefers-reduced-motion: reduce) {
@@ -213,3 +176,117 @@ body:has(.feed-eating) #feed-food{animation:feed-food .9s cubic-bezier(.4,0,.2,1
 /* Commander: stable stance while reading/assigning; keep explicit feed and touch gestures. */
 .pet.commander { animation: none; }
 .pet.commander.speaking:not(.feed-eating):not(.happy):not(.dropped) .avatar { animation: none; }
+
+.pet.idle .bubble { display: none; }
+
+/* ---- 聊天面板（2026-10-31）：桌宠页内的轻量对话 ---- */
+.chat-panel {
+  position: fixed;
+  z-index: 30;
+  inset: 6px;
+  display: flex;
+  flex-direction: column;
+  width: auto;
+  height: auto;
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid rgba(13, 13, 13, .1);
+  border-radius: 14px;
+  box-shadow: 0 16px 40px -16px rgba(16, 32, 40, .3), 0 2px 8px rgba(16, 32, 40, .08);
+  color: #0d0d0d;
+  font-size: 12px;
+}
+.chat-panel[hidden] { display: none; }
+/* 聊天时让面板占满桌宠窗口，3D 形象退场，避免面板被 270x290 的窗口裁掉。 */
+#pet { transition: opacity .16s ease; }
+body.chatting #pet { opacity: 0; visibility: hidden; pointer-events: none; }
+.chat-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(13, 13, 13, .07);
+  cursor: grab;
+  user-select: none;
+}
+.chat-panel header:active { cursor: grabbing; }
+.chat-id { display: flex; align-items: center; gap: 6px; }
+.chat-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #6ff0ef, #1fc3cf 58%, #0e93a6);
+  box-shadow: inset 0 -2px 4px rgba(6, 78, 90, .28);
+}
+.chat-panel header strong { font-size: 12px; }
+.chat-panel header button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: -6px -6px -6px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(13, 13, 13, .55);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.chat-panel header button:hover { background: rgba(13, 13, 13, .06); color: #0d0d0d; }
+.chat-panel header button:active { background: rgba(13, 13, 13, .1); }
+.chat-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #ffffff;
+}
+.chat-empty {
+  margin: auto;
+  padding: 0 18px;
+  color: rgba(13, 13, 13, .42);
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: center;
+}
+.chat-line {
+  max-width: 88%;
+  padding: 6px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.chat-line.user {
+  align-self: flex-end;
+  background: #0d0d0d;
+  color: #ffffff;
+  border-bottom-right-radius: 4px;
+}
+.chat-line.assistant {
+  align-self: flex-start;
+  background: rgba(13, 13, 13, .06);
+  color: #0d0d0d;
+  border-bottom-left-radius: 4px;
+}
+.chat-line.error { color: #b3261e; }
+#chat-input {
+  flex: 0 0 auto;
+  height: 34px;
+  margin: 8px;
+  padding: 0 10px;
+  border: 1px solid rgba(13, 13, 13, .12);
+  border-radius: 9px;
+  background: #ffffff;
+  color: #0d0d0d;
+  font-size: 12px;
+  outline: 0;
+}
+#chat-input:focus { border-color: rgba(13, 13, 13, .4); }

@@ -4,10 +4,19 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("owo", {
   pendingFeed: () => ipcRenderer.invoke('pet:feed:pending'),
   onOpenFeed: handler => {const fn=(_event,ref)=>handler(ref);ipcRenderer.on('pet:feed:open-run',fn);return ()=>ipcRenderer.removeListener('pet:feed:open-run',fn);},
+  onImeSession: handler => { const listener = (_event, ref) => handler(ref); ipcRenderer.on("ime:open-session", listener); return () => ipcRenderer.removeListener("ime:open-session", listener); },
+  imeConnection: { status: () => ipcRenderer.invoke("ime:status"), start: () => ipcRenderer.invoke("ime:start"), stop: () => ipcRenderer.invoke("ime:stop") },
   getCoreState: () => ipcRenderer.invoke("core:get"),
   downloadArtifact: id => ipcRenderer.invoke("artifact:download", id),
   teamFiles: { list: input => ipcRenderer.invoke("team:files:list", input), act: input => ipcRenderer.invoke("team:files:act", input) },
   setZoom: factor => ipcRenderer.invoke("view:zoom", factor),
+  setWindowChrome: input => ipcRenderer.invoke("window:chrome", input),
+  setPetVisible: visible => ipcRenderer.invoke("pet:visible", Boolean(visible)),
+  onPetFocusWorkspace: (handler) => {
+    const fn = (_event, workspace) => handler(workspace);
+    ipcRenderer.on("pet:focus-workspace", fn);
+    return () => ipcRenderer.removeListener("pet:focus-workspace", fn);
+  },
   customModels: { list: () => ipcRenderer.invoke("models:list"), upsert: input => ipcRenderer.invoke("models:upsert", input), remove: id => ipcRenderer.invoke("models:remove", { id }), migrate: input => ipcRenderer.invoke("models:migrate", input), probe: input => ipcRenderer.invoke("models:probe", input) },
   restartCore: () => ipcRenderer.invoke("core:restart"),
   readConfig: () => ipcRenderer.invoke("config:read"),
@@ -39,6 +48,11 @@ contextBridge.exposeInMainWorld("petShell", {
   openApprovals: () => ipcRenderer.invoke("pet:feed:approvals"),
   forwardFeed: text => ipcRenderer.invoke("pet:feed:forward",text),
   moveBy: (dx, dy) => ipcRenderer.invoke("pet:actor:move", dx, dy),
+  setIgnoreMouseEvents: ignore => ipcRenderer.invoke("pet:actor:ignore-mouse", Boolean(ignore)),
+  setHover: inside => ipcRenderer.invoke("pet:actor:hover", Boolean(inside)),
+  releaseFocus: () => ipcRenderer.invoke("pet:actor:blur"),
+  setChatFocus: open => ipcRenderer.invoke("pet:actor:chat-focus", Boolean(open)),
+  showMenu: items => ipcRenderer.invoke("pet:actor:menu", items),
   setVisible: (visible) => ipcRenderer.invoke("pet:actor:visible", visible),
   showWorkbench: () => ipcRenderer.invoke("pet:workbench"),
   // 真实可见性 + 归位：桌宠页用心跳对账（见 main.js pet:query 注释）。
@@ -46,6 +60,7 @@ contextBridge.exposeInMainWorld("petShell", {
   resetPosition: () => ipcRenderer.invoke("pet:actor:reset"),
   // 偏好存壳侧文件，不存 localStorage（origin 绑随机端口，见 main.js petPrefPath）。
   getPref: () => ipcRenderer.invoke("pet:pref:get"),
+  chatConnection: model => ipcRenderer.invoke("pet:chat:connection", String(model || "")),
   setPref: (patch) => ipcRenderer.invoke("pet:pref:set", patch),
 });
 

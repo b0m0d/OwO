@@ -1,6 +1,6 @@
 /* The team page prioritizes the user's files and a compact progress summary. */
-#workbenchPanelSection:has([data-panel="workswarm"]) .workbench-panel-rail { display:none; }
-body.tools-open.panel-open #workbenchPanelSection:has([data-panel="workswarm"]) .workbench-panel-layout { grid-template-columns:minmax(0,1fr); }
+#workbenchPanelSection:has(#panelRoot section[data-panel="workswarm"]) .workbench-panel-rail { display:none; }
+body.tools-open.panel-open #workbenchPanelSection:has(#panelRoot section[data-panel="workswarm"]) .workbench-panel-layout { grid-template-columns:minmax(0,1fr); }
 .owo-ws-panel:has(#ws-d-main) .owo-ws-tabs { display:none; }
 .owo-ws-panel:has(#ws-d-main) { max-width:1080px; margin:0 auto; }
 .owo-ws-panel #ws-d-main { gap:16px !important; }
@@ -45,3 +45,12 @@ body.tools-open.panel-open #workbenchPanelSection:has([data-panel="workswarm"]) 
 #panelRoot .team-progress .owo-ws-sumline.hint { display:none; }
 #panelRoot .team-more { margin:0; }
 #panelRoot .team-more > .owo-ws-sec h3 { margin:0; }
+
+/* 最终界面整理覆盖：工作区上下文在对话模式隐藏，避免重复信息。 */
+.composer-context { display: none !important; }
+.composer-key-hint { display: none !important; }
+#chatForm textarea { min-height: 52px !important; padding: 8px 2px !important; }
+#chatForm .prompt-toolbar { margin-top: 2px; }
+.empty-examples { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 16px auto 2px; }
+.empty-examples button { min-height: 32px; padding: 0 12px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; font-size: 12px; cursor: pointer; }
+.empty-examples button:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }

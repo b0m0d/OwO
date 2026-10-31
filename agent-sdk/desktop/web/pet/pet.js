@@ -27,15 +27,25 @@
 
 const $ = (id) => document.getElementById(id);
 const pet = $("pet");
+const petHitbox = $("pet-hitbox");
 const avatar = $("pet-avatar");
 const avatarImg = $("pet-avatar-img");
+const avatar3d = $("pet-avatar-3d");
+const modelRenderer = globalThis.OwoModelRenderer && avatar3d ? globalThis.OwoModelRenderer.create(avatar3d) : null;
 const bubble = $("bubble");
 const fxLayer = $("fx");
-const menu = $("skin-menu");
 
 // 桌宠与 Electron 壳之间的桥（preload 注入）。浏览器直接打开时为 null，
 // 此时桌宠仍可显示状态，只是不能移动/拉起工作台。
 const shellBridge = globalThis.petShell || null;
+
+// 点击/拖动会激活桌宠窗口（Windows 必须这样才能收到 mousedown）。互动一结束就把
+// 键盘交还给用户原来的前台窗口；聊天打开时由主进程忽略，不打断输入。
+function releaseKeyboard() {
+  if (shellBridge && typeof shellBridge.releaseFocus === "function") {
+    Promise.resolve(shellBridge.releaseFocus()).catch(() => {});
+  }
+}
 
 // ---- 帧动画驱动（petdex spritesheet）----
 // 一个状态用 sheet 的某一行循环播放；rAF 按帧时长推进 background-position。
@@ -180,7 +190,7 @@ const DEFAULT_BUBBLES = {
   alert: "需要你",
 };
 
-let config = { images: {}, anims: null, frame: null, bubbles: DEFAULT_BUBBLES };
+let config = { images: {}, anims: null, model: null, frame: null, bubbles: DEFAULT_BUBBLES };
 let currentSkinId = "";
 let skinIndex = { default: "", skins: [] };
 let status = "idle";
@@ -201,6 +211,14 @@ function probeAsset(url) {
   });
 }
 
+function probeModelAsset(url) {
+  const client = window.OwoApi;
+  if (!client || typeof client.resource !== "function") return Promise.resolve(false);
+  return client.resource(url, { cache: "no-store" })
+    .then((response) => response.ok)
+    .catch(() => false);
+}
+
 /// 切换形象：**先确认素材可达再装配**。
 ///
 /// 为什么不直接 applySkin：素材缺失时页面只剩一个气泡、形象凭空消失，用户完全
@@ -208,9 +226,10 @@ function probeAsset(url) {
 /// spritesheet.webp，切过去桌宠看着就像"自己没了"）。宁可不切，也不能切完变空。
 async function switchSkin(entry, silent) {
   const idle = entry.states.idle || {};
-  const file = idle.sheet || idle.image;
+  const file = entry.kind === "gltf" ? entry.model : (idle.sheet || idle.image);
   if (file) {
-    const ok = await probeAsset(`${ASSETS}/${entry.id}/${file}`);
+    const url = `${ASSETS}/${entry.id}/${file}`;
+    const ok = entry.kind === "gltf" ? await probeModelAsset(url) : await probeAsset(url);
     if (!ok) {
       if (!silent) sayTemp("这套形象素材缺失");
       return false;
@@ -282,6 +301,10 @@ function applySkin(entry) {
   config = {
     images,
     anims: Object.keys(anims).length ? anims : null,
+    model: entry.kind === "gltf" && entry.model ? {
+      url: `${ASSETS}/${entry.id}/${entry.model}`,
+      scale: Number(entry.modelScale) || 1.0,
+    } : null,
     frame: entry.frame || null,
     bubbles: entry.bubbles || DEFAULT_BUBBLES,
   };
@@ -299,7 +322,7 @@ async function loadSkinIndex() {
 /// 恢复上次皮肤；偏好里已没有（旧皮肤下架）时回落默认。
 async function restoreSkin() {
   const role = globalThis.OwoPetActor?.role;
-  const bound = new URLSearchParams(globalThis.location?.search || "").get("skin") || { implementer: "petdex-coco", w1: "petdex-coco", reviewer: "petdex-boba" }[role];
+  const bound = new URLSearchParams(globalThis.location?.search || "").get("skin") || "owo-squid";
   if (bound && skinEntry(bound)) return bound;
   const saved = await loadSkinPref();
   if (saved && skinEntry(saved)) return saved;
@@ -311,16 +334,48 @@ globalThis.OwoPetActor = { render, role: new URLSearchParams(globalThis.location
 // The commander reads the brief in place; sprite motion carries its state.
 pet.classList.toggle("commander", ["planner", "lead"].includes(globalThis.OwoPetActor.role));
 
+function fallbackFromModel() {
+  const fallback = skinEntry(skinIndex.default) || skinIndex.skins[0];
+  if (fallback && fallback.id !== currentSkinId) {
+    applySkin(fallback);
+    sayTemp("3D 墨鱼暂不可用，请检查模型资源");
+  } else {
+    sayTemp(modelRenderer ? "3D 墨鱼加载失败" : "当前环境不支持 WebGL");
+  }
+}
+
 function render(next) {
   if ((globalThis.OwoFeedUI?.controller.ref || !activity.pending_approvals) && globalThis.OwoFeedUI?.state?.()) next = globalThis.OwoFeedUI.state();
   status = next || "idle";
   // 只切状态类，保留 dragging/dropped/antic/happy 等临时动画类。
   for (const s of STATES) pet.classList.toggle(s, s === status);
   const anim = (config.anims && config.anims[status]) || null;
-  if (anim && startAnim(anim)) {
+  if (config.model) {
+    if (!modelRenderer) {
+      fallbackFromModel();
+      return;
+    }
+    stopAnim();
+    avatar.classList.remove("is-anim");
+    avatar.classList.add("is-model");
+    avatarImg.style.display = "none";
+    if (avatar3d) avatar3d.style.display = "block";
+    modelRenderer.setState(status);
+    modelRenderer.setModel(config.model.url, { scale: config.model.scale }).catch((error) => {
+      avatar.classList.remove("is-model");
+      if (avatar3d) avatar3d.style.display = "none";
+      fallbackFromModel();
+    });
+  } else if (anim && startAnim(anim)) {
+    avatar.classList.remove("is-model");
+    if (modelRenderer) modelRenderer.clear();
+    if (avatar3d) avatar3d.style.display = "none";
     avatarImg.style.display = "none";
     avatar.classList.add("is-anim");
   } else {
+    avatar.classList.remove("is-model");
+    if (modelRenderer) modelRenderer.clear();
+    if (avatar3d) avatar3d.style.display = "none";
     const file = config.images[status];
     // 既没有帧动画也没有静态图（皮肤数据异常）时**保持当前画面**，不清成空白：
     // 「形象旧一帧」远好过「形象凭空消失」——后者用户只会看到气泡，无从判断。
@@ -459,42 +514,6 @@ async function refreshActivity() {
 // 唯一入口是**右键**（左键留给逗它玩，见文件头「按键口径」）：能做什么全写在菜单
 // 里、按状态出现，不需要记"单击做什么、双击做什么"。
 
-function closeMenu() {
-  menu.hidden = true;
-  menu.replaceChildren();
-}
-
-function menuItem(label, onClick, extraClass) {
-  const item = document.createElement("button");
-  item.type = "button";
-  item.className = "skin-item" + (extraClass ? " " + extraClass : "");
-  const text = document.createElement("span");
-  text.textContent = label;
-  item.append(text);
-  item.addEventListener("click", () => {
-    closeMenu();
-    Promise.resolve()
-      .then(onClick)
-      .catch(() => {
-        /* 单项失败不打断菜单 */
-      });
-  });
-  return item;
-}
-
-function menuHead(text, extraClass) {
-  const head = document.createElement("div");
-  head.className = "menu-head" + (extraClass ? " " + extraClass : "");
-  head.textContent = text;
-  return head;
-}
-
-function placeMenu(x, y) {
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = Math.max(6, Math.min(x - rect.width / 2, 214 - rect.width)) + "px";
-  menu.style.top = Math.max(6, Math.min(y - 10, 254 - rect.height)) + "px";
-}
-
 async function decide(requestId, sessionId, allow) {
   const result = await api(`/session/${sessionId}/permission/${requestId}`, {
     method: "POST",
@@ -510,86 +529,90 @@ async function abortCurrent(sessionId) {
   if (result) setTimeout(refreshActivity, 500);
 }
 
-function openMenu(x, y) {
-  menu.replaceChildren();
-  menu.appendChild(menuHead(globalThis.OwoFeedUI?.text() || describeHead() || "空闲"));
-  if (globalThis.OwoFeedUI) {
-    menu.appendChild(menuItem("喂入剪贴板需求", () => globalThis.OwoFeedUI.paste()));
-    menu.appendChild(menuItem("查看任务与成果", () => globalThis.OwoFeedUI.controller.open()));
-    if ((globalThis.OwoFeedUI.controller.busy || globalThis.OwoFeedUI.controller.interrupted) && globalThis.OwoFeedUI.controller.ref?.id) menu.appendChild(menuItem("停止这次任务", () => globalThis.OwoFeedUI.controller.cancel(), "is-deny"));
-  }
-
-  const boundTeam = !!globalThis.OwoFeedUI?.controller.ref;
-  if(boundTeam && activity.pending.length && shellBridge?.openApprovals)menu.appendChild(menuItem("打开审批中心（核对任务后处理）",()=>shellBridge.openApprovals()));
-  if(globalThis.OwoFeedUI?.controller.ref?.pending){
-    menu.appendChild(menuItem("查找已启动的任务",()=>globalThis.OwoFeedUI.controller.reconcile()));
-    menu.appendChild(menuItem("解除不确定绑定",()=>{if(globalThis.confirm("任务可能仍在运行。已查看团队记录并确认可以解除观察绑定？"))return globalThis.OwoFeedUI.controller.forget();}));
-  }
-  const waiting = boundTeam ? null : (activity.pending || [])[0];
-  if (waiting) {
-    const remaining = approvalRemaining(waiting.request_id);
-    menu.appendChild(
-      menuItem(
-        `允许：${waiting.tool || "操作"}${
-          remaining !== null ? ` · 剩 ${formatRemaining(remaining)}` : ""
-        }`,
-        () => decide(waiting.request_id, waiting.session_id, true),
-        "is-allow"
-      )
-    );
-    menu.appendChild(
-      menuItem(`拒绝：${waiting.tool || "操作"}`, () =>
-        decide(waiting.request_id, waiting.session_id, false)
-      , "is-deny")
-    );
-  }
-  const head = boundTeam ? null : (activity.active || [])[0];
-  if (head && head.session_id) {
-    menu.appendChild(menuItem("停止当前回合", () => abortCurrent(head.session_id), "is-deny"));
-  }
-  if (shellBridge && typeof shellBridge.showWorkbench === "function") {
-    menu.appendChild(menuItem("打开工作台", () => shellBridge.showWorkbench()));
-  }
-  // 皮肤区：只列清单里真实存在的（缺 idle 的在生成 index 时已剔除）。
-  if (skinIndex.skins.length && !globalThis.OwoFeedUI) {
-    menu.appendChild(menuHead("换形象", "menu-sub"));
-    for (const entry of skinIndex.skins) {
-      menu.appendChild(
-        menuItem(entry.name, () => switchSkin(entry), entry.id === currentSkinId ? "is-active" : "")
-      );
+let menuOpen = false;
+async function openMenu() {
+  if (menuOpen || !shellBridge || typeof shellBridge.showMenu !== "function") return;
+  menuOpen = true;
+  const actions = new Map();
+  let actionSequence = 0;
+  const menuItem = (label, onClick, options = {}) => {
+    const id = `action-${++actionSequence}`;
+    actions.set(id, onClick);
+    return { id, label, ...options };
+  };
+  try {
+    const items = [];
+    if (typeof shellBridge.showWorkbench === "function") {
+      items.push(menuItem("打开工作台", () => shellBridge.showWorkbench()));
     }
-  }
-  if (shellBridge && typeof shellBridge.setVisible === "function") {
-    menu.appendChild(menuItem("隐藏桌宠", async () => {
-      // 写期望值而不是直接隐藏：所有显隐入口都只写这一个真相源（见 reportVisibility 说明）。
-      visibleRegistry = false;
-      await api("/desktop/pet", { method: "POST", json: { visible: false } });
-      await shellBridge.setVisible(false);
-    }));
+    items.push(menuItem("和我聊天", () => toggleChat(true)));
+    if (activity.pending_approvals && Array.isArray(activity.pending) && activity.pending.length) {
+      items.push({ type: "separator" });
+      for (const pending of activity.pending.slice(0, 3)) {
+        const tool = pending.tool || "操作";
+        items.push(menuItem(`允许：${tool}`, () => decide(pending.request_id, pending.session_id, true)));
+        items.push(menuItem(`拒绝：${tool}`, () => decide(pending.request_id, pending.session_id, false)));
+      }
+    }
+    if ((activity.active || []).length) {
+      items.push(menuItem("停止当前回合", () => abortCurrent(activity.active[0].session_id)));
+    }
+    if (skinIndex.skins.length) {
+      items.push({ type: "separator" });
+      items.push({
+        id: "skins",
+        label: "更换形象",
+        submenu: skinIndex.skins.map((entry) => menuItem(entry.name, () => switchSkin(entry), { checked: entry.id === currentSkinId })),
+      });
+    }
     if (typeof shellBridge.resetPosition === "function") {
-      menu.appendChild(menuItem("回到右下角", () => shellBridge.resetPosition()));
+      items.push(menuItem("回到右下角", () => shellBridge.resetPosition()));
     }
+    if (typeof shellBridge.setVisible === "function") {
+      items.push({ type: "separator" });
+      items.push(menuItem("隐藏桌宠", async () => {
+        visibleRegistry = false;
+        await api("/desktop/pet", { method: "POST", json: { visible: false } });
+        await shellBridge.setVisible(false);
+      }));
+    }
+    const selected = await shellBridge.showMenu(items);
+    const action = actions.get(selected);
+    if (action) await action();
+  } catch {
+    /* 菜单取消或单项失败不影响桌宠 */
+  } finally {
+    menuOpen = false;
+    releaseKeyboard();
   }
-  menu.hidden = false;
-  placeMenu(x, y);
 }
 
-// 右键＝功能面：开着就关（toggle），关着就按当前状态重列一遍。
+// 系统菜单在桌宠窗口外弹出，由 shell 处理定位、关闭、深色模式与屏幕边缘。
 pet.addEventListener("contextmenu", (event) => {
   event.preventDefault();
-  if (!menu.hidden) {
-    closeMenu();
-    return;
-  }
-  openMenu(event.clientX, event.clientY);
+  void openMenu();
 });
 
-document.addEventListener("mousedown", (event) => {
-  if (!menu.hidden && !menu.contains(event.target)) closeMenu();
-});
-window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !menu.hidden) closeMenu();
-});
+let lastMouseInside = null;
+function updateMousePassthrough(event) {
+  if (!petHitbox || !shellBridge || typeof shellBridge.setIgnoreMouseEvents !== "function") return;
+  if (document.body?.classList.contains("chatting")) return;
+  const rect = petHitbox.getBoundingClientRect();
+  const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+  if (inside === lastMouseInside) return;
+  lastMouseInside = inside;
+  Promise.resolve(shellBridge.setIgnoreMouseEvents(!inside)).catch(() => {});
+  // Windows 的 WS_EX_NOACTIVATE 会让 Chromium 丢掉 mousedown（只剩 mouseup），
+  // 单击、双击、点 × 都会"时灵时不灵"。进入命中区时临时去掉该样式（不主动 focus，
+  // 只有真的点下去才激活），移出后再交还鼠标焦点。
+  if (typeof shellBridge.setHover === "function") {
+    Promise.resolve(shellBridge.setHover(inside)).catch(() => {});
+  }
+}
+document.addEventListener("mousemove", updateMousePassthrough);
+
+// 双击＝简单聊天（左键单击仍是摸摸头）。
+pet.addEventListener("dblclick", () => toggleChat());
 
 // ---- 拖动：交给壳移动真实窗口 ----
 //
@@ -618,7 +641,7 @@ pet.addEventListener("pointerdown", (event) => {
   } catch {
     /* capture 失败不影响拖动本身 */
   }
-  down = { x: event.screenX, y: event.screenY, moved: false };
+  down = { x: event.screenX, y: event.screenY, moved: false, shift: event.shiftKey };
   lastPointer = { x: event.screenX, y: event.screenY };
   pet.classList.add("dragging");
   pet.classList.remove("dropped");
@@ -632,9 +655,15 @@ pet.addEventListener("pointermove", (event) => {
   const total = Math.hypot(event.screenX - down.x, event.screenY - down.y);
   // 5px 死区：单击的微小抖动不应推动窗口；越过一次就永久生效（回拖也不失效）。
   if (total > 5) down.moved = true;
-  if (down.moved && (dx || dy) && shellBridge && typeof shellBridge.moveBy === "function") {
-    const dpr = globalThis.devicePixelRatio || 1;
-    shellBridge.moveBy(Math.round(dx * dpr), Math.round(dy * dpr));
+  if (down.moved && (dx || dy)) {
+    // 2026-10-31 口径：拖动默认就是移动窗口（用户反馈“按键卡住”——3D 形象
+    // 拖动只旋转不移动，看起来像没反应）。想转着看 3D 模型时按住 Shift 拖动。
+    if (down.shift && config.model && modelRenderer && typeof modelRenderer.rotate === "function") {
+      modelRenderer.rotate(dx * 0.018, dy * 0.018);
+    } else if (shellBridge && typeof shellBridge.moveBy === "function") {
+      const dpr = globalThis.devicePixelRatio || 1;
+      shellBridge.moveBy(Math.round(dx * dpr), Math.round(dy * dpr));
+    }
   }
 });
 
@@ -653,13 +682,14 @@ function endDrag(event, movedOverride) {
   down = null;
   lastPointer = null;
   pet.classList.remove("dragging");
+  releaseKeyboard();
   if (moved) {
     pet.classList.add("dropped");
     setTimeout(() => pet.classList.remove("dropped"), 620);
     return;
   }
-  // 左键点击＝只互动：收起右键菜单（若还开着）＋摸摸头（happy 摇动 + ❤×4 + 皮肤台词）。
-  if (!menu.hidden) closeMenu();
+  // 左键点击＝只互动：摸摸头（happy 摇动 + ❤×4 + 皮肤台词）。
+  // 聊天不占用左键（双击/右键菜单进入），保留“点着玩”的手感。
   petted();
 }
 
@@ -688,8 +718,8 @@ function scheduleAntic() {
 }
 
 const PET_LINES = {
-  "petdex-nailong": ["duang～再摸摸", "肚肚不许戳！", "龙龙很满意", "嘿嘿嘿"],
-  "petdex-coco": ["呼噜呼噜…", "下巴这边再挠挠", "尾巴不许拽！", "喵呜～好舒服"],
+  "owo-squid": ["墨鱼触手伸懒腰～", "再摸摸我嘛", "墨鱼很满意", "咕噜咕噜～"],
+  "pink-squid": ["粉色触手伸懒腰～", "粉色墨鱼很满意", "再摸摸我嘛", "闪闪发光～"],
 };
 const PET_FALLBACK_LINES = ["嘿嘿，好痒～", "再摸摸我嘛", "(*´▽`*)"];
 
@@ -730,6 +760,214 @@ function petted() {
   spawnFx("❤", 4);
   sayTemp(pick(PET_LINES[currentSkinId] || PET_FALLBACK_LINES));
 }
+
+
+// ---- 简单聊天（2026-10-31）----
+//
+// 边界：桌宠聊天就是普通会话——同一 Daemon 的 POST /session（workspace 用壳配置的
+// 工作区）+ POST /session/:id/turn 流式回合；解析复用 core/turn-sse.js 的
+// consumeResponse（final + turn_stats 双确认语义不变），不新建第二套 Agent。
+// 会话 id 只放在内存里，桌宠是“轻聊两句”，历史记录去工作台看。
+
+const chatPanel = $("chat-panel");
+const chatLog = $("chat-log");
+const chatInput = $("chat-input");
+const chatCloseBtn = $("chat-close");
+
+let chatSessionId = null;
+let chatBusy = false;
+let chatBubbleTimer = 0;
+
+function chatSay(text) {
+  sayTemp(text, 2600);
+}
+
+function chatAppend(kind, text) {
+  $("chat-empty")?.remove();
+  const line = document.createElement("div");
+  line.className = "chat-line " + kind;
+  line.textContent = text;
+  chatLog.appendChild(line);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return line;
+}
+
+// 桌宠轻聊也要走“当前模型的实际连接”：主工作台选中的是自定义模型时，
+// 回合必须带 model_connection（密钥仍只以环境引用传递），否则核心会按
+// 未配置的默认服务商报凭据缺失。
+async function chatModelConnection() {
+  try {
+    const settings = await api("/settings");
+    const model = String((settings && (settings.model || (settings.runtime && settings.runtime.model))) || "").trim();
+    if (!model) return null;
+    // 主进程按当前模型从安全存储里取出端点与凭据引用；桌宠帧不接触密钥。
+    return (await shellBridge?.chatConnection?.(model)) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureChatSession() {
+  if (chatSessionId) return chatSessionId;
+  let workspace = "";
+  try {
+    workspace = (await shellBridge?.getPref?.())?.workspace || "";
+  } catch {
+    /* 旧壳没有该字段 */
+  }
+  if (!workspace) throw Error("还没有工作区：先在右键菜单打开工作台并选择项目");
+  const session = await api("/session", { method: "POST", json: { workspace } });
+  if (!session || !session.id) throw Error("会话创建失败");
+  chatSessionId = session.id;
+  return chatSessionId;
+}
+
+async function sendChat() {
+  const text = chatInput.value.trim();
+  if (!text || chatBusy) return;
+  chatInput.value = "";
+  chatAppend("user", text);
+  chatBusy = true;
+  const replyLine = chatAppend("assistant", "…");
+  pet.classList.add("thinking");
+  try {
+    const sessionId = await ensureChatSession();
+    const client = await syncBase();
+    const connection = await chatModelConnection();
+    const response = await client.stream("/session/" + encodeURIComponent(sessionId) + "/turn", {
+      method: "POST",
+      json: { prompt: text, ...(connection ? { model_connection: connection } : {}) },
+    });
+    let answer = "";
+    const result = await globalThis.OwoTurnSse.consumeResponse(response, {
+      onEvent: (event, payload) => {
+        if (event === "token_delta" && payload.delta) {
+          answer += payload.delta;
+          replyLine.textContent = answer;
+          chatLog.scrollTop = chatLog.scrollHeight;
+        }
+      },
+      replay: null,
+      idleTimeoutMs: 60000,
+    });
+    replyLine.textContent = result.finalText || answer || "（没有回复）";
+  } catch (error) {
+    replyLine.textContent = "发送失败：" + (error.message || error);
+    replyLine.classList.add("error");
+  } finally {
+    chatBusy = false;
+    pet.classList.remove("thinking");
+    render(status);
+  }
+}
+
+async function revealChatPanel() {
+  if (!shellBridge || typeof shellBridge.moveBy !== "function") return;
+  const rect = chatPanel.getBoundingClientRect();
+  const area = {
+    left: screen.availLeft,
+    top: screen.availTop,
+    right: screen.availLeft + screen.availWidth,
+    bottom: screen.availTop + screen.availHeight,
+  };
+  const panel = {
+    left: screenX + rect.left,
+    top: screenY + rect.top,
+    right: screenX + rect.right,
+    bottom: screenY + rect.bottom,
+  };
+  const dx = panel.left < area.left ? area.left - panel.left : panel.right > area.right ? area.right - panel.right : 0;
+  const dy = panel.top < area.top ? area.top - panel.top : panel.bottom > area.bottom ? area.bottom - panel.bottom : 0;
+  if (!dx && !dy) return;
+  // setPosition 与 screen/availRect 都使用 DIP，这里不能再乘 devicePixelRatio。
+  await Promise.resolve(shellBridge.moveBy(Math.round(dx), Math.round(dy))).catch(() => {});
+}
+
+async function toggleChat(force) {
+  if (!chatPanel) {
+    chatSay("这个版本还不能聊天");
+    return;
+  }
+  const open = force !== undefined ? force : chatPanel.hidden;
+  chatPanel.hidden = !open;
+  // 面板占满窗口时把 3D 形象收起来，否则面板会被小窗口裁掉上半截。
+  document.body.classList.toggle("chatting", open);
+  if (shellBridge && typeof shellBridge.setIgnoreMouseEvents === "function") {
+    lastMouseInside = open ? true : null;
+    Promise.resolve(shellBridge.setIgnoreMouseEvents(!open)).catch(() => {});
+  }
+  // 桌宠窗口平时 focusable:false（不抢键盘），聊天期间必须临时可聚焦，
+  // 否则输入框只是"画出来"了，系统键盘仍发给上一个前台窗口。
+  if (shellBridge && typeof shellBridge.setChatFocus === "function") {
+    Promise.resolve(shellBridge.setChatFocus(open)).catch(() => {});
+  }
+  if (open) {
+    await revealChatPanel();
+    if (chatBubbleTimer) clearTimeout(chatBubbleTimer);
+    bubble.textContent = "在呢～";
+    sayActive = true;
+    chatBubbleTimer = setTimeout(() => {
+      sayActive = false;
+      render(status);
+    }, 2600);
+    // chatting 类会让 #pet 进入 visibility:hidden；同一帧聚焦会在样式更新时
+    // 把焦点退回 body，所以要等下一帧再聚焦输入框。
+    const focusInput = () => {
+      if (!chatPanel.hidden) chatInput?.focus();
+    };
+    focusInput();
+    requestAnimationFrame(focusInput);
+  }
+}
+
+// 聊天面板支持 Esc 收起：窗口不可聚焦时点不到/点偏 × 也有确定的退出路径。
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !chatPanel || chatPanel.hidden) return;
+  event.preventDefault();
+  void toggleChat(false);
+});
+
+// 点面板空白处（日志区）会把输入框失焦；窗口被激活时把焦点还给输入框，
+// 用户点一下面板就能直接打字，不必精确点中底部那条输入框。
+globalThis.addEventListener("focus", () => {
+  if (chatPanel && !chatPanel.hidden) chatInput?.focus();
+});
+
+chatInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    sendChat();
+  }
+});
+chatInput?.addEventListener("pointerdown", (event) => event.stopPropagation());
+chatPanel?.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+// 聊天面板铺满窗口后，3D 形象不可见；把标题栏做成拖动把手，聊天时也能挪窗口。
+let chatDrag = null;
+const chatHeader = chatPanel?.querySelector("header");
+chatHeader?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || event.target.closest("button")) return;
+  event.preventDefault();
+  try {
+    chatHeader.setPointerCapture(event.pointerId);
+  } catch {
+    /* capture 失败不影响拖动 */
+  }
+  chatDrag = { x: event.screenX, y: event.screenY };
+});
+chatHeader?.addEventListener("pointermove", (event) => {
+  if (!chatDrag || event.buttons !== 1) return;
+  const dx = event.screenX - chatDrag.x;
+  const dy = event.screenY - chatDrag.y;
+  chatDrag = { x: event.screenX, y: event.screenY };
+  if (shellBridge && typeof shellBridge.moveBy === "function") {
+    const dpr = globalThis.devicePixelRatio || 1;
+    shellBridge.moveBy(Math.round(dx * dpr), Math.round(dy * dpr));
+  }
+});
+chatHeader?.addEventListener("pointerup", () => { chatDrag = null; });
+chatHeader?.addEventListener("pointercancel", () => { chatDrag = null; });
+chatCloseBtn?.addEventListener("click", () => toggleChat(false));
 
 // ---- 显隐（内核期望值是唯一真相源）----
 //
