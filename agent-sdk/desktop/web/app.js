@@ -84,7 +84,7 @@ function applySessionModeClass(mode) {
   document.body.classList.toggle("agent-mode", activeSessionMode === "agent");
   return activeSessionMode;
 }
-applySessionModeClass("chat");
+applySessionModeClass(state.sessionMode);
 
 // Markdown/LaTeX 渲染器唯一来源：core/markdown.js（须在 app.js 之前加载）。
 const {
@@ -847,6 +847,7 @@ function showHomeView(options = {}) {
     const chatTab = document.querySelector('#modeSwitch [data-mode-switch="chat"]');
     if (chatTab && chatTab.getAttribute("aria-selected") !== "true") chatTab.click();
   }
+  setTaskDetailsVisible(false);
   syncSessionWelcome();
   syncTaskDetails();
   syncSidebarHome();
@@ -1118,6 +1119,7 @@ async function openWorkspacePath(path, line) {
 function createToolStep(payload = {}) {
   const row = document.createElement("details");
   row.className = "tool-step is-running";
+  row.dataset.kind = window.OwoTaskWorkbench?.toolKind(payload.tool) || "tool";
   if (payload.id) row.dataset.toolId = String(payload.id);
   const summaryText = toolStepSummary(payload.tool, payload.args);
   const filePath = toolStepPath(payload.tool, payload.args);
@@ -1312,6 +1314,12 @@ function updateToolRun(run) {
   if (run.headText) run.headText.textContent = text;
   else run.head.textContent = `⚙ ${text}`;
   run.head.classList.toggle("has-failure", run.failed > 0);
+  run.el.dataset.state = run.running > 0 ? "running" : run.failed ? "failed" : "settled";
+  // Compact long completed runs; preserve the user's choice on subsequent updates.
+  if (run.total > 6 && !run.running && !run.failed && !run.el.dataset.autoCompacted) {
+    run.el.open = false;
+    run.el.dataset.autoCompacted = "true";
+  }
 }
 
 function pushToolUse(payload) {
@@ -1528,6 +1536,7 @@ async function renderTurnSummary(sessionId, turn) {
   });
   card.querySelector(".turn-summary-open").addEventListener("click", () => {
     if (!document.body.classList.contains("inspector-open")) $("inspectorToggle").click();
+    selectInspectorTab("changes");
     list.classList.remove("hidden");
   });
 
@@ -2399,8 +2408,30 @@ function syncTaskDetails(statusFacts) {
     workspace: workspaceAlias,
     title: session?.title || "", fallbackTitle: document.body.classList.contains("agent-mode") ? "新任务" : "新对话",
     request, running: Boolean(active), phase: active?.phase,
-    pendingApprovals: state.pendingApprovals.size, pendingQuestion: state.pendingQuestion, authFailed: authorizationUnavailable,
+    pendingApprovals: [...state.pendingApprovals.values()].filter(item => item.sessionId === state.sessionId).length,
+    pendingQuestion: state.pendingQuestion, authFailed: authorizationUnavailable,
+    workspacePath: sessionWorkspace || $("workspace")?.value || "",
+    completion: window.OwoTaskWorkbench?.completion(state.completedTurnFacts.get(state.sessionId)),
     steps, hasFileChanges: Boolean($("diffList")?.querySelector(".diff-item")),
+    fileCount: $("diffList")?.querySelectorAll(".diff-item:not(.hunk-review)").length || 0,
+  });
+}
+function selectInspectorTab(tab, focus = false) {
+  for (const button of document.querySelectorAll("[data-inspector-tab]")) {
+    const active = button.dataset.inspectorTab === tab;
+    button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1;
+    const panel = $(button.getAttribute("aria-controls"));
+    if (panel) panel.hidden = !active;
+    if (active && focus) button.focus();
+  }
+}
+for (const button of document.querySelectorAll("[data-inspector-tab]")) {
+  button.addEventListener("click", () => selectInspectorTab(button.dataset.inspectorTab));
+  button.addEventListener("keydown", event => {
+    const tabs = [...document.querySelectorAll("[data-inspector-tab]")];
+    const index = tabs.indexOf(button);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : -1;
+    if (next >= 0) { event.preventDefault(); selectInspectorTab(tabs[next].dataset.inspectorTab, true); }
   });
 }
 function setTaskDetailsVisible(open) {
@@ -3389,6 +3420,7 @@ function refreshModeSwitch(mode) {
   const box = $("modeSwitch");
   if (!box) return;
   document.body.classList.toggle("chat-mode", mode === "chat");
+  document.body.classList.toggle("agent-mode", mode === "agent");
   for (const button of box.querySelectorAll("[data-mode-switch]")) {
     const active = button.dataset.modeSwitch === mode;
     button.classList.toggle("is-active", active);

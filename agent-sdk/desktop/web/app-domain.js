@@ -778,6 +778,10 @@ function adoptSessionWorkspace(workspace) {
 // 注意与折叠态的关系：搜索是"临时看全部"，因此**搜索期间忽略折叠**——
 // 否则用户会抱怨"明明折叠了却又冒出来"。query 非空时按搜索结果判定可见性，
 // query 清空时恢复折叠态（由 refreshSessions 重渲染时统一处理）。
+function taskNavigationFacts() {
+  return { activeTurns: state.activeTurns, approvals: [...state.pendingApprovals.values()],
+    questionSessionId: state.pendingQuestion ? state.sessionId : null };
+}
 function filterSessionList() {
   const input = $("sessionSearch");
   const query = (input.value || "").trim().toLowerCase();
@@ -3225,7 +3229,7 @@ const WORKBENCH_HUB_PANELS = new Set([
 function panelHelpers() {
   return {
     baseUrl: API_BASE,
-    snapshot: () => ({ sessionId: state.sessionId, workspace: state.sessionId && state.sessionWorkspace ? state.sessionWorkspace : $("workspace")?.value || "", settings: state.settings || {}, sessions: state.sessionIndex || [], sessionsKnown: state.sessionsKnown === true }),
+    snapshot: () => ({ sessionId: state.sessionId, workspace: state.sessionId && state.sessionWorkspace ? state.sessionWorkspace : $("workspace")?.value || "", settings: state.settings || {}, sessions: state.sessionIndex || [], sessionsKnown: state.sessionsKnown === true, taskFacts: taskNavigationFacts() }),
     openPanel: openPanelById,
     // 面板里发起模型请求（如 AI 生成工作流）时要带上当前选择的模型连接：桌面端把
     // 密钥放在核心进程环境里，核心默认 provider 在只配了桌面自定义模型时是未配置的。

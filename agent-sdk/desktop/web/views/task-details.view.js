@@ -9,7 +9,7 @@
     const needsInput = Boolean(input.pendingQuestion);
     const running = Boolean(input.running);
     const status = needsInput ? "需要补充信息" : pending ? "等待你确认" : running ? phaseLabels[input.phase] || "正在处理任务" : task.text === "空闲" || !task.text ? "等待任务" : task.text;
-    const hint = needsInput ? "请先回答对话中的问题，再继续执行。" : pending ? "请检查操作范围与影响，再决定是否允许。" : running ? "进展来自实际执行记录；你可以随时停止。" : status === "等待任务" ? "写下目标，或先规划任务的范围与执行方式。" : /未验证|候选/.test(status) ? "回答已经结束。请检查结果和验证依据后再确认交付。" : /失败|阻断|未确认/.test(status) ? "任务尚未顺利结束，请查看对话中的说明与恢复入口。" : /验收通过/.test(status) ? "已有宿主验收记录，来源可在成果页查看。" : "详细结果和执行记录保留在对话中。";
+    const hint = needsInput ? "请先回答对话中的问题，再继续执行。" : pending ? "请检查操作范围与影响，再决定是否允许。" : running ? "进展来自实际执行记录；你可以随时停止。" : status === "等待任务" ? "写下目标，或先规划任务的范围与执行方式。" : /未验证|待验证|候选/.test(status) ? "回答已经结束。请检查结果和验证依据后再确认交付。" : /失败|阻断|未确认/.test(status) ? "任务尚未顺利结束，请查看对话中的说明与恢复入口。" : /验收通过/.test(status) ? "已有宿主验收记录，来源可在成果页查看。" : "详细结果和执行记录保留在对话中。";
     const title = input.title && !/^会话\s+[a-f0-9-]+$/i.test(input.title) ? input.title : input.request ? input.request.split("\n")[0] : input.fallbackTitle || "新对话";
     return {
       title: String(title).slice(0, 100), status, hint,
@@ -35,6 +35,12 @@
     setText(doc, "taskDetailHint", p.hint);
     setText(doc, "taskDetailRequest", p.request);
     setText(doc, "connectionLabel", p.connectionLabel);
+    setText(doc, "taskWorkspaceName", input.workspace || "未选择项目");
+    setText(doc, "taskWorkspacePath", input.workspacePath || "普通对话无需本地目录");
+    setText(doc, "taskFileCount", String(input.fileCount || 0));
+    setText(doc, "taskChangeSummary", input.fileCount ? `${input.fileCount} 个文件发生变化 · 当前会话累计` : "当前会话尚无文件变更。");
+    setText(doc, "taskCompletionStatus", input.completion?.label || "尚无完成记录");
+    setText(doc, "taskCompletionHint", input.completion?.hint || "执行结束后，在这里核对宿主记录与验证来源。");
     const pill = doc.getElementById("taskStatusPill");
     if (pill) pill.dataset.tone = p.tone;
     // 运行态只来自宿主事实：running / 待确认 / 待回答；供样式表达"Agent 正在哪里工作"。

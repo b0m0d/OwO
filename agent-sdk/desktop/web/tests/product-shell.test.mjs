@@ -38,10 +38,10 @@ test("administrative identifiers and repeated raw UI events have readable summar
 test("task-header hydration uses the real authorization flag and existing session state", () => {
   const fn=read("app.js").match(/function syncTaskDetails\(statusFacts\) \{[\s\S]*?\n\}/)[0];
   let captured;
-  const state={sessionId:"s",sessionIndex:[{id:"s",title:"资料整理"}],lastSessionPrompts:new Map([["s","整理资料"]]),pendingApprovals:new Map(),pendingQuestion:null};
+  const state={sessionId:"s",sessionIndex:[{id:"s",title:"资料整理"}],lastSessionPrompts:new Map([["s","整理资料"]]),pendingApprovals:new Map(),completedTurnFacts:new Map(),pendingQuestion:null};
   const doc={body:{classList:{contains:()=>false}}};
   const context={state,document:doc,authorizationUnavailable:false,currentTurn:()=>null,
-    $:id=>["messages","diffList"].includes(id)?{querySelector:()=>null}:{textContent:"research-studio"},
+    $:id=>["messages","diffList"].includes(id)?{querySelector:()=>null,querySelectorAll:()=>[]}:{textContent:"research-studio"},
     window:{OwoTaskDetails:{render:(doc,input)=>{captured=input;}},OwoStatusBar:{snapshotFacts:()=>facts("空闲")}},Array,Boolean};
   const sync=runInNewContext(fn+"\nsyncTaskDetails;",context);
   sync(facts("空闲"));
@@ -61,7 +61,7 @@ test("collapsed conversation groups remain reachable and restore after search", 
   group.nextElementSibling=row;
   const input={value:""};
   const source=read("app-domain.js").match(/function filterSessionList\(\) \{[\s\S]*?\n\}/)[0];
-  const filter=runInNewContext(source+"\nfilterSessionList;",{$:id=>id==="sessionSearch"?input:{querySelectorAll:()=>[group,row]},collapsedGroups:new Set(["workspace"]),Boolean,String});
+  const filter=runInNewContext(source+"\nfilterSessionList;",{state:{sessionIndex:[],sessionsKnown:false},window:{},taskListFilter:"all",taskNavigationFacts:()=>({}),syncTaskNavigation:()=>{},$:id=>id==="sessionSearch"?input:{querySelectorAll:()=>[group,row]},collapsedGroups:new Set(["workspace"]),Boolean,String});
   filter();assert.equal(group.classList.contains("hidden"),false);assert.equal(row.classList.contains("hidden"),true);
   input.value="research";filter();assert.equal(row.classList.contains("hidden"),false);assert.equal(group.attrs["aria-expanded"],"true");
   input.value="";filter();assert.equal(row.classList.contains("hidden"),true);assert.equal(group.classList.contains("hidden"),false);
@@ -88,8 +88,8 @@ test("restored successful tool steps stay readable and the panel reserves editor
   let captured, reserve;
   const tool={classList:{contains:name=>name==="is-ok"},querySelector:selector=>({textContent:selector===".tool-step-state"?"":selector===".tool-step-label"?"读取文件":"brief.md"})};
   const view={querySelectorAll:()=>[tool]};
-  const nodes={messages:{querySelector:()=>view},composerProjectName:{textContent:"workspace"},diffList:{querySelector:()=>null},chatForm:{getBoundingClientRect:()=>({top:500,height:180})},approvalBar:{classList:{contains:()=>true}},right:{style:{setProperty:(name,value)=>{reserve=value;}}}};
-  const state={sessionId:"s",sessionIndex:[],lastSessionPrompts:new Map([["s","读取项目"]]),pendingApprovals:new Map(),pendingQuestion:null};
+  const nodes={messages:{querySelector:()=>view},composerProjectName:{textContent:"workspace"},diffList:{querySelector:()=>null,querySelectorAll:()=>[]},chatForm:{getBoundingClientRect:()=>({top:500,height:180})},approvalBar:{classList:{contains:()=>true}},right:{style:{setProperty:(name,value)=>{reserve=value;}}}};
+  const state={sessionId:"s",sessionIndex:[],lastSessionPrompts:new Map([["s","读取项目"]]),pendingApprovals:new Map(),completedTurnFacts:new Map(),pendingQuestion:null};
   const ctx={state,document:{body:{classList:{contains:()=>true}}},authorizationUnavailable:false,currentTurn:()=>null,$:id=>nodes[id],
     window:{innerHeight:700,OwoTaskDetails:{render:(doc,input)=>{captured=input;}}},Array,Boolean,Math};
   const sync=runInNewContext(fn+"\nsyncTaskDetails;",ctx);sync(facts("回答完成 · 未验证"));

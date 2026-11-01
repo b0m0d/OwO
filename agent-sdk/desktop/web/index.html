@@ -31,6 +31,7 @@
   <link rel="stylesheet" href="workflow-canvas.css?v=20261101-3">
   <link rel="stylesheet" href="team-workbench.css?v=20261101-3">
   <link rel="stylesheet" href="shell-compat.css?v=20261101-13">
+  <link rel="stylesheet" href="task-details.css?v=20261101-restore">
 </head>
 <body class="dark-theme">
   <main id="setupRoot" class="setup-root" hidden aria-label="首次配置"></main>
@@ -1044,16 +1045,29 @@
 
   <aside id="right" class="task-details" aria-labelledby="taskDetailsTitle">
     <div class="task-details-head"><div><span class="detail-eyebrow">当前会话</span><h2 id="taskDetailsTitle">运行详情</h2></div><button id="taskDetailsClose" type="button" aria-label="关闭运行详情">×</button></div>
+    <div class="task-inspector-tabs" role="tablist" aria-label="任务详情分类">
+      <button id="inspectorProgressTab" type="button" role="tab" data-inspector-tab="progress" aria-controls="inspectorProgress" aria-selected="true">进展</button>
+      <button id="inspectorChangesTab" type="button" role="tab" data-inspector-tab="changes" aria-controls="inspectorChanges" aria-selected="false" tabindex="-1">变更 <span id="taskFileCount">0</span></button>
+      <button id="inspectorResultsTab" type="button" role="tab" data-inspector-tab="results" aria-controls="inspectorResults" aria-selected="false" tabindex="-1">结果</button>
+    </div>
     <div class="task-details-content">
+      <div id="inspectorProgress" role="tabpanel" aria-labelledby="inspectorProgressTab">
       <section class="task-overview">
         <span class="detail-label">现在的进展</span><strong id="taskDetailStatus">等待任务</strong><p id="taskDetailHint">写下目标，或先规划任务的范围与执行方式。</p>
         <button id="taskDetailReview" class="primary" type="button" hidden>查看待确认操作</button><button id="taskDetailsStart" class="primary" type="button" data-workbench-panel="project-launcher">创建任务 →</button>
       </section>
       <section id="taskRequestSection" class="task-request"><h3>任务目标</h3><p id="taskDetailRequest">还没有填写任务目标。</p></section>
       <section id="taskActivitySection" class="task-activity"><h3>最近的执行步骤</h3><ul id="taskDetailSteps"></ul><p id="taskDetailStepsEmpty" class="sub">有操作发生时，这里会显示最近的执行步骤。</p></section>
+      <section class="task-context"><h3>项目上下文</h3><strong id="taskWorkspaceName">未选择项目</strong><p id="taskWorkspacePath" class="sub"></p></section>
+      </div>
+      <div id="inspectorChanges" role="tabpanel" aria-labelledby="inspectorChangesTab" hidden>
+      <p id="taskChangeSummary" class="task-change-summary">文件变化按当前会话累计。</p>
       <section id="taskFilesSection" class="task-files"><div class="detail-section-head"><h3>文件变化</h3><button type="button" data-workbench-panel="evidence">查看成果 →</button></div><ul id="diffList" class="list"><li class="sub">开始任务后，可以在这里检查文件变化。</li></ul>
         <div class="detail-file-actions"><button id="revertBtn" type="button" disabled>撤销本次文件改动</button></div>
       </section>
+      </div>
+      <div id="inspectorResults" role="tabpanel" aria-labelledby="inspectorResultsTab" hidden>
+      <section class="task-result-facts"><h3>交付状态</h3><strong id="taskCompletionStatus">尚无完成记录</strong><p id="taskCompletionHint" class="sub">执行结束后，在这里核对宿主记录与验证来源。</p><button type="button" data-workbench-panel="evidence">审查产物与证据 →</button></section>
       <section id="taskExportSection" class="task-export"><h3>保存对话</h3><div class="detail-export-actions"><button id="exportMdBtn" title="导出为可编辑的 Markdown 文档">文本格式</button><button id="exportHtmlBtn" title="导出为可直接打开的网页">网页格式</button></div></section>
       <details id="taskAdvanced" class="task-advanced"><summary>技术记录 <span>高级</span></summary><div class="task-advanced-content">
         <section><h3>周边活动</h3><p class="sub">记录界面变化，帮助复查自动操作。</p><pre id="snapshot">打开后读取活动摘要。</pre></section>
@@ -1061,6 +1075,7 @@
         <section><h3>近期活动记录</h3><ul id="observationList" class="list"></ul><button type="button" data-workbench-panel="memory">检索历史记录 →</button></section>
         <section><h3>操作日志</h3><p class="sub">用于排查问题，保留原始事件与工具名称。</p><div class="inline audit-filters"><input id="auditEvent" aria-label="审计事件过滤" placeholder="事件类型（可留空）"><input id="auditTool" aria-label="审计工具过滤" placeholder="工具名称（可留空）"><input id="auditQ" aria-label="审计关键词" placeholder="搜索日志内容"><button id="auditFilterBtn">筛选</button></div><ul id="auditList" class="list"></ul></section>
       </div></details>
+      </div>
     </div>
   </aside>
 
@@ -1099,6 +1114,7 @@
   <script src="permissions/permissions.view.js"></script>
   <script src="views/setup-guide.view.js"></script>
   <script src="views/status-bar.view.js"></script>
+  <script src="core/task-workbench.js"></script>
   <script src="views/task-details.view.js"></script>
   <script src="views/diagnostics-ledger.view.js"></script>
   <script src="panels/notes.panel.js"></script>

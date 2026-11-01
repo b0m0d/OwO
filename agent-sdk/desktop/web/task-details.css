@@ -1,0 +1,8 @@
+/* Retained task details only. The welcome page uses the a01b1bf1 visual baseline. */
+.task-inspector-tabs { display: flex; gap: 16px; padding: 0 18px; border-bottom: 1px solid var(--border); }
+.task-inspector-tabs button { min-height: 34px; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; box-shadow: none; color: var(--text-3); font-size: 12px; }
+.task-inspector-tabs button[aria-selected=true] { color: var(--text); border-bottom-color: var(--text-2); }
+.task-inspector-tabs button span { margin-left: 4px; font-size: 10px; }
+#right [role=tabpanel][hidden] { display: none !important; }
+#right .task-change-summary { padding-top: 14px; font-size: 12px; color: var(--text-3); }
+#right .task-context p { overflow-wrap: anywhere; }
