@@ -3,9 +3,21 @@
   "use strict";
   // Current /session/{id}/attachments JSON body gate and turn image gate.
   var REQUEST_BYTES=32*1024*1024, IMAGE_BYTES=5*1024*1024;
+  var AUDIO_VIDEO=/\.(mp4|mov|m4v|webm|avi|mkv|mp3|wav|m4a|aac|ogg|flac)$/i;
+  var DOCUMENT=/\.(txt|md|pdf|json|csv|docx|xlsx|pptx|zip|py|js|ts|rs|html|css|log|yaml|yml|toml|xml)$/i;
+  function unsupportedMedia(file){
+    var mime=String(file&&file.type||"").toLowerCase();
+    var name=String(file&&file.name||"");
+    return /^(audio|video)\//i.test(mime)||AUDIO_VIDEO.test(name);
+  }
+  function documentHint(file){
+    var name=String(file&&file.name||"");
+    return DOCUMENT.test(name)?"（文档仅传路径与版本，不自动解析内容）":"";
+  }
   function plan(file){
     if(!file||typeof file.name!=="string"||!file.name||!Number.isSafeInteger(file.size)||file.size<0)
       throw new Error("附件名称或大小无效");
+    if(unsupportedMedia(file))throw new Error("当前尚未配置音频/视频输入适配器；请先转写为文本或移除该附件"+documentHint(file));
     var mime=typeof file.type==="string"&&file.type?file.type:"application/octet-stream";
     var image=/\.(png|jpe?g|webp|gif)$/i.test(file.name);
     if(/^image\//i.test(mime)&&!image)throw new Error("当前图片输入仅支持 PNG、JPEG、WebP、GIF；请先转换图片格式");
@@ -66,6 +78,6 @@
     if(result.content_parts.filter(function(part){return part.type==="image";}).length>8)throw new Error("每次最多提交 8 张图片");
     return result;
   }
-  var api={plan:plan,upload:upload,turnInput:turnInput,requestBytes:REQUEST_BYTES,imageBytes:IMAGE_BYTES};root.OwoAttachmentUpload=api;
+  var api={plan:plan,upload:upload,turnInput:turnInput,unsupportedMedia:unsupportedMedia,documentHint:documentHint,requestBytes:REQUEST_BYTES,imageBytes:IMAGE_BYTES};root.OwoAttachmentUpload=api;
   if(typeof module!=="undefined"&&module.exports)module.exports=api;
 })(typeof window!=="undefined"?window:globalThis);

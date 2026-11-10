@@ -431,6 +431,16 @@ async fn host_declarations_apply_to_exact_connections_and_clear_without_granting
         .await
         .unwrap_err()
         .contains("image_capability_unknown"));
+    // A settings file that omits declarations inherits a host-injected binding
+    // instead of clearing it; an explicit empty list above is the denial path.
+    let host_binding: ModelInputCapabilityBinding =
+        serde_json::from_value(peer.binding("openai", true)).unwrap();
+    std::env::set_var(INPUT_CAPABILITIES_ENV, json!([host_binding]).to_string());
+    owo_agent_core::Settings::default().apply_model_input_capabilities_env();
+    assert_eq!(
+        input_capability_bindings_from_env().unwrap(),
+        vec![host_binding]
+    );
     for bad in ["{}", "[{\"verified\":true}]", "not json"] {
         std::env::set_var(INPUT_CAPABILITIES_ENV, bad);
         assert!(input_capability_bindings_from_env()

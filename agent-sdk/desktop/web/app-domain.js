@@ -850,6 +850,38 @@ async function sessionUndo(sessionId) {
   else await refreshSessions(state.sessionId);
 }
 
+/// 压缩当前会话历史：调用核心已有摘要能力，并保留无历史可压缩时的明确反馈。
+async function compactCurrentSession() {
+  const id = state.sessionId;
+  if (!id) {
+    showToast("请先选择会话，再压缩会话历史", "error");
+    return null;
+  }
+  if (currentTurn()) {
+    showToast("本会话仍有回合在运行，结束后再压缩", "error");
+    return null;
+  }
+  try {
+    const result = await api(`/session/${encodeURIComponent(id)}/compact`, { method: "POST", body: "{}" });
+    if (!result?.compacted) {
+      showToast("当前会话没有可压缩的历史", "info");
+      addMessage("system", "当前会话没有可压缩的历史；发送较长对话后可使用 /compact。");
+      return result;
+    }
+    const before = Number(result.tokens_before) || 0;
+    const after = Number(result.tokens_after) || 0;
+    showToast(`会话已压缩：${before} → ${after} tokens`, "ok");
+    addMessage("system", `会话历史已压缩：${before} → ${after} tokens，摘要已保留在会话中。`);
+    await selectSession(id);
+    return result;
+  } catch (error) {
+    const detail = friendlyError(error, { resource: true });
+    showToast(`压缩失败：${detail}`, "error");
+    addMessage("system", `压缩失败：${detail}`);
+    return null;
+  }
+}
+
 /// 重做：恢复最近一次回退掉的回合。
 async function sessionRedo(sessionId) {
   const id = sessionId || state.sessionId;
@@ -1172,6 +1204,7 @@ async function selectSession(id, forceHistory = false) {
   state.sessionWorkspace = "";
   // 记住当前对话：下次进入自动恢复，不再要求手动切换。
   localStorage.setItem("owo.lastSession", id);
+  releaseAttachmentPreviews(state.attachments);
   state.attachments = [];
   renderAttachmentChips();
   // 切会话：清掉上一回合的流式句柄与未答提问，回复底部跟随。
@@ -1521,7 +1554,12 @@ async function sendPrompt() {
         sameInput);
     }
   } catch (error) {
-    showToast(friendlyError(error), "error");
+    const message = friendlyError(error);
+    showToast(message, "error");
+    addMessage("system", `本次未发送：${message}`);
+    if (`${message} ${String(error?.message || error)}`.includes("input/image_capability_unknown")) {
+      addMessage("system", "图片能力尚未声明：请在「设置 → 模型」选择当前端点/模型的图片输入能力并保存；声明不等于实测。");
+    }
     return;
   }
   // 无会话时**自动新建**再发，而不是甩一句"请先新建或选择一个会话"。
@@ -1549,7 +1587,12 @@ async function sendPrompt() {
       throw new Error("当前核心不支持结构化附件输入，请更新核心；本次未发送");
     }
   }
-  catch (error) { showToast(error.message || "附件输入无效", "error"); return; }
+  catch (error) {
+    const message = error.message || "附件输入无效";
+    showToast(message, "error");
+    addMessage("system", `本次未发送：${message}`);
+    return;
+  }
   if (promptInput.value === promptValue) promptInput.value = "";
   updateComposerHint();
   // 主动发送：回到跟随底部（此前上滑过也要跟住新回合）。
@@ -1732,6 +1775,7 @@ async function sendPrompt() {
     // A background completion must not clear another conversation's draft,
     // or an attachment added while this turn was running.
     if (state.sessionId === turnSessionId && state.selectionVersion === turnSelection && JSON.stringify(state.attachments) === draftAttachments) {
+      releaseAttachmentPreviews(state.attachments);
       state.attachments = [];
       renderAttachmentChips();
     }
@@ -1783,15 +1827,48 @@ async function sendPrompt() {
   }
 }
 
+function releaseAttachmentPreviews(attachments) {
+  if (typeof URL === "undefined" || !URL.revokeObjectURL) return;
+  for (const attachment of attachments || []) {
+    if (attachment?.preview_url) URL.revokeObjectURL(attachment.preview_url);
+  }
+}
+
 function renderAttachmentChips() {
   const container = $("attachmentChips");
   container.innerHTML = "";
   for (const attachment of state.attachments) {
     const chip = document.createElement("span");
     chip.className = "chip";
-    chip.textContent = `${attachment.name} ×`;
-    chip.title = attachment.mime || "attachment";
+    const mime = String(attachment.mime || "attachment").toLowerCase();
+    const name = String(attachment.name || "附件");
+    const hint = window.OwoAttachmentUpload?.documentHint?.(attachment) || "";
+    const extension = name.includes(".") ? name.split(".").pop().slice(0, 4).toUpperCase() : "FILE";
+    chip.title = `${mime}${hint}${hint ? "；" : "；"}点击移除附件`;
+    chip.setAttribute("aria-label", `${name}；${chip.title}`);
+    if (mime.startsWith("image/") && attachment.preview_url) {
+      const thumbnail = document.createElement("img");
+      thumbnail.className = "attachment-thumb";
+      thumbnail.src = attachment.preview_url;
+      thumbnail.alt = "";
+      chip.classList.add("has-preview");
+      chip.appendChild(thumbnail);
+    } else {
+      const kind = document.createElement("span");
+      kind.className = "attachment-kind";
+      kind.textContent = extension;
+      chip.classList.add("has-preview");
+      chip.appendChild(kind);
+    }
+    const label = document.createElement("span");
+    label.textContent = name;
+    chip.appendChild(label);
+    const remove = document.createElement("span");
+    remove.textContent = "×";
+    remove.setAttribute("aria-hidden", "true");
+    chip.appendChild(remove);
     chip.addEventListener("click", () => {
+      if (attachment.preview_url) URL.revokeObjectURL(attachment.preview_url);
       state.attachments = state.attachments.filter(
         (item) => item.id !== attachment.id
       );
@@ -1801,22 +1878,55 @@ function renderAttachmentChips() {
   }
 }
 
+async function ensureAttachmentSession() {
+  if (state.sessionId) {
+    return { id: state.sessionId, selectionVersion: state.selectionVersion };
+  }
+  // 与首条消息发送共用同一把会话创建锁：先选附件再按发送时，不会创建两个空会话。
+  const created = await promptSessionStart.run(() => newSession());
+  if (!created?.id) throw new Error("新会话尚未就绪，请稍后重试附件");
+  return created;
+}
+
 async function uploadAttachments(files) {
-  if (!state.sessionId) {
-    addMessage("system", "请先新建或选择一个会话，再添加附件");
+  const selectedFiles = Array.from(files || []);
+  // 在等待会话创建前就快照并清空文件输入；否则同一批 FileList 会被二次读取，
+  // 用户重新选同一个文件也不会再触发 change。
+  $("attachmentInput").value = "";
+  if (!selectedFiles.length) return;
+  const unsupported = selectedFiles.find((file) => window.OwoAttachmentUpload?.unsupportedMedia?.(file));
+  if (unsupported) {
+    addMessage("system", `附件未上传 ${unsupported.name}：当前尚未配置音频/视频输入适配器；请先转写为文本或移除该附件`);
     return;
   }
-  const selectedFiles = Array.from(files || []);
-  $("attachmentInput").value = "";
-  const sessionId = state.sessionId;
-  const selectionVersion = state.selectionVersion;
+  const chatMode = typeof currentSessionMode === "function" && currentSessionMode() === "chat";
+  if (!state.sessionId && !$("workspace").value.trim() && !chatMode) {
+    openWorkspaceMenu($("composerProjectBtn"));
+    return;
+  }
+  let created;
+  try {
+    created = await ensureAttachmentSession();
+  } catch (error) {
+    const message = error?.userFacing ? String(error.message || error) : friendlyError(error);
+    showToast(`附件未上传：${message}`, "error");
+    addMessage("system", `附件未上传：${message}`);
+    return;
+  }
+  const sessionId = created.id;
+  const selectionVersion = created.selectionVersion;
+  if (state.sessionId !== sessionId || state.selectionVersion !== selectionVersion) return;
   await OwoAttachmentUpload.upload(selectedFiles, {
     sessionId,
     isCurrent: () => state.sessionId === sessionId && state.selectionVersion === selectionVersion,
     request: api,
-    onUploaded(uploaded) {
+    onUploaded(uploaded, file) {
       if (!state.attachments.some((item) => item.id === uploaded.id)) {
-        state.attachments.push({ id: uploaded.id, name: uploaded.name, mime: uploaded.mime, size: uploaded.size, content_part: uploaded.content_part });
+        const mime = String(uploaded.mime || file?.type || "");
+        const preview_url = mime.startsWith("image/") && file && typeof URL !== "undefined" && URL.createObjectURL
+          ? URL.createObjectURL(file)
+          : "";
+        state.attachments.push({ id: uploaded.id, name: uploaded.name, mime, size: uploaded.size, content_part: uploaded.content_part, preview_url });
       }
       renderAttachmentChips();
     },
@@ -3267,6 +3377,11 @@ function panelHelpers() {
     // 任意 method/无 body 的请求（如自动化 toggle/clear 的空体 POST）。
     call(path, options) {
       return api(path, options);
+    },
+    openStream(path, options) {
+      const client = window.OwoApi;
+      if (!client?.openEventStream) return Promise.reject(new Error("当前核心不支持带认证的事件流；请更新桌面端"));
+      return client.openEventStream(path, options);
     },
     // 面板内统一走样式化弹窗（原生 confirm/prompt 会阻塞渲染且无法定制）
     confirm: askConfirm,

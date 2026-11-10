@@ -131,3 +131,70 @@ test("a default zero cost with missing prices is unknown, not free", () => {
   assert.match(context.format({ cost_usd: 0, budget: { input_price_per_mtok: 0, output_price_per_mtok: 0 } }), /未知/);
   assert.equal(context.format({ cost_usd: 0, budget: { input_price_per_mtok: 1, output_price_per_mtok: 1 } }), "$0.0000");
 });
+
+test("mature-workflow slash commands map to real settings, inspector and evidence entries", async () => {
+  const app = read("app.js");
+  const source = app.slice(app.indexOf("function openModelSettings()"), app.indexOf("function runSlashCommand("));
+  const calls = [];
+  const context = {
+    state: { sessionId: "s-1" },
+    window: { OwoPanels: { evidence: { openSession: id => calls.push(["review", id]) } } },
+    document: { body: { classList: { contains: () => false } } },
+    setSettingsPageVisible: value => calls.push(["settings", value]),
+    setSettingsTab: value => calls.push(["tab", value]),
+    refreshProviderImageInput: () => calls.push(["capabilities"]),
+    setToolsVisible: value => calls.push(["tools", value]),
+    showToast: (...args) => calls.push(["toast", ...args]),
+    setTaskDetailsVisible: value => calls.push(["inspector", value]),
+    selectInspectorTab: (...args) => calls.push(["inspector-tab", ...args]),
+    refreshDiff: async id => calls.push(["diff", id]),
+    openPanelById: id => { calls.push(["panel", id]); return id === "evidence"; },
+  };
+  runInNewContext(source + "\nthis.commands={openModelSettings,openSessionDiff,openSessionReview};", context);
+  const commands = context.commands;
+  commands.openModelSettings();
+  await Promise.resolve();
+  commands.openSessionDiff();
+  commands.openSessionReview();
+  await Promise.resolve();
+  assert.deepEqual(calls, [
+    ["settings", true], ["tab", "models"], ["capabilities"],
+    ["inspector", true], ["inspector-tab", "changes", true], ["diff", "s-1"],
+    ["panel", "evidence"], ["review", "s-1"],
+  ]);
+  const names = app.slice(app.indexOf("const SLASH_COMMANDS = ["), app.indexOf("let slashMatches"));
+  for (const name of ["goal", "plan", "model", "diff", "review", "status", "compact"]) {
+    assert.match(names, new RegExp('name: "' + name + '"'));
+  }
+  assert.doesNotMatch(names, /openPanelById\("diff"\)/);
+});
+
+test("/compact uses the session compaction route and refreshes the active session", async () => {
+  const domain = read("app-domain.js");
+  const start = domain.indexOf("async function compactCurrentSession()");
+  const end = domain.indexOf("/// 重做：恢复最近一次回退掉的回合。", start);
+  assert.ok(start >= 0 && end > start);
+  const calls = [];
+  const context = {
+    state: { sessionId: "session/42" },
+    currentTurn: () => false,
+    api: async (path, options) => {
+      calls.push(["api", path, options]);
+      return { compacted: true, tokens_before: 120, tokens_after: 30 };
+    },
+    selectSession: async id => calls.push(["reload", id]),
+    showToast: (...args) => calls.push(["toast", ...args]),
+    addMessage: (...args) => calls.push(["message", ...args]),
+    friendlyError: error => String(error),
+  };
+  runInNewContext(domain.slice(start, end) + "\nthis.compact=compactCurrentSession;", context);
+  const result = await context.compact();
+  assert.equal(result.compacted, true);
+  const observed = JSON.parse(JSON.stringify(calls));
+  assert.deepEqual(observed[0], ["api", "/session/session%2F42/compact", { method: "POST", body: "{}" }]);
+  assert.deepEqual(observed.slice(1), [
+    ["toast", "会话已压缩：120 → 30 tokens", "ok"],
+    ["message", "system", "会话历史已压缩：120 → 30 tokens，摘要已保留在会话中。"],
+    ["reload", "session/42"],
+  ]);
+});

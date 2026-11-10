@@ -102,13 +102,15 @@ pub(super) fn effective_runtime_config(settings: &owo_agent_core::Settings) -> V
         "qwen"
     } else if lower.contains("deepseek") {
         "deepseek"
-    } else if lower.contains("ollama") || lower.contains("127.0.0.1") || lower.contains("localhost")
-    {
+    } else if lower.contains("ollama") {
         "ollama"
     } else {
+        // A loopback OpenAI-compatible endpoint is not an Ollama provider. Keep the
+        // display name protocol-neutral and let endpoint_kind describe its locality.
         "openai-compatible"
     };
-    let local = provider == "ollama";
+    let local =
+        lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("ollama");
     let cloud_enabled = std::env::var("OWO_CLOUD_ENABLED")
         .ok()
         .and_then(|value| value.parse::<bool>().ok())
@@ -136,7 +138,12 @@ pub(super) fn effective_runtime_config(settings: &owo_agent_core::Settings) -> V
         "base_url_set": settings.provider.has_base_url()
             || std::env::var("OPENAI_BASE_URL").is_ok_and(|v| !v.trim().is_empty()),
         "api_key_set": key_present,
-        "model_input_capabilities": owo_agent_core::gateway::input_capabilities::input_capability_bindings_from_env().ok(),
+        // Reflect what the request boundary sees: settings override host-injected
+        // declarations when present, otherwise the host environment is authoritative.
+        "model_input_capabilities": match owo_agent_core::gateway::input_capabilities::input_capability_bindings_from_env() {
+            Ok(bindings) => json!(bindings),
+            Err(_) => json!([]),
+        },
         "input_capability_config_error": owo_agent_core::gateway::input_capabilities::input_capability_bindings_from_env().err(),
     })
 }

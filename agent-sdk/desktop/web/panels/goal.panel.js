@@ -96,6 +96,16 @@ window.OwoPanels.goal = (function () {
   function label(status) {
     return ({Pending:"未运行",Planning:"计划中",Running:"运行中",Verifying:"校验中",Succeeded:"已完成",Failed:"失败",Aborted:"已中止",Skipped:"已跳过"})[status] || "未知状态";
   }
+  function displayStatus(status, goal) {
+    var terminal = status && status.goal_status || goal && (status || goal.status);
+    if (terminal === "Failed") {
+      var completion = status && status.completion_record && status.completion_record.status
+        || goal && goal.completion_record && goal.completion_record.status;
+      if (completion === "candidate") return "候选结果待验收";
+      if (completion === "unverified") return "结果缺少验收证据";
+    }
+    return label(terminal);
+  }
   function setBusy(button, busy, text) {
     if (!button) return;
     if (button.setAttribute) {
@@ -150,14 +160,23 @@ window.OwoPanels.goal = (function () {
     if (button && button.setAttribute) button.setAttribute("aria-expanded",String(editorOpen));
     if (open && !restoring) { selectTab("goals"); var input=el("owo-goal-objective"); if(input && input.focus) input.focus({preventScroll:true}); }
   }
+  function normalizeStep(step) {
+    var verify = step.verify;
+    if (verify === "OutputNonEmpty" || (verify && typeof verify === "object" && Object.prototype.hasOwnProperty.call(verify,"OutputNonEmpty"))) verify = {kind:"nonempty"};
+    else if (verify && typeof verify === "object" && Object.prototype.hasOwnProperty.call(verify,"OutputEquals")) verify = {kind:"equals",value:verify.OutputEquals};
+    else if (verify && typeof verify === "object" && Object.prototype.hasOwnProperty.call(verify,"OutputContains")) verify = {kind:"contains",value:verify.OutputContains};
+    var normalized = {id:step.id,worker:step.worker,deps:step.depends_on || step.deps || [],verify:verify == null ? null : verify,max_retries:step.retries == null ? (step.max_retries || 0) : step.retries,input:step.input === undefined ? {} : step.input,parallel:!!step.parallel};
+    // Legacy hand-written plans used payload.text. Map it to the worker's real
+    // input field instead of silently dropping the text from the saved plan.
+    var text = step.payload && typeof step.payload.text === "string" ? step.payload.text
+      : typeof step.text === "string" ? step.text : null;
+    if (text != null && normalized.input.text === undefined && normalized.input.prompt === undefined) {
+      normalized.input[String(step.worker) === "agent" ? "prompt" : "text"] = text;
+    }
+    return normalized;
+  }
   function serializableSteps(plan) {
-    return (plan && Array.isArray(plan.steps) ? plan.steps : []).map(function (step) {
-      var verify = step.verify;
-      if (verify === "OutputNonEmpty" || (verify && typeof verify === "object" && Object.prototype.hasOwnProperty.call(verify,"OutputNonEmpty"))) verify = {kind:"nonempty"};
-      else if (verify && typeof verify === "object" && Object.prototype.hasOwnProperty.call(verify,"OutputEquals")) verify = {kind:"equals",value:verify.OutputEquals};
-      else if (verify && typeof verify === "object" && Object.prototype.hasOwnProperty.call(verify,"OutputContains")) verify = {kind:"contains",value:verify.OutputContains};
-      return {id:step.id,worker:step.worker,deps:step.depends_on || step.deps || [],verify:verify == null ? null : verify,max_retries:step.retries == null ? (step.max_retries || 0) : step.retries,input:step.input === undefined ? {} : step.input,parallel:!!step.parallel};
-    });
+    return (plan && Array.isArray(plan.steps) ? plan.steps : []).map(normalizeStep);
   }
 
   function nav() {
@@ -253,11 +272,12 @@ window.OwoPanels.goal = (function () {
       return;
     }
     var query = goalQuery.trim().toLowerCase();
-    var goals = state.goals.filter(function(g){return (!goalFilter || goalStatus(g)===goalFilter) && (!query || String(g.objective || "").toLowerCase().indexOf(query)!==-1 || String(g.id).toLowerCase().indexOf(query)!==-1);});
+    // 候选/缺证据的目标在列表过滤中仍按真实终态 Failed 归类；显示文本才作解释。
+    var goals = state.goals.filter(function(g){var status=goalStatus(g);return (!goalFilter || status===goalFilter) && (!query || String(g.objective || "").toLowerCase().indexOf(query)!==-1 || String(g.id).toLowerCase().indexOf(query)!==-1);});
     if (!goals.length) { list.innerHTML='<p class="sub">'+(state.goals.length?"没有匹配的目标。":"暂无目标，先创建一个。")+'</p>';return; }
     list.innerHTML=goals.map(function(g){
       return '<div class="owo-goal-row'+(state.current===g.id?' is-selected':'')+'"><div><strong>'+H.esc(g.objective || g.id)+'</strong>' +
-        '<span class="owo-goal-state">'+H.esc(label(goalStatus(g)))+'</span><p class="sub">'+H.esc(localTime(g.updated_at || g.created_at))+'（本地时间）</p></div>' +
+        '<span class="owo-goal-state">'+H.esc(displayStatus({goal_status:goalStatus(g)},g))+'</span><p class="sub">'+H.esc(localTime(g.updated_at || g.created_at))+'（本地时间）</p></div>' +
         '<button type="button" data-id="'+H.esc(g.id)+'" class="owo-goal-open" aria-label="打开目标：'+H.esc(g.objective || g.id)+'">打开</button></div>';
     }).join("");
     if (list.querySelectorAll) Array.prototype.forEach.call(list.querySelectorAll(".owo-goal-open"),function(button){
@@ -353,7 +373,7 @@ window.OwoPanels.goal = (function () {
     var raw=Object.prototype.hasOwnProperty.call(planDrafts,goal.id)?planDrafts[goal.id]:JSON.stringify(serializableSteps(plan),null,2);
     renderedGoalId=goal.id;
     var pending=goalActionPending[goal.id], running=["Running","Verifying"].indexOf(goalStatus(goal))!==-1;
-    detail.innerHTML='<div class="owo-goal-detail-head"><h3>'+H.esc(goal.objective)+'</h3><span class="owo-goal-state" id="owo-goal-current-status">'+H.esc(label(goalStatus(goal)))+'</span></div>' +
+    detail.innerHTML='<div class="owo-goal-detail-head"><h3>'+H.esc(goal.objective)+'</h3><span class="owo-goal-state" id="owo-goal-current-status">'+H.esc(displayStatus({goal_status:goalStatus(goal)},goal))+'</span></div>' +
       '<div role="tablist" aria-label="目标详情" class="owo-goal-detail-tabs">' +
       ["plan","status","audit"].map(function(name,index){return '<button type="button" role="tab" id="owo-goal-detail-tab-'+name+'" aria-controls="owo-goal-detail-pane-'+name+'">'+["执行计划","执行状态","审计记录"][index]+'</button>';}).join("")+'</div>' +
       '<div role="tabpanel" id="owo-goal-detail-pane-plan" aria-labelledby="owo-goal-detail-tab-plan">' +
@@ -410,9 +430,7 @@ window.OwoPanels.goal = (function () {
       notify("步骤需包含 id、worker，依赖须为字符串数组，重试次数须为非负整数","error");
       return Promise.resolve(null);
     }
-    var normalized = steps.map(function(step){
-      return {id:step.id,worker:step.worker,deps:step.deps || [],verify:step.verify == null ? null : step.verify,max_retries:step.max_retries || 0,input:step.input === undefined ? {} : step.input,parallel:!!step.parallel};
-    });
+    var normalized = steps.map(function(step){return normalizeStep(step);});
     var submitted=textarea.value;
     var scope=hostScope, transport=H.post, locks=savingPlans;
     var owner = panelGeneration;
@@ -497,7 +515,7 @@ window.OwoPanels.goal = (function () {
       if (typeof status.goal_status === "string") {
         runtimeStatuses[goalId]=status.goal_status;
         renderList();
-        var heading=el("owo-goal-current-status");if(heading)heading.textContent=label(status.goal_status);
+        var heading=el("owo-goal-current-status");if(heading)heading.textContent=displayStatus(status);
         var running=["Running","Verifying"].indexOf(status.goal_status)!==-1;
         function disabled(id,value) {
           var button=el(id);if(!button)return;
@@ -527,7 +545,8 @@ window.OwoPanels.goal = (function () {
       }).join("");
       table.innerHTML="<thead><tr><th>步骤</th><th>状态</th><th>工具 / 模型</th><th>尝试</th><th>输出</th></tr></thead><tbody>"+
         (rows || '<tr><td colspan="5">暂无步骤执行记录。</td></tr>')+
-        '<tr><td colspan="5">'+H.esc(label(status.goal_status))+" · 执行步骤 "+H.esc(status.steps_taken == null?"—":status.steps_taken)+" · 重新规划 "+H.esc(status.replan_count == null?"—":status.replan_count)+"</td></tr></tbody>";
+        '<tr><td colspan="5">'+H.esc(displayStatus(status))+" · 执行步骤 "+H.esc(status.steps_taken == null?"—":status.steps_taken)+" · 重新规划 "+H.esc(status.replan_count == null?"—":status.replan_count)+
+          (status.goal?.error?'<p class="sub">'+H.esc(status.goal.error)+"</p>":"")+"</td></tr></tbody>";
     }).catch(function(error){
       if(request!==statusGeneration || owner!==panelGeneration || state.current!==goalId)return;
       var table=el("owo-goal-status");if(!table)return;
@@ -555,39 +574,74 @@ window.OwoPanels.goal = (function () {
   var cloudSource = null;
   var cloudGeneration = 0;
   var cloudReconnectNoticeShown = false;
+  var cloudLastEventId = "";
+
+  function closeCloudSource() {
+    var source = cloudSource;
+    cloudSource = null;
+    if (source && typeof source.abort === "function") source.abort();
+    else if (source && typeof source.close === "function") source.close();
+  }
+
+  function subscribeCloudAttempt(generation, path, options) {
+    var open = H.openStream || (window.OwoApi && typeof window.OwoApi.openEventStream === "function"
+      ? function (url, opts) { return window.OwoApi.openEventStream(url, opts); }
+      : null);
+    if (!open) {
+      appendCloudLog("（事件流客户端未加载，无法订阅云端进度）");
+      return;
+    }
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    if (!controller) { appendCloudLog("（当前环境不支持带取消能力的事件流）"); return; }
+    cloudSource = controller;
+    var opts = Object.assign({}, options || {});
+    opts.signal = controller.signal;
+    // Last-Event-ID is supplied by the authenticated client so reconnects resume
+    // from the last frame instead of replaying the whole task from the beginning.
+    opts.lastEventId = cloudLastEventId;
+    opts.onOpen = function () {
+      if (generation !== cloudGeneration) return;
+      cloudReconnectNoticeShown = false;
+      appendCloudLog("（已连接云端进度）");
+    };
+    opts.onEvent = function (frame) {
+      if (generation !== cloudGeneration) return;
+      if (frame && frame.id) cloudLastEventId = String(frame.id);
+      onCloudProgress(frame);
+    };
+    var promise;
+    try {
+      promise = open(path, opts);
+    } catch (error) {
+      promise = Promise.reject(error);
+    }
+    if (!promise || typeof promise.catch !== "function") return;
+    promise.catch(function (error) {
+      if (generation !== cloudGeneration) return;
+      if (error && (error.name === "AbortError" || controller.signal.aborted)) return;
+      appendCloudLog("云端进度连接失败：" + H.friendlyError(error));
+      if (!cloudReconnectNoticeShown) {
+        appendCloudLog("（正在自动重连并续传进度）");
+        cloudReconnectNoticeShown = true;
+      }
+      window.setTimeout(function () {
+        if (generation === cloudGeneration) subscribeCloudAttempt(generation, path, options);
+      }, 1000);
+    });
+  }
 
   function subscribeCloud() {
     var input = document.getElementById("owo-goal-cloud-task");
     var taskId = (input && input.value.trim()) || "";
     if (!taskId) return;
     closeCloud();
-    var base = H.baseUrl || window.location.origin;
     var log = document.getElementById("owo-goal-cloudlog");
     if (log) log.textContent = "订阅 " + taskId + " ...";
     cloudReconnectNoticeShown = false;
+    cloudLastEventId = "";
     var generation = cloudGeneration;
-    cloudSource = new EventSource(base + "/cloud/tasks/" + encodeURIComponent(taskId) + "/events");
-    cloudSource.onopen = function () {
-      if (generation !== cloudGeneration) return;
-      cloudReconnectNoticeShown = false;
-    };
-    cloudSource.onmessage = function (event) {
-      if (generation === cloudGeneration) onCloudProgress(event);
-    };
-    // The server names cloud progress frames `progress`; EventSource.onmessage only
-    // receives unnamed `message` events, so subscribe to both wire forms.
-    cloudSource.addEventListener("progress", function (event) {
-      if (generation === cloudGeneration) onCloudProgress(event);
-    });
-    cloudSource.onerror = function () {
-      if (generation !== cloudGeneration) return;
-      // EventSource tracks Last-Event-ID and retries transient disconnects itself.
-      // Only explicit user action or a terminal/not-found frame closes this source.
-      if (!cloudReconnectNoticeShown) {
-        appendCloudLog("（连接暂时中断，正在自动续传进度）");
-        cloudReconnectNoticeShown = true;
-      }
-    };
+    var path = "/cloud/tasks/" + encodeURIComponent(taskId) + "/events";
+    subscribeCloudAttempt(generation, path, {});
   }
 
   function onCloudProgress(ev) {
@@ -616,9 +670,7 @@ window.OwoPanels.goal = (function () {
 
   function closeCloudSilently() {
     cloudGeneration += 1;
-    var source = cloudSource;
-    cloudSource = null;
-    if (source) source.close();
+    closeCloudSource();
   }
 
   function dispose() {

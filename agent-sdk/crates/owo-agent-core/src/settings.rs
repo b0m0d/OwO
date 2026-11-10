@@ -230,7 +230,7 @@ pub struct Settings {
     /// 模型提供商接入（端点 / 密钥）。缺失时 provider_ready 仍可由环境变量满足。
     #[serde(default)]
     pub provider: ProviderSettings,
-    /// Exact connection/model declarations; None inherits host environment, Some([]) clears.
+    /// Exact connection/model declarations; None inherits host environment, Some([]) explicitly clears.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_input_capabilities: Option<Vec<owo_agent_protocol::ModelInputCapabilityBinding>>,
     /// 启动默认只读（plan）模式。
@@ -349,20 +349,25 @@ impl Settings {
 
     /// Apply host declarations only. Per-turn connections never mutate this environment.
     pub fn apply_model_input_capabilities_env(&self) {
-        if let Some(bindings) = &self.model_input_capabilities {
-            // Malformed persisted declarations remain fail-closed at the request boundary.
-            let raw =
+        // `None` inherits a host-injected environment declaration; `Some([])` is an
+        // explicit settings-level denial. Both prevent a request from silently using
+        // an old model's support, while preserving host-managed deployments.
+        let raw = match &self.model_input_capabilities {
+            None => return,
+            Some(bindings) => {
+                // Malformed persisted declarations remain fail-closed at the request boundary.
                 crate::gateway::input_capabilities::validate_input_capability_bindings(bindings)
                     .and_then(|()| {
                         serde_json::to_string(bindings).map_err(|error| error.to_string())
                     })
-                    // Explicit invalid marker: do not silently retain stale support or overflow Windows.
-                    .unwrap_or_else(|_| "null".to_string());
-            std::env::set_var(
-                crate::gateway::input_capabilities::INPUT_CAPABILITIES_ENV,
-                raw,
-            );
-        }
+                    // Explicit invalid marker: do not silently retain stale support.
+                    .unwrap_or_else(|_| "null".to_string())
+            }
+        };
+        std::env::set_var(
+            crate::gateway::input_capabilities::INPUT_CAPABILITIES_ENV,
+            raw,
+        );
     }
 
     /// 把用量预算配置写回环境变量（provider 每次调用前读取，即时生效）。

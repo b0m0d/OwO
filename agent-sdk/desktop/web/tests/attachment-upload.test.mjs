@@ -61,9 +61,9 @@ test("main composer uses current generation, deduplicates references, and restor
  const domain=readFileSync(new URL("../app-domain.js",import.meta.url),"utf8");
  const body=domain.slice(domain.indexOf("async function uploadAttachments(files) {"),domain.indexOf("// ---------- 审批条"));
  let pending,errors=[],toasts=[],renders=0;const state={sessionId:"a",attachments:[],selectionVersion:1},input={value:"selected"};
- const context={OwoAttachmentUpload:U,state,api:async()=>({id:"same",name:"note.txt",mime:"text/plain"}),$:()=>input,renderAttachmentChips:()=>renders++,addMessage:(_,text)=>errors.push(text),showToast:t=>toasts.push(t)};
+ const context={window:{OwoAttachmentUpload:U},state,api:async()=>({id:"same",name:"note.txt",mime:"text/plain"}),$:()=>input,renderAttachmentChips:()=>renders++,addMessage:(_,text)=>errors.push(text),showToast:t=>toasts.push(t),currentSessionMode:()=>"chat",friendlyError:e=>String(e)};
  context.OwoAttachmentUpload={upload:(files,o)=>{pending=o;return Promise.resolve();}};
- const upload=runInNewContext(body+"\nuploadAttachments;",context);
+ const upload=runInNewContext("async function ensureAttachmentSession(){return {id:state.sessionId,selectionVersion:state.selectionVersion};}\n"+body+"\nuploadAttachments;",context);
  await upload([file()]);pending.onUploaded({id:"same"});pending.onUploaded({id:"same"});assert.equal(state.attachments.length,1);assert.equal(renders,2);assert.equal(input.value,"");
  assert.equal(pending.isCurrent(),true);state.selectionVersion++;assert.equal(pending.isCurrent(),false);
  state.sessionId="b";assert.equal(pending.isCurrent(),false);pending.onStopped({requestStarted:true});assert.match(toasts[0],/仍归原会话/);
@@ -75,8 +75,9 @@ test("composer snapshots FileList before clearing it and an old upload completio
  const domain=readFileSync(new URL("../app-domain.js",import.meta.url),"utf8"),body=domain.slice(domain.indexOf("async function uploadAttachments(files) {"),domain.indexOf("// ---------- 审批条"));
  const files=[file()];let inputValue="initial",finish,passed;
  const input={get value(){return inputValue;},set value(v){inputValue=v;if(v==="")files.length=0;}};
- const context={state:{sessionId:"a",selectionVersion:1,attachments:[]},$:()=>input,OwoAttachmentUpload:{upload:(items)=>{passed=items;return new Promise(r=>finish=r);}},renderAttachmentChips(){},addMessage(){},showToast(){},api(){}};
- const upload=runInNewContext(body+"\nuploadAttachments;",context),pending=upload(files);
+ const context={state:{sessionId:"a",selectionVersion:1,attachments:[]},$:()=>input,window:{OwoAttachmentUpload:U},OwoAttachmentUpload:{upload:(items)=>{passed=items;return new Promise(r=>finish=r);}},renderAttachmentChips(){},addMessage(){},showToast(){},api(){},currentSessionMode:()=>"chat",friendlyError:e=>String(e)};
+ const upload=runInNewContext("async function ensureAttachmentSession(){return {id:state.sessionId,selectionVersion:state.selectionVersion};}\n"+body+"\nuploadAttachments;",context),pending=upload(files);
+ await Promise.resolve(); // 会话创建锁经一次微任务返回；此时才进入真实 upload 调用。
  assert.equal(files.length,0);assert.equal(passed.length,1);input.value="new-selection";finish();await pending;assert.equal(input.value,"new-selection");
 });
 
@@ -86,6 +87,15 @@ test("turn input preserves immutable hash references, separates legacy IDs and d
  const inputs=U.turnInput([first,{id:"legacy.txt"},first,second]);
  assert.deepEqual(inputs,{attachments:["legacy.txt"],content_parts:[first.content_part,second.content_part]});
  inputs.content_parts[0].asset.sha256="b".repeat(64);assert.equal(first.content_part.asset.sha256,"a".repeat(64));
+});
+test("audio/video files are rejected before upload and documents advertise their reference-only semantics",()=>{
+ for(const [name,type] of [["clip.mp4","video/mp4"],["voice.wav","audio/wav"],["sound.flac",""]]){
+  assert.equal(U.unsupportedMedia(file(name,10,type)),true);
+  assert.throws(()=>U.plan(file(name,10,type)),/输入适配器/);
+ }
+ assert.equal(U.unsupportedMedia(file("report.pdf",10,"application/pdf")),false);
+ assert.match(U.documentHint(file("report.pdf",10,"application/pdf")),/不自动解析内容/);
+ assert.equal(U.documentHint(file("photo.png",10,"image/png")),"");
 });
 test("unsupported media and invalid asset references fail before a turn is submitted",()=>{
  for(const type of ["audio","video"])assert.throws(()=>U.turnInput([assetUpload(type)]),/输入适配器/);

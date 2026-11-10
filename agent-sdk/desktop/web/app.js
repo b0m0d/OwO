@@ -836,6 +836,7 @@ function showHomeView(options = {}) {
   // 让仍在进行中的会话加载请求失效，避免它晚到后又把视图切回旧会话。
   state.selectionVersion = (state.selectionVersion || 0) + 1;
   state.sessionId = null;
+  releaseAttachmentPreviews(state.attachments);
   state.attachments = [];
   renderAttachmentChips();
   showSessionView(null);
@@ -3882,9 +3883,16 @@ const SLASH_COMMANDS = [
   { name: "undo", desc: "回退最近一个回合", run: () => sessionUndo() },
   { name: "redo", desc: "重做被回退的回合", run: () => sessionRedo() },
   { name: "export", desc: "导出当前会话为 Markdown", run: () => exportSession("md") },
+  { name: "compact", desc: "压缩当前会话历史", run: () => compactCurrentSession() },
   { name: "stop", desc: "中断正在执行的回合", run: () => abortTurn() },
   { name: "settings", desc: "打开设置页", run: () => setSettingsPageVisible(true) },
   { name: "help", desc: "查看全部命令", run: () => showSlashHelp() },
+  { name: "goal", desc: "打开目标与计划；带描述可填入新目标", run: (args) => openGoalPanel(args) },
+  { name: "plan", desc: "打开任务规划", run: () => openPanelById("project-launcher") },
+  { name: "model", desc: "打开模型设置与能力声明", run: () => openModelSettings() },
+  { name: "diff", desc: "在右侧检查器查看当前会话文件变更", run: () => openSessionDiff() },
+  { name: "review", desc: "打开评审与产物面板", run: () => openSessionReview() },
+  { name: "status", desc: "查看本次连接与能力状态", run: () => showConnectionStatus() },
 ];
 
 let slashMatches = [];
@@ -3897,8 +3905,8 @@ function slashQuery() {
   const value = promptEl.value;
   if (!value.startsWith("/")) return null;
   const rest = value.slice(1);
-  if (/\s/.test(rest)) return null;
-  return rest.toLowerCase();
+  const space = rest.search(/\s/);
+  return (space < 0 ? rest : rest.slice(0, space)).toLowerCase();
 }
 
 function matchingSlashCommands(query) {
@@ -3976,13 +3984,67 @@ async function newSessionWithMode(mode) {
   await newSession();
 }
 
-function runSlashCommand(command) {
+function openModelSettings() {
+  setSettingsPageVisible(true);
+  setSettingsTab("models");
+  refreshProviderImageInput();
+}
+
+function openSessionDiff() {
+  if (document.body.classList.contains("tools-open") || document.body.classList.contains("settings-open") || document.body.classList.contains("panel-open")) {
+    setToolsVisible(false);
+  }
+  if (!state.sessionId) {
+    showToast("选择或开始一个会话后，才能查看该会话的文件变更", "error");
+    return;
+  }
+  if (!document.body.classList.contains("inspector-open")) setTaskDetailsVisible(true);
+  selectInspectorTab("changes", true);
+  void refreshDiff(state.sessionId);
+}
+
+function openSessionReview() {
+  if (!openPanelById("evidence")) return;
+  if (!state.sessionId) return;
+  const panel = window.OwoPanels?.evidence;
+  panel?.openSession?.(state.sessionId);
+}
+
+function openGoalPanel(objective) {
+  openPanelById("goal");
+  const text = String(objective || "").trim();
+  if (!text) return;
+  const showEditor = () => {
+    const editor = $("owo-goal-editor");
+    if (!editor || !editor.hidden) return true;
+    const button = $("owo-goal-new");
+    button?.click();
+    return !editor.hidden;
+  };
+  let attempts = 0;
+  const fill = () => {
+    const input = $("owo-goal-objective");
+    if (input && showEditor()) {
+      input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+      return;
+    }
+    if (attempts++ < 20) setTimeout(fill, 50);
+  };
+  setTimeout(fill, 0);
+}
+
+function runSlashCommand(command, args = "") {
   if (!command) return;
   closeSlashMenu();
+  const raw = String($("prompt").value || "");
+  const space = raw.slice(1).search(/\s/);
+  if (space >= 0 && !args) args = raw.slice(space + 2).trim();
   $("prompt").value = "";
   updateComposerHint();
   try {
-    const result = command.run();
+    const result = command.run(args);
     if (result && typeof result.catch === "function") {
       result.catch((error) => {
         showToast(friendlyError(error, { resource: true }), "error");
@@ -4001,6 +4063,32 @@ function showSlashHelp() {
     title: "可用命令",
     body: `<ul class="slash-help">${rows}</ul>`,
     actions: [{ label: "关闭", kind: "primary", onClick: ({ close }) => close() }],
+  });
+}
+
+function showConnectionStatus() {
+  const settings = state.settings || {};
+  const runtime = settings.runtime || {};
+  const identity = currentProviderIdentity();
+  const imageState = ModelRouting.imageInputLabel(
+    ModelRouting.imageInputDeclaration(identity, currentCapabilityBindings()),
+  );
+  const rows = [
+    ["核心", runtime.provider_ready === false ? "未就绪" : "已连接"],
+    ["模型", identity.model || "未配置"],
+    ["端点", identity.base_url || "使用服务端默认"],
+    ["图片", imageState],
+    ["文档", "仅传引用与版本；暂不自动解析内容"],
+    ["音视频", "未配置输入适配器；请先转写为文本"],
+    ["会话", state.sessionId ? "已选择" : "草稿（发送时创建）"],
+  ];
+  openModal({
+    title: "连接与能力状态",
+    body: `<ul class="slash-help">${rows.map(([label, value]) => `<li><strong>${esc(label)}</strong><span>${esc(value)}</span></li>`).join("")}</ul><p class="sub">能力声明只对当前端点和模型生效，不代表自动实测；连接身份变化时请在设置页重新声明。</p>`,
+    actions: [
+      { label: "打开设置", onClick: ({ close }) => { close(); setSettingsPageVisible(true); setSettingsTab("models"); } },
+      { label: "关闭", kind: "primary", onClick: ({ close }) => close() },
+    ],
   });
 }
 
@@ -4614,7 +4702,7 @@ async function saveSettings(options = {}) {
   try {
     const settings = { ...(state.settings || {}) };
     delete settings.custom_models; // 自定义模型只存本机，不发给服务端
-    settings.model = $("settingsModel").value;
+    settings.model = $("settingsModel").value.trim() || String(state.settings?.runtime?.model || "").trim();
     const resp = await api("/settings", {
       method: "POST",
       body: JSON.stringify(settings),
@@ -4793,7 +4881,15 @@ async function saveModelOutputSettings() {
 function renderProviderForm() {
   const settings = state.settings || {};
   const provider = settings.provider || {};
+  const runtime = settings.runtime || {};
   $("providerBaseUrl").value = provider.base_url || "";
+  // 保存后 /settings 的顶层 model 可能是脱敏投影；用运行时模型回填，避免把空值
+  // 写回声明，造成「界面显示已支持、preflight 仍报能力未知」。
+  if (!$("settingsModel").value && runtime.model) {
+    const option = [...$("settingsModel").options].find((item) => item.value === runtime.model);
+    if (!option) $("settingsModel").add(new Option(runtime.model, runtime.model));
+    $("settingsModel").value = runtime.model;
+  }
   refreshProviderImageInput();
   // 密钥只显示状态，不回填明文；已保存时留空即代表"不改动"。
   $("providerApiKey").value = "";
@@ -4810,13 +4906,52 @@ function renderProviderForm() {
   }
 }
 
-function refreshProviderImageInput() {
+function currentProviderIdentity() {
   const settings = state.settings || {};
-  const bindings = settings.runtime?.model_input_capabilities ?? settings.model_input_capabilities ?? [];
-  $("providerImageInput").value = ModelRouting.imageInputDeclaration({
-    model: $("settingsModel").value, base_url: $("providerBaseUrl").value, api_format: "openai", use_full_url: false,
-  }, bindings);
+  // Local/loopback endpoints injected by the shell are not visible in the settings
+  // form. Prefer the runtime endpoint over the BigModel preset so an image
+  // declaration is bound to the exact connection the daemon will actually use.
+  const defaultBaseUrl = String(
+    settings.provider?.base_url
+      || settings.runtime?.provider?.base_url
+      || findPreset("bigmodel")?.baseUrl
+      || window.OwoProviderPresets?.presets?.().find((preset) => preset?.id === "bigmodel")?.baseUrl
+      || "",
+  ).trim();
+  return {
+    model: String($("settingsModel").value || settings.runtime?.model || getDefaultModel() || "").trim(),
+    base_url: String($("providerBaseUrl").value || defaultBaseUrl).trim(),
+    api_format: "openai",
+    use_full_url: false,
+  };
 }
+
+function currentCapabilityBindings() {
+  const settings = state.settings || {};
+  return settings.runtime?.model_input_capabilities ?? settings.model_input_capabilities ?? [];
+}
+
+function capabilitySettingsForSave(settings, identity) {
+  const updated = { ...settings };
+  const identityKey = ModelRouting.inputIdentity(identity);
+  if (!identityKey) return updated;
+  const imageInput = $("providerImageInput").value;
+  updated.model_input_capabilities = currentCapabilityBindings().filter(
+    (item) => ModelRouting.inputIdentity(item) !== identityKey,
+  );
+  if (imageInput !== "unknown") {
+    updated.model_input_capabilities.push({ ...identity, image_input: imageInput === "supported" });
+  }
+  return updated;
+}
+
+function refreshProviderImageInput() {
+  const select = $("providerImageInput");
+  const identity = currentProviderIdentity();
+  select.value = ModelRouting.imageInputDeclaration(identity, currentCapabilityBindings());
+  select.title = `声明仅对 ${identity.model || "未选择模型"} @ ${identity.base_url || "默认端点"} 生效；未实测，不会自动开通图片输入。`;
+}
+$("providerImageInput").addEventListener("change", () => saveProvider());
 $("providerBaseUrl").addEventListener("input", () => refreshProviderImageInput());
 $("settingsModel").addEventListener("change", () => refreshProviderImageInput());
 
@@ -4847,7 +4982,9 @@ async function saveProvider() {
   try {
     const settings = { ...(state.settings || {}) };
     delete settings.custom_models; // 自定义模型只存本机，不发给服务端
-    const selectedModel = $("settingsModel").value.trim() || String(preset?.model || "").trim();
+    const selectedModel = $("settingsModel").value.trim()
+      || String(state.settings?.runtime?.model || "").trim()
+      || String(preset?.model || "").trim();
     if (selectedModel) settings.model = selectedModel;
     else delete settings.model;
     settings.provider = {
@@ -4855,16 +4992,12 @@ async function saveProvider() {
       // 留空不下发密钥字段，服务端据此保留加密信封里的旧值。
       ...(apiKey ? { api_key: apiKey } : {}),
     };
-    const imageState = $("providerImageInput").value;
     const identity = {model: settings.model, base_url: baseUrl, api_format: "openai", use_full_url: false};
-    const identityKey = ModelRouting.inputIdentity(identity);
-    if (!identityKey) throw new Error("请填写有效的模型和 HTTP(S) 端点");
-    const bindings = state.settings?.runtime?.model_input_capabilities ?? settings.model_input_capabilities ?? [];
-    settings.model_input_capabilities = bindings.filter(item => ModelRouting.inputIdentity(item) !== identityKey);
-    if (imageState !== "unknown") settings.model_input_capabilities.push({...identity, image_input: imageState === "supported"});
+    if (!ModelRouting.inputIdentity(identity)) throw new Error("请填写有效的模型和 HTTP(S) 端点");
+    const updated = capabilitySettingsForSave(settings, identity);
     const resp = await api("/settings", {
       method: "POST",
-      body: JSON.stringify(settings),
+      body: JSON.stringify(updated),
     });
     await refreshSettings();
     renderProviderForm();
@@ -6257,8 +6390,36 @@ $("modeSwitch")?.addEventListener("keydown", (event) => {
   buttons[next]?.click();
 });
 $("showArchived").addEventListener("change", () => refreshSessions(state.sessionId));
-$("attachmentBtn").addEventListener("click", () => $("attachmentInput").click());
-$("attachmentInput").addEventListener("change", () => uploadAttachments($("attachmentInput").files));
+const attachmentInput = $("attachmentInput");
+attachmentInput.setAttribute("accept", "image/png,image/jpeg,image/gif,image/webp,.txt,.md,.pdf,.json,.csv,.docx,.xlsx,.pptx,.zip,.py,.js,.ts,.rs,.html,.css,.log,.yaml,.yml,.toml,.xml");
+$("attachmentBtn").title = "添加附件（图片或文档；暂不支持音视频）";
+$("attachmentBtn").addEventListener("click", () => attachmentInput.click());
+$("attachmentInput").addEventListener("change", () => uploadAttachments(attachmentInput.files));
+// 只在外层表单接 drop：#prompt / #attachmentChips 的 drop 会冒泡到这里，
+// 重复注册会把同一批文件上传两次。dragover 也要 preventDefault 才允许放下。
+const chatForm = $("chatForm");
+chatForm?.addEventListener("dragover", (event) => {
+  if (!event.dataTransfer?.types?.includes("Files")) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  chatForm.classList.add("is-dropping");
+});
+chatForm?.addEventListener("dragleave", (event) => {
+  if (event.relatedTarget && chatForm.contains(event.relatedTarget)) return;
+  chatForm.classList.remove("is-dropping");
+});
+chatForm?.addEventListener("drop", (event) => {
+  if (!event.dataTransfer?.files?.length) return;
+  event.preventDefault();
+  chatForm.classList.remove("is-dropping");
+  uploadAttachments(event.dataTransfer.files);
+});
+$("prompt").addEventListener("paste", (event) => {
+  const files = Array.from(event.clipboardData?.files || []);
+  if (!files.length) return;
+  event.preventDefault();
+  uploadAttachments(files);
+});
 $("chatForm").addEventListener("submit", (event) => {
   event.preventDefault();
   sendPrompt();
@@ -6305,16 +6466,8 @@ $("accessChip").addEventListener("click", () => {
   openAccessMenu();
   if (composerMenuEl) composerMenuEl.dataset.owner = "access";
 });
-$("mediaBtn")?.addEventListener("click", () => {
-  openComposerMenu($("mediaBtn"), '<div class="composer-menu-title">生成媒体</div><div class="composer-menu-note">请先在设置中配置图片或语音连接，再从这里发起生成。</div><button type="button" class="composer-menu-item" data-open-media-settings>打开媒体设置 →</button>', (menu) => {
-    menu.classList.add("composer-menu-media");
-    menu.querySelector("[data-open-media-settings]")?.addEventListener("click", () => {
-      closeComposerMenu();
-      setSettingsPageVisible(true);
-    });
-  });
-  if (composerMenuEl) composerMenuEl.dataset.owner = "media";
-});
+// #mediaBtn 的单一入口在 openMediaMenu()；不要在这里再注册第二个 click，
+// 否则后注册的空菜单会覆盖媒体指令模板。
 $("revertBtn").addEventListener("click", revertAll);
 $("auditFilterBtn").addEventListener("click", () => refreshAudit());
 $("learnStart").addEventListener("click", () => learnControl("start"));

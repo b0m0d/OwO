@@ -3373,3 +3373,15 @@ body.dark-theme { --accent-text: #8cb4ff; }
 .media-profiles-settings .media-profiles-actions label {flex-direction:row;align-items:center}
 .media-profiles-settings p {overflow-wrap:anywhere}.media-profiles-settings [data-error=true] {color:var(--danger,#b42318)}
 @media(max-width:600px){.media-profiles-settings .media-profiles-grid {grid-template-columns:minmax(0,1fr)}}
+
+/* ---------- 6. 附件预览：主布局不变，只在已有 chips 行内显示缩略图/类型标记 ---------- */
+#attachmentChips .chip.has-preview { display: inline-flex; align-items: center; gap: 6px; padding-right: 8px; }
+#attachmentChips .chip .attachment-kind,
+#attachmentChips .chip .attachment-thumb {
+  width: 20px; height: 20px; border-radius: 5px; flex: 0 0 20px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; letter-spacing: .02em;
+  color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); overflow: hidden;
+}
+#attachmentChips .chip .attachment-thumb { object-fit: cover; padding: 0; }
+#chatForm.is-dropping { outline: 2px dashed var(--accent); outline-offset: 3px; }

@@ -91,6 +91,27 @@ async fn settings_image_declaration_roundtrip_and_invalid_update_is_atomic() {
     );
     assert!(value["runtime"]["input_capability_config_error"].is_null());
     assert_eq!(value["model_input_capabilities"][0].get("verified"), None);
+    // Saving an unrelated setting omits this field: it must inherit the current
+    // runtime declaration rather than silently clearing a host-injected binding.
+    let response = router
+        .clone()
+        .oneshot(request("POST", json!({"theme":"dark"})))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let response = router
+        .clone()
+        .oneshot(request("GET", Value::Null))
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        value["runtime"]["model_input_capabilities"][0]["image_input"],
+        false
+    );
     let before = std::fs::read(dir.path().join("settings.json")).unwrap();
     let mut bad = binding.clone();
     bad["base_url"] = json!("https://user:secret@example.com/v1");
